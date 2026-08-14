@@ -1,0 +1,2205 @@
+//! Pure durable Run and typed-controller decisions.
+//!
+//! The module performs no I/O and never reads a wall clock. Repositories provide committed facts
+//! and database-observed time; application services persist returned decisions atomically.
+
+#![allow(async_fn_in_trait)]
+
+use chrono::{DateTime, Utc};
+use insight_platform_contracts::{
+    canonical_digest, CommandAudit, CommandOutcome, DataClassification, ExactDeploymentRef,
+    Failure, HardLimitProfile, JobState, JsonLimits, LimitUnit, NodeExecutionState, PlanNodeKind,
+    PrincipalSnapshot, ResourceId, ResourceKind, RunBindingsSnapshot, RunState, Sha256Digest,
+    ValueRef,
+};
+use insight_platform_jobs::WakeContract;
+use serde::{de, Deserialize, Deserializer, Serialize};
+use std::{collections::BTreeMap, error::Error, fmt};
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct PlanNodeKey(String);
+
+impl PlanNodeKey {
+    pub fn new(value: String) -> Result<Self, OrchestratorError> {
+        let bytes = value.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > 128
+            || !bytes[0].is_ascii_alphanumeric()
+            || !bytes.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-' | b'.' | b':')
+            })
+        {
+            return Err(OrchestratorError::InvalidPlanNodeKey);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PlanNodeKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinPolicy {
+    AllSuccess,
+    AllSettled,
+    Quorum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinRemainderPolicy {
+    Cancel,
+    Drain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MapFailurePolicy {
+    FailFast,
+    AllSettled,
+    BoundedErrorCount { maximum_failures: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeNode {
+    Start {
+        next: PlanNodeKey,
+    },
+    Compute {
+        next: PlanNodeKey,
+    },
+    Branch {
+        ordered_targets: Vec<PlanNodeKey>,
+    },
+    Fork {
+        legs: Vec<PlanNodeKey>,
+        join: PlanNodeKey,
+    },
+    Join {
+        policy: JoinPolicy,
+        quorum: Option<u16>,
+        remainder: Option<JoinRemainderPolicy>,
+        next: PlanNodeKey,
+    },
+    Map {
+        body: PlanNodeKey,
+        next: PlanNodeKey,
+        maximum_items: u32,
+        failure_policy: MapFailurePolicy,
+    },
+    Loop {
+        body: PlanNodeKey,
+        exit: PlanNodeKey,
+        maximum_iterations: u32,
+    },
+    ErrorBoundary {
+        body: PlanNodeKey,
+        handlers: BTreeMap<String, PlanNodeKey>,
+    },
+    ModelLoop {
+        resume: PlanNodeKey,
+    },
+    CapabilityCall {
+        resume: PlanNodeKey,
+    },
+    ContextQuery {
+        resume: PlanNodeKey,
+    },
+    ChildAgentCall {
+        resume: PlanNodeKey,
+    },
+    HumanTask {
+        resume: PlanNodeKey,
+    },
+    TimerWait {
+        resume: PlanNodeKey,
+    },
+    SignalWait {
+        resume: PlanNodeKey,
+    },
+    Return,
+    Raise,
+}
+
+impl RuntimeNode {
+    pub const fn kind(&self) -> PlanNodeKind {
+        match self {
+            Self::Start { .. } => PlanNodeKind::Start,
+            Self::Compute { .. } => PlanNodeKind::Compute,
+            Self::Branch { .. } => PlanNodeKind::Branch,
+            Self::Fork { .. } => PlanNodeKind::Fork,
+            Self::Join { .. } => PlanNodeKind::Join,
+            Self::Map { .. } => PlanNodeKind::Map,
+            Self::Loop { .. } => PlanNodeKind::Loop,
+            Self::ErrorBoundary { .. } => PlanNodeKind::ErrorBoundary,
+            Self::ModelLoop { .. } => PlanNodeKind::ModelLoop,
+            Self::CapabilityCall { .. } => PlanNodeKind::CapabilityCall,
+            Self::ContextQuery { .. } => PlanNodeKind::ContextQuery,
+            Self::ChildAgentCall { .. } => PlanNodeKind::ChildAgentCall,
+            Self::HumanTask { .. } => PlanNodeKind::HumanTask,
+            Self::TimerWait { .. } => PlanNodeKind::TimerWait,
+            Self::SignalWait { .. } => PlanNodeKind::SignalWait,
+            Self::Return => PlanNodeKind::Return,
+            Self::Raise => PlanNodeKind::Raise,
+        }
+    }
+
+    fn references(&self) -> Vec<&PlanNodeKey> {
+        match self {
+            Self::Start { next }
+            | Self::Compute { next }
+            | Self::ModelLoop { resume: next }
+            | Self::CapabilityCall { resume: next }
+            | Self::ContextQuery { resume: next }
+            | Self::ChildAgentCall { resume: next }
+            | Self::HumanTask { resume: next }
+            | Self::TimerWait { resume: next }
+            | Self::SignalWait { resume: next } => vec![next],
+            Self::Branch { ordered_targets } => ordered_targets.iter().collect(),
+            Self::Fork { legs, join } => legs.iter().chain(std::iter::once(join)).collect(),
+            Self::Join { next, .. } => vec![next],
+            Self::Map { body, next, .. } => vec![body, next],
+            Self::Loop { body, exit, .. } => vec![body, exit],
+            Self::ErrorBoundary { body, handlers } => {
+                std::iter::once(body).chain(handlers.values()).collect()
+            }
+            Self::Return | Self::Raise => Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLimits {
+    pub maximum_nodes: usize,
+    pub maximum_edges: usize,
+    pub maximum_fan_out: usize,
+    pub maximum_map_items: u32,
+    pub maximum_loop_iterations: u32,
+    pub maximum_error_handlers: usize,
+}
+
+impl PlanLimits {
+    pub fn from_profile(profile: &HardLimitProfile) -> Result<Self, OrchestratorError> {
+        profile
+            .validate()
+            .map_err(|_| OrchestratorError::InvalidPlan)?;
+        let registry = &profile.registry_plan;
+        if registry.plan_nodes.unit != LimitUnit::Count
+            || registry.plan_edges.unit != LimitUnit::Count
+            || registry.branch_legs.unit != LimitUnit::Count
+            || registry.map_items.unit != LimitUnit::Items
+            || registry.loop_iterations.unit != LimitUnit::Count
+        {
+            return Err(OrchestratorError::InvalidPlan);
+        }
+        Ok(Self {
+            maximum_nodes: usize::try_from(registry.plan_nodes.q1_default)
+                .map_err(|_| OrchestratorError::InvalidPlan)?,
+            maximum_edges: usize::try_from(registry.plan_edges.q1_default)
+                .map_err(|_| OrchestratorError::InvalidPlan)?,
+            maximum_fan_out: usize::try_from(registry.branch_legs.q1_default)
+                .map_err(|_| OrchestratorError::InvalidPlan)?,
+            maximum_map_items: u32::try_from(registry.map_items.q1_default)
+                .map_err(|_| OrchestratorError::InvalidPlan)?,
+            maximum_loop_iterations: u32::try_from(registry.loop_iterations.q1_default)
+                .map_err(|_| OrchestratorError::InvalidPlan)?,
+            maximum_error_handlers: usize::try_from(registry.branch_legs.q1_default)
+                .map_err(|_| OrchestratorError::InvalidPlan)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePlan {
+    pub plan_version: u32,
+    pub interface_revision_id: ResourceId,
+    pub entry_node_id: PlanNodeKey,
+    pub nodes: BTreeMap<PlanNodeKey, RuntimeNode>,
+}
+
+impl RuntimePlan {
+    pub fn validate(&self, limits: PlanLimits) -> Result<(), OrchestratorError> {
+        if self.plan_version != 1
+            || self.interface_revision_id.kind() != ResourceKind::AgentInterfaceRevision
+            || limits.maximum_nodes == 0
+            || limits.maximum_edges == 0
+            || limits.maximum_fan_out == 0
+            || limits.maximum_map_items == 0
+            || limits.maximum_loop_iterations == 0
+            || limits.maximum_error_handlers == 0
+            || self.nodes.is_empty()
+            || self.nodes.len() > limits.maximum_nodes
+            || !self.nodes.contains_key(&self.entry_node_id)
+        {
+            return Err(OrchestratorError::InvalidPlan);
+        }
+        let mut edge_count = 0_usize;
+        for node in self.nodes.values() {
+            validate_node(node, limits)?;
+            let references = node.references();
+            edge_count = edge_count
+                .checked_add(references.len())
+                .ok_or(OrchestratorError::InvalidPlan)?;
+            if edge_count > limits.maximum_edges {
+                return Err(OrchestratorError::InvalidPlan);
+            }
+            if references
+                .into_iter()
+                .any(|reference| !self.nodes.contains_key(reference))
+            {
+                return Err(OrchestratorError::UnknownPlanNodeReference);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self, limits: PlanLimits) -> Result<Sha256Digest, OrchestratorError> {
+        self.validate(limits)?;
+        let value = serde_json::to_value(self).map_err(|_| OrchestratorError::Canonicalization)?;
+        canonical_digest(&value)
+            .map_err(|_| OrchestratorError::Canonicalization)?
+            .parse()
+            .map_err(|_| OrchestratorError::Canonicalization)
+    }
+
+    pub fn node(&self, key: &PlanNodeKey) -> Result<&RuntimeNode, OrchestratorError> {
+        self.nodes
+            .get(key)
+            .ok_or(OrchestratorError::UnknownPlanNodeReference)
+    }
+}
+
+fn validate_node(node: &RuntimeNode, limits: PlanLimits) -> Result<(), OrchestratorError> {
+    match node {
+        RuntimeNode::Branch { ordered_targets }
+            if ordered_targets.is_empty()
+                || ordered_targets.len() > limits.maximum_fan_out
+                || has_duplicate_keys(ordered_targets) =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::Fork { legs, join }
+            if legs.is_empty()
+                || legs.len() > limits.maximum_fan_out
+                || legs.iter().any(|leg| leg == join)
+                || has_duplicate_keys(legs) =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::Join {
+            policy,
+            quorum,
+            remainder,
+            ..
+        } => match (policy, quorum, remainder) {
+            (JoinPolicy::Quorum, Some(value), Some(_)) if *value > 0 => Ok(()),
+            (JoinPolicy::AllSuccess | JoinPolicy::AllSettled, None, None) => Ok(()),
+            _ => Err(OrchestratorError::InvalidPlan),
+        },
+        RuntimeNode::Map { maximum_items, .. }
+            if *maximum_items == 0 || *maximum_items > limits.maximum_map_items =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::Map {
+            maximum_items,
+            failure_policy: MapFailurePolicy::BoundedErrorCount { maximum_failures },
+            ..
+        } if *maximum_failures == 0 || maximum_failures > maximum_items => {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::Loop {
+            maximum_iterations, ..
+        } if *maximum_iterations == 0 || *maximum_iterations > limits.maximum_loop_iterations => {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::ErrorBoundary { handlers, .. }
+            if handlers.len() > limits.maximum_error_handlers
+                || handlers.keys().any(|code| !is_stable_code(code)) =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn has_duplicate_keys(values: &[PlanNodeKey]) -> bool {
+    values.windows(2).any(|pair| pair[0] == pair[1])
+        || values
+            .iter()
+            .enumerate()
+            .any(|(index, value)| values[index + 1..].contains(value))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildOutcome {
+    Active,
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+impl ChildOutcome {
+    const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Active)
+    }
+
+    const fn is_success(self) -> bool {
+        matches!(self, Self::Succeeded)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ControllerObservation {
+    None,
+    Branch { selected: PlanNodeKey },
+    Join { children: Vec<ChildOutcome> },
+    Map { item_count: u32 },
+    MapSettlement { children: Vec<ChildOutcome> },
+    Loop { iteration: u32, condition: bool },
+    ErrorBoundary { failure_code: Option<String> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeafKind {
+    ModelLoop,
+    Capability,
+    Context,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableWaitKind {
+    HumanTask,
+    Timer,
+    Signal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum ControllerDecision {
+    CompleteNode {
+        activate: Vec<PlanNodeKey>,
+    },
+    FanOut {
+        activate: Vec<PlanNodeKey>,
+        create_pending: Vec<PlanNodeKey>,
+    },
+    WaitForChildren,
+    OpenMapItems {
+        body: PlanNodeKey,
+        next: PlanNodeKey,
+        item_count: u32,
+        failure_policy: MapFailurePolicy,
+    },
+    OpenLoopIteration {
+        body: PlanNodeKey,
+        iteration: u32,
+    },
+    EnterErrorHandler {
+        target: PlanNodeKey,
+    },
+    DispatchLeaf {
+        kind: LeafKind,
+        resume: PlanNodeKey,
+    },
+    CreateChildRun {
+        resume: PlanNodeKey,
+    },
+    CreateDurableWait {
+        kind: DurableWaitKind,
+        resume: PlanNodeKey,
+    },
+    CompleteRun,
+    FailNode {
+        code: &'static str,
+    },
+    FailRun,
+}
+
+pub fn decide_controller(
+    node: &RuntimeNode,
+    observation: &ControllerObservation,
+) -> Result<ControllerDecision, OrchestratorError> {
+    match (node, observation) {
+        (
+            RuntimeNode::Start { next } | RuntimeNode::Compute { next },
+            ControllerObservation::None,
+        ) => Ok(ControllerDecision::CompleteNode {
+            activate: vec![next.clone()],
+        }),
+        (RuntimeNode::Branch { ordered_targets }, ControllerObservation::Branch { selected })
+            if ordered_targets.contains(selected) =>
+        {
+            Ok(ControllerDecision::CompleteNode {
+                activate: vec![selected.clone()],
+            })
+        }
+        (RuntimeNode::Fork { legs, join }, ControllerObservation::None) => {
+            Ok(ControllerDecision::FanOut {
+                activate: legs.clone(),
+                create_pending: vec![join.clone()],
+            })
+        }
+        (
+            RuntimeNode::Join {
+                policy,
+                quorum,
+                remainder: _,
+                next,
+            },
+            ControllerObservation::Join { children },
+        ) => decide_join(*policy, *quorum, next, children),
+        (
+            RuntimeNode::Map {
+                body,
+                next,
+                maximum_items,
+                failure_policy,
+            },
+            ControllerObservation::Map { item_count },
+        ) if item_count <= maximum_items => Ok(ControllerDecision::OpenMapItems {
+            body: body.clone(),
+            next: next.clone(),
+            item_count: *item_count,
+            failure_policy: *failure_policy,
+        }),
+        (
+            RuntimeNode::Map {
+                next,
+                failure_policy,
+                ..
+            },
+            ControllerObservation::MapSettlement { children },
+        ) => decide_map_settlement(*failure_policy, next, children),
+        (
+            RuntimeNode::Loop {
+                body,
+                exit,
+                maximum_iterations,
+            },
+            ControllerObservation::Loop {
+                iteration,
+                condition,
+            },
+        ) => {
+            if !condition {
+                Ok(ControllerDecision::CompleteNode {
+                    activate: vec![exit.clone()],
+                })
+            } else if iteration < maximum_iterations {
+                Ok(ControllerDecision::OpenLoopIteration {
+                    body: body.clone(),
+                    iteration: *iteration,
+                })
+            } else {
+                Ok(ControllerDecision::FailNode {
+                    code: "budget_exhausted",
+                })
+            }
+        }
+        (
+            RuntimeNode::ErrorBoundary { body, handlers },
+            ControllerObservation::ErrorBoundary { failure_code },
+        ) => match failure_code {
+            None => Ok(ControllerDecision::CompleteNode {
+                activate: vec![body.clone()],
+            }),
+            Some(code) => handlers
+                .get(code)
+                .cloned()
+                .map(|target| ControllerDecision::EnterErrorHandler { target })
+                .ok_or(OrchestratorError::UnhandledFailure),
+        },
+        (RuntimeNode::ModelLoop { resume }, ControllerObservation::None) => {
+            Ok(ControllerDecision::DispatchLeaf {
+                kind: LeafKind::ModelLoop,
+                resume: resume.clone(),
+            })
+        }
+        (RuntimeNode::CapabilityCall { resume }, ControllerObservation::None) => {
+            Ok(ControllerDecision::DispatchLeaf {
+                kind: LeafKind::Capability,
+                resume: resume.clone(),
+            })
+        }
+        (RuntimeNode::ContextQuery { resume }, ControllerObservation::None) => {
+            Ok(ControllerDecision::DispatchLeaf {
+                kind: LeafKind::Context,
+                resume: resume.clone(),
+            })
+        }
+        (RuntimeNode::ChildAgentCall { resume }, ControllerObservation::None) => {
+            Ok(ControllerDecision::CreateChildRun {
+                resume: resume.clone(),
+            })
+        }
+        (RuntimeNode::HumanTask { resume }, ControllerObservation::None) => {
+            Ok(ControllerDecision::CreateDurableWait {
+                kind: DurableWaitKind::HumanTask,
+                resume: resume.clone(),
+            })
+        }
+        (RuntimeNode::TimerWait { resume }, ControllerObservation::None) => {
+            Ok(ControllerDecision::CreateDurableWait {
+                kind: DurableWaitKind::Timer,
+                resume: resume.clone(),
+            })
+        }
+        (RuntimeNode::SignalWait { resume }, ControllerObservation::None) => {
+            Ok(ControllerDecision::CreateDurableWait {
+                kind: DurableWaitKind::Signal,
+                resume: resume.clone(),
+            })
+        }
+        (RuntimeNode::Return, ControllerObservation::None) => Ok(ControllerDecision::CompleteRun),
+        (RuntimeNode::Raise, ControllerObservation::None) => Ok(ControllerDecision::FailRun),
+        _ => Err(OrchestratorError::ObservationMismatch),
+    }
+}
+
+fn decide_map_settlement(
+    policy: MapFailurePolicy,
+    next: &PlanNodeKey,
+    children: &[ChildOutcome],
+) -> Result<ControllerDecision, OrchestratorError> {
+    if children.is_empty() {
+        return Err(OrchestratorError::ObservationMismatch);
+    }
+    let failed = children
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                ChildOutcome::Failed | ChildOutcome::Cancelled | ChildOutcome::TimedOut
+            )
+        })
+        .count();
+    match policy {
+        MapFailurePolicy::FailFast if failed > 0 => Ok(ControllerDecision::FailNode {
+            code: "map_item_failed",
+        }),
+        MapFailurePolicy::BoundedErrorCount { maximum_failures }
+            if failed > maximum_failures as usize =>
+        {
+            Ok(ControllerDecision::FailNode {
+                code: "map_error_limit_exceeded",
+            })
+        }
+        _ if children.iter().all(|outcome| outcome.is_terminal()) => {
+            Ok(ControllerDecision::CompleteNode {
+                activate: vec![next.clone()],
+            })
+        }
+        _ => Ok(ControllerDecision::WaitForChildren),
+    }
+}
+
+fn decide_join(
+    policy: JoinPolicy,
+    quorum: Option<u16>,
+    next: &PlanNodeKey,
+    children: &[ChildOutcome],
+) -> Result<ControllerDecision, OrchestratorError> {
+    if children.is_empty() {
+        return Err(OrchestratorError::ObservationMismatch);
+    }
+    let successes = children.iter().filter(|child| child.is_success()).count();
+    let active = children.iter().filter(|child| !child.is_terminal()).count();
+    match policy {
+        JoinPolicy::AllSuccess
+            if children
+                .iter()
+                .any(|child| child.is_terminal() && !child.is_success()) =>
+        {
+            Ok(ControllerDecision::FailNode {
+                code: "child_failed",
+            })
+        }
+        JoinPolicy::AllSuccess if active == 0 => Ok(ControllerDecision::CompleteNode {
+            activate: vec![next.clone()],
+        }),
+        JoinPolicy::AllSettled if active == 0 => Ok(ControllerDecision::CompleteNode {
+            activate: vec![next.clone()],
+        }),
+        JoinPolicy::Quorum => {
+            let required = usize::from(quorum.ok_or(OrchestratorError::InvalidPlan)?);
+            if successes >= required {
+                Ok(ControllerDecision::CompleteNode {
+                    activate: vec![next.clone()],
+                })
+            } else if successes + active < required {
+                Ok(ControllerDecision::FailNode {
+                    code: "quorum_unreachable",
+                })
+            } else {
+                Ok(ControllerDecision::WaitForChildren)
+            }
+        }
+        _ => Ok(ControllerDecision::WaitForChildren),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunControlSnapshot {
+    pub pause_generation: u64,
+    pub pause_requested: bool,
+    pub cancel_generation: u64,
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+    pub cancel_reason_code: Option<String>,
+    pub cancel_principal: Option<PrincipalSnapshot>,
+    pub timeout_generation: u64,
+    pub timeout_requested_at: Option<DateTime<Utc>>,
+    pub timeout_observed_run_state: Option<String>,
+    pub timeout_observed_run_version: Option<u64>,
+}
+
+impl RunControlSnapshot {
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        let cancel_fields = [
+            self.cancel_reason_code.is_some(),
+            self.cancel_principal.is_some(),
+        ];
+        if cancel_fields
+            .iter()
+            .any(|present| *present != self.cancel_requested_at.is_some())
+            || self
+                .cancel_reason_code
+                .as_ref()
+                .is_some_and(|code| !is_stable_code(code))
+            || self
+                .cancel_principal
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.validate().is_err())
+            || (self.cancel_requested_at.is_some() && self.cancel_generation == 0)
+            || (self.timeout_requested_at.is_some() && self.timeout_generation == 0)
+            || self.timeout_requested_at.is_some()
+                != (self.timeout_observed_run_state.is_some()
+                    && self.timeout_observed_run_version.is_some())
+            || self
+                .timeout_observed_run_state
+                .as_ref()
+                .is_some_and(|state| !is_stable_code(state))
+            || self.timeout_observed_run_version == Some(0)
+        {
+            return Err(OrchestratorError::InvalidRunControl);
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, OrchestratorError> {
+        self.validate()?;
+        let value = serde_json::to_value(self).map_err(|_| OrchestratorError::Canonicalization)?;
+        canonical_digest(&value)
+            .map_err(|_| OrchestratorError::Canonicalization)?
+            .parse()
+            .map_err(|_| OrchestratorError::Canonicalization)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlDecision {
+    Unchanged(RunControlSnapshot),
+    Updated(RunControlSnapshot),
+}
+
+pub fn decide_pause(
+    current: &RunControlSnapshot,
+    expected_generation: u64,
+    requested: bool,
+) -> Result<ControlDecision, OrchestratorError> {
+    current.validate()?;
+    if expected_generation != current.pause_generation {
+        return Err(OrchestratorError::StaleGeneration);
+    }
+    if current.pause_requested == requested {
+        return Ok(ControlDecision::Unchanged(current.clone()));
+    }
+    let mut next = current.clone();
+    next.pause_generation = next
+        .pause_generation
+        .checked_add(1)
+        .ok_or(OrchestratorError::CounterOverflow)?;
+    next.pause_requested = requested;
+    Ok(ControlDecision::Updated(next))
+}
+
+pub fn decide_cancel(
+    current: &RunControlSnapshot,
+    expected_generation: u64,
+    database_observed_at: DateTime<Utc>,
+    reason_code: String,
+    principal: PrincipalSnapshot,
+) -> Result<ControlDecision, OrchestratorError> {
+    current.validate()?;
+    if expected_generation != current.cancel_generation {
+        return Err(OrchestratorError::StaleGeneration);
+    }
+    if current.cancel_requested_at.is_some() {
+        if current.cancel_reason_code.as_ref() == Some(&reason_code)
+            && current.cancel_principal.as_ref() == Some(&principal)
+        {
+            return Ok(ControlDecision::Unchanged(current.clone()));
+        }
+        return Err(OrchestratorError::ControlConflict);
+    }
+    if !is_stable_code(&reason_code) || principal.validate().is_err() {
+        return Err(OrchestratorError::InvalidRunControl);
+    }
+    let mut next = current.clone();
+    next.cancel_generation = next
+        .cancel_generation
+        .checked_add(1)
+        .ok_or(OrchestratorError::CounterOverflow)?;
+    next.cancel_requested_at = Some(database_observed_at);
+    next.cancel_reason_code = Some(reason_code);
+    next.cancel_principal = Some(principal);
+    Ok(ControlDecision::Updated(next))
+}
+
+pub fn decide_timeout(
+    current: &RunControlSnapshot,
+    expected_generation: u64,
+    database_observed_at: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+    observed_run_state: String,
+    observed_run_version: u64,
+) -> Result<ControlDecision, OrchestratorError> {
+    current.validate()?;
+    if expected_generation != current.timeout_generation {
+        return Err(OrchestratorError::StaleGeneration);
+    }
+    if database_observed_at < deadline
+        || !is_stable_code(&observed_run_state)
+        || observed_run_version == 0
+    {
+        return Err(OrchestratorError::InvalidTimeoutObservation);
+    }
+    if current.timeout_requested_at.is_some() {
+        if current.timeout_observed_run_state.as_ref() == Some(&observed_run_state)
+            && current.timeout_observed_run_version == Some(observed_run_version)
+        {
+            return Ok(ControlDecision::Unchanged(current.clone()));
+        }
+        return Err(OrchestratorError::ControlConflict);
+    }
+    let mut next = current.clone();
+    next.timeout_generation = next
+        .timeout_generation
+        .checked_add(1)
+        .ok_or(OrchestratorError::CounterOverflow)?;
+    next.timeout_requested_at = Some(database_observed_at);
+    next.timeout_observed_run_state = Some(observed_run_state);
+    next.timeout_observed_run_version = Some(observed_run_version);
+    Ok(ControlDecision::Updated(next))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrchestrationConvergenceReason {
+    CancelRequested,
+    TimeoutObserved,
+    DeadlineExceeded,
+    AttemptLimitExhausted,
+}
+
+impl OrchestrationConvergenceReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CancelRequested => "cancel_requested",
+            Self::TimeoutObserved => "timeout_observed",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::AttemptLimitExhausted => "attempt_limit_exhausted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestrationConvergenceDecision {
+    pub reason: OrchestrationConvergenceReason,
+    pub run_state: RunState,
+    pub node_state: NodeExecutionState,
+    pub job_state: JobState,
+    pub control: RunControlSnapshot,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrchestrationConvergenceFacts {
+    pub run_state: RunState,
+    pub run_version: u64,
+    pub run_deadline: DateTime<Utc>,
+    pub control: RunControlSnapshot,
+    pub node_state: NodeExecutionState,
+    pub job_state: JobState,
+    pub job_attempt_count: u32,
+    pub job_attempt_limit: u32,
+    pub job_deadline: DateTime<Utc>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+}
+
+/// Chooses the single terminal outcome for an orchestration owner from committed facts.
+/// Timeout wins only after its intent is committed or the database clock crosses the immutable
+/// deadline; cancellation wins before that; exhausted attempts are considered only when no
+/// generation can still produce a fenced result.
+pub fn decide_orchestration_convergence(
+    facts: OrchestrationConvergenceFacts,
+    database_now: DateTime<Utc>,
+) -> Result<Option<OrchestrationConvergenceDecision>, OrchestratorError> {
+    facts.control.validate()?;
+    if facts.run_version == 0
+        || facts.job_attempt_limit == 0
+        || facts.job_attempt_count > facts.job_attempt_limit
+    {
+        return Err(OrchestratorError::InvalidRunControl);
+    }
+
+    let deadline_exceeded =
+        database_now >= facts.run_deadline || database_now >= facts.job_deadline;
+    let (reason, run_state, node_state, job_state, control) =
+        if facts.control.timeout_requested_at.is_some() || deadline_exceeded {
+            let control = if facts.control.timeout_requested_at.is_some() {
+                facts.control.clone()
+            } else {
+                match decide_timeout(
+                    &facts.control,
+                    facts.control.timeout_generation,
+                    database_now,
+                    facts.run_deadline.min(facts.job_deadline),
+                    facts.run_state.as_str().to_owned(),
+                    facts.run_version,
+                )? {
+                    ControlDecision::Updated(control) | ControlDecision::Unchanged(control) => {
+                        control
+                    }
+                }
+            };
+            (
+                if deadline_exceeded {
+                    OrchestrationConvergenceReason::DeadlineExceeded
+                } else {
+                    OrchestrationConvergenceReason::TimeoutObserved
+                },
+                RunState::TimedOut,
+                NodeExecutionState::TimedOut,
+                JobState::TimedOut,
+                control,
+            )
+        } else if facts.control.cancel_requested_at.is_some() {
+            (
+                OrchestrationConvergenceReason::CancelRequested,
+                RunState::Cancelled,
+                NodeExecutionState::Cancelled,
+                JobState::Cancelled,
+                facts.control.clone(),
+            )
+        } else if facts.job_attempt_count >= facts.job_attempt_limit
+            && facts
+                .lease_expires_at
+                .is_none_or(|expires_at| database_now >= expires_at)
+        {
+            (
+                OrchestrationConvergenceReason::AttemptLimitExhausted,
+                RunState::Failed,
+                NodeExecutionState::Failed,
+                JobState::Failed,
+                facts.control.clone(),
+            )
+        } else {
+            return Ok(None);
+        };
+
+    let node_can_converge = facts.node_state.can_transition_to(node_state)
+        || (facts.node_state == NodeExecutionState::Running
+            && node_state == NodeExecutionState::Cancelled
+            && NodeExecutionState::Running.can_transition_to(NodeExecutionState::Cancelling)
+            && NodeExecutionState::Cancelling.can_transition_to(NodeExecutionState::Cancelled));
+    if !facts.run_state.can_transition_to(run_state)
+        || !node_can_converge
+        || !facts.job_state.can_transition_to(job_state)
+    {
+        return Err(OrchestratorError::InvalidRunControl);
+    }
+    Ok(Some(OrchestrationConvergenceDecision {
+        reason,
+        run_state,
+        node_state,
+        job_state,
+        control,
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunInputValue {
+    pub value_id: ResourceId,
+    pub classification: DataClassification,
+    pub schema_digest: Sha256Digest,
+    pub content_digest: Sha256Digest,
+    pub value: ValueRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrchestrationJobPayload {
+    pub bindings_digest: Sha256Digest,
+    pub node_execution_id: ResourceId,
+    pub root_scope_id: ResourceId,
+    pub retry_backoff_milliseconds: u64,
+    pub wake_contract: Option<WakeContract>,
+}
+
+impl OrchestrationJobPayload {
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        if self.node_execution_id.kind() != ResourceKind::NodeExecution
+            || self.root_scope_id.kind() != ResourceKind::ScopeInstance
+            || self.retry_backoff_milliseconds == 0
+            || self.retry_backoff_milliseconds > 60_000
+        {
+            return Err(OrchestratorError::InvalidRunAdmission);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunAncestrySnapshot {
+    pub root_run_id: ResourceId,
+    pub parent_run_id: Option<ResourceId>,
+    pub parent_node_execution_id: Option<ResourceId>,
+    pub parent_child_link_id: Option<ResourceId>,
+    pub depth: u16,
+    pub ancestry_agent_deployment_ids: Vec<ResourceId>,
+}
+
+impl RunAncestrySnapshot {
+    pub fn root(run_id: ResourceId, agent_deployment_id: ResourceId) -> Self {
+        Self {
+            root_run_id: run_id,
+            parent_run_id: None,
+            parent_node_execution_id: None,
+            parent_child_link_id: None,
+            depth: 0,
+            ancestry_agent_deployment_ids: vec![agent_deployment_id],
+        }
+    }
+
+    pub fn validate(&self, run_id: &ResourceId) -> Result<(), OrchestratorError> {
+        let parent_fields = [
+            self.parent_run_id.is_some(),
+            self.parent_node_execution_id.is_some(),
+            self.parent_child_link_id.is_some(),
+        ];
+        if self.root_run_id.kind() != ResourceKind::Run
+            || self
+                .parent_run_id
+                .as_ref()
+                .is_some_and(|id| id.kind() != ResourceKind::Run)
+            || self
+                .parent_node_execution_id
+                .as_ref()
+                .is_some_and(|id| id.kind() != ResourceKind::NodeExecution)
+            || self
+                .parent_child_link_id
+                .as_ref()
+                .is_some_and(|id| id.kind() != ResourceKind::ChildRunLink)
+            || parent_fields
+                .iter()
+                .any(|present| *present != (self.depth > 0))
+            || (self.depth == 0 && &self.root_run_id != run_id)
+            || self.ancestry_agent_deployment_ids.is_empty()
+            || self.ancestry_agent_deployment_ids.len() > 32
+            || self
+                .ancestry_agent_deployment_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::AgentDeployment)
+        {
+            return Err(OrchestratorError::InvalidRunAdmission);
+        }
+        let mut unique = self.ancestry_agent_deployment_ids.clone();
+        unique.sort();
+        unique.dedup();
+        if unique.len() != self.ancestry_agent_deployment_ids.len() {
+            return Err(OrchestratorError::InvalidRunAdmission);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildLinkState {
+    Running,
+    Waiting,
+    Cancelling,
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+impl ChildLinkState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Cancelling => "cancelling",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::TimedOut
+        )
+    }
+
+    pub const fn can_transition_to(self, target: Self) -> bool {
+        matches!(
+            (self, target),
+            (
+                Self::Running,
+                Self::Waiting
+                    | Self::Cancelling
+                    | Self::Succeeded
+                    | Self::Failed
+                    | Self::Cancelled
+                    | Self::TimedOut
+            ) | (
+                Self::Waiting,
+                Self::Running
+                    | Self::Cancelling
+                    | Self::Succeeded
+                    | Self::Failed
+                    | Self::Cancelled
+                    | Self::TimedOut
+            ) | (
+                Self::Cancelling,
+                Self::Succeeded | Self::Failed | Self::Cancelled | Self::TimedOut
+            )
+        )
+    }
+}
+
+impl fmt::Display for ChildLinkState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ChildLinkState {
+    type Err = OrchestratorError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "running" => Ok(Self::Running),
+            "waiting" => Ok(Self::Waiting),
+            "cancelling" => Ok(Self::Cancelling),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "timed_out" => Ok(Self::TimedOut),
+            _ => Err(OrchestratorError::InvalidChildRun),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildCancellationPolicy {
+    CascadeAndWait,
+    CascadeWithDeadline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildBudget {
+    pub deadline: DateTime<Utc>,
+    pub maximum_model_tokens: u64,
+    pub maximum_capability_calls: u32,
+    pub maximum_artifact_bytes: u64,
+    pub maximum_descendant_runs: u32,
+}
+
+impl ChildBudget {
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        if self.maximum_model_tokens == 0
+            || self.maximum_capability_calls == 0
+            || self.maximum_artifact_bytes == 0
+        {
+            return Err(OrchestratorError::InvalidChildBudget);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildRunLinkPayload {
+    pub parent_attempt_ordinal: u16,
+    pub child_agent_deployment: ExactDeploymentRef,
+    pub input_digest: Sha256Digest,
+    pub cancellation_policy: ChildCancellationPolicy,
+    pub budget: ChildBudget,
+}
+
+impl ChildRunLinkPayload {
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        self.child_agent_deployment
+            .validate()
+            .map_err(|_| OrchestratorError::InvalidChildRun)?;
+        self.budget.validate()?;
+        if self.parent_attempt_ordinal == 0
+            || self.child_agent_deployment.resource_kind != ResourceKind::AgentDeployment
+        {
+            return Err(OrchestratorError::InvalidChildRun);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildRunLinkProjection {
+    pub tenant_id: ResourceId,
+    pub child_link_id: ResourceId,
+    pub parent_run_id: ResourceId,
+    pub parent_node_execution_id: ResourceId,
+    pub child_run_id: ResourceId,
+    pub state: ChildLinkState,
+    pub generation: u64,
+    pub version: u64,
+    pub payload: ChildRunLinkPayload,
+    pub deadline: DateTime<Utc>,
+    pub terminal_at: Option<DateTime<Utc>>,
+}
+
+impl ChildRunLinkProjection {
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        self.payload.validate()?;
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.child_link_id.kind() != ResourceKind::ChildRunLink
+            || self.parent_run_id.kind() != ResourceKind::Run
+            || self.parent_node_execution_id.kind() != ResourceKind::NodeExecution
+            || self.child_run_id.kind() != ResourceKind::Run
+            || self.generation == 0
+            || self.version == 0
+            || self.deadline != self.payload.budget.deadline
+            || self.state.is_terminal() != self.terminal_at.is_some()
+        {
+            return Err(OrchestratorError::InvalidChildRun);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PrepareChildRun {
+    pub parent_run_id: ResourceId,
+    pub parent_node_execution_id: ResourceId,
+    pub child_link_id: ResourceId,
+    pub child_run_id: ResourceId,
+    pub child_agent_deployment: ExactDeploymentRef,
+    pub parent_ancestry: RunAncestrySnapshot,
+    pub parent_deadline: DateTime<Utc>,
+    pub parent_delegated_budget: Option<ChildBudget>,
+    pub parent_delegated_descendant_count: u32,
+    pub parent_descendant_count: u32,
+    pub maximum_depth: u16,
+    pub maximum_descendants: u32,
+    pub budget: ChildBudget,
+}
+
+pub fn prepare_child_run(
+    command: PrepareChildRun,
+) -> Result<RunAncestrySnapshot, OrchestratorError> {
+    command.budget.validate()?;
+    if let Some(parent_budget) = &command.parent_delegated_budget {
+        parent_budget.validate()?;
+        if command.budget.deadline > parent_budget.deadline
+            || command.budget.maximum_model_tokens > parent_budget.maximum_model_tokens
+            || command.budget.maximum_capability_calls > parent_budget.maximum_capability_calls
+            || command.budget.maximum_artifact_bytes > parent_budget.maximum_artifact_bytes
+            || command.budget.maximum_descendant_runs > parent_budget.maximum_descendant_runs
+            || command.parent_delegated_descendant_count >= parent_budget.maximum_descendant_runs
+            || command.budget.maximum_descendant_runs
+                > parent_budget
+                    .maximum_descendant_runs
+                    .saturating_sub(command.parent_delegated_descendant_count.saturating_add(1))
+        {
+            return Err(OrchestratorError::InvalidChildBudget);
+        }
+    } else if command.parent_delegated_descendant_count != 0 {
+        return Err(OrchestratorError::InvalidChildBudget);
+    }
+    command.parent_ancestry.validate(&command.parent_run_id)?;
+    command
+        .child_agent_deployment
+        .validate()
+        .map_err(|_| OrchestratorError::InvalidChildRun)?;
+    if command.parent_node_execution_id.kind() != ResourceKind::NodeExecution
+        || command.child_link_id.kind() != ResourceKind::ChildRunLink
+        || command.child_run_id.kind() != ResourceKind::Run
+        || command.child_agent_deployment.resource_kind != ResourceKind::AgentDeployment
+        || command.maximum_depth == 0
+        || command.maximum_depth > 32
+        || command.maximum_descendants == 0
+        || command.budget.deadline > command.parent_deadline
+        || command.parent_descendant_count >= command.maximum_descendants
+        || command.budget.maximum_descendant_runs
+            > command
+                .maximum_descendants
+                .saturating_sub(command.parent_descendant_count + 1)
+    {
+        return Err(OrchestratorError::InvalidChildRun);
+    }
+    let depth = command
+        .parent_ancestry
+        .depth
+        .checked_add(1)
+        .ok_or(OrchestratorError::InvalidChildRun)?;
+    if depth > command.maximum_depth {
+        return Err(OrchestratorError::ChildDepthExceeded);
+    }
+    let mut deployments = command.parent_ancestry.ancestry_agent_deployment_ids;
+    if deployments.contains(&command.child_agent_deployment.deployment_id) {
+        return Err(OrchestratorError::ChildCycle);
+    }
+    deployments.push(command.child_agent_deployment.deployment_id);
+    let ancestry = RunAncestrySnapshot {
+        root_run_id: command.parent_ancestry.root_run_id,
+        parent_run_id: Some(command.parent_run_id),
+        parent_node_execution_id: Some(command.parent_node_execution_id),
+        parent_child_link_id: Some(command.child_link_id),
+        depth,
+        ancestry_agent_deployment_ids: deployments,
+    };
+    ancestry.validate(&command.child_run_id)?;
+    Ok(ancestry)
+}
+
+pub fn decide_child_link_cancel(
+    current: &ChildRunLinkProjection,
+    expected_generation: u64,
+    expected_version: u64,
+) -> Result<ChildRunLinkProjection, OrchestratorError> {
+    current.validate()?;
+    if current.generation != expected_generation || current.version != expected_version {
+        return Err(OrchestratorError::StaleGeneration);
+    }
+    if current.state == ChildLinkState::Cancelling {
+        return Ok(current.clone());
+    }
+    if !current.state.can_transition_to(ChildLinkState::Cancelling) {
+        return Err(OrchestratorError::ChildFirstWinnerLost);
+    }
+    let mut next = current.clone();
+    next.state = ChildLinkState::Cancelling;
+    next.version = next
+        .version
+        .checked_add(1)
+        .ok_or(OrchestratorError::CounterOverflow)?;
+    next.validate()?;
+    Ok(next)
+}
+
+pub fn decide_child_link_terminal(
+    current: &ChildRunLinkProjection,
+    expected_generation: u64,
+    expected_version: u64,
+    child_run_state: RunState,
+    database_now: DateTime<Utc>,
+) -> Result<ChildRunLinkProjection, OrchestratorError> {
+    current.validate()?;
+    if current.generation != expected_generation
+        || current.version != expected_version
+        || current.state.is_terminal()
+    {
+        return Err(OrchestratorError::ChildFirstWinnerLost);
+    }
+    let target = match child_run_state {
+        RunState::Succeeded => ChildLinkState::Succeeded,
+        RunState::Failed => ChildLinkState::Failed,
+        RunState::Cancelled => ChildLinkState::Cancelled,
+        RunState::TimedOut => ChildLinkState::TimedOut,
+        _ => return Err(OrchestratorError::InvalidChildRun),
+    };
+    if !current.state.can_transition_to(target) {
+        return Err(OrchestratorError::ChildFirstWinnerLost);
+    }
+    let mut next = current.clone();
+    next.state = target;
+    next.version = next
+        .version
+        .checked_add(1)
+        .ok_or(OrchestratorError::CounterOverflow)?;
+    next.terminal_at = Some(database_now);
+    next.validate()?;
+    Ok(next)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunCurrentSnapshot {
+    pub schema_version: u32,
+    pub control: RunControlSnapshot,
+    pub ancestry: RunAncestrySnapshot,
+    pub input_value_id: ResourceId,
+    pub output_value_id: Option<ResourceId>,
+    pub failure: Option<Failure>,
+    pub waiting_reason: Option<String>,
+}
+
+impl RunCurrentSnapshot {
+    pub fn initial(
+        run_id: ResourceId,
+        agent_deployment_id: ResourceId,
+        input_value_id: ResourceId,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            control: RunControlSnapshot {
+                pause_generation: 0,
+                pause_requested: false,
+                cancel_generation: 0,
+                cancel_requested_at: None,
+                cancel_reason_code: None,
+                cancel_principal: None,
+                timeout_generation: 0,
+                timeout_requested_at: None,
+                timeout_observed_run_state: None,
+                timeout_observed_run_version: None,
+            },
+            ancestry: RunAncestrySnapshot::root(run_id, agent_deployment_id),
+            input_value_id,
+            output_value_id: None,
+            failure: None,
+            waiting_reason: None,
+        }
+    }
+
+    pub fn validate(&self, run_id: &ResourceId) -> Result<(), OrchestratorError> {
+        self.control.validate()?;
+        self.ancestry.validate(run_id)?;
+        if self.schema_version != 1
+            || self.input_value_id.kind() != ResourceKind::RunValue
+            || self
+                .output_value_id
+                .as_ref()
+                .is_some_and(|id| id.kind() != ResourceKind::RunValue)
+            || self
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.validate(1_024).is_err())
+            || self
+                .waiting_reason
+                .as_ref()
+                .is_some_and(|reason| !is_stable_code(reason))
+        {
+            return Err(OrchestratorError::InvalidRunAdmission);
+        }
+        Ok(())
+    }
+}
+
+impl RunInputValue {
+    pub fn validate(&self, inline_limits: JsonLimits) -> Result<(), OrchestratorError> {
+        if self.value_id.kind() != ResourceKind::RunValue {
+            return Err(OrchestratorError::InvalidRunAdmission);
+        }
+        self.value
+            .validate(inline_limits)
+            .map_err(|_| OrchestratorError::InvalidRunInput)?;
+        match &self.value {
+            ValueRef::Inline { value } => {
+                let actual: Sha256Digest = canonical_digest(value)
+                    .map_err(|_| OrchestratorError::Canonicalization)?
+                    .parse()
+                    .map_err(|_| OrchestratorError::Canonicalization)?;
+                if actual != self.content_digest {
+                    return Err(OrchestratorError::InvalidRunInput);
+                }
+            }
+            ValueRef::Artifact { artifact } => {
+                if artifact.content_digest() != &self.content_digest
+                    || artifact.classification() != self.classification
+                {
+                    return Err(OrchestratorError::InvalidRunInput);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AdmitRun {
+    pub audit: CommandAudit,
+    pub run_id: ResourceId,
+    pub agent_deployment_id: ResourceId,
+    pub root_scope_id: ResourceId,
+    pub entry_node_execution_id: ResourceId,
+    pub orchestration_job_id: ResourceId,
+    pub entry_plan_node_key: PlanNodeKey,
+    pub entry_node_kind: PlanNodeKind,
+    pub bindings: RunBindingsSnapshot,
+    pub input: RunInputValue,
+    pub deadline: DateTime<Utc>,
+    pub inline_limits: JsonLimits,
+    pub attempt_limit: u16,
+    pub retry_backoff_milliseconds: u64,
+}
+
+impl AdmitRun {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), OrchestratorError> {
+        validate_audit(&self.audit, now)?;
+        self.bindings
+            .validate()
+            .map_err(|_| OrchestratorError::InvalidRunAdmission)?;
+        self.input.validate(self.inline_limits)?;
+        if self.run_id.kind() != ResourceKind::Run
+            || self.agent_deployment_id.kind() != ResourceKind::AgentDeployment
+            || self.root_scope_id.kind() != ResourceKind::ScopeInstance
+            || self.entry_node_execution_id.kind() != ResourceKind::NodeExecution
+            || self.orchestration_job_id.kind() != ResourceKind::Job
+            || self.bindings.agent.deployment_id != self.agent_deployment_id
+            || self.deadline <= now
+            || self.attempt_limit == 0
+            || self.attempt_limit > 32
+            || self.retry_backoff_milliseconds == 0
+            || self.retry_backoff_milliseconds > 60_000
+        {
+            return Err(OrchestratorError::InvalidRunAdmission);
+        }
+        Ok(())
+    }
+
+    pub fn initial_current_snapshot(&self) -> RunCurrentSnapshot {
+        RunCurrentSnapshot::initial(
+            self.run_id.clone(),
+            self.agent_deployment_id.clone(),
+            self.input.value_id.clone(),
+        )
+    }
+
+    pub fn orchestration_job_payload(&self) -> OrchestrationJobPayload {
+        OrchestrationJobPayload {
+            bindings_digest: self.bindings.canonical_digest.clone(),
+            node_execution_id: self.entry_node_execution_id.clone(),
+            root_scope_id: self.root_scope_id.clone(),
+            retry_backoff_milliseconds: self.retry_backoff_milliseconds,
+            wake_contract: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SetRunPause {
+    pub audit: CommandAudit,
+    pub run_id: ResourceId,
+    pub expected_run_version: i64,
+    pub expected_pause_generation: u64,
+    pub requested: bool,
+}
+
+impl SetRunPause {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), OrchestratorError> {
+        validate_audit(&self.audit, now)?;
+        validate_run_fence(&self.run_id, self.expected_run_version)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestRunCancel {
+    pub audit: CommandAudit,
+    pub run_id: ResourceId,
+    pub expected_run_version: i64,
+    pub expected_cancel_generation: u64,
+    pub reason_code: String,
+}
+
+impl RequestRunCancel {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), OrchestratorError> {
+        validate_audit(&self.audit, now)?;
+        validate_run_fence(&self.run_id, self.expected_run_version)?;
+        if !is_stable_code(&self.reason_code) {
+            return Err(OrchestratorError::InvalidRunControl);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ObserveRunTimeout {
+    pub audit: CommandAudit,
+    pub run_id: ResourceId,
+    pub expected_run_version: i64,
+    pub expected_timeout_generation: u64,
+}
+
+impl ObserveRunTimeout {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), OrchestratorError> {
+        validate_audit(&self.audit, now)?;
+        validate_run_fence(&self.run_id, self.expected_run_version)
+    }
+}
+
+/// One caller-owned Run transaction. Mutation methods must not commit the outer transaction.
+pub trait RunTransaction {
+    type Error;
+    type RunRecord;
+
+    async fn admit_run(
+        &mut self,
+        command: AdmitRun,
+    ) -> Result<CommandOutcome<Self::RunRecord>, Self::Error>;
+    async fn set_run_pause(
+        &mut self,
+        command: SetRunPause,
+    ) -> Result<CommandOutcome<Self::RunRecord>, Self::Error>;
+    async fn request_run_cancel(
+        &mut self,
+        command: RequestRunCancel,
+    ) -> Result<CommandOutcome<Self::RunRecord>, Self::Error>;
+    async fn observe_run_timeout(
+        &mut self,
+        command: ObserveRunTimeout,
+    ) -> Result<CommandOutcome<Self::RunRecord>, Self::Error>;
+    async fn commit(self) -> Result<(), Self::Error>;
+    async fn rollback(self) -> Result<(), Self::Error>;
+}
+
+pub trait RunStore {
+    type Error;
+    type Transaction<'a>: RunTransaction<Error = Self::Error>
+    where
+        Self: 'a;
+
+    async fn begin(&self) -> Result<Self::Transaction<'_>, Self::Error>;
+}
+
+fn validate_audit(audit: &CommandAudit, now: DateTime<Utc>) -> Result<(), OrchestratorError> {
+    audit
+        .validate_at(now)
+        .map_err(|_| OrchestratorError::InvalidAudit)
+}
+
+fn validate_run_fence(
+    run_id: &ResourceId,
+    expected_run_version: i64,
+) -> Result<(), OrchestratorError> {
+    if run_id.kind() != ResourceKind::Run || expected_run_version <= 0 {
+        return Err(OrchestratorError::InvalidRunControl);
+    }
+    Ok(())
+}
+
+fn is_stable_code(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrchestratorError {
+    InvalidAudit,
+    InvalidPlanNodeKey,
+    InvalidPlan,
+    UnknownPlanNodeReference,
+    ObservationMismatch,
+    UnhandledFailure,
+    InvalidRunControl,
+    InvalidTimeoutObservation,
+    StaleGeneration,
+    ControlConflict,
+    CounterOverflow,
+    Canonicalization,
+    InvalidRunAdmission,
+    InvalidRunInput,
+    InvalidChildRun,
+    InvalidChildBudget,
+    ChildDepthExceeded,
+    ChildCycle,
+    ChildFirstWinnerLost,
+}
+
+impl fmt::Display for OrchestratorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidAudit => "command audit identity or expiry is invalid",
+            Self::InvalidPlanNodeKey => "plan node key is invalid",
+            Self::InvalidPlan => "runtime plan is invalid or outside its hard limits",
+            Self::UnknownPlanNodeReference => "runtime plan references an unknown node",
+            Self::ObservationMismatch => "controller observation does not match the node kind",
+            Self::UnhandledFailure => "error boundary has no matching stable failure route",
+            Self::InvalidRunControl => "run control snapshot is invalid",
+            Self::InvalidTimeoutObservation => "timeout observation is early or invalid",
+            Self::StaleGeneration => "run control generation is stale",
+            Self::ControlConflict => "run control terminal intent conflicts with committed intent",
+            Self::CounterOverflow => "orchestrator counter overflowed",
+            Self::Canonicalization => "orchestrator snapshot cannot be canonicalized",
+            Self::InvalidRunAdmission => {
+                "run admission identity, binding, deadline, or limit is invalid"
+            }
+            Self::InvalidRunInput => "run input is invalid, unbounded, or has a mismatched digest",
+            Self::InvalidChildRun => {
+                "child Run identity, deployment, relation, or transition is invalid"
+            }
+            Self::InvalidChildBudget => "child Run budget is invalid or not bounded",
+            Self::ChildDepthExceeded => "child Run depth exceeds the runtime hard limit",
+            Self::ChildCycle => "child Run deployment would create a runtime ancestry cycle",
+            Self::ChildFirstWinnerLost => "child Run link lost its generation/version first-winner",
+        })
+    }
+}
+
+impl Error for OrchestratorError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn key(value: &str) -> PlanNodeKey {
+        PlanNodeKey::new(value.to_owned()).unwrap()
+    }
+
+    fn id(value: &str) -> ResourceId {
+        value.parse().unwrap()
+    }
+
+    fn digest(character: char) -> Sha256Digest {
+        format!("sha256:{}", character.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    fn limits() -> PlanLimits {
+        PlanLimits {
+            maximum_nodes: 64,
+            maximum_edges: 256,
+            maximum_fan_out: 8,
+            maximum_map_items: 16,
+            maximum_loop_iterations: 16,
+            maximum_error_handlers: 8,
+        }
+    }
+
+    #[test]
+    fn runtime_plan_is_closed_bounded_and_digestible() {
+        let plan = RuntimePlan {
+            plan_version: 1,
+            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            entry_node_id: key("start"),
+            nodes: BTreeMap::from([
+                (
+                    key("start"),
+                    RuntimeNode::Start {
+                        next: key("return"),
+                    },
+                ),
+                (key("return"), RuntimeNode::Return),
+            ]),
+        };
+        plan.validate(limits()).unwrap();
+        assert_eq!(
+            plan.canonical_digest(limits()),
+            plan.canonical_digest(limits())
+        );
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value["unknown"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<RuntimePlan>(value).is_err());
+    }
+
+    #[test]
+    fn plan_limits_are_derived_from_the_versioned_q1_profile_and_bound_edges() {
+        let profile = insight_platform_contracts::checked_in_hard_limit_profile();
+        let derived = PlanLimits::from_profile(&profile).unwrap();
+        assert_eq!(derived.maximum_nodes, 2_000);
+        assert_eq!(derived.maximum_edges, 8_000);
+        assert_eq!(derived.maximum_fan_out, 32);
+        assert_eq!(derived.maximum_map_items, 1_000);
+        assert_eq!(derived.maximum_loop_iterations, 1_000);
+
+        let start = key("start");
+        let finish = key("finish");
+        let plan = RuntimePlan {
+            plan_version: 1,
+            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            entry_node_id: start.clone(),
+            nodes: BTreeMap::from([
+                (
+                    start,
+                    RuntimeNode::Start {
+                        next: finish.clone(),
+                    },
+                ),
+                (finish, RuntimeNode::Return),
+            ]),
+        };
+        assert_eq!(
+            plan.validate(PlanLimits {
+                maximum_edges: 0,
+                ..derived
+            }),
+            Err(OrchestratorError::InvalidPlan)
+        );
+    }
+
+    #[test]
+    fn branch_does_not_activate_unselected_paths() {
+        let node = RuntimeNode::Branch {
+            ordered_targets: vec![key("left"), key("right")],
+        };
+        assert_eq!(
+            decide_controller(
+                &node,
+                &ControllerObservation::Branch {
+                    selected: key("right"),
+                },
+            ),
+            Ok(ControllerDecision::CompleteNode {
+                activate: vec![key("right")],
+            })
+        );
+    }
+
+    #[test]
+    fn join_and_loop_fail_closed() {
+        let join = RuntimeNode::Join {
+            policy: JoinPolicy::Quorum,
+            quorum: Some(2),
+            remainder: Some(JoinRemainderPolicy::Drain),
+            next: key("next"),
+        };
+        assert_eq!(
+            decide_controller(
+                &join,
+                &ControllerObservation::Join {
+                    children: vec![ChildOutcome::Succeeded, ChildOutcome::Failed],
+                },
+            ),
+            Ok(ControllerDecision::FailNode {
+                code: "quorum_unreachable"
+            })
+        );
+        assert_eq!(
+            decide_controller(
+                &join,
+                &ControllerObservation::Join {
+                    children: vec![ChildOutcome::Succeeded, ChildOutcome::Active],
+                },
+            ),
+            Ok(ControllerDecision::WaitForChildren)
+        );
+        let quorum_one = RuntimeNode::Join {
+            policy: JoinPolicy::Quorum,
+            quorum: Some(1),
+            remainder: Some(JoinRemainderPolicy::Drain),
+            next: key("next"),
+        };
+        assert_eq!(
+            decide_controller(
+                &quorum_one,
+                &ControllerObservation::Join {
+                    children: vec![ChildOutcome::Succeeded, ChildOutcome::Active],
+                },
+            ),
+            Ok(ControllerDecision::CompleteNode {
+                activate: vec![key("next")]
+            })
+        );
+        let loop_node = RuntimeNode::Loop {
+            body: key("body"),
+            exit: key("exit"),
+            maximum_iterations: 3,
+        };
+        assert_eq!(
+            decide_controller(
+                &loop_node,
+                &ControllerObservation::Loop {
+                    iteration: 3,
+                    condition: true,
+                },
+            ),
+            Ok(ControllerDecision::FailNode {
+                code: "budget_exhausted"
+            })
+        );
+    }
+
+    #[test]
+    fn map_failure_policies_are_bounded_and_deterministic() {
+        let all_settled = RuntimeNode::Map {
+            body: key("body"),
+            next: key("next"),
+            maximum_items: 4,
+            failure_policy: MapFailurePolicy::AllSettled,
+        };
+        assert_eq!(
+            decide_controller(
+                &all_settled,
+                &ControllerObservation::MapSettlement {
+                    children: vec![ChildOutcome::Failed, ChildOutcome::Active],
+                },
+            ),
+            Ok(ControllerDecision::WaitForChildren)
+        );
+        assert_eq!(
+            decide_controller(
+                &all_settled,
+                &ControllerObservation::MapSettlement {
+                    children: vec![ChildOutcome::Failed, ChildOutcome::Cancelled],
+                },
+            ),
+            Ok(ControllerDecision::CompleteNode {
+                activate: vec![key("next")],
+            })
+        );
+
+        let fail_fast = RuntimeNode::Map {
+            body: key("body"),
+            next: key("next"),
+            maximum_items: 4,
+            failure_policy: MapFailurePolicy::FailFast,
+        };
+        assert_eq!(
+            decide_controller(
+                &fail_fast,
+                &ControllerObservation::MapSettlement {
+                    children: vec![ChildOutcome::Succeeded, ChildOutcome::Failed],
+                },
+            ),
+            Ok(ControllerDecision::FailNode {
+                code: "map_item_failed",
+            })
+        );
+
+        let bounded = RuntimeNode::Map {
+            body: key("body"),
+            next: key("next"),
+            maximum_items: 4,
+            failure_policy: MapFailurePolicy::BoundedErrorCount {
+                maximum_failures: 1,
+            },
+        };
+        assert_eq!(
+            decide_controller(
+                &bounded,
+                &ControllerObservation::MapSettlement {
+                    children: vec![ChildOutcome::Failed, ChildOutcome::Succeeded],
+                },
+            ),
+            Ok(ControllerDecision::CompleteNode {
+                activate: vec![key("next")],
+            })
+        );
+        assert_eq!(
+            decide_controller(
+                &bounded,
+                &ControllerObservation::MapSettlement {
+                    children: vec![
+                        ChildOutcome::Failed,
+                        ChildOutcome::Cancelled,
+                        ChildOutcome::Active,
+                    ],
+                },
+            ),
+            Ok(ControllerDecision::FailNode {
+                code: "map_error_limit_exceeded",
+            })
+        );
+        assert_eq!(
+            decide_controller(
+                &bounded,
+                &ControllerObservation::MapSettlement {
+                    children: Vec::new(),
+                },
+            ),
+            Err(OrchestratorError::ObservationMismatch)
+        );
+
+        assert_eq!(
+            validate_node(
+                &RuntimeNode::Map {
+                    body: key("body"),
+                    next: key("next"),
+                    maximum_items: 2,
+                    failure_policy: MapFailurePolicy::BoundedErrorCount {
+                        maximum_failures: 3,
+                    },
+                },
+                limits(),
+            ),
+            Err(OrchestratorError::InvalidPlan)
+        );
+    }
+
+    fn control() -> RunControlSnapshot {
+        RunControlSnapshot {
+            pause_generation: 0,
+            pause_requested: false,
+            cancel_generation: 0,
+            cancel_requested_at: None,
+            cancel_reason_code: None,
+            cancel_principal: None,
+            timeout_generation: 0,
+            timeout_requested_at: None,
+            timeout_observed_run_state: None,
+            timeout_observed_run_version: None,
+        }
+    }
+
+    #[test]
+    fn pause_cancel_and_timeout_use_exact_generations() {
+        let paused = match decide_pause(&control(), 0, true).unwrap() {
+            ControlDecision::Updated(value) => value,
+            ControlDecision::Unchanged(_) => panic!("pause must toggle"),
+        };
+        assert_eq!(paused.pause_generation, 1);
+        assert_eq!(
+            decide_pause(&paused, 0, false),
+            Err(OrchestratorError::StaleGeneration)
+        );
+
+        let observed = Utc.with_ymd_and_hms(2026, 8, 9, 12, 0, 0).unwrap();
+        let cancelled = match decide_cancel(
+            &paused,
+            0,
+            observed,
+            "user_requested".to_owned(),
+            PrincipalSnapshot::build(
+                id("ten_0198f1c5-0787-75e1-a9e8-d95ca0f37002"),
+                id("prn_0198f1c5-0787-75e1-a9e8-d95ca0f37003"),
+                insight_platform_contracts::PrincipalKind::AgentRunner,
+                insight_platform_contracts::PermissionSet::new(vec![
+                    insight_platform_contracts::Permission::RuntimeControl,
+                ])
+                .unwrap(),
+                1,
+                1,
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        {
+            ControlDecision::Updated(value) => value,
+            ControlDecision::Unchanged(_) => panic!("cancel must set intent"),
+        };
+        assert_eq!(cancelled.cancel_generation, 1);
+
+        let cancel_convergence = decide_orchestration_convergence(
+            OrchestrationConvergenceFacts {
+                run_state: RunState::Cancelling,
+                run_version: 2,
+                run_deadline: observed + chrono::Duration::minutes(1),
+                control: cancelled.clone(),
+                node_state: NodeExecutionState::Running,
+                job_state: JobState::Running,
+                job_attempt_count: 1,
+                job_attempt_limit: 3,
+                job_deadline: observed + chrono::Duration::minutes(1),
+                lease_expires_at: Some(observed + chrono::Duration::seconds(30)),
+            },
+            observed,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            cancel_convergence.reason,
+            OrchestrationConvergenceReason::CancelRequested
+        );
+        assert_eq!(cancel_convergence.run_state, RunState::Cancelled);
+
+        let timeout_convergence = decide_orchestration_convergence(
+            OrchestrationConvergenceFacts {
+                run_state: RunState::Running,
+                run_version: 3,
+                run_deadline: observed,
+                control: control(),
+                node_state: NodeExecutionState::Running,
+                job_state: JobState::Running,
+                job_attempt_count: 1,
+                job_attempt_limit: 3,
+                job_deadline: observed,
+                lease_expires_at: Some(observed + chrono::Duration::seconds(30)),
+            },
+            observed,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            timeout_convergence.reason,
+            OrchestrationConvergenceReason::DeadlineExceeded
+        );
+        assert_eq!(timeout_convergence.run_state, RunState::TimedOut);
+        assert_eq!(timeout_convergence.control.timeout_generation, 1);
+
+        assert_eq!(
+            decide_timeout(
+                &cancelled,
+                0,
+                observed,
+                observed + chrono::Duration::seconds(1),
+                "cancelling".to_owned(),
+                2,
+            ),
+            Err(OrchestratorError::InvalidTimeoutObservation)
+        );
+    }
+
+    #[test]
+    fn child_ancestry_rejects_cycles_depth_and_unbounded_delegation() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 9, 12, 0, 0).unwrap();
+        let parent_run_id = id("run_0198f1c5-0787-75e1-a9e8-d95ca0f37101");
+        let parent_deployment_id = id("adep_0198f1c5-0787-75e1-a9e8-d95ca0f37102");
+        let child_deployment =
+            ExactDeploymentRef::new(id("adep_0198f1c5-0787-75e1-a9e8-d95ca0f37103"), digest('1'))
+                .unwrap();
+        let command = PrepareChildRun {
+            parent_run_id: parent_run_id.clone(),
+            parent_node_execution_id: id("nex_0198f1c5-0787-75e1-a9e8-d95ca0f37104"),
+            child_link_id: id("crun_0198f1c5-0787-75e1-a9e8-d95ca0f37105"),
+            child_run_id: id("run_0198f1c5-0787-75e1-a9e8-d95ca0f37106"),
+            child_agent_deployment: child_deployment.clone(),
+            parent_ancestry: RunAncestrySnapshot::root(parent_run_id.clone(), parent_deployment_id),
+            parent_deadline: now + chrono::Duration::minutes(5),
+            parent_delegated_budget: None,
+            parent_delegated_descendant_count: 0,
+            parent_descendant_count: 2,
+            maximum_depth: 4,
+            maximum_descendants: 8,
+            budget: ChildBudget {
+                deadline: now + chrono::Duration::minutes(4),
+                maximum_model_tokens: 1_000,
+                maximum_capability_calls: 10,
+                maximum_artifact_bytes: 1_048_576,
+                maximum_descendant_runs: 5,
+            },
+        };
+        let ancestry = prepare_child_run(command.clone()).unwrap();
+        assert_eq!(ancestry.depth, 1);
+        assert_eq!(
+            ancestry.ancestry_agent_deployment_ids.last(),
+            Some(&child_deployment.deployment_id)
+        );
+
+        let mut cycle = command.clone();
+        cycle.child_agent_deployment = ExactDeploymentRef::new(
+            command.parent_ancestry.ancestry_agent_deployment_ids[0].clone(),
+            digest('2'),
+        )
+        .unwrap();
+        assert_eq!(prepare_child_run(cycle), Err(OrchestratorError::ChildCycle));
+
+        let mut depth = command.clone();
+        depth.maximum_depth = 0;
+        assert_eq!(
+            prepare_child_run(depth),
+            Err(OrchestratorError::InvalidChildRun)
+        );
+
+        let mut nested = command.clone();
+        nested.parent_delegated_budget = Some(ChildBudget {
+            deadline: now + chrono::Duration::minutes(4),
+            maximum_model_tokens: 1_000,
+            maximum_capability_calls: 10,
+            maximum_artifact_bytes: 1_048_576,
+            maximum_descendant_runs: 8,
+        });
+        nested.parent_delegated_descendant_count = 2;
+        assert!(prepare_child_run(nested).is_ok());
+
+        let mut over_parent_budget = command.clone();
+        over_parent_budget.parent_delegated_budget = Some(ChildBudget {
+            deadline: now + chrono::Duration::minutes(4),
+            maximum_model_tokens: 999,
+            maximum_capability_calls: 10,
+            maximum_artifact_bytes: 1_048_576,
+            maximum_descendant_runs: 8,
+        });
+        assert_eq!(
+            prepare_child_run(over_parent_budget),
+            Err(OrchestratorError::InvalidChildBudget)
+        );
+
+        let mut descendants = command;
+        descendants.budget.maximum_descendant_runs = 6;
+        assert_eq!(
+            prepare_child_run(descendants),
+            Err(OrchestratorError::InvalidChildRun)
+        );
+    }
+
+    #[test]
+    fn child_link_cancel_and_terminal_are_generation_first_winner() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 9, 12, 0, 0).unwrap();
+        let current = ChildRunLinkProjection {
+            tenant_id: id("ten_0198f1c5-0787-75e1-a9e8-d95ca0f37201"),
+            child_link_id: id("crun_0198f1c5-0787-75e1-a9e8-d95ca0f37202"),
+            parent_run_id: id("run_0198f1c5-0787-75e1-a9e8-d95ca0f37203"),
+            parent_node_execution_id: id("nex_0198f1c5-0787-75e1-a9e8-d95ca0f37204"),
+            child_run_id: id("run_0198f1c5-0787-75e1-a9e8-d95ca0f37205"),
+            state: ChildLinkState::Running,
+            generation: 1,
+            version: 1,
+            payload: ChildRunLinkPayload {
+                parent_attempt_ordinal: 1,
+                child_agent_deployment: ExactDeploymentRef::new(
+                    id("adep_0198f1c5-0787-75e1-a9e8-d95ca0f37206"),
+                    digest('3'),
+                )
+                .unwrap(),
+                input_digest: digest('4'),
+                cancellation_policy: ChildCancellationPolicy::CascadeAndWait,
+                budget: ChildBudget {
+                    deadline: now + chrono::Duration::minutes(1),
+                    maximum_model_tokens: 100,
+                    maximum_capability_calls: 2,
+                    maximum_artifact_bytes: 1024,
+                    maximum_descendant_runs: 0,
+                },
+            },
+            deadline: now + chrono::Duration::minutes(1),
+            terminal_at: None,
+        };
+        let cancelling = decide_child_link_cancel(&current, 1, 1).unwrap();
+        assert_eq!(cancelling.state, ChildLinkState::Cancelling);
+        assert_eq!(cancelling.version, 2);
+        let succeeded =
+            decide_child_link_terminal(&cancelling, 1, 2, RunState::Succeeded, now).unwrap();
+        assert_eq!(succeeded.state, ChildLinkState::Succeeded);
+        assert_eq!(succeeded.version, 3);
+        assert_eq!(
+            decide_child_link_terminal(&succeeded, 1, 2, RunState::Cancelled, now),
+            Err(OrchestratorError::ChildFirstWinnerLost)
+        );
+    }
+}
