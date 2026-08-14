@@ -3,11 +3,11 @@ use async_trait::async_trait;
 use insight_platform_contracts::{ResourceKind, SandboxIsolationClass, Sha256Digest};
 use insight_platform_jobs::JobFence;
 use insight_platform_sandbox::{
-    ActivatedManagedMcpSandboxSession, InstalledSandboxBackendDescriptor,
-    ManagedMcpSandboxSessionCleanupOutcome, ManagedMcpSandboxSessionLivenessEvidence,
-    ManagedMcpSandboxSessionProvider, ManagedMcpSandboxSessionRequest,
-    PreparedManagedMcpSandboxSession, PreparedManagedMcpSandboxSessionActivation,
-    SandboxCommandLimits, SandboxIsolationBackendKind,
+    ActivatedManagedMcpSandboxSession, ExpiredManagedMcpSandboxSessionLease,
+    InstalledSandboxBackendDescriptor, ManagedMcpSandboxSessionCleanupOutcome,
+    ManagedMcpSandboxSessionLivenessEvidence, ManagedMcpSandboxSessionProvider,
+    ManagedMcpSandboxSessionRequest, PreparedManagedMcpSandboxSession,
+    PreparedManagedMcpSandboxSessionActivation, SandboxCommandLimits, SandboxIsolationBackendKind,
 };
 use std::sync::Arc;
 
@@ -50,6 +50,11 @@ pub trait ManagedMcpMicroVmSessionLifecyclePort: Send + Sync {
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
         prepared: Option<&PreparedManagedMcpSandboxSession>,
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, MicroVmProviderFailure>;
+
+    async fn recover_expired_exact(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
     ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, MicroVmProviderFailure>;
 }
 
@@ -307,6 +312,33 @@ where
         outcome
             .validate_for(request, fence, prepared, self.clock.now())
             .map_err(|_| provider_contract_failure("managed_mcp_microvm_cleanup_invalid"))?;
+        Ok(outcome)
+    }
+
+    async fn recover_expired_exact(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
+        expired
+            .validate(self.limits)
+            .map_err(|_| provider_contract_failure("managed_mcp_microvm_recovery_invalid"))?;
+        if expired.request.isolation_class != SandboxIsolationClass::MicroVm
+            || expired.request.executor_worker_manifest_digest
+                != self.descriptor.worker_manifest_digest
+            || expired.request.isolation_backend_contract_digest
+                != self.descriptor.backend_contract_digest
+            || expired.physical_state == insight_platform_contracts::SandboxJobState::Accepted
+        {
+            return Err(provider_contract_failure(
+                "managed_mcp_microvm_recovery_contract_mismatch",
+            ));
+        }
+        let outcome = self.lifecycle.recover_expired_exact(expired).await?;
+        outcome
+            .validate_for_expired(expired, self.clock.now())
+            .map_err(|_| {
+                provider_contract_failure("managed_mcp_microvm_recovery_outcome_invalid")
+            })?;
         Ok(outcome)
     }
 }

@@ -536,7 +536,7 @@ pub trait WasiExecutorProcessRegistrationVerifier: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProveWasiProcessGenerationAbsent {
+pub struct ProveSandboxProcessGenerationAbsent {
     pub tenant_id: ResourceId,
     pub sandbox_job_id: ResourceId,
     pub request_digest: Sha256Digest,
@@ -545,14 +545,14 @@ pub struct ProveWasiProcessGenerationAbsent {
     pub attestor_route: NodeAttestorRoute,
 }
 
-impl ProveWasiProcessGenerationAbsent {
-    pub fn validate(&self) -> Result<(), WasiProcessGenerationIsolationError> {
+impl ProveSandboxProcessGenerationAbsent {
+    pub fn validate(&self) -> Result<(), SandboxProcessGenerationIsolationError> {
         if self.tenant_id.kind() != ResourceKind::Tenant
             || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
             || self.previous_worker_process_generation_id.kind()
                 != ResourceKind::WorkerProcessGeneration
         {
-            return Err(WasiProcessGenerationIsolationError::Rejected);
+            return Err(SandboxProcessGenerationIsolationError::Rejected);
         }
         Ok(())
     }
@@ -560,14 +560,14 @@ impl ProveWasiProcessGenerationAbsent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WasiProcessGenerationIsolationDisposition {
+pub enum SandboxProcessGenerationIsolationDisposition {
     ProcessAbsent,
     NodeQuarantined,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WasiProcessGenerationAbsenceEvidence {
+pub struct SandboxProcessGenerationAbsenceEvidence {
     pub schema_version: u32,
     pub tenant_id: ResourceId,
     pub sandbox_job_id: ResourceId,
@@ -576,24 +576,24 @@ pub struct WasiProcessGenerationAbsenceEvidence {
     pub executor_identity_digest: Sha256Digest,
     pub attestor_identity_digest: Sha256Digest,
     pub attestor_route: NodeAttestorRoute,
-    pub disposition: WasiProcessGenerationIsolationDisposition,
+    pub disposition: SandboxProcessGenerationIsolationDisposition,
     pub observed_at: DateTime<Utc>,
     pub evidence_digest: Sha256Digest,
 }
 
-impl WasiProcessGenerationAbsenceEvidence {
-    pub fn seal(mut self) -> Result<Self, WasiProcessGenerationIsolationError> {
+impl SandboxProcessGenerationAbsenceEvidence {
+    pub fn seal(mut self) -> Result<Self, SandboxProcessGenerationIsolationError> {
         self.evidence_digest = self
             .canonical_evidence_digest()
-            .map_err(|_| WasiProcessGenerationIsolationError::Rejected)?;
+            .map_err(|_| SandboxProcessGenerationIsolationError::Rejected)?;
         Ok(self)
     }
 
     pub fn validate_for(
         &self,
-        request: &ProveWasiProcessGenerationAbsent,
+        request: &ProveSandboxProcessGenerationAbsent,
         now: DateTime<Utc>,
-    ) -> Result<(), WasiProcessGenerationIsolationError> {
+    ) -> Result<(), SandboxProcessGenerationIsolationError> {
         request.validate()?;
         if self.schema_version != 1
             || self.tenant_id != request.tenant_id
@@ -606,14 +606,14 @@ impl WasiProcessGenerationAbsenceEvidence {
             || self.observed_at > now
             || self.evidence_digest != self.canonical_evidence_digest()?
         {
-            return Err(WasiProcessGenerationIsolationError::Rejected);
+            return Err(SandboxProcessGenerationIsolationError::Rejected);
         }
         Ok(())
     }
 
     fn canonical_evidence_digest(
         &self,
-    ) -> Result<Sha256Digest, WasiProcessGenerationIsolationError> {
+    ) -> Result<Sha256Digest, SandboxProcessGenerationIsolationError> {
         canonical_digest(&serde_json::json!({
             "attestor_identity_digest": self.attestor_identity_digest,
             "attestor_route": self.attestor_route,
@@ -626,23 +626,23 @@ impl WasiProcessGenerationAbsenceEvidence {
             "schema_version": self.schema_version,
             "tenant_id": self.tenant_id,
         }))
-        .map_err(|_| WasiProcessGenerationIsolationError::Rejected)?
+        .map_err(|_| SandboxProcessGenerationIsolationError::Rejected)?
         .parse()
-        .map_err(|_| WasiProcessGenerationIsolationError::Rejected)
+        .map_err(|_| SandboxProcessGenerationIsolationError::Rejected)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WasiProcessGenerationIsolationError {
+pub enum SandboxProcessGenerationIsolationError {
     StillLive,
     Unavailable,
     Rejected,
 }
 
 #[async_trait]
-pub trait WasiProcessGenerationIsolation: Send + Sync {
+pub trait SandboxProcessGenerationIsolation: Send + Sync {
     async fn prove_absent(
         &self,
-        request: ProveWasiProcessGenerationAbsent,
-    ) -> Result<WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolationError>;
+        request: ProveSandboxProcessGenerationAbsent,
+    ) -> Result<SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolationError>;
 }

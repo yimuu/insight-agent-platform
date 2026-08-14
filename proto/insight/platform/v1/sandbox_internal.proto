@@ -26,7 +26,7 @@ service SandboxExecutorBrokerService {
   rpc ReadExactArtifact(ClosedSandboxEnvelope) returns (SandboxBytesEnvelope);
   rpc ValidateWasiValue(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
   rpc RevokeWasiGrants(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc ProveWasiProcessGenerationAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc ProveSandboxProcessGenerationAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
 // Provider-only broker authority. It is a separate service so the privileged microVM Provider
@@ -68,6 +68,7 @@ service SandboxManagedMcpSessionProviderService {
   rpc ActivateManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
   rpc ObserveExactManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
   rpc DestroyExactManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc RecoverExpiredManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
 // Executor-only registration endpoint. The attestor observes node/runtime identity on behalf of
@@ -85,7 +86,7 @@ service SandboxMicroVmExecutorProcessRegistrationService {
 // Controller-only verification/recovery endpoint on the independently deployed attestor.
 service SandboxProcessIsolationAttestorService {
   rpc VerifyWasiExecutorProcessGeneration(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc ProveWasiProcessGenerationAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc ProveSandboxProcessGenerationAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
 message ClosedSandboxEnvelope {

@@ -1402,6 +1402,14 @@ impl ManagedMcpSandboxSessionProvider for RecordingManagedSessionProvider {
         .map(ManagedMcpSandboxSessionCleanupOutcome::Destroyed)
         .map_err(|_| ManagedSessionFixtureError)
     }
+
+    async fn recover_expired_exact(
+        &self,
+        _expired: &ExpiredManagedMcpSandboxSessionLease,
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
+        self.events.lock().unwrap().push("provider_recover_expired");
+        Err(ManagedSessionFixtureError)
+    }
 }
 
 fn managed_session_worker_fixture(
@@ -4046,7 +4054,7 @@ fn backend_failure_with_possible_effect_is_never_safe_automatic_retry() {
 #[test]
 fn process_generation_absence_evidence_is_exactly_bound_and_tamper_evident() {
     let observed_at = Utc::now();
-    let request = ProveWasiProcessGenerationAbsent {
+    let request = ProveSandboxProcessGenerationAbsent {
         tenant_id: id(ResourceKind::Tenant, 401),
         sandbox_job_id: id(ResourceKind::SandboxJob, 402),
         request_digest: sha('1'),
@@ -4054,7 +4062,7 @@ fn process_generation_absence_evidence_is_exactly_bound_and_tamper_evident() {
         executor_identity_digest: sha('2'),
         attestor_route: attestor_route(),
     };
-    let evidence = WasiProcessGenerationAbsenceEvidence {
+    let evidence = SandboxProcessGenerationAbsenceEvidence {
         schema_version: 1,
         tenant_id: request.tenant_id.clone(),
         sandbox_job_id: request.sandbox_job_id.clone(),
@@ -4065,7 +4073,7 @@ fn process_generation_absence_evidence_is_exactly_bound_and_tamper_evident() {
         executor_identity_digest: request.executor_identity_digest.clone(),
         attestor_identity_digest: sha('3'),
         attestor_route: request.attestor_route.clone(),
-        disposition: WasiProcessGenerationIsolationDisposition::ProcessAbsent,
+        disposition: SandboxProcessGenerationIsolationDisposition::ProcessAbsent,
         observed_at,
         evidence_digest: sha('0'),
     }
@@ -4078,18 +4086,18 @@ fn process_generation_absence_evidence_is_exactly_bound_and_tamper_evident() {
     wrong_request.executor_identity_digest = sha('4');
     assert_eq!(
         evidence.validate_for(&wrong_request, observed_at),
-        Err(WasiProcessGenerationIsolationError::Rejected)
+        Err(SandboxProcessGenerationIsolationError::Rejected)
     );
 
     let mut tampered = evidence.clone();
-    tampered.disposition = WasiProcessGenerationIsolationDisposition::NodeQuarantined;
+    tampered.disposition = SandboxProcessGenerationIsolationDisposition::NodeQuarantined;
     assert_eq!(
         tampered.validate_for(&request, observed_at),
-        Err(WasiProcessGenerationIsolationError::Rejected)
+        Err(SandboxProcessGenerationIsolationError::Rejected)
     );
     assert_eq!(
         evidence.validate_for(&request, observed_at - ChronoDuration::milliseconds(1)),
-        Err(WasiProcessGenerationIsolationError::Rejected)
+        Err(SandboxProcessGenerationIsolationError::Rejected)
     );
 }
 

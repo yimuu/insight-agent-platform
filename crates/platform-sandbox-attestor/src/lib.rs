@@ -8,12 +8,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{canonical_digest, parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_sandbox::{
-    NodeAttestorRoute, ProveWasiProcessGenerationAbsent, RegisterWasiExecutorProcessGeneration,
+    NodeAttestorRoute, ProveSandboxProcessGenerationAbsent, RegisterWasiExecutorProcessGeneration,
+    SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolation,
+    SandboxProcessGenerationIsolationDisposition, SandboxProcessGenerationIsolationError,
     VerifyWasiExecutorProcessGeneration, WasiExecutorProcessAttestationAuthority,
     WasiExecutorProcessIdentityEvidence, WasiExecutorProcessRegistrationError,
     WasiExecutorProcessRegistrationVerifier, WasiExecutorRegistrationPeer,
-    WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolation,
-    WasiProcessGenerationIsolationDisposition, WasiProcessGenerationIsolationError,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -481,14 +481,15 @@ where
 }
 
 #[async_trait]
-impl<O> WasiProcessGenerationIsolation for NodeProcessAttestor<O>
+impl<O> SandboxProcessGenerationIsolation for NodeProcessAttestor<O>
 where
     O: ExecutorProcessObserver + 'static,
 {
     async fn prove_absent(
         &self,
-        request: ProveWasiProcessGenerationAbsent,
-    ) -> Result<WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolationError> {
+        request: ProveSandboxProcessGenerationAbsent,
+    ) -> Result<SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolationError>
+    {
         request.validate()?;
         let stored = {
             let records = self.records.lock().await;
@@ -500,19 +501,19 @@ where
                         && stored.evidence.attestor_route == request.attestor_route
                 })
                 .cloned()
-                .ok_or(WasiProcessGenerationIsolationError::Rejected)?
+                .ok_or(SandboxProcessGenerationIsolationError::Rejected)?
         };
         match self.observe_stored(&stored).await {
             Ok(ObservationDisposition::SameProcess) => {
-                return Err(WasiProcessGenerationIsolationError::StillLive)
+                return Err(SandboxProcessGenerationIsolationError::StillLive)
             }
             Ok(ObservationDisposition::Absent) => {}
             Err(ProcessObservationError::Unavailable) => {
-                return Err(WasiProcessGenerationIsolationError::Unavailable)
+                return Err(SandboxProcessGenerationIsolationError::Unavailable)
             }
             Err(ProcessObservationError::Missing) => {}
             Err(ProcessObservationError::Rejected) => {
-                return Err(WasiProcessGenerationIsolationError::Rejected)
+                return Err(SandboxProcessGenerationIsolationError::Rejected)
             }
         }
         let confirmation_candidate = Utc::now();
@@ -521,7 +522,7 @@ where
             let (observed_at, changed) = {
                 let current = records
                     .get_mut(request.executor_identity_digest.as_str())
-                    .ok_or(WasiProcessGenerationIsolationError::Rejected)?;
+                    .ok_or(SandboxProcessGenerationIsolationError::Rejected)?;
                 match current.confirmed_absent_at {
                     Some(confirmed_at) => (confirmed_at, false),
                     None => {
@@ -533,11 +534,11 @@ where
             if changed {
                 self.persist_locked(&records)
                     .await
-                    .map_err(|_| WasiProcessGenerationIsolationError::Unavailable)?;
+                    .map_err(|_| SandboxProcessGenerationIsolationError::Unavailable)?;
             }
             observed_at
         };
-        WasiProcessGenerationAbsenceEvidence {
+        SandboxProcessGenerationAbsenceEvidence {
             schema_version: 1,
             tenant_id: request.tenant_id.clone(),
             sandbox_job_id: request.sandbox_job_id.clone(),
@@ -548,7 +549,7 @@ where
             executor_identity_digest: request.executor_identity_digest.clone(),
             attestor_identity_digest: self.config.attestor_identity_digest.clone(),
             attestor_route: self.config.attestor_route.clone(),
-            disposition: WasiProcessGenerationIsolationDisposition::ProcessAbsent,
+            disposition: SandboxProcessGenerationIsolationDisposition::ProcessAbsent,
             observed_at,
             evidence_digest: zero_digest(),
         }

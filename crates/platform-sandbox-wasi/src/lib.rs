@@ -13,17 +13,17 @@ use insight_platform_contracts::{
 };
 use insight_platform_sandbox::{
     AbortSandboxExecution, CollectedSandbox, DestroySandbox, ExpiredSandboxLease,
-    InstalledSandboxBackendDescriptor, PreparedSandbox, ProveWasiProcessGenerationAbsent,
+    InstalledSandboxBackendDescriptor, PreparedSandbox, ProveSandboxProcessGenerationAbsent,
     RevokeWasiSandboxGrants, RunningSandbox, SafeSandboxFailure, SandboxAbortEvidence,
     SandboxBackendFailure, SandboxBackendFailureStage, SandboxCleanupDisposition,
     SandboxCleanupEvidence, SandboxCompletedOutput, SandboxExecutionOutcome,
     SandboxExecutionRequest, SandboxExecutorBackend, SandboxIsolationBackendKind,
-    SandboxLeaseRecoveryEvidence, SandboxNetworkMode, SandboxResourceUsage,
-    SandboxTerminationEvidence, SandboxUncertainty, TerminateSandbox, WasiArtifactBroker,
-    WasiArtifactBrokerError, WasiArtifactReadPurpose, WasiArtifactReadRequest,
-    WasiGrantRevocationError, WasiGrantRevocationEvidence, WasiGrantRevoker,
-    WasiProcessGenerationIsolation, WasiProcessGenerationIsolationError, WasiValueDirection,
-    WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator,
+    SandboxLeaseRecoveryEvidence, SandboxNetworkMode, SandboxProcessGenerationIsolation,
+    SandboxProcessGenerationIsolationError, SandboxResourceUsage, SandboxTerminationEvidence,
+    SandboxUncertainty, TerminateSandbox, WasiArtifactBroker, WasiArtifactBrokerError,
+    WasiArtifactReadPurpose, WasiArtifactReadRequest, WasiGrantRevocationError,
+    WasiGrantRevocationEvidence, WasiGrantRevoker, WasiValueDirection, WasiValueValidationError,
+    WasiValueValidationRequest, WasiValueValidator,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -112,7 +112,7 @@ pub struct WasmtimeSandboxExecutorBackend {
     artifact_broker: Arc<dyn WasiArtifactBroker>,
     value_validator: Arc<dyn WasiValueValidator>,
     grant_revoker: Arc<dyn WasiGrantRevoker>,
-    process_generation_isolation: Arc<dyn WasiProcessGenerationIsolation>,
+    process_generation_isolation: Arc<dyn SandboxProcessGenerationIsolation>,
     clock: Arc<dyn WasiExecutorClock>,
     permits: Arc<Semaphore>,
     executions: Mutex<BTreeMap<Sha256Digest, Arc<WasiExecution>>>,
@@ -170,7 +170,7 @@ impl WasmtimeSandboxExecutorBackend {
         artifact_broker: Arc<dyn WasiArtifactBroker>,
         value_validator: Arc<dyn WasiValueValidator>,
         grant_revoker: Arc<dyn WasiGrantRevoker>,
-        process_generation_isolation: Arc<dyn WasiProcessGenerationIsolation>,
+        process_generation_isolation: Arc<dyn SandboxProcessGenerationIsolation>,
         clock: Arc<dyn WasiExecutorClock>,
     ) -> Result<Self, WasiBackendConfigurationError> {
         if !config.validate() {
@@ -834,7 +834,7 @@ impl SandboxExecutorBackend for WasmtimeSandboxExecutorBackend {
                     true,
                 ));
             }
-            let proof_request = ProveWasiProcessGenerationAbsent {
+            let proof_request = ProveSandboxProcessGenerationAbsent {
                 tenant_id: expired.tenant_id.clone(),
                 sandbox_job_id: expired.sandbox_job_id.clone(),
                 request_digest: expired.request.request_digest.clone(),
@@ -927,20 +927,20 @@ async fn wait_for_guest_stop(execution: &WasiExecution) {
 }
 
 fn process_generation_isolation_failure(
-    error: WasiProcessGenerationIsolationError,
+    error: SandboxProcessGenerationIsolationError,
 ) -> SandboxBackendFailure {
     let (code, message, retryability) = match error {
-        WasiProcessGenerationIsolationError::StillLive => (
+        SandboxProcessGenerationIsolationError::StillLive => (
             "sandbox_wasi_previous_generation_still_live",
             "Previous WASI process generation is still live",
             Retryability::SafeWithinPolicy,
         ),
-        WasiProcessGenerationIsolationError::Unavailable => (
+        SandboxProcessGenerationIsolationError::Unavailable => (
             "sandbox_wasi_process_isolation_unavailable",
             "WASI process-generation isolation authority is unavailable",
             Retryability::SafeWithinPolicy,
         ),
-        WasiProcessGenerationIsolationError::Rejected => (
+        SandboxProcessGenerationIsolationError::Rejected => (
             "sandbox_wasi_process_isolation_rejected",
             "WASI process-generation isolation proof was rejected",
             Retryability::Never,

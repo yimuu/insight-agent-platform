@@ -7,8 +7,8 @@ use insight_platform_sandbox::{
     InstalledSandboxBackendDescriptor, InstalledSandboxBackendRegistry,
     RegisterWasiExecutorProcessGeneration, SandboxCommandLimits, SandboxExecutionControlRouter,
     SandboxExecutorBackend, SandboxExecutorHost, SandboxExecutorWorker, SandboxHeartbeatConfig,
-    SandboxIsolationBackendKind, WasiArtifactBroker, WasiExecutorProcessRegistrar,
-    WasiGrantRevoker, WasiProcessGenerationIsolation, WasiValueValidator,
+    SandboxIsolationBackendKind, SandboxProcessGenerationIsolation, WasiArtifactBroker,
+    WasiExecutorProcessRegistrar, WasiGrantRevoker, WasiValueValidator,
 };
 use insight_platform_sandbox_executor::{
     ManagedMcpSandboxSessionExecutorDriver, RegisteredManagedMcpSandboxSessionExecutor,
@@ -264,7 +264,7 @@ async fn run() -> Result<(), ProcessError> {
             let artifacts: Arc<dyn WasiArtifactBroker> = broker.clone();
             let value_validator: Arc<dyn WasiValueValidator> = broker.clone();
             let grant_revoker: Arc<dyn WasiGrantRevoker> = broker.clone();
-            let process_isolation: Arc<dyn WasiProcessGenerationIsolation> = broker;
+            let process_isolation: Arc<dyn SandboxProcessGenerationIsolation> = broker;
             let mut backend_config = WasiExecutorBackendConfig::production(
                 descriptor.clone(),
                 process_generation_id.clone(),

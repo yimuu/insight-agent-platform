@@ -1,9 +1,11 @@
 use crate::{
     digest_without_field, required_isolation, ClaimSandboxJobs, HeartbeatSandboxExecution,
-    NodeAttestorRoute, SandboxClaimFailure, SandboxCleanupEvidence, SandboxCommandLimits,
-    SandboxContractError, SandboxExecutionPolicyClosure, SandboxHeartbeatConfig,
-    SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit, SandboxWorkerCommitIdentity,
-    ScopedArtifactGrant, ScopedSecretGrant, MAX_SANDBOX_ARTIFACT_GRANTS, MAX_SANDBOX_SECRET_GRANTS,
+    NodeAttestorRoute, ProveSandboxProcessGenerationAbsent, SandboxClaimFailure,
+    SandboxCleanupEvidence, SandboxCommandLimits, SandboxContractError,
+    SandboxExecutionPolicyClosure, SandboxHeartbeatConfig, SandboxNetworkMode,
+    SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolationDisposition,
+    SandboxResourceEnvelope, SandboxWorkerAudit, SandboxWorkerCommitIdentity, ScopedArtifactGrant,
+    ScopedSecretGrant, MAX_SANDBOX_ARTIFACT_GRANTS, MAX_SANDBOX_SECRET_GRANTS,
     SANDBOX_PROTOCOL_VERSION, SANDBOX_QUOTA_LINES,
 };
 use async_trait::async_trait;
@@ -14,8 +16,8 @@ use insight_platform_contracts::{
     SandboxRuntimeFamily, Sha256Digest, WorkClass,
 };
 use insight_platform_jobs::{
-    decide_cleanup_reconciliation, decide_heartbeat, decide_observation_update, decide_start,
-    JobFence, JobOwnerRef, JobProjection, LeasePolicy,
+    decide_cleanup_reconciliation, decide_expired_lease, decide_heartbeat,
+    decide_observation_update, decide_start, JobFence, JobOwnerRef, JobProjection, LeasePolicy,
 };
 use insight_platform_mcp_host::{
     EncryptedMcpState, ManagedMcpSandboxSessionIdentity, McpHostExecutionContract,
@@ -310,6 +312,7 @@ pub struct ManagedMcpSandboxSessionJobPayload {
     pub prepared_binding: Option<PreparedManagedMcpSandboxSession>,
     pub ready_binding: Option<ManagedMcpSandboxSessionReadyBinding>,
     pub cleanup: Option<SandboxCleanupEvidence>,
+    pub expired_lease_recovery: Option<ManagedMcpSandboxSessionExpiredLeaseEvidence>,
     pub payload_digest: Sha256Digest,
 }
 
@@ -330,6 +333,7 @@ impl ManagedMcpSandboxSessionJobPayload {
             prepared_binding: None,
             ready_binding: None,
             cleanup: None,
+            expired_lease_recovery: None,
             payload_digest: submission_digest.clone(),
         };
         payload.payload_digest = digest_without_field(&payload, "payload_digest")?;
@@ -353,6 +357,7 @@ impl ManagedMcpSandboxSessionJobPayload {
                 job.state == JobState::Running
             }
             SandboxJobState::Lost => job.state == JobState::ReconciliationRequired,
+            SandboxJobState::TimedOut => job.state == JobState::TimedOut,
             _ => false,
         };
         if self.schema_version != 1
@@ -375,7 +380,8 @@ impl ManagedMcpSandboxSessionJobPayload {
                     || self.phase_evidence_digest.is_some()
                     || self.prepared_binding.is_some()
                     || self.ready_binding.is_some()
-                    || self.cleanup.is_some()))
+                    || self.cleanup.is_some()
+                    || self.expired_lease_recovery.is_some()))
             || (matches!(
                 self.physical_state,
                 SandboxJobState::Preparing | SandboxJobState::Starting | SandboxJobState::Running
@@ -383,13 +389,23 @@ impl ManagedMcpSandboxSessionJobPayload {
                 || self.executor_identity_digest.is_none()
                 || self.attestor_route.is_none()
                 || self.phase_evidence_digest.is_none()
-                || self.cleanup.is_some()))
+                || self.cleanup.is_some()
+                || self.expired_lease_recovery.is_some()))
             || (self.physical_state == SandboxJobState::Lost
                 && (self.phase_sequence < 2
                     || self.executor_identity_digest.is_none()
                     || self.attestor_route.is_none()
                     || self.phase_evidence_digest.is_none()
-                    || self.cleanup.is_none()))
+                    || self.cleanup.is_some() == self.expired_lease_recovery.is_some()))
+            || (self.physical_state == SandboxJobState::TimedOut
+                && (self.phase_sequence != 1
+                    || self.executor_identity_digest.is_some()
+                    || self.attestor_route.is_some()
+                    || self.phase_evidence_digest.is_none()
+                    || self.prepared_binding.is_some()
+                    || self.ready_binding.is_some()
+                    || self.cleanup.is_some()
+                    || self.expired_lease_recovery.is_some()))
             || (self.physical_state == SandboxJobState::Preparing
                 && self.prepared_binding.is_some())
             || (matches!(
@@ -435,6 +451,15 @@ impl ManagedMcpSandboxSessionJobPayload {
             }) {
                 return Err(SandboxContractError::InvalidOutcome);
             }
+        }
+        if let Some(recovery) = &self.expired_lease_recovery {
+            recovery.validate_durable_for(
+                &self.request,
+                self.executor_identity_digest
+                    .as_ref()
+                    .ok_or(SandboxContractError::InvalidOutcome)?,
+                self.prepared_binding.as_ref(),
+            )?;
         }
         if self
             .prepared_binding
@@ -851,6 +876,503 @@ pub trait ManagedMcpSandboxSessionClaimAuthority: Send + Sync + 'static {
         &self,
         command: ClaimSandboxJobs,
     ) -> Result<Vec<ClaimedManagedMcpSandboxSession>, SandboxClaimFailure>;
+}
+
+/// Stable keyset cursor for the dedicated Managed-session expired-lease scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionRecoveryCursor {
+    pub lease_expires_at: DateTime<Utc>,
+    pub physical_job_id: ResourceId,
+}
+
+impl ManagedMcpSandboxSessionRecoveryCursor {
+    pub fn validate(&self) -> Result<(), SandboxContractError> {
+        if self.physical_job_id.kind() != ResourceKind::Job {
+            return Err(SandboxContractError::InvalidWorkerCommand);
+        }
+        Ok(())
+    }
+}
+
+/// One shard of the durable Managed-session recovery keyspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionRecoveryShard {
+    pub index: u16,
+    pub count: u16,
+}
+
+impl ManagedMcpSandboxSessionRecoveryShard {
+    pub fn validate(self, maximum_shards: u16) -> Result<(), SandboxContractError> {
+        if self.count == 0 || self.count > maximum_shards || self.index >= self.count {
+            return Err(SandboxContractError::InvalidWorkerCommand);
+        }
+        Ok(())
+    }
+}
+
+/// Exact current recovery-Executor identity. The Controller re-verifies this registration before
+/// returning any candidate; started candidates are additionally pinned to the same node route so
+/// the caller can address the authoritative node-local Provider state directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanExpiredManagedMcpSandboxSessionLeases {
+    pub recovery_worker_process_generation_id: ResourceId,
+    pub worker_manifest_digest: Sha256Digest,
+    pub isolation_backend_contract_digest: Sha256Digest,
+    pub recovery_executor_identity_digest: Sha256Digest,
+    pub recovery_attestor_route: NodeAttestorRoute,
+    pub shard: ManagedMcpSandboxSessionRecoveryShard,
+    pub after: Option<ManagedMcpSandboxSessionRecoveryCursor>,
+    pub limit: u16,
+}
+
+impl ScanExpiredManagedMcpSandboxSessionLeases {
+    pub fn validate(
+        &self,
+        maximum_batch: u16,
+        maximum_shards: u16,
+    ) -> Result<(), SandboxContractError> {
+        self.shard.validate(maximum_shards)?;
+        if self.recovery_worker_process_generation_id.kind()
+            != ResourceKind::WorkerProcessGeneration
+            || self.limit == 0
+            || self.limit > maximum_batch
+        {
+            return Err(SandboxContractError::InvalidWorkerCommand);
+        }
+        if let Some(after) = &self.after {
+            after.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Read-only, token-free observation of one exact expired physical Managed-session lease.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpiredManagedMcpSandboxSessionLease {
+    pub request: ManagedMcpSandboxSessionRequest,
+    pub usage_reservation_id: ResourceId,
+    pub observed_job_version: u64,
+    pub observed_lease_generation: u64,
+    pub previous_worker_process_generation_id: ResourceId,
+    pub lease_expires_at: DateTime<Utc>,
+    pub database_observed_at: DateTime<Utc>,
+    pub physical_state: SandboxJobState,
+    pub executor_identity_digest: Option<Sha256Digest>,
+    pub attestor_route: Option<NodeAttestorRoute>,
+    pub phase_evidence_digest: Option<Sha256Digest>,
+    pub prepared_binding: Option<PreparedManagedMcpSandboxSession>,
+    pub ready_binding: Option<ManagedMcpSandboxSessionReadyBinding>,
+}
+
+impl ExpiredManagedMcpSandboxSessionLease {
+    pub fn validate(&self, limits: SandboxCommandLimits) -> Result<(), SandboxContractError> {
+        let request_validation_time = self
+            .lease_expires_at
+            .checked_sub_signed(chrono::Duration::milliseconds(1))
+            .ok_or(SandboxContractError::InvalidWorkerCommand)?;
+        self.request.validate_at(request_validation_time, limits)?;
+        if self.usage_reservation_id.kind() != ResourceKind::UsageReservation
+            || self.observed_job_version == 0
+            || self.observed_lease_generation == 0
+            || self.previous_worker_process_generation_id.kind()
+                != ResourceKind::WorkerProcessGeneration
+            || self.lease_expires_at > self.database_observed_at
+            || !matches!(
+                self.physical_state,
+                SandboxJobState::Accepted
+                    | SandboxJobState::Preparing
+                    | SandboxJobState::Starting
+                    | SandboxJobState::Running
+            )
+        {
+            return Err(SandboxContractError::InvalidWorkerCommand);
+        }
+        match self.physical_state {
+            SandboxJobState::Accepted => {
+                if self.executor_identity_digest.is_some()
+                    || self.attestor_route.is_some()
+                    || self.phase_evidence_digest.is_some()
+                    || self.prepared_binding.is_some()
+                    || self.ready_binding.is_some()
+                {
+                    return Err(SandboxContractError::InvalidWorkerCommand);
+                }
+            }
+            SandboxJobState::Preparing => {
+                if self.executor_identity_digest.is_none()
+                    || self.attestor_route.is_none()
+                    || self.phase_evidence_digest.is_none()
+                    || self.prepared_binding.is_some()
+                    || self.ready_binding.is_some()
+                {
+                    return Err(SandboxContractError::InvalidWorkerCommand);
+                }
+            }
+            SandboxJobState::Starting | SandboxJobState::Running => {
+                let executor = self
+                    .executor_identity_digest
+                    .as_ref()
+                    .ok_or(SandboxContractError::InvalidWorkerCommand)?;
+                let prepared = self
+                    .prepared_binding
+                    .as_ref()
+                    .ok_or(SandboxContractError::InvalidWorkerCommand)?;
+                if self.attestor_route.is_none()
+                    || self.phase_evidence_digest.is_none()
+                    || prepared
+                        .validate_durable_for(&self.request, executor)
+                        .is_err()
+                    || prepared.worker_process_generation_id
+                        != self.previous_worker_process_generation_id
+                    || prepared.lease_generation != self.observed_lease_generation
+                    || (self.physical_state == SandboxJobState::Starting
+                        && (self.phase_evidence_digest.as_ref()
+                            != Some(&prepared.canonical_digest)
+                            || self.ready_binding.is_some()))
+                    || (self.physical_state == SandboxJobState::Running
+                        && self.ready_binding.as_ref().is_none_or(|ready| {
+                            ready.validate_canonical_for(&self.request).is_err()
+                                || ready.sandbox_identity_digest != prepared.sandbox_identity_digest
+                        }))
+                {
+                    return Err(SandboxContractError::InvalidWorkerCommand);
+                }
+            }
+            _ => return Err(SandboxContractError::InvalidWorkerCommand),
+        }
+        Ok(())
+    }
+
+    pub fn process_absence_request(
+        &self,
+        limits: SandboxCommandLimits,
+    ) -> Result<ProveSandboxProcessGenerationAbsent, SandboxContractError> {
+        self.validate(limits)?;
+        Ok(ProveSandboxProcessGenerationAbsent {
+            tenant_id: self.request.identity.tenant_id.clone(),
+            sandbox_job_id: self.request.identity.sandbox_job_id.clone(),
+            request_digest: self.request.request_digest.clone(),
+            previous_worker_process_generation_id: self
+                .previous_worker_process_generation_id
+                .clone(),
+            executor_identity_digest: self
+                .executor_identity_digest
+                .clone()
+                .ok_or(SandboxContractError::InvalidWorkerCommand)?,
+            attestor_route: self
+                .attestor_route
+                .clone()
+                .ok_or(SandboxContractError::InvalidWorkerCommand)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpiredManagedMcpSandboxSessionLeasePage {
+    pub records: Vec<ExpiredManagedMcpSandboxSessionLease>,
+    pub next_cursor: Option<ManagedMcpSandboxSessionRecoveryCursor>,
+    pub exhausted: bool,
+}
+
+/// Closed physical absence proof used by the expired-lease commit. `process_absent` requires a
+/// second, same-node Provider observation after the old process is gone. A sealed node quarantine
+/// is independently sufficient and therefore cannot be combined with a caller-fabricated
+/// Provider outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionExpiredLeaseEvidence {
+    pub schema_version: u32,
+    pub process_absence: SandboxProcessGenerationAbsenceEvidence,
+    pub provider_cleanup: Option<ManagedMcpSandboxSessionCleanupOutcome>,
+    pub canonical_digest: Sha256Digest,
+}
+
+impl ManagedMcpSandboxSessionExpiredLeaseEvidence {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.canonical_digest = digest_without_field(&self, "canonical_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_for(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
+        now: DateTime<Utc>,
+        limits: SandboxCommandLimits,
+    ) -> Result<(), SandboxContractError> {
+        expired.validate(limits)?;
+        let request = expired.process_absence_request(limits)?;
+        self.process_absence
+            .validate_for(&request, now)
+            .map_err(|_| SandboxContractError::InvalidOutcome)?;
+        match self.process_absence.disposition {
+            SandboxProcessGenerationIsolationDisposition::ProcessAbsent => {
+                let cleanup = self
+                    .provider_cleanup
+                    .as_ref()
+                    .ok_or(SandboxContractError::InvalidOutcome)?;
+                cleanup.validate_for_expired(expired, now)?;
+                if cleanup.observed_at() < self.process_absence.observed_at {
+                    return Err(SandboxContractError::InvalidOutcome);
+                }
+            }
+            SandboxProcessGenerationIsolationDisposition::NodeQuarantined => {
+                if self.provider_cleanup.is_some() {
+                    return Err(SandboxContractError::InvalidOutcome);
+                }
+            }
+        }
+        if self.schema_version != 1
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+
+    fn validate_durable_for(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        executor_identity_digest: &Sha256Digest,
+        prepared: Option<&PreparedManagedMcpSandboxSession>,
+    ) -> Result<(), SandboxContractError> {
+        let absence = &self.process_absence;
+        if self.schema_version != 1
+            || absence.schema_version != 1
+            || absence.tenant_id != request.identity.tenant_id
+            || absence.sandbox_job_id != request.identity.sandbox_job_id
+            || absence.request_digest != request.request_digest
+            || absence.previous_worker_process_generation_id.kind()
+                != ResourceKind::WorkerProcessGeneration
+            || &absence.executor_identity_digest != executor_identity_digest
+            || absence.evidence_digest
+                != absence
+                    .clone()
+                    .seal()
+                    .map_err(|_| SandboxContractError::InvalidOutcome)?
+                    .evidence_digest
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        match absence.disposition {
+            SandboxProcessGenerationIsolationDisposition::ProcessAbsent => {
+                let cleanup = self
+                    .provider_cleanup
+                    .as_ref()
+                    .ok_or(SandboxContractError::InvalidOutcome)?;
+                match cleanup {
+                    ManagedMcpSandboxSessionCleanupOutcome::Absent(evidence) => {
+                        if prepared.is_some()
+                            || evidence.identity != request.identity
+                            || evidence.request_digest != request.request_digest
+                            || evidence.worker_process_generation_id
+                                != absence.previous_worker_process_generation_id
+                            || evidence.lease_generation == 0
+                            || evidence.observed_at < absence.observed_at
+                            || evidence.clone().seal()? != *evidence
+                        {
+                            return Err(SandboxContractError::InvalidOutcome);
+                        }
+                    }
+                    ManagedMcpSandboxSessionCleanupOutcome::Destroyed(evidence) => {
+                        evidence.cleanup.validate_recovery()?;
+                        if evidence.identity != request.identity
+                            || evidence.request_digest != request.request_digest
+                            || evidence.worker_process_generation_id
+                                != absence.previous_worker_process_generation_id
+                            || &evidence.executor_identity_digest != executor_identity_digest
+                            || evidence.lease_generation == 0
+                            || evidence.sandbox_identity_digest
+                                != evidence.cleanup.sandbox_identity_digest
+                            || evidence.cleanup.observed_at < absence.observed_at
+                            || prepared.is_some_and(|prepared| {
+                                prepared.worker_process_generation_id
+                                    != evidence.worker_process_generation_id
+                                    || prepared.provider_process_generation_id
+                                        != evidence.provider_process_generation_id
+                                    || prepared.lease_generation != evidence.lease_generation
+                                    || prepared.executor_identity_digest
+                                        != evidence.executor_identity_digest
+                                    || prepared.sandbox_identity_digest
+                                        != evidence.sandbox_identity_digest
+                            })
+                            || evidence.clone().seal()? != *evidence
+                        {
+                            return Err(SandboxContractError::InvalidOutcome);
+                        }
+                    }
+                }
+            }
+            SandboxProcessGenerationIsolationDisposition::NodeQuarantined => {
+                if self.provider_cleanup.is_some() {
+                    return Err(SandboxContractError::InvalidOutcome);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ManagedMcpSandboxSessionLeaseRecoveryAction {
+    RequeueUnstarted {
+        recovery_evidence_digest: Sha256Digest,
+    },
+    TimeoutUnstarted {
+        recovery_evidence_digest: Sha256Digest,
+    },
+    MarkLost {
+        evidence: Box<ManagedMcpSandboxSessionExpiredLeaseEvidence>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionRecoveryAudit {
+    pub tenant_id: ResourceId,
+    pub recovery_process_generation_id: ResourceId,
+    pub receipt_id: ResourceId,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+}
+
+impl ManagedMcpSandboxSessionRecoveryAudit {
+    fn validate_at(&self, now: DateTime<Utc>) -> Result<(), SandboxContractError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.recovery_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.receipt_id.kind() != ResourceKind::Receipt
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.receipt_expires_at <= now
+        {
+            return Err(SandboxContractError::InvalidWorkerCommand);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverExpiredManagedMcpSandboxSessionLease {
+    pub audit: ManagedMcpSandboxSessionRecoveryAudit,
+    pub expired: ExpiredManagedMcpSandboxSessionLease,
+    pub action: ManagedMcpSandboxSessionLeaseRecoveryAction,
+    pub quota_entry_ids: Vec<ResourceId>,
+}
+
+impl RecoverExpiredManagedMcpSandboxSessionLease {
+    pub fn canonical_idempotency_key_digest(&self) -> Result<Sha256Digest, SandboxContractError> {
+        insight_platform_contracts::canonical_digest(&serde_json::json!({
+            "job_id": self.expired.request.identity.physical_job_id,
+            "observed_lease_generation": self.expired.observed_lease_generation,
+            "schema_version": 1,
+        }))
+        .map_err(|_| SandboxContractError::Canonicalization)?
+        .parse()
+        .map_err(|_| SandboxContractError::Canonicalization)
+    }
+
+    pub fn canonical_request_digest(&self) -> Result<Sha256Digest, SandboxContractError> {
+        insight_platform_contracts::canonical_digest(&serde_json::json!({
+            "action": self.action,
+            "expired": self.expired,
+            "quota_entry_ids": self.quota_entry_ids,
+            "recovery_process_generation_id": self.audit.recovery_process_generation_id,
+            "schema_version": 1,
+            "tenant_id": self.audit.tenant_id,
+        }))
+        .map_err(|_| SandboxContractError::Canonicalization)?
+        .parse()
+        .map_err(|_| SandboxContractError::Canonicalization)
+    }
+
+    pub fn validate_at(
+        &self,
+        now: DateTime<Utc>,
+        limits: SandboxCommandLimits,
+    ) -> Result<(), SandboxContractError> {
+        self.audit.validate_at(now)?;
+        self.expired.validate(limits)?;
+        let terminal = !matches!(
+            self.action,
+            ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted { .. }
+        );
+        if self.audit.tenant_id != self.expired.request.identity.tenant_id
+            || (terminal && self.quota_entry_ids.len() != SANDBOX_QUOTA_LINES)
+            || (!terminal && !self.quota_entry_ids.is_empty())
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || !sorted_unique_ids(self.quota_entry_ids.iter())
+            || self.audit.idempotency_key_digest != self.canonical_idempotency_key_digest()?
+            || self.audit.request_digest != self.canonical_request_digest()?
+        {
+            return Err(SandboxContractError::InvalidWorkerCommand);
+        }
+        match &self.action {
+            ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted { .. }
+            | ManagedMcpSandboxSessionLeaseRecoveryAction::TimeoutUnstarted { .. }
+                if self.expired.physical_state != SandboxJobState::Accepted =>
+            {
+                Err(SandboxContractError::InvalidTransition)
+            }
+            ManagedMcpSandboxSessionLeaseRecoveryAction::MarkLost { evidence } => {
+                evidence.validate_for(&self.expired, now, limits)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedMcpSandboxSessionLeaseRecoveryDisposition {
+    Requeued,
+    TimedOut,
+    Lost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionLeaseRecoveryResult {
+    pub tenant_id: ResourceId,
+    pub subscription_id: ResourceId,
+    pub physical_job_id: ResourceId,
+    pub recovered_lease_generation: u64,
+    pub disposition: ManagedMcpSandboxSessionLeaseRecoveryDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedMcpSandboxSessionRecoveryFailure {
+    Unavailable,
+    FirstWinnerLost,
+    InvariantViolation,
+}
+
+#[async_trait]
+pub trait ManagedMcpSandboxSessionRecoveryAuthority: Send + Sync + 'static {
+    async fn scan_expired_managed_mcp_sandbox_session_leases(
+        &self,
+        command: ScanExpiredManagedMcpSandboxSessionLeases,
+    ) -> Result<ExpiredManagedMcpSandboxSessionLeasePage, ManagedMcpSandboxSessionRecoveryFailure>;
+
+    async fn recover_expired_managed_mcp_sandbox_session_lease(
+        &self,
+        command: RecoverExpiredManagedMcpSandboxSessionLease,
+    ) -> Result<
+        CommandOutcome<ManagedMcpSandboxSessionLeaseRecoveryResult>,
+        ManagedMcpSandboxSessionRecoveryFailure,
+    >;
 }
 
 #[async_trait]
@@ -1509,6 +2031,13 @@ pub enum ManagedMcpSandboxSessionCleanupOutcome {
 }
 
 impl ManagedMcpSandboxSessionCleanupOutcome {
+    pub fn observed_at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Absent(evidence) => evidence.observed_at,
+            Self::Destroyed(evidence) => evidence.cleanup.observed_at,
+        }
+    }
+
     pub fn validate_for(
         &self,
         request: &ManagedMcpSandboxSessionRequest,
@@ -1524,6 +2053,31 @@ impl ManagedMcpSandboxSessionCleanupOutcome {
                 evidence.validate_for(request, fence, now)
             }
             Self::Destroyed(evidence) => evidence.validate_for(request, fence, prepared, now),
+        }
+    }
+
+    pub fn validate_for_expired(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        let executor_identity_digest = expired
+            .executor_identity_digest
+            .as_ref()
+            .ok_or(SandboxContractError::InvalidOutcome)?;
+        match self {
+            Self::Absent(evidence) => {
+                if expired.prepared_binding.is_some() {
+                    return Err(SandboxContractError::InvalidOutcome);
+                }
+                evidence.validate_for_expired(expired, now)
+            }
+            Self::Destroyed(evidence) => evidence.validate_for_expired(
+                expired,
+                executor_identity_digest,
+                expired.prepared_binding.as_ref(),
+                now,
+            ),
         }
     }
 }
@@ -1557,6 +2111,24 @@ impl ManagedMcpSandboxSessionAbsenceEvidence {
             || self.request_digest != request.request_digest
             || self.worker_process_generation_id != fence.worker_process_generation_id
             || self.lease_generation != fence.lease_generation
+            || self.observed_at > now
+            || digest_without_field(self, "evidence_digest")? != self.evidence_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+
+    fn validate_for_expired(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        if self.schema_version != 1
+            || self.identity != expired.request.identity
+            || self.request_digest != expired.request.request_digest
+            || self.worker_process_generation_id != expired.previous_worker_process_generation_id
+            || self.lease_generation != expired.observed_lease_generation
             || self.observed_at > now
             || digest_without_field(self, "evidence_digest")? != self.evidence_digest
         {
@@ -1601,6 +2173,40 @@ impl ManagedMcpSandboxSessionDestroyedEvidence {
             || self.worker_process_generation_id != fence.worker_process_generation_id
             || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.lease_generation != fence.lease_generation
+            || self.sandbox_identity_digest != self.cleanup.sandbox_identity_digest
+            || self.cleanup.observed_at > now
+            || prepared.is_some_and(|prepared| {
+                prepared.identity != self.identity
+                    || prepared.request_digest != self.request_digest
+                    || prepared.worker_process_generation_id != self.worker_process_generation_id
+                    || prepared.provider_process_generation_id
+                        != self.provider_process_generation_id
+                    || prepared.lease_generation != self.lease_generation
+                    || prepared.executor_identity_digest != self.executor_identity_digest
+                    || prepared.sandbox_identity_digest != self.sandbox_identity_digest
+            })
+            || digest_without_field(self, "evidence_digest")? != self.evidence_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+
+    fn validate_for_expired(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
+        executor_identity_digest: &Sha256Digest,
+        prepared: Option<&PreparedManagedMcpSandboxSession>,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        self.cleanup.validate_recovery()?;
+        if self.schema_version != 1
+            || self.identity != expired.request.identity
+            || self.request_digest != expired.request.request_digest
+            || self.worker_process_generation_id != expired.previous_worker_process_generation_id
+            || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.lease_generation != expired.observed_lease_generation
+            || &self.executor_identity_digest != executor_identity_digest
             || self.sandbox_identity_digest != self.cleanup.sandbox_identity_digest
             || self.cleanup.observed_at > now
             || prepared.is_some_and(|prepared| {
@@ -1666,6 +2272,14 @@ pub trait ManagedMcpSandboxSessionProvider: Send + Sync {
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
         prepared: Option<&PreparedManagedMcpSandboxSession>,
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error>;
+
+    /// Node-local recovery lookup for an expired lease. The lease token is intentionally absent:
+    /// this operation owns no durable mutation authority and addresses only the Provider's exact
+    /// persisted instance key after process-generation absence has already been proved.
+    async fn recover_expired_exact(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
     ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error>;
 }
 
@@ -2712,6 +3326,160 @@ pub fn decide_managed_mcp_sandbox_session_lost(
         .ok_or(SandboxContractError::InvalidTransition)?;
     physical_payload.phase_evidence_digest = Some(command.session_loss_evidence_digest.clone());
     physical_payload.cleanup = Some(command.cleanup.clone());
+    physical_payload = physical_payload.seal()?;
+    physical_payload.validate_for(&physical_job, limits)?;
+    Ok(ManagedMcpSandboxSessionPhaseDecision {
+        logical_payload,
+        logical_state,
+        physical_job,
+        physical_payload,
+    })
+}
+
+/// Applies one token-free CAS recovery for the exact expired physical lease. An unstarted lease
+/// may be requeued or timed out. Once `Preparing` is durable, the old generation is fenced out
+/// only after the closed process/Provider absence evidence has been validated.
+pub fn decide_expired_managed_mcp_sandbox_session_lease(
+    current: &McpSubscriptionRecord,
+    current_job: &JobProjection,
+    current_payload: &ManagedMcpSandboxSessionJobPayload,
+    command: &RecoverExpiredManagedMcpSandboxSessionLease,
+    database_now: DateTime<Utc>,
+    limits: SandboxCommandLimits,
+) -> Result<ManagedMcpSandboxSessionPhaseDecision, SandboxContractError> {
+    command.validate_at(database_now, limits)?;
+    validate_current_managed_session(
+        current,
+        current_job,
+        current_payload,
+        &command.expired.request.identity,
+        limits,
+    )?;
+    let expired = &command.expired;
+    let lease = current_job
+        .lease
+        .as_ref()
+        .ok_or(SandboxContractError::StaleFence)?;
+    if current_payload.request.as_ref() != &expired.request
+        || current_payload.physical_state != expired.physical_state
+        || current_payload.executor_identity_digest != expired.executor_identity_digest
+        || current_payload.attestor_route != expired.attestor_route
+        || current_payload.phase_evidence_digest != expired.phase_evidence_digest
+        || current_payload.prepared_binding != expired.prepared_binding
+        || current_payload.ready_binding != expired.ready_binding
+        || current_job.version != expired.observed_job_version
+        || current_job.lease_generation != expired.observed_lease_generation
+        || lease.worker_process_generation_id != expired.previous_worker_process_generation_id
+        || lease.expires_at != expired.lease_expires_at
+    {
+        return Err(SandboxContractError::StaleFence);
+    }
+    let mut physical_payload = current_payload.clone();
+    let (physical_job, logical_payload, logical_state) = match &command.action {
+        ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted { .. } => {
+            if current_payload.physical_state != SandboxJobState::Accepted
+                || current_job.state != JobState::Leased
+                || database_now >= current_job.deadline
+            {
+                return Err(SandboxContractError::InvalidTransition);
+            }
+            let physical_job = decide_expired_lease(
+                current_job,
+                expired.observed_job_version,
+                expired.observed_lease_generation,
+                database_now,
+                JobState::Ready,
+                None,
+            )
+            .map_err(|_| SandboxContractError::StaleFence)?;
+            (physical_job, current.payload.clone(), current.state)
+        }
+        ManagedMcpSandboxSessionLeaseRecoveryAction::TimeoutUnstarted {
+            recovery_evidence_digest,
+        } => {
+            if current_payload.physical_state != SandboxJobState::Accepted
+                || current_job.state != JobState::Leased
+                || database_now < current_job.deadline
+            {
+                return Err(SandboxContractError::InvalidTransition);
+            }
+            let physical_job = decide_expired_lease(
+                current_job,
+                expired.observed_job_version,
+                expired.observed_lease_generation,
+                database_now,
+                JobState::TimedOut,
+                None,
+            )
+            .map_err(|_| SandboxContractError::StaleFence)?;
+            let (logical_payload, logical_state) = current
+                .payload
+                .transition_managed_sandbox_session(
+                    current.payload.session.version,
+                    &expired.request.identity,
+                    McpSessionState::Failed,
+                    None,
+                    expired
+                        .request
+                        .mcp_contract
+                        .server
+                        .limits
+                        .maximum_session_milliseconds,
+                    database_now,
+                )
+                .map_err(|_| SandboxContractError::InvalidTransition)?;
+            physical_payload.physical_state = SandboxJobState::TimedOut;
+            physical_payload.phase_sequence = 1;
+            physical_payload.phase_evidence_digest = Some(recovery_evidence_digest.clone());
+            (physical_job, logical_payload, logical_state)
+        }
+        ManagedMcpSandboxSessionLeaseRecoveryAction::MarkLost { evidence } => {
+            if current_payload.physical_state == SandboxJobState::Accepted
+                || current_job.state != JobState::Running
+                || !current_payload
+                    .physical_state
+                    .can_transition_to(SandboxJobState::Lost)
+            {
+                return Err(SandboxContractError::InvalidTransition);
+            }
+            evidence.validate_for(expired, database_now, limits)?;
+            let physical_job = decide_expired_lease(
+                current_job,
+                expired.observed_job_version,
+                expired.observed_lease_generation,
+                database_now,
+                JobState::ReconciliationRequired,
+                None,
+            )
+            .map_err(|_| SandboxContractError::StaleFence)?;
+            let (logical_payload, logical_state) = current
+                .payload
+                .rebuild_managed_sandbox_session_after_loss(
+                    current.payload.session.version,
+                    &expired.request.identity,
+                    database_now,
+                )
+                .map_err(|_| SandboxContractError::InvalidTransition)?;
+            physical_payload.physical_state = SandboxJobState::Lost;
+            physical_payload.phase_sequence = physical_payload
+                .phase_sequence
+                .checked_add(1)
+                .ok_or(SandboxContractError::InvalidTransition)?;
+            physical_payload.phase_evidence_digest = Some(evidence.canonical_digest.clone());
+            physical_payload.cleanup =
+                evidence
+                    .provider_cleanup
+                    .as_ref()
+                    .and_then(|outcome| match outcome {
+                        ManagedMcpSandboxSessionCleanupOutcome::Destroyed(evidence) => {
+                            Some(evidence.cleanup.clone())
+                        }
+                        ManagedMcpSandboxSessionCleanupOutcome::Absent(_) => None,
+                    });
+            physical_payload.expired_lease_recovery = Some(evidence.as_ref().clone());
+            (physical_job, logical_payload, logical_state)
+        }
+    };
     physical_payload = physical_payload.seal()?;
     physical_payload.validate_for(&physical_job, limits)?;
     Ok(ManagedMcpSandboxSessionPhaseDecision {

@@ -19,31 +19,32 @@ use insight_platform_sandbox::{
     AuthorizedManagedMcpSandboxSecretDelivery, ClaimSandboxJobs, ClaimedManagedMcpSandboxSession,
     ClaimedSandboxJob, CollectedSandbox, CommitManagedMcpSandboxSessionLost,
     CommitManagedMcpSandboxSessionPhase, CommitManagedMcpSandboxSessionReady, CommitSandboxOutcome,
-    CommitSandboxPhase, DestroySandbox, ExpiredSandboxLease, HeartbeatSandboxExecution,
-    InstalledSandboxBackendDescriptor, ManagedMcpSandboxSecretCommitOutcome,
-    ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryError,
-    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
-    ManagedMcpSandboxSessionClaimAuthority, ManagedMcpSandboxSessionCleanupOutcome,
-    ManagedMcpSandboxSessionExecutionAuthority, ManagedMcpSandboxSessionLivenessEvidence,
-    ManagedMcpSandboxSessionPhaseDecision, ManagedMcpSandboxSessionProvider,
-    ManagedMcpSandboxSessionRequest, MicroVmArtifactBroker, MicroVmArtifactBrokerError,
-    MicroVmArtifactReadRequest, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
-    MicroVmGrantRevoker, MicroVmIsolationProviderBackend, MicroVmProviderExecutionFence,
-    PreparedManagedMcpSandboxSession, PreparedManagedMcpSandboxSessionActivation, PreparedSandbox,
-    ProveWasiProcessGenerationAbsent, RegisterWasiExecutorProcessGeneration,
+    CommitSandboxPhase, DestroySandbox, ExpiredManagedMcpSandboxSessionLease, ExpiredSandboxLease,
+    HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor,
+    ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryAuthority,
+    ManagedMcpSandboxSecretDeliveryError, ManagedMcpSandboxSecretDeliveryRequest,
+    ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSessionClaimAuthority,
+    ManagedMcpSandboxSessionCleanupOutcome, ManagedMcpSandboxSessionExecutionAuthority,
+    ManagedMcpSandboxSessionLivenessEvidence, ManagedMcpSandboxSessionPhaseDecision,
+    ManagedMcpSandboxSessionProvider, ManagedMcpSandboxSessionRequest, MicroVmArtifactBroker,
+    MicroVmArtifactBrokerError, MicroVmArtifactReadRequest, MicroVmGrantRevocationError,
+    MicroVmGrantRevocationEvidence, MicroVmGrantRevoker, MicroVmIsolationProviderBackend,
+    MicroVmProviderExecutionFence, PreparedManagedMcpSandboxSession,
+    PreparedManagedMcpSandboxSessionActivation, PreparedSandbox,
+    ProveSandboxProcessGenerationAbsent, RegisterWasiExecutorProcessGeneration,
     RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants, RunningSandbox, SandboxBackendFailure,
     SandboxBackendFailureStage, SandboxClaimAuthority, SandboxClaimFailure, SandboxCleanupEvidence,
     SandboxCommandLimits, SandboxExecutionAuthority, SandboxExecutionRequest,
     SandboxExecutorBackend, SandboxIsolationBackendKind, SandboxLeaseRecoveryEvidence,
-    SandboxPhaseDecision, SandboxTerminationEvidence, TerminateSandbox,
-    VerifyWasiExecutorProcessGeneration, WasiArtifactBroker, WasiArtifactBrokerError,
-    WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
-    WasiExecutorProcessIdentityEvidence, WasiExecutorProcessRegistrar,
-    WasiExecutorProcessRegistrationError, WasiExecutorProcessRegistrationVerifier,
-    WasiExecutorRegistrationPeer, WasiGrantRevocationError, WasiGrantRevocationEvidence,
-    WasiGrantRevoker, WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolation,
-    WasiProcessGenerationIsolationError, WasiValueValidationError, WasiValueValidationRequest,
-    WasiValueValidator,
+    SandboxPhaseDecision, SandboxProcessGenerationAbsenceEvidence,
+    SandboxProcessGenerationIsolation, SandboxProcessGenerationIsolationError,
+    SandboxTerminationEvidence, TerminateSandbox, VerifyWasiExecutorProcessGeneration,
+    WasiArtifactBroker, WasiArtifactBrokerError, WasiArtifactReadRequest,
+    WasiExecutorProcessAttestationAuthority, WasiExecutorProcessIdentityEvidence,
+    WasiExecutorProcessRegistrar, WasiExecutorProcessRegistrationError,
+    WasiExecutorProcessRegistrationVerifier, WasiExecutorRegistrationPeer,
+    WasiGrantRevocationError, WasiGrantRevocationEvidence, WasiGrantRevoker,
+    WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator,
 };
 #[cfg(test)]
 use insight_platform_sandbox::{MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind};
@@ -874,31 +875,32 @@ impl WasiExecutorProcessRegistrationVerifier for SandboxProcessIsolationAttestor
 }
 
 #[async_trait]
-impl WasiProcessGenerationIsolation for SandboxProcessIsolationAttestorGrpcClient {
+impl SandboxProcessGenerationIsolation for SandboxProcessIsolationAttestorGrpcClient {
     async fn prove_absent(
         &self,
-        request: ProveWasiProcessGenerationAbsent,
-    ) -> Result<WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolationError> {
+        request: ProveSandboxProcessGenerationAbsent,
+    ) -> Result<SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolationError>
+    {
         request.validate()?;
         let envelope = encode(&request, self.limits)
-            .map_err(|_| WasiProcessGenerationIsolationError::Rejected)?;
+            .map_err(|_| SandboxProcessGenerationIsolationError::Rejected)?;
         let mut client = self.client.clone();
-        let evidence: WasiProcessGenerationAbsenceEvidence = client
-            .prove_wasi_process_generation_absent(Request::new(envelope))
+        let evidence: SandboxProcessGenerationAbsenceEvidence = client
+            .prove_sandbox_process_generation_absent(Request::new(envelope))
             .await
             .map_err(|status| match status.code() {
                 tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
-                    WasiProcessGenerationIsolationError::Unavailable
+                    SandboxProcessGenerationIsolationError::Unavailable
                 }
-                tonic::Code::Aborted => WasiProcessGenerationIsolationError::StillLive,
-                _ => WasiProcessGenerationIsolationError::Rejected,
+                tonic::Code::Aborted => SandboxProcessGenerationIsolationError::StillLive,
+                _ => SandboxProcessGenerationIsolationError::Rejected,
             })
             .and_then(|response| {
                 decode(response.into_inner(), self.limits)
-                    .map_err(|_| WasiProcessGenerationIsolationError::Rejected)
+                    .map_err(|_| SandboxProcessGenerationIsolationError::Rejected)
             })?;
         if evidence.attestor_identity_digest != self.attestor_identity_digest {
-            return Err(WasiProcessGenerationIsolationError::Rejected);
+            return Err(SandboxProcessGenerationIsolationError::Rejected);
         }
         evidence.validate_for(&request, chrono::Utc::now())?;
         Ok(evidence)
@@ -1114,19 +1116,20 @@ impl WasiGrantRevoker for SandboxBrokerGrpcClient {
 }
 
 #[async_trait]
-impl WasiProcessGenerationIsolation for SandboxBrokerGrpcClient {
+impl SandboxProcessGenerationIsolation for SandboxBrokerGrpcClient {
     async fn prove_absent(
         &self,
-        request: ProveWasiProcessGenerationAbsent,
-    ) -> Result<WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolationError> {
+        request: ProveSandboxProcessGenerationAbsent,
+    ) -> Result<SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolationError>
+    {
         self.closed_unary(&request, |client, request| {
-            Box::pin(client.prove_wasi_process_generation_absent(request))
+            Box::pin(client.prove_sandbox_process_generation_absent(request))
         })
         .await
         .map_err(|error| match error {
-            SandboxRpcError::Unavailable => WasiProcessGenerationIsolationError::Unavailable,
-            SandboxRpcError::FirstWinnerLost => WasiProcessGenerationIsolationError::StillLive,
-            _ => WasiProcessGenerationIsolationError::Rejected,
+            SandboxRpcError::Unavailable => SandboxProcessGenerationIsolationError::Unavailable,
+            SandboxRpcError::FirstWinnerLost => SandboxProcessGenerationIsolationError::StillLive,
+            _ => SandboxProcessGenerationIsolationError::Rejected,
         })
     }
 }
@@ -1423,6 +1426,21 @@ impl ManagedMcpSandboxSessionProvider for SandboxManagedMcpSessionProviderGrpcCl
         let outcome = self.destroy_remote(request, fence, prepared).await?;
         outcome
             .validate_for(request, fence, prepared, chrono::Utc::now())
+            .map_err(|_| SandboxRpcError::InvalidEnvelope)?;
+        Ok(outcome)
+    }
+
+    async fn recover_expired_exact(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
+        let outcome: ManagedMcpSandboxSessionCleanupOutcome = self
+            .unary(expired, |client, request| {
+                Box::pin(client.recover_expired_managed_mcp_sandbox_session(request))
+            })
+            .await?;
+        outcome
+            .validate_for_expired(expired, chrono::Utc::now())
             .map_err(|_| SandboxRpcError::InvalidEnvelope)?;
         Ok(outcome)
     }
@@ -2182,6 +2200,29 @@ where
                 .await,
         )
     }
+
+    async fn recover_expired_managed_mcp_sandbox_session(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let expired: ExpiredManagedMcpSandboxSessionLease =
+            decode(request.into_inner(), self.limits)?;
+        expired
+            .validate(self.sandbox_limits)
+            .map_err(|_| Status::invalid_argument("invalid expired Managed MCP lease"))?;
+        if expired.request.executor_worker_manifest_digest != self.descriptor.worker_manifest_digest
+            || expired.request.isolation_backend_contract_digest
+                != self.descriptor.backend_contract_digest
+            || expired.request.isolation_class
+                != insight_platform_contracts::SandboxIsolationClass::MicroVm
+            || expired.physical_state == insight_platform_contracts::SandboxJobState::Accepted
+        {
+            return Err(Status::failed_precondition(
+                "expired Managed MCP lease targets a different provider contract",
+            ));
+        }
+        self.response(self.provider.recover_expired_exact(&expired).await)
+    }
 }
 
 #[tonic::async_trait]
@@ -2237,7 +2278,7 @@ where
 #[tonic::async_trait]
 impl<P> SandboxProcessIsolationAttestorService for SandboxProcessIsolationAttestorGrpcService<P>
 where
-    P: WasiProcessGenerationIsolation + WasiExecutorProcessRegistrationVerifier + 'static,
+    P: SandboxProcessGenerationIsolation + WasiExecutorProcessRegistrationVerifier + 'static,
 {
     async fn verify_wasi_executor_process_generation(
         &self,
@@ -2253,11 +2294,12 @@ where
         Ok(Response::new(encode(&evidence, self.limits)?))
     }
 
-    async fn prove_wasi_process_generation_absent(
+    async fn prove_sandbox_process_generation_absent(
         &self,
         request: Request<ClosedSandboxEnvelope>,
     ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
-        let request: ProveWasiProcessGenerationAbsent = decode(request.into_inner(), self.limits)?;
+        let request: ProveSandboxProcessGenerationAbsent =
+            decode(request.into_inner(), self.limits)?;
         request
             .validate()
             .map_err(|_| Status::invalid_argument("invalid process-generation proof request"))?;
@@ -2266,13 +2308,13 @@ where
             .prove_absent(request.clone())
             .await
             .map_err(|error| match error {
-                WasiProcessGenerationIsolationError::StillLive => {
+                SandboxProcessGenerationIsolationError::StillLive => {
                     Status::aborted("process generation is still live")
                 }
-                WasiProcessGenerationIsolationError::Unavailable => {
+                SandboxProcessGenerationIsolationError::Unavailable => {
                     Status::unavailable("process isolation attestor unavailable")
                 }
-                WasiProcessGenerationIsolationError::Rejected => {
+                SandboxProcessGenerationIsolationError::Rejected => {
                     Status::failed_precondition("process absence proof rejected")
                 }
             })?;
@@ -2318,7 +2360,7 @@ where
     B: WasiArtifactBroker + 'static,
     V: WasiValueValidator + 'static,
     G: WasiGrantRevoker + 'static,
-    P: WasiProcessGenerationIsolation + 'static,
+    P: SandboxProcessGenerationIsolation + 'static,
 {
     async fn read_exact_artifact(
         &self,
@@ -2394,23 +2436,24 @@ where
         Ok(Response::new(encode(&evidence, self.limits)?))
     }
 
-    async fn prove_wasi_process_generation_absent(
+    async fn prove_sandbox_process_generation_absent(
         &self,
         request: Request<ClosedSandboxEnvelope>,
     ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
-        let request: ProveWasiProcessGenerationAbsent = decode(request.into_inner(), self.limits)?;
+        let request: ProveSandboxProcessGenerationAbsent =
+            decode(request.into_inner(), self.limits)?;
         let evidence = self
             .process_isolation
             .prove_absent(request)
             .await
             .map_err(|error| match error {
-                WasiProcessGenerationIsolationError::StillLive => {
+                SandboxProcessGenerationIsolationError::StillLive => {
                     Status::aborted("process generation is still live")
                 }
-                WasiProcessGenerationIsolationError::Unavailable => {
+                SandboxProcessGenerationIsolationError::Unavailable => {
                     Status::unavailable("process isolation authority unavailable")
                 }
-                WasiProcessGenerationIsolationError::Rejected => {
+                SandboxProcessGenerationIsolationError::Rejected => {
                     Status::failed_precondition("process absence proof rejected")
                 }
             })?;
@@ -3215,6 +3258,14 @@ mod tests {
             self.calls.fetch_add(1, Ordering::AcqRel);
             Err(SandboxRpcError::Rejected)
         }
+
+        async fn recover_expired_exact(
+            &self,
+            _expired: &ExpiredManagedMcpSandboxSessionLease,
+        ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Err(SandboxRpcError::Rejected)
+        }
     }
 
     #[derive(Default)]
@@ -3367,14 +3418,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl WasiProcessGenerationIsolation for RecordingProcessIsolation {
+    impl SandboxProcessGenerationIsolation for RecordingProcessIsolation {
         async fn prove_absent(
             &self,
-            request: ProveWasiProcessGenerationAbsent,
-        ) -> Result<WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolationError>
+            request: ProveSandboxProcessGenerationAbsent,
+        ) -> Result<SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolationError>
         {
             self.calls.fetch_add(1, Ordering::AcqRel);
-            WasiProcessGenerationAbsenceEvidence {
+            SandboxProcessGenerationAbsenceEvidence {
                 schema_version: 1,
                 tenant_id: request.tenant_id,
                 sandbox_job_id: request.sandbox_job_id,
@@ -3385,7 +3436,7 @@ mod tests {
                 attestor_identity_digest: self.attestor_identity_digest.clone(),
                 attestor_route: request.attestor_route,
                 disposition:
-                    insight_platform_sandbox::WasiProcessGenerationIsolationDisposition::ProcessAbsent,
+                    insight_platform_sandbox::SandboxProcessGenerationIsolationDisposition::ProcessAbsent,
                 observed_at: chrono::Utc::now(),
                 evidence_digest: format!("sha256:{}", "0".repeat(64)).parse().unwrap(),
             }
@@ -4398,7 +4449,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
 
-        let request = ProveWasiProcessGenerationAbsent {
+        let request = ProveSandboxProcessGenerationAbsent {
             tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
                 .unwrap(),
             sandbox_job_id: ResourceId::from_uuid_v7(
@@ -4438,7 +4489,7 @@ mod tests {
         );
         assert_eq!(
             wrong_identity.prove_absent(request.clone()).await,
-            Err(WasiProcessGenerationIsolationError::Rejected)
+            Err(SandboxProcessGenerationIsolationError::Rejected)
         );
         assert_eq!(isolation.calls.load(Ordering::Acquire), 2);
 
@@ -4462,7 +4513,9 @@ mod tests {
         .await;
         let mut unauthorized = SandboxProcessIsolationAttestorServiceClient::new(channel);
         let error = unauthorized
-            .prove_wasi_process_generation_absent(Request::new(encode(&request, limits).unwrap()))
+            .prove_sandbox_process_generation_absent(Request::new(
+                encode(&request, limits).unwrap(),
+            ))
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::PermissionDenied);

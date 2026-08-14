@@ -13,10 +13,11 @@ use insight_platform_contracts::{
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_sandbox::{
-    NodeAttestorRoute, ProveWasiProcessGenerationAbsent, VerifyWasiExecutorProcessGeneration,
+    NodeAttestorRoute, ProveSandboxProcessGenerationAbsent,
+    SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolation,
+    SandboxProcessGenerationIsolationError, VerifyWasiExecutorProcessGeneration,
     WasiExecutorProcessIdentityEvidence, WasiExecutorProcessRegistrationError,
-    WasiExecutorProcessRegistrationVerifier, WasiProcessGenerationAbsenceEvidence,
-    WasiProcessGenerationIsolation, WasiProcessGenerationIsolationError,
+    WasiExecutorProcessRegistrationVerifier,
 };
 use insight_platform_sandbox_rpc::{
     proto::{
@@ -450,15 +451,16 @@ impl WasiExecutorProcessRegistrationVerifier for RoutedProcessAttestor {
 }
 
 #[tonic::async_trait]
-impl WasiProcessGenerationIsolation for RoutedProcessAttestor {
+impl SandboxProcessGenerationIsolation for RoutedProcessAttestor {
     async fn prove_absent(
         &self,
-        request: ProveWasiProcessGenerationAbsent,
-    ) -> Result<WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolationError> {
+        request: ProveSandboxProcessGenerationAbsent,
+    ) -> Result<SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolationError>
+    {
         let client = self
             .client_for(&request.attestor_route)
             .await
-            .map_err(|_| WasiProcessGenerationIsolationError::Unavailable)?;
+            .map_err(|_| SandboxProcessGenerationIsolationError::Unavailable)?;
         client.prove_absent(request).await
     }
 }

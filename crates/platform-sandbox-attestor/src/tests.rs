@@ -172,7 +172,7 @@ async fn pid_reuse_is_absence_but_never_a_live_registration() {
         executor_identity_digest: registered.executor_identity_digest.clone(),
         attestor_route: registered.attestor_route.clone(),
     };
-    let absence_request = ProveWasiProcessGenerationAbsent {
+    let absence_request = ProveSandboxProcessGenerationAbsent {
         tenant_id: id(ResourceKind::Tenant, 10),
         sandbox_job_id: id(ResourceKind::SandboxJob, 11),
         request_digest: digest('d'),
@@ -182,7 +182,7 @@ async fn pid_reuse_is_absence_but_never_a_live_registration() {
     };
     assert_eq!(
         attestor.prove_absent(absence_request.clone()).await,
-        Err(WasiProcessGenerationIsolationError::StillLive)
+        Err(SandboxProcessGenerationIsolationError::StillLive)
     );
 
     observer.set_reused();
@@ -197,7 +197,7 @@ async fn pid_reuse_is_absence_but_never_a_live_registration() {
     evidence.validate_for(&absence_request, Utc::now()).unwrap();
     assert_eq!(
         evidence.disposition,
-        WasiProcessGenerationIsolationDisposition::ProcessAbsent
+        SandboxProcessGenerationIsolationDisposition::ProcessAbsent
     );
 
     observer.set_absent();

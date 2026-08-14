@@ -18,16 +18,17 @@ use insight_platform_contracts::{
 use insight_platform_egress::{ManagedMcpSandboxSecretBroker, ManagedMcpSandboxSecretBrokerError};
 use insight_platform_jobs::JobFence;
 use insight_platform_sandbox::{
-    ActivatedManagedMcpSandboxSession, ManagedMcpSandboxOpaqueSessionClaims,
-    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSessionAbsenceEvidence,
-    ManagedMcpSandboxSessionCleanupOutcome, ManagedMcpSandboxSessionDestroyedEvidence,
-    ManagedMcpSandboxSessionLiveness, ManagedMcpSandboxSessionLivenessEvidence,
-    ManagedMcpSandboxSessionReadyEvidence, ManagedMcpSandboxSessionRequest,
-    ManagedMcpSandboxSessionStateSealError, ManagedMcpSandboxSessionStateSealer,
-    MicroVmArtifactBroker, MicroVmArtifactBrokerError, MicroVmArtifactReadPurpose,
-    MicroVmArtifactReadRequest, MicroVmGrantRevoker, MicroVmSandboxWorkloadKind,
-    PreparedManagedMcpSandboxSession, PreparedManagedMcpSandboxSessionActivation,
-    RevokeMicroVmSandboxGrants, SandboxCleanupDisposition, SandboxCleanupEvidence,
+    ActivatedManagedMcpSandboxSession, ExpiredManagedMcpSandboxSessionLease,
+    ManagedMcpSandboxOpaqueSessionClaims, ManagedMcpSandboxSecretDeliveryRequest,
+    ManagedMcpSandboxSessionAbsenceEvidence, ManagedMcpSandboxSessionCleanupOutcome,
+    ManagedMcpSandboxSessionDestroyedEvidence, ManagedMcpSandboxSessionLiveness,
+    ManagedMcpSandboxSessionLivenessEvidence, ManagedMcpSandboxSessionReadyEvidence,
+    ManagedMcpSandboxSessionRequest, ManagedMcpSandboxSessionStateSealError,
+    ManagedMcpSandboxSessionStateSealer, MicroVmArtifactBroker, MicroVmArtifactBrokerError,
+    MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest, MicroVmGrantRevoker,
+    MicroVmSandboxWorkloadKind, PreparedManagedMcpSandboxSession,
+    PreparedManagedMcpSandboxSessionActivation, RevokeMicroVmSandboxGrants,
+    SandboxCleanupDisposition, SandboxCleanupEvidence,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -75,6 +76,19 @@ impl ManagedMcpMicroVmSessionKey {
             request_digest: request.request_digest.clone(),
             executor_worker_process_generation_id: fence.worker_process_generation_id.clone(),
             lease_generation: fence.lease_generation,
+        }
+    }
+
+    fn from_expired(expired: &ExpiredManagedMcpSandboxSessionLease) -> Self {
+        Self {
+            tenant_id: expired.request.identity.tenant_id.clone(),
+            sandbox_job_id: expired.request.identity.sandbox_job_id.clone(),
+            session_identity_digest: expired.request.identity.canonical_digest.clone(),
+            request_digest: expired.request.request_digest.clone(),
+            executor_worker_process_generation_id: expired
+                .previous_worker_process_generation_id
+                .clone(),
+            lease_generation: expired.observed_lease_generation,
         }
     }
 
@@ -1688,6 +1702,61 @@ impl ManagedMcpMicroVmSessionLifecyclePort for LinuxManagedMcpSessionFactory {
             worker_process_generation_id: fence.worker_process_generation_id.clone(),
             provider_process_generation_id: record.provider_process_generation_id.clone(),
             lease_generation: fence.lease_generation,
+            executor_identity_digest: record.executor_identity_digest.clone(),
+            sandbox_identity_digest: record.sandbox_identity_digest.clone(),
+            cleanup,
+            evidence_digest: placeholder_digest(),
+        }
+        .seal()
+        .map_err(|_| host_contract_failure("managed_mcp_microvm_destroyed_seal_failed"))?;
+        Ok(ManagedMcpSandboxSessionCleanupOutcome::Destroyed(evidence))
+    }
+
+    async fn recover_expired_exact(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, MicroVmProviderFailure> {
+        let key = ManagedMcpMicroVmSessionKey::from_expired(expired);
+        key.validate()?;
+        let instance = self.instances.lock().await.get(&key).cloned();
+        let Some(instance) = instance else {
+            let evidence = ManagedMcpSandboxSessionAbsenceEvidence {
+                schema_version: 1,
+                identity: expired.request.identity.clone(),
+                request_digest: expired.request.request_digest.clone(),
+                worker_process_generation_id: expired.previous_worker_process_generation_id.clone(),
+                lease_generation: expired.observed_lease_generation,
+                observed_at: Utc::now(),
+                evidence_digest: placeholder_digest(),
+            }
+            .seal()
+            .map_err(|_| host_contract_failure("managed_mcp_microvm_absence_seal_failed"))?;
+            return Ok(ManagedMcpSandboxSessionCleanupOutcome::Absent(evidence));
+        };
+        {
+            let record = instance.record.lock().await;
+            let persisted_prepared = record.prepared(&expired.request)?;
+            if Some(&record.executor_identity_digest) != expired.executor_identity_digest.as_ref()
+                || expired.prepared_binding.as_ref().is_some_and(|prepared| {
+                    prepared.provider_process_generation_id != record.provider_process_generation_id
+                        || prepared.sandbox_identity_digest != record.sandbox_identity_digest
+                        || prepared.canonical_digest != persisted_prepared.canonical_digest
+                })
+            {
+                return Err(host_contract_failure(
+                    "managed_mcp_microvm_recovery_identity_mismatch",
+                ));
+            }
+        }
+        let cleanup = instance.cleanup().await?;
+        let record = instance.record.lock().await;
+        let evidence = ManagedMcpSandboxSessionDestroyedEvidence {
+            schema_version: 1,
+            identity: expired.request.identity.clone(),
+            request_digest: expired.request.request_digest.clone(),
+            worker_process_generation_id: expired.previous_worker_process_generation_id.clone(),
+            provider_process_generation_id: record.provider_process_generation_id.clone(),
+            lease_generation: expired.observed_lease_generation,
             executor_identity_digest: record.executor_identity_digest.clone(),
             sandbox_identity_digest: record.sandbox_identity_digest.clone(),
             cleanup,

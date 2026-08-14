@@ -10,7 +10,7 @@ use insight_platform_contracts::{
 };
 use insight_platform_sandbox::{
     SafeSandboxTraceContext, SandboxCommandLimits, SandboxExecutionPolicyClosure,
-    SandboxResourceEnvelope, ScopedSandboxCallback, WasiProcessGenerationAbsenceEvidence,
+    SandboxProcessGenerationAbsenceEvidence, SandboxResourceEnvelope, ScopedSandboxCallback,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -444,13 +444,14 @@ struct RecordingProcessIsolation {
 }
 
 #[async_trait]
-impl WasiProcessGenerationIsolation for RecordingProcessIsolation {
+impl SandboxProcessGenerationIsolation for RecordingProcessIsolation {
     async fn prove_absent(
         &self,
-        request: ProveWasiProcessGenerationAbsent,
-    ) -> Result<WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolationError> {
+        request: ProveSandboxProcessGenerationAbsent,
+    ) -> Result<SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolationError>
+    {
         self.calls.fetch_add(1, Ordering::AcqRel);
-        WasiProcessGenerationAbsenceEvidence {
+        SandboxProcessGenerationAbsenceEvidence {
             schema_version: 1,
             tenant_id: request.tenant_id,
             sandbox_job_id: request.sandbox_job_id,
@@ -460,7 +461,7 @@ impl WasiProcessGenerationIsolation for RecordingProcessIsolation {
             attestor_identity_digest: sha('f'),
             attestor_route: request.attestor_route,
             disposition:
-                insight_platform_sandbox::WasiProcessGenerationIsolationDisposition::ProcessAbsent,
+                insight_platform_sandbox::SandboxProcessGenerationIsolationDisposition::ProcessAbsent,
             observed_at: self.observed_at,
             evidence_digest: evidence_digest(
                 "test_process_generation_absent",
