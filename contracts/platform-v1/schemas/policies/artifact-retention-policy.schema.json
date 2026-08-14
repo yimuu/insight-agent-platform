@@ -1,0 +1,43 @@
+{
+  "$id": "urn:insight:platform:v1:artifact-retention-policy",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Closed Artifact retention and two-phase deletion policy. Legal holds and live references remain non-overridable database predicates.",
+  "properties": {
+    "delete_requires_approval": {
+      "type": "boolean"
+    },
+    "gc_grace_seconds": {
+      "maximum": 31536000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "minimum_retention_seconds": {
+      "maximum": 3155760000,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "retain_provenance_sources": {
+      "type": "boolean"
+    },
+    "tombstone_retention_seconds": {
+      "maximum": 3155760000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "minimum_retention_seconds",
+    "gc_grace_seconds",
+    "tombstone_retention_seconds",
+    "retain_provenance_sources",
+    "delete_requires_approval"
+  ],
+  "title": "ArtifactRetentionPolicy",
+  "type": "object"
+}

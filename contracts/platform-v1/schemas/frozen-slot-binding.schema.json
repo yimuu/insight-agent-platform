@@ -1,0 +1,505 @@
+{
+  "$id": "urn:insight:platform:v1:frozen-slot-binding",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The only Agent Deployment and RunBindings dependency-slot wire schema.",
+  "properties": {
+    "binding_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "requirement_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "slot_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "target": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "candidates": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "deployment_digest": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "deployment_id": {
+                    "pattern": "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                    "type": "string"
+                  },
+                  "resource_kind": {
+                    "const": "model_deployment"
+                  }
+                },
+                "required": [
+                  "deployment_id",
+                  "resource_kind",
+                  "deployment_digest"
+                ],
+                "type": "object"
+              },
+              "maxItems": 512,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "kind": {
+              "const": "model"
+            },
+            "selection_policy": {
+              "additionalProperties": false,
+              "properties": {
+                "resource_kind": {
+                  "const": "policy_revision"
+                },
+                "revision_id": {
+                  "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "semantic_digest": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "revision_id",
+                "resource_kind",
+                "semantic_digest"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "candidates",
+            "selection_policy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "candidates": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "deployment_digest": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "deployment_id": {
+                    "pattern": "^cdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                    "type": "string"
+                  },
+                  "resource_kind": {
+                    "const": "capability_deployment"
+                  }
+                },
+                "required": [
+                  "deployment_id",
+                  "resource_kind",
+                  "deployment_digest"
+                ],
+                "type": "object"
+              },
+              "maxItems": 512,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "kind": {
+              "const": "capability"
+            },
+            "selection_policy": {
+              "additionalProperties": false,
+              "properties": {
+                "resource_kind": {
+                  "const": "policy_revision"
+                },
+                "revision_id": {
+                  "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "semantic_digest": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "revision_id",
+                "resource_kind",
+                "semantic_digest"
+              ],
+              "type": "object"
+            },
+            "tool_alias": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "candidates",
+            "selection_policy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "additionalProperties": false,
+              "properties": {
+                "allowed_projection": {
+                  "items": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9_.-]+$",
+                    "type": "string"
+                  },
+                  "maxItems": 256,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "authorization_policy": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "resource_kind": {
+                      "const": "policy_revision"
+                    },
+                    "revision_id": {
+                      "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "semantic_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "revision_id",
+                    "resource_kind",
+                    "semantic_digest"
+                  ],
+                  "type": "object"
+                },
+                "binding_digest": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "consistency": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "generation": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "dataset_id": {
+                              "pattern": "^dset_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                              "type": "string"
+                            },
+                            "generation_digest": {
+                              "pattern": "^sha256:[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "generation_id": {
+                              "pattern": "^dgen_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "dataset_id",
+                            "generation_id",
+                            "generation_digest"
+                          ],
+                          "type": "object"
+                        },
+                        "mode": {
+                          "const": "pinned_generation"
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "generation"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "dataset_id": {
+                          "pattern": "^dset_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        },
+                        "mode": {
+                          "const": "pin_at_run_admission"
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "dataset_id"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "dataset_id": {
+                          "pattern": "^dset_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        },
+                        "mode": {
+                          "const": "latest_at_query_start"
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "dataset_id"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "mode": {
+                          "const": "external_observation"
+                        }
+                      },
+                      "required": [
+                        "mode"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "context_binding_id": {
+                  "pattern": "^xcb_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "context_deployment": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "deployment_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "deployment_id": {
+                      "pattern": "^xdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "resource_kind": {
+                      "const": "context_deployment"
+                    }
+                  },
+                  "required": [
+                    "deployment_id",
+                    "resource_kind",
+                    "deployment_digest"
+                  ],
+                  "type": "object"
+                },
+                "owner_agent_deployment_id": {
+                  "pattern": "^adep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "ranking_policy": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "resource_kind": {
+                      "const": "policy_revision"
+                    },
+                    "revision_id": {
+                      "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "semantic_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "revision_id",
+                    "resource_kind",
+                    "semantic_digest"
+                  ],
+                  "type": "object"
+                },
+                "schema_version": {
+                  "const": 1
+                }
+              },
+              "required": [
+                "schema_version",
+                "context_binding_id",
+                "owner_agent_deployment_id",
+                "context_deployment",
+                "consistency",
+                "allowed_projection",
+                "authorization_policy",
+                "ranking_policy",
+                "binding_digest"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "context"
+            }
+          },
+          "required": [
+            "kind",
+            "binding"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "candidates": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "deployment_digest": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "deployment_id": {
+                    "pattern": "^adep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                    "type": "string"
+                  },
+                  "resource_kind": {
+                    "const": "agent_deployment"
+                  }
+                },
+                "required": [
+                  "deployment_id",
+                  "resource_kind",
+                  "deployment_digest"
+                ],
+                "type": "object"
+              },
+              "maxItems": 512,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "kind": {
+              "const": "child_agent"
+            },
+            "selection_policy": {
+              "additionalProperties": false,
+              "properties": {
+                "resource_kind": {
+                  "const": "policy_revision"
+                },
+                "revision_id": {
+                  "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "semantic_digest": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "revision_id",
+                "resource_kind",
+                "semantic_digest"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "candidates",
+            "selection_policy"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "candidates": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "resource_kind": {
+                    "const": "skill_revision"
+                  },
+                  "revision_id": {
+                    "pattern": "^srev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                    "type": "string"
+                  },
+                  "semantic_digest": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "revision_id",
+                  "resource_kind",
+                  "semantic_digest"
+                ],
+                "type": "object"
+              },
+              "maxItems": 512,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "kind": {
+              "const": "skill"
+            },
+            "selection_policy": {
+              "additionalProperties": false,
+              "properties": {
+                "resource_kind": {
+                  "const": "policy_revision"
+                },
+                "revision_id": {
+                  "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                  "type": "string"
+                },
+                "semantic_digest": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "revision_id",
+                "resource_kind",
+                "semantic_digest"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "candidates",
+            "selection_policy"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "slot_id",
+    "requirement_digest",
+    "target",
+    "binding_digest"
+  ],
+  "title": "FrozenSlotBinding",
+  "type": "object"
+}

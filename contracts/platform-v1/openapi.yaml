@@ -1,0 +1,172 @@
+openapi: 3.1.0
+info:
+  title: Insight Platform API
+  version: 1.0.0-implementing
+  description: >-
+    Target insight.platform/v1 contract. Operations remain implementing-not-current until
+    qualification and clean replacement are complete.
+x-insight-contract-status: implementing-not-current
+servers:
+  - url: /v1
+paths:
+  /mcp/oauth/callback:
+    get:
+      operationId: completeMcpOAuthCallback
+      summary: Complete an MCP OAuth authorization redirect
+      description: >-
+        Fixed public redirect authenticated by the encrypted one-time state value. Exactly one of
+        code or error is required. Duplicate and unknown query fields are rejected. The response
+        never reflects callback values or internal failure details.
+      tags:
+        - MCP OAuth Callback
+      security: []
+      x-insight-authentication: oauth_callback_state
+      x-insight-permission: none
+      x-insight-idempotency: callback_receipt
+      x-insight-rate-class: internal_callback
+      x-insight-audit: callback_receipt_event_outbox
+      x-insight-maximum-raw-query-bytes: 8192
+      x-insight-exactly-one-query-parameter:
+        - code
+        - error
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 4096
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 8192
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - name: iss
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 2048
+      responses:
+        "200":
+          description: The callback has one durable authorized or declined winner.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            Referrer-Policy:
+              $ref: "#/components/headers/NoReferrer"
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - MCP authorization response received. You may close this window.
+        "202":
+          description: External preparation or database commit is uncertain; durable reconciliation applies.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            Referrer-Policy:
+              $ref: "#/components/headers/NoReferrer"
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - The MCP authorization response is being processed.
+        "400":
+          description: The bounded callback query or authenticated binding was rejected.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            Referrer-Policy:
+              $ref: "#/components/headers/NoReferrer"
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - The MCP authorization response could not be accepted.
+        "405":
+          description: Only GET is accepted and the request body must be empty.
+          headers:
+            Allow:
+              schema:
+                type: string
+                const: GET
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - The MCP authorization response could not be accepted.
+        "500":
+          description: A fail-closed internal invariant prevented a safe callback projection.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - The MCP authorization response could not be processed.
+        "503":
+          description: A required callback dependency is temporarily unavailable before a durable winner.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            Retry-After:
+              schema:
+                type: string
+                const: "1"
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - The MCP authorization service is temporarily unavailable.
+components:
+  headers:
+    NoStore:
+      schema:
+        type: string
+        const: no-store
+    NoReferrer:
+      schema:
+        type: string
+        const: no-referrer
+  schemas:
+    PlatformResourceId:
+      $ref: ./schemas/resource-id.schema.json
+    Digest:
+      $ref: ./schemas/nominal/digest.schema.json
+    UtcTimestamp:
+      $ref: ./schemas/nominal/utc-timestamp.schema.json
+    DecimalMoney:
+      $ref: ./schemas/nominal/decimal-money.schema.json
+    ArtifactRef:
+      $ref: ./schemas/nominal/artifact-ref.schema.json
+    Failure:
+      $ref: ./schemas/nominal/failure.schema.json
+    ApiProblem:
+      $ref: ./schemas/nominal/api-problem.schema.json
+    OpaqueListCursor:
+      $ref: ./schemas/nominal/opaque-list-cursor.schema.json
+    OpaqueRunEventCursor:
+      $ref: ./schemas/nominal/opaque-run-event-cursor.schema.json
+    DurablePublicRunEventPayload:
+      $ref: ./events/public-run-payloads.schema.json

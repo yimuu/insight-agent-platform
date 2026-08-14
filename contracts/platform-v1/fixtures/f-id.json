@@ -1,0 +1,53 @@
+{
+  "suite_id": "F-ID",
+  "cases": [
+    {
+      "fixture_id": "fid-valid-agent-v7",
+      "owner_spec": "02",
+      "related_specs": ["17"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"value":"agt_0198f1c3-8f49-7c3e-b1f3-773c28367b7e","expected_kind":"agent"},
+      "input_digest": "sha256:64fc56bae54fe1f2d74216fbb25a64bc58183e72988472305b08983d89cfa2f2",
+      "expected": {"canonical":"agt_0198f1c3-8f49-7c3e-b1f3-773c28367b7e","kind":"agent"},
+      "privacy_classification": "public",
+      "polarity": "positive"
+    },
+    {
+      "fixture_id": "fid-unknown-prefix",
+      "owner_spec": "02",
+      "related_specs": ["17"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"value":"zzz_0198f1c3-8f49-7c3e-b1f3-773c28367b7e","expected_kind":"agent"},
+      "input_digest": "sha256:394d0599da93c50a77e143012b352d3b2083544748da7ddb9317284b51984789",
+      "stable_rejection": "unknown_prefix",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    },
+    {
+      "fixture_id": "fid-wrong-field-kind",
+      "owner_spec": "02",
+      "related_specs": ["05", "17"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"value":"mdep_0198f1c3-8f49-7c3e-b1f3-773c28367b7e","expected_kind":"agent_deployment"},
+      "input_digest": "sha256:d51feaf97988757a4eba7646d734b08b44fb5a80a68a54044ee33d9934296a8b",
+      "stable_rejection": "wrong_kind",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    },
+    {
+      "fixture_id": "fid-uuid-not-v7",
+      "owner_spec": "02",
+      "related_specs": ["17"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"value":"agt_550e8400-e29b-41d4-a716-446655440000","expected_kind":"agent"},
+      "input_digest": "sha256:70a7ebeec28030cf25cb62dcd2986839aee9c638b5bd2c95c5babd0e8283e8e5",
+      "stable_rejection": "not_uuid_v7",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    }
+  ]
+}

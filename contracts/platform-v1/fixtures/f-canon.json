@@ -1,0 +1,65 @@
+{
+  "suite_id": "F-CANON",
+  "cases": [
+    {
+      "fixture_id": "fcanon-object-key-order",
+      "owner_spec": "02",
+      "related_specs": ["05", "18"],
+      "profile": "rfc8785",
+      "seed": 0,
+      "input": {"z":1,"a":[true,null]},
+      "input_digest": "sha256:ca6da02fba3343778761e7785f2b55f7fb17b36ce16eee3492dc392fa7c9deaa",
+      "expected": {"canonical_json":"{\"a\":[true,null],\"z\":1}","digest":"sha256:ca6da02fba3343778761e7785f2b55f7fb17b36ce16eee3492dc392fa7c9deaa"},
+      "privacy_classification": "public",
+      "polarity": "positive"
+    },
+    {
+      "fixture_id": "fcanon-duplicate-key",
+      "owner_spec": "05",
+      "related_specs": ["02", "17"],
+      "profile": "insight.closed-json-schema/1",
+      "seed": 0,
+      "input_artifact": {"media_type":"application/json","utf8":"{\"a\":1,\"a\":2}"},
+      "input_digest": "sha256:c40de5e3d887fd216200eb8da4cbbc374478055064a08fbbc17b01542d269f0b",
+      "stable_rejection": "duplicate_object_key",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    },
+    {
+      "fixture_id": "fcanon-invalid-utf8",
+      "owner_spec": "05",
+      "related_specs": ["17"],
+      "profile": "insight.closed-json-schema/1",
+      "seed": 0,
+      "input_artifact": {"media_type":"application/json","bytes_hex":"ff"},
+      "input_digest": "sha256:4b7087d639986eba77f2a443da5232806fe437cda92d8195f651c10dc8f1886f",
+      "stable_rejection": "invalid_utf8",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    },
+    {
+      "fixture_id": "fcanon-integer-outside-interoperable-range",
+      "owner_spec": "05",
+      "related_specs": ["02", "17"],
+      "profile": "insight.closed-json-schema/1",
+      "seed": 0,
+      "input_artifact": {"media_type":"application/json","utf8":"18446744073709551616"},
+      "input_digest": "sha256:5c4f55420f422d48fb6a05a75f170557b674cc921460a046c5de8e8eba1ef985",
+      "stable_rejection": "integer_outside_interoperable_range",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    },
+    {
+      "fixture_id": "fcanon-number-not-finite",
+      "owner_spec": "05",
+      "related_specs": ["02", "17"],
+      "profile": "insight.closed-json-schema/1",
+      "seed": 0,
+      "input_artifact": {"media_type":"application/json","utf8":"1e400"},
+      "input_digest": "sha256:1ce450a2004d4e4ffaeb82ada20d786861ac9907f70371672a148abb81aa91a4",
+      "stable_rejection": "number_not_finite",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    }
+  ]
+}

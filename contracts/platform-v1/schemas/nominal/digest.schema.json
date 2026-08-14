@@ -1,0 +1,10 @@
+{
+  "$id": "urn:insight:platform:v1:schema:Digest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "maxLength": 71,
+  "minLength": 71,
+  "pattern": "^sha256:[0-9a-f]{64}$",
+  "title": "Digest",
+  "type": "string",
+  "x-platform-max-bytes": 71
+}

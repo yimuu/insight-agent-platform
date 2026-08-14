@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package insight.platform.v1;
+
+// Phase 0 nominal scalar wrappers. Domain services are added only with their implemented owner.
+message ResourceId {
+  string value = 1;
+}
+
+message Digest {
+  string value = 1;
+}
+
+message UtcTimestamp {
+  string value = 1;
+}
+
+message DecimalMoney {
+  string currency = 1;
+  sint64 minor_units = 2;
+  uint32 scale = 3;
+}
+
+message OpaqueListCursor {
+  bytes value = 1;
+}
+
+message OpaqueRunEventCursor {
+  bytes value = 1;
+}
+
+message ArtifactRef {
+  ResourceId artifact_id = 1;
+  Digest content_digest = 2;
+  uint64 byte_length = 3;
+  string media_type = 4;
+  string classification = 5;
+  optional string display_name = 6;
+}

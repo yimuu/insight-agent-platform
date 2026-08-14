@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:insight:platform:v1:hard-limit-profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile_id",
+    "profile_version",
+    "api",
+    "registry_plan",
+    "run_scheduler",
+    "model_context_mcp",
+    "capability_sandbox",
+    "artifact",
+    "durable_quota",
+    "control_data"
+  ],
+  "properties": {
+    "profile_id": { "const": "q1-50" },
+    "profile_version": { "type": "integer", "minimum": 1 },
+    "api": { "$ref": "#/$defs/api" },
+    "registry_plan": { "$ref": "#/$defs/registry_plan" },
+    "run_scheduler": { "$ref": "#/$defs/run_scheduler" },
+    "model_context_mcp": { "$ref": "#/$defs/model_context_mcp" },
+    "capability_sandbox": { "$ref": "#/$defs/capability_sandbox" },
+    "artifact": { "$ref": "#/$defs/artifact" },
+    "durable_quota": { "$ref": "#/$defs/durable_quota" },
+    "control_data": { "$ref": "#/$defs/control_data" }
+  },
+  "$defs": {
+    "limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "hard_max", "q1_default", "overflow_outcome"],
+      "properties": {
+        "unit": {
+          "enum": [
+            "bytes", "count", "depth", "items", "milliseconds", "seconds", "connections",
+            "requests_per_second", "tokens", "millicpu", "mebibytes", "currency_microunits",
+            "pids", "files"
+          ]
+        },
+        "hard_max": { "type": "integer", "minimum": 1 },
+        "q1_default": { "type": "integer", "minimum": 1 },
+        "overflow_outcome": {
+          "enum": [
+            "invalid_request", "quota_exceeded", "rate_limited", "content_rejected",
+            "budget_exhausted", "deadline_exceeded", "durable_queue", "drop_live_then_close",
+            "promote_to_artifact", "temporarily_unavailable"
+          ]
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "header_bytes", "url_bytes", "compressed_body_bytes", "decoded_body_bytes", "json_depth",
+        "json_properties", "json_items", "list_page_items", "sse_event_bytes", "sse_buffer_events",
+        "sse_connections_per_tenant"
+      ],
+      "properties": {
+        "header_bytes": { "$ref": "#/$defs/limit" },
+        "url_bytes": { "$ref": "#/$defs/limit" },
+        "compressed_body_bytes": { "$ref": "#/$defs/limit" },
+        "decoded_body_bytes": { "$ref": "#/$defs/limit" },
+        "json_depth": { "$ref": "#/$defs/limit" },
+        "json_properties": { "$ref": "#/$defs/limit" },
+        "json_items": { "$ref": "#/$defs/limit" },
+        "list_page_items": { "$ref": "#/$defs/limit" },
+        "sse_event_bytes": { "$ref": "#/$defs/limit" },
+        "sse_buffer_events": { "$ref": "#/$defs/limit" },
+        "sse_connections_per_tenant": { "$ref": "#/$defs/limit" }
+      }
+    },
+    "registry_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "draft_bytes", "package_bytes", "schema_bytes", "definitions", "plan_nodes", "plan_edges",
+        "branch_legs", "map_items", "loop_iterations", "model_rounds", "dependency_closure"
+      ],
+      "properties": {
+        "draft_bytes": { "$ref": "#/$defs/limit" },
+        "package_bytes": { "$ref": "#/$defs/limit" },
+        "schema_bytes": { "$ref": "#/$defs/limit" },
+        "definitions": { "$ref": "#/$defs/limit" },
+        "plan_nodes": { "$ref": "#/$defs/limit" },
+        "plan_edges": { "$ref": "#/$defs/limit" },
+        "branch_legs": { "$ref": "#/$defs/limit" },
+        "map_items": { "$ref": "#/$defs/limit" },
+        "loop_iterations": { "$ref": "#/$defs/limit" },
+        "model_rounds": { "$ref": "#/$defs/limit" },
+        "dependency_closure": { "$ref": "#/$defs/limit" }
+      }
+    },
+    "run_scheduler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_runs_per_tenant", "waiting_runs_per_tenant", "descendants_per_run", "ready_rows_per_run",
+        "inline_value_bytes", "value_refs_per_run", "claim_batch", "attempts_per_work", "lease_milliseconds", "heartbeat_milliseconds",
+        "deferred_poll_base_milliseconds", "deferred_poll_max_milliseconds",
+        "wake_contracts_per_run", "interactions_per_run"
+      ],
+      "properties": {
+        "active_runs_per_tenant": { "$ref": "#/$defs/limit" },
+        "waiting_runs_per_tenant": { "$ref": "#/$defs/limit" },
+        "descendants_per_run": { "$ref": "#/$defs/limit" },
+        "ready_rows_per_run": { "$ref": "#/$defs/limit" },
+        "inline_value_bytes": { "$ref": "#/$defs/limit" },
+        "value_refs_per_run": { "$ref": "#/$defs/limit" },
+        "claim_batch": { "$ref": "#/$defs/limit" },
+        "attempts_per_work": { "$ref": "#/$defs/limit" },
+        "lease_milliseconds": { "$ref": "#/$defs/limit" },
+        "heartbeat_milliseconds": { "$ref": "#/$defs/limit" },
+        "deferred_poll_base_milliseconds": { "$ref": "#/$defs/limit" },
+        "deferred_poll_max_milliseconds": { "$ref": "#/$defs/limit" },
+        "wake_contracts_per_run": { "$ref": "#/$defs/limit" },
+        "interactions_per_run": { "$ref": "#/$defs/limit" }
+      }
+    },
+    "model_context_mcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_bytes", "response_bytes", "delta_bytes", "tokens_per_turn", "tool_calls_per_turn",
+        "context_candidates", "context_items", "context_pages", "mcp_sessions_per_tenant",
+        "mcp_tasks_per_session", "mcp_subscriptions_per_session"
+      ],
+      "properties": {
+        "request_bytes": { "$ref": "#/$defs/limit" },
+        "response_bytes": { "$ref": "#/$defs/limit" },
+        "delta_bytes": { "$ref": "#/$defs/limit" },
+        "tokens_per_turn": { "$ref": "#/$defs/limit" },
+        "tool_calls_per_turn": { "$ref": "#/$defs/limit" },
+        "context_candidates": { "$ref": "#/$defs/limit" },
+        "context_items": { "$ref": "#/$defs/limit" },
+        "context_pages": { "$ref": "#/$defs/limit" },
+        "mcp_sessions_per_tenant": { "$ref": "#/$defs/limit" },
+        "mcp_tasks_per_session": { "$ref": "#/$defs/limit" },
+        "mcp_subscriptions_per_session": { "$ref": "#/$defs/limit" }
+      }
+    },
+    "capability_sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_bytes", "output_bytes", "progress_events", "queue_depth", "cpu_millicores",
+        "memory_mebibytes", "pids", "files", "io_bytes", "wall_seconds", "cleanup_seconds"
+      ],
+      "properties": {
+        "input_bytes": { "$ref": "#/$defs/limit" },
+        "output_bytes": { "$ref": "#/$defs/limit" },
+        "progress_events": { "$ref": "#/$defs/limit" },
+        "queue_depth": { "$ref": "#/$defs/limit" },
+        "cpu_millicores": { "$ref": "#/$defs/limit" },
+        "memory_mebibytes": { "$ref": "#/$defs/limit" },
+        "pids": { "$ref": "#/$defs/limit" },
+        "files": { "$ref": "#/$defs/limit" },
+        "io_bytes": { "$ref": "#/$defs/limit" },
+        "wall_seconds": { "$ref": "#/$defs/limit" },
+        "cleanup_seconds": { "$ref": "#/$defs/limit" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "single_bytes", "tenant_total_bytes", "multipart_parts", "references_per_artifact",
+        "grants_per_artifact", "scan_expansion_bytes", "list_page_items", "objects_per_operation",
+        "staging_seconds", "retention_batch"
+      ],
+      "properties": {
+        "single_bytes": { "$ref": "#/$defs/limit" },
+        "tenant_total_bytes": { "$ref": "#/$defs/limit" },
+        "multipart_parts": { "$ref": "#/$defs/limit" },
+        "references_per_artifact": { "$ref": "#/$defs/limit" },
+        "grants_per_artifact": { "$ref": "#/$defs/limit" },
+        "scan_expansion_bytes": { "$ref": "#/$defs/limit" },
+        "list_page_items": { "$ref": "#/$defs/limit" },
+        "objects_per_operation": { "$ref": "#/$defs/limit" },
+        "staging_seconds": { "$ref": "#/$defs/limit" },
+        "retention_batch": { "$ref": "#/$defs/limit" }
+      }
+    },
+    "durable_quota": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_concurrent_runs", "work_class_concurrent_operations",
+        "capability_concurrent_invocations", "sandbox_concurrent_executions",
+        "sandbox_cpu_seconds", "sandbox_memory_mebibytes", "sandbox_output_bytes",
+        "model_tokens", "model_cost_microunits", "model_requests", "context_queries",
+        "context_result_bytes", "artifact_count", "artifact_physical_bytes",
+        "artifact_staging_bytes", "artifact_uploads", "human_tasks_pending",
+        "human_task_retention_seconds"
+      ],
+      "properties": {
+        "agent_concurrent_runs": { "$ref": "#/$defs/limit" },
+        "work_class_concurrent_operations": { "$ref": "#/$defs/limit" },
+        "capability_concurrent_invocations": { "$ref": "#/$defs/limit" },
+        "sandbox_concurrent_executions": { "$ref": "#/$defs/limit" },
+        "sandbox_cpu_seconds": { "$ref": "#/$defs/limit" },
+        "sandbox_memory_mebibytes": { "$ref": "#/$defs/limit" },
+        "sandbox_output_bytes": { "$ref": "#/$defs/limit" },
+        "model_tokens": { "$ref": "#/$defs/limit" },
+        "model_cost_microunits": { "$ref": "#/$defs/limit" },
+        "model_requests": { "$ref": "#/$defs/limit" },
+        "context_queries": { "$ref": "#/$defs/limit" },
+        "context_result_bytes": { "$ref": "#/$defs/limit" },
+        "artifact_count": { "$ref": "#/$defs/limit" },
+        "artifact_physical_bytes": { "$ref": "#/$defs/limit" },
+        "artifact_staging_bytes": { "$ref": "#/$defs/limit" },
+        "artifact_uploads": { "$ref": "#/$defs/limit" },
+        "human_tasks_pending": { "$ref": "#/$defs/limit" },
+        "human_task_retention_seconds": { "$ref": "#/$defs/limit" }
+      }
+    },
+    "control_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "database_connections", "transaction_milliseconds", "outbox_batch", "callback_batch",
+        "recovery_batch", "recovery_shards", "nats_payload_bytes", "telemetry_buffer_events", "metric_label_values", "audit_batch"
+      ],
+      "properties": {
+        "database_connections": { "$ref": "#/$defs/limit" },
+        "transaction_milliseconds": { "$ref": "#/$defs/limit" },
+        "outbox_batch": { "$ref": "#/$defs/limit" },
+        "callback_batch": { "$ref": "#/$defs/limit" },
+        "recovery_batch": { "$ref": "#/$defs/limit" },
+        "recovery_shards": { "$ref": "#/$defs/limit" },
+        "nats_payload_bytes": { "$ref": "#/$defs/limit" },
+        "telemetry_buffer_events": { "$ref": "#/$defs/limit" },
+        "metric_label_values": { "$ref": "#/$defs/limit" },
+        "audit_batch": { "$ref": "#/$defs/limit" }
+      }
+    }
+  }
+}

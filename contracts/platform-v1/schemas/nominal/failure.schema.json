@@ -1,0 +1,225 @@
+{
+  "$id": "urn:insight:platform:v1:schema:Failure",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "class": {
+      "enum": [
+        "validation",
+        "authorization",
+        "policy",
+        "quota",
+        "deadline",
+        "dependency",
+        "external",
+        "resource",
+        "cancelled",
+        "uncertain_effect",
+        "platform"
+      ],
+      "maxLength": 32,
+      "minLength": 1,
+      "type": "string",
+      "x-platform-max-bytes": 32
+    },
+    "code": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "enum": [
+                "agent_input_invalid",
+                "agent_output_invalid",
+                "plan_invariant_failed",
+                "budget_exhausted",
+                "deadline_exceeded",
+                "capability_failed",
+                "context_query_failed",
+                "model_turn_failed",
+                "child_agent_failed",
+                "artifact_unavailable",
+                "interaction_failed",
+                "dependency_unavailable",
+                "content_rejected",
+                "uncertain_effect",
+                "platform_invariant_failed"
+              ],
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 64
+            },
+            "kind": {
+              "const": "platform",
+              "maxLength": 8,
+              "minLength": 8,
+              "type": "string",
+              "x-platform-max-bytes": 8
+            }
+          },
+          "required": [
+            "kind",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string",
+              "x-platform-max-bytes": 64
+            },
+            "interface_revision_id": {
+              "maxLength": 43,
+              "minLength": 42,
+              "pattern": "^(aif|cirev)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "kind": {
+              "const": "declared",
+              "maxLength": 8,
+              "minLength": 8,
+              "type": "string",
+              "x-platform-max-bytes": 8
+            }
+          },
+          "required": [
+            "kind",
+            "interface_revision_id",
+            "code"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "details_ref": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "maxLength": 40,
+              "minLength": 40,
+              "pattern": "^(art)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "type": "string",
+              "x-platform-max-bytes": 40
+            },
+            "byte_length": {
+              "maximum": 1073741824,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "classification": {
+              "enum": [
+                "public",
+                "internal",
+                "confidential",
+                "restricted"
+              ],
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "content_digest": {
+              "maxLength": 71,
+              "minLength": 71,
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string",
+              "x-platform-max-bytes": 71
+            },
+            "display_name": {
+              "oneOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 1020
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "media_type": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 255
+            }
+          },
+          "required": [
+            "artifact_id",
+            "content_digest",
+            "byte_length",
+            "media_type",
+            "classification",
+            "display_name"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retryability": {
+      "enum": [
+        "never",
+        "safe_within_policy",
+        "reconcile_before_retry"
+      ],
+      "maxLength": 32,
+      "minLength": 1,
+      "type": "string",
+      "x-platform-max-bytes": 32
+    },
+    "safe_message": {
+      "oneOf": [
+        {
+          "maxLength": 4096,
+          "minLength": 0,
+          "type": "string",
+          "x-platform-max-bytes": 16384
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "enum": [
+        "agent",
+        "plan",
+        "capability",
+        "context",
+        "model",
+        "child_agent",
+        "artifact",
+        "interaction",
+        "dependency",
+        "platform"
+      ],
+      "maxLength": 32,
+      "minLength": 1,
+      "type": "string",
+      "x-platform-max-bytes": 32
+    }
+  },
+  "required": [
+    "code",
+    "class",
+    "retryability",
+    "safe_message",
+    "details_ref",
+    "source"
+  ],
+  "title": "Failure",
+  "type": "object"
+}

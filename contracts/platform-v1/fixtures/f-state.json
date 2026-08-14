@@ -1,0 +1,41 @@
+{
+  "suite_id": "F-STATE",
+  "cases": [
+    {
+      "fixture_id": "fstate-run-wait-resume",
+      "owner_spec": "06",
+      "related_specs": ["07", "17"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"machine":"run","from":"waiting","to":"running"},
+      "input_digest": "sha256:dfa8c14b8d21c1275a4ccd1ff16b95b8177a6c23738ccbd285c50adc4690fe21",
+      "expected": {"allowed":true},
+      "privacy_classification": "public",
+      "polarity": "positive"
+    },
+    {
+      "fixture_id": "fstate-run-terminal-cannot-leave",
+      "owner_spec": "06",
+      "related_specs": ["17"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"machine":"run","from":"succeeded","to":"running"},
+      "input_digest": "sha256:4474083a6485e51ef22f640ba5555b115d44974ad2b5f912d30c8bb72d4b08ee",
+      "stable_rejection": "invalid_state_transition",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    },
+    {
+      "fixture_id": "fstate-stale-fence-not-attempt-state",
+      "owner_spec": "06",
+      "related_specs": ["03", "10"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"machine":"execution_attempt","state":"rejected_stale_fence"},
+      "input_digest": "sha256:2782f745cc1aee40acdfc6f71d0b4282821331782c7afe8e9cff83a4fca9369c",
+      "stable_rejection": "unknown_state",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    }
+  ]
+}

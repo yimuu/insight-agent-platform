@@ -1,0 +1,61 @@
+{
+  "profile": "insight.platform/v1",
+  "status": "implementing_not_current",
+  "resource_id": "agt_0198f1c3-8f49-7c3e-b1f3-773c28367b7e",
+  "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "timestamp": "2026-08-07T12:34:56.123456Z",
+  "money": {
+    "currency": "CNY",
+    "minor_units": 1234,
+    "scale": 2
+  },
+  "artifact_ref": {
+    "artifact_id": "art_0198f1c5-0787-75e1-a9e8-d95ca0f35201",
+    "content_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "byte_length": 0,
+    "media_type": "application/octet-stream",
+    "classification": "internal",
+    "display_name": "empty.bin"
+  },
+  "value_ref": {
+    "kind": "artifact",
+    "artifact": {
+      "artifact_id": "art_0198f1c5-0787-75e1-a9e8-d95ca0f35201",
+      "content_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "byte_length": 0,
+      "media_type": "application/octet-stream",
+      "classification": "internal",
+      "display_name": "empty.bin"
+    }
+  },
+  "list_cursor": "list.foundation-token",
+  "run_event_cursor": "run-event.foundation-token",
+  "failure": {
+    "code": {
+      "kind": "platform",
+      "code": "dependency_unavailable"
+    },
+    "class": "dependency",
+    "retryability": "safe_within_policy",
+    "safe_message": "Dependency is temporarily unavailable.",
+    "details_ref": null,
+    "source": "dependency"
+  },
+  "api_problem": {
+    "type_uri": "urn:insight:problem:invalid-request",
+    "title": "Invalid request",
+    "status": 400,
+    "code": "invalid_request",
+    "detail": "One or more fields are invalid.",
+    "request_id": "req_0198f1c5-0787-75e1-a9e8-d95ca0f35201",
+    "retryable": false,
+    "retry_after_ms": null,
+    "field_errors": [
+      {
+        "field": "input.name",
+        "code": "invalid_value",
+        "safe_message": "The value is invalid."
+      }
+    ]
+  }
+}

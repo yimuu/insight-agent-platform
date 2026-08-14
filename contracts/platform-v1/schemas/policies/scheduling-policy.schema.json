@@ -1,0 +1,35 @@
+{
+  "$id": "urn:insight:platform:v1:scheduling-policy",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Closed tenant/work-class fairness policy. Runtime hard limits may only tighten these machine maxima.",
+  "properties": {
+    "aging_rounds": {
+      "maximum": 65535,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "burst": {
+      "maximum": 65535,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "weight": {
+      "maximum": 65535,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "weight",
+    "burst",
+    "aging_rounds"
+  ],
+  "title": "SchedulingPolicy",
+  "type": "object"
+}

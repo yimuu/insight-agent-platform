@@ -1,0 +1,9 @@
+{
+  "manifest_version": 1,
+  "worker_role": "orchestration.primary",
+  "work_class": "orchestration",
+  "adapter_runtime_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "protocol_version": 1,
+  "max_concurrency": 64,
+  "critical_control_reserved_slots": 2
+}

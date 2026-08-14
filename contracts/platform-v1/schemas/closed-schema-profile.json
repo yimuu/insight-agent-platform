@@ -1,0 +1,62 @@
+{
+  "allowed_keywords": [
+    "$schema",
+    "$id",
+    "$defs",
+    "$ref",
+    "type",
+    "title",
+    "description",
+    "properties",
+    "required",
+    "additionalProperties",
+    "items",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "enum",
+    "const",
+    "oneOf",
+    "x-platform-max-bytes",
+    "x-platform-classification"
+  ],
+  "forbidden_features": [
+    "remote_ref",
+    "recursive_ref",
+    "default",
+    "coercion",
+    "pattern",
+    "open_format",
+    "anyOf",
+    "allOf",
+    "not",
+    "conditionals",
+    "unevaluated",
+    "unknown_keyword"
+  ],
+  "json_schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "maximum_interoperable_integer": 9007199254740991,
+  "nominal_types": [
+    "ArtifactRef",
+    "Message",
+    "Citation",
+    "Failure",
+    "UtcTimestamp",
+    "UuidV7Id",
+    "DecimalMoney"
+  ],
+  "object_additional_properties": false,
+  "profile_id": "insight.closed-json-schema/1",
+  "references": [
+    "acyclic_local_defs",
+    "digest_pinned_platform_nominal"
+  ],
+  "root_type": "object"
+}

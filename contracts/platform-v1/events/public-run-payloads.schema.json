@@ -1,0 +1,3006 @@
+{
+  "$id": "urn:insight:platform:v1:durable-public-run-event-payload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Closed safe source projection shared by Rust, SQL, OpenAPI and F-EVENT. Snapshot and live-only payloads are not durable projections.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.queued",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.started",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.waiting",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run_control",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.paused",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run_control",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.resumed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.cancelling",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.completed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.failed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.cancelled",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "run",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "run.timed_out",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "node_execution",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "node.started",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "node_execution",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "node.completed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "node_execution",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "node.failed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "node_execution",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "node.cancelled",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "node_execution",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "node.timed_out",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "skill_activation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "skill.selected",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "skill_activation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "skill.activated",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "skill_activation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "skill.rejected",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "model_turn",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "model.started",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "model_turn",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "model.tool_intent",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "model_turn",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "model.completed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "model_turn",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "model.failed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "model_turn",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "model.cancelled",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "model_turn",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "model.timed_out",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "capability_invocation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "capability.started",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "capability_invocation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "capability.waiting",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "capability_invocation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "capability.input_required",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "capability_invocation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "capability.progress",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "capability_invocation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "capability.completed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "capability_invocation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "capability.failed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "capability_invocation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "capability.cancelled",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "capability_invocation",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "capability.timed_out",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "context_query",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "context.started",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "context_query",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "context.completed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "context_query",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "context.failed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "context_query",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "context.cancelled",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "context_query",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "context.timed_out",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "child_run_link",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "child.started",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "child_run_link",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "child.waiting",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "child_run_link",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "child.progress",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "child_run_link",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "child.completed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "child_run_link",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "child.failed",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "child_run_link",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "child.cancelled",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "child_run_link",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "child.timed_out",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "interaction",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "interaction.required",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "interaction",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "interaction.resolved",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "approval_task",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "approval.required",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "safe_summary": {
+              "oneOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-platform-max-bytes": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_id": {
+              "maxLength": 43,
+              "minLength": 40,
+              "type": "string",
+              "x-platform-max-bytes": 43
+            },
+            "source_kind": {
+              "const": "approval_task",
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 32
+            },
+            "source_projection_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_id",
+            "source_projection_version",
+            "safe_summary"
+          ],
+          "type": "object"
+        },
+        "event_type": {
+          "const": "approval.resolved",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 64
+        }
+      },
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "type": "object"
+    }
+  ],
+  "properties": {
+    "data": {
+      "additionalProperties": false,
+      "properties": {
+        "safe_summary": {
+          "oneOf": [
+            {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_id": {
+          "maxLength": 43,
+          "minLength": 40,
+          "type": "string",
+          "x-platform-max-bytes": 43
+        },
+        "source_kind": {
+          "enum": [
+            "run",
+            "run_control",
+            "node_execution",
+            "skill_activation",
+            "model_turn",
+            "capability_invocation",
+            "context_query",
+            "child_run_link",
+            "interaction",
+            "approval_task"
+          ],
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 32
+        },
+        "source_projection_version": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source_kind",
+        "source_id",
+        "source_projection_version",
+        "safe_summary"
+      ],
+      "type": "object"
+    },
+    "event_type": {
+      "enum": [
+        "run.queued",
+        "run.started",
+        "run.waiting",
+        "run.paused",
+        "run.resumed",
+        "run.cancelling",
+        "run.completed",
+        "run.failed",
+        "run.cancelled",
+        "run.timed_out",
+        "node.started",
+        "node.completed",
+        "node.failed",
+        "node.cancelled",
+        "node.timed_out",
+        "skill.selected",
+        "skill.activated",
+        "skill.rejected",
+        "model.started",
+        "model.tool_intent",
+        "model.completed",
+        "model.failed",
+        "model.cancelled",
+        "model.timed_out",
+        "capability.started",
+        "capability.waiting",
+        "capability.input_required",
+        "capability.progress",
+        "capability.completed",
+        "capability.failed",
+        "capability.cancelled",
+        "capability.timed_out",
+        "context.started",
+        "context.completed",
+        "context.failed",
+        "context.cancelled",
+        "context.timed_out",
+        "child.started",
+        "child.waiting",
+        "child.progress",
+        "child.completed",
+        "child.failed",
+        "child.cancelled",
+        "child.timed_out",
+        "interaction.required",
+        "interaction.resolved",
+        "approval.required",
+        "approval.resolved"
+      ],
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string",
+      "x-platform-max-bytes": 64
+    }
+  },
+  "required": [
+    "event_type",
+    "data"
+  ],
+  "title": "DurablePublicRunEventPayload",
+  "type": "object"
+}

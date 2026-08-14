@@ -1,0 +1,83 @@
+{
+  "api_problem": {
+    "codes": [
+      "invalid_request",
+      "schema_validation_failed",
+      "unauthenticated",
+      "permission_denied",
+      "resource_not_found",
+      "etag_mismatch",
+      "idempotency_conflict",
+      "invalid_state_transition",
+      "policy_denied",
+      "approval_required",
+      "quota_exceeded",
+      "rate_limited",
+      "resource_suspended",
+      "secret_unavailable",
+      "network_denied",
+      "isolation_unavailable",
+      "content_rejected",
+      "cursor_invalid",
+      "cursor_expired",
+      "run_not_terminal",
+      "operation_not_terminal",
+      "deadline_exceeded",
+      "temporarily_unavailable",
+      "internal_error"
+    ],
+    "media_type": "application/problem+json"
+  },
+  "failure": {
+    "classes": [
+      "validation",
+      "authorization",
+      "policy",
+      "quota",
+      "deadline",
+      "dependency",
+      "external",
+      "resource",
+      "cancelled",
+      "uncertain_effect",
+      "platform"
+    ],
+    "declared_code_pattern": "^[a-z][a-z0-9_]{0,63}$",
+    "declared_codes_must_not_shadow_platform_codes": true,
+    "platform_codes": [
+      "agent_input_invalid",
+      "agent_output_invalid",
+      "plan_invariant_failed",
+      "budget_exhausted",
+      "deadline_exceeded",
+      "capability_failed",
+      "context_query_failed",
+      "model_turn_failed",
+      "child_agent_failed",
+      "artifact_unavailable",
+      "interaction_failed",
+      "dependency_unavailable",
+      "content_rejected",
+      "uncertain_effect",
+      "platform_invariant_failed"
+    ],
+    "retryability": [
+      "never",
+      "safe_within_policy",
+      "reconcile_before_retry"
+    ],
+    "sources": [
+      "agent",
+      "plan",
+      "capability",
+      "context",
+      "model",
+      "child_agent",
+      "artifact",
+      "interaction",
+      "dependency",
+      "platform"
+    ]
+  },
+  "profile": "insight.platform/v1"
+}

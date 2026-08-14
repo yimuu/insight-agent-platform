@@ -1,0 +1,1394 @@
+{
+  "active_head_targets": [
+    {
+      "owner_prefix": "agt",
+      "target_prefix": "adep"
+    },
+    {
+      "owner_prefix": "skl",
+      "target_prefix": "srev"
+    },
+    {
+      "owner_prefix": "cap",
+      "target_prefix": "cdep"
+    },
+    {
+      "owner_prefix": "ctx",
+      "target_prefix": "xdep"
+    },
+    {
+      "owner_prefix": "dset",
+      "target_prefix": "dgen"
+    },
+    {
+      "owner_prefix": "mcp",
+      "target_prefix": "mcdep"
+    },
+    {
+      "owner_prefix": "mpr",
+      "target_prefix": "mpdep"
+    },
+    {
+      "owner_prefix": "mdl",
+      "target_prefix": "mdep"
+    },
+    {
+      "owner_prefix": "pol",
+      "target_prefix": "prev"
+    },
+    {
+      "owner_prefix": "srt",
+      "target_prefix": "srrev"
+    },
+    {
+      "owner_prefix": "spk",
+      "target_prefix": "sprev"
+    },
+    {
+      "owner_prefix": "sxp",
+      "target_prefix": "sxrev"
+    }
+  ],
+  "agent_authoring_modes": [
+    "structured",
+    "graph"
+  ],
+  "artifact_grant_operations": [
+    "read_whole",
+    "read_range",
+    "write_staging",
+    "commit_staging"
+  ],
+  "artifact_purposes": [
+    "authoring_document",
+    "interface_contract",
+    "typed_plan",
+    "package",
+    "sbom",
+    "backend_binding",
+    "model_generation_defaults",
+    "run_input",
+    "run_output",
+    "capability_input",
+    "capability_output",
+    "context_source",
+    "context_derived",
+    "mcp_resource",
+    "sandbox_input",
+    "sandbox_output",
+    "diagnostic",
+    "export"
+  ],
+  "artifact_reference_kinds": [
+    "definition",
+    "input",
+    "output",
+    "evidence",
+    "package",
+    "attachment",
+    "result",
+    "provenance"
+  ],
+  "artifact_workload_audiences": [
+    "principal",
+    "runtime",
+    "registry_worker",
+    "capability_worker",
+    "context_worker",
+    "model_worker",
+    "mcp_host",
+    "sandbox_gateway",
+    "artifact_worker"
+  ],
+  "authentication_strengths": [
+    "single_factor",
+    "multi_factor",
+    "phishing_resistant",
+    "workload_identity"
+  ],
+  "blob_integrity_states": [
+    "staging",
+    "verified",
+    "corrupt",
+    "deleting",
+    "deleted"
+  ],
+  "capability_backend_kinds": [
+    "native",
+    "http",
+    "grpc",
+    "mcp",
+    "sandbox"
+  ],
+  "capability_cancellation_kinds": [
+    "unsupported",
+    "best_effort",
+    "confirmed"
+  ],
+  "capability_idempotency_kinds": [
+    "intrinsic",
+    "caller_key",
+    "reconcile_before_retry",
+    "none"
+  ],
+  "capability_progress_durabilities": [
+    "none",
+    "live_only",
+    "coarse_durable"
+  ],
+  "capability_progress_modes": [
+    "none",
+    "events"
+  ],
+  "code_trust_classes": [
+    "built_in",
+    "reviewed_published",
+    "tenant_published",
+    "model_generated"
+  ],
+  "context_backend_kinds": [
+    "managed_index",
+    "remote_search",
+    "mcp_resources",
+    "sql_catalog",
+    "artifact_collection",
+    "native_catalog"
+  ],
+  "context_backend_outcome_kinds": [
+    "completed",
+    "deferred",
+    "retryable_failure",
+    "permanent_failure"
+  ],
+  "context_citation_strengths": [
+    "exact",
+    "observation_only"
+  ],
+  "context_consistency_modes": [
+    "pinned_generation",
+    "pin_at_run_admission",
+    "latest_at_query_start",
+    "external_observation"
+  ],
+  "cursor_purposes": [
+    "list",
+    "run_event"
+  ],
+  "data_classifications": [
+    "public",
+    "internal",
+    "confidential",
+    "restricted"
+  ],
+  "dependency_slot_kinds": [
+    "model",
+    "capability",
+    "context",
+    "child_agent",
+    "skill"
+  ],
+  "deployment_prefixes": [
+    "adep",
+    "cdep",
+    "xdep",
+    "mcdep",
+    "mpdep",
+    "mdep"
+  ],
+  "effects": [
+    "pure",
+    "read_only",
+    "idempotent_write",
+    "non_idempotent_write",
+    "irreversible"
+  ],
+  "exact_registry_projection_kinds": [
+    {
+      "prefix": "aif",
+      "resource_kind": "agent_interface_revision"
+    },
+    {
+      "prefix": "arev",
+      "resource_kind": "agent_plan_revision"
+    },
+    {
+      "prefix": "adep",
+      "resource_kind": "agent_deployment"
+    },
+    {
+      "prefix": "srev",
+      "resource_kind": "skill_revision"
+    },
+    {
+      "prefix": "cirev",
+      "resource_kind": "capability_interface_revision"
+    },
+    {
+      "prefix": "cimp",
+      "resource_kind": "capability_implementation_revision"
+    },
+    {
+      "prefix": "cdep",
+      "resource_kind": "capability_deployment"
+    },
+    {
+      "prefix": "xirev",
+      "resource_kind": "context_source_interface_revision"
+    },
+    {
+      "prefix": "ximp",
+      "resource_kind": "context_source_implementation_revision"
+    },
+    {
+      "prefix": "xdep",
+      "resource_kind": "context_deployment"
+    },
+    {
+      "prefix": "xcb",
+      "resource_kind": "context_binding"
+    },
+    {
+      "prefix": "dset",
+      "resource_kind": "context_dataset"
+    },
+    {
+      "prefix": "dgen",
+      "resource_kind": "dataset_generation"
+    },
+    {
+      "prefix": "mrev",
+      "resource_kind": "mcp_server_revision"
+    },
+    {
+      "prefix": "mcdep",
+      "resource_kind": "mcp_deployment"
+    },
+    {
+      "prefix": "mdsc",
+      "resource_kind": "mcp_discovery_snapshot"
+    },
+    {
+      "prefix": "mprev",
+      "resource_kind": "model_provider_revision"
+    },
+    {
+      "prefix": "mpdep",
+      "resource_kind": "model_provider_deployment"
+    },
+    {
+      "prefix": "mdrev",
+      "resource_kind": "model_profile_revision"
+    },
+    {
+      "prefix": "mdep",
+      "resource_kind": "model_deployment"
+    },
+    {
+      "prefix": "srrev",
+      "resource_kind": "sandbox_runtime_revision"
+    },
+    {
+      "prefix": "sprev",
+      "resource_kind": "sandbox_package_revision"
+    },
+    {
+      "prefix": "sxrev",
+      "resource_kind": "sandbox_profile_revision"
+    },
+    {
+      "prefix": "art",
+      "resource_kind": "artifact"
+    }
+  ],
+  "execution_work_owner_pairs": [
+    {
+      "owner_kind": "management_operation",
+      "work_class": "registry_validation"
+    },
+    {
+      "owner_kind": "node_execution",
+      "work_class": "orchestration"
+    },
+    {
+      "owner_kind": "model_turn",
+      "work_class": "model"
+    },
+    {
+      "owner_kind": "capability_invocation",
+      "work_class": "capability_native"
+    },
+    {
+      "owner_kind": "capability_invocation",
+      "work_class": "capability_remote"
+    },
+    {
+      "owner_kind": "mcp_operation",
+      "work_class": "mcp"
+    },
+    {
+      "owner_kind": "context_query",
+      "work_class": "context"
+    },
+    {
+      "owner_kind": "sandbox_job",
+      "work_class": "sandbox"
+    },
+    {
+      "owner_kind": "interaction",
+      "work_class": "interaction"
+    },
+    {
+      "owner_kind": "management_operation",
+      "work_class": "artifact"
+    },
+    {
+      "owner_kind": "internal_blob",
+      "work_class": "artifact"
+    },
+    {
+      "owner_kind": "run",
+      "work_class": "recovery"
+    },
+    {
+      "owner_kind": "node_execution",
+      "work_class": "recovery"
+    },
+    {
+      "owner_kind": "capability_invocation",
+      "work_class": "recovery"
+    },
+    {
+      "owner_kind": "context_query",
+      "work_class": "recovery"
+    },
+    {
+      "owner_kind": "mcp_operation",
+      "work_class": "recovery"
+    },
+    {
+      "owner_kind": "model_turn",
+      "work_class": "recovery"
+    },
+    {
+      "owner_kind": "sandbox_job",
+      "work_class": "recovery"
+    },
+    {
+      "owner_kind": "management_operation",
+      "work_class": "recovery"
+    }
+  ],
+  "interaction_kinds": [
+    "form",
+    "url_consent",
+    "business_input"
+  ],
+  "lock_ranks": [
+    {
+      "name": "command_receipt",
+      "ordinal": 10
+    },
+    {
+      "name": "scheduler_fairness",
+      "ordinal": 15
+    },
+    {
+      "name": "tenant_quota_policy",
+      "ordinal": 20
+    },
+    {
+      "name": "parent_root_aggregate",
+      "ordinal": 30
+    },
+    {
+      "name": "child_leaf_aggregate",
+      "ordinal": 40
+    },
+    {
+      "name": "job_fence",
+      "ordinal": 50
+    },
+    {
+      "name": "public_run_stream_head",
+      "ordinal": 60
+    },
+    {
+      "name": "append_only_projection_outbox",
+      "ordinal": 70
+    }
+  ],
+  "management_operation_kinds": [
+    "validation",
+    "import",
+    "discovery",
+    "build",
+    "artifact_upload",
+    "artifact_verify",
+    "artifact_rescan",
+    "artifact_delete",
+    "export"
+  ],
+  "mcp_authorization_principal_kinds": [
+    "per_user",
+    "service_identity"
+  ],
+  "mcp_oauth_client_authentication_kinds": [
+    "none",
+    "client_secret_basic"
+  ],
+  "mcp_transport_kinds": [
+    "streamable_http",
+    "managed_stdio"
+  ],
+  "model_identity_stabilities": [
+    "pinned",
+    "externally_mutable"
+  ],
+  "model_modalities": [
+    "text",
+    "image",
+    "audio",
+    "document"
+  ],
+  "permissions": [
+    "installation.manage",
+    "installation.support",
+    "tenant.read",
+    "tenant.manage",
+    "tenant.emergency_stop",
+    "agent.read",
+    "agent.write",
+    "agent.publish",
+    "agent.deploy",
+    "agent.activate",
+    "agent.run",
+    "skill.read",
+    "skill.write",
+    "skill.publish",
+    "skill.bind",
+    "skill.activate",
+    "capability.read",
+    "capability.write",
+    "capability.publish",
+    "capability.deploy",
+    "capability.activate",
+    "capability.bind",
+    "capability.invoke",
+    "context.read",
+    "context.write",
+    "context.publish",
+    "context.deploy",
+    "context.activate",
+    "context.query",
+    "context.build_dataset",
+    "mcp.read",
+    "mcp.write",
+    "mcp.discover",
+    "mcp.import",
+    "mcp.publish",
+    "mcp.deploy",
+    "mcp.activate",
+    "mcp.invoke",
+    "model.read",
+    "model.write",
+    "model.discover",
+    "model.import",
+    "model.publish",
+    "model.deploy",
+    "model.activate",
+    "model.invoke",
+    "sandbox.read",
+    "sandbox.write",
+    "sandbox.build",
+    "sandbox.publish",
+    "sandbox.activate",
+    "sandbox.execute",
+    "artifact.read",
+    "artifact.write",
+    "artifact.delete",
+    "artifact.hold",
+    "artifact.rescan",
+    "approval.read",
+    "approval.respond",
+    "interaction.read",
+    "interaction.respond",
+    "policy.read",
+    "policy.write",
+    "policy.publish",
+    "policy.activate",
+    "operation.read",
+    "operation.cancel",
+    "runtime.read",
+    "runtime.control",
+    "runtime.signal",
+    "secret.inspect",
+    "secret.bind",
+    "secret.rotate",
+    "secret.revoke"
+  ],
+  "plan_node_kinds": [
+    "start",
+    "compute",
+    "branch",
+    "fork",
+    "join",
+    "map",
+    "loop",
+    "error_boundary",
+    "model_loop",
+    "capability_call",
+    "context_query",
+    "child_agent_call",
+    "human_task",
+    "timer_wait",
+    "signal_wait",
+    "return",
+    "raise"
+  ],
+  "policy_kinds": [
+    "authorization",
+    "approval",
+    "data_flow",
+    "declassification",
+    "network",
+    "tls",
+    "trust",
+    "retry",
+    "budget",
+    "quota",
+    "selection",
+    "scheduling",
+    "execution",
+    "resource",
+    "isolation",
+    "parser",
+    "chunker",
+    "ranking",
+    "retention",
+    "artifact_io",
+    "secret_resolution",
+    "public_projection",
+    "protocol",
+    "mcp_auth"
+  ],
+  "policy_reference_roles": [
+    {
+      "expected_policy_kind": "authorization",
+      "required_revision_prefix": "prev",
+      "role": "authorization"
+    },
+    {
+      "expected_policy_kind": "approval",
+      "required_revision_prefix": "prev",
+      "role": "approval"
+    },
+    {
+      "expected_policy_kind": "data_flow",
+      "required_revision_prefix": "prev",
+      "role": "data"
+    },
+    {
+      "expected_policy_kind": "declassification",
+      "required_revision_prefix": "prev",
+      "role": "declassification"
+    },
+    {
+      "expected_policy_kind": "network",
+      "required_revision_prefix": "prev",
+      "role": "network"
+    },
+    {
+      "expected_policy_kind": "tls",
+      "required_revision_prefix": "prev",
+      "role": "tls"
+    },
+    {
+      "expected_policy_kind": "trust",
+      "required_revision_prefix": "prev",
+      "role": "trust"
+    },
+    {
+      "expected_policy_kind": "isolation",
+      "required_revision_prefix": "prev",
+      "role": "isolation"
+    },
+    {
+      "expected_policy_kind": "retry",
+      "required_revision_prefix": "prev",
+      "role": "retry"
+    },
+    {
+      "expected_policy_kind": "budget",
+      "required_revision_prefix": "prev",
+      "role": "budget"
+    },
+    {
+      "expected_policy_kind": "quota",
+      "required_revision_prefix": "prev",
+      "role": "quota"
+    },
+    {
+      "expected_policy_kind": "selection",
+      "required_revision_prefix": "prev",
+      "role": "selection"
+    },
+    {
+      "expected_policy_kind": "scheduling",
+      "required_revision_prefix": "prev",
+      "role": "scheduling"
+    },
+    {
+      "expected_policy_kind": "execution",
+      "required_revision_prefix": "prev",
+      "role": "execution"
+    },
+    {
+      "expected_policy_kind": "resource",
+      "required_revision_prefix": "prev",
+      "role": "resource"
+    },
+    {
+      "expected_policy_kind": "parser",
+      "required_revision_prefix": "prev",
+      "role": "parser"
+    },
+    {
+      "expected_policy_kind": "chunker",
+      "required_revision_prefix": "prev",
+      "role": "chunker"
+    },
+    {
+      "expected_policy_kind": "ranking",
+      "required_revision_prefix": "prev",
+      "role": "ranking"
+    },
+    {
+      "expected_policy_kind": "retention",
+      "required_revision_prefix": "prev",
+      "role": "retention"
+    },
+    {
+      "expected_policy_kind": "artifact_io",
+      "required_revision_prefix": "prev",
+      "role": "artifact_io"
+    },
+    {
+      "expected_policy_kind": "secret_resolution",
+      "required_revision_prefix": "prev",
+      "role": "secret_rotation"
+    },
+    {
+      "expected_policy_kind": "public_projection",
+      "required_revision_prefix": "prev",
+      "role": "public_projection"
+    },
+    {
+      "expected_policy_kind": "protocol",
+      "required_revision_prefix": "prev",
+      "role": "protocol"
+    },
+    {
+      "expected_policy_kind": "mcp_auth",
+      "required_revision_prefix": "prev",
+      "role": "auth_profile"
+    }
+  ],
+  "principal_kinds": [
+    "installation_operator",
+    "tenant_admin",
+    "agent_author",
+    "agent_runner",
+    "human_approver",
+    "service_identity"
+  ],
+  "profile": "insight.platform/v1",
+  "quota_accounting_modes": [
+    "leased",
+    "consumable",
+    "reclaimable"
+  ],
+  "quota_dimensions": [
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "run_scheduler.active_runs_per_tenant",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "run_scheduler.waiting_runs_per_tenant",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "durable_quota.agent_concurrent_runs",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "durable_quota.work_class_concurrent_operations",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "durable_quota.capability_concurrent_invocations",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "durable_quota.sandbox_concurrent_executions",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "consumable",
+      "hard_limit_path": "durable_quota.sandbox_cpu_seconds",
+      "unit": "seconds"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "durable_quota.sandbox_memory_mebibytes",
+      "unit": "mebibytes"
+    },
+    {
+      "accounting_mode": "consumable",
+      "hard_limit_path": "durable_quota.sandbox_output_bytes",
+      "unit": "bytes"
+    },
+    {
+      "accounting_mode": "consumable",
+      "hard_limit_path": "durable_quota.model_tokens",
+      "unit": "tokens"
+    },
+    {
+      "accounting_mode": "consumable",
+      "hard_limit_path": "durable_quota.model_cost_microunits",
+      "unit": "currency_microunits"
+    },
+    {
+      "accounting_mode": "consumable",
+      "hard_limit_path": "durable_quota.model_requests",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "consumable",
+      "hard_limit_path": "durable_quota.context_queries",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "consumable",
+      "hard_limit_path": "durable_quota.context_result_bytes",
+      "unit": "bytes"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "model_context_mcp.mcp_sessions_per_tenant",
+      "unit": "connections"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "model_context_mcp.mcp_tasks_per_session",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "model_context_mcp.mcp_subscriptions_per_session",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "reclaimable",
+      "hard_limit_path": "durable_quota.artifact_count",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "reclaimable",
+      "hard_limit_path": "artifact.tenant_total_bytes",
+      "unit": "bytes"
+    },
+    {
+      "accounting_mode": "reclaimable",
+      "hard_limit_path": "durable_quota.artifact_physical_bytes",
+      "unit": "bytes"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "durable_quota.artifact_staging_bytes",
+      "unit": "bytes"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "durable_quota.artifact_uploads",
+      "unit": "count"
+    },
+    {
+      "accounting_mode": "leased",
+      "hard_limit_path": "durable_quota.human_tasks_pending",
+      "unit": "count"
+    }
+  ],
+  "quota_scope_kinds": [
+    "tenant",
+    "agent_deployment",
+    "work_class",
+    "capability_deployment",
+    "model_deployment",
+    "context_deployment",
+    "mcp_deployment",
+    "sandbox_profile_revision",
+    "run",
+    "principal"
+  ],
+  "quota_window_kinds": [
+    "current",
+    "run",
+    "utc_day",
+    "utc_month",
+    "lifetime"
+  ],
+  "resource_kinds": [
+    {
+      "exposure": "public",
+      "name": "tenant",
+      "prefix": "ten"
+    },
+    {
+      "exposure": "public",
+      "name": "principal",
+      "prefix": "prn"
+    },
+    {
+      "exposure": "internal",
+      "name": "installation_service",
+      "prefix": "svc"
+    },
+    {
+      "exposure": "internal",
+      "name": "worker_process_generation",
+      "prefix": "wrk"
+    },
+    {
+      "exposure": "public",
+      "name": "secret_provider",
+      "prefix": "spr"
+    },
+    {
+      "exposure": "public",
+      "name": "secret_binding",
+      "prefix": "sbd"
+    },
+    {
+      "exposure": "public",
+      "name": "agent",
+      "prefix": "agt"
+    },
+    {
+      "exposure": "public",
+      "name": "agent_interface_revision",
+      "prefix": "aif"
+    },
+    {
+      "exposure": "public",
+      "name": "agent_plan_revision",
+      "prefix": "arev"
+    },
+    {
+      "exposure": "public",
+      "name": "agent_deployment",
+      "prefix": "adep"
+    },
+    {
+      "exposure": "public",
+      "name": "skill",
+      "prefix": "skl"
+    },
+    {
+      "exposure": "public",
+      "name": "skill_revision",
+      "prefix": "srev"
+    },
+    {
+      "exposure": "public",
+      "name": "skill_activation",
+      "prefix": "sact"
+    },
+    {
+      "exposure": "public",
+      "name": "capability_interface",
+      "prefix": "cap"
+    },
+    {
+      "exposure": "public",
+      "name": "capability_interface_revision",
+      "prefix": "cirev"
+    },
+    {
+      "exposure": "public",
+      "name": "capability_implementation",
+      "prefix": "cim"
+    },
+    {
+      "exposure": "public",
+      "name": "capability_implementation_revision",
+      "prefix": "cimp"
+    },
+    {
+      "exposure": "public",
+      "name": "capability_deployment",
+      "prefix": "cdep"
+    },
+    {
+      "exposure": "public",
+      "name": "context_source_interface",
+      "prefix": "ctx"
+    },
+    {
+      "exposure": "public",
+      "name": "context_source_interface_revision",
+      "prefix": "xirev"
+    },
+    {
+      "exposure": "public",
+      "name": "context_source_implementation",
+      "prefix": "xim"
+    },
+    {
+      "exposure": "public",
+      "name": "context_source_implementation_revision",
+      "prefix": "ximp"
+    },
+    {
+      "exposure": "public",
+      "name": "context_deployment",
+      "prefix": "xdep"
+    },
+    {
+      "exposure": "public",
+      "name": "context_binding",
+      "prefix": "xcb"
+    },
+    {
+      "exposure": "public",
+      "name": "context_dataset",
+      "prefix": "dset"
+    },
+    {
+      "exposure": "public",
+      "name": "dataset_generation",
+      "prefix": "dgen"
+    },
+    {
+      "exposure": "public",
+      "name": "context_query",
+      "prefix": "cqry"
+    },
+    {
+      "exposure": "public",
+      "name": "context_observation",
+      "prefix": "cobs"
+    },
+    {
+      "exposure": "public",
+      "name": "context_item",
+      "prefix": "cit"
+    },
+    {
+      "exposure": "public",
+      "name": "mcp_server",
+      "prefix": "mcp"
+    },
+    {
+      "exposure": "public",
+      "name": "mcp_server_revision",
+      "prefix": "mrev"
+    },
+    {
+      "exposure": "public",
+      "name": "mcp_deployment",
+      "prefix": "mcdep"
+    },
+    {
+      "exposure": "public",
+      "name": "mcp_discovery_snapshot",
+      "prefix": "mdsc"
+    },
+    {
+      "exposure": "public",
+      "name": "mcp_authorization_binding",
+      "prefix": "mab"
+    },
+    {
+      "exposure": "public",
+      "name": "mcp_operation",
+      "prefix": "mop"
+    },
+    {
+      "exposure": "public",
+      "name": "model_provider",
+      "prefix": "mpr"
+    },
+    {
+      "exposure": "public",
+      "name": "model_provider_revision",
+      "prefix": "mprev"
+    },
+    {
+      "exposure": "public",
+      "name": "model_provider_deployment",
+      "prefix": "mpdep"
+    },
+    {
+      "exposure": "public",
+      "name": "model_profile",
+      "prefix": "mdl"
+    },
+    {
+      "exposure": "public",
+      "name": "model_profile_revision",
+      "prefix": "mdrev"
+    },
+    {
+      "exposure": "public",
+      "name": "model_deployment",
+      "prefix": "mdep"
+    },
+    {
+      "exposure": "public",
+      "name": "model_turn",
+      "prefix": "mturn"
+    },
+    {
+      "exposure": "public",
+      "name": "usage_reservation",
+      "prefix": "ures"
+    },
+    {
+      "exposure": "public",
+      "name": "policy",
+      "prefix": "pol"
+    },
+    {
+      "exposure": "public",
+      "name": "policy_revision",
+      "prefix": "prev"
+    },
+    {
+      "exposure": "public",
+      "name": "sandbox_runtime",
+      "prefix": "srt"
+    },
+    {
+      "exposure": "public",
+      "name": "sandbox_runtime_revision",
+      "prefix": "srrev"
+    },
+    {
+      "exposure": "public",
+      "name": "sandbox_package",
+      "prefix": "spk"
+    },
+    {
+      "exposure": "public",
+      "name": "sandbox_package_revision",
+      "prefix": "sprev"
+    },
+    {
+      "exposure": "public",
+      "name": "sandbox_profile",
+      "prefix": "sxp"
+    },
+    {
+      "exposure": "public",
+      "name": "sandbox_profile_revision",
+      "prefix": "sxrev"
+    },
+    {
+      "exposure": "public",
+      "name": "sandbox_job",
+      "prefix": "sjob"
+    },
+    {
+      "exposure": "public",
+      "name": "run",
+      "prefix": "run"
+    },
+    {
+      "exposure": "internal",
+      "name": "run_value",
+      "prefix": "rval"
+    },
+    {
+      "exposure": "public",
+      "name": "node_execution",
+      "prefix": "nex"
+    },
+    {
+      "exposure": "internal",
+      "name": "scope_instance",
+      "prefix": "scp"
+    },
+    {
+      "exposure": "public",
+      "name": "capability_invocation",
+      "prefix": "inv"
+    },
+    {
+      "exposure": "public",
+      "name": "child_run_link",
+      "prefix": "crun"
+    },
+    {
+      "exposure": "public",
+      "name": "artifact",
+      "prefix": "art"
+    },
+    {
+      "exposure": "internal",
+      "name": "artifact_grant",
+      "prefix": "agr"
+    },
+    {
+      "exposure": "internal",
+      "name": "internal_blob",
+      "prefix": "blb"
+    },
+    {
+      "exposure": "internal",
+      "name": "encryption_domain",
+      "prefix": "enc"
+    },
+    {
+      "exposure": "public",
+      "name": "interaction",
+      "prefix": "int"
+    },
+    {
+      "exposure": "public",
+      "name": "approval_task",
+      "prefix": "apr"
+    },
+    {
+      "exposure": "internal",
+      "name": "job",
+      "prefix": "job"
+    },
+    {
+      "exposure": "internal",
+      "name": "task",
+      "prefix": "tsk"
+    },
+    {
+      "exposure": "internal",
+      "name": "receipt",
+      "prefix": "rcp"
+    },
+    {
+      "exposure": "internal",
+      "name": "outbox_event",
+      "prefix": "out"
+    },
+    {
+      "exposure": "internal",
+      "name": "quota_account",
+      "prefix": "qac"
+    },
+    {
+      "exposure": "internal",
+      "name": "quota_ledger_entry",
+      "prefix": "qle"
+    },
+    {
+      "exposure": "internal",
+      "name": "event",
+      "prefix": "evt"
+    },
+    {
+      "exposure": "public",
+      "name": "management_operation",
+      "prefix": "op"
+    },
+    {
+      "exposure": "public",
+      "name": "validation",
+      "prefix": "val"
+    },
+    {
+      "exposure": "public",
+      "name": "evidence",
+      "prefix": "evd"
+    },
+    {
+      "exposure": "correlation_only",
+      "name": "server_request",
+      "prefix": "req"
+    },
+    {
+      "exposure": "internal",
+      "name": "release_candidate",
+      "prefix": "cand"
+    },
+    {
+      "exposure": "internal",
+      "name": "qualification_profile",
+      "prefix": "qpr"
+    },
+    {
+      "exposure": "internal",
+      "name": "qualification",
+      "prefix": "qlf"
+    },
+    {
+      "exposure": "internal",
+      "name": "release",
+      "prefix": "rel"
+    },
+    {
+      "exposure": "internal",
+      "name": "approval_receipt",
+      "prefix": "aprr"
+    },
+    {
+      "exposure": "internal",
+      "name": "artifact_link",
+      "prefix": "alk"
+    }
+  ],
+  "revision_prefixes": [
+    "aif",
+    "arev",
+    "srev",
+    "cirev",
+    "cimp",
+    "xirev",
+    "ximp",
+    "dgen",
+    "mrev",
+    "mprev",
+    "mdrev",
+    "prev",
+    "srrev",
+    "sprev",
+    "sxrev"
+  ],
+  "sandbox_abi_versions": [
+    "v1"
+  ],
+  "sandbox_cleanup_policies": [
+    "single_use_destroy"
+  ],
+  "sandbox_entrypoint_kinds": [
+    "python_module",
+    "node_module",
+    "wasm_export",
+    "reviewed_executable",
+    "managed_mcp_server"
+  ],
+  "sandbox_isolation_classes": [
+    {
+      "name": "wasm",
+      "security_rank": 1
+    },
+    {
+      "name": "sandboxed_container",
+      "security_rank": 2
+    },
+    {
+      "name": "micro_vm",
+      "security_rank": 3
+    }
+  ],
+  "sandbox_runtime_families": [
+    "python",
+    "node_js",
+    "wasm_wasi",
+    "reviewed_shell",
+    "managed_mcp_server"
+  ],
+  "scheduler_priorities": [
+    "low",
+    "normal",
+    "high",
+    "critical_control"
+  ],
+  "scope_kinds": [
+    "root",
+    "branch_leg",
+    "parallel_leg",
+    "map_item",
+    "loop_iteration",
+    "model_round",
+    "error_boundary"
+  ],
+  "service_classes": [
+    "low",
+    "normal",
+    "high"
+  ],
+  "skill_instruction_audiences": [
+    "planner",
+    "tool_user",
+    "validator",
+    "composer"
+  ],
+  "skill_instruction_phases": [
+    "task_understanding",
+    "planning",
+    "tool_use",
+    "validation",
+    "output_composition"
+  ],
+  "skill_package_entry_kinds": [
+    "manifest",
+    "instruction",
+    "reference",
+    "example",
+    "asset"
+  ],
+  "skill_requirement_kinds": [
+    "capability",
+    "context",
+    "model_feature"
+  ],
+  "skill_selection_modes": [
+    "required",
+    "plan_selected",
+    "policy_selected",
+    "model_proposed"
+  ],
+  "slot_target_prefixes": {
+    "capability": [
+      "cdep"
+    ],
+    "child_agent": [
+      "adep"
+    ],
+    "context": [
+      "xcb"
+    ],
+    "model": [
+      "mdep"
+    ],
+    "skill": [
+      "srev"
+    ]
+  },
+  "wake_contract_kinds": [
+    "timer",
+    "signal",
+    "human_task",
+    "approval",
+    "remote_invocation",
+    "child_run",
+    "retry_deadline"
+  ],
+  "work_classes": [
+    "registry_validation",
+    "orchestration",
+    "model",
+    "capability_native",
+    "capability_remote",
+    "mcp",
+    "context",
+    "sandbox",
+    "interaction",
+    "artifact",
+    "recovery"
+  ]
+}

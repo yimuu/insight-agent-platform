@@ -1,0 +1,53 @@
+{
+  "suite_id": "F-EVENT",
+  "cases": [
+    {
+      "fixture_id": "fevent-run-terminal-durable",
+      "owner_spec": "17",
+      "related_specs": ["03", "06"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"event_type":"run.completed","durability":"durable","event_id":"present","sequence":"present","cursor":"present","data":{"source_kind":"run","source_id":"run_018f0000-0000-7000-8000-000000000001","source_projection_version":1,"safe_summary":null}},
+      "input_digest": "sha256:d53692931f2da7bc8475523eb87959168aa92bf7161f5b3a12178573096e77e6",
+      "expected": {"valid":true},
+      "privacy_classification": "public",
+      "polarity": "positive"
+    },
+    {
+      "fixture_id": "fevent-node-source-kind-mismatch",
+      "owner_spec": "17",
+      "related_specs": ["03", "06"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"event_type":"node.completed","durability":"durable","event_id":"present","sequence":"present","cursor":"present","data":{"source_kind":"run","source_id":"run_018f0000-0000-7000-8000-000000000001","source_projection_version":1,"safe_summary":null}},
+      "input_digest": "sha256:c2be38c62be8e60d09a42403bc7e93b34af6ca587daff06df8d7ccd45c9a8088",
+      "stable_rejection": "public_event_source_kind_mismatch",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    },
+    {
+      "fixture_id": "fevent-live-delta-cannot-advance",
+      "owner_spec": "17",
+      "related_specs": ["16"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"event_type":"model.delta","durability":"live_only","event_id":"present","sequence":"absent","cursor":"absent"},
+      "input_digest": "sha256:972c7b382db91aed1a523aaf3d183849373faed45adb51bb4ad10e918d470f95",
+      "stable_rejection": "live_only_event_has_durable_identity",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    },
+    {
+      "fixture_id": "fevent-list-cursor-cannot-resume-run",
+      "owner_spec": "17",
+      "related_specs": ["03"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"actual_purpose":"list","required_purpose":"run_event"},
+      "input_digest": "sha256:5a3e85ba1cd9e4693c4039c92b8fde59af76b62c0011031bc76bfe54213dee31",
+      "stable_rejection": "cursor_purpose_mismatch",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    }
+  ]
+}

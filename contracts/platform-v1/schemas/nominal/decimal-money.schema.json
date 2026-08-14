@@ -1,0 +1,31 @@
+{
+  "$id": "urn:insight:platform:v1:schema:DecimalMoney",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "currency": {
+      "maxLength": 3,
+      "minLength": 3,
+      "pattern": "^[A-Z]{3}$",
+      "type": "string",
+      "x-platform-max-bytes": 3
+    },
+    "minor_units": {
+      "maximum": 9007199254740991,
+      "minimum": -9007199254740991,
+      "type": "integer"
+    },
+    "scale": {
+      "maximum": 18,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "currency",
+    "minor_units",
+    "scale"
+  ],
+  "title": "DecimalMoney",
+  "type": "object"
+}

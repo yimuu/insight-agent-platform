@@ -1,0 +1,398 @@
+{
+  "durability": [
+    "snapshot",
+    "durable",
+    "live_only"
+  ],
+  "durable_source_kinds": [
+    "run",
+    "run_control",
+    "node_execution",
+    "skill_activation",
+    "model_turn",
+    "capability_invocation",
+    "context_query",
+    "child_run_link",
+    "interaction",
+    "approval_task"
+  ],
+  "envelope_invariants": {
+    "durable": {
+      "cursor": "required",
+      "event_id": "required",
+      "sequence": "required"
+    },
+    "live_only": {
+      "cursor": "absent",
+      "event_id": "absent",
+      "sequence": "absent"
+    },
+    "snapshot": {
+      "cursor": "high_water",
+      "event_id": "absent",
+      "sequence": "absent"
+    }
+  },
+  "event_types": [
+    {
+      "allowed_durability": [
+        "snapshot"
+      ],
+      "durable_source_kind": null,
+      "type": "run.snapshot"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run",
+      "type": "run.queued"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run",
+      "type": "run.started"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run",
+      "type": "run.waiting"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run_control",
+      "type": "run.paused"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run_control",
+      "type": "run.resumed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run",
+      "type": "run.cancelling"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run",
+      "type": "run.completed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run",
+      "type": "run.failed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run",
+      "type": "run.cancelled"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "run",
+      "type": "run.timed_out"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "node_execution",
+      "type": "node.started"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "node_execution",
+      "type": "node.completed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "node_execution",
+      "type": "node.failed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "node_execution",
+      "type": "node.cancelled"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "node_execution",
+      "type": "node.timed_out"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "skill_activation",
+      "type": "skill.selected"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "skill_activation",
+      "type": "skill.activated"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "skill_activation",
+      "type": "skill.rejected"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "model_turn",
+      "type": "model.started"
+    },
+    {
+      "allowed_durability": [
+        "live_only"
+      ],
+      "durable_source_kind": null,
+      "type": "model.delta"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "model_turn",
+      "type": "model.tool_intent"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "model_turn",
+      "type": "model.completed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "model_turn",
+      "type": "model.failed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "model_turn",
+      "type": "model.cancelled"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "model_turn",
+      "type": "model.timed_out"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "capability_invocation",
+      "type": "capability.started"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "capability_invocation",
+      "type": "capability.waiting"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "capability_invocation",
+      "type": "capability.input_required"
+    },
+    {
+      "allowed_durability": [
+        "durable",
+        "live_only"
+      ],
+      "durable_source_kind": "capability_invocation",
+      "type": "capability.progress"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "capability_invocation",
+      "type": "capability.completed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "capability_invocation",
+      "type": "capability.failed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "capability_invocation",
+      "type": "capability.cancelled"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "capability_invocation",
+      "type": "capability.timed_out"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "context_query",
+      "type": "context.started"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "context_query",
+      "type": "context.completed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "context_query",
+      "type": "context.failed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "context_query",
+      "type": "context.cancelled"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "context_query",
+      "type": "context.timed_out"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "child_run_link",
+      "type": "child.started"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "child_run_link",
+      "type": "child.waiting"
+    },
+    {
+      "allowed_durability": [
+        "durable",
+        "live_only"
+      ],
+      "durable_source_kind": "child_run_link",
+      "type": "child.progress"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "child_run_link",
+      "type": "child.completed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "child_run_link",
+      "type": "child.failed"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "child_run_link",
+      "type": "child.cancelled"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "child_run_link",
+      "type": "child.timed_out"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "interaction",
+      "type": "interaction.required"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "interaction",
+      "type": "interaction.resolved"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "approval_task",
+      "type": "approval.required"
+    },
+    {
+      "allowed_durability": [
+        "durable"
+      ],
+      "durable_source_kind": "approval_task",
+      "type": "approval.resolved"
+    },
+    {
+      "allowed_durability": [
+        "live_only"
+      ],
+      "durable_source_kind": null,
+      "type": "stream.live_gap"
+    }
+  ],
+  "profile": "insight.platform/v1"
+}

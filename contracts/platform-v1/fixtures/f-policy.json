@@ -1,0 +1,41 @@
+{
+  "suite_id": "F-POLICY",
+  "cases": [
+    {
+      "fixture_id": "fpolicy-effect-max-risk",
+      "owner_spec": "04",
+      "related_specs": ["09", "10"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"interface_effect":"read_only","implementation_effect":"non_idempotent_write"},
+      "input_digest": "sha256:4d1ebcc74020d4b560a346962c6f448589127f76d1ce6f07647263dd91a360a9",
+      "expected": {"effective_effect":"non_idempotent_write"},
+      "privacy_classification": "internal",
+      "polarity": "positive"
+    },
+    {
+      "fixture_id": "fpolicy-classification-join",
+      "owner_spec": "04",
+      "related_specs": ["12", "15", "16"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"classifications":["internal","restricted","confidential"]},
+      "input_digest": "sha256:8a18cc3b35defc0ccc0b1d86cd9d1cc9a281de14a12987cc0cec59a5c7ddad1d",
+      "expected": {"classification":"restricted"},
+      "privacy_classification": "internal",
+      "polarity": "positive"
+    },
+    {
+      "fixture_id": "fpolicy-secret-read-does-not-exist",
+      "owner_spec": "04",
+      "related_specs": ["17"],
+      "profile": "insight.platform/v1",
+      "seed": 0,
+      "input": {"permission":"secret.read"},
+      "input_digest": "sha256:4e2848a4ce2a53a213a1fce2740267ecb82b5b17a3a1980620626b6c219ccde5",
+      "stable_rejection": "unknown_permission",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    }
+  ]
+}

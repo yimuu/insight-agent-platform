@@ -1,0 +1,11 @@
+{
+  "$id": "urn:insight:platform:v1:schema:UtcTimestamp",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "UTC RFC 3339 timestamp with exactly six fractional digits.",
+  "maxLength": 27,
+  "minLength": 27,
+  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+  "title": "UtcTimestamp",
+  "type": "string",
+  "x-platform-max-bytes": 27
+}

@@ -1,0 +1,29 @@
+{
+  "suite_id": "F-FENCE",
+  "cases": [
+    {
+      "fixture_id": "ffence-current-epoch-commits",
+      "owner_spec": "03",
+      "related_specs": ["06", "07"],
+      "profile": "insight.platform/v1",
+      "seed": 41,
+      "input": {"stored_epoch":7,"attempt_epoch":7,"terminal_already_committed":false},
+      "input_digest": "sha256:8c46340e69a012ab8a6282621978f1ce782b78a8547c6870cdb0eee7bf98b02d",
+      "expected": {"commit_disposition":"committed"},
+      "privacy_classification": "internal",
+      "polarity": "positive"
+    },
+    {
+      "fixture_id": "ffence-stale-epoch-rejected",
+      "owner_spec": "03",
+      "related_specs": ["06", "07"],
+      "profile": "insight.platform/v1",
+      "seed": 41,
+      "input": {"stored_epoch":8,"attempt_epoch":7,"terminal_already_committed":false},
+      "input_digest": "sha256:d5d2c809918d80ce997911779a150fba22f67cb5ce19d6baed02185edeeb50b5",
+      "expected": {"commit_disposition":"rejected_stale_fence"},
+      "privacy_classification": "internal",
+      "polarity": "negative"
+    }
+  ]
+}

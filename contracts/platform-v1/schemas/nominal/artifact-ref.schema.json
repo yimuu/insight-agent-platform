@@ -1,0 +1,67 @@
+{
+  "$id": "urn:insight:platform:v1:schema:ArtifactRef",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "maxLength": 40,
+      "minLength": 40,
+      "pattern": "^(art)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string",
+      "x-platform-max-bytes": 40
+    },
+    "byte_length": {
+      "maximum": 1073741824,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "classification": {
+      "enum": [
+        "public",
+        "internal",
+        "confidential",
+        "restricted"
+      ],
+      "maxLength": 32,
+      "minLength": 1,
+      "type": "string",
+      "x-platform-max-bytes": 32
+    },
+    "content_digest": {
+      "maxLength": 71,
+      "minLength": 71,
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string",
+      "x-platform-max-bytes": 71
+    },
+    "display_name": {
+      "oneOf": [
+        {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 1020
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "media_type": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string",
+      "x-platform-max-bytes": 255
+    }
+  },
+  "required": [
+    "artifact_id",
+    "content_digest",
+    "byte_length",
+    "media_type",
+    "classification",
+    "display_name"
+  ],
+  "title": "ArtifactRef",
+  "type": "object"
+}

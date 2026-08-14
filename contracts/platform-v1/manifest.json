@@ -1,0 +1,176 @@
+{
+  "contract_digest": "sha256:46c72b158f9edbf4e4a631bca386fb1072c05dae263ffcdce590261603ad566a",
+  "contract_profile": "insight.platform/v1",
+  "files": [
+    {
+      "bytes": 5608,
+      "media_type": "application/yaml",
+      "path": "contracts/platform-v1/openapi.yaml",
+      "sha256": "eee830280057a612f9331e6594f3e7c7165618509e597588eab25369605dd041"
+    },
+    {
+      "bytes": 28148,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/registries.json",
+      "sha256": "fff40929fd0cf9be55f65c792bf8d9bdb828020de455be152f77c65494a343bb"
+    },
+    {
+      "bytes": 1912,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/errors.json",
+      "sha256": "1fec1854eee31bc3f6a36f11f0d1b89449685fe77065645db3dc49b6bf662c38"
+    },
+    {
+      "bytes": 8262,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/events/public-run-events.json",
+      "sha256": "2cbd55b981897c7387a872f3cc88e1474c1f45dfbc8cfebe7861cc335dfd0e5b"
+    },
+    {
+      "bytes": 77793,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/events/public-run-payloads.schema.json",
+      "sha256": "98031a2ed9e243b7a24bb0ee601fff8ae0ea8e3ae4f64199983f27dc45236b6c"
+    },
+    {
+      "bytes": 1186,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/closed-schema-profile.json",
+      "sha256": "b3992a4633c1feb8f8c532457e16a2312c43e9bc1572221446c824131e0c95f3"
+    },
+    {
+      "bytes": 764,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/resource-id.schema.json",
+      "sha256": "af77d09957583e7a698870bcd2d1d89de6d5c25152a425bfa0a3175179b2d482"
+    },
+    {
+      "bytes": 28307,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/states.json",
+      "sha256": "d8ed59100f3eeba8314856f0e9a0f2950b544fa0d198233c7f3826a4dfd70a3c"
+    },
+    {
+      "bytes": 3466,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal-types.json",
+      "sha256": "c446e8c6147304b4304ac06c0869226531bd767b214fbf1bf6194c45c4e3123f"
+    },
+    {
+      "bytes": 16831,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/frozen-slot-binding.schema.json",
+      "sha256": "ffbf5c306d0ec3c958b1cc698376fb2e888abba8f402bcbc1a8cc3c049b73f99"
+    },
+    {
+      "bytes": 1524,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/worker-manifest.schema.json",
+      "sha256": "07851119c32bc17ffcce1f2c28d0e833e2689697992623fff03ac2fc36f5ca7d"
+    },
+    {
+      "bytes": 1117,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
+      "sha256": "5cab3d2d2af2dfc45979194e845dde211d8f0694a869af721ad159c82f2ba05a"
+    },
+    {
+      "bytes": 771,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/policies/scheduling-policy.schema.json",
+      "sha256": "a43cee5a2db18f9ce23ce8c5880d8b3a982c7ad81a907f3aadc14d3730330007"
+    },
+    {
+      "bytes": 3303,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
+      "sha256": "fd48917094463c2415d088ea2e4213c7f8782b88bd37f08a876e0c86d6074292"
+    },
+    {
+      "bytes": 1477,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal/artifact-ref.schema.json",
+      "sha256": "0a6deef2979eeae5820cf6e6ecd8982fa1a1c66443c880149b667f5da1f89b8c"
+    },
+    {
+      "bytes": 656,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal/decimal-money.schema.json",
+      "sha256": "0c59d0b347ef2f384c18305f5d21eff05b44293a981d2473fb415697c8e1385e"
+    },
+    {
+      "bytes": 261,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal/digest.schema.json",
+      "sha256": "6c548aac61f8bbde74a6c2730ce5a21e54e7a37d9dfa7d454930cc0394a2cfc9"
+    },
+    {
+      "bytes": 5694,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal/failure.schema.json",
+      "sha256": "89ba395b693be5c33cbebf6ae0dd7ef3a0148139f35ead6ac7825a797ce68ea8"
+    },
+    {
+      "bytes": 377,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal/opaque-list-cursor.schema.json",
+      "sha256": "5c1c757e61cbb8b7a6b77f5128467172784ca2ca58f664c64d385d317e858149"
+    },
+    {
+      "bytes": 385,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal/opaque-run-event-cursor.schema.json",
+      "sha256": "f59afaa2e08eab2ebfc020b974714979a9dc777fb770c235536cd8b600f48555"
+    },
+    {
+      "bytes": 398,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal/utc-timestamp.schema.json",
+      "sha256": "33ad3b836e6eef72cd7dedee974a0a6f7eccd385cf7d5f2a9e78d7b1c6940f88"
+    },
+    {
+      "bytes": 764,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/nominal/uuid-v7-id.schema.json",
+      "sha256": "6b957495688903bd82c13ea6edce3a57a1f2053ff6011eefac44139d01a8aa7a"
+    },
+    {
+      "bytes": 10827,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/limits/hard-limit-profile.schema.json",
+      "sha256": "73e2270ead80aff1ce03404e14476ac15b4e20cef89b6c7fc38f8effc441e1cb"
+    },
+    {
+      "bytes": 11547,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/limits/q1-50.json",
+      "sha256": "8eba8650687552af2e4813bdab76eb8ea97d6a5d9ec9ececfe72d5bbd3307ce2"
+    },
+    {
+      "bytes": 1430,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/fixtures/manifest.json",
+      "sha256": "7c45aabea2dbd1310188b674940c80ddedceccd402f45633aa0316d5f2f06a4d"
+    },
+    {
+      "bytes": 1912,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/examples/foundation-scalars.json",
+      "sha256": "f9f3fe27562d11f13fae15b18f79040066c164dd0f0be5d3f5000716eb9ce68d"
+    },
+    {
+      "bytes": 296,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/examples/q1-orchestration-worker-manifest.json",
+      "sha256": "684f98453e69a396782c402f16f4189d6e646fead202156d24a95cbba258b357"
+    },
+    {
+      "bytes": 673,
+      "media_type": "text/x-protobuf",
+      "path": "proto/insight/platform/v1/foundation.proto",
+      "sha256": "1ede8d6ee1ee45ab513aa55d9f6472e3c64079e9698df78bab7968349d04662a"
+    }
+  ],
+  "manifest_version": 1,
+  "status": "implementing_not_current"
+}

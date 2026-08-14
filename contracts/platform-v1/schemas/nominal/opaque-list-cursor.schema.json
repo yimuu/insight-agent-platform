@@ -1,0 +1,11 @@
+{
+  "$id": "urn:insight:platform:v1:schema:OpaqueListCursor",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Opaque token. The nominal schema name is its non-interchangeable purpose.",
+  "maxLength": 8192,
+  "minLength": 1,
+  "pattern": "^[\\u0020-\\u007e]+$",
+  "title": "OpaqueListCursor",
+  "type": "string",
+  "x-platform-max-bytes": 8192
+}

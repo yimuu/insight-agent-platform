@@ -1,0 +1,30 @@
+{
+  "suite_id": "F-Q1",
+  "completion_gate": "Phase 6",
+  "cases": [
+    {
+      "fixture_id": "fq1-foundation-workload-shape",
+      "owner_spec": "18",
+      "related_specs": ["07", "14", "15", "17"],
+      "profile": "q1-50",
+      "seed": 20260807,
+      "input": {
+        "active_runs":50,
+        "sustained_admissions_per_second":10,
+        "sustained_seconds":1800,
+        "burst_admissions_per_second":25,
+        "burst_seconds":60,
+        "sse_clients":200,
+        "sandbox_jobs":10,
+        "sandbox_saturation_seconds":1800,
+        "artifact_transfers":20,
+        "artifact_typical_bytes":10485760,
+        "artifact_boundary_bytes":104857600
+      },
+      "input_digest": "sha256:e45fa208e8d250092b858c1a1527c75ef0fba19bd7646b56585ff623db96555a",
+      "expected": {"limit_profile":"q1-50","qualification_required":true},
+      "privacy_classification": "public",
+      "polarity": "positive"
+    }
+  ]
+}

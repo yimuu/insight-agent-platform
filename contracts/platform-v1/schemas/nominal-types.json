@@ -1,0 +1,66 @@
+{
+  "parameterized_types": [
+    {
+      "name": "ValueRef",
+      "reason": "the inline branch is parameterized by the owning closed payload schema; the artifact branch uses ArtifactRef"
+    }
+  ],
+  "profile": "insight.platform/v1",
+  "reference_form": "urn:insight:platform:v1:nominal:<name>@sha256:<canonical-schema-digest>",
+  "schemas": [
+    {
+      "canonical_digest": "sha256:b5a461072ff1eb324fc4bdf95ea3be01038133cd96271aacae012b375f0740b7",
+      "name": "ApiProblem",
+      "path": "schemas/nominal/api-problem.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:ApiProblem@sha256:b5a461072ff1eb324fc4bdf95ea3be01038133cd96271aacae012b375f0740b7"
+    },
+    {
+      "canonical_digest": "sha256:8fbbadad731437b96cff228a523b256698e181b168c5f4467592260cc8580e14",
+      "name": "ArtifactRef",
+      "path": "schemas/nominal/artifact-ref.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:ArtifactRef@sha256:8fbbadad731437b96cff228a523b256698e181b168c5f4467592260cc8580e14"
+    },
+    {
+      "canonical_digest": "sha256:2d9c057b05eeabf866fb581e29ab204d8f9f0cb863f7a3faeb15461e6b1e6960",
+      "name": "DecimalMoney",
+      "path": "schemas/nominal/decimal-money.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:DecimalMoney@sha256:2d9c057b05eeabf866fb581e29ab204d8f9f0cb863f7a3faeb15461e6b1e6960"
+    },
+    {
+      "canonical_digest": "sha256:51355465ccef03e75245c00270769fbe80b2bafa957a7b608491ebd523c68b29",
+      "name": "Digest",
+      "path": "schemas/nominal/digest.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:Digest@sha256:51355465ccef03e75245c00270769fbe80b2bafa957a7b608491ebd523c68b29"
+    },
+    {
+      "canonical_digest": "sha256:3a33a7ec0f81aa4a535b30113784bd6e4d620165fcc8d45f49c029d7124fdf62",
+      "name": "Failure",
+      "path": "schemas/nominal/failure.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:Failure@sha256:3a33a7ec0f81aa4a535b30113784bd6e4d620165fcc8d45f49c029d7124fdf62"
+    },
+    {
+      "canonical_digest": "sha256:f03a1fe22587c42219919843eaec5c58d67dbab2d974f77e8232553de576c1f4",
+      "name": "OpaqueListCursor",
+      "path": "schemas/nominal/opaque-list-cursor.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:OpaqueListCursor@sha256:f03a1fe22587c42219919843eaec5c58d67dbab2d974f77e8232553de576c1f4"
+    },
+    {
+      "canonical_digest": "sha256:a4d9d7e618b20ff918c66bf6f3b3300eec314da3074b34fe5dd05aa18438ff33",
+      "name": "OpaqueRunEventCursor",
+      "path": "schemas/nominal/opaque-run-event-cursor.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:OpaqueRunEventCursor@sha256:a4d9d7e618b20ff918c66bf6f3b3300eec314da3074b34fe5dd05aa18438ff33"
+    },
+    {
+      "canonical_digest": "sha256:3d11c3a9848b65b6ee13c396fb586e4869d1d12dc7436cedde6a611339b5187b",
+      "name": "UtcTimestamp",
+      "path": "schemas/nominal/utc-timestamp.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:UtcTimestamp@sha256:3d11c3a9848b65b6ee13c396fb586e4869d1d12dc7436cedde6a611339b5187b"
+    },
+    {
+      "canonical_digest": "sha256:3df0cac96e407c5eca2a698e06ad142382e50fc09275e048481f335b53e047d1",
+      "name": "UuidV7Id",
+      "path": "schemas/nominal/uuid-v7-id.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:UuidV7Id@sha256:3df0cac96e407c5eca2a698e06ad142382e50fc09275e048481f335b53e047d1"
+    }
+  ]
+}

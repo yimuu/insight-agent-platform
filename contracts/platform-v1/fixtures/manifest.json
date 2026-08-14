@@ -1,0 +1,17 @@
+{
+  "profile": "insight.platform/v1",
+  "manifest_version": 1,
+  "status": "foundation",
+  "suites": [
+    {"suite_id":"F-ID","file":"f-id.json","digest":"sha256:505fb752195a1bb02f0bc1536c5d24d6f7a05c7e400876400c0811340658a760"},
+    {"suite_id":"F-CANON","file":"f-canon.json","digest":"sha256:f14f5fa74cb69a0895e4625a83c6154450ce08967a791cd58a213d079494626d"},
+    {"suite_id":"F-SCHEMA","file":"f-schema.json","digest":"sha256:525b441670f463a6884ef79f7b457ca71ca9da695fd238d94659d37f4938ff37"},
+    {"suite_id":"F-STATE","file":"f-state.json","digest":"sha256:679717cf655a164dced26bd5e484980da8c8d7c260e4a2754215430efb555cd7"},
+    {"suite_id":"F-FENCE","file":"f-fence.json","digest":"sha256:1728ef3f86c03f17e0b8cf244443451205002e5ed44d4fee6f2fe4860a22d9f0"},
+    {"suite_id":"F-EVENT","file":"f-event.json","digest":"sha256:e4440bbe5fea411a46a2fbb613c01dd5c1d43a48b7d58d4345d77057ef5aebe9"},
+    {"suite_id":"F-POLICY","file":"f-policy.json","digest":"sha256:6e3f6df3d11b6d2c2d95791c07c9e81eb9587114a2e5315c9bd95da42abae455"},
+    {"suite_id":"F-BACKEND","file":"f-backend.json","digest":"sha256:b76432e2af0b5f18aece117a345b1f4028996fd9960c3900d2a695f0457a75d6"},
+    {"suite_id":"F-E2E","file":"f-e2e.json","digest":"sha256:86415f4d1cee1994d567ae744ed052375826af5a8e7fbfb502a8b8c03c38e199"},
+    {"suite_id":"F-Q1","file":"f-q1.json","digest":"sha256:fffc449bcae28b36b773146b6c21aa79006d5ad99ecc48da23b25a8ba857dd37"}
+  ]
+}

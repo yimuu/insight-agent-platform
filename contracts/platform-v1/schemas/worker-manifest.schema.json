@@ -1,0 +1,64 @@
+{
+  "$id": "urn:insight:platform:v1:worker-manifest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable per-role local worker capacity. It is referenced by CandidateManifest and is not a durable quota authority.",
+  "properties": {
+    "adapter_runtime_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "critical_control_reserved_slots": {
+      "maximum": 65535,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "manifest_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "max_concurrency": {
+      "maximum": 65535,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "protocol_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "work_class": {
+      "enum": [
+        "registry_validation",
+        "orchestration",
+        "model",
+        "capability_native",
+        "capability_remote",
+        "mcp",
+        "context",
+        "sandbox",
+        "interaction",
+        "artifact",
+        "recovery"
+      ],
+      "type": "string"
+    },
+    "worker_role": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+      "type": "string",
+      "x-platform-max-bytes": 128
+    }
+  },
+  "required": [
+    "manifest_version",
+    "worker_role",
+    "work_class",
+    "adapter_runtime_digest",
+    "protocol_version",
+    "max_concurrency",
+    "critical_control_reserved_slots"
+  ],
+  "title": "WorkerManifest",
+  "type": "object"
+}

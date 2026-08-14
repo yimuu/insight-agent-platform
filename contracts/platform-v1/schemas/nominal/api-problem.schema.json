@@ -1,0 +1,146 @@
+{
+  "$id": "urn:insight:platform:v1:schema:ApiProblem",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "enum": [
+        "invalid_request",
+        "schema_validation_failed",
+        "unauthenticated",
+        "permission_denied",
+        "resource_not_found",
+        "etag_mismatch",
+        "idempotency_conflict",
+        "invalid_state_transition",
+        "policy_denied",
+        "approval_required",
+        "quota_exceeded",
+        "rate_limited",
+        "resource_suspended",
+        "secret_unavailable",
+        "network_denied",
+        "isolation_unavailable",
+        "content_rejected",
+        "cursor_invalid",
+        "cursor_expired",
+        "run_not_terminal",
+        "operation_not_terminal",
+        "deadline_exceeded",
+        "temporarily_unavailable",
+        "internal_error"
+      ],
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string",
+      "x-platform-max-bytes": 64
+    },
+    "detail": {
+      "oneOf": [
+        {
+          "maxLength": 4096,
+          "minLength": 0,
+          "type": "string",
+          "x-platform-max-bytes": 16384
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "field_errors": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string",
+            "x-platform-max-bytes": 64
+          },
+          "field": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string",
+            "x-platform-max-bytes": 2048
+          },
+          "safe_message": {
+            "oneOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 0,
+                "type": "string",
+                "x-platform-max-bytes": 16384
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "field",
+          "code",
+          "safe_message"
+        ],
+        "type": "object"
+      },
+      "maxItems": 256,
+      "minItems": 0,
+      "type": "array"
+    },
+    "request_id": {
+      "maxLength": 40,
+      "minLength": 40,
+      "pattern": "^(req)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string",
+      "x-platform-max-bytes": 40
+    },
+    "retry_after_ms": {
+      "oneOf": [
+        {
+          "maximum": 86400000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "status": {
+      "maximum": 599,
+      "minimum": 400,
+      "type": "integer"
+    },
+    "title": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string",
+      "x-platform-max-bytes": 16384
+    },
+    "type_uri": {
+      "maxLength": 2048,
+      "minLength": 1,
+      "type": "string",
+      "x-platform-max-bytes": 8192
+    }
+  },
+  "required": [
+    "type_uri",
+    "title",
+    "status",
+    "code",
+    "detail",
+    "request_id",
+    "retryable",
+    "retry_after_ms",
+    "field_errors"
+  ],
+  "title": "ApiProblem",
+  "type": "object"
+}

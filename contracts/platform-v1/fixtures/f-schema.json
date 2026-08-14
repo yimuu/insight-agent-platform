@@ -1,0 +1,51 @@
+{
+  "suite_id": "F-SCHEMA",
+  "cases": [
+    {
+      "fixture_id": "fschema-closed-bounded-object",
+      "owner_spec": "05",
+      "related_specs": ["09", "12", "16", "17"],
+      "profile": "insight.closed-json-schema/1",
+      "seed": 0,
+      "input": {
+        "$schema":"https://json-schema.org/draft/2020-12/schema",
+        "$id":"urn:fixture:closed",
+        "type":"object",
+        "properties":{
+          "count":{"type":"integer","minimum":0,"maximum":100},
+          "name":{"type":"string","minLength":0,"maxLength":32,"x-platform-max-bytes":128}
+        },
+        "required":["count"],
+        "additionalProperties":false
+      },
+      "input_digest": "sha256:96a70a97358aafc44999a5abce439121cd59ff6b33a245893baea0d807217823",
+      "expected": {"valid":true},
+      "privacy_classification": "public",
+      "polarity": "positive"
+    },
+    {
+      "fixture_id": "fschema-open-object",
+      "owner_spec": "05",
+      "related_specs": ["17"],
+      "profile": "insight.closed-json-schema/1",
+      "seed": 0,
+      "input": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"required":[],"additionalProperties":true},
+      "input_digest": "sha256:646929c954318bc4f0403e65001c6687f0827e454d188816051ea45280fd48f1",
+      "stable_rejection": "schema_object_open",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    },
+    {
+      "fixture_id": "fschema-unknown-keyword",
+      "owner_spec": "05",
+      "related_specs": ["17"],
+      "profile": "insight.closed-json-schema/1",
+      "seed": 0,
+      "input": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"required":[],"additionalProperties":false,"pattern":".*"},
+      "input_digest": "sha256:0338bf0745bb80428cf6d7ccd2ef341c1997e2d4e24d26b23c5929fb13334eac",
+      "stable_rejection": "schema_unknown_keyword",
+      "privacy_classification": "public",
+      "polarity": "negative"
+    }
+  ]
+}
