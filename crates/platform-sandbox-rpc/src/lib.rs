@@ -13,26 +13,29 @@ use insight_platform_contracts::{
     canonical_digest, parse_strict_json, CommandOutcome, HardLimitProfile, JsonLimits,
     Retryability, Sha256Digest,
 };
+use insight_platform_jobs::JobFence;
 use insight_platform_sandbox::{
-    AbortSandboxExecution, AuthorizedManagedMcpSandboxSecretDelivery, ClaimSandboxJobs,
-    ClaimedManagedMcpSandboxSession, ClaimedSandboxJob, CollectedSandbox,
-    CommitManagedMcpSandboxSessionPhase, CommitManagedMcpSandboxSessionReady, CommitSandboxOutcome,
-    CommitSandboxPhase, DestroySandbox, ExpiredSandboxLease, HeartbeatSandboxExecution,
-    InstalledSandboxBackendDescriptor, ManagedMcpSandboxSecretCommitOutcome,
-    ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryError,
-    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
-    ManagedMcpSandboxSessionClaimAuthority, ManagedMcpSandboxSessionExecutionAuthority,
-    ManagedMcpSandboxSessionPhaseDecision, MicroVmArtifactBroker, MicroVmArtifactBrokerError,
-    MicroVmArtifactReadRequest, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
-    MicroVmGrantRevoker, MicroVmIsolationProviderBackend, MicroVmProviderExecutionFence,
-    PreparedSandbox, ProveWasiProcessGenerationAbsent, RegisterWasiExecutorProcessGeneration,
-    RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants, RunningSandbox, SandboxBackendFailure,
-    SandboxBackendFailureStage, SandboxClaimAuthority, SandboxClaimFailure, SandboxCleanupEvidence,
-    SandboxCommandLimits, SandboxExecutionAuthority, SandboxExecutionRequest,
-    SandboxExecutorBackend, SandboxIsolationBackendKind, SandboxLeaseRecoveryEvidence,
-    SandboxPhaseDecision, SandboxTerminationEvidence, TerminateSandbox,
-    VerifyWasiExecutorProcessGeneration, WasiArtifactBroker, WasiArtifactBrokerError,
-    WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
+    AbortSandboxExecution, ActivatedManagedMcpSandboxSession,
+    AuthorizedManagedMcpSandboxSecretDelivery, ClaimSandboxJobs, ClaimedManagedMcpSandboxSession,
+    ClaimedSandboxJob, CollectedSandbox, CommitManagedMcpSandboxSessionPhase,
+    CommitManagedMcpSandboxSessionReady, CommitSandboxOutcome, CommitSandboxPhase, DestroySandbox,
+    ExpiredSandboxLease, HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor,
+    ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryAuthority,
+    ManagedMcpSandboxSecretDeliveryError, ManagedMcpSandboxSecretDeliveryRequest,
+    ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSessionClaimAuthority,
+    ManagedMcpSandboxSessionExecutionAuthority, ManagedMcpSandboxSessionPhaseDecision,
+    ManagedMcpSandboxSessionProvider, ManagedMcpSandboxSessionRequest, MicroVmArtifactBroker,
+    MicroVmArtifactBrokerError, MicroVmArtifactReadRequest, MicroVmGrantRevocationError,
+    MicroVmGrantRevocationEvidence, MicroVmGrantRevoker, MicroVmIsolationProviderBackend,
+    MicroVmProviderExecutionFence, PreparedManagedMcpSandboxSession,
+    PreparedManagedMcpSandboxSessionActivation, PreparedSandbox, ProveWasiProcessGenerationAbsent,
+    RegisterWasiExecutorProcessGeneration, RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants,
+    RunningSandbox, SandboxBackendFailure, SandboxBackendFailureStage, SandboxClaimAuthority,
+    SandboxClaimFailure, SandboxCleanupEvidence, SandboxCommandLimits, SandboxExecutionAuthority,
+    SandboxExecutionRequest, SandboxExecutorBackend, SandboxIsolationBackendKind,
+    SandboxLeaseRecoveryEvidence, SandboxPhaseDecision, SandboxTerminationEvidence,
+    TerminateSandbox, VerifyWasiExecutorProcessGeneration, WasiArtifactBroker,
+    WasiArtifactBrokerError, WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
     WasiExecutorProcessIdentityEvidence, WasiExecutorProcessRegistrar,
     WasiExecutorProcessRegistrationError, WasiExecutorProcessRegistrationVerifier,
     WasiExecutorRegistrationPeer, WasiGrantRevocationError, WasiGrantRevocationEvidence,
@@ -64,6 +67,8 @@ use proto::{
     sandbox_isolation_provider_service_server::SandboxIsolationProviderService,
     sandbox_managed_mcp_session_authority_service_client::SandboxManagedMcpSessionAuthorityServiceClient,
     sandbox_managed_mcp_session_authority_service_server::SandboxManagedMcpSessionAuthorityService,
+    sandbox_managed_mcp_session_provider_service_client::SandboxManagedMcpSessionProviderServiceClient,
+    sandbox_managed_mcp_session_provider_service_server::SandboxManagedMcpSessionProviderService,
     sandbox_micro_vm_broker_service_client::SandboxMicroVmBrokerServiceClient,
     sandbox_micro_vm_broker_service_server::SandboxMicroVmBrokerService,
     sandbox_micro_vm_executor_process_registration_service_client::SandboxMicroVmExecutorProcessRegistrationServiceClient,
@@ -483,6 +488,120 @@ pub struct SandboxMicroVmExecutorProcessRegistrationGrpcClient {
 enum SandboxIsolationProviderReply<T> {
     Completed(T),
     Failed(SandboxBackendFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrepareManagedMcpSandboxSessionWire {
+    request: ManagedMcpSandboxSessionRequest,
+    fence: JobFence,
+    executor_identity_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InitializeManagedMcpSandboxSessionWire {
+    request: ManagedMcpSandboxSessionRequest,
+    fence: JobFence,
+    prepared: PreparedManagedMcpSandboxSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivateManagedMcpSandboxSessionWire {
+    request: ManagedMcpSandboxSessionRequest,
+    fence: JobFence,
+    activation: PreparedManagedMcpSandboxSessionActivation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DestroyExactManagedMcpSandboxSessionWire {
+    request: ManagedMcpSandboxSessionRequest,
+    fence: JobFence,
+    prepared: Option<PreparedManagedMcpSandboxSession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "disposition",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum ManagedMcpSandboxSessionProviderReply<T> {
+    Completed(T),
+    Failed,
+}
+
+/// Executor-side client for the long-lived Managed MCP microVM lifecycle. A lost prepare reply is
+/// followed by exact keyed destruction before the method returns, because the worker has no
+/// prepared identity with which to perform its normal cleanup path.
+#[derive(Clone)]
+pub struct SandboxManagedMcpSessionProviderGrpcClient {
+    client: SandboxManagedMcpSessionProviderServiceClient<tonic::transport::Channel>,
+    limits: SandboxInternalRpcLimits,
+}
+
+impl SandboxManagedMcpSessionProviderGrpcClient {
+    pub fn new(channel: tonic::transport::Channel, limits: SandboxInternalRpcLimits) -> Self {
+        let maximum = limits.maximum_message_bytes();
+        Self {
+            client: SandboxManagedMcpSessionProviderServiceClient::new(channel)
+                .max_encoding_message_size(maximum)
+                .max_decoding_message_size(maximum),
+            limits,
+        }
+    }
+
+    async fn unary<Req, Res>(
+        &self,
+        request: &Req,
+        invoke: impl for<'a> FnOnce(
+            &'a mut SandboxManagedMcpSessionProviderServiceClient<tonic::transport::Channel>,
+            Request<ClosedSandboxEnvelope>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Response<ClosedSandboxEnvelope>, Status>>
+                    + Send
+                    + 'a,
+            >,
+        >,
+    ) -> Result<Res, SandboxRpcError>
+    where
+        Req: Serialize,
+        Res: DeserializeOwned,
+    {
+        let envelope = encode(request, self.limits)?;
+        let mut client = self.client.clone();
+        let response = invoke(&mut client, Request::new(envelope))
+            .await
+            .map_err(classify_status)?;
+        match decode::<ManagedMcpSandboxSessionProviderReply<Res>>(
+            response.into_inner(),
+            self.limits,
+        )? {
+            ManagedMcpSandboxSessionProviderReply::Completed(value) => Ok(value),
+            ManagedMcpSandboxSessionProviderReply::Failed => Err(SandboxRpcError::Rejected),
+        }
+    }
+
+    async fn destroy_remote(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: Option<&PreparedManagedMcpSandboxSession>,
+    ) -> Result<(), SandboxRpcError> {
+        let wire = DestroyExactManagedMcpSandboxSessionWire {
+            request: request.clone(),
+            fence: fence.clone(),
+            prepared: prepared.cloned(),
+        };
+        self.unary(&wire, |client, request| {
+            Box::pin(client.destroy_exact_managed_mcp_sandbox_session(request))
+        })
+        .await
+    }
 }
 
 #[derive(Clone)]
@@ -1168,6 +1287,79 @@ fn request_external_effect_possible(request: &SandboxExecutionRequest) -> bool {
 }
 
 #[async_trait]
+impl ManagedMcpSandboxSessionProvider for SandboxManagedMcpSessionProviderGrpcClient {
+    type Error = SandboxRpcError;
+
+    async fn prepare(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        executor_identity_digest: &Sha256Digest,
+    ) -> Result<PreparedManagedMcpSandboxSession, Self::Error> {
+        let wire = PrepareManagedMcpSandboxSessionWire {
+            request: request.clone(),
+            fence: fence.clone(),
+            executor_identity_digest: executor_identity_digest.clone(),
+        };
+        match self
+            .unary(&wire, |client, request| {
+                Box::pin(client.prepare_managed_mcp_sandbox_session(request))
+            })
+            .await
+        {
+            Ok(prepared) => Ok(prepared),
+            Err(error) => match self.destroy_remote(request, fence, None).await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(cleanup),
+            },
+        }
+    }
+
+    async fn initialize(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+    ) -> Result<PreparedManagedMcpSandboxSessionActivation, Self::Error> {
+        let wire = InitializeManagedMcpSandboxSessionWire {
+            request: request.clone(),
+            fence: fence.clone(),
+            prepared: prepared.clone(),
+        };
+        self.unary(&wire, |client, request| {
+            Box::pin(client.initialize_managed_mcp_sandbox_session(request))
+        })
+        .await
+    }
+
+    async fn activate(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        activation: &PreparedManagedMcpSandboxSessionActivation,
+    ) -> Result<ActivatedManagedMcpSandboxSession, Self::Error> {
+        let wire = ActivateManagedMcpSandboxSessionWire {
+            request: request.clone(),
+            fence: fence.clone(),
+            activation: activation.clone(),
+        };
+        self.unary(&wire, |client, request| {
+            Box::pin(client.activate_managed_mcp_sandbox_session(request))
+        })
+        .await
+    }
+
+    async fn destroy_exact(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: Option<&PreparedManagedMcpSandboxSession>,
+    ) -> Result<(), Self::Error> {
+        self.destroy_remote(request, fence, prepared).await
+    }
+}
+
+#[async_trait]
 impl SandboxExecutorBackend for SandboxIsolationProviderGrpcClient {
     fn descriptor(&self) -> InstalledSandboxBackendDescriptor {
         self.descriptor.clone()
@@ -1487,6 +1679,99 @@ pub struct SandboxIsolationProviderGrpcService<B> {
     sandbox_limits: SandboxCommandLimits,
 }
 
+pub struct SandboxManagedMcpSessionProviderGrpcService<P> {
+    provider: Arc<P>,
+    descriptor: InstalledSandboxBackendDescriptor,
+    limits: SandboxInternalRpcLimits,
+    sandbox_limits: SandboxCommandLimits,
+}
+
+impl<P> SandboxManagedMcpSessionProviderGrpcService<P>
+where
+    P: ManagedMcpSandboxSessionProvider,
+{
+    pub fn new(
+        provider: Arc<P>,
+        descriptor: InstalledSandboxBackendDescriptor,
+        limits: SandboxInternalRpcLimits,
+        sandbox_limits: SandboxCommandLimits,
+    ) -> Result<Self, SandboxRpcError> {
+        if descriptor.backend_kind != SandboxIsolationBackendKind::MicroVm
+            || descriptor.isolation_class
+                != insight_platform_contracts::SandboxIsolationClass::MicroVm
+        {
+            return Err(SandboxRpcError::InvalidConfiguration);
+        }
+        Ok(Self {
+            provider,
+            descriptor,
+            limits,
+            sandbox_limits,
+        })
+    }
+
+    fn validate_live_request(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+    ) -> Result<(), Status> {
+        request
+            .validate_at(chrono::Utc::now(), self.sandbox_limits)
+            .map_err(|_| Status::invalid_argument("invalid Managed MCP Sandbox request"))?;
+        self.validate_contract(request, fence)
+    }
+
+    fn validate_cleanup_request(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+    ) -> Result<(), Status> {
+        let sealed = request
+            .clone()
+            .seal()
+            .map_err(|_| Status::invalid_argument("invalid Managed MCP Sandbox request"))?;
+        if &sealed != request {
+            return Err(Status::invalid_argument(
+                "invalid Managed MCP Sandbox request digest",
+            ));
+        }
+        self.validate_contract(request, fence)
+    }
+
+    fn validate_contract(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+    ) -> Result<(), Status> {
+        if request.identity.sandbox_job_id.kind()
+            != insight_platform_contracts::ResourceKind::SandboxJob
+            || fence.expected_version == 0
+            || fence.worker_process_generation_id.kind()
+                != insight_platform_contracts::ResourceKind::WorkerProcessGeneration
+            || fence.lease_generation == 0
+            || request.executor_worker_manifest_digest != self.descriptor.worker_manifest_digest
+            || request.isolation_backend_contract_digest != self.descriptor.backend_contract_digest
+            || request.isolation_class != insight_platform_contracts::SandboxIsolationClass::MicroVm
+        {
+            return Err(Status::failed_precondition(
+                "Managed MCP microVM provider contract does not match the request",
+            ));
+        }
+        Ok(())
+    }
+
+    fn response<T: Serialize>(
+        &self,
+        result: Result<T, P::Error>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let reply = match result {
+            Ok(value) => ManagedMcpSandboxSessionProviderReply::Completed(value),
+            Err(_) => ManagedMcpSandboxSessionProviderReply::Failed,
+        };
+        Ok(Response::new(encode(&reply, self.limits)?))
+    }
+}
+
 impl<B> SandboxIsolationProviderGrpcService<B>
 where
     B: MicroVmIsolationProviderBackend,
@@ -1695,6 +1980,102 @@ where
             ));
         }
         self.response(self.backend.recover_expired_lease(fence, expired).await)
+    }
+}
+
+#[tonic::async_trait]
+impl<P> SandboxManagedMcpSessionProviderService for SandboxManagedMcpSessionProviderGrpcService<P>
+where
+    P: ManagedMcpSandboxSessionProvider + 'static,
+{
+    async fn prepare_managed_mcp_sandbox_session(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let wire: PrepareManagedMcpSandboxSessionWire = decode(request.into_inner(), self.limits)?;
+        self.validate_live_request(&wire.request, &wire.fence)?;
+        self.response(
+            self.provider
+                .prepare(&wire.request, &wire.fence, &wire.executor_identity_digest)
+                .await,
+        )
+    }
+
+    async fn initialize_managed_mcp_sandbox_session(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let wire: InitializeManagedMcpSandboxSessionWire =
+            decode(request.into_inner(), self.limits)?;
+        self.validate_live_request(&wire.request, &wire.fence)?;
+        wire.prepared
+            .validate_for(
+                &wire.request,
+                &wire.fence,
+                &wire.prepared.executor_identity_digest,
+            )
+            .map_err(|_| {
+                Status::failed_precondition(
+                    "prepared Managed MCP microVM does not match the request",
+                )
+            })?;
+        self.response(
+            self.provider
+                .initialize(&wire.request, &wire.fence, &wire.prepared)
+                .await,
+        )
+    }
+
+    async fn activate_managed_mcp_sandbox_session(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let wire: ActivateManagedMcpSandboxSessionWire = decode(request.into_inner(), self.limits)?;
+        self.validate_live_request(&wire.request, &wire.fence)?;
+        wire.activation
+            .validate_for(
+                &wire.request,
+                &wire.fence,
+                &wire.activation.prepared.executor_identity_digest,
+                chrono::Utc::now(),
+            )
+            .map_err(|_| {
+                Status::failed_precondition(
+                    "Managed MCP microVM activation does not match the request",
+                )
+            })?;
+        self.response(
+            self.provider
+                .activate(&wire.request, &wire.fence, &wire.activation)
+                .await,
+        )
+    }
+
+    async fn destroy_exact_managed_mcp_sandbox_session(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let wire: DestroyExactManagedMcpSandboxSessionWire =
+            decode(request.into_inner(), self.limits)?;
+        self.validate_cleanup_request(&wire.request, &wire.fence)?;
+        if let Some(prepared) = &wire.prepared {
+            prepared
+                .validate_for(
+                    &wire.request,
+                    &wire.fence,
+                    &prepared.executor_identity_digest,
+                )
+                .map_err(|_| {
+                    Status::failed_precondition(
+                        "prepared Managed MCP microVM does not match the cleanup fence",
+                    )
+                })?;
+        }
+        self.response(
+            self.provider
+                .destroy_exact(&wire.request, &wire.fence, wire.prepared.as_ref())
+                .await,
+        )
     }
 }
 
@@ -2625,6 +3006,56 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct RecordingManagedMcpSessionProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ManagedMcpSandboxSessionProvider for RecordingManagedMcpSessionProvider {
+        type Error = SandboxRpcError;
+
+        async fn prepare(
+            &self,
+            _request: &ManagedMcpSandboxSessionRequest,
+            _fence: &JobFence,
+            _executor_identity_digest: &Sha256Digest,
+        ) -> Result<PreparedManagedMcpSandboxSession, Self::Error> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Err(SandboxRpcError::Rejected)
+        }
+
+        async fn initialize(
+            &self,
+            _request: &ManagedMcpSandboxSessionRequest,
+            _fence: &JobFence,
+            _prepared: &PreparedManagedMcpSandboxSession,
+        ) -> Result<PreparedManagedMcpSandboxSessionActivation, Self::Error> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Err(SandboxRpcError::Rejected)
+        }
+
+        async fn activate(
+            &self,
+            _request: &ManagedMcpSandboxSessionRequest,
+            _fence: &JobFence,
+            _activation: &PreparedManagedMcpSandboxSessionActivation,
+        ) -> Result<ActivatedManagedMcpSandboxSession, Self::Error> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Err(SandboxRpcError::Rejected)
+        }
+
+        async fn destroy_exact(
+            &self,
+            _request: &ManagedMcpSandboxSessionRequest,
+            _fence: &JobFence,
+            _prepared: Option<&PreparedManagedMcpSandboxSession>,
+        ) -> Result<(), Self::Error> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Err(SandboxRpcError::Rejected)
+        }
+    }
+
+    #[derive(Default)]
     struct RecordingMicroVmGrantRevoker {
         calls: AtomicUsize,
     }
@@ -3328,6 +3759,90 @@ mod tests {
             .unwrap_err();
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
         assert_eq!(backend.destroys.load(Ordering::Acquire), 1);
+
+        shutdown_sender.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_mcp_provider_rpc_is_exact_role_gated_and_closed() {
+        let fixture = mtls_fixture();
+        let profile = checked_in_hard_limit_profile();
+        let limits = SandboxInternalRpcLimits::from_profile(&profile).unwrap();
+        let sandbox_limits = SandboxCommandLimits::from_profile(&profile).unwrap();
+        let descriptor = InstalledSandboxBackendDescriptor {
+            backend_kind: SandboxIsolationBackendKind::MicroVm,
+            isolation_class: insight_platform_contracts::SandboxIsolationClass::MicroVm,
+            worker_manifest_digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
+            backend_contract_digest: format!("sha256:{}", "b".repeat(64)).parse().unwrap(),
+        };
+        let provider = Arc::new(RecordingManagedMcpSessionProvider::default());
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = incoming.local_addr().unwrap();
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+        let service = proto::sandbox_managed_mcp_session_provider_service_server::SandboxManagedMcpSessionProviderServiceServer::new(
+            SandboxManagedMcpSessionProviderGrpcService::new(
+                Arc::clone(&provider),
+                descriptor,
+                limits,
+                sandbox_limits,
+            )
+            .unwrap(),
+        )
+        .max_encoding_message_size(limits.maximum_message_bytes())
+        .max_decoding_message_size(limits.maximum_message_bytes());
+        let service = tonic::service::interceptor::InterceptedService::new(
+            service,
+            MicroVmExecutorWorkloadIdentity,
+        );
+        let tls = ServerTlsConfig::new()
+            .identity(Identity::from_pem(
+                &fixture.provider_server_certificate_pem,
+                &fixture.provider_server_key_pem,
+            ))
+            .client_ca_root(Certificate::from_pem(&fixture.ca_pem));
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(tls)
+                .unwrap()
+                .add_service(service)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_receiver.await;
+                })
+                .await
+                .unwrap();
+        });
+        let endpoint = format!("https://localhost:{}", address.port());
+        let invalid = encode(&serde_json::json!({}), limits).unwrap();
+
+        let channel = mtls_channel(
+            &endpoint,
+            &fixture,
+            &fixture.wrong_certificate_pem,
+            &fixture.wrong_key_pem,
+        )
+        .await;
+        let mut unauthorized = SandboxManagedMcpSessionProviderServiceClient::new(channel);
+        let rejected = unauthorized
+            .prepare_managed_mcp_sandbox_session(Request::new(invalid.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
+
+        let channel = mtls_channel(
+            &endpoint,
+            &fixture,
+            &fixture.microvm_certificate_pem,
+            &fixture.microvm_key_pem,
+        )
+        .await;
+        let mut authorized = SandboxManagedMcpSessionProviderServiceClient::new(channel);
+        let rejected = authorized
+            .prepare_managed_mcp_sandbox_session(Request::new(invalid))
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code(), tonic::Code::InvalidArgument);
+        assert_eq!(provider.calls.load(Ordering::Acquire), 0);
 
         shutdown_sender.send(()).unwrap();
         server.await.unwrap();

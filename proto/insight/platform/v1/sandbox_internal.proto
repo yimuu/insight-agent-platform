@@ -56,6 +56,17 @@ service SandboxIsolationProviderService {
   rpc RecoverExpiredSandboxLease(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
+// Long-lived Managed MCP sessions use a distinct provider lifecycle. They cannot be represented
+// as one-shot Sandbox executions because initialization must remain notification-disabled until
+// the Controller has durably committed Ready. Calls are routed to the same node-local Provider
+// instance and authorized only for the dedicated microVM Executor workload.
+service SandboxManagedMcpSessionProviderService {
+  rpc PrepareManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc InitializeManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc ActivateManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc DestroyExactManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
 // Executor-only registration endpoint. The attestor observes node/runtime identity on behalf of
 // the Executor; the Executor never talks to Kubernetes or the container runtime directly.
 service SandboxExecutorProcessRegistrationService {

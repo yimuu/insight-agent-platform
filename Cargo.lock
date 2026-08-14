@@ -2772,6 +2772,7 @@ dependencies = [
  "futures",
  "hyper-util",
  "insight-platform-contracts",
+ "insight-platform-jobs",
  "insight-platform-sandbox",
  "prost",
  "protoc-bin-vendored",
