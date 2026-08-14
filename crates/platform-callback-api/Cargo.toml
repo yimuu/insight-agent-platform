@@ -1,0 +1,27 @@
+[package]
+name = "insight-platform-callback-api"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "platform-callback-api"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+insight-platform-api.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-egress-rpc.workspace = true
+insight-platform-mcp-host.workspace = true
+insight-platform-postgres.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+url.workspace = true
+uuid.workspace = true
