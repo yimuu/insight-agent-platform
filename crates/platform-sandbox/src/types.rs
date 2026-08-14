@@ -936,10 +936,8 @@ impl SandboxExecutionRequest {
             .map_err(|_| SandboxContractError::InvalidInput)?;
         if let ValueRef::Artifact { artifact } = &self.input_ref {
             let covered = self.artifact_grants.iter().any(|grant| {
-                matches!(
-                    grant.operation,
-                    ArtifactGrantOperation::ReadWhole | ArtifactGrantOperation::ReadRange
-                ) && grant.artifact.as_ref() == Some(artifact)
+                grant.operation == ArtifactGrantOperation::ReadWhole
+                    && grant.artifact.as_ref() == Some(artifact)
             });
             if !covered {
                 return Err(SandboxContractError::InvalidInput);

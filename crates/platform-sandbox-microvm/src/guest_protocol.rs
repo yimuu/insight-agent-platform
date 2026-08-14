@@ -1,14 +1,75 @@
 use crate::MicroVmGuestCollection;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, JsonLimits, ResourceId, ResourceKind, Sha256Digest,
+    canonical_digest, parse_strict_json, ArtifactGrantOperation, ArtifactRef, JsonLimits,
+    ResourceId, ResourceKind, Sha256Digest, ValueRef,
 };
 use insight_platform_sandbox::{SandboxExecutionRequest, SandboxStopReason};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{error::Error, fmt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MICROVM_GUEST_PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MICROVM_GUEST_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_MICROVM_GUEST_ARTIFACT_CHUNK_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MicroVmGuestArtifactPurpose {
+    RuntimeBundle,
+    InputValue,
+}
+
+/// One canonical, request-bound piece of an Artifact delivered over the private host/guest vsock.
+///
+/// The Provider fetches the exact bytes through the Controller's Artifact Broker. Chunking keeps
+/// the guest protocol bounded even when a published package is larger than one control frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MicroVmGuestArtifactChunk {
+    pub purpose: MicroVmGuestArtifactPurpose,
+    pub artifact: ArtifactRef,
+    pub offset: u64,
+    pub content_base64: String,
+    pub chunk_digest: Sha256Digest,
+    pub final_chunk: bool,
+}
+
+impl MicroVmGuestArtifactChunk {
+    pub fn decoded_content(&self) -> Result<Vec<u8>, MicroVmGuestProtocolError> {
+        let content = BASE64_STANDARD
+            .decode(&self.content_base64)
+            .map_err(|_| MicroVmGuestProtocolError::InvalidEnvelope)?;
+        if content.is_empty()
+            || content.len() > MAX_MICROVM_GUEST_ARTIFACT_CHUNK_BYTES
+            || BASE64_STANDARD.encode(&content) != self.content_base64
+        {
+            return Err(MicroVmGuestProtocolError::InvalidEnvelope);
+        }
+        Ok(content)
+    }
+
+    fn validate(&self) -> Result<(), MicroVmGuestProtocolError> {
+        self.artifact
+            .validate()
+            .map_err(|_| MicroVmGuestProtocolError::InvalidEnvelope)?;
+        let content = self.decoded_content()?;
+        let content_length =
+            u64::try_from(content.len()).map_err(|_| MicroVmGuestProtocolError::InvalidEnvelope)?;
+        let end = self
+            .offset
+            .checked_add(content_length)
+            .ok_or(MicroVmGuestProtocolError::InvalidEnvelope)?;
+        if end > self.artifact.byte_length()
+            || self.final_chunk != (end == self.artifact.byte_length())
+            || bytes_digest(&content)? != self.chunk_digest
+        {
+            return Err(MicroVmGuestProtocolError::InvalidEnvelope);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -18,6 +79,7 @@ pub const MAX_MICROVM_GUEST_FRAME_BYTES: usize = 16 * 1024 * 1024;
     deny_unknown_fields
 )]
 pub enum MicroVmGuestCommand {
+    MaterializeArtifact(Box<MicroVmGuestArtifactChunk>),
     Execute(Box<SandboxExecutionRequest>),
     Cancel { reason: SandboxStopReason },
 }
@@ -37,14 +99,70 @@ pub struct MicroVmGuestCommandEnvelope {
 
 impl MicroVmGuestCommandEnvelope {
     pub fn execute(request: SandboxExecutionRequest) -> Result<Self, MicroVmGuestProtocolError> {
+        Self::execute_at(request, 1)
+    }
+
+    pub fn execute_at(
+        request: SandboxExecutionRequest,
+        sequence: u64,
+    ) -> Result<Self, MicroVmGuestProtocolError> {
         let mut value = Self {
             protocol_version: MICROVM_GUEST_PROTOCOL_VERSION,
-            sequence: 1,
+            sequence,
             sandbox_job_id: request.sandbox_job_id.clone(),
             request_digest: request.request_digest.clone(),
             attempt_no: request.attempt_no,
             lease_generation: request.lease_generation,
             command: MicroVmGuestCommand::Execute(Box::new(request)),
+            envelope_digest: placeholder_digest(),
+        };
+        value.envelope_digest = digest_without_field(&value, "envelope_digest")?;
+        value.validate()?;
+        Ok(value)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn materialize_artifact(
+        request: &SandboxExecutionRequest,
+        sequence: u64,
+        purpose: MicroVmGuestArtifactPurpose,
+        artifact: ArtifactRef,
+        offset: u64,
+        content: &[u8],
+        final_chunk: bool,
+    ) -> Result<Self, MicroVmGuestProtocolError> {
+        let purpose_matches = match purpose {
+            MicroVmGuestArtifactPurpose::RuntimeBundle => {
+                request.package.runtime_bundle_artifact == artifact
+            }
+            MicroVmGuestArtifactPurpose::InputValue => {
+                matches!(&request.input_ref, ValueRef::Artifact { artifact: input } if input == &artifact)
+                    && request.artifact_grants.iter().any(|grant| {
+                        grant.operation == ArtifactGrantOperation::ReadWhole
+                            && grant.artifact.as_ref() == Some(&artifact)
+                    })
+            }
+        };
+        if sequence == 0 || !purpose_matches {
+            return Err(MicroVmGuestProtocolError::InvalidEnvelope);
+        }
+        let chunk = MicroVmGuestArtifactChunk {
+            purpose,
+            artifact,
+            offset,
+            content_base64: BASE64_STANDARD.encode(content),
+            chunk_digest: bytes_digest(content)?,
+            final_chunk,
+        };
+        chunk.validate()?;
+        let mut value = Self {
+            protocol_version: MICROVM_GUEST_PROTOCOL_VERSION,
+            sequence,
+            sandbox_job_id: request.sandbox_job_id.clone(),
+            request_digest: request.request_digest.clone(),
+            attempt_no: request.attempt_no,
+            lease_generation: request.lease_generation,
+            command: MicroVmGuestCommand::MaterializeArtifact(Box::new(chunk)),
             envelope_digest: placeholder_digest(),
         };
         value.envelope_digest = digest_without_field(&value, "envelope_digest")?;
@@ -80,6 +198,7 @@ impl MicroVmGuestCommandEnvelope {
                     && request.attempt_no == self.attempt_no
                     && request.lease_generation == self.lease_generation
             }
+            MicroVmGuestCommand::MaterializeArtifact(chunk) => chunk.validate().is_ok(),
             MicroVmGuestCommand::Cancel { .. } => self.sequence > 1,
         };
         if self.protocol_version != MICROVM_GUEST_PROTOCOL_VERSION
@@ -250,6 +369,22 @@ fn placeholder_digest() -> Sha256Digest {
     "sha256:0000000000000000000000000000000000000000000000000000000000000000"
         .parse()
         .expect("static digest is valid")
+}
+
+fn bytes_digest(value: &[u8]) -> Result<Sha256Digest, MicroVmGuestProtocolError> {
+    format!("sha256:{}", lower_hex(&Sha256::digest(value)))
+        .parse()
+        .map_err(|_| MicroVmGuestProtocolError::Canonicalization)
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

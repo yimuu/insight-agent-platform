@@ -769,6 +769,13 @@ memory-page与Job memory envelope耦合、运行中epoch interrupt等待guest退
 revoke。该开发期证据仍未包含生产Artifact/
 Secret broker实现、独立Executor进程/Pod、gVisor/microVM、Linux escape suite或CandidateManifest，不能声明Phase 4/6通过。
 
+production Firecracker Provider现已接入Controller Artifact Broker：每个请求按exact tenant、Sandbox Job/request、Executor与Provider
+process generation、sandbox identity、lease、deadline读取runtime bundle及可选Artifact-backed输入，Provider再次核对完整ArtifactRef长度和
+SHA-256；主逻辑输入必须持有exact `read_whole` grant。通过guest Ready fence后，Provider以不超过1 MiB的canonical、digest-bound chunk在
+private vsock依序交付一次性runtime/input materialization，最后才发送同一request fence的execute command；materialization与execute envelope
+digest共同进入start evidence。已安装且合同闭合的`managed_mcp_server` runtime可由该Provider选择。定向domain/config/protocol/socket fixture
+实际通过，但尚无真实Linux KVM/jailer/guest-agent互操作、进程终止/恢复、escape或饱和证据，因此不把microVM backend或Phase 4/6标记为完成。
+
 process-generation isolation authority是独立于PostgreSQL lease、NATS和Controller进程的node/runtime attestor；数据库lease过期、NATS
 断连、Pod deletion request、Controller本地cache miss或对旧generation RPC超时都不是absence proof。其closed请求必须精确绑定
 `tenant_id`、`sandbox_job_id`、`request_digest`、旧`worker_process_generation_id`和已提交到Sandbox Job phase evidence中的

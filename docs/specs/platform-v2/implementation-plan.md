@@ -555,7 +555,13 @@ CR-158修正了Managed stdio的物理Job所有权：现有直接Runner port不�
 Sandbox，违反单物理attempt、独立bulkhead和Worker permit释放合同。目标实现改为由exact MCP transport在admission时直接路由到唯一
 `work_class=sandbox` Job；Sandbox source冻结完整Capability/MCP/Discovery/Auth/operation与Package/Runtime/Profile/Policy closure，
 claim后才绑定物理fence。Managed subscription按独立生命周期保留逻辑MCP Job并为每generation关联至多一个Sandbox session Job。
-该修订不增表或migration；对应domain/repository/microVM provider尚未交付，因此CR-131/CR-158和Phase 4继续保持Open。
+该修订不增表或migration。operation路径的domain/repository及production Firecracker Provider组合现已交付：Provider只从Controller
+Artifact Broker按exact tenant/Job/request/Executor generation/Provider generation/sandbox identity/lease/deadline读取Package runtime bundle和
+Artifact-backed逻辑输入，二次复核完整`ArtifactRef`长度与SHA-256，再以bounded canonical chunk在private vsock上先完成一次性guest
+materialization、后发送同一fence的execute command；主逻辑输入只接受exact `read_whole` grant。进程配置不再拒绝已安装且digest闭合的
+`managed_mcp_server` runtime。定向29项Sandbox、1项Provider config和10项microVM protocol/Firecracker socket fixture实际通过。
+该开发期证据仍不包含真实Linux KVM/jailer/guest-agent互操作、Managed subscription的MCP Job→Sandbox session Job组合、process-kill/
+recovery或escape/saturation资格，因此CR-131/CR-158和Phase 4继续保持Open。
 
 clean-cut baseline现由部署期独立provisioning流程对fresh PostgreSQL target一次性安装；Platform运行时crate已删除DDL apply入口，
 API/Scheduler/Worker只做read-only schema verification。旧`coordinator.rs`实现路径改为role-neutral orchestration模块，cutover gate

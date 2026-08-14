@@ -1,18 +1,23 @@
 use crate::{
     FirecrackerApiClient, FirecrackerGuestChannel, FirecrackerInstallation,
     InstalledMicroVmRuntime, JailerLaunchPlan, MicroVmAbortProof, MicroVmAttemptKey,
-    MicroVmCleanupProof, MicroVmGuestCollection, MicroVmGuestCommandEnvelope, MicroVmGuestEvent,
-    MicroVmHostFactory, MicroVmHostInstance, MicroVmProviderFailure, MicroVmRecoveryProof,
-    MicroVmTerminationProof, PreparedMicroVm, PreparedMicroVmHost, RunningMicroVm,
-    FIRECRACKER_GUEST_CONTROL_PORT,
+    MicroVmCleanupProof, MicroVmGuestArtifactPurpose, MicroVmGuestCollection,
+    MicroVmGuestCommandEnvelope, MicroVmGuestEvent, MicroVmHostFactory, MicroVmHostInstance,
+    MicroVmProviderFailure, MicroVmRecoveryProof, MicroVmTerminationProof, PreparedMicroVm,
+    PreparedMicroVmHost, RunningMicroVm, FIRECRACKER_GUEST_CONTROL_PORT,
+    MAX_MICROVM_GUEST_ARTIFACT_CHUNK_BYTES,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use insight_platform_contracts::{canonical_digest, ResourceId, Sha256Digest};
+use insight_platform_contracts::{
+    canonical_digest, ArtifactGrantOperation, ArtifactRef, ResourceId, Sha256Digest, ValueRef,
+};
 use insight_platform_sandbox::{
-    AbortSandboxExecution, DestroySandbox, ExpiredSandboxLease, MicroVmGrantRevocationEvidence,
-    MicroVmGrantRevoker, MicroVmProviderExecutionFence, RevokeMicroVmSandboxGrants,
-    SandboxCleanupDisposition, SandboxExecutionRequest, SandboxNetworkMode, TerminateSandbox,
+    AbortSandboxExecution, DestroySandbox, ExpiredSandboxLease, MicroVmArtifactBroker,
+    MicroVmArtifactBrokerError, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
+    MicroVmGrantRevocationEvidence, MicroVmGrantRevoker, MicroVmProviderExecutionFence,
+    RevokeMicroVmSandboxGrants, SandboxCleanupDisposition, SandboxExecutionRequest,
+    SandboxNetworkMode, ScopedArtifactGrant, TerminateSandbox,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -123,6 +128,7 @@ struct LinuxFirecrackerShared {
     config: LinuxFirecrackerHostConfig,
     runtimes: BTreeMap<Sha256Digest, InstalledMicroVmRuntime>,
     grant_authority: Arc<dyn MicroVmGrantRevoker>,
+    artifact_broker: Arc<dyn MicroVmArtifactBroker>,
 }
 
 pub struct LinuxFirecrackerHostFactory {
@@ -134,6 +140,7 @@ impl LinuxFirecrackerHostFactory {
     pub async fn install(
         config: LinuxFirecrackerHostConfig,
         grant_authority: Arc<dyn MicroVmGrantRevoker>,
+        artifact_broker: Arc<dyn MicroVmArtifactBroker>,
     ) -> Result<Self, LinuxFirecrackerHostError> {
         if !cfg!(target_os = "linux") {
             return Err(LinuxFirecrackerHostError::LinuxRequired);
@@ -186,6 +193,7 @@ impl LinuxFirecrackerHostFactory {
                 config,
                 runtimes,
                 grant_authority,
+                artifact_broker,
             }),
             instances: Mutex::new(BTreeMap::new()),
         };
@@ -476,7 +484,14 @@ struct LinuxFirecrackerInstance {
     operation: Mutex<()>,
     child: Mutex<Option<Child>>,
     channel: Mutex<Option<FirecrackerGuestChannel>>,
+    next_command_sequence: Mutex<Option<u64>>,
     collection: Mutex<Option<MicroVmGuestCollection>>,
+}
+
+struct MaterializedGuestArtifact {
+    purpose: MicroVmGuestArtifactPurpose,
+    artifact: ArtifactRef,
+    bytes: Vec<u8>,
 }
 
 impl LinuxFirecrackerInstance {
@@ -506,6 +521,7 @@ impl LinuxFirecrackerInstance {
             operation: Mutex::new(()),
             child: Mutex::new(None),
             channel: Mutex::new(None),
+            next_command_sequence: Mutex::new(None),
             collection: Mutex::new(None),
         }
     }
@@ -542,8 +558,113 @@ impl LinuxFirecrackerInstance {
             operation: Mutex::new(()),
             child: Mutex::new(None),
             channel: Mutex::new(None),
+            next_command_sequence: Mutex::new(None),
             collection: Mutex::new(None),
         }
+    }
+
+    async fn load_guest_artifact(
+        &self,
+        fence: &MicroVmProviderExecutionFence,
+        request: &SandboxExecutionRequest,
+        purpose: MicroVmGuestArtifactPurpose,
+        artifact: ArtifactRef,
+        read_grant: Option<ScopedArtifactGrant>,
+    ) -> Result<MaterializedGuestArtifact, MicroVmProviderFailure> {
+        let maximum_bytes = usize::try_from(artifact.byte_length())
+            .map_err(|_| contract_failure("microvm_artifact_size_unsupported"))?;
+        let broker_purpose = match purpose {
+            MicroVmGuestArtifactPurpose::RuntimeBundle => MicroVmArtifactReadPurpose::RuntimeBundle,
+            MicroVmGuestArtifactPurpose::InputValue => MicroVmArtifactReadPurpose::InputValue,
+        };
+        let bytes = self
+            .shared
+            .artifact_broker
+            .read_exact(MicroVmArtifactReadRequest {
+                tenant_id: request.tenant_id.clone(),
+                sandbox_job_id: request.sandbox_job_id.clone(),
+                request_digest: request.request_digest.clone(),
+                executor_worker_process_generation_id: fence.worker_process_generation_id.clone(),
+                provider_process_generation_id: self
+                    .shared
+                    .config
+                    .provider_process_generation_id
+                    .clone(),
+                sandbox_identity_digest: self.sandbox_identity_digest(),
+                lease_generation: request.lease_generation,
+                artifact: artifact.clone(),
+                purpose: broker_purpose,
+                read_grant,
+                maximum_bytes,
+                deadline: request.deadline,
+            })
+            .await
+            .map_err(|error| match error {
+                MicroVmArtifactBrokerError::Unavailable => {
+                    contract_failure("microvm_artifact_broker_unavailable")
+                }
+                MicroVmArtifactBrokerError::Denied => {
+                    contract_failure("microvm_artifact_read_denied")
+                }
+                MicroVmArtifactBrokerError::NotFound => {
+                    contract_failure("microvm_artifact_not_found")
+                }
+                MicroVmArtifactBrokerError::Integrity => {
+                    contract_failure("microvm_artifact_integrity_failed")
+                }
+                MicroVmArtifactBrokerError::TooLarge => {
+                    contract_failure("microvm_artifact_too_large")
+                }
+            })?;
+        if bytes.len() != maximum_bytes || sha256_bytes(&bytes)? != *artifact.content_digest() {
+            return Err(contract_failure(
+                "microvm_artifact_broker_evidence_mismatch",
+            ));
+        }
+        Ok(MaterializedGuestArtifact {
+            purpose,
+            artifact,
+            bytes,
+        })
+    }
+
+    async fn load_guest_artifacts(
+        &self,
+        fence: &MicroVmProviderExecutionFence,
+        request: &SandboxExecutionRequest,
+    ) -> Result<Vec<MaterializedGuestArtifact>, MicroVmProviderFailure> {
+        let mut artifacts = vec![
+            self.load_guest_artifact(
+                fence,
+                request,
+                MicroVmGuestArtifactPurpose::RuntimeBundle,
+                request.package.runtime_bundle_artifact.clone(),
+                None,
+            )
+            .await?,
+        ];
+        if let ValueRef::Artifact { artifact } = &request.input_ref {
+            let read_grant = request
+                .artifact_grants
+                .iter()
+                .find(|grant| {
+                    grant.operation == ArtifactGrantOperation::ReadWhole
+                        && grant.artifact.as_ref() == Some(artifact)
+                })
+                .cloned()
+                .ok_or_else(|| contract_failure("microvm_input_read_grant_missing"))?;
+            artifacts.push(
+                self.load_guest_artifact(
+                    fence,
+                    request,
+                    MicroVmGuestArtifactPurpose::InputValue,
+                    artifact.clone(),
+                    Some(read_grant),
+                )
+                .await?,
+            );
+        }
+        Ok(artifacts)
     }
 
     async fn ensure_prepared(
@@ -832,6 +953,7 @@ impl MicroVmHostInstance for LinuxFirecrackerInstance {
                 ));
             }
         }
+        let materialized_artifacts = self.load_guest_artifacts(fence, request).await?;
         {
             let mut record = self.record.lock().await;
             record.phase = FirecrackerHostPhase::Starting;
@@ -890,11 +1012,52 @@ impl MicroVmHostInstance for LinuxFirecrackerInstance {
                 request_external_effect_possible(request),
             ));
         }
+        let mut command_sequence = 1_u64;
+        let mut materialization_envelope_digests = Vec::new();
+        for materialized in materialized_artifacts {
+            for (index, content) in materialized
+                .bytes
+                .chunks(MAX_MICROVM_GUEST_ARTIFACT_CHUNK_BYTES)
+                .enumerate()
+            {
+                let offset = index
+                    .checked_mul(MAX_MICROVM_GUEST_ARTIFACT_CHUNK_BYTES)
+                    .and_then(|offset| u64::try_from(offset).ok())
+                    .ok_or_else(|| contract_failure("microvm_artifact_offset_overflow"))?;
+                let final_chunk =
+                    offset
+                        .checked_add(u64::try_from(content.len()).map_err(|_| {
+                            contract_failure("microvm_artifact_chunk_size_overflow")
+                        })?)
+                        .is_some_and(|end| end == materialized.artifact.byte_length());
+                let envelope = MicroVmGuestCommandEnvelope::materialize_artifact(
+                    request,
+                    command_sequence,
+                    materialized.purpose,
+                    materialized.artifact.clone(),
+                    offset,
+                    content,
+                    final_chunk,
+                )
+                .map_err(|_| contract_failure("microvm_guest_artifact_command_invalid"))?;
+                channel.write_command(&envelope).await.map_err(|_| {
+                    uncertain_failure(
+                        "microvm_guest_artifact_delivery_failed",
+                        Some(self.sandbox_identity_digest()),
+                        request_external_effect_possible(request),
+                    )
+                })?;
+                materialization_envelope_digests.push(envelope.envelope_digest);
+                command_sequence = command_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| contract_failure("microvm_guest_command_sequence_overflow"))?;
+            }
+        }
+        let execute_envelope =
+            MicroVmGuestCommandEnvelope::execute_at(request.clone(), command_sequence)
+                .map_err(|_| contract_failure("microvm_guest_execute_command_invalid"))?;
         channel
-            .write_command(
-                &MicroVmGuestCommandEnvelope::execute(request.clone())
-                    .map_err(|_| contract_failure("microvm_guest_execute_command_invalid"))?,
-            )
+            .write_command(&execute_envelope)
             .await
             .map_err(|_| {
                 uncertain_failure(
@@ -903,14 +1066,20 @@ impl MicroVmHostInstance for LinuxFirecrackerInstance {
                     request_external_effect_possible(request),
                 )
             })?;
+        let next_command_sequence = command_sequence
+            .checked_add(1)
+            .ok_or_else(|| contract_failure("microvm_guest_command_sequence_overflow"))?;
         let start_evidence_digest = digest(&serde_json::json!({
             "domain": "linux_firecracker_start",
             "schema_version": 1,
             "sandbox_identity_digest": self.sandbox_identity_digest(),
             "request_digest": request.request_digest,
             "ready_envelope_digest": ready.envelope_digest,
+            "materialization_envelope_digests": materialization_envelope_digests,
+            "execute_envelope_digest": execute_envelope.envelope_digest,
         }))?;
         *self.channel.lock().await = Some(channel);
+        *self.next_command_sequence.lock().await = Some(next_command_sequence);
         *self.request.lock().await = Some(request.clone());
         let running = RunningMicroVm {
             sandbox_identity_digest: self.sandbox_identity_digest(),
@@ -1050,9 +1219,13 @@ impl MicroVmHostInstance for LinuxFirecrackerInstance {
         }
         if let Some(request) = self.request.lock().await.clone() {
             if let Some(channel) = self.channel.lock().await.as_mut() {
-                if let Ok(cancel) = MicroVmGuestCommandEnvelope::cancel(&request, 2, command.reason)
-                {
-                    let _ = channel.write_command(&cancel).await;
+                let next_sequence = *self.next_command_sequence.lock().await;
+                if let Some(next_sequence) = next_sequence {
+                    if let Ok(cancel) =
+                        MicroVmGuestCommandEnvelope::cancel(&request, next_sequence, command.reason)
+                    {
+                        let _ = channel.write_command(&cancel).await;
+                    }
                 }
             }
         }
@@ -1694,6 +1867,12 @@ fn digest(value: &serde_json::Value) -> Result<Sha256Digest, MicroVmProviderFail
         .map_err(|_| contract_failure("microvm_evidence_canonicalization_failed"))?
         .parse()
         .map_err(|_| contract_failure("microvm_evidence_digest_invalid"))
+}
+
+fn sha256_bytes(value: &[u8]) -> Result<Sha256Digest, MicroVmProviderFailure> {
+    format!("sha256:{}", hex_prefix(&Sha256::digest(value), 64))
+        .parse()
+        .map_err(|_| contract_failure("microvm_artifact_digest_invalid"))
 }
 
 fn digest_without_field<T: Serialize>(

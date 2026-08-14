@@ -34,19 +34,21 @@ use insight_platform_sandbox::{
     MicroVmIsolationProviderBackend, MicroVmProviderExecutionFence, SafeSandboxTraceContext,
     SandboxCleanupDisposition, SandboxCommandLimits, SandboxExecutionPolicyClosure,
     SandboxExecutionRequest, SandboxExecutionSource, SandboxIsolationBackendKind,
-    SandboxNetworkMode, SandboxResourceEnvelope, SandboxResourceUsage, ScopedSandboxCallback,
-    ScopedSecretGrant, TerminateSandbox, SANDBOX_PROTOCOL_VERSION,
+    SandboxNetworkMode, SandboxResourceEnvelope, SandboxResourceUsage, SandboxStopReason,
+    ScopedSandboxCallback, ScopedSecretGrant, TerminateSandbox, SANDBOX_PROTOCOL_VERSION,
 };
 use insight_platform_sandbox_microvm::{
     read_guest_frame, write_guest_frame, DurableMicroVmLifecycle, FirecrackerApiClient,
     FirecrackerGuestChannel, FirecrackerInstallation, JailerLaunchPlan,
     ManagedMcpSandboxProtocolAdapter, MicroVmAbortProof, MicroVmAttemptKey, MicroVmCleanupProof,
-    MicroVmGuestCollection, MicroVmGuestCommandEnvelope, MicroVmGuestEvent,
-    MicroVmGuestEventEnvelope, MicroVmHostFactory, MicroVmHostInstance, MicroVmLifecyclePort,
-    MicroVmProviderClock, MicroVmProviderFailure, MicroVmRecoveryProof,
-    MicroVmSandboxExecutorBackend, MicroVmTerminationProof, PreparedMicroVm, PreparedMicroVmHost,
-    RunningMicroVm, FIRECRACKER_API_SOCKET_IN_JAIL, MICROVM_GUEST_PROTOCOL_VERSION,
+    MicroVmGuestArtifactPurpose, MicroVmGuestCollection, MicroVmGuestCommand,
+    MicroVmGuestCommandEnvelope, MicroVmGuestEvent, MicroVmGuestEventEnvelope, MicroVmHostFactory,
+    MicroVmHostInstance, MicroVmLifecyclePort, MicroVmProviderClock, MicroVmProviderFailure,
+    MicroVmRecoveryProof, MicroVmSandboxExecutorBackend, MicroVmTerminationProof, PreparedMicroVm,
+    PreparedMicroVmHost, RunningMicroVm, FIRECRACKER_API_SOCKET_IN_JAIL,
+    MICROVM_GUEST_PROTOCOL_VERSION,
 };
+use sha2::{Digest as _, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::BTreeMap, path::PathBuf, str::FromStr, sync::Arc, time::Duration as StdDuration,
@@ -67,6 +69,15 @@ fn sha(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
         .unwrap()
+}
+
+fn content_sha(value: &[u8]) -> Sha256Digest {
+    let digest = Sha256::digest(value);
+    let hexadecimal = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hexadecimal}").parse().unwrap()
 }
 
 fn artifact(suffix: u16, character: char) -> ArtifactRef {
@@ -744,6 +755,69 @@ async fn guest_frames_are_canonical_and_exactly_fenced() {
     let mut stale = ready;
     stale.lease_generation += 1;
     assert!(stale.validate_for(&request, 1).is_err());
+}
+
+#[test]
+fn guest_artifacts_are_chunked_canonical_and_delivered_before_execute() {
+    let bytes = b"managed-mcp-runtime-bundle";
+    let runtime_bundle = ArtifactRef::new(
+        id(ResourceKind::Artifact, 90),
+        content_sha(bytes),
+        u64::try_from(bytes.len()).unwrap(),
+        "application/octet-stream",
+        DataClassification::Internal,
+        Some("managed-mcp-runtime.bundle".to_owned()),
+    )
+    .unwrap();
+    let mut request = managed_request(Utc::now())
+        .bind_lease_generation(1)
+        .unwrap();
+    request.package.runtime_bundle_artifact = runtime_bundle.clone();
+    request = request.seal().unwrap();
+
+    let first = MicroVmGuestCommandEnvelope::materialize_artifact(
+        &request,
+        1,
+        MicroVmGuestArtifactPurpose::RuntimeBundle,
+        runtime_bundle.clone(),
+        0,
+        &bytes[..8],
+        false,
+    )
+    .unwrap();
+    let second = MicroVmGuestCommandEnvelope::materialize_artifact(
+        &request,
+        2,
+        MicroVmGuestArtifactPurpose::RuntimeBundle,
+        runtime_bundle.clone(),
+        8,
+        &bytes[8..],
+        true,
+    )
+    .unwrap();
+    let execute = MicroVmGuestCommandEnvelope::execute_at(request.clone(), 3).unwrap();
+    let cancel =
+        MicroVmGuestCommandEnvelope::cancel(&request, 4, SandboxStopReason::Cancelled).unwrap();
+    for (expected_sequence, envelope) in [(1, &first), (2, &second), (3, &execute), (4, &cancel)] {
+        assert_eq!(envelope.sequence, expected_sequence);
+        envelope.validate().unwrap();
+    }
+    let MicroVmGuestCommand::MaterializeArtifact(chunk) = &second.command else {
+        panic!("second command must carry the final runtime chunk")
+    };
+    assert_eq!(chunk.decoded_content().unwrap(), bytes[8..]);
+    assert!(matches!(execute.command, MicroVmGuestCommand::Execute(_)));
+
+    assert!(MicroVmGuestCommandEnvelope::materialize_artifact(
+        &request,
+        4,
+        MicroVmGuestArtifactPurpose::RuntimeBundle,
+        runtime_bundle,
+        8,
+        &bytes[8..],
+        false,
+    )
+    .is_err());
 }
 
 #[tokio::test]

@@ -11,8 +11,8 @@ use insight_platform_contracts::{
     ResourceKind, Sha256Digest,
 };
 use insight_platform_sandbox::{
-    InstalledSandboxBackendDescriptor, MicroVmGrantRevoker, SandboxCommandLimits,
-    SandboxIsolationBackendKind,
+    InstalledSandboxBackendDescriptor, MicroVmArtifactBroker, MicroVmGrantRevoker,
+    SandboxCommandLimits, SandboxIsolationBackendKind,
 };
 use insight_platform_sandbox_microvm::{
     DurableMicroVmLifecycle, FirecrackerInstallation, InstalledMicroVmRuntime,
@@ -127,11 +127,10 @@ impl ProviderProcessConfig {
             || state == self.installation.chroot_base_directory
             || self.runtimes.is_empty()
             || self.runtimes.len() > 256
-            || self.runtimes.iter().any(|runtime| {
-                runtime.validate().is_err()
-                    || runtime.runtime_family
-                        == insight_platform_contracts::SandboxRuntimeFamily::ManagedMcpServer
-            })
+            || self
+                .runtimes
+                .iter()
+                .any(|runtime| runtime.validate().is_err())
             || self.maximum_instances == 0
             || self.maximum_instances > 65_536
             || self.maximum_tombstones < self.maximum_instances
@@ -198,7 +197,8 @@ async fn run() -> Result<(), ProcessError> {
         connect_broker(&config).await?,
         rpc_limits,
     ));
-    let grant_revoker: Arc<dyn MicroVmGrantRevoker> = broker;
+    let grant_revoker: Arc<dyn MicroVmGrantRevoker> = broker.clone();
+    let artifact_broker: Arc<dyn MicroVmArtifactBroker> = broker;
     let host = Arc::new(
         LinuxFirecrackerHostFactory::install(
             LinuxFirecrackerHostConfig {
@@ -222,6 +222,7 @@ async fn run() -> Result<(), ProcessError> {
                 ),
             },
             grant_revoker,
+            artifact_broker,
         )
         .await
         .map_err(|_| ProcessError::HostUnavailable)?,
@@ -551,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn config_is_closed_and_rejects_broad_paths_or_uninstalled_managed_mcp() {
+    fn config_is_closed_and_accepts_an_exact_installed_managed_mcp_runtime() {
         config().validate().unwrap();
 
         let mut broad = config();
@@ -565,6 +566,10 @@ mod tests {
         let mut managed = config();
         managed.runtimes[0].runtime_family =
             insight_platform_contracts::SandboxRuntimeFamily::ManagedMcpServer;
-        assert!(managed.validate().is_err());
+        managed.validate().unwrap();
+
+        let mut duplicate = managed;
+        duplicate.runtimes.push(duplicate.runtimes[0].clone());
+        assert!(duplicate.validate().is_err());
     }
 }

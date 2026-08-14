@@ -730,8 +730,11 @@ material digest复核。Helm只发布exact `/v1/mcp/oauth/callback` Ingress，�
 生产PKCE cleanup delivery已由独立Worker组合：共享Outbox使用bounded `SKIP LOCKED` claim与owner/epoch/lease fence，PostgreSQL先重验
 terminal Task及Pinned binding，Egress再删除exact Secret Manager version；成功推进`cleanup_completed`但保留`published_at=NULL`供后续
 committed Event投影，临时/不确定失败退避重试，永久合同错误dead-letter。fresh PostgreSQL 16 fixture覆盖lease reclaim、stale fence拒绝和
-first-winner完成，双副本/PDB/default-deny NetworkPolicy部署合同也已通过，不增加表或migration。Managed Runner provider仍未交付，因此
-该证据不关闭MCP或Phase 4，也不把本规范标记为Implemented/Verified。此前workspace
+first-winner完成，双副本/PDB/default-deny NetworkPolicy部署合同也已通过，不增加表或migration。Managed stdio operation现已直接进入
+唯一Sandbox Job，并由production Firecracker Provider经Controller Artifact Broker取得exact Package/input、在private vsock中bounded
+materialize后才执行；Provider不再拒绝已安装的Managed MCP runtime。Managed subscription尚未建立MCP Job→Sandbox session Job的
+production组合，真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未取得，因此该证据不关闭MCP或Phase 4，
+也不把本规范标记为Implemented/Verified。此前workspace
 all-target/all-feature check、test、doc-test与strict Clippy及public API/contract/schema/cutover门禁证据不自动覆盖本次变更；本次完整门禁
 结果以实施计划的最新记录为准。
 两个显式ignored RustFS qualification test仍不计为当前切片资格证据。

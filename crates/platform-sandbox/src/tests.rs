@@ -1120,6 +1120,42 @@ fn range_grant_freezes_an_in_bounds_exact_byte_window() {
 }
 
 #[test]
+fn artifact_backed_logical_input_requires_a_whole_read_grant() {
+    let now = Utc::now();
+    let mut request = request_at(now);
+    let source = artifact(92, 'a');
+    request.input_ref = ValueRef::Artifact {
+        artifact: source.clone(),
+    };
+    request.artifact_grants = vec![ScopedArtifactGrant {
+        schema_version: 1,
+        grant_id: id(ResourceKind::ArtifactGrant, 93),
+        tenant_id: request.tenant_id.clone(),
+        sandbox_job_id: request.sandbox_job_id.clone(),
+        operation: ArtifactGrantOperation::ReadRange,
+        port: "input".to_owned(),
+        artifact: Some(source),
+        staging_artifact_id: None,
+        byte_range: Some(SandboxArtifactByteRange {
+            offset: 0,
+            length: 16,
+        }),
+        maximum_bytes: 16,
+        generation: 1,
+        expires_at: request.deadline,
+        grant_digest: sha('0'),
+    }
+    .seal()
+    .unwrap()];
+    request = request.seal().unwrap();
+
+    assert_eq!(
+        request.validate_submission_at(now, limits()),
+        Err(SandboxContractError::InvalidInput)
+    );
+}
+
+#[test]
 fn sandbox_profile_policy_closure_cannot_drift_from_role_bindings() {
     let now = Utc::now();
     let mut request = request_at(now);
