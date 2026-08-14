@@ -1361,6 +1361,54 @@ async fn managed_session_worker_destroys_prepared_instance_when_ready_commit_fai
     );
 }
 
+#[test]
+fn managed_session_opaque_claims_bind_both_process_generations_and_the_exact_vm() {
+    let now = Utc::now();
+    let (_, _, command) = managed_session_worker_fixture(now, false);
+    let request = &command.claimed.request;
+    let fence = &command.claimed.fence;
+    let prepared = PreparedManagedMcpSandboxSession {
+        schema_version: 1,
+        identity: request.identity.clone(),
+        request_digest: request.request_digest.clone(),
+        worker_process_generation_id: fence.worker_process_generation_id.clone(),
+        provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 190),
+        lease_generation: fence.lease_generation,
+        executor_identity_digest: command.executor_identity_digest.clone(),
+        sandbox_identity_digest: sha('2'),
+        prepare_evidence_digest: sha('3'),
+        canonical_digest: sha('0'),
+    }
+    .seal()
+    .unwrap();
+    let claims = ManagedMcpSandboxOpaqueSessionClaims {
+        schema_version: 1,
+        identity: request.identity.clone(),
+        request_digest: request.request_digest.clone(),
+        worker_process_generation_id: fence.worker_process_generation_id.clone(),
+        provider_process_generation_id: prepared.provider_process_generation_id.clone(),
+        lease_generation: fence.lease_generation,
+        sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+        protocol_evidence_digest: sha('4'),
+        established_at: now,
+        expires_at: now + ChronoDuration::minutes(1),
+    };
+    claims.validate_for(request, fence, &prepared, now).unwrap();
+    assert_eq!(
+        claims.canonical_digest().unwrap(),
+        canonical_digest(&serde_json::to_value(&claims).unwrap())
+            .unwrap()
+            .parse()
+            .unwrap()
+    );
+
+    let mut drifted = claims;
+    drifted.provider_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 191);
+    assert!(drifted
+        .validate_for(request, fence, &prepared, now)
+        .is_err());
+}
+
 fn managed_mcp_session_fixture(
     now: DateTime<Utc>,
 ) -> (McpSubscriptionRecord, AcceptManagedMcpSandboxSession) {

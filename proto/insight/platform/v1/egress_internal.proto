@@ -19,6 +19,7 @@ service EgressBrokerService {
   rpc CancelMcpRemoteTask(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
   rpc StreamMcpStreamableHttpSubscription(stream ClosedEgressEnvelope) returns (stream ClosedEgressEnvelope);
   rpc ResolveManagedMcpSandboxSecret(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc SealManagedMcpSandboxSessionState(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
 }
 
 message ClosedEgressEnvelope {

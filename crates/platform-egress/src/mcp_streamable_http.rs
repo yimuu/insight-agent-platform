@@ -22,6 +22,10 @@ use insight_platform_mcp_host::{
     McpStreamableHttpSubscriptionTermination, McpSubscriptionActivation, McpTransportFailure,
     PreparedMcpSubscription, SafeMcpFailure, SensitiveMcpNotificationWire,
 };
+use insight_platform_sandbox::{
+    ManagedMcpSandboxOpaqueSessionClaims, ManagedMcpSandboxSessionStateSealError,
+    ManagedMcpSandboxSessionStateSealer,
+};
 use reqwest::{
     header::{
         HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH,
@@ -63,6 +67,9 @@ const MAX_MCP_REMOTE_TASK_ID_BYTES: usize = 1_024;
 const MAX_MCP_ELICITATION_MESSAGE_BYTES: usize = 4_096;
 const MCP_SUBSCRIPTION_STATE_SCHEME: &str = "aes256_gcm_v1";
 const MCP_SUBSCRIPTION_STATE_AAD: &[u8] = b"insight.platform/v1/mcp-subscription-session\0";
+const MANAGED_MCP_SANDBOX_SESSION_STATE_SCHEME: &str = "aes256_gcm_v1";
+const MANAGED_MCP_SANDBOX_SESSION_STATE_AAD: &[u8] =
+    b"insight.platform/v1/managed-mcp-sandbox-session\0";
 const MCP_SUBSCRIPTION_STATE_KEY_BYTES: usize = 32;
 const MAX_MCP_SUBSCRIPTION_STATE_KEYS: usize = 4;
 const MAX_MCP_SUBSCRIPTION_KEY_ID_BYTES: usize = 64;
@@ -250,6 +257,59 @@ impl AeadMcpSubscriptionStateCodec {
         Ok(state)
     }
 
+    fn seal_managed_sandbox_session(
+        &self,
+        claims: &ManagedMcpSandboxOpaqueSessionClaims,
+    ) -> Result<EncryptedMcpState, ManagedMcpSandboxSessionStateSealError> {
+        claims
+            .validate_shape(Utc::now())
+            .map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)?;
+        let value = serde_json::to_value(claims)
+            .map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)?;
+        let plaintext_digest =
+            digest_value(&value).map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)?;
+        if claims
+            .canonical_digest()
+            .map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)?
+            != plaintext_digest
+        {
+            return Err(ManagedMcpSandboxSessionStateSealError::Denied);
+        }
+        let mut plaintext = SensitiveRemoteTaskBuffer(
+            canonical_json(&value).map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)?,
+        );
+        let installed = self
+            .keys
+            .get(&self.active_key_id)
+            .ok_or(ManagedMcpSandboxSessionStateSealError::Unavailable)?;
+        let mut nonce_bytes = [0_u8; NONCE_LEN];
+        self.random
+            .fill(&mut nonce_bytes)
+            .map_err(|_| ManagedMcpSandboxSessionStateSealError::Unavailable)?;
+        installed
+            .key
+            .seal_in_place_append_tag(
+                Nonce::assume_unique_for_key(nonce_bytes),
+                Aad::from(managed_mcp_sandbox_session_state_aad(&self.active_key_id)),
+                &mut plaintext.0,
+            )
+            .map_err(|_| ManagedMcpSandboxSessionStateSealError::Unavailable)?;
+        let mut ciphertext = Vec::with_capacity(NONCE_LEN + plaintext.0.len());
+        ciphertext.extend_from_slice(&nonce_bytes);
+        ciphertext.extend_from_slice(&plaintext.0);
+        let state = EncryptedMcpState {
+            scheme: MANAGED_MCP_SANDBOX_SESSION_STATE_SCHEME.to_owned(),
+            ciphertext,
+            key_id: self.active_key_id.clone(),
+            key_reference_digest: installed.key_reference_digest.clone(),
+            plaintext_digest,
+        };
+        state
+            .validate()
+            .map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)?;
+        Ok(state)
+    }
+
     #[cfg(test)]
     fn open(
         &self,
@@ -289,6 +349,16 @@ impl AeadMcpSubscriptionStateCodec {
             return Err(rejected("mcp_egress_subscription_state_invalid"));
         }
         Ok(claims)
+    }
+}
+
+#[async_trait]
+impl ManagedMcpSandboxSessionStateSealer for AeadMcpSubscriptionStateCodec {
+    async fn seal_managed_mcp_sandbox_session_state(
+        &self,
+        claims: ManagedMcpSandboxOpaqueSessionClaims,
+    ) -> Result<EncryptedMcpState, ManagedMcpSandboxSessionStateSealError> {
+        self.seal_managed_sandbox_session(&claims)
     }
 }
 
@@ -365,6 +435,13 @@ impl Drop for McpSubscriptionStateClaims {
 fn subscription_state_aad(key_id: &str) -> Vec<u8> {
     let mut aad = Vec::with_capacity(MCP_SUBSCRIPTION_STATE_AAD.len() + key_id.len());
     aad.extend_from_slice(MCP_SUBSCRIPTION_STATE_AAD);
+    aad.extend_from_slice(key_id.as_bytes());
+    aad
+}
+
+fn managed_mcp_sandbox_session_state_aad(key_id: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(MANAGED_MCP_SANDBOX_SESSION_STATE_AAD.len() + key_id.len());
+    aad.extend_from_slice(MANAGED_MCP_SANDBOX_SESSION_STATE_AAD);
     aad.extend_from_slice(key_id.as_bytes());
     aad
 }
@@ -5569,6 +5646,64 @@ mod tests {
         assert_eq!(codec.open(&encrypted).unwrap(), claims);
         let debug = format!("{claims:?}");
         assert!(!debug.contains("opaque-subscription-session-canary"));
+    }
+
+    #[tokio::test]
+    async fn managed_sandbox_session_state_uses_a_domain_separated_egress_key_boundary() {
+        let codec = AeadMcpSubscriptionStateCodec::new(
+            "subscription-key".to_owned(),
+            vec![McpSubscriptionStateKey {
+                key_id: "subscription-key".to_owned(),
+                key_reference_digest: digest('d'),
+                key_material: SensitiveMcpSubscriptionStateKey::new(vec![17; 32]).unwrap(),
+            }],
+        )
+        .unwrap();
+        let physical_job_id = id(ResourceKind::Job, 91);
+        let mut identity = insight_platform_mcp_host::ManagedMcpSandboxSessionIdentity {
+            schema_version: 1,
+            tenant_id: id(ResourceKind::Tenant, 90),
+            subscription_id: id(ResourceKind::McpOperation, 92),
+            logical_job_id: id(ResourceKind::Job, 93),
+            admitted_subscription_version: 1,
+            admitted_logical_job_version: 2,
+            session_generation: 3,
+            sandbox_job_id: ResourceId::from_uuid_v7(
+                ResourceKind::SandboxJob,
+                physical_job_id.uuid(),
+            )
+            .unwrap(),
+            physical_job_id,
+            subscription_binding_digest: digest('a'),
+            canonical_digest: digest('0'),
+        };
+        let mut identity_value = serde_json::to_value(&identity).unwrap();
+        identity_value
+            .as_object_mut()
+            .unwrap()
+            .remove("canonical_digest");
+        identity.canonical_digest = canonical_digest(&identity_value).unwrap().parse().unwrap();
+        let now = Utc::now();
+        let claims = ManagedMcpSandboxOpaqueSessionClaims {
+            schema_version: 1,
+            identity,
+            request_digest: digest('b'),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 94),
+            provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 95),
+            lease_generation: 4,
+            sandbox_identity_digest: digest('c'),
+            protocol_evidence_digest: digest('e'),
+            established_at: now,
+            expires_at: now + chrono::Duration::minutes(1),
+        };
+        let expected_digest = claims.canonical_digest().unwrap();
+        let encrypted = codec
+            .seal_managed_mcp_sandbox_session_state(claims)
+            .await
+            .unwrap();
+        assert_eq!(encrypted.plaintext_digest, expected_digest);
+        assert_eq!(encrypted.scheme, MANAGED_MCP_SANDBOX_SESSION_STATE_SCHEME);
+        assert!(codec.open(&encrypted).is_err());
     }
 
     fn subscription_request(fixture: &Fixture) -> McpStreamableHttpSubscriptionRequest {

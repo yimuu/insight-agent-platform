@@ -420,7 +420,7 @@ async fn run() -> Result<(), ProcessError> {
             mcp_endpoints,
             Arc::clone(&secrets),
             dns.clone(),
-            subscription_state,
+            Arc::clone(&subscription_state),
             mcp_subscription_sink,
             config.mcp_streamable_http_limits,
         )
@@ -468,7 +468,8 @@ async fn run() -> Result<(), ProcessError> {
                 mcp_streamable_http_subscription,
                 mcp_subscription_bridge,
             )
-            .with_managed_mcp_sandbox_secrets(managed_mcp_sandbox_secrets),
+            .with_managed_mcp_sandbox_secrets(managed_mcp_sandbox_secrets)
+            .with_managed_mcp_sandbox_session_states(subscription_state),
     )
     .max_encoding_message_size(maximum)
     .max_decoding_message_size(maximum);

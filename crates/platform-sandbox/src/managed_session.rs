@@ -1027,6 +1027,123 @@ pub enum ManagedMcpSandboxSecretDeliveryError {
     OutcomeUncertain,
 }
 
+/// Credential-free locator sealed by the Egress cryptographic boundary after a Managed MCP
+/// guest has initialized. The plaintext never contains a Secret or a process/socket path; it is
+/// only the exact durable-to-physical fence needed to reject cross-session state substitution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxOpaqueSessionClaims {
+    pub schema_version: u32,
+    pub identity: ManagedMcpSandboxSessionIdentity,
+    pub request_digest: Sha256Digest,
+    pub worker_process_generation_id: ResourceId,
+    pub provider_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub sandbox_identity_digest: Sha256Digest,
+    pub protocol_evidence_digest: Sha256Digest,
+    pub established_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl ManagedMcpSandboxOpaqueSessionClaims {
+    pub fn validate_shape(&self, now: DateTime<Utc>) -> Result<(), SandboxContractError> {
+        let maximum_expiry = self
+            .established_at
+            .checked_add_signed(chrono::Duration::milliseconds(
+                i64::try_from(insight_platform_contracts::MAX_MCP_SESSION_MILLISECONDS)
+                    .map_err(|_| SandboxContractError::InvalidCallback)?,
+            ))
+            .ok_or(SandboxContractError::InvalidCallback)?;
+        if self.schema_version != 1
+            || self.identity.schema_version != 1
+            || self.identity.tenant_id.kind() != ResourceKind::Tenant
+            || self.identity.subscription_id.kind() != ResourceKind::McpOperation
+            || self.identity.logical_job_id.kind() != ResourceKind::Job
+            || self.identity.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.identity.physical_job_id.kind() != ResourceKind::Job
+            || self.identity.sandbox_job_id.uuid() != self.identity.physical_job_id.uuid()
+            || self.identity.admitted_subscription_version == 0
+            || self.identity.admitted_logical_job_version == 0
+            || self.identity.session_generation == 0
+            || digest_without_field(&self.identity, "canonical_digest")?
+                != self.identity.canonical_digest
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.lease_generation == 0
+            || self.established_at > now
+            || self.expires_at <= now
+            || self.expires_at <= self.established_at
+            || self.expires_at > maximum_expiry
+        {
+            return Err(SandboxContractError::InvalidCallback);
+        }
+        Ok(())
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        self.validate_shape(now)?;
+        prepared.validate_for(request, fence, &prepared.executor_identity_digest)?;
+        let maximum_session_milliseconds = i64::try_from(
+            request
+                .mcp_contract
+                .server
+                .limits
+                .maximum_session_milliseconds,
+        )
+        .map_err(|_| SandboxContractError::InvalidCallback)?;
+        let maximum_expiry = self
+            .established_at
+            .checked_add_signed(chrono::Duration::milliseconds(maximum_session_milliseconds))
+            .ok_or(SandboxContractError::InvalidCallback)?;
+        if self.schema_version != 1
+            || self.identity != request.identity
+            || self.request_digest != request.request_digest
+            || self.worker_process_generation_id != fence.worker_process_generation_id
+            || self.worker_process_generation_id != prepared.worker_process_generation_id
+            || self.provider_process_generation_id != prepared.provider_process_generation_id
+            || self.lease_generation != fence.lease_generation
+            || self.lease_generation != prepared.lease_generation
+            || self.sandbox_identity_digest != prepared.sandbox_identity_digest
+            || self.expires_at > maximum_expiry
+            || self.expires_at > request.deadline
+        {
+            return Err(SandboxContractError::InvalidCallback);
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, SandboxContractError> {
+        let value =
+            serde_json::to_value(self).map_err(|_| SandboxContractError::InvalidCallback)?;
+        insight_platform_contracts::canonical_digest(&value)
+            .map_err(|_| SandboxContractError::InvalidCallback)?
+            .parse()
+            .map_err(|_| SandboxContractError::InvalidCallback)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedMcpSandboxSessionStateSealError {
+    Unavailable,
+    Denied,
+}
+
+/// Cryptographic port implemented only by the independently deployed Egress Broker. The
+/// Provider can request sealing but never receives the Candidate state key material.
+#[async_trait]
+pub trait ManagedMcpSandboxSessionStateSealer: Send + Sync {
+    async fn seal_managed_mcp_sandbox_session_state(
+        &self,
+        claims: ManagedMcpSandboxOpaqueSessionClaims,
+    ) -> Result<EncryptedMcpState, ManagedMcpSandboxSessionStateSealError>;
+}
+
 /// Durable Controller authority used only by the Egress Broker. PostgreSQL stores one bounded
 /// receipt per read, so `maximum_reads` is enforced without a Secret-specific table or mutation
 /// of the Job version fence.
