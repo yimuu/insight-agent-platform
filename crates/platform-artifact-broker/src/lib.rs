@@ -1,0 +1,465 @@
+//! Trusted Artifact materialization for credential-free execution roles.
+//!
+//! The Broker owns no durable state. PostgreSQL authorizes the exact read, a KMS adapter unseals
+//! the locator, and a CandidateManifest-installed object-store adapter reads one immutable
+//! generation. Bytes are returned only after a second authority check closes the I/O race.
+
+use async_trait::async_trait;
+use chrono::Utc;
+use insight_platform_artifacts::{
+    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, AuthorizedArtifactObjectRead,
+};
+use insight_platform_contracts::{parse_strict_json, JsonLimits, Sha256Digest};
+use insight_platform_sandbox::{
+    WasiArtifactBroker, WasiArtifactBrokerError, WasiArtifactReadRequest,
+};
+use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
+use tokio::{sync::Semaphore, time::timeout};
+
+mod aws;
+
+pub use aws::{
+    AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig, AwsArtifactProviderConfigError,
+    AwsArtifactProviderReadinessError, AwsKmsKeyBindingConfig, AwsS3StorageBindingConfig,
+};
+
+pub const MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS: usize = 64;
+pub const MAX_ARTIFACT_READ_IN_FLIGHT_HARD: usize = 4_096;
+pub const MAX_DECRYPTED_ARTIFACT_LOCATOR_BYTES: usize = 16_384;
+pub const MAX_ARTIFACT_OBJECT_KEY_BYTES: usize = 1_024;
+pub const MAX_ARTIFACT_BROKER_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactBrokerLimits {
+    pub maximum_in_flight: usize,
+    pub maximum_read_bytes: usize,
+    pub operation_timeout: Duration,
+}
+
+impl ArtifactBrokerLimits {
+    pub fn validate(self) -> Result<(), ArtifactBrokerConfigurationError> {
+        if self.maximum_in_flight == 0
+            || self.maximum_in_flight > MAX_ARTIFACT_READ_IN_FLIGHT_HARD
+            || self.maximum_read_bytes == 0
+            || self.operation_timeout.is_zero()
+            || self.operation_timeout > MAX_ARTIFACT_BROKER_TIMEOUT
+        {
+            return Err(ArtifactBrokerConfigurationError::InvalidLimits);
+        }
+        Ok(())
+    }
+}
+
+impl Default for ArtifactBrokerLimits {
+    fn default() -> Self {
+        Self {
+            maximum_in_flight: 128,
+            maximum_read_bytes: 16 * 1024 * 1024,
+            operation_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactBrokerConfigurationError {
+    InvalidLimits,
+    InvalidStorageBinding,
+    DuplicateStorageBinding,
+    StorageBindingCatalogTooLarge,
+}
+
+/// KMS plaintext. It cannot be cloned or formatted and is zeroed on drop.
+pub struct DecryptedArtifactObjectReference(Vec<u8>);
+
+impl DecryptedArtifactObjectReference {
+    pub fn new(mut bytes: Vec<u8>) -> Result<Self, ArtifactObjectReferenceUnsealError> {
+        if bytes.is_empty() || bytes.len() > MAX_DECRYPTED_ARTIFACT_LOCATOR_BYTES {
+            bytes.fill(0);
+            return Err(ArtifactObjectReferenceUnsealError::InvalidEvidence);
+        }
+        Ok(Self(bytes))
+    }
+
+    fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for DecryptedArtifactObjectReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DecryptedArtifactObjectReference")
+            .field("byte_length", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for DecryptedArtifactObjectReference {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactObjectReferenceUnsealError {
+    Unavailable,
+    Rejected,
+    InvalidEvidence,
+}
+
+/// KMS port. Associated data must contain every identity in the authorized projection.
+#[async_trait]
+pub trait ArtifactObjectReferenceUnsealer: Send + Sync {
+    async fn unseal(
+        &self,
+        authorized: &AuthorizedArtifactObjectRead,
+    ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError>;
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactObjectLocator {
+    schema_version: u32,
+    backend: String,
+    storage_binding_digest: Sha256Digest,
+    object_key: String,
+    object_generation: String,
+}
+
+impl ArtifactObjectLocator {
+    fn validate_for(&self, authorized: &AuthorizedArtifactObjectRead) -> bool {
+        self.schema_version == 1
+            && self.backend == "s3"
+            && self.backend == authorized.backend
+            && self.storage_binding_digest == authorized.storage_binding_digest
+            && self.object_generation == authorized.object_generation
+            && valid_opaque_object_key(&self.object_key)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactObjectMetadata {
+    pub object_generation: String,
+    pub byte_length: u64,
+}
+
+/// Non-clone object bytes. Providers must enforce their own streaming ceiling before creating it.
+pub struct ArtifactObjectBytes {
+    pub metadata: ArtifactObjectMetadata,
+    bytes: Vec<u8>,
+}
+
+impl ArtifactObjectBytes {
+    pub fn new(
+        metadata: ArtifactObjectMetadata,
+        mut bytes: Vec<u8>,
+        maximum_bytes: usize,
+    ) -> Result<Self, ArtifactObjectStoreError> {
+        if bytes.len() > maximum_bytes
+            || u64::try_from(bytes.len()).ok() != Some(metadata.byte_length)
+            || metadata.object_generation.is_empty()
+        {
+            bytes.fill(0);
+            return Err(ArtifactObjectStoreError::InvalidEvidence);
+        }
+        Ok(Self { metadata, bytes })
+    }
+
+    fn expose(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl fmt::Debug for ArtifactObjectBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactObjectBytes")
+            .field("metadata", &self.metadata)
+            .field("byte_length", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ArtifactObjectBytes {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactObjectStoreError {
+    Unavailable,
+    NotFound,
+    Rejected,
+    TooLarge,
+    InvalidEvidence,
+}
+
+#[async_trait]
+pub trait InstalledArtifactObjectStore: Send + Sync {
+    fn backend(&self) -> &str;
+    fn storage_binding_digest(&self) -> &Sha256Digest;
+
+    async fn head_exact(
+        &self,
+        object_key: &str,
+        object_generation: &str,
+    ) -> Result<ArtifactObjectMetadata, ArtifactObjectStoreError>;
+
+    async fn read_exact(
+        &self,
+        object_key: &str,
+        object_generation: &str,
+        maximum_bytes: usize,
+    ) -> Result<ArtifactObjectBytes, ArtifactObjectStoreError>;
+}
+
+#[derive(Clone)]
+pub struct InstalledArtifactObjectStoreCatalog {
+    stores: BTreeMap<Sha256Digest, Arc<dyn InstalledArtifactObjectStore>>,
+}
+
+impl InstalledArtifactObjectStoreCatalog {
+    pub fn new(
+        stores: Vec<Arc<dyn InstalledArtifactObjectStore>>,
+    ) -> Result<Self, ArtifactBrokerConfigurationError> {
+        if stores.is_empty() || stores.len() > MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS {
+            return Err(ArtifactBrokerConfigurationError::StorageBindingCatalogTooLarge);
+        }
+        let mut installed = BTreeMap::new();
+        for store in stores {
+            if store.backend() != "s3" {
+                return Err(ArtifactBrokerConfigurationError::InvalidStorageBinding);
+            }
+            let digest = store.storage_binding_digest().clone();
+            if installed.insert(digest, store).is_some() {
+                return Err(ArtifactBrokerConfigurationError::DuplicateStorageBinding);
+            }
+        }
+        Ok(Self { stores: installed })
+    }
+
+    fn get(&self, digest: &Sha256Digest) -> Option<Arc<dyn InstalledArtifactObjectStore>> {
+        self.stores.get(digest).cloned()
+    }
+}
+
+pub struct BrokeredWasiArtifactBroker {
+    authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
+    unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
+    stores: InstalledArtifactObjectStoreCatalog,
+    limits: ArtifactBrokerLimits,
+    in_flight: Arc<Semaphore>,
+}
+
+impl BrokeredWasiArtifactBroker {
+    pub fn new(
+        authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
+        unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
+        stores: InstalledArtifactObjectStoreCatalog,
+        limits: ArtifactBrokerLimits,
+    ) -> Result<Self, ArtifactBrokerConfigurationError> {
+        limits.validate()?;
+        Ok(Self {
+            authority,
+            unsealer,
+            stores,
+            limits,
+            in_flight: Arc::new(Semaphore::new(limits.maximum_in_flight)),
+        })
+    }
+
+    async fn read_inner(
+        &self,
+        request: &WasiArtifactReadRequest,
+    ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
+        if request.deadline <= Utc::now()
+            || request.maximum_bytes == 0
+            || request.maximum_bytes > self.limits.maximum_read_bytes
+            || u64::try_from(request.maximum_bytes)
+                .map_or(true, |maximum| maximum < request.artifact.byte_length())
+        {
+            return Err(WasiArtifactBrokerError::Denied);
+        }
+        let authorized = self
+            .authority
+            .authorize_object_read(request)
+            .await
+            .map_err(map_authority_error)?;
+        authorized
+            .validate()
+            .map_err(|_| WasiArtifactBrokerError::Integrity)?;
+        if authorized.artifact != request.artifact {
+            return Err(WasiArtifactBrokerError::Integrity);
+        }
+        let store = self
+            .stores
+            .get(&authorized.storage_binding_digest)
+            .ok_or(WasiArtifactBrokerError::Denied)?;
+        if store.backend() != authorized.backend {
+            return Err(WasiArtifactBrokerError::Integrity);
+        }
+        let plaintext = self
+            .unsealer
+            .unseal(&authorized)
+            .await
+            .map_err(map_unseal_error)?;
+        let locator = parse_locator(plaintext.expose())?;
+        if !locator.validate_for(&authorized) {
+            return Err(WasiArtifactBrokerError::Integrity);
+        }
+        let head = store
+            .head_exact(&locator.object_key, &locator.object_generation)
+            .await
+            .map_err(map_store_error)?;
+        require_object_metadata(&authorized, &head, request.maximum_bytes)?;
+        let object = store
+            .read_exact(
+                &locator.object_key,
+                &locator.object_generation,
+                request.maximum_bytes,
+            )
+            .await
+            .map_err(map_store_error)?;
+        require_object_metadata(&authorized, &object.metadata, request.maximum_bytes)?;
+        if sha256(object.expose()) != authorized.artifact.content_digest().clone() {
+            return Err(WasiArtifactBrokerError::Integrity);
+        }
+
+        // The object I/O happened outside the database transaction. Re-authorize before release
+        // so terminal/revoke/lease changes cannot race a successful read into the Executor.
+        let final_authorization = self
+            .authority
+            .authorize_object_read(request)
+            .await
+            .map_err(map_authority_error)?;
+        if final_authorization.authorization_digest != authorized.authorization_digest {
+            return Err(WasiArtifactBrokerError::Denied);
+        }
+        Ok(object.into_bytes())
+    }
+}
+
+#[async_trait]
+impl WasiArtifactBroker for BrokeredWasiArtifactBroker {
+    async fn read_exact(
+        &self,
+        request: WasiArtifactReadRequest,
+    ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
+        let permit = self
+            .in_flight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| WasiArtifactBrokerError::Unavailable)?;
+        let deadline_budget = request
+            .deadline
+            .signed_duration_since(Utc::now())
+            .to_std()
+            .map_err(|_| WasiArtifactBrokerError::Denied)?;
+        let budget = self.limits.operation_timeout.min(deadline_budget);
+        let result = timeout(budget, self.read_inner(&request))
+            .await
+            .map_err(|_| WasiArtifactBrokerError::Unavailable)?;
+        drop(permit);
+        result
+    }
+}
+
+fn parse_locator(bytes: &[u8]) -> Result<ArtifactObjectLocator, WasiArtifactBrokerError> {
+    let value = parse_strict_json(
+        bytes,
+        JsonLimits {
+            max_bytes: MAX_DECRYPTED_ARTIFACT_LOCATOR_BYTES,
+            max_depth: 4,
+            max_items_per_array: 1,
+            max_properties_per_object: 5,
+            max_string_bytes: MAX_ARTIFACT_OBJECT_KEY_BYTES,
+        },
+    )
+    .map_err(|_| WasiArtifactBrokerError::Integrity)?;
+    if serde_jcs::to_vec(&value).map_err(|_| WasiArtifactBrokerError::Integrity)? != bytes {
+        return Err(WasiArtifactBrokerError::Integrity);
+    }
+    serde_json::from_value(value).map_err(|_| WasiArtifactBrokerError::Integrity)
+}
+
+fn require_object_metadata(
+    authorized: &AuthorizedArtifactObjectRead,
+    metadata: &ArtifactObjectMetadata,
+    maximum_bytes: usize,
+) -> Result<(), WasiArtifactBrokerError> {
+    if metadata.object_generation != authorized.object_generation
+        || metadata.byte_length != authorized.artifact.byte_length()
+        || metadata.byte_length > u64::try_from(maximum_bytes).unwrap_or(u64::MAX)
+    {
+        return Err(WasiArtifactBrokerError::Integrity);
+    }
+    Ok(())
+}
+
+fn valid_opaque_object_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ARTIFACT_OBJECT_KEY_BYTES
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("//")
+        && value
+            .split('/')
+            .all(|segment| !matches!(segment, "" | "." | ".."))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'\\')
+}
+
+fn sha256(bytes: &[u8]) -> Sha256Digest {
+    let value = Sha256::digest(bytes);
+    format!("sha256:{}", lower_hex(&value))
+        .parse()
+        .expect("SHA-256 output has the nominal digest shape")
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn map_authority_error(error: ArtifactObjectReadAuthorityError) -> WasiArtifactBrokerError {
+    match error {
+        ArtifactObjectReadAuthorityError::Unavailable => WasiArtifactBrokerError::Unavailable,
+        ArtifactObjectReadAuthorityError::Denied => WasiArtifactBrokerError::Denied,
+        ArtifactObjectReadAuthorityError::NotFound => WasiArtifactBrokerError::NotFound,
+        ArtifactObjectReadAuthorityError::InvalidEvidence => WasiArtifactBrokerError::Integrity,
+    }
+}
+
+fn map_unseal_error(error: ArtifactObjectReferenceUnsealError) -> WasiArtifactBrokerError {
+    match error {
+        ArtifactObjectReferenceUnsealError::Unavailable => WasiArtifactBrokerError::Unavailable,
+        ArtifactObjectReferenceUnsealError::Rejected => WasiArtifactBrokerError::Denied,
+        ArtifactObjectReferenceUnsealError::InvalidEvidence => WasiArtifactBrokerError::Integrity,
+    }
+}
+
+fn map_store_error(error: ArtifactObjectStoreError) -> WasiArtifactBrokerError {
+    match error {
+        ArtifactObjectStoreError::Unavailable => WasiArtifactBrokerError::Unavailable,
+        ArtifactObjectStoreError::NotFound => WasiArtifactBrokerError::NotFound,
+        ArtifactObjectStoreError::Rejected => WasiArtifactBrokerError::Denied,
+        ArtifactObjectStoreError::TooLarge => WasiArtifactBrokerError::TooLarge,
+        ArtifactObjectStoreError::InvalidEvidence => WasiArtifactBrokerError::Integrity,
+    }
+}
+
+#[cfg(test)]
+mod tests;

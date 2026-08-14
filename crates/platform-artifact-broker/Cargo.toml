@@ -1,0 +1,26 @@
+[package]
+name = "insight-platform-artifact-broker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+aws-config.workspace = true
+aws-sdk-kms.workspace = true
+aws-sdk-s3.workspace = true
+chrono.workspace = true
+insight-platform-artifacts.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-sandbox.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
