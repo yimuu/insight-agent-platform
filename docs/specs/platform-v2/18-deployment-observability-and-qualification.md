@@ -140,8 +140,10 @@ Gate A～G结果或ReleaseManifest；因此这项machine-contract foundation本�
 
 Sandbox expired-lease runtime现也有独立`WorkClass::Sandbox` business/critical-control permit、分片scan、backend evidence与fenced
 commit driver；unit fixture证明Sandbox业务permit耗尽时critical-control scan仍运行。Core NATS control adapter也已实现exact
-WorkerProcessGeneration subject、bounded closed request/reply和signal-digest binding。两者尚未在authenticated NATS、独立Pod/node pool、
-真实backend、PostgreSQL故障窗口或Q1饱和环境资格化，因此只属于开发期Contract/Functional子证据。
+WorkerProcessGeneration subject、bounded closed request/reply和signal-digest binding。Helm已把WASI与microVM拆为独立DaemonSet/node
+selector；microVM Pod内又把非root Executor和唯一持有KVM/cgroup/jail/state权限的Provider按volume、credential与capability拆开，并由
+default-deny NetworkPolicy和ValidatingAdmissionPolicy锁定。该渲染合同已通过静态门禁，但仍未在authenticated NATS、真实KVM node、
+PostgreSQL故障窗口或Q1饱和环境资格化，因此只属于开发期Contract/Functional子证据。
 
 Model执行面现有OpenAI Responses与Anthropic Messages两个wire adapter的共同开发期fixture，覆盖固定protocol request、text/tool/schema/
 usage normalization与未知Provider字段拒绝；credential-free brokered connector还覆盖incremental SSE、总量边界、重复JSON key、closed

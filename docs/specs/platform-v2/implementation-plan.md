@@ -592,6 +592,14 @@ Sandbox deployment合同门禁；两个显式ignored RustFS资格测试仍不计
 establishment Worker、实际Managed microVM session Provider、guest Secret注入与terminal supervisor仍未组合进Executor进程，heartbeat、terminal/session-loss
 recovery和真实资格也未交付，故上述开放项和Phase状态不变。
 
+随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor
+只经node-local mTLS Unix socket调用同Pod的最小Provider。只有Provider容器挂载KVM、host cgroup、持久化jail/state并持有closed Linux
+capability allowlist；Executor与Provider的TLS/queue/attestor volume互斥，均无Kubernetes API token。独立ConfigMap生成closed Executor/
+Provider JSON，WorkerManifest canonical digest与backend digest共同绑定两端；default-deny NetworkPolicy开放Controller、NATS、DNS和Egress
+Broker的必要边，ValidatingAdmissionPolicy逐容器锁定hostPath、credential、capability及专用node contract。部署脚本实际通过4 workload、
+6 NetworkPolicy、immutable image、JSON解析及capacity drift负向检查，两个进程config unit共3项通过。该切片建立production-equivalent
+部署合同但没有生成Candidate或真实KVM互操作证据，Managed establishment/Provider/guest Secret/terminal开放项及Phase 4/6状态不变。
+
 CR-159关闭Phase 6入口的CandidateManifest machine-contract空洞：closed Rust type与checked-in JSON Schema冻结full tagged Git object ID、
 `cand`/`qpr` nominal identity、schema contract version、bounded component image map、canonical WorkerManifest digest set、deployment/limit/
 policy/contract digest和UTC创建时间。builder从实际WorkerManifest与HardLimitProfile计算closure，复验拒绝重复role、缺失或额外worker、

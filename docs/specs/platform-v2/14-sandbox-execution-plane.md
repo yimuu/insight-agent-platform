@@ -749,9 +749,9 @@ expired-lease safety scan返回exact request、旧Job version/generation、旧Wo
 同一恢复可由不同recovery process以新mutation ID重放。`Preparing -> Lost`已加入closed state contract，因为该phase提交后backend prepare
 可能正在进行，不能回退到Accepted。
 58个contract fixture、22个Sandbox domain/worker fixture、3个NATS control wire/config fixture、strict Clippy及真实PostgreSQL 16
-Sandbox transaction/resolver/scan/recovery测试均已实际通过。生产WASI/gVisor/microVM adapter、
-authenticated NATS real-process/control ACL fixture、生产backend reconnect/abort/quarantine实现、Artifact/Secret/Egress broker、独立执行拓扑、
-escape/process-kill/saturation conformance均仍是Phase 4退出门禁，不能由mock backend或编译结果替代。
+Sandbox transaction/resolver/scan/recovery测试均已实际通过。生产WASI与Firecracker adapter及其独立进程/Helm拓扑已经交付；gVisor adapter、
+authenticated NATS real-process/control ACL fixture、生产backend reconnect/abort/quarantine实现、完整Artifact/Secret/Egress broker组合以及
+escape/process-kill/saturation conformance仍是Phase 4退出门禁，不能由mock backend、Helm渲染或编译结果替代。
 
 运行时`SandboxRecoveryDriver`使用Sandbox WorkerManifest的独立critical-control permit循环执行分片scan；每个已进入backend的候选先经
 exact backend contract执行destroy或node quarantine并生成sealed evidence，再由不同的PostgreSQL连接阶段提交恢复。业务Sandbox permit
@@ -775,6 +775,14 @@ SHA-256；主逻辑输入必须持有exact `read_whole` grant。通过guest Read
 private vsock依序交付一次性runtime/input materialization，最后才发送同一request fence的execute command；materialization与execute envelope
 digest共同进入start evidence。已安装且合同闭合的`managed_mcp_server` runtime可由该Provider选择。定向domain/config/protocol/socket fixture
 实际通过，但尚无真实Linux KVM/jailer/guest-agent互操作、进程终止/恢复、escape或饱和证据，因此不把microVM backend或Phase 4/6标记为完成。
+
+生产部署合同现增加独立`executor-microvm` DaemonSet，只调度到带专用label与taint的KVM Linux node pool。非root Executor与root
+Firecracker Provider在同一node-local Pod内仅共享mTLS保护的Unix socket；只有Provider挂载`/dev/kvm`、host cgroup、持久化jail/state
+目录并取得逐项allowlist的Linux capability，Executor不挂载这些路径或Provider credential，Provider也不挂载Executor/NATS/attestor
+credential。两者使用不同mTLS Secret，Pod不挂service-account token；默认deny NetworkPolicy只开放Controller、NATS、DNS以及为Managed
+Secret预留的Egress Broker边。ValidatingAdmissionPolicy逐容器拒绝KVM、hostPath、capability或credential边界漂移，静态部署门禁同时验证
+四个workload、六条NetworkPolicy、immutable image、closed JSON及`max_concurrency <= maximum_instances`。这只是production-equivalent
+topology合同，未在CandidateManifest绑定的真实KVM node上运行，不能替代上述Linux资格证据。
 
 Managed stdio Resource subscription的durable authority现已复用共享23表交付到Ready提交，不增加表或migration。closed `SandboxJobPayload`以
 `capability_execution | managed_mcp_subscription_session`区分两种物理workload；Managed variant冻结逻辑subscription/Job、session
