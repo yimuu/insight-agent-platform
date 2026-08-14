@@ -507,7 +507,7 @@ server identity校验，不引入Service负载均衡、Kubernetes API或中心ro
 NetworkPolicy，静态合同通过；Sandbox相关strict Clippy、Attestor 8项和Sandbox RPC 6项测试通过。Linux real-process/跨节点网络资格前
 CR-155及Phase 4保持Open。
 
-具体KMS/真实Secret Manager Provider adapter、生产token verifier、Sandbox one-time delivery、real-process Provider conformance、
+具体KMS/真实Secret Manager Provider adapter、real-process Provider conformance、
 独立Pod/NetworkPolicy及Phase 6资格通过前CR-136/CR-137/CR-143/CR-144仍保持Open。
 
 CR-137正在修复MCP OAuth的credential scope：旧实现把per-user token SecretBinding错误地要求为immutable Deployment closure成员，
@@ -582,9 +582,14 @@ object-store/KMS/二次授权和一个in-flight bulkhead，同时调用各自typ
 `Starting`、exact Executor lease、deadline和active `read_whole` package grant；grant回收按workload分流，并以Managed
 Job/request/attempt/lease/Executor及Ready sandbox identity幂等验证。全新PostgreSQL 16 Managed fixture和既有Sandbox回归fixture实际通过，
 错误Executor/workload均fail closed，重复回收返回相同evidence且active grant归零；不增加表或migration。
+Managed Secret one-time delivery也已交付其authority/broker/RPC/deployment切片：microVM Provider以exact workload identity调用Egress，
+Egress经Sandbox Controller reserve后才解析Secret，随后由Controller重新锁定并复验exact Job/request/attempt/current lease/Executor、
+Provider process generation、sandbox identity、完整prepared canonical digest和ScopedSecretGrant再commit。只有fresh reserve与fresh commit
+同时成功才返回bytes；reserve/commit replay与响应丢失均fail closed。`maximum_reads`复用现有Receipt计数，commit写Receipt/Event/Outbox而
+不修改Job version；Controller不见明文、Egress无数据库credential、Provider无数据库/KMS/Secret Manager权限，仍为23表/单一migration。
 本切片最终通过workspace all-target/all-feature test与doc-test、strict Clippy、public API baseline、crate boundary、cutover residual及
 Sandbox deployment合同门禁；两个显式ignored RustFS资格测试仍不计入证据。
-establishment Worker、实际Managed microVM session Provider与terminal supervisor仍未组合进Executor进程，heartbeat、terminal/session-loss
+establishment Worker、实际Managed microVM session Provider、guest Secret注入与terminal supervisor仍未组合进Executor进程，heartbeat、terminal/session-loss
 recovery和真实资格也未交付，故上述开放项和Phase状态不变。
 
 CR-159关闭Phase 6入口的CandidateManifest machine-contract空洞：closed Rust type与checked-in JSON Schema冻结full tagged Git object ID、

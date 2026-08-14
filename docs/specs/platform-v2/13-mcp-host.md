@@ -752,6 +752,13 @@ Artifact Broker按workload选择PostgreSQL authority并共享一个in-flight bul
 `Starting`、exact Executor lease仍有效且`read_whole` grant仍为active时读取，并在object I/O前后各授权一次。Provider销毁后的grant
 回收也按Managed workload、Job/request/attempt/lease/Executor及Ready后的sandbox identity幂等验证。全新PostgreSQL 16 fixture实际覆盖
 成功读取、错误Executor/workload拒绝、Ready后两次回收得到同一evidence及active grant归零；该切片不增加表或migration。
+Managed runtime Secret现通过独立Egress与Sandbox Controller之间的两阶段交付：Controller使用现有`receipts`在exact Managed Job、
+request、attempt、lease、Executor、Provider process generation、sandbox identity和ScopedSecretGrant上保留一次read，Egress才通过既有
+Security Authority、KMS和Secret Provider解析明文；解析后Controller再次锁定并复验全部authority，再原子提交Receipt/Event/Outbox。
+只有fresh reserve与fresh commit同时成功的一次调用可以向Provider返回bytes；reserve/commit重放、响应丢失或任一fence漂移均fail closed，
+已经提交的重放不得再次返回明文。Controller永不接触明文，Egress没有数据库credential，Provider没有数据库、KMS或Secret Manager权限。
+`maximum_reads`由现有Receipt计数执行，不增加表或migration，也不修改Job version；`Starting` phase evidence改为提交包含Provider generation
+和sandbox identity的完整prepared canonical digest，防止交付时用较弱prepare evidence替换实际运行实例。
 该切片仍未把establishment Worker、真实microVM Managed session Provider和terminal supervisor组合进Executor进程；heartbeat、
 terminal/session-loss recovery以及真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未交付，因此该证据不关闭MCP或Phase 4，也不把本规范标记为
 Implemented/Verified。此前workspace

@@ -800,6 +800,15 @@ domain定向测试分别9、3、33项通过。该切片尚未把establishment Wo
 microVM session Provider和terminal supervisor组合进Executor进程，也没有heartbeat、terminal/session-loss recovery或真实进程资格，
 因此不关闭Phase 4。
 
+Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身
+workload identity调用Sandbox Controller执行reserve与commit，并在两者之间通过既有Security Authority、KMS和Secret Provider解析材料。
+Controller在reserve和commit均锁定并复验同一Managed Sandbox Job、request/attempt、当前lease、Executor、Provider process generation、
+sandbox identity、完整prepared canonical digest和active ScopedSecretGrant。只有fresh reserve后紧接fresh commit的调用可以释放bytes；
+任何重放、响应丢失、过期、generation/fence漂移或已达`maximum_reads`都fail closed。read次数使用共享`receipts` authority计数，commit写入
+同一Receipt及Event/Outbox，且不推进Job version，避免使正在执行的Worker fence失效。该设计保持Controller不见明文、Egress无数据库
+credential、Provider无数据库/KMS/Secret Manager权限，并继续保持23表与单一`0001` migration。guest内注入与真实Managed session
+Provider的生产组合仍未交付，因此本切片不关闭Phase 4。
+
 process-generation isolation authority是独立于PostgreSQL lease、NATS和Controller进程的node/runtime attestor；数据库lease过期、NATS
 断连、Pod deletion request、Controller本地cache miss或对旧generation RPC超时都不是absence proof。其closed请求必须精确绑定
 `tenant_id`、`sandbox_job_id`、`request_digest`、旧`worker_process_generation_id`和已提交到Sandbox Job phase evidence中的
