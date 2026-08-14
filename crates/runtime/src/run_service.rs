@@ -93,8 +93,8 @@ use crate::{
         qualification_summary_delay_from_environment, summary_preview, ConversationAttachedTurn,
         ConversationDetachedTurn, ConversationMessagePageView, ConversationMessageView,
         ConversationVisibilityGuard, RunPersistenceCapability, TerminalAdmissionAuthority,
-        TerminalAttachedRun, TerminalOnlyRunConfig, TerminalOnlyRunEngine, TerminalOnlyStore,
-        SUMMARY_MAX_ENTRIES,
+        TerminalAttachedRun, TerminalConversationTurnCreation, TerminalOnlyRunConfig,
+        TerminalOnlyRunEngine, TerminalOnlyStore, TerminalRunCreation, SUMMARY_MAX_ENTRIES,
     },
 };
 
@@ -3639,15 +3639,15 @@ impl RunService {
             return self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
-                .create_detached_for_tenant_with_authority(
-                    tenant_id,
+                .create_detached_for_tenant_with_authority(TerminalRunCreation {
+                    tenant_id: tenant_id.to_owned(),
                     agent,
                     input,
-                    format!("adm_{}", Uuid::new_v4().simple()),
+                    admission_id: format!("adm_{}", Uuid::new_v4().simple()),
                     request_id,
-                    Vec::new(),
+                    file_bindings: Vec::new(),
                     authority,
-                )
+                })
                 .await;
         }
         let principal = RunPrincipal::new(tenant_id, None::<String>)?;
@@ -3687,17 +3687,17 @@ impl RunService {
             return self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
-                .create_detached_for_tenant_with_authority(
-                    tenant_id,
+                .create_detached_for_tenant_with_authority(TerminalRunCreation {
+                    tenant_id: tenant_id.to_owned(),
                     agent,
-                    prepared.input,
+                    input: prepared.input,
                     admission_id,
-                    request
+                    request_id: request
                         .request_id
                         .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
-                    prepared.file_bindings,
+                    file_bindings: prepared.file_bindings,
                     authority,
-                )
+                })
                 .await;
         }
         let (projection, _, _) = self
@@ -3761,15 +3761,15 @@ impl RunService {
             return self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
-                .create_detached_for_tenant_with_authority(
-                    tenant_id,
+                .create_detached_for_tenant_with_authority(TerminalRunCreation {
+                    tenant_id: tenant_id.to_owned(),
                     agent,
                     input,
-                    format!("adm_{}", Uuid::new_v4().simple()),
+                    admission_id: format!("adm_{}", Uuid::new_v4().simple()),
                     request_id,
-                    Vec::new(),
+                    file_bindings: Vec::new(),
                     authority,
-                )
+                })
                 .await;
         }
         let agent = self
@@ -3993,15 +3993,15 @@ impl RunService {
             let attached = self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
-                .create_attached_with_authority(
-                    tenant_id,
+                .create_attached_with_authority(TerminalRunCreation {
+                    tenant_id: tenant_id.to_owned(),
                     agent,
                     input,
-                    format!("adm_{}", Uuid::new_v4().simple()),
+                    admission_id: format!("adm_{}", Uuid::new_v4().simple()),
                     request_id,
-                    Vec::new(),
+                    file_bindings: Vec::new(),
                     authority,
-                )
+                })
                 .await?;
             return Ok(AnyAttachedRun::TerminalOnly(attached));
         }
@@ -4030,17 +4030,17 @@ impl RunService {
             let attached = self
                 .terminal_engine()
                 .ok_or_else(terminal_only_not_installed)?
-                .create_attached_with_authority(
-                    tenant_id,
+                .create_attached_with_authority(TerminalRunCreation {
+                    tenant_id: tenant_id.to_owned(),
                     agent,
-                    prepared.input,
+                    input: prepared.input,
                     admission_id,
-                    request
+                    request_id: request
                         .request_id
                         .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple())),
-                    prepared.file_bindings,
+                    file_bindings: prepared.file_bindings,
                     authority,
-                )
+                })
                 .await?;
             return Ok(AnyAttachedRun::TerminalOnly(attached));
         }
@@ -5395,13 +5395,15 @@ impl RunService {
         self.terminal_engine()
             .ok_or_else(terminal_only_not_installed)?
             .create_conversation_detached_invocation_with_authority(
-                conversation_id,
-                tenant_id,
-                user_id,
-                admission_id,
-                request_id,
-                invocation,
-                authority,
+                TerminalConversationTurnCreation {
+                    conversation_id,
+                    tenant_id,
+                    user_id,
+                    admission_id,
+                    request_id,
+                    invocation,
+                    authority,
+                },
             )
             .await
     }
@@ -5446,13 +5448,15 @@ impl RunService {
             .terminal_engine()
             .ok_or_else(terminal_only_not_installed)?
             .create_conversation_attached_invocation_with_authority(
-                conversation_id,
-                tenant_id,
-                user_id,
-                admission_id,
-                request_id,
-                invocation,
-                authority,
+                TerminalConversationTurnCreation {
+                    conversation_id,
+                    tenant_id,
+                    user_id,
+                    admission_id,
+                    request_id,
+                    invocation,
+                    authority,
+                },
             )
             .await?;
         Ok(AnyConversationAttachedTurn {

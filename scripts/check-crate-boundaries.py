@@ -16,10 +16,44 @@ INTERNAL_ROLES = {
     "insight-storage": "storage",
     "insight-runtime": "runtime",
     "insight-api": "api",
+    "insight-platform-artifacts": "artifacts_domain",
+    "insight-platform-artifact-broker": "artifact_broker",
+    "insight-platform-api": "platform_api",
+    "insight-platform-capability-adapters": "capability_adapters",
+    "insight-platform-callback-api": "callback_api",
+    "insight-platform-contracts": "contracts",
+    "insight-platform-context": "context_domain",
+    "insight-platform-egress": "egress_core",
+    "insight-platform-egress-broker": "egress_broker",
+    "insight-platform-egress-rpc": "egress_rpc",
+    "insight-platform-invocations": "invocations_domain",
+    "insight-platform-jobs": "jobs_domain",
+    "insight-platform-mcp-cleanup-worker": "mcp_cleanup_worker",
+    "insight-platform-mcp-host": "mcp_host",
+    "insight-platform-model-adapters": "model_adapters",
+    "insight-platform-models": "models_domain",
+    "insight-platform-orchestrator": "orchestrator_domain",
+    "insight-platform-postgres": "platform_postgres",
+    "insight-platform-registry": "registry_domain",
+    "insight-platform-runtime": "platform_runtime",
+    "insight-platform-sandbox": "sandbox_domain",
+    "insight-platform-sandbox-attestor": "sandbox_attestor",
+    "insight-platform-sandbox-controller": "sandbox_controller",
+    "insight-platform-sandbox-executor": "sandbox_executor",
+    "insight-platform-sandbox-rpc": "sandbox_rpc",
+    "insight-platform-sandbox-microvm": "sandbox_microvm_provider",
+    "insight-platform-sandbox-wasi": "sandbox_wasi_executor",
+    "insight-platform-scheduler": "scheduler_domain",
+    "insight-platform-secret-broker": "secret_broker",
+    "insight-platform-security": "security_domain",
+    "insight-platform-security-authority": "security_authority",
+    "insight-platform-security-rpc": "security_rpc",
+    "insight-platform-tasks": "tasks_domain",
+    "insight-platform-worker": "platform_worker",
 }
 
 ALLOWED_INTERNAL = {
-    "root": {"engine", "dsl", "durable", "resources", "mcp", "storage", "runtime", "api"},
+    "root": {"engine", "dsl", "durable", "resources", "mcp", "storage", "runtime", "api", "artifacts_domain", "platform_api", "capability_adapters", "contracts", "context_domain", "egress_core", "invocations_domain", "jobs_domain", "mcp_host", "model_adapters", "models_domain", "orchestrator_domain", "registry_domain", "sandbox_domain", "scheduler_domain", "secret_broker", "security_domain", "tasks_domain", "platform_postgres", "platform_runtime", "platform_worker"},
     "engine": set(),
     "dsl": {"engine"},
     "durable": {"engine", "dsl"},
@@ -28,6 +62,40 @@ ALLOWED_INTERNAL = {
     "storage": {"engine", "durable", "dsl"},
     "runtime": {"engine", "durable", "dsl", "resources", "mcp"},
     "api": {"engine", "dsl", "durable", "resources", "runtime", "mcp"},
+    "artifacts_domain": {"contracts", "jobs_domain"},
+    "artifact_broker": {"artifacts_domain", "contracts", "sandbox_domain"},
+    "platform_api": {"mcp_host"},
+    "capability_adapters": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
+    "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "platform_postgres"},
+    "contracts": set(),
+    "context_domain": {"contracts", "invocations_domain", "jobs_domain"},
+    "egress_core": {"capability_adapters", "contracts", "mcp_host", "model_adapters"},
+    "egress_broker": {"contracts", "egress_core", "egress_rpc", "model_adapters", "secret_broker", "security_rpc"},
+    "egress_rpc": {"capability_adapters", "contracts", "mcp_host", "model_adapters"},
+    "invocations_domain": {"contracts", "jobs_domain"},
+    "jobs_domain": {"contracts"},
+    "mcp_cleanup_worker": {"contracts", "egress_rpc", "mcp_host", "platform_postgres"},
+    "mcp_host": {"contracts", "jobs_domain"},
+    "model_adapters": {"contracts", "jobs_domain", "models_domain"},
+    "models_domain": {"contracts", "invocations_domain", "jobs_domain"},
+    "orchestrator_domain": {"contracts", "jobs_domain"},
+    "registry_domain": {"contracts"},
+    "scheduler_domain": {"contracts"},
+    "secret_broker": {"contracts", "egress_core", "mcp_host", "security_domain"},
+    "security_domain": {"contracts"},
+    "security_authority": {"contracts", "platform_postgres", "security_domain", "security_rpc"},
+    "security_rpc": {"contracts", "security_domain"},
+    "tasks_domain": {"contracts"},
+    "platform_postgres": {"artifact_broker", "artifacts_domain", "capability_adapters", "contracts", "context_domain", "invocations_domain", "jobs_domain", "mcp_host", "model_adapters", "models_domain", "orchestrator_domain", "registry_domain", "sandbox_domain", "scheduler_domain", "security_domain", "tasks_domain"},
+    "platform_runtime": {"contracts", "orchestrator_domain", "platform_postgres", "platform_worker", "sandbox_domain", "sandbox_rpc", "security_domain"},
+    "sandbox_domain": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
+    "sandbox_attestor": {"contracts", "sandbox_domain", "sandbox_rpc"},
+    "sandbox_controller": {"artifact_broker", "contracts", "platform_postgres", "sandbox_domain", "sandbox_rpc"},
+    "sandbox_executor": {"contracts", "sandbox_domain", "sandbox_rpc", "sandbox_wasi_executor", "platform_worker"},
+    "sandbox_rpc": {"contracts", "sandbox_domain"},
+    "sandbox_microvm_provider": {"capability_adapters", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "sandbox_domain", "sandbox_rpc"},
+    "sandbox_wasi_executor": {"contracts", "sandbox_domain"},
+    "platform_worker": {"contracts"},
 }
 
 FORBIDDEN_DIRECT = {
@@ -51,10 +119,44 @@ FORBIDDEN_DIRECT = {
     # shared pinned/SSRF-restricted client from insight-mcp for issuer/JWKS
     # discovery. Direct SQL remains forbidden.
     "api": {"sqlx"},
+    "artifacts_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "artifact_broker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "platform_api": {"sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "capability_adapters": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "callback_api": {"reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    "contracts": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "context_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "egress_core": {"axum", "sqlx", "dotenvy", "tracing-subscriber"},
+    "egress_broker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "egress_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    "invocations_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "jobs_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "mcp_cleanup_worker": {"axum", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    "mcp_host": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "model_adapters": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "models_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "orchestrator_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "registry_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "scheduler_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "secret_broker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "security_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "security_authority": {"axum", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    "security_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    "tasks_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "platform_postgres": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
+    "platform_runtime": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_attestor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_controller": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_executor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_microvm_provider": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_wasi_executor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "platform_worker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
 }
 
 TRANSITIVELY_FORBIDDEN = {"axum", "sqlx", "reqwest"}
-CRITICAL_FEATURE_PACKAGES = {"axum", "sqlx", "reqwest", "tokio"}
+CRITICAL_FEATURE_PACKAGES = {"axum", "hyper", "hyper-rustls", "hyper-util", "sqlx", "reqwest", "tokio"}
 REQUIRED_RUSTLS_PROVIDER_FEATURE = "aws_lc_rs"
 FORBIDDEN_RUSTLS_PROVIDER_FEATURE = "ring"
 
@@ -161,6 +263,9 @@ MANIFEST_PARENT_PATH_PATTERN = re.compile(
     r"CARGO_MANIFEST_DIR[^;]{0,500}(?:\.\./){2}", re.DOTALL
 )
 ALLOWED_FIXED_ASSET_LOCATORS = {
+    # The contract owner embeds the versioned hard-limit profile once; all
+    # consumers use its typed loader instead of reaching across the workspace.
+    "crates/platform-contracts/src/limits.rs",
     # Test-only Schema provisioning reads the workspace-owned baseline at
     # runtime; production storage builds contain no embedded DDL.
     "crates/storage/src/repository/schema_contract.rs",
@@ -263,7 +368,7 @@ def check(metadata, baseline_path, workspace_root):
         missing = sorted(expected_workspace_names - actual_workspace_names)
         unexpected = sorted(actual_workspace_names - expected_workspace_names)
         errors.append(
-            "workspace package set must contain exactly the nine declared packages; "
+            "workspace package set must contain exactly the declared packages; "
             f"missing={missing or 'none'}, unexpected={unexpected or 'none'}, "
             f"package_count={len(workspace_ids)}"
         )

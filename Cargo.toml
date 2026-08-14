@@ -9,6 +9,40 @@ members = [
     "crates/storage",
     "crates/runtime",
     "crates/api",
+    "crates/platform-artifact-broker",
+    "crates/platform-artifacts",
+    "crates/platform-api",
+    "crates/platform-capability-adapters",
+    "crates/platform-callback-api",
+    "crates/platform-contracts",
+    "crates/platform-context",
+    "crates/platform-egress",
+    "crates/platform-egress-broker",
+    "crates/platform-egress-rpc",
+    "crates/platform-invocations",
+    "crates/platform-jobs",
+    "crates/platform-model-adapters",
+    "crates/platform-models",
+    "crates/platform-mcp-host",
+    "crates/platform-mcp-cleanup-worker",
+    "crates/platform-postgres",
+    "crates/platform-orchestrator",
+    "crates/platform-registry",
+    "crates/platform-runtime",
+    "crates/platform-sandbox",
+    "crates/platform-sandbox-controller",
+    "crates/platform-sandbox-attestor",
+    "crates/platform-sandbox-executor",
+    "crates/platform-sandbox-rpc",
+    "crates/platform-sandbox-microvm",
+    "crates/platform-sandbox-wasi",
+    "crates/platform-scheduler",
+    "crates/platform-secret-broker",
+    "crates/platform-security",
+    "crates/platform-security-authority",
+    "crates/platform-security-rpc",
+    "crates/platform-tasks",
+    "crates/platform-worker",
 ]
 default-members = ["."]
 resolver = "2"
@@ -21,7 +55,10 @@ license = "Apache-2.0"
 [workspace.dependencies]
 async-trait = "0.1"
 async-nats = { version = "0.50.0", default-features = false, features = ["aws-lc-rs", "nkeys", "server_2_10", "server_2_11", "server_2_12", "server_2_14"] }
+aws-config = { version = "=1.10.1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-kms = { version = "=1.114.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-s3 = { version = "=1.140.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-secretsmanager = { version = "=1.111.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-credential-types = { version = "=1.3.0", features = ["hardcoded-credentials"] }
 aws-smithy-http-client = { version = "=1.2.0", default-features = false, features = ["default-client"] }
 axum = "0.8"
@@ -33,10 +70,19 @@ chrono-tz = "0.10"
 dotenvy = "0.15.7"
 futures = "0.3"
 handlebars = "6"
+http = "1"
+http-body-util = "0.1"
 humantime = "2"
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http2", "native-tokio", "tls12"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http2", "tokio"] }
+ipnet = "2"
 jsonschema = { version = "0.47", default-features = false }
+libc = "0.2"
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 log = "0.4"
+prost = "0.14.4"
+protoc-bin-vendored = "3.2.0"
 regex = "=1.13.0"
 reqwest = { version = "0.13", features = ["form", "json", "stream", "rustls"], default-features = false }
 rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
@@ -48,14 +94,19 @@ serde_json = "1"
 sha2 = "0.11"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "json", "macros", "tls-rustls-aws-lc-rs"], default-features = false }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
+tonic = { version = "0.14.6", default-features = false, features = ["channel", "codegen", "router", "server", "tls-aws-lc"] }
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+x509-parser = { version = "0.18.1", default-features = false }
 url = "2"
+wasmtime = { version = "=42.0.0", default-features = false, features = ["cranelift", "runtime", "std"] }
 yaml-rust2 = { version = "0.11", default-features = false }
 yaml_serde = "0.10.4"
 
@@ -64,6 +115,40 @@ insight-dsl = { path = "crates/dsl" }
 insight-durable = { path = "crates/durable" }
 insight-engine = { path = "crates/engine" }
 insight-mcp = { path = "crates/mcp" }
+insight-platform-artifact-broker = { path = "crates/platform-artifact-broker" }
+insight-platform-artifacts = { path = "crates/platform-artifacts" }
+insight-platform-api = { path = "crates/platform-api" }
+insight-platform-capability-adapters = { path = "crates/platform-capability-adapters" }
+insight-platform-callback-api = { path = "crates/platform-callback-api" }
+insight-platform-contracts = { path = "crates/platform-contracts" }
+insight-platform-context = { path = "crates/platform-context" }
+insight-platform-egress = { path = "crates/platform-egress" }
+insight-platform-egress-broker = { path = "crates/platform-egress-broker" }
+insight-platform-egress-rpc = { path = "crates/platform-egress-rpc" }
+insight-platform-invocations = { path = "crates/platform-invocations" }
+insight-platform-jobs = { path = "crates/platform-jobs" }
+insight-platform-model-adapters = { path = "crates/platform-model-adapters" }
+insight-platform-models = { path = "crates/platform-models" }
+insight-platform-mcp-host = { path = "crates/platform-mcp-host" }
+insight-platform-mcp-cleanup-worker = { path = "crates/platform-mcp-cleanup-worker" }
+insight-platform-postgres = { path = "crates/platform-postgres" }
+insight-platform-orchestrator = { path = "crates/platform-orchestrator" }
+insight-platform-registry = { path = "crates/platform-registry" }
+insight-platform-runtime = { path = "crates/platform-runtime" }
+insight-platform-sandbox = { path = "crates/platform-sandbox" }
+insight-platform-sandbox-controller = { path = "crates/platform-sandbox-controller" }
+insight-platform-sandbox-attestor = { path = "crates/platform-sandbox-attestor" }
+insight-platform-sandbox-executor = { path = "crates/platform-sandbox-executor" }
+insight-platform-sandbox-rpc = { path = "crates/platform-sandbox-rpc" }
+insight-platform-sandbox-microvm = { path = "crates/platform-sandbox-microvm" }
+insight-platform-sandbox-wasi = { path = "crates/platform-sandbox-wasi" }
+insight-platform-scheduler = { path = "crates/platform-scheduler" }
+insight-platform-secret-broker = { path = "crates/platform-secret-broker" }
+insight-platform-security = { path = "crates/platform-security" }
+insight-platform-security-authority = { path = "crates/platform-security-authority" }
+insight-platform-security-rpc = { path = "crates/platform-security-rpc" }
+insight-platform-tasks = { path = "crates/platform-tasks" }
+insight-platform-worker = { path = "crates/platform-worker" }
 insight-resources = { path = "crates/resources" }
 insight-runtime = { path = "crates/runtime" }
 insight-storage = { path = "crates/storage" }

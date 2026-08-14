@@ -193,11 +193,12 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │   ├── indexmap feature "default"
 │   │   │   │   ├── indexmap v2.14.0
 │   │   │   │   │   ├── equivalent v1.0.2
-│   │   │   │   │   └── hashbrown v0.17.1
-│   │   │   │   │       ├── equivalent v1.0.2
-│   │   │   │   │       ├── foldhash v0.2.0
-│   │   │   │   │       └── allocator-api2 feature "alloc"
-│   │   │   │   │           └── allocator-api2 v0.2.21
+│   │   │   │   │   ├── hashbrown v0.17.1
+│   │   │   │   │   │   ├── equivalent v1.0.2
+│   │   │   │   │   │   ├── foldhash v0.2.0
+│   │   │   │   │   │   └── allocator-api2 feature "alloc"
+│   │   │   │   │   │       └── allocator-api2 v0.2.21
+│   │   │   │   │   └── serde_core v1.0.228
 │   │   │   │   └── indexmap feature "std"
 │   │   │   │       └── indexmap v2.14.0 (*)
 │   │   │   └── zmij feature "default"
@@ -766,14 +767,20 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │       │   │   │   └── deranged v0.5.8
 │       │       │       │   │   ├── num-conv feature "default"
 │       │       │       │   │   │   └── num-conv v0.2.2
-│       │       │       │   │   └── time-core feature "default"
-│       │       │       │   │       └── time-core v0.1.9
+│       │       │       │   │   ├── time-core feature "default"
+│       │       │       │   │   │   └── time-core v0.1.9
+│       │       │       │   │   └── time-macros feature "default"
+│       │       │       │   │       └── time-macros v0.2.32 (proc-macro)
+│       │       │       │   │           ├── num-conv feature "default" (*)
+│       │       │       │   │           └── time-core feature "default" (*)
 │       │       │       │   └── time feature "std"
 │       │       │       │       ├── time v0.3.55 (*)
 │       │       │       │       └── time feature "alloc"
 │       │       │       │           └── time v0.3.55 (*)
 │       │       │       ├── time feature "parsing"
-│       │       │       │   └── time v0.3.55 (*)
+│       │       │       │   ├── time v0.3.55 (*)
+│       │       │       │   └── time-macros feature "parsing"
+│       │       │       │       └── time-macros v0.2.32 (proc-macro) (*)
 │       │       │       └── tokio-util feature "default"
 │       │       │           └── tokio-util v0.7.18
 │       │       │               ├── futures-util feature "default"
@@ -1139,6 +1146,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   │   │       │   │   └── untrusted feature "default"
 │       │       │   │   │       │   │       └── untrusted v0.7.1
 │       │       │   │   │       │   ├── subtle v2.6.1
+│       │       │   │   │       │   ├── log feature "default" (*)
 │       │       │   │   │       │   ├── once_cell feature "alloc" (*)
 │       │       │   │   │       │   ├── once_cell feature "race" (*)
 │       │       │   │   │       │   ├── zeroize feature "default" (*)
@@ -1316,11 +1324,14 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   │   │       ├── rustls-native-certs feature "default" (*)
 │       │       │   │   │       └── tower feature "default"
 │       │       │   │   │           └── tower v0.5.3
+│       │       │   │   │               ├── tokio-util v0.7.18 (*)
 │       │       │   │   │               ├── futures-util feature "alloc" (*)
 │       │       │   │   │               ├── futures-core feature "default" (*)
 │       │       │   │   │               ├── pin-project-lite feature "default" (*)
+│       │       │   │   │               ├── slab feature "default" (*)
 │       │       │   │   │               ├── tokio feature "default" (*)
 │       │       │   │   │               ├── tracing feature "std" (*)
+│       │       │   │   │               ├── indexmap feature "default" (*)
 │       │       │   │   │               ├── tower-service feature "default" (*)
 │       │       │   │   │               ├── sync_wrapper feature "default"
 │       │       │   │   │               │   └── sync_wrapper v1.0.2
@@ -1579,6 +1590,9 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   ├── uuid v1.23.4 (*)
 │   └── uuid feature "rng"
 │       └── uuid v1.23.4 (*)
+├── uuid feature "v7"
+│   ├── uuid v1.23.4 (*)
+│   └── uuid feature "rng" (*)
 ├── url feature "default" (*)
 ├── axum feature "default"
 │   ├── axum v0.8.9
@@ -1991,6 +2005,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       ├── uuid feature "default" (*)
 │       ├── uuid feature "serde" (*)
 │       ├── uuid feature "v4" (*)
+│       ├── uuid feature "v7" (*)
 │       ├── axum feature "default" (*)
 │       ├── serde_json feature "default" (*)
 │       ├── chrono feature "default" (*)
@@ -2028,6 +2043,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │       ├── uuid feature "default" (*)
 │       │       │       ├── uuid feature "serde" (*)
 │       │       │       ├── uuid feature "v4" (*)
+│       │       │       ├── uuid feature "v7" (*)
 │       │       │       ├── serde_json feature "default" (*)
 │       │       │       ├── cel feature "default" (*)
 │       │       │       ├── cel feature "json" (*)
@@ -2278,6 +2294,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       ├── uuid feature "default" (*)
 │       │       ├── uuid feature "serde" (*)
 │       │       ├── uuid feature "v4" (*)
+│       │       ├── uuid feature "v7" (*)
 │       │       ├── url feature "default" (*)
 │       │       ├── serde_json feature "default" (*)
 │       │       ├── chrono feature "default" (*)
@@ -2646,6 +2663,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       ├── uuid feature "default" (*)
 │       ├── uuid feature "serde" (*)
 │       ├── uuid feature "v4" (*)
+│       ├── uuid feature "v7" (*)
 │       ├── serde_json feature "default" (*)
 │       ├── chrono feature "default" (*)
 │       ├── chrono feature "serde" (*)
@@ -2774,12 +2792,9 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       │       ├── tracing feature "log" (*)
 │       │   │   │       │       ├── cfg-if feature "default" (*)
 │       │   │   │       │       ├── percent-encoding feature "default" (*)
-│       │   │   │       │       ├── indexmap feature "default" (*)
 │       │   │   │       │       ├── hashbrown feature "default" (*)
 │       │   │   │       │       ├── url feature "default" (*)
 │       │   │   │       │       ├── hashlink feature "default" (*)
-│       │   │   │       │       ├── tokio-stream feature "default" (*)
-│       │   │   │       │       ├── tokio-stream feature "fs" (*)
 │       │   │   │       │       ├── crc feature "default" (*)
 │       │   │   │       │       ├── crossbeam-queue feature "default" (*)
 │       │   │   │       │       ├── event-listener feature "default" (*)
@@ -2842,6 +2857,12 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       │       │   ├── futures-util v0.3.32 (*)
 │       │   │   │       │       │   └── futures-util feature "futures-sink"
 │       │   │   │       │       │       └── futures-util v0.3.32 (*)
+│       │   │   │       │       ├── indexmap feature "default"
+│       │   │   │       │       │   ├── indexmap v2.14.0
+│       │   │   │       │       │   │   ├── equivalent v1.0.2
+│       │   │   │       │       │   │   └── hashbrown v0.17.1
+│       │   │   │       │       │   └── indexmap feature "std"
+│       │   │   │       │       │       └── indexmap v2.14.0 (*)
 │       │   │   │       │       ├── rustls feature "std"
 │       │   │   │       │       │   ├── rustls v0.23.41
 │       │   │   │       │       │   │   ├── aws-lc-rs v1.17.1
@@ -2908,8 +2929,21 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │   │   │       │       │   └── tokio v1.52.3 (*)
 │       │   │   │       │       ├── tokio feature "sync"
 │       │   │   │       │       │   └── tokio v1.52.3 (*)
-│       │   │   │       │       └── tokio feature "time"
-│       │   │   │       │           └── tokio v1.52.3 (*)
+│       │   │   │       │       ├── tokio feature "time"
+│       │   │   │       │       │   └── tokio v1.52.3 (*)
+│       │   │   │       │       ├── tokio-stream feature "default"
+│       │   │   │       │       │   ├── tokio-stream v0.1.18
+│       │   │   │       │       │   │   ├── futures-core feature "default" (*)
+│       │   │   │       │       │   │   ├── pin-project-lite feature "default" (*)
+│       │   │   │       │       │   │   ├── tokio feature "default"
+│       │   │   │       │       │   │   │   └── tokio v1.52.3 (*)
+│       │   │   │       │       │   │   └── tokio feature "sync" (*)
+│       │   │   │       │       │   └── tokio-stream feature "time"
+│       │   │   │       │       │       ├── tokio-stream v0.1.18 (*)
+│       │   │   │       │       │       └── tokio feature "time" (*)
+│       │   │   │       │       └── tokio-stream feature "fs"
+│       │   │   │       │           ├── tokio-stream v0.1.18 (*)
+│       │   │   │       │           └── tokio feature "fs" (*)
 │       │   │   │       ├── sqlx-core feature "default"
 │       │   │   │       │   └── sqlx-core v0.9.0 (*)
 │       │   │   │       └── sqlx-macros-core feature "default"
@@ -3522,6 +3556,1756 @@ insight-durable v0.1.0 (<workspace>/crates/durable) (*)
 insight-engine v0.1.0 (<workspace>/crates/engine) (*)
 
 insight-mcp v0.1.0 (<workspace>/crates/mcp) (*)
+
+insight-platform-api v0.1.0 (<workspace>/crates/platform-api)
+├── async-trait feature "default" (*)
+├── axum feature "default" (*)
+├── chrono feature "default" (*)
+├── chrono feature "serde" (*)
+└── insight-platform-mcp-host feature "default" (command-line)
+    └── insight-platform-mcp-host v0.1.0 (<workspace>/crates/platform-mcp-host)
+        ├── async-trait feature "default" (*)
+        ├── tokio feature "default" (*)
+        ├── tokio feature "macros" (*)
+        ├── tokio feature "net" (*)
+        ├── tokio feature "rt-multi-thread" (*)
+        ├── tokio feature "signal" (*)
+        ├── tokio feature "sync" (*)
+        ├── tokio feature "test-util" (*)
+        ├── tokio feature "time" (*)
+        ├── serde feature "default" (*)
+        ├── serde feature "derive" (*)
+        ├── base64 feature "default" (*)
+        ├── uuid feature "default" (*)
+        ├── uuid feature "serde" (*)
+        ├── uuid feature "v4" (*)
+        ├── uuid feature "v7" (*)
+        ├── url feature "default" (*)
+        ├── serde_json feature "default" (*)
+        ├── chrono feature "default" (*)
+        ├── chrono feature "serde" (*)
+        ├── futures feature "default" (*)
+        ├── ring feature "default" (*)
+        ├── insight-platform-contracts feature "default" (command-line)
+        │   └── insight-platform-contracts v0.1.0 (<workspace>/crates/platform-contracts)
+        │       ├── jsonschema v0.47.0 (*)
+        │       ├── serde feature "default" (*)
+        │       ├── serde feature "derive" (*)
+        │       ├── sha2 feature "default" (*)
+        │       ├── uuid feature "default" (*)
+        │       ├── uuid feature "serde" (*)
+        │       ├── uuid feature "v4" (*)
+        │       ├── uuid feature "v7" (*)
+        │       ├── serde_json feature "default" (*)
+        │       ├── chrono feature "default" (*)
+        │       ├── chrono feature "serde" (*)
+        │       └── serde_jcs feature "default" (*)
+        └── insight-platform-jobs feature "default" (command-line)
+            └── insight-platform-jobs v0.1.0 (<workspace>/crates/platform-jobs)
+                ├── serde feature "default" (*)
+                ├── serde feature "derive" (*)
+                ├── chrono feature "default" (*)
+                ├── chrono feature "serde" (*)
+                └── insight-platform-contracts feature "default" (command-line) (*)
+[dev-dependencies]
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+└── tower feature "default" (*)
+
+insight-platform-artifact-broker v0.1.0 (<workspace>/crates/platform-artifact-broker)
+├── async-trait feature "default" (*)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── aws-sdk-s3 feature "behavior-version-latest" (*)
+├── aws-sdk-s3 feature "default-https-client" (*)
+├── aws-sdk-s3 feature "rt-tokio" (*)
+├── sha2 feature "default" (*)
+├── url feature "default" (*)
+├── serde_json feature "default" (*)
+├── chrono feature "default" (*)
+├── chrono feature "serde" (*)
+├── serde_jcs feature "default" (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── aws-config feature "behavior-version-latest"
+│   └── aws-config v1.10.1
+│       ├── aws-sdk-sts v1.110.0
+│       │   ├── aws-credential-types feature "default" (*)
+│       │   ├── aws-smithy-async feature "default" (*)
+│       │   ├── aws-smithy-runtime-api feature "client" (*)
+│       │   ├── aws-smithy-runtime-api feature "default" (*)
+│       │   ├── aws-smithy-runtime-api feature "http-1x" (*)
+│       │   ├── aws-smithy-types feature "default" (*)
+│       │   ├── aws-smithy-types feature "http-body-1-x" (*)
+│       │   ├── http feature "default" (*)
+│       │   ├── http feature "default" (*)
+│       │   ├── tracing feature "default" (*)
+│       │   ├── arc-swap feature "default" (*)
+│       │   ├── aws-runtime feature "default" (*)
+│       │   ├── aws-smithy-http feature "default" (*)
+│       │   ├── aws-smithy-runtime feature "client" (*)
+│       │   ├── aws-smithy-runtime feature "default" (*)
+│       │   ├── aws-smithy-observability feature "default" (*)
+│       │   ├── aws-smithy-schema feature "default" (*)
+│       │   ├── fastrand feature "default" (*)
+│       │   ├── aws-types feature "default" (*)
+│       │   ├── aws-smithy-json feature "default" (*)
+│       │   ├── aws-smithy-xml feature "default" (*)
+│       │   ├── regex-lite feature "default" (*)
+│       │   └── aws-smithy-query feature "default"
+│       │       └── aws-smithy-query v0.62.0
+│       │           ├── aws-smithy-runtime-api feature "client" (*)
+│       │           ├── aws-smithy-runtime-api feature "default" (*)
+│       │           ├── aws-smithy-runtime-api feature "http-1x" (*)
+│       │           ├── aws-smithy-types feature "default" (*)
+│       │           ├── aws-smithy-types feature "http-body-1-x" (*)
+│       │           ├── aws-smithy-schema feature "default" (*)
+│       │           ├── aws-smithy-xml feature "default" (*)
+│       │           └── urlencoding feature "default"
+│       │               └── urlencoding v2.1.3
+│       ├── aws-credential-types feature "default" (*)
+│       ├── aws-credential-types feature "test-util"
+│       │   ├── aws-credential-types v1.3.0 (*)
+│       │   └── aws-smithy-runtime-api feature "test-util"
+│       │       ├── aws-smithy-runtime-api v1.14.0 (*)
+│       │       ├── aws-smithy-runtime-api feature "http-1x" (*)
+│       │       └── aws-smithy-types feature "test-util"
+│       │           └── aws-smithy-types v1.6.1 (*)
+│       ├── aws-smithy-async feature "default" (*)
+│       ├── tokio feature "default" (*)
+│       ├── tokio feature "sync" (*)
+│       ├── bytes feature "default" (*)
+│       ├── aws-smithy-runtime-api feature "client" (*)
+│       ├── aws-smithy-runtime-api feature "default" (*)
+│       ├── aws-smithy-types feature "default" (*)
+│       ├── http feature "default" (*)
+│       ├── time feature "default" (*)
+│       ├── time feature "parsing" (*)
+│       ├── tracing feature "default" (*)
+│       ├── aws-runtime feature "default" (*)
+│       ├── aws-smithy-http feature "default" (*)
+│       ├── aws-smithy-runtime feature "client" (*)
+│       ├── aws-smithy-runtime feature "default" (*)
+│       ├── aws-smithy-schema feature "default" (*)
+│       ├── fastrand feature "default" (*)
+│       ├── aws-types feature "default" (*)
+│       ├── aws-smithy-json feature "default" (*)
+│       └── url feature "default" (*)
+├── aws-config feature "default-https-client"
+│   ├── aws-config v1.10.1 (*)
+│   └── aws-smithy-runtime feature "default-https-client" (*)
+├── aws-config feature "rt-tokio"
+│   ├── aws-config v1.10.1 (*)
+│   ├── aws-smithy-async feature "rt-tokio" (*)
+│   ├── tokio feature "rt" (*)
+│   └── aws-smithy-runtime feature "rt-tokio"
+│       ├── aws-smithy-runtime v1.12.1 (*)
+│       └── tokio feature "rt" (*)
+├── aws-sdk-kms feature "behavior-version-latest"
+│   └── aws-sdk-kms v1.114.0
+│       ├── aws-credential-types feature "default" (*)
+│       ├── aws-smithy-async feature "default" (*)
+│       ├── bytes feature "default" (*)
+│       ├── aws-smithy-runtime-api feature "client" (*)
+│       ├── aws-smithy-runtime-api feature "default" (*)
+│       ├── aws-smithy-runtime-api feature "http-1x" (*)
+│       ├── aws-smithy-types feature "default" (*)
+│       ├── aws-smithy-types feature "http-body-1-x" (*)
+│       ├── http feature "default" (*)
+│       ├── http feature "default" (*)
+│       ├── tracing feature "default" (*)
+│       ├── arc-swap feature "default" (*)
+│       ├── aws-runtime feature "default" (*)
+│       ├── aws-smithy-http feature "default" (*)
+│       ├── aws-smithy-runtime feature "client" (*)
+│       ├── aws-smithy-runtime feature "default" (*)
+│       ├── aws-smithy-observability feature "default" (*)
+│       ├── aws-smithy-schema feature "default" (*)
+│       ├── fastrand feature "default" (*)
+│       ├── aws-types feature "default" (*)
+│       ├── aws-smithy-json feature "default" (*)
+│       └── regex-lite feature "default" (*)
+├── aws-sdk-kms feature "default-https-client"
+│   ├── aws-sdk-kms v1.114.0 (*)
+│   └── aws-smithy-runtime feature "default-https-client" (*)
+├── aws-sdk-kms feature "rt-tokio"
+│   ├── aws-sdk-kms v1.114.0 (*)
+│   ├── aws-smithy-async feature "rt-tokio" (*)
+│   └── aws-smithy-types feature "rt-tokio" (*)
+├── insight-platform-artifacts feature "default" (command-line)
+│   └── insight-platform-artifacts v0.1.0 (<workspace>/crates/platform-artifacts)
+│       ├── async-trait feature "default" (*)
+│       ├── serde feature "default" (*)
+│       ├── serde feature "derive" (*)
+│       ├── serde_json feature "default" (*)
+│       ├── chrono feature "default" (*)
+│       ├── chrono feature "serde" (*)
+│       ├── insight-platform-contracts feature "default" (command-line) (*)
+│       └── insight-platform-jobs feature "default" (command-line) (*)
+│       [dev-dependencies]
+│       ├── tokio feature "default" (*)
+│       ├── tokio feature "macros" (*)
+│       ├── tokio feature "net" (*)
+│       ├── tokio feature "rt-multi-thread" (*)
+│       ├── tokio feature "signal" (*)
+│       ├── tokio feature "sync" (*)
+│       ├── tokio feature "test-util" (*)
+│       ├── tokio feature "time" (*)
+│       ├── uuid feature "default" (*)
+│       ├── uuid feature "serde" (*)
+│       ├── uuid feature "v4" (*)
+│       └── uuid feature "v7" (*)
+└── insight-platform-sandbox feature "default" (command-line)
+    └── insight-platform-sandbox v0.1.0 (<workspace>/crates/platform-sandbox)
+        ├── async-trait feature "default" (*)
+        ├── tokio feature "default" (*)
+        ├── tokio feature "macros" (*)
+        ├── tokio feature "net" (*)
+        ├── tokio feature "rt-multi-thread" (*)
+        ├── tokio feature "signal" (*)
+        ├── tokio feature "sync" (*)
+        ├── tokio feature "test-util" (*)
+        ├── tokio feature "time" (*)
+        ├── serde feature "default" (*)
+        ├── serde feature "derive" (*)
+        ├── tokio-util feature "default" (*)
+        ├── tokio-util feature "rt" (*)
+        ├── url feature "default" (*)
+        ├── serde_json feature "default" (*)
+        ├── chrono feature "default" (*)
+        ├── chrono feature "serde" (*)
+        ├── futures feature "default" (*)
+        ├── insight-platform-contracts feature "default" (command-line) (*)
+        └── insight-platform-jobs feature "default" (command-line) (*)
+[dev-dependencies]
+├── uuid feature "default" (*)
+├── uuid feature "serde" (*)
+├── uuid feature "v4" (*)
+└── uuid feature "v7" (*)
+
+insight-platform-artifacts v0.1.0 (<workspace>/crates/platform-artifacts) (*)
+
+insight-platform-callback-api v0.1.0 (<workspace>/crates/platform-callback-api)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── sha2 feature "default" (*)
+├── uuid feature "default" (*)
+├── uuid feature "serde" (*)
+├── uuid feature "v4" (*)
+├── uuid feature "v7" (*)
+├── url feature "default" (*)
+├── axum feature "default" (*)
+├── serde_json feature "default" (*)
+├── sqlx feature "chrono" (*)
+├── sqlx feature "json" (*)
+├── sqlx feature "macros" (*)
+├── sqlx feature "postgres" (*)
+├── sqlx feature "runtime-tokio" (*)
+├── sqlx feature "sqlite" (*)
+├── sqlx feature "tls-rustls-aws-lc-rs" (*)
+├── insight-platform-api feature "default" (command-line)
+│   └── insight-platform-api v0.1.0 (<workspace>/crates/platform-api) (*)
+├── insight-platform-mcp-host feature "default" (command-line) (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-egress-rpc feature "default" (command-line)
+│   └── insight-platform-egress-rpc v0.1.0 (<workspace>/crates/platform-egress-rpc)
+│       ├── x509-parser v0.18.1
+│       │   ├── time feature "default" (*)
+│       │   ├── time feature "formatting"
+│       │   │   ├── time v0.3.55 (*)
+│       │   │   ├── time feature "std" (*)
+│       │   │   └── time-macros feature "formatting"
+│       │   │       └── time-macros v0.2.32 (proc-macro) (*)
+│       │   ├── lazy_static feature "default" (*)
+│       │   ├── nom feature "default" (*)
+│       │   ├── thiserror feature "default" (*)
+│       │   ├── data-encoding feature "default" (*)
+│       │   ├── asn1-rs feature "datetime"
+│       │   │   ├── asn1-rs v0.7.2
+│       │   │   │   ├── num-traits feature "default" (*)
+│       │   │   │   ├── time feature "default" (*)
+│       │   │   │   ├── time feature "formatting" (*)
+│       │   │   │   ├── time feature "macros"
+│       │   │   │   │   └── time v0.3.55 (*)
+│       │   │   │   ├── time feature "parsing" (*)
+│       │   │   │   ├── displaydoc feature "default"
+│       │   │   │   │   ├── displaydoc v0.2.6 (proc-macro) (*)
+│       │   │   │   │   └── displaydoc feature "std"
+│       │   │   │   │       └── displaydoc v0.2.6 (proc-macro) (*)
+│       │   │   │   ├── nom feature "std" (*)
+│       │   │   │   ├── thiserror feature "default" (*)
+│       │   │   │   ├── asn1-rs-derive feature "default"
+│       │   │   │   │   └── asn1-rs-derive v0.6.0 (proc-macro)
+│       │   │   │   │       ├── proc-macro2 feature "default" (*)
+│       │   │   │   │       ├── quote feature "default" (*)
+│       │   │   │   │       ├── syn feature "default" (*)
+│       │   │   │   │       ├── syn feature "full" (*)
+│       │   │   │   │       └── synstructure feature "default" (*)
+│       │   │   │   ├── asn1-rs-impl feature "default"
+│       │   │   │   │   └── asn1-rs-impl v0.2.0 (proc-macro)
+│       │   │   │   │       ├── proc-macro2 feature "default" (*)
+│       │   │   │   │       ├── quote feature "default" (*)
+│       │   │   │   │       └── syn feature "default" (*)
+│       │   │   │   └── rusticata-macros feature "default"
+│       │   │   │       └── rusticata-macros v4.1.0
+│       │   │   │           └── nom feature "std" (*)
+│       │   │   └── asn1-rs feature "time"
+│       │   │       └── asn1-rs v0.7.2 (*)
+│       │   ├── asn1-rs feature "default"
+│       │   │   ├── asn1-rs v0.7.2 (*)
+│       │   │   └── asn1-rs feature "std"
+│       │   │       └── asn1-rs v0.7.2 (*)
+│       │   ├── rusticata-macros feature "default" (*)
+│       │   ├── der-parser feature "bigint"
+│       │   │   ├── der-parser v10.0.0
+│       │   │   │   ├── displaydoc v0.2.6 (proc-macro) (*)
+│       │   │   │   ├── num-traits feature "default" (*)
+│       │   │   │   ├── nom feature "default" (*)
+│       │   │   │   ├── num-bigint feature "default"
+│       │   │   │   │   ├── num-bigint v0.4.6 (*)
+│       │   │   │   │   └── num-bigint feature "std" (*)
+│       │   │   │   ├── asn1-rs feature "default" (*)
+│       │   │   │   └── rusticata-macros feature "default" (*)
+│       │   │   └── der-parser feature "num-bigint"
+│       │   │       └── der-parser v10.0.0 (*)
+│       │   ├── der-parser feature "default"
+│       │   │   ├── der-parser v10.0.0 (*)
+│       │   │   └── der-parser feature "std"
+│       │   │       └── der-parser v10.0.0 (*)
+│       │   ├── oid-registry feature "crypto"
+│       │   │   ├── oid-registry v0.8.1
+│       │   │   │   └── asn1-rs feature "default" (*)
+│       │   │   ├── oid-registry feature "kdf"
+│       │   │   │   └── oid-registry v0.8.1 (*)
+│       │   │   ├── oid-registry feature "nist_algs"
+│       │   │   │   └── oid-registry v0.8.1 (*)
+│       │   │   ├── oid-registry feature "pkcs1"
+│       │   │   │   └── oid-registry v0.8.1 (*)
+│       │   │   ├── oid-registry feature "pkcs12"
+│       │   │   │   └── oid-registry v0.8.1 (*)
+│       │   │   ├── oid-registry feature "pkcs7"
+│       │   │   │   └── oid-registry v0.8.1 (*)
+│       │   │   ├── oid-registry feature "pkcs9"
+│       │   │   │   └── oid-registry v0.8.1 (*)
+│       │   │   └── oid-registry feature "x962"
+│       │   │       └── oid-registry v0.8.1 (*)
+│       │   ├── oid-registry feature "default"
+│       │   │   ├── oid-registry v0.8.1 (*)
+│       │   │   └── oid-registry feature "registry"
+│       │   │       └── oid-registry v0.8.1 (*)
+│       │   ├── oid-registry feature "x509"
+│       │   │   └── oid-registry v0.8.1 (*)
+│       │   └── oid-registry feature "x962" (*)
+│       ├── async-trait feature "default" (*)
+│       ├── tokio feature "default" (*)
+│       ├── tokio feature "macros" (*)
+│       ├── tokio feature "net" (*)
+│       ├── tokio feature "rt-multi-thread" (*)
+│       ├── tokio feature "signal" (*)
+│       ├── tokio feature "sync" (*)
+│       ├── tokio feature "test-util" (*)
+│       ├── tokio feature "time" (*)
+│       ├── serde feature "default" (*)
+│       ├── serde feature "derive" (*)
+│       ├── sha2 feature "default" (*)
+│       ├── serde_json feature "default" (*)
+│       ├── chrono feature "default" (*)
+│       ├── chrono feature "serde" (*)
+│       ├── futures feature "default" (*)
+│       ├── serde_jcs feature "default" (*)
+│       ├── tokio-stream feature "default" (*)
+│       ├── insight-platform-mcp-host feature "default" (command-line) (*)
+│       ├── insight-platform-contracts feature "default" (command-line) (*)
+│       ├── insight-platform-capability-adapters feature "default" (command-line)
+│       │   └── insight-platform-capability-adapters v0.1.0 (<workspace>/crates/platform-capability-adapters)
+│       │       ├── async-trait feature "default" (*)
+│       │       ├── tokio feature "default" (*)
+│       │       ├── tokio feature "macros" (*)
+│       │       ├── tokio feature "net" (*)
+│       │       ├── tokio feature "rt-multi-thread" (*)
+│       │       ├── tokio feature "signal" (*)
+│       │       ├── tokio feature "sync" (*)
+│       │       ├── tokio feature "test-util" (*)
+│       │       ├── tokio feature "time" (*)
+│       │       ├── serde feature "default" (*)
+│       │       ├── serde feature "derive" (*)
+│       │       ├── sha2 feature "default" (*)
+│       │       ├── base64 feature "default" (*)
+│       │       ├── uuid feature "default" (*)
+│       │       ├── uuid feature "serde" (*)
+│       │       ├── uuid feature "v4" (*)
+│       │       ├── uuid feature "v7" (*)
+│       │       ├── serde_json feature "default" (*)
+│       │       ├── chrono feature "default" (*)
+│       │       ├── chrono feature "serde" (*)
+│       │       ├── futures feature "default" (*)
+│       │       ├── insight-platform-mcp-host feature "default" (command-line) (*)
+│       │       ├── insight-platform-contracts feature "default" (command-line) (*)
+│       │       ├── insight-platform-jobs feature "default" (command-line) (*)
+│       │       └── insight-platform-invocations feature "default" (command-line)
+│       │           └── insight-platform-invocations v0.1.0 (<workspace>/crates/platform-invocations)
+│       │               ├── serde feature "default" (*)
+│       │               ├── serde feature "derive" (*)
+│       │               ├── serde_json feature "default" (*)
+│       │               ├── chrono feature "default" (*)
+│       │               ├── chrono feature "serde" (*)
+│       │               ├── insight-platform-contracts feature "default" (command-line) (*)
+│       │               └── insight-platform-jobs feature "default" (command-line) (*)
+│       ├── insight-platform-model-adapters feature "default" (command-line)
+│       │   └── insight-platform-model-adapters v0.1.0 (<workspace>/crates/platform-model-adapters)
+│       │       ├── async-trait feature "default" (*)
+│       │       ├── tokio feature "default" (*)
+│       │       ├── tokio feature "macros" (*)
+│       │       ├── tokio feature "net" (*)
+│       │       ├── tokio feature "rt-multi-thread" (*)
+│       │       ├── tokio feature "signal" (*)
+│       │       ├── tokio feature "sync" (*)
+│       │       ├── tokio feature "test-util" (*)
+│       │       ├── tokio feature "time" (*)
+│       │       ├── serde feature "default" (*)
+│       │       ├── serde feature "derive" (*)
+│       │       ├── serde_json feature "default" (*)
+│       │       ├── chrono feature "default" (*)
+│       │       ├── chrono feature "serde" (*)
+│       │       ├── futures feature "default" (*)
+│       │       ├── insight-platform-contracts feature "default" (command-line) (*)
+│       │       ├── insight-platform-jobs feature "default" (command-line) (*)
+│       │       └── insight-platform-models feature "default" (command-line)
+│       │           └── insight-platform-models v0.1.0 (<workspace>/crates/platform-models)
+│       │               ├── serde feature "default" (*)
+│       │               ├── serde feature "derive" (*)
+│       │               ├── serde_json feature "default" (*)
+│       │               ├── chrono feature "default" (*)
+│       │               ├── chrono feature "serde" (*)
+│       │               ├── insight-platform-contracts feature "default" (command-line) (*)
+│       │               ├── insight-platform-jobs feature "default" (command-line) (*)
+│       │               └── insight-platform-invocations feature "default" (command-line) (*)
+│       ├── prost feature "default"
+│       │   ├── prost v0.14.4
+│       │   │   ├── bytes v1.12.1 (*)
+│       │   │   └── prost-derive feature "default"
+│       │   │       └── prost-derive v0.14.4 (proc-macro)
+│       │   │           ├── proc-macro2 feature "default" (*)
+│       │   │           ├── quote feature "default" (*)
+│       │   │           ├── syn feature "default" (*)
+│       │   │           ├── syn feature "extra-traits" (*)
+│       │   │           ├── anyhow feature "default"
+│       │   │           │   ├── anyhow v1.0.104
+│       │   │           │   └── anyhow feature "std"
+│       │   │           │       └── anyhow v1.0.104
+│       │   │           └── itertools feature "default"
+│       │   │               ├── itertools v0.14.0
+│       │   │               │   └── either v1.16.0 (*)
+│       │   │               └── itertools feature "use_std"
+│       │   │                   ├── itertools v0.14.0 (*)
+│       │   │                   ├── either feature "use_std"
+│       │   │                   │   ├── either v1.16.0 (*)
+│       │   │                   │   └── either feature "std" (*)
+│       │   │                   └── itertools feature "use_alloc"
+│       │   │                       └── itertools v0.14.0 (*)
+│       │   ├── prost feature "derive"
+│       │   │   └── prost v0.14.4 (*)
+│       │   └── prost feature "std"
+│       │       └── prost v0.14.4 (*)
+│       ├── tonic feature "channel"
+│       │   ├── tonic v0.14.6
+│       │   │   ├── axum v0.8.9 (*)
+│       │   │   ├── tokio v1.52.3 (*)
+│       │   │   ├── tokio-stream v0.1.18 (*)
+│       │   │   ├── tower v0.5.3 (*)
+│       │   │   ├── async-trait feature "default" (*)
+│       │   │   ├── bytes feature "default" (*)
+│       │   │   ├── socket2 feature "all" (*)
+│       │   │   ├── socket2 feature "default" (*)
+│       │   │   ├── http feature "default" (*)
+│       │   │   ├── http-body feature "default" (*)
+│       │   │   ├── http-body-util feature "default" (*)
+│       │   │   ├── tracing feature "default" (*)
+│       │   │   ├── percent-encoding feature "default" (*)
+│       │   │   ├── h2 feature "default" (*)
+│       │   │   ├── hyper feature "default" (*)
+│       │   │   ├── hyper feature "http1" (*)
+│       │   │   ├── hyper feature "http2" (*)
+│       │   │   ├── hyper-util feature "default" (*)
+│       │   │   ├── hyper-util feature "tokio" (*)
+│       │   │   ├── base64 feature "default" (*)
+│       │   │   ├── tower-service feature "default" (*)
+│       │   │   ├── tokio-rustls feature "logging"
+│       │   │   │   ├── tokio-rustls v0.26.4 (*)
+│       │   │   │   └── rustls feature "logging"
+│       │   │   │       ├── rustls v0.23.41 (*)
+│       │   │   │       └── rustls feature "log"
+│       │   │   │           └── rustls v0.23.41 (*)
+│       │   │   ├── tokio-rustls feature "tls12" (*)
+│       │   │   ├── sync_wrapper feature "default" (*)
+│       │   │   ├── tower-layer feature "default" (*)
+│       │   │   ├── pin-project feature "default" (*)
+│       │   │   └── hyper-timeout feature "default"
+│       │   │       └── hyper-timeout v0.5.2
+│       │   │           ├── pin-project-lite feature "default" (*)
+│       │   │           ├── tokio feature "default" (*)
+│       │   │           ├── hyper feature "default" (*)
+│       │   │           ├── hyper-util feature "client-legacy" (*)
+│       │   │           ├── hyper-util feature "default" (*)
+│       │   │           ├── hyper-util feature "http1" (*)
+│       │   │           └── tower-service feature "default" (*)
+│       │   ├── tokio feature "time" (*)
+│       │   ├── hyper feature "client" (*)
+│       │   ├── hyper-util feature "client-legacy" (*)
+│       │   ├── tower feature "balance"
+│       │   │   ├── tower v0.5.3 (*)
+│       │   │   ├── tower feature "discover"
+│       │   │   │   ├── tower v0.5.3 (*)
+│       │   │   │   ├── tower feature "futures-core" (*)
+│       │   │   │   └── tower feature "pin-project-lite" (*)
+│       │   │   ├── tower feature "load"
+│       │   │   │   ├── tower v0.5.3 (*)
+│       │   │   │   ├── tokio feature "time" (*)
+│       │   │   │   ├── tower feature "pin-project-lite" (*)
+│       │   │   │   ├── tower feature "tokio" (*)
+│       │   │   │   └── tower feature "tracing" (*)
+│       │   │   ├── tower feature "make" (*)
+│       │   │   ├── tower feature "ready-cache"
+│       │   │   │   ├── tower v0.5.3 (*)
+│       │   │   │   ├── tokio feature "sync" (*)
+│       │   │   │   ├── tower feature "futures-core" (*)
+│       │   │   │   ├── tower feature "futures-util" (*)
+│       │   │   │   ├── tower feature "indexmap"
+│       │   │   │   │   └── tower v0.5.3 (*)
+│       │   │   │   ├── tower feature "pin-project-lite" (*)
+│       │   │   │   ├── tower feature "tokio" (*)
+│       │   │   │   └── tower feature "tracing" (*)
+│       │   │   ├── tower feature "slab"
+│       │   │   │   └── tower v0.5.3 (*)
+│       │   │   └── tower feature "util" (*)
+│       │   ├── tower feature "buffer"
+│       │   │   ├── tower v0.5.3 (*)
+│       │   │   ├── tokio feature "rt" (*)
+│       │   │   ├── tokio feature "sync" (*)
+│       │   │   ├── tower feature "pin-project-lite" (*)
+│       │   │   ├── tower feature "tokio" (*)
+│       │   │   ├── tower feature "tokio-util"
+│       │   │   │   └── tower v0.5.3 (*)
+│       │   │   └── tower feature "tracing" (*)
+│       │   ├── tower feature "discover" (*)
+│       │   ├── tower feature "limit"
+│       │   │   ├── tower v0.5.3 (*)
+│       │   │   ├── tokio feature "sync" (*)
+│       │   │   ├── tokio feature "time" (*)
+│       │   │   ├── tower feature "pin-project-lite" (*)
+│       │   │   ├── tower feature "tokio" (*)
+│       │   │   ├── tower feature "tokio-util" (*)
+│       │   │   └── tower feature "tracing" (*)
+│       │   ├── tower feature "load-shed"
+│       │   │   ├── tower v0.5.3 (*)
+│       │   │   └── tower feature "pin-project-lite" (*)
+│       │   └── tower feature "util" (*)
+│       ├── tonic feature "codegen"
+│       │   └── tonic v0.14.6 (*)
+│       ├── tonic feature "router"
+│       │   ├── tonic v0.14.6 (*)
+│       │   └── tower feature "util" (*)
+│       ├── tonic feature "server"
+│       │   ├── tonic v0.14.6 (*)
+│       │   ├── tokio feature "macros" (*)
+│       │   ├── tokio feature "net" (*)
+│       │   ├── tokio feature "time" (*)
+│       │   ├── hyper feature "server" (*)
+│       │   ├── hyper-util feature "server-auto"
+│       │   │   ├── hyper-util v0.1.20 (*)
+│       │   │   ├── hyper-util feature "http1" (*)
+│       │   │   ├── hyper-util feature "http2" (*)
+│       │   │   └── hyper-util feature "server" (*)
+│       │   ├── hyper-util feature "service" (*)
+│       │   ├── tower feature "limit" (*)
+│       │   ├── tower feature "load-shed" (*)
+│       │   ├── tower feature "util" (*)
+│       │   └── tokio-stream feature "net"
+│       │       ├── tokio-stream v0.1.18 (*)
+│       │       └── tokio feature "net" (*)
+│       ├── tonic feature "tls-aws-lc"
+│       │   ├── tonic v0.14.6 (*)
+│       │   ├── tokio-rustls feature "aws-lc-rs" (*)
+│       │   ├── tonic feature "_tls-any"
+│       │   │   ├── tonic v0.14.6 (*)
+│       │   │   ├── tokio feature "macros" (*)
+│       │   │   ├── tokio feature "rt" (*)
+│       │   │   └── tonic feature "tls-connect-info"
+│       │   │       └── tonic v0.14.6 (*)
+│       │   └── tonic feature "tokio-rustls"
+│       │       └── tonic v0.14.6 (*)
+│       └── tonic-prost feature "default"
+│           └── tonic-prost v0.14.6
+│               ├── tonic v0.14.6 (*)
+│               ├── bytes feature "default" (*)
+│               └── prost feature "default" (*)
+│       [build-dependencies]
+│       ├── protoc-bin-vendored feature "default"
+│       │   └── protoc-bin-vendored v3.2.0
+│       │       ├── protoc-bin-vendored-linux-aarch_64 feature "default"
+│       │       │   └── protoc-bin-vendored-linux-aarch_64 v3.2.0
+│       │       ├── protoc-bin-vendored-linux-ppcle_64 feature "default"
+│       │       │   └── protoc-bin-vendored-linux-ppcle_64 v3.2.0
+│       │       ├── protoc-bin-vendored-linux-s390_64 feature "default"
+│       │       │   └── protoc-bin-vendored-linux-s390_64 v3.2.0
+│       │       ├── protoc-bin-vendored-linux-x86_32 feature "default"
+│       │       │   └── protoc-bin-vendored-linux-x86_32 v3.2.0
+│       │       ├── protoc-bin-vendored-linux-x86_64 feature "default"
+│       │       │   └── protoc-bin-vendored-linux-x86_64 v3.2.0
+│       │       ├── protoc-bin-vendored-macos-aarch_64 feature "default"
+│       │       │   └── protoc-bin-vendored-macos-aarch_64 v3.2.0
+│       │       ├── protoc-bin-vendored-macos-x86_64 feature "default"
+│       │       │   └── protoc-bin-vendored-macos-x86_64 v3.2.0
+│       │       └── protoc-bin-vendored-win32 feature "default"
+│       │           └── protoc-bin-vendored-win32 v3.2.0
+│       └── tonic-prost-build feature "default"
+│           ├── tonic-prost-build v0.14.6
+│           │   ├── tonic-build v0.14.6
+│           │   │   ├── proc-macro2 feature "default" (*)
+│           │   │   ├── quote feature "default" (*)
+│           │   │   ├── syn feature "default" (*)
+│           │   │   └── prettyplease feature "default"
+│           │   │       └── prettyplease v0.2.37
+│           │   │           ├── proc-macro2 v1.0.106 (*)
+│           │   │           └── syn feature "full" (*)
+│           │   ├── proc-macro2 feature "default" (*)
+│           │   ├── quote feature "default" (*)
+│           │   ├── syn feature "default" (*)
+│           │   ├── tempfile feature "default" (*)
+│           │   ├── prettyplease feature "default" (*)
+│           │   ├── prost-build feature "default"
+│           │   │   ├── prost-build v0.14.4
+│           │   │   │   ├── multimap v0.10.1
+│           │   │   │   ├── prost v0.14.4
+│           │   │   │   │   ├── bytes v1.12.1
+│           │   │   │   │   └── prost-derive feature "default" (*)
+│           │   │   │   ├── prost-types v0.14.4
+│           │   │   │   │   └── prost feature "derive"
+│           │   │   │   │       └── prost v0.14.4 (*)
+│           │   │   │   ├── pulldown-cmark v0.13.4
+│           │   │   │   │   ├── memchr feature "default" (*)
+│           │   │   │   │   ├── bitflags feature "default" (*)
+│           │   │   │   │   └── unicase feature "default"
+│           │   │   │   │       └── unicase v2.9.0
+│           │   │   │   ├── tempfile v3.27.0 (*)
+│           │   │   │   ├── syn feature "default" (*)
+│           │   │   │   ├── syn feature "full" (*)
+│           │   │   │   ├── log feature "default" (*)
+│           │   │   │   ├── heck feature "default" (*)
+│           │   │   │   ├── itertools feature "use_alloc" (*)
+│           │   │   │   ├── prettyplease feature "default" (*)
+│           │   │   │   ├── petgraph feature "std"
+│           │   │   │   │   ├── petgraph v0.8.3
+│           │   │   │   │   │   ├── fixedbitset v0.5.7
+│           │   │   │   │   │   ├── indexmap v2.14.0 (*)
+│           │   │   │   │   │   ├── hashbrown feature "default-hasher"
+│           │   │   │   │   │   │   └── hashbrown v0.15.5
+│           │   │   │   │   │   │       └── foldhash v0.1.5
+│           │   │   │   │   │   └── hashbrown feature "inline-more"
+│           │   │   │   │   │       └── hashbrown v0.15.5 (*)
+│           │   │   │   │   └── indexmap feature "std" (*)
+│           │   │   │   ├── pulldown-cmark-to-cmark feature "default"
+│           │   │   │   │   └── pulldown-cmark-to-cmark v22.0.1
+│           │   │   │   │       └── pulldown-cmark v0.13.4 (*)
+│           │   │   │   ├── regex feature "std"
+│           │   │   │   │   ├── regex v1.13.0
+│           │   │   │   │   │   ├── regex-syntax v0.8.11
+│           │   │   │   │   │   ├── regex-automata feature "alloc"
+│           │   │   │   │   │   │   └── regex-automata v0.4.14
+│           │   │   │   │   │   │       └── regex-syntax v0.8.11
+│           │   │   │   │   │   ├── regex-automata feature "meta"
+│           │   │   │   │   │   │   ├── regex-automata v0.4.14 (*)
+│           │   │   │   │   │   │   ├── regex-automata feature "nfa-pikevm"
+│           │   │   │   │   │   │   │   ├── regex-automata v0.4.14 (*)
+│           │   │   │   │   │   │   │   └── regex-automata feature "nfa-thompson"
+│           │   │   │   │   │   │   │       ├── regex-automata v0.4.14 (*)
+│           │   │   │   │   │   │   │       └── regex-automata feature "alloc" (*)
+│           │   │   │   │   │   │   └── regex-automata feature "syntax"
+│           │   │   │   │   │   │       ├── regex-automata v0.4.14 (*)
+│           │   │   │   │   │   │       └── regex-automata feature "alloc" (*)
+│           │   │   │   │   │   ├── regex-automata feature "nfa-pikevm" (*)
+│           │   │   │   │   │   └── regex-automata feature "syntax" (*)
+│           │   │   │   │   ├── regex-automata feature "std"
+│           │   │   │   │   │   ├── regex-automata v0.4.14 (*)
+│           │   │   │   │   │   ├── regex-automata feature "alloc" (*)
+│           │   │   │   │   │   └── regex-syntax feature "std"
+│           │   │   │   │   │       └── regex-syntax v0.8.11
+│           │   │   │   │   └── regex-syntax feature "std" (*)
+│           │   │   │   └── regex feature "unicode-bool"
+│           │   │   │       ├── regex v1.13.0 (*)
+│           │   │   │       ├── regex-automata feature "unicode-bool"
+│           │   │   │       │   ├── regex-automata v0.4.14 (*)
+│           │   │   │       │   └── regex-syntax feature "unicode-bool"
+│           │   │   │       │       └── regex-syntax v0.8.11
+│           │   │   │       └── regex-syntax feature "unicode-bool" (*)
+│           │   │   └── prost-build feature "format"
+│           │   │       └── prost-build v0.14.4 (*)
+│           │   └── prost-types feature "default"
+│           │       ├── prost-types v0.14.4 (*)
+│           │       └── prost-types feature "std"
+│           │           ├── prost-types v0.14.4 (*)
+│           │           └── prost feature "std"
+│           │               └── prost v0.14.4 (*)
+│           ├── tonic-prost-build feature "cleanup-markdown"
+│           │   ├── tonic-prost-build v0.14.6 (*)
+│           │   └── prost-build feature "cleanup-markdown"
+│           │       └── prost-build v0.14.4 (*)
+│           └── tonic-prost-build feature "transport"
+│               ├── tonic-prost-build v0.14.6 (*)
+│               └── tonic-build feature "transport"
+│                   └── tonic-build v0.14.6 (*)
+│       [dev-dependencies]
+│       ├── tokio feature "default" (*)
+│       ├── tokio feature "macros" (*)
+│       ├── tokio feature "net" (*)
+│       ├── tokio feature "rt-multi-thread" (*)
+│       ├── tokio feature "signal" (*)
+│       ├── tokio feature "sync" (*)
+│       ├── tokio feature "test-util" (*)
+│       ├── tokio feature "time" (*)
+│       ├── uuid feature "default" (*)
+│       ├── uuid feature "serde" (*)
+│       ├── uuid feature "v4" (*)
+│       ├── uuid feature "v7" (*)
+│       ├── chrono feature "default" (*)
+│       ├── chrono feature "serde" (*)
+│       ├── rcgen feature "aws_lc_rs"
+│       │   ├── rcgen v0.14.9
+│       │   │   ├── aws-lc-rs v1.17.1 (*)
+│       │   │   ├── time v0.3.55 (*)
+│       │   │   ├── rustls-pki-types feature "default" (*)
+│       │   │   ├── pem feature "default"
+│       │   │   │   ├── pem v3.0.6
+│       │   │   │   │   └── base64 feature "alloc" (*)
+│       │   │   │   └── pem feature "std"
+│       │   │   │       ├── pem v3.0.6 (*)
+│       │   │   │       └── base64 feature "std" (*)
+│       │   │   ├── yasna feature "default"
+│       │   │   │   └── yasna v0.6.0
+│       │   │   │       └── time v0.3.55 (*)
+│       │   │   ├── yasna feature "std"
+│       │   │   │   ├── yasna v0.6.0 (*)
+│       │   │   │   └── time feature "std" (*)
+│       │   │   └── yasna feature "time"
+│       │   │       └── yasna v0.6.0 (*)
+│       │   ├── aws-lc-rs feature "aws-lc-sys" (*)
+│       │   ├── rcgen feature "aws-lc-rs"
+│       │   │   └── rcgen v0.14.9 (*)
+│       │   └── rcgen feature "crypto"
+│       │       └── rcgen v0.14.9 (*)
+│       └── rcgen feature "pem"
+│           └── rcgen v0.14.9 (*)
+├── tonic feature "channel" (*)
+├── tonic feature "codegen" (*)
+├── tonic feature "router" (*)
+├── tonic feature "server" (*)
+├── tonic feature "tls-aws-lc" (*)
+└── insight-platform-postgres feature "default" (command-line)
+    └── insight-platform-postgres v0.1.0 (<workspace>/crates/platform-postgres)
+        ├── async-trait feature "default" (*)
+        ├── tokio feature "default" (*)
+        ├── tokio feature "macros" (*)
+        ├── tokio feature "net" (*)
+        ├── tokio feature "rt-multi-thread" (*)
+        ├── tokio feature "signal" (*)
+        ├── tokio feature "sync" (*)
+        ├── tokio feature "test-util" (*)
+        ├── tokio feature "time" (*)
+        ├── serde feature "default" (*)
+        ├── serde feature "derive" (*)
+        ├── sha2 feature "default" (*)
+        ├── uuid feature "default" (*)
+        ├── uuid feature "serde" (*)
+        ├── uuid feature "v4" (*)
+        ├── uuid feature "v7" (*)
+        ├── serde_json feature "default" (*)
+        ├── chrono feature "default" (*)
+        ├── chrono feature "serde" (*)
+        ├── serde_jcs feature "default" (*)
+        ├── sqlx feature "chrono" (*)
+        ├── sqlx feature "json" (*)
+        ├── sqlx feature "macros" (*)
+        ├── sqlx feature "postgres" (*)
+        ├── sqlx feature "runtime-tokio" (*)
+        ├── sqlx feature "sqlite" (*)
+        ├── sqlx feature "tls-rustls-aws-lc-rs" (*)
+        ├── insight-platform-mcp-host feature "default" (command-line) (*)
+        ├── insight-platform-contracts feature "default" (command-line) (*)
+        ├── insight-platform-jobs feature "default" (command-line) (*)
+        ├── insight-platform-artifacts feature "default" (command-line) (*)
+        ├── insight-platform-sandbox feature "default" (command-line) (*)
+        ├── insight-platform-capability-adapters feature "default" (command-line) (*)
+        ├── insight-platform-invocations feature "default" (command-line) (*)
+        ├── insight-platform-model-adapters feature "default" (command-line) (*)
+        ├── insight-platform-models feature "default" (command-line) (*)
+        ├── insight-platform-context feature "default" (command-line)
+        │   └── insight-platform-context v0.1.0 (<workspace>/crates/platform-context)
+        │       ├── serde feature "default" (*)
+        │       ├── serde feature "derive" (*)
+        │       ├── serde_json feature "default" (*)
+        │       ├── chrono feature "default" (*)
+        │       ├── chrono feature "serde" (*)
+        │       ├── insight-platform-contracts feature "default" (command-line) (*)
+        │       ├── insight-platform-jobs feature "default" (command-line) (*)
+        │       └── insight-platform-invocations feature "default" (command-line) (*)
+        ├── insight-platform-orchestrator feature "default" (command-line)
+        │   └── insight-platform-orchestrator v0.1.0 (<workspace>/crates/platform-orchestrator)
+        │       ├── serde feature "default" (*)
+        │       ├── serde feature "derive" (*)
+        │       ├── serde_json feature "default" (*)
+        │       ├── chrono feature "default" (*)
+        │       ├── chrono feature "serde" (*)
+        │       ├── insight-platform-contracts feature "default" (command-line) (*)
+        │       └── insight-platform-jobs feature "default" (command-line) (*)
+        ├── insight-platform-registry feature "default" (command-line)
+        │   └── insight-platform-registry v0.1.0 (<workspace>/crates/platform-registry)
+        │       ├── serde feature "default" (*)
+        │       ├── serde feature "derive" (*)
+        │       ├── chrono feature "default" (*)
+        │       ├── chrono feature "serde" (*)
+        │       └── insight-platform-contracts feature "default" (command-line) (*)
+        ├── insight-platform-scheduler feature "default" (command-line)
+        │   └── insight-platform-scheduler v0.1.0 (<workspace>/crates/platform-scheduler)
+        │       ├── serde feature "default" (*)
+        │       ├── serde feature "derive" (*)
+        │       ├── serde_json feature "default" (*)
+        │       └── insight-platform-contracts feature "default" (command-line) (*)
+        ├── insight-platform-security feature "default" (command-line)
+        │   └── insight-platform-security v0.1.0 (<workspace>/crates/platform-security)
+        │       ├── async-trait feature "default" (*)
+        │       ├── serde_json feature "default" (*)
+        │       ├── chrono feature "default" (*)
+        │       ├── chrono feature "serde" (*)
+        │       └── insight-platform-contracts feature "default" (command-line) (*)
+        └── insight-platform-tasks feature "default" (command-line)
+            └── insight-platform-tasks v0.1.0 (<workspace>/crates/platform-tasks)
+                ├── serde feature "default" (*)
+                ├── serde feature "derive" (*)
+                ├── chrono feature "default" (*)
+                ├── chrono feature "serde" (*)
+                └── insight-platform-contracts feature "default" (command-line) (*)
+        [dev-dependencies]
+        └── insight-platform-artifact-broker feature "default" (command-line)
+            └── insight-platform-artifact-broker v0.1.0 (<workspace>/crates/platform-artifact-broker) (*)
+
+insight-platform-capability-adapters v0.1.0 (<workspace>/crates/platform-capability-adapters) (*)
+
+insight-platform-context v0.1.0 (<workspace>/crates/platform-context) (*)
+
+insight-platform-contracts v0.1.0 (<workspace>/crates/platform-contracts) (*)
+
+insight-platform-egress v0.1.0 (<workspace>/crates/platform-egress)
+├── async-trait feature "default" (*)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── bytes feature "default" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── http feature "default" (*)
+├── http-body-util feature "default" (*)
+├── tokio-util feature "default" (*)
+├── tokio-util feature "rt" (*)
+├── hyper feature "client" (*)
+├── hyper feature "default" (*)
+├── hyper feature "http2" (*)
+├── hyper-rustls feature "aws-lc-rs" (*)
+├── hyper-rustls feature "http2" (*)
+├── hyper-rustls feature "native-tokio" (*)
+├── hyper-rustls feature "tls12" (*)
+├── hyper-util feature "client" (*)
+├── hyper-util feature "client-legacy" (*)
+├── hyper-util feature "default" (*)
+├── hyper-util feature "http2" (*)
+├── hyper-util feature "tokio" (*)
+├── base64 feature "default" (*)
+├── tower feature "default" (*)
+├── url feature "default" (*)
+├── serde_json feature "default" (*)
+├── chrono feature "default" (*)
+├── chrono feature "serde" (*)
+├── futures feature "default" (*)
+├── reqwest feature "form" (*)
+├── reqwest feature "json" (*)
+├── reqwest feature "rustls" (*)
+├── reqwest feature "stream" (*)
+├── ring feature "default" (*)
+├── jsonwebtoken feature "aws_lc_rs" (*)
+├── insight-platform-mcp-host feature "default" (command-line) (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-capability-adapters feature "default" (command-line) (*)
+└── insight-platform-model-adapters feature "default" (command-line) (*)
+
+insight-platform-egress-broker v0.1.0 (<workspace>/crates/platform-egress-broker)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── url feature "default" (*)
+├── serde_json feature "default" (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-egress-rpc feature "default" (command-line) (*)
+├── insight-platform-model-adapters feature "default" (command-line) (*)
+├── tonic feature "channel" (*)
+├── tonic feature "codegen" (*)
+├── tonic feature "router" (*)
+├── tonic feature "server" (*)
+├── tonic feature "tls-aws-lc" (*)
+├── insight-platform-egress feature "default" (command-line)
+│   └── insight-platform-egress v0.1.0 (<workspace>/crates/platform-egress) (*)
+├── insight-platform-secret-broker feature "default" (command-line)
+│   └── insight-platform-secret-broker v0.1.0 (<workspace>/crates/platform-secret-broker)
+│       ├── async-trait feature "default" (*)
+│       ├── tokio feature "default" (*)
+│       ├── tokio feature "macros" (*)
+│       ├── tokio feature "net" (*)
+│       ├── tokio feature "rt-multi-thread" (*)
+│       ├── tokio feature "signal" (*)
+│       ├── tokio feature "sync" (*)
+│       ├── tokio feature "test-util" (*)
+│       ├── tokio feature "time" (*)
+│       ├── serde feature "default" (*)
+│       ├── serde feature "derive" (*)
+│       ├── sha2 feature "default" (*)
+│       ├── base64 feature "default" (*)
+│       ├── uuid feature "default" (*)
+│       ├── uuid feature "serde" (*)
+│       ├── uuid feature "v4" (*)
+│       ├── uuid feature "v7" (*)
+│       ├── url feature "default" (*)
+│       ├── serde_json feature "default" (*)
+│       ├── chrono feature "default" (*)
+│       ├── chrono feature "serde" (*)
+│       ├── serde_jcs feature "default" (*)
+│       ├── insight-platform-mcp-host feature "default" (command-line) (*)
+│       ├── insight-platform-contracts feature "default" (command-line) (*)
+│       ├── aws-config feature "behavior-version-latest" (*)
+│       ├── aws-config feature "default-https-client" (*)
+│       ├── aws-config feature "rt-tokio" (*)
+│       ├── aws-sdk-kms feature "behavior-version-latest" (*)
+│       ├── aws-sdk-kms feature "default-https-client" (*)
+│       ├── aws-sdk-kms feature "rt-tokio" (*)
+│       ├── insight-platform-security feature "default" (command-line) (*)
+│       ├── insight-platform-egress feature "default" (command-line) (*)
+│       ├── aws-sdk-secretsmanager feature "behavior-version-latest"
+│       │   └── aws-sdk-secretsmanager v1.111.0
+│       │       ├── aws-credential-types feature "default" (*)
+│       │       ├── aws-smithy-async feature "default" (*)
+│       │       ├── bytes feature "default" (*)
+│       │       ├── aws-smithy-runtime-api feature "client" (*)
+│       │       ├── aws-smithy-runtime-api feature "default" (*)
+│       │       ├── aws-smithy-runtime-api feature "http-1x" (*)
+│       │       ├── aws-smithy-types feature "default" (*)
+│       │       ├── aws-smithy-types feature "http-body-1-x" (*)
+│       │       ├── http feature "default" (*)
+│       │       ├── http feature "default" (*)
+│       │       ├── tracing feature "default" (*)
+│       │       ├── arc-swap feature "default" (*)
+│       │       ├── aws-runtime feature "default" (*)
+│       │       ├── aws-smithy-http feature "default" (*)
+│       │       ├── aws-smithy-runtime feature "client" (*)
+│       │       ├── aws-smithy-runtime feature "default" (*)
+│       │       ├── aws-smithy-observability feature "default" (*)
+│       │       ├── aws-smithy-schema feature "default" (*)
+│       │       ├── fastrand feature "default" (*)
+│       │       ├── aws-types feature "default" (*)
+│       │       ├── aws-smithy-json feature "default" (*)
+│       │       └── regex-lite feature "default" (*)
+│       ├── aws-sdk-secretsmanager feature "default-https-client"
+│       │   ├── aws-sdk-secretsmanager v1.111.0 (*)
+│       │   └── aws-smithy-runtime feature "default-https-client" (*)
+│       └── aws-sdk-secretsmanager feature "rt-tokio"
+│           ├── aws-sdk-secretsmanager v1.111.0 (*)
+│           ├── aws-smithy-async feature "rt-tokio" (*)
+│           └── aws-smithy-types feature "rt-tokio" (*)
+└── insight-platform-security-rpc feature "default" (command-line)
+    └── insight-platform-security-rpc v0.1.0 (<workspace>/crates/platform-security-rpc)
+        ├── x509-parser v0.18.1 (*)
+        ├── async-trait feature "default" (*)
+        ├── serde feature "default" (*)
+        ├── serde feature "derive" (*)
+        ├── base64 feature "default" (*)
+        ├── serde_json feature "default" (*)
+        ├── chrono feature "default" (*)
+        ├── chrono feature "serde" (*)
+        ├── serde_jcs feature "default" (*)
+        ├── insight-platform-contracts feature "default" (command-line) (*)
+        ├── prost feature "default" (*)
+        ├── tonic feature "channel" (*)
+        ├── tonic feature "codegen" (*)
+        ├── tonic feature "router" (*)
+        ├── tonic feature "server" (*)
+        ├── tonic feature "tls-aws-lc" (*)
+        ├── tonic-prost feature "default" (*)
+        └── insight-platform-security feature "default" (command-line) (*)
+        [build-dependencies]
+        ├── protoc-bin-vendored feature "default" (*)
+        └── tonic-prost-build feature "default" (*)
+        [dev-dependencies]
+        ├── tokio feature "default" (*)
+        ├── tokio feature "macros" (*)
+        ├── tokio feature "net" (*)
+        ├── tokio feature "rt-multi-thread" (*)
+        ├── tokio feature "signal" (*)
+        ├── tokio feature "sync" (*)
+        ├── tokio feature "test-util" (*)
+        ├── tokio feature "time" (*)
+        ├── uuid feature "default" (*)
+        ├── uuid feature "serde" (*)
+        ├── uuid feature "v4" (*)
+        ├── uuid feature "v7" (*)
+        ├── tokio-stream feature "default" (*)
+        ├── rcgen feature "aws_lc_rs" (*)
+        └── rcgen feature "pem" (*)
+
+insight-platform-egress-rpc v0.1.0 (<workspace>/crates/platform-egress-rpc) (*)
+
+insight-platform-invocations v0.1.0 (<workspace>/crates/platform-invocations) (*)
+
+insight-platform-jobs v0.1.0 (<workspace>/crates/platform-jobs) (*)
+
+insight-platform-mcp-cleanup-worker v0.1.0 (<workspace>/crates/platform-mcp-cleanup-worker)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── uuid feature "default" (*)
+├── uuid feature "serde" (*)
+├── uuid feature "v4" (*)
+├── uuid feature "v7" (*)
+├── url feature "default" (*)
+├── serde_json feature "default" (*)
+├── sqlx feature "chrono" (*)
+├── sqlx feature "json" (*)
+├── sqlx feature "macros" (*)
+├── sqlx feature "postgres" (*)
+├── sqlx feature "runtime-tokio" (*)
+├── sqlx feature "sqlite" (*)
+├── sqlx feature "tls-rustls-aws-lc-rs" (*)
+├── insight-platform-mcp-host feature "default" (command-line) (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-egress-rpc feature "default" (command-line) (*)
+├── tonic feature "channel" (*)
+├── tonic feature "codegen" (*)
+├── tonic feature "router" (*)
+├── tonic feature "server" (*)
+├── tonic feature "tls-aws-lc" (*)
+└── insight-platform-postgres feature "default" (command-line) (*)
+
+insight-platform-mcp-host v0.1.0 (<workspace>/crates/platform-mcp-host) (*)
+
+insight-platform-model-adapters v0.1.0 (<workspace>/crates/platform-model-adapters) (*)
+
+insight-platform-models v0.1.0 (<workspace>/crates/platform-models) (*)
+
+insight-platform-orchestrator v0.1.0 (<workspace>/crates/platform-orchestrator) (*)
+
+insight-platform-postgres v0.1.0 (<workspace>/crates/platform-postgres) (*)
+
+insight-platform-registry v0.1.0 (<workspace>/crates/platform-registry) (*)
+
+insight-platform-runtime v0.1.0 (<workspace>/crates/platform-runtime)
+├── async-trait feature "default" (*)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── tokio-util feature "default" (*)
+├── tokio-util feature "rt" (*)
+├── sha2 feature "default" (*)
+├── uuid feature "default" (*)
+├── uuid feature "serde" (*)
+├── uuid feature "v4" (*)
+├── uuid feature "v7" (*)
+├── serde_json feature "default" (*)
+├── chrono feature "default" (*)
+├── chrono feature "serde" (*)
+├── futures feature "default" (*)
+├── async-nats feature "aws-lc-rs" (*)
+├── async-nats feature "nkeys" (*)
+├── async-nats feature "server_2_10" (*)
+├── async-nats feature "server_2_11" (*)
+├── async-nats feature "server_2_12" (*)
+├── async-nats feature "server_2_14" (*)
+├── sqlx feature "chrono" (*)
+├── sqlx feature "json" (*)
+├── sqlx feature "macros" (*)
+├── sqlx feature "postgres" (*)
+├── sqlx feature "runtime-tokio" (*)
+├── sqlx feature "sqlite" (*)
+├── sqlx feature "tls-rustls-aws-lc-rs" (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-sandbox feature "default" (command-line) (*)
+├── insight-platform-postgres feature "default" (command-line) (*)
+├── insight-platform-sandbox-rpc feature "default" (command-line)
+│   └── insight-platform-sandbox-rpc v0.1.0 (<workspace>/crates/platform-sandbox-rpc)
+│       ├── x509-parser v0.18.1 (*)
+│       ├── async-trait feature "default" (*)
+│       ├── tokio feature "default" (*)
+│       ├── tokio feature "macros" (*)
+│       ├── tokio feature "net" (*)
+│       ├── tokio feature "rt-multi-thread" (*)
+│       ├── tokio feature "signal" (*)
+│       ├── tokio feature "sync" (*)
+│       ├── tokio feature "test-util" (*)
+│       ├── tokio feature "time" (*)
+│       ├── serde feature "default" (*)
+│       ├── serde feature "derive" (*)
+│       ├── tokio-util feature "default" (*)
+│       ├── tokio-util feature "rt" (*)
+│       ├── sha2 feature "default" (*)
+│       ├── serde_json feature "default" (*)
+│       ├── chrono feature "default" (*)
+│       ├── chrono feature "serde" (*)
+│       ├── futures feature "default" (*)
+│       ├── serde_jcs feature "default" (*)
+│       ├── async-nats feature "aws-lc-rs" (*)
+│       ├── async-nats feature "nkeys" (*)
+│       ├── async-nats feature "server_2_10" (*)
+│       ├── async-nats feature "server_2_11" (*)
+│       ├── async-nats feature "server_2_12" (*)
+│       ├── async-nats feature "server_2_14" (*)
+│       ├── insight-platform-contracts feature "default" (command-line) (*)
+│       ├── insight-platform-sandbox feature "default" (command-line) (*)
+│       ├── prost feature "default" (*)
+│       ├── tonic feature "channel" (*)
+│       ├── tonic feature "codegen" (*)
+│       ├── tonic feature "router" (*)
+│       ├── tonic feature "server" (*)
+│       ├── tonic feature "tls-aws-lc" (*)
+│       └── tonic-prost feature "default" (*)
+│       [build-dependencies]
+│       ├── protoc-bin-vendored feature "default" (*)
+│       └── tonic-prost-build feature "default" (*)
+│       [dev-dependencies]
+│       ├── hyper-util feature "client" (*)
+│       ├── hyper-util feature "client-legacy" (*)
+│       ├── hyper-util feature "default" (*)
+│       ├── hyper-util feature "http2" (*)
+│       ├── hyper-util feature "tokio" (*)
+│       ├── tower feature "default" (*)
+│       ├── uuid feature "default" (*)
+│       ├── uuid feature "serde" (*)
+│       ├── uuid feature "v4" (*)
+│       ├── uuid feature "v7" (*)
+│       ├── tokio-stream feature "default" (*)
+│       ├── tempfile feature "default" (*)
+│       ├── rcgen feature "aws_lc_rs" (*)
+│       └── rcgen feature "pem" (*)
+└── insight-platform-worker feature "default" (command-line)
+    └── insight-platform-worker v0.1.0 (<workspace>/crates/platform-worker)
+        ├── tokio feature "default" (*)
+        ├── tokio feature "macros" (*)
+        ├── tokio feature "net" (*)
+        ├── tokio feature "rt-multi-thread" (*)
+        ├── tokio feature "signal" (*)
+        ├── tokio feature "sync" (*)
+        ├── tokio feature "test-util" (*)
+        ├── tokio feature "time" (*)
+        └── insight-platform-contracts feature "default" (command-line) (*)
+[dev-dependencies]
+├── insight-platform-orchestrator feature "default" (command-line) (*)
+└── insight-platform-security feature "default" (command-line) (*)
+
+insight-platform-sandbox v0.1.0 (<workspace>/crates/platform-sandbox) (*)
+
+insight-platform-sandbox-attestor v0.1.0 (<workspace>/crates/platform-sandbox-attestor)
+├── async-trait feature "default" (*)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── libc feature "default" (*)
+├── tokio-util feature "default" (*)
+├── tokio-util feature "rt" (*)
+├── uuid feature "default" (*)
+├── uuid feature "serde" (*)
+├── uuid feature "v4" (*)
+├── uuid feature "v7" (*)
+├── serde_json feature "default" (*)
+├── chrono feature "default" (*)
+├── chrono feature "serde" (*)
+├── tokio-stream feature "default" (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-sandbox feature "default" (command-line) (*)
+├── tonic feature "channel" (*)
+├── tonic feature "codegen" (*)
+├── tonic feature "router" (*)
+├── tonic feature "server" (*)
+├── tonic feature "tls-aws-lc" (*)
+└── insight-platform-sandbox-rpc feature "default" (command-line) (*)
+[dev-dependencies]
+└── tempfile feature "default" (*)
+
+insight-platform-sandbox-controller v0.1.0 (<workspace>/crates/platform-sandbox-controller)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── ipnet feature "default" (*)
+├── serde_json feature "default" (*)
+├── sqlx feature "chrono" (*)
+├── sqlx feature "json" (*)
+├── sqlx feature "macros" (*)
+├── sqlx feature "postgres" (*)
+├── sqlx feature "runtime-tokio" (*)
+├── sqlx feature "sqlite" (*)
+├── sqlx feature "tls-rustls-aws-lc-rs" (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-artifact-broker feature "default" (command-line) (*)
+├── insight-platform-sandbox feature "default" (command-line) (*)
+├── tonic feature "channel" (*)
+├── tonic feature "codegen" (*)
+├── tonic feature "router" (*)
+├── tonic feature "server" (*)
+├── tonic feature "tls-aws-lc" (*)
+├── insight-platform-postgres feature "default" (command-line) (*)
+└── insight-platform-sandbox-rpc feature "default" (command-line) (*)
+
+insight-platform-sandbox-executor v0.1.0 (<workspace>/crates/platform-sandbox-executor)
+├── async-trait feature "default" (*)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── tokio-util feature "default" (*)
+├── tokio-util feature "rt" (*)
+├── sha2 feature "default" (*)
+├── hyper-util feature "client" (*)
+├── hyper-util feature "client-legacy" (*)
+├── hyper-util feature "default" (*)
+├── hyper-util feature "http2" (*)
+├── hyper-util feature "tokio" (*)
+├── tower feature "default" (*)
+├── uuid feature "default" (*)
+├── uuid feature "serde" (*)
+├── uuid feature "v4" (*)
+├── uuid feature "v7" (*)
+├── url feature "default" (*)
+├── serde_json feature "default" (*)
+├── chrono feature "default" (*)
+├── chrono feature "serde" (*)
+├── serde_jcs feature "default" (*)
+├── async-nats feature "aws-lc-rs" (*)
+├── async-nats feature "nkeys" (*)
+├── async-nats feature "server_2_10" (*)
+├── async-nats feature "server_2_11" (*)
+├── async-nats feature "server_2_12" (*)
+├── async-nats feature "server_2_14" (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-sandbox feature "default" (command-line) (*)
+├── tonic feature "channel" (*)
+├── tonic feature "codegen" (*)
+├── tonic feature "router" (*)
+├── tonic feature "server" (*)
+├── tonic feature "tls-aws-lc" (*)
+├── insight-platform-sandbox-rpc feature "default" (command-line) (*)
+├── insight-platform-worker feature "default" (command-line) (*)
+└── insight-platform-sandbox-wasi feature "default" (command-line)
+    └── insight-platform-sandbox-wasi v0.1.0 (<workspace>/crates/platform-sandbox-wasi)
+        ├── async-trait feature "default" (*)
+        ├── tokio feature "default" (*)
+        ├── tokio feature "macros" (*)
+        ├── tokio feature "net" (*)
+        ├── tokio feature "rt-multi-thread" (*)
+        ├── tokio feature "signal" (*)
+        ├── tokio feature "sync" (*)
+        ├── tokio feature "test-util" (*)
+        ├── tokio feature "time" (*)
+        ├── serde feature "default" (*)
+        ├── serde feature "derive" (*)
+        ├── sha2 feature "default" (*)
+        ├── serde_json feature "default" (*)
+        ├── chrono feature "default" (*)
+        ├── chrono feature "serde" (*)
+        ├── insight-platform-contracts feature "default" (command-line) (*)
+        ├── insight-platform-sandbox feature "default" (command-line) (*)
+        ├── wasmtime feature "cranelift"
+        │   ├── wasmtime v42.0.0
+        │   │   ├── log v0.4.33
+        │   │   ├── async-trait feature "default" (*)
+        │   │   ├── serde feature "alloc" (*)
+        │   │   ├── serde_derive feature "default" (*)
+        │   │   ├── libc feature "default" (*)
+        │   │   ├── once_cell feature "default" (*)
+        │   │   ├── cfg-if feature "default" (*)
+        │   │   ├── smallvec feature "default" (*)
+        │   │   ├── smallvec feature "union"
+        │   │   │   └── smallvec v1.15.2 (*)
+        │   │   ├── bitflags feature "default" (*)
+        │   │   ├── rustix feature "default" (*)
+        │   │   ├── rustix feature "mm"
+        │   │   │   └── rustix v1.1.4 (*)
+        │   │   ├── rustix feature "param"
+        │   │   │   └── rustix v1.1.4 (*)
+        │   │   ├── bumpalo feature "default"
+        │   │   │   └── bumpalo v3.20.3
+        │   │   │       └── allocator-api2 v0.2.21
+        │   │   ├── mach2 feature "default"
+        │   │   │   └── mach2 v0.4.3
+        │   │   │       └── libc v0.2.186
+        │   │   ├── object feature "elf"
+        │   │   │   └── object v0.37.3
+        │   │   │       ├── crc32fast v1.5.0 (*)
+        │   │   │       ├── indexmap v2.14.0 (*)
+        │   │   │       ├── memchr v2.8.2
+        │   │   │       └── hashbrown feature "default-hasher"
+        │   │   │           └── hashbrown v0.15.5
+        │   │   │               └── foldhash v0.1.5
+        │   │   ├── object feature "read_core"
+        │   │   │   └── object v0.37.3 (*)
+        │   │   ├── object feature "unaligned"
+        │   │   │   └── object v0.37.3 (*)
+        │   │   ├── postcard feature "alloc"
+        │   │   │   ├── postcard v1.1.3
+        │   │   │   │   ├── cobs v0.3.0
+        │   │   │   │   │   └── thiserror v2.0.18 (*)
+        │   │   │   │   └── serde feature "derive" (*)
+        │   │   │   └── serde feature "alloc" (*)
+        │   │   ├── pulley-interpreter feature "default"
+        │   │   │   └── pulley-interpreter v42.0.0
+        │   │   │       ├── log v0.4.33
+        │   │   │       ├── cranelift-bitset feature "default"
+        │   │   │       │   └── cranelift-bitset v0.129.0
+        │   │   │       │       ├── serde feature "alloc" (*)
+        │   │   │       │       ├── serde_derive feature "default" (*)
+        │   │   │       │       └── wasmtime-internal-core feature "default"
+        │   │   │       │           └── wasmtime-internal-core v42.0.0
+        │   │   │       │               └── libm feature "default"
+        │   │   │       │                   ├── libm v0.2.16
+        │   │   │       │                   └── libm feature "arch"
+        │   │   │       │                       └── libm v0.2.16
+        │   │   │       ├── wasmtime-internal-core feature "default" (*)
+        │   │   │       └── pulley-macros feature "default"
+        │   │   │           └── pulley-macros v42.0.0 (proc-macro)
+        │   │   │               ├── proc-macro2 feature "default" (*)
+        │   │   │               ├── quote feature "default" (*)
+        │   │   │               ├── syn feature "default" (*)
+        │   │   │               └── syn feature "full" (*)
+        │   │   ├── wasmtime-internal-core feature "default" (*)
+        │   │   ├── target-lexicon feature "default"
+        │   │   │   └── target-lexicon v0.13.5
+        │   │   ├── wasmparser feature "simd"
+        │   │   │   └── wasmparser v0.244.0
+        │   │   │       ├── semver v1.0.28
+        │   │   │       ├── serde feature "alloc" (*)
+        │   │   │       └── bitflags feature "default" (*)
+        │   │   ├── wasmtime-environ feature "default"
+        │   │   │   └── wasmtime-environ v42.0.0
+        │   │   │       ├── anyhow v1.0.104
+        │   │   │       ├── log v0.4.33
+        │   │   │       ├── serde feature "alloc" (*)
+        │   │   │       ├── serde_derive feature "default" (*)
+        │   │   │       ├── indexmap feature "serde"
+        │   │   │       │   └── indexmap v2.14.0 (*)
+        │   │   │       ├── smallvec feature "default" (*)
+        │   │   │       ├── smallvec feature "serde" (*)
+        │   │   │       ├── smallvec feature "union" (*)
+        │   │   │       ├── object feature "elf" (*)
+        │   │   │       ├── object feature "read_core" (*)
+        │   │   │       ├── hashbrown feature "default-hasher" (*)
+        │   │   │       ├── postcard feature "alloc" (*)
+        │   │   │       ├── cranelift-bitset feature "default" (*)
+        │   │   │       ├── cranelift-bitset feature "enable-serde"
+        │   │   │       │   └── cranelift-bitset v0.129.0 (*)
+        │   │   │       ├── wasmtime-internal-core feature "default" (*)
+        │   │   │       ├── target-lexicon feature "default" (*)
+        │   │   │       ├── wasmparser feature "features"
+        │   │   │       │   └── wasmparser v0.244.0 (*)
+        │   │   │       ├── wasmparser feature "serde"
+        │   │   │       │   └── wasmparser v0.244.0 (*)
+        │   │   │       ├── wasmparser feature "simd" (*)
+        │   │   │       ├── wasmparser feature "validate"
+        │   │   │       │   └── wasmparser v0.244.0 (*)
+        │   │   │       ├── cranelift-entity feature "default"
+        │   │   │       │   └── cranelift-entity v0.129.0
+        │   │   │       │       ├── serde feature "alloc" (*)
+        │   │   │       │       ├── serde_derive feature "default" (*)
+        │   │   │       │       ├── cranelift-bitset feature "default" (*)
+        │   │   │       │       └── wasmtime-internal-core feature "default" (*)
+        │   │   │       ├── cranelift-entity feature "enable-serde"
+        │   │   │       │   ├── cranelift-entity v0.129.0 (*)
+        │   │   │       │   ├── cranelift-bitset feature "enable-serde" (*)
+        │   │   │       │   ├── cranelift-entity feature "serde"
+        │   │   │       │   │   └── cranelift-entity v0.129.0 (*)
+        │   │   │       │   └── cranelift-entity feature "serde_derive"
+        │   │   │       │       └── cranelift-entity v0.129.0 (*)
+        │   │   │       ├── gimli feature "read"
+        │   │   │       │   ├── gimli v0.33.0
+        │   │   │       │   │   ├── fnv v1.0.7
+        │   │   │       │   │   ├── hashbrown v0.16.1 (*)
+        │   │   │       │   │   └── indexmap v2.14.0 (*)
+        │   │   │       │   └── gimli feature "read-core"
+        │   │   │       │       └── gimli v0.33.0 (*)
+        │   │   │       ├── wasm-encoder feature "default"
+        │   │   │       │   ├── wasm-encoder v0.244.0
+        │   │   │       │   │   └── leb128fmt v0.1.0
+        │   │   │       │   ├── wasm-encoder feature "component-model"
+        │   │   │       │   │   └── wasm-encoder v0.244.0 (*)
+        │   │   │       │   └── wasm-encoder feature "std"
+        │   │   │       │       └── wasm-encoder v0.244.0 (*)
+        │   │   │       └── wasmprinter feature "default"
+        │   │   │           ├── wasmprinter v0.244.0
+        │   │   │           │   ├── anyhow feature "default" (*)
+        │   │   │           │   ├── wasmparser feature "simd" (*)
+        │   │   │           │   ├── wasmparser feature "std"
+        │   │   │           │   │   └── wasmparser v0.244.0 (*)
+        │   │   │           │   └── termcolor feature "default"
+        │   │   │           │       └── termcolor v1.4.1
+        │   │   │           ├── wasmprinter feature "component-model"
+        │   │   │           │   ├── wasmprinter v0.244.0 (*)
+        │   │   │           │   └── wasmparser feature "component-model"
+        │   │   │           │       └── wasmparser v0.244.0 (*)
+        │   │   │           └── wasmprinter feature "validate"
+        │   │   │               ├── wasmprinter v0.244.0 (*)
+        │   │   │               ├── wasmparser feature "features" (*)
+        │   │   │               └── wasmparser feature "validate" (*)
+        │   │   ├── wasmtime-internal-cranelift feature "default"
+        │   │   │   └── wasmtime-internal-cranelift v42.0.0
+        │   │   │       ├── cranelift-control v0.129.2
+        │   │   │       │   └── arbitrary feature "default"
+        │   │   │       │       └── arbitrary v1.4.2
+        │   │   │       ├── log v0.4.33
+        │   │   │       ├── cfg-if feature "default" (*)
+        │   │   │       ├── smallvec feature "default" (*)
+        │   │   │       ├── smallvec feature "union" (*)
+        │   │   │       ├── thiserror feature "default" (*)
+        │   │   │       ├── itertools feature "default" (*)
+        │   │   │       ├── object feature "elf" (*)
+        │   │   │       ├── object feature "read_core" (*)
+        │   │   │       ├── object feature "std"
+        │   │   │       │   ├── object v0.37.3 (*)
+        │   │   │       │   └── memchr feature "std" (*)
+        │   │   │       ├── object feature "write"
+        │   │   │       │   ├── object v0.37.3 (*)
+        │   │   │       │   ├── object feature "coff"
+        │   │   │       │   │   └── object v0.37.3 (*)
+        │   │   │       │   ├── object feature "elf" (*)
+        │   │   │       │   ├── object feature "macho"
+        │   │   │       │   │   └── object v0.37.3 (*)
+        │   │   │       │   ├── object feature "pe"
+        │   │   │       │   │   ├── object v0.37.3 (*)
+        │   │   │       │   │   └── object feature "coff" (*)
+        │   │   │       │   ├── object feature "write_std"
+        │   │   │       │   │   ├── object v0.37.3 (*)
+        │   │   │       │   │   ├── crc32fast feature "std" (*)
+        │   │   │       │   │   ├── indexmap feature "std" (*)
+        │   │   │       │   │   ├── object feature "std" (*)
+        │   │   │       │   │   └── object feature "write_core"
+        │   │   │       │   │       └── object v0.37.3 (*)
+        │   │   │       │   └── object feature "xcoff"
+        │   │   │       │       └── object v0.37.3 (*)
+        │   │   │       ├── pulley-interpreter feature "default" (*)
+        │   │   │       ├── wasmtime-internal-core feature "default" (*)
+        │   │   │       ├── target-lexicon feature "default" (*)
+        │   │   │       ├── wasmparser feature "simd" (*)
+        │   │   │       ├── wasmtime-environ feature "compile"
+        │   │   │       │   ├── wasmtime-environ v42.0.0 (*)
+        │   │   │       │   ├── object feature "write_core" (*)
+        │   │   │       │   ├── wasmtime-environ feature "std"
+        │   │   │       │   │   ├── wasmtime-environ v42.0.0 (*)
+        │   │   │       │   │   ├── indexmap feature "std" (*)
+        │   │   │       │   │   ├── anyhow feature "std" (*)
+        │   │   │       │   │   ├── object feature "std" (*)
+        │   │   │       │   │   ├── wasmtime-internal-core feature "std"
+        │   │   │       │   │   │   └── wasmtime-internal-core v42.0.0 (*)
+        │   │   │       │   │   └── wasmparser feature "std" (*)
+        │   │   │       │   └── gimli feature "write"
+        │   │   │       │       └── gimli v0.33.0 (*)
+        │   │   │       ├── wasmtime-environ feature "default" (*)
+        │   │   │       ├── cranelift-entity feature "default" (*)
+        │   │   │       ├── gimli feature "read" (*)
+        │   │   │       ├── gimli feature "std"
+        │   │   │       │   └── gimli v0.33.0 (*)
+        │   │   │       ├── cranelift-codegen feature "host-arch"
+        │   │   │       │   └── cranelift-codegen v0.129.0
+        │   │   │       │       ├── cranelift-control v0.129.2 (*)
+        │   │   │       │       ├── log v0.4.33
+        │   │   │       │       ├── rustc-hash v2.1.3
+        │   │   │       │       ├── smallvec feature "default" (*)
+        │   │   │       │       ├── smallvec feature "union" (*)
+        │   │   │       │       ├── bumpalo feature "default" (*)
+        │   │   │       │       ├── hashbrown feature "default-hasher" (*)
+        │   │   │       │       ├── pulley-interpreter feature "default" (*)
+        │   │   │       │       ├── cranelift-bitset feature "default" (*)
+        │   │   │       │       ├── wasmtime-internal-core feature "default" (*)
+        │   │   │       │       ├── libm feature "default" (*)
+        │   │   │       │       ├── target-lexicon feature "default" (*)
+        │   │   │       │       ├── cranelift-entity feature "default" (*)
+        │   │   │       │       ├── gimli feature "read" (*)
+        │   │   │       │       ├── gimli feature "write" (*)
+        │   │   │       │       ├── cranelift-assembler-x64 feature "default"
+        │   │   │       │       │   └── cranelift-assembler-x64 v0.129.2
+        │   │   │       │       │       [build-dependencies]
+        │   │   │       │       │       └── cranelift-assembler-x64-meta feature "default"
+        │   │   │       │       │           └── cranelift-assembler-x64-meta v0.129.2
+        │   │   │       │       │               └── cranelift-srcgen feature "default"
+        │   │   │       │       │                   └── cranelift-srcgen v0.129.2
+        │   │   │       │       ├── cranelift-bforest feature "default"
+        │   │   │       │       │   └── cranelift-bforest v0.129.0
+        │   │   │       │       │       └── cranelift-entity feature "default" (*)
+        │   │   │       │       ├── cranelift-codegen-shared feature "default"
+        │   │   │       │       │   └── cranelift-codegen-shared v0.129.2
+        │   │   │       │       ├── regalloc2 feature "checker"
+        │   │   │       │       │   └── regalloc2 v0.13.5
+        │   │   │       │       │       ├── hashbrown v0.15.5 (*)
+        │   │   │       │       │       ├── log v0.4.33
+        │   │   │       │       │       ├── rustc-hash v2.1.3
+        │   │   │       │       │       ├── allocator-api2 feature "alloc" (*)
+        │   │   │       │       │       ├── smallvec feature "default" (*)
+        │   │   │       │       │       ├── smallvec feature "union" (*)
+        │   │   │       │       │       ├── bumpalo feature "allocator-api2"
+        │   │   │       │       │       │   └── bumpalo v3.20.3 (*)
+        │   │   │       │       │       └── bumpalo feature "default" (*)
+        │   │   │       │       └── regalloc2 feature "default"
+        │   │   │       │           ├── regalloc2 v0.13.5 (*)
+        │   │   │       │           └── regalloc2 feature "std"
+        │   │   │       │               └── regalloc2 v0.13.5 (*)
+        │   │   │       │       [build-dependencies]
+        │   │   │       │       ├── cranelift-codegen-meta feature "default"
+        │   │   │       │       │   └── cranelift-codegen-meta v0.129.0
+        │   │   │       │       │       ├── heck feature "default" (*)
+        │   │   │       │       │       ├── cranelift-assembler-x64-meta feature "default" (*)
+        │   │   │       │       │       ├── cranelift-srcgen feature "default" (*)
+        │   │   │       │       │       ├── cranelift-codegen-shared feature "default" (*)
+        │   │   │       │       │       └── pulley-interpreter feature "default"
+        │   │   │       │       │           └── pulley-interpreter v42.0.0
+        │   │   │       │       │               ├── log v0.4.33
+        │   │   │       │       │               ├── pulley-macros feature "default" (*)
+        │   │   │       │       │               └── cranelift-bitset feature "default"
+        │   │   │       │       │                   └── cranelift-bitset v0.129.0
+        │   │   │       │       │                       └── wasmtime-internal-core feature "default"
+        │   │   │       │       │                           └── wasmtime-internal-core v42.0.0
+        │   │   │       │       │                               └── libm feature "default" (*)
+        │   │   │       │       └── cranelift-isle feature "default"
+        │   │   │       │           └── cranelift-isle v0.129.0
+        │   │   │       ├── cranelift-codegen feature "std"
+        │   │   │       │   ├── cranelift-codegen v0.129.0 (*)
+        │   │   │       │   ├── gimli feature "std" (*)
+        │   │   │       │   ├── cranelift-codegen feature "gimli"
+        │   │   │       │   │   └── cranelift-codegen v0.129.0 (*)
+        │   │   │       │   ├── cranelift-control feature "fuzz"
+        │   │   │       │   │   └── cranelift-control v0.129.2 (*)
+        │   │   │       │   └── rustc-hash feature "std"
+        │   │   │       │       └── rustc-hash v2.1.3
+        │   │   │       ├── cranelift-codegen feature "timing"
+        │   │   │       │   └── cranelift-codegen v0.129.0 (*)
+        │   │   │       ├── cranelift-codegen feature "unwind"
+        │   │   │       │   ├── cranelift-codegen v0.129.0 (*)
+        │   │   │       │   └── cranelift-codegen feature "gimli" (*)
+        │   │   │       ├── cranelift-frontend feature "default"
+        │   │   │       │   ├── cranelift-frontend v0.129.0
+        │   │   │       │   │   ├── log v0.4.33
+        │   │   │       │   │   ├── smallvec feature "default" (*)
+        │   │   │       │   │   ├── smallvec feature "union" (*)
+        │   │   │       │   │   ├── target-lexicon feature "default" (*)
+        │   │   │       │   │   ├── cranelift-codegen feature "std" (*)
+        │   │   │       │   │   └── cranelift-codegen feature "unwind" (*)
+        │   │   │       │   └── cranelift-frontend feature "std"
+        │   │   │       │       ├── cranelift-frontend v0.129.0 (*)
+        │   │   │       │       └── cranelift-codegen feature "std" (*)
+        │   │   │       ├── cranelift-native feature "default"
+        │   │   │       │   ├── cranelift-native v0.129.0
+        │   │   │       │   │   ├── target-lexicon feature "default" (*)
+        │   │   │       │   │   ├── cranelift-codegen feature "std" (*)
+        │   │   │       │   │   └── cranelift-codegen feature "unwind" (*)
+        │   │   │       │   └── cranelift-native feature "std"
+        │   │   │       │       ├── cranelift-native v0.129.0 (*)
+        │   │   │       │       └── cranelift-codegen feature "std" (*)
+        │   │   │       ├── wasmtime-internal-unwinder feature "cranelift"
+        │   │   │       │   └── wasmtime-internal-unwinder v42.0.0
+        │   │   │       │       ├── log v0.4.33
+        │   │   │       │       ├── cfg-if feature "default" (*)
+        │   │   │       │       ├── object feature "elf" (*)
+        │   │   │       │       ├── object feature "read_core" (*)
+        │   │   │       │       ├── wasmtime-environ feature "default" (*)
+        │   │   │       │       ├── cranelift-codegen feature "std" (*)
+        │   │   │       │       └── cranelift-codegen feature "unwind" (*)
+        │   │   │       ├── wasmtime-internal-unwinder feature "default"
+        │   │   │       │   └── wasmtime-internal-unwinder v42.0.0 (*)
+        │   │   │       └── wasmtime-internal-versioned-export-macros feature "default"
+        │   │   │           └── wasmtime-internal-versioned-export-macros v42.0.0 (proc-macro)
+        │   │   │               ├── proc-macro2 feature "default" (*)
+        │   │   │               ├── quote feature "default" (*)
+        │   │   │               ├── syn feature "default" (*)
+        │   │   │               └── syn feature "full" (*)
+        │   │   ├── wasmtime-internal-cranelift feature "pulley"
+        │   │   │   ├── wasmtime-internal-cranelift v42.0.0 (*)
+        │   │   │   └── cranelift-codegen feature "pulley"
+        │   │   │       ├── cranelift-codegen v0.129.0 (*)
+        │   │   │       ├── pulley-interpreter feature "disas"
+        │   │   │       │   ├── pulley-interpreter v42.0.0 (*)
+        │   │   │       │   └── pulley-interpreter feature "decode"
+        │   │   │       │       └── pulley-interpreter v42.0.0 (*)
+        │   │   │       ├── pulley-interpreter feature "encode"
+        │   │   │       │   └── pulley-interpreter v42.0.0 (*)
+        │   │   │       ├── cranelift-codegen feature "pulley-interpreter"
+        │   │   │       │   └── cranelift-codegen v0.129.0 (*)
+        │   │   │       └── cranelift-codegen-meta feature "pulley"
+        │   │   │           └── cranelift-codegen-meta v0.129.0 (*)
+        │   │   ├── wasmtime-internal-unwinder feature "default" (*)
+        │   │   ├── wasmtime-internal-versioned-export-macros feature "default" (*)
+        │   │   └── wasmtime-internal-jit-icache-coherence feature "default"
+        │   │       └── wasmtime-internal-jit-icache-coherence v42.0.0
+        │   │           ├── libc feature "default" (*)
+        │   │           ├── cfg-if feature "default" (*)
+        │   │           └── wasmtime-internal-core feature "default" (*)
+        │   │   [build-dependencies]
+        │   │   ├── cc feature "default" (*)
+        │   │   └── wasmtime-internal-versioned-export-macros feature "default" (*)
+        │   ├── wasmtime feature "std"
+        │   │   ├── wasmtime v42.0.0 (*)
+        │   │   ├── wasmtime feature "once_cell"
+        │   │   │   └── wasmtime v42.0.0 (*)
+        │   │   ├── wasmtime feature "wasmtime-jit-icache-coherence"
+        │   │   │   └── wasmtime v42.0.0 (*)
+        │   │   ├── object feature "std" (*)
+        │   │   ├── postcard feature "use-std"
+        │   │   │   ├── postcard v1.1.3 (*)
+        │   │   │   ├── serde feature "std" (*)
+        │   │   │   └── postcard feature "alloc" (*)
+        │   │   ├── pulley-interpreter feature "std"
+        │   │   │   ├── pulley-interpreter v42.0.0 (*)
+        │   │   │   └── wasmtime-internal-core feature "std" (*)
+        │   │   ├── wasmtime-internal-core feature "std" (*)
+        │   │   └── wasmtime-environ feature "std" (*)
+        │   ├── wasmtime feature "wasmtime-unwinder"
+        │   │   └── wasmtime v42.0.0 (*)
+        │   └── wasmtime-internal-unwinder feature "cranelift" (*)
+        ├── wasmtime feature "runtime"
+        │   ├── wasmtime v42.0.0 (*)
+        │   └── pulley-interpreter feature "interp"
+        │       ├── pulley-interpreter v42.0.0 (*)
+        │       ├── pulley-interpreter feature "decode" (*)
+        │       └── pulley-interpreter feature "encode" (*)
+        └── wasmtime feature "std" (*)
+        [dev-dependencies]
+        └── wat feature "default"
+            ├── wat v1.244.0
+            │   └── wast feature "wasm-module"
+            │       └── wast v244.0.0
+            │           ├── leb128fmt v0.1.0
+            │           ├── memchr feature "default" (*)
+            │           ├── bumpalo feature "default" (*)
+            │           ├── wasm-encoder feature "std" (*)
+            │           └── unicode-width feature "default"
+            │               ├── unicode-width v0.2.2
+            │               └── unicode-width feature "cjk"
+            │                   └── unicode-width v0.2.2
+            └── wat feature "component-model"
+                ├── wat v1.244.0 (*)
+                └── wast feature "component-model"
+                    ├── wast v244.0.0 (*)
+                    ├── wasm-encoder feature "component-model" (*)
+                    └── wast feature "wasm-module" (*)
+
+insight-platform-sandbox-rpc v0.1.0 (<workspace>/crates/platform-sandbox-rpc) (*)
+
+insight-platform-sandbox-wasi v0.1.0 (<workspace>/crates/platform-sandbox-wasi) (*)
+
+insight-platform-scheduler v0.1.0 (<workspace>/crates/platform-scheduler) (*)
+
+insight-platform-secret-broker v0.1.0 (<workspace>/crates/platform-secret-broker) (*)
+
+insight-platform-security v0.1.0 (<workspace>/crates/platform-security) (*)
+
+insight-platform-security-authority v0.1.0 (<workspace>/crates/platform-security-authority)
+├── async-trait feature "default" (*)
+├── tokio feature "default" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── serde_json feature "default" (*)
+├── sqlx feature "chrono" (*)
+├── sqlx feature "json" (*)
+├── sqlx feature "macros" (*)
+├── sqlx feature "postgres" (*)
+├── sqlx feature "runtime-tokio" (*)
+├── sqlx feature "sqlite" (*)
+├── sqlx feature "tls-rustls-aws-lc-rs" (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── tonic feature "channel" (*)
+├── tonic feature "codegen" (*)
+├── tonic feature "router" (*)
+├── tonic feature "server" (*)
+├── tonic feature "tls-aws-lc" (*)
+├── insight-platform-postgres feature "default" (command-line) (*)
+├── insight-platform-security feature "default" (command-line) (*)
+└── insight-platform-security-rpc feature "default" (command-line) (*)
+
+insight-platform-security-rpc v0.1.0 (<workspace>/crates/platform-security-rpc) (*)
+
+insight-platform-tasks v0.1.0 (<workspace>/crates/platform-tasks) (*)
+
+insight-platform-worker v0.1.0 (<workspace>/crates/platform-worker) (*)
 
 insight-resources v0.1.0 (<workspace>/crates/resources) (*)
 

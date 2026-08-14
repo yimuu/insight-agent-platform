@@ -248,6 +248,35 @@ pub(crate) struct TerminalAdmissionAuthority {
     pub provider_fences: BTreeMap<String, u64>,
 }
 
+pub(crate) struct TerminalRunCreation {
+    pub tenant_id: String,
+    pub agent: Arc<DeployedAgent>,
+    pub input: Value,
+    pub admission_id: String,
+    pub request_id: String,
+    pub file_bindings: Vec<RunFileBinding>,
+    pub authority: TerminalAdmissionAuthority,
+}
+
+pub(crate) struct TerminalConversationTurnCreation<'a> {
+    pub conversation_id: &'a str,
+    pub tenant_id: &'a str,
+    pub user_id: &'a str,
+    pub admission_id: &'a str,
+    pub request_id: &'a str,
+    pub invocation: crate::invocation::AgentInvocation,
+    pub authority: TerminalAdmissionAuthority,
+}
+
+struct PreparedConversationTurn<'a> {
+    admission_id: &'a str,
+    request_id: &'a str,
+    content: Value,
+    invocation: crate::invocation::AgentInvocation,
+    attachment: RunAttachment,
+    authority: TerminalAdmissionAuthority,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConversationMessageView {
     pub message_id: String,
@@ -592,38 +621,23 @@ impl TerminalOnlyRunEngine {
             .published()
             .normalize_invocation(invocation, None, Vec::new())
             .map_err(|error| ServiceError::new(error.code(), error.message()))?;
-        self.create_detached_with_agent(
-            tenant_id,
+        self.create_detached_with_agent(TerminalRunCreation {
+            tenant_id: tenant_id.to_owned(),
             agent,
-            normalized.value().clone(),
+            input: normalized.value().clone(),
             admission_id,
             request_id,
-            Vec::new(),
-            TerminalAdmissionAuthority::default(),
-        )
+            file_bindings: Vec::new(),
+            authority: TerminalAdmissionAuthority::default(),
+        })
         .await
     }
 
     pub(crate) async fn create_detached_for_tenant_with_authority(
         &self,
-        tenant_id: &str,
-        agent: Arc<DeployedAgent>,
-        input: Value,
-        admission_id: String,
-        request_id: String,
-        file_bindings: Vec<RunFileBinding>,
-        authority: TerminalAdmissionAuthority,
+        creation: TerminalRunCreation,
     ) -> Result<RunRecord, ServiceError> {
-        self.create_detached_with_agent(
-            tenant_id,
-            agent,
-            input,
-            admission_id,
-            request_id,
-            file_bindings,
-            authority,
-        )
-        .await
+        self.create_detached_with_agent(creation).await
     }
 
     pub async fn create_detached_from_deployment(
@@ -648,15 +662,15 @@ impl TerminalOnlyRunEngine {
                     "graph deployment revision was not found for this agent",
                 )
             })?;
-        self.create_detached_with_agent(
-            tenant_id,
+        self.create_detached_with_agent(TerminalRunCreation {
+            tenant_id: tenant_id.to_owned(),
             agent,
             input,
-            format!("adm_{}", Uuid::new_v4().simple()),
+            admission_id: format!("adm_{}", Uuid::new_v4().simple()),
             request_id,
-            Vec::new(),
-            TerminalAdmissionAuthority::default(),
-        )
+            file_bindings: Vec::new(),
+            authority: TerminalAdmissionAuthority::default(),
+        })
         .await
     }
 
@@ -778,32 +792,27 @@ impl TerminalOnlyRunEngine {
 
     async fn create_detached_with_agent(
         &self,
-        tenant_id: &str,
-        agent: Arc<DeployedAgent>,
-        input: Value,
-        admission_id: String,
-        request_id: String,
-        file_bindings: Vec<RunFileBinding>,
-        authority: TerminalAdmissionAuthority,
+        creation: TerminalRunCreation,
     ) -> Result<RunRecord, ServiceError> {
-        let normalized = agent
+        let normalized = creation
+            .agent
             .published()
-            .normalize_input(input)
+            .normalize_input(creation.input)
             .map_err(|_| ServiceError::new("INPUT_INVALID", "agent input is invalid"))?;
         let admission = self
             .admit(
-                tenant_id.to_owned(),
-                admission_id,
-                request_id,
-                agent,
+                creation.tenant_id,
+                creation.admission_id,
+                creation.request_id,
+                creation.agent,
                 normalized,
                 None,
                 RunAttachment::Detached,
                 None,
                 None,
-                file_bindings,
+                creation.file_bindings,
                 Vec::new(),
-                authority,
+                creation.authority,
             )
             .await?;
         Ok(admission.run)
@@ -845,32 +854,27 @@ impl TerminalOnlyRunEngine {
 
     pub(crate) async fn create_attached_with_authority(
         &self,
-        tenant_id: &str,
-        agent: Arc<DeployedAgent>,
-        input: Value,
-        admission_id: String,
-        request_id: String,
-        file_bindings: Vec<RunFileBinding>,
-        authority: TerminalAdmissionAuthority,
+        creation: TerminalRunCreation,
     ) -> Result<TerminalAttachedRun, ServiceError> {
-        let normalized = agent
+        let normalized = creation
+            .agent
             .published()
-            .normalize_input(input)
+            .normalize_input(creation.input)
             .map_err(|_| ServiceError::new("INPUT_INVALID", "agent input is invalid"))?;
         let admission = self
             .admit(
-                tenant_id.to_owned(),
-                admission_id,
-                request_id,
-                agent,
+                creation.tenant_id,
+                creation.admission_id,
+                creation.request_id,
+                creation.agent,
                 normalized,
                 None,
                 RunAttachment::Attached,
                 None,
                 None,
-                file_bindings,
+                creation.file_bindings,
                 Vec::new(),
-                authority,
+                creation.authority,
             )
             .await?;
         admission
@@ -1212,13 +1216,15 @@ impl TerminalOnlyRunEngine {
         invocation: crate::invocation::AgentInvocation,
     ) -> Result<ConversationDetachedTurn, ServiceError> {
         self.create_conversation_detached_invocation_with_authority(
-            conversation_id,
-            tenant_id,
-            user_id,
-            admission_id,
-            request_id,
-            invocation,
-            TerminalAdmissionAuthority::default(),
+            TerminalConversationTurnCreation {
+                conversation_id,
+                tenant_id,
+                user_id,
+                admission_id,
+                request_id,
+                invocation,
+                authority: TerminalAdmissionAuthority::default(),
+            },
         )
         .await
     }
@@ -1233,43 +1239,46 @@ impl TerminalOnlyRunEngine {
         invocation: crate::invocation::AgentInvocation,
     ) -> Result<ConversationAttachedTurn, ServiceError> {
         self.create_conversation_attached_invocation_with_authority(
-            conversation_id,
-            tenant_id,
-            user_id,
-            admission_id,
-            request_id,
-            invocation,
-            TerminalAdmissionAuthority::default(),
+            TerminalConversationTurnCreation {
+                conversation_id,
+                tenant_id,
+                user_id,
+                admission_id,
+                request_id,
+                invocation,
+                authority: TerminalAdmissionAuthority::default(),
+            },
         )
         .await
     }
 
     pub(crate) async fn create_conversation_detached_invocation_with_authority(
         &self,
-        conversation_id: &str,
-        tenant_id: &str,
-        user_id: &str,
-        admission_id: &str,
-        request_id: &str,
-        invocation: crate::invocation::AgentInvocation,
-        authority: TerminalAdmissionAuthority,
+        creation: TerminalConversationTurnCreation<'_>,
     ) -> Result<ConversationDetachedTurn, ServiceError> {
         self.ensure_conversations_enabled()?;
-        let content = invocation
+        let content = creation
+            .invocation
             .canonical_user_content()
             .map_err(|error| ServiceError::new(error.code(), error.message()))?;
         let conversation = self
-            .get_conversation(conversation_id, tenant_id, user_id)
+            .get_conversation(
+                creation.conversation_id,
+                creation.tenant_id,
+                creation.user_id,
+            )
             .await?;
         let admitted = self
             .admit_conversation_turn(
                 conversation,
-                admission_id,
-                request_id,
-                content,
-                invocation,
-                RunAttachment::Detached,
-                authority,
+                PreparedConversationTurn {
+                    admission_id: creation.admission_id,
+                    request_id: creation.request_id,
+                    content,
+                    invocation: creation.invocation,
+                    attachment: RunAttachment::Detached,
+                    authority: creation.authority,
+                },
             )
             .await?;
         Ok(ConversationDetachedTurn {
@@ -1283,30 +1292,31 @@ impl TerminalOnlyRunEngine {
 
     pub(crate) async fn create_conversation_attached_invocation_with_authority(
         &self,
-        conversation_id: &str,
-        tenant_id: &str,
-        user_id: &str,
-        admission_id: &str,
-        request_id: &str,
-        invocation: crate::invocation::AgentInvocation,
-        authority: TerminalAdmissionAuthority,
+        creation: TerminalConversationTurnCreation<'_>,
     ) -> Result<ConversationAttachedTurn, ServiceError> {
         self.ensure_conversations_enabled()?;
-        let content = invocation
+        let content = creation
+            .invocation
             .canonical_user_content()
             .map_err(|error| ServiceError::new(error.code(), error.message()))?;
         let conversation = self
-            .get_conversation(conversation_id, tenant_id, user_id)
+            .get_conversation(
+                creation.conversation_id,
+                creation.tenant_id,
+                creation.user_id,
+            )
             .await?;
         let admitted = self
             .admit_conversation_turn(
                 conversation,
-                admission_id,
-                request_id,
-                content,
-                invocation,
-                RunAttachment::Attached,
-                authority,
+                PreparedConversationTurn {
+                    admission_id: creation.admission_id,
+                    request_id: creation.request_id,
+                    content,
+                    invocation: creation.invocation,
+                    attachment: RunAttachment::Attached,
+                    authority: creation.authority,
+                },
             )
             .await?;
         let attached = admitted.attached.ok_or_else(|| {
@@ -1612,13 +1622,16 @@ impl TerminalOnlyRunEngine {
     async fn admit_conversation_turn(
         &self,
         conversation: Conversation,
-        admission_id: &str,
-        request_id: &str,
-        content: Value,
-        invocation: crate::invocation::AgentInvocation,
-        attachment: RunAttachment,
-        authority: TerminalAdmissionAuthority,
+        prepared: PreparedConversationTurn<'_>,
     ) -> Result<ConversationAdmission, ServiceError> {
+        let PreparedConversationTurn {
+            admission_id,
+            request_id,
+            content,
+            invocation,
+            attachment,
+            authority,
+        } = prepared;
         let _mutation = self
             .conversation_mutation(&conversation.conversation_id)
             .lock_owned()

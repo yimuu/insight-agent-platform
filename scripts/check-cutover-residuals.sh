@@ -74,7 +74,7 @@ fi
 report_matches \
   "production source contains deleted runtime Schema migration authority" \
   -RInE --include='*.rs' \
-  '(DURABLE_MIGRATIONS|DurableMigration|SqliteMigrationGuard|schema_migrations|migrate_schema|initialize_schema|migration_manifest)' \
+  '(DURABLE_MIGRATIONS|DurableMigration|SqliteMigrationGuard|apply_migrations|migrate_schema|initialize_schema|migration_manifest)' \
   "${production_source_roots[@]}"
 
 report_matches \
