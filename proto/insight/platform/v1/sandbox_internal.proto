@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package insight.platform.v1;
+
+// Internal-only Sandbox authority service. Every payload is strict canonical JSON for a closed
+// Rust domain type; protobuf owns transport versioning and never provides an extension bag.
+service SandboxExecutorAuthorityService {
+  rpc ClaimSandboxJobs(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc CommitSandboxPhase(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc CommitSandboxOutcome(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc HeartbeatSandboxExecution(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
+service SandboxExecutorBrokerService {
+  rpc ReadExactArtifact(ClosedSandboxEnvelope) returns (SandboxBytesEnvelope);
+  rpc ValidateWasiValue(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc RevokeWasiGrants(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc ProveWasiProcessGenerationAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
+// Provider-only broker authority. It is a separate service so the privileged microVM Provider
+// cannot call Executor value-validation or process-isolation methods, and the Executor cannot
+// revoke grants while impersonating a physical VMM cleanup.
+service SandboxMicroVmBrokerService {
+  rpc ReadExactMicroVmArtifact(ClosedSandboxEnvelope) returns (stream SandboxArtifactChunkEnvelope);
+  rpc RevokeMicroVmGrants(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
+// Node-local/sidecar isolation-provider boundary. The Executor owns the durable Job lease and
+// phase commits; this service owns only the concrete microVM lifecycle. All calls for one sandbox
+// identity must be routed to the same provider instance rather than a load-balanced ClusterIP.
+service SandboxIsolationProviderService {
+  rpc PrepareSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc StartSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc CollectSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc TerminateSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc DestroySandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc AbortSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc RecoverExpiredSandboxLease(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
+// Executor-only registration endpoint. The attestor observes node/runtime identity on behalf of
+// the Executor; the Executor never talks to Kubernetes or the container runtime directly.
+service SandboxExecutorProcessRegistrationService {
+  rpc RegisterWasiExecutorProcessGeneration(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
+// Separate service name preserves exact method-level mTLS authorization for the microVM Executor
+// while reusing the same node-local attestation authority and closed registration payload.
+service SandboxMicroVmExecutorProcessRegistrationService {
+  rpc RegisterMicroVmExecutorProcessGeneration(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
+// Controller-only verification/recovery endpoint on the independently deployed attestor.
+service SandboxProcessIsolationAttestorService {
+  rpc VerifyWasiExecutorProcessGeneration(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc ProveWasiProcessGenerationAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+}
+
+message ClosedSandboxEnvelope {
+  uint32 schema_version = 1;
+  bytes canonical_json = 2;
+  string payload_digest = 3;
+}
+
+message SandboxBytesEnvelope {
+  uint32 schema_version = 1;
+  bytes value = 2;
+  string content_digest = 3;
+}
+
+message SandboxArtifactChunkEnvelope {
+  uint32 schema_version = 1;
+  uint64 sequence = 2;
+  bytes value = 3;
+  string chunk_digest = 4;
+  uint64 total_bytes = 5;
+  string content_digest = 6;
+}
