@@ -1,10 +1,17 @@
 use crate::{
-    read_guest_frame, write_guest_frame, MicroVmGuestCommandEnvelope, MicroVmGuestEventEnvelope,
+    read_guest_frame, write_guest_frame, write_managed_mcp_guest_secret,
+    ManagedMcpGuestCommandEnvelope, ManagedMcpGuestEventEnvelope, MicroVmGuestCommandEnvelope,
+    MicroVmGuestEventEnvelope,
 };
+use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, SandboxIsolationClass, SandboxRuntimeFamily, Sha256Digest,
 };
-use insight_platform_sandbox::SandboxExecutionRequest;
+use insight_platform_jobs::JobFence;
+use insight_platform_sandbox::{
+    ManagedMcpSandboxSessionRequest, PreparedManagedMcpSandboxSession,
+    SandboxExecutionPolicyClosure, SandboxExecutionRequest, SandboxResourceEnvelope,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -91,6 +98,14 @@ impl InstalledMicroVmRuntime {
             && request.runtime.guest_kernel_digest.as_ref() == Some(&self.guest_kernel_digest)
             && request.runtime.guest_agent_digest == self.guest_agent_digest
     }
+
+    pub fn matches_managed_request(&self, request: &ManagedMcpSandboxSessionRequest) -> bool {
+        request.isolation_class == SandboxIsolationClass::MicroVm
+            && request.runtime.runtime_family == self.runtime_family
+            && request.runtime.image_or_module_digest == self.runtime_digest
+            && request.runtime.guest_kernel_digest.as_ref() == Some(&self.guest_kernel_digest)
+            && request.runtime.guest_agent_digest == self.guest_agent_digest
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,42 +129,78 @@ impl JailerLaunchPlan {
         uid: u32,
         gid: u32,
     ) -> Result<Self, FirecrackerContractError> {
+        Self::build_from_contract(
+            installation,
+            request.isolation_class,
+            &request.policies,
+            &request.resources,
+            instance_id,
+            uid,
+            gid,
+        )
+    }
+
+    pub fn build_managed(
+        installation: &FirecrackerInstallation,
+        request: &ManagedMcpSandboxSessionRequest,
+        instance_id: String,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Self, FirecrackerContractError> {
+        Self::build_from_contract(
+            installation,
+            request.isolation_class,
+            &request.policies,
+            &request.resources,
+            instance_id,
+            uid,
+            gid,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_from_contract(
+        installation: &FirecrackerInstallation,
+        isolation_class: SandboxIsolationClass,
+        policies: &SandboxExecutionPolicyClosure,
+        resources: &SandboxResourceEnvelope,
+        instance_id: String,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Self, FirecrackerContractError> {
         installation.validate()?;
         if !stable_identifier(&instance_id, MAX_FIRECRACKER_INSTANCE_ID_BYTES)
             || uid == 0
             || gid == 0
-            || request.isolation_class != SandboxIsolationClass::MicroVm
-            || !request
-                .policies
+            || isolation_class != SandboxIsolationClass::MicroVm
+            || !policies
                 .isolation
                 .require_hardware_virtualization_for_microvm
-            || !request.policies.isolation.fresh_jail_per_job
-            || !request.policies.isolation.fresh_guest_kernel_per_job
-            || !request.policies.isolation.single_tenant_guest
-            || !request.policies.isolation.single_use_guest
-            || !request.policies.isolation.deny_host_devices
-            || !request.policies.resource.swap_disabled
+            || !policies.isolation.fresh_jail_per_job
+            || !policies.isolation.fresh_guest_kernel_per_job
+            || !policies.isolation.single_tenant_guest
+            || !policies.isolation.single_use_guest
+            || !policies.isolation.deny_host_devices
+            || !policies.resource.swap_disabled
         {
             return Err(FirecrackerContractError::InvalidLaunchPlan);
         }
         let period = 100_000_u64;
-        let cpu_quota = u64::from(request.resources.cpu_millicores)
+        let cpu_quota = u64::from(resources.cpu_millicores)
             .checked_mul(period)
             .and_then(|value| value.checked_div(1_000))
             .filter(|value| *value > 0)
             .ok_or(FirecrackerContractError::InvalidLaunchPlan)?;
-        let memory_bytes = u64::from(request.resources.memory_mebibytes)
+        let memory_bytes = u64::from(resources.memory_mebibytes)
             .checked_mul(1024 * 1024)
             .ok_or(FirecrackerContractError::InvalidLaunchPlan)?;
-        let file_size = request
-            .resources
+        let file_size = resources
             .artifact_output_bytes
-            .checked_add(request.resources.result_bytes)
-            .and_then(|value| value.checked_add(request.resources.stdout_bytes))
-            .and_then(|value| value.checked_add(request.resources.stderr_bytes))
+            .checked_add(resources.result_bytes)
+            .and_then(|value| value.checked_add(resources.stdout_bytes))
+            .and_then(|value| value.checked_add(resources.stderr_bytes))
             .ok_or(FirecrackerContractError::InvalidLaunchPlan)?;
-        let no_file = request
-            .resources
+        let no_file = resources
             .files
             .checked_add(1)
             .ok_or(FirecrackerContractError::InvalidLaunchPlan)?;
@@ -180,7 +231,7 @@ impl JailerLaunchPlan {
             "--cgroup".to_owned(),
             "memory.swap.max=0".to_owned(),
             "--cgroup".to_owned(),
-            format!("pids.max={}", request.resources.pids),
+            format!("pids.max={}", resources.pids),
             "--resource-limit".to_owned(),
             format!("fsize={file_size}"),
             "--resource-limit".to_owned(),
@@ -246,23 +297,38 @@ impl FirecrackerApiClient {
         request: &SandboxExecutionRequest,
         guest_cid: u32,
     ) -> Result<(), FirecrackerApiError> {
-        if request.isolation_class != SandboxIsolationClass::MicroVm
+        self.configure_machine(request.isolation_class, &request.resources, guest_cid)
+            .await
+    }
+
+    pub async fn configure_managed(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        guest_cid: u32,
+    ) -> Result<(), FirecrackerApiError> {
+        self.configure_machine(request.isolation_class, &request.resources, guest_cid)
+            .await
+    }
+
+    async fn configure_machine(
+        &self,
+        isolation_class: SandboxIsolationClass,
+        resources: &SandboxResourceEnvelope,
+        guest_cid: u32,
+    ) -> Result<(), FirecrackerApiError> {
+        if isolation_class != SandboxIsolationClass::MicroVm
             || guest_cid < 3
-            || request.resources.memory_mebibytes < 1
+            || resources.memory_mebibytes < 1
         {
             return Err(FirecrackerApiError::InvalidRequest);
         }
-        let vcpu_count = request
-            .resources
-            .cpu_millicores
-            .div_ceil(1_000)
-            .clamp(1, 32);
+        let vcpu_count = resources.cpu_millicores.div_ceil(1_000).clamp(1, 32);
         self.put(
             "/machine-config",
             &serde_json::json!({
                 "vcpu_count": u8::try_from(vcpu_count)
                     .map_err(|_| FirecrackerApiError::InvalidRequest)?,
-                "mem_size_mib": request.resources.memory_mebibytes,
+                "mem_size_mib": resources.memory_mebibytes,
                 "smt": false,
                 "track_dirty_pages": false,
             }),
@@ -436,6 +502,68 @@ impl FirecrackerGuestChannel {
             .await
             .map_err(|_| FirecrackerGuestChannelError::Timeout)?
             .map_err(|_| FirecrackerGuestChannelError::InvalidFrame)
+    }
+
+    pub async fn write_managed_command(
+        &mut self,
+        command: &ManagedMcpGuestCommandEnvelope,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        expected_sequence: u64,
+    ) -> Result<(), FirecrackerGuestChannelError> {
+        command
+            .validate_for(request, fence, prepared, expected_sequence)
+            .map_err(|_| FirecrackerGuestChannelError::InvalidFrame)?;
+        timeout(self.timeout, write_guest_frame(&mut self.stream, command))
+            .await
+            .map_err(|_| FirecrackerGuestChannelError::Timeout)?
+            .map_err(|_| FirecrackerGuestChannelError::InvalidFrame)
+    }
+
+    pub async fn write_managed_secret(
+        &mut self,
+        command: &ManagedMcpGuestCommandEnvelope,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        expected_sequence: u64,
+        material: &mut [u8],
+    ) -> Result<(), FirecrackerGuestChannelError> {
+        command
+            .validate_for(request, fence, prepared, expected_sequence)
+            .map_err(|_| FirecrackerGuestChannelError::InvalidFrame)?;
+        match timeout(
+            self.timeout,
+            write_managed_mcp_guest_secret(&mut self.stream, command, material),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|_| FirecrackerGuestChannelError::InvalidFrame),
+            Err(_) => {
+                material.fill(0);
+                Err(FirecrackerGuestChannelError::Timeout)
+            }
+        }
+    }
+
+    pub async fn read_managed_event(
+        &mut self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        expected_sequence: u64,
+        now: DateTime<Utc>,
+    ) -> Result<ManagedMcpGuestEventEnvelope, FirecrackerGuestChannelError> {
+        let event: ManagedMcpGuestEventEnvelope =
+            timeout(self.timeout, read_guest_frame(&mut self.stream))
+                .await
+                .map_err(|_| FirecrackerGuestChannelError::Timeout)?
+                .map_err(|_| FirecrackerGuestChannelError::InvalidFrame)?;
+        event
+            .validate_for(request, fence, prepared, expected_sequence, now)
+            .map_err(|_| FirecrackerGuestChannelError::InvalidFrame)?;
+        Ok(event)
     }
 }
 

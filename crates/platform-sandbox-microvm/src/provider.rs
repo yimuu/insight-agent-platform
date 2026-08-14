@@ -642,7 +642,7 @@ fn request_effect_possible(
         || network_mode != insight_platform_sandbox::SandboxNetworkMode::None
 }
 
-fn provider_contract_failure(code: &str) -> MicroVmProviderFailure {
+pub(crate) fn provider_contract_failure(code: &str) -> MicroVmProviderFailure {
     MicroVmProviderFailure {
         safe_code: code.to_owned(),
         safe_message: "microVM provider rejected an invalid contract".to_owned(),
