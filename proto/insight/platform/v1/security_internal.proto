@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package insight.platform.v1;
+
+// Internal-only SecretBinding authority. The wire body remains one closed canonical Rust
+// contract so protobuf cannot become a generic command or extension surface.
+service SecuritySecretAuthorityService {
+  rpc LoadSecretBinding(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);
+  rpc RegisterPreparedSecretBinding(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);
+}
+
+message ClosedSecurityEnvelope {
+  uint32 schema_version = 1;
+  bytes canonical_json = 2;
+  string payload_digest = 3;
+}

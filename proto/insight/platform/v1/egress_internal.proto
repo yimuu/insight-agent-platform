@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package insight.platform.v1;
+
+// Internal-only Egress Broker surface. Metadata is strict canonical JSON for a closed Rust
+// contract. Potentially large request/response bytes remain a raw payload so binary Capability
+// bodies are not expanded into JSON arrays. The operation, metadata and payload are jointly
+// digest-bound by the adapter.
+service EgressBrokerService {
+  rpc OpenModelProvider(ClosedEgressEnvelope) returns (stream ClosedEgressEnvelope);
+  rpc CancelModelProvider(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc RoundTripCapabilityHttp(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc CancelCapabilityHttp(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc UnaryCapabilityGrpc(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc CancelCapabilityGrpc(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc ExchangeMcpOAuthAuthorizationCode(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc DeleteMcpOAuthPkceSecret(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc ExecuteMcpStreamableHttp(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc CancelMcpRemoteTask(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  rpc StreamMcpStreamableHttpSubscription(stream ClosedEgressEnvelope) returns (stream ClosedEgressEnvelope);
+}
+
+message ClosedEgressEnvelope {
+  uint32 schema_version = 1;
+  string operation = 2;
+  bytes canonical_metadata_json = 3;
+  bytes payload = 4;
+  string payload_digest = 5;
+  string envelope_digest = 6;
+}
