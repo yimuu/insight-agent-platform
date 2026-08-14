@@ -1338,6 +1338,196 @@ impl ActivatedManagedMcpSandboxSession {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedMcpSandboxSessionLiveness {
+    Alive,
+    Exited,
+}
+
+/// Exact Provider observation for an activated Managed MCP microVM. Transport failure is not an
+/// observation and therefore can never be translated into `Exited` by an Executor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionLivenessEvidence {
+    pub schema_version: u32,
+    pub identity: ManagedMcpSandboxSessionIdentity,
+    pub request_digest: Sha256Digest,
+    pub worker_process_generation_id: ResourceId,
+    pub provider_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub executor_identity_digest: Sha256Digest,
+    pub sandbox_identity_digest: Sha256Digest,
+    pub liveness: ManagedMcpSandboxSessionLiveness,
+    pub observed_at: DateTime<Utc>,
+    pub evidence_digest: Sha256Digest,
+}
+
+impl ManagedMcpSandboxSessionLivenessEvidence {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.evidence_digest = digest_without_field(&self, "evidence_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        activated: &ActivatedManagedMcpSandboxSession,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        prepared.validate_for(request, fence, &prepared.executor_identity_digest)?;
+        if self.schema_version != 1
+            || self.identity != request.identity
+            || self.request_digest != request.request_digest
+            || self.worker_process_generation_id != fence.worker_process_generation_id
+            || self.provider_process_generation_id != prepared.provider_process_generation_id
+            || self.lease_generation != fence.lease_generation
+            || self.executor_identity_digest != prepared.executor_identity_digest
+            || self.sandbox_identity_digest != prepared.sandbox_identity_digest
+            || activated.identity != request.identity
+            || activated.request_digest != request.request_digest
+            || activated.worker_process_generation_id != fence.worker_process_generation_id
+            || activated.lease_generation != fence.lease_generation
+            || activated.sandbox_identity_digest != prepared.sandbox_identity_digest
+            || self.observed_at < activated.activated_at
+            || self.observed_at > now
+            || digest_without_field(self, "evidence_digest")? != self.evidence_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+}
+
+/// Proof that exact cleanup either found no keyed instance or destroyed the prepared instance.
+/// Only `Destroyed` can authorize terminalization of a session that reached `Prepared`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "disposition",
+    content = "evidence",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ManagedMcpSandboxSessionCleanupOutcome {
+    Absent(ManagedMcpSandboxSessionAbsenceEvidence),
+    Destroyed(ManagedMcpSandboxSessionDestroyedEvidence),
+}
+
+impl ManagedMcpSandboxSessionCleanupOutcome {
+    pub fn validate_for(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: Option<&PreparedManagedMcpSandboxSession>,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        match self {
+            Self::Absent(evidence) => {
+                if prepared.is_some() {
+                    return Err(SandboxContractError::InvalidOutcome);
+                }
+                evidence.validate_for(request, fence, now)
+            }
+            Self::Destroyed(evidence) => evidence.validate_for(request, fence, prepared, now),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionAbsenceEvidence {
+    pub schema_version: u32,
+    pub identity: ManagedMcpSandboxSessionIdentity,
+    pub request_digest: Sha256Digest,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub observed_at: DateTime<Utc>,
+    pub evidence_digest: Sha256Digest,
+}
+
+impl ManagedMcpSandboxSessionAbsenceEvidence {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.evidence_digest = digest_without_field(&self, "evidence_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        if self.schema_version != 1
+            || self.identity != request.identity
+            || self.request_digest != request.request_digest
+            || self.worker_process_generation_id != fence.worker_process_generation_id
+            || self.lease_generation != fence.lease_generation
+            || self.observed_at > now
+            || digest_without_field(self, "evidence_digest")? != self.evidence_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedMcpSandboxSessionDestroyedEvidence {
+    pub schema_version: u32,
+    pub identity: ManagedMcpSandboxSessionIdentity,
+    pub request_digest: Sha256Digest,
+    pub worker_process_generation_id: ResourceId,
+    pub provider_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub executor_identity_digest: Sha256Digest,
+    pub sandbox_identity_digest: Sha256Digest,
+    pub cleanup: SandboxCleanupEvidence,
+    pub evidence_digest: Sha256Digest,
+}
+
+impl ManagedMcpSandboxSessionDestroyedEvidence {
+    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+        self.evidence_digest = digest_without_field(&self, "evidence_digest")?;
+        Ok(self)
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: Option<&PreparedManagedMcpSandboxSession>,
+        now: DateTime<Utc>,
+    ) -> Result<(), SandboxContractError> {
+        self.cleanup.validate_recovery()?;
+        if self.schema_version != 1
+            || self.identity != request.identity
+            || self.request_digest != request.request_digest
+            || self.worker_process_generation_id != fence.worker_process_generation_id
+            || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.lease_generation != fence.lease_generation
+            || self.sandbox_identity_digest != self.cleanup.sandbox_identity_digest
+            || self.cleanup.observed_at > now
+            || prepared.is_some_and(|prepared| {
+                prepared.identity != self.identity
+                    || prepared.request_digest != self.request_digest
+                    || prepared.worker_process_generation_id != self.worker_process_generation_id
+                    || prepared.provider_process_generation_id
+                        != self.provider_process_generation_id
+                    || prepared.lease_generation != self.lease_generation
+                    || prepared.executor_identity_digest != self.executor_identity_digest
+                    || prepared.sandbox_identity_digest != self.sandbox_identity_digest
+            })
+            || digest_without_field(self, "evidence_digest")? != self.evidence_digest
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        Ok(())
+    }
+}
+
 /// Physical Managed-session provider boundary. Implementations run only in the Sandbox execution
 /// plane. `initialize` must keep notification delivery disabled, and `activate` must address the
 /// exact same instance represented by `PreparedManagedMcpSandboxSessionActivation`.
@@ -1366,6 +1556,14 @@ pub trait ManagedMcpSandboxSessionProvider: Send + Sync {
         activation: &PreparedManagedMcpSandboxSessionActivation,
     ) -> Result<ActivatedManagedMcpSandboxSession, Self::Error>;
 
+    async fn observe_exact(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        activated: &ActivatedManagedMcpSandboxSession,
+    ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, Self::Error>;
+
     /// Destroys the exact deterministic request/fence instance. `prepared` is absent only when a
     /// remote prepare response was lost; implementations must still prove the keyed instance is
     /// absent before returning success. This makes a transport timeout fail closed instead of
@@ -1375,7 +1573,7 @@ pub trait ManagedMcpSandboxSessionProvider: Send + Sync {
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
         prepared: Option<&PreparedManagedMcpSandboxSession>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error>;
 }
 
 /// Establishment worker that enforces the only valid activation order:
@@ -1526,7 +1724,7 @@ where
                     .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
-                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Ok(_) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
                     Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
                         contract,
                         cleanup,
@@ -1552,7 +1750,7 @@ where
                         .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
-                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                        Ok(_) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
                         Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
                             contract,
                             cleanup,
@@ -1574,7 +1772,7 @@ where
                         .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
-                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Authority(authority),
+                        Ok(_) => ManagedMcpSandboxSessionWorkerError::Authority(authority),
                         Err(cleanup) => {
                             ManagedMcpSandboxSessionWorkerError::CleanupAfterAuthority {
                                 authority,
@@ -1599,7 +1797,7 @@ where
                     .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
-                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Ok(_) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
                     Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
                         contract,
                         cleanup,
@@ -1629,7 +1827,7 @@ where
                         .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
-                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Provider(provider),
+                        Ok(_) => ManagedMcpSandboxSessionWorkerError::Provider(provider),
                         Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterProvider {
                             provider,
                             cleanup,
@@ -1658,7 +1856,7 @@ where
                     .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
-                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Ok(_) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
                     Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
                         contract,
                         cleanup,
@@ -1682,7 +1880,7 @@ where
                         .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
-                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                        Ok(_) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
                         Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
                             contract,
                             cleanup,
@@ -1704,7 +1902,7 @@ where
                         .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
-                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Authority(authority),
+                        Ok(_) => ManagedMcpSandboxSessionWorkerError::Authority(authority),
                         Err(cleanup) => {
                             ManagedMcpSandboxSessionWorkerError::CleanupAfterAuthority {
                                 authority,
@@ -1729,7 +1927,7 @@ where
                     .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
-                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Ok(_) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
                     Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
                         contract,
                         cleanup,
@@ -1759,7 +1957,7 @@ where
                         .destroy_exact(request, &fence, Some(&prepared))
                         .await
                     {
-                        Ok(()) => ManagedMcpSandboxSessionWorkerError::Provider(provider),
+                        Ok(_) => ManagedMcpSandboxSessionWorkerError::Provider(provider),
                         Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterProvider {
                             provider,
                             cleanup,
@@ -1783,7 +1981,7 @@ where
                     .destroy_exact(request, &fence, Some(&prepared))
                     .await
                 {
-                    Ok(()) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
+                    Ok(_) => ManagedMcpSandboxSessionWorkerError::Contract(contract),
                     Err(cleanup) => ManagedMcpSandboxSessionWorkerError::CleanupAfterContract {
                         contract,
                         cleanup,
@@ -1877,10 +2075,10 @@ where
                 .destroy_exact(request, fence, Some(prepared))
                 .await,
         ) {
-            (ManagedMcpHeartbeatFailure::Contract(contract), Ok(())) => {
+            (ManagedMcpHeartbeatFailure::Contract(contract), Ok(_)) => {
                 ManagedMcpSandboxSessionWorkerError::Contract(contract)
             }
-            (ManagedMcpHeartbeatFailure::Authority(authority), Ok(())) => {
+            (ManagedMcpHeartbeatFailure::Authority(authority), Ok(_)) => {
                 ManagedMcpSandboxSessionWorkerError::Authority(authority)
             }
             (ManagedMcpHeartbeatFailure::Contract(contract), Err(cleanup)) => {

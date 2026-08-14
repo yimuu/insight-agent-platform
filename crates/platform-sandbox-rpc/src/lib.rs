@@ -23,7 +23,8 @@ use insight_platform_sandbox::{
     InstalledSandboxBackendDescriptor, ManagedMcpSandboxSecretCommitOutcome,
     ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryError,
     ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
-    ManagedMcpSandboxSessionClaimAuthority, ManagedMcpSandboxSessionExecutionAuthority,
+    ManagedMcpSandboxSessionClaimAuthority, ManagedMcpSandboxSessionCleanupOutcome,
+    ManagedMcpSandboxSessionExecutionAuthority, ManagedMcpSandboxSessionLivenessEvidence,
     ManagedMcpSandboxSessionPhaseDecision, ManagedMcpSandboxSessionProvider,
     ManagedMcpSandboxSessionRequest, MicroVmArtifactBroker, MicroVmArtifactBrokerError,
     MicroVmArtifactReadRequest, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
@@ -517,6 +518,15 @@ struct ActivateManagedMcpSandboxSessionWire {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ObserveExactManagedMcpSandboxSessionWire {
+    request: ManagedMcpSandboxSessionRequest,
+    fence: JobFence,
+    prepared: PreparedManagedMcpSandboxSession,
+    activated: ActivatedManagedMcpSandboxSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DestroyExactManagedMcpSandboxSessionWire {
     request: ManagedMcpSandboxSessionRequest,
     fence: JobFence,
@@ -592,7 +602,7 @@ impl SandboxManagedMcpSessionProviderGrpcClient {
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
         prepared: Option<&PreparedManagedMcpSandboxSession>,
-    ) -> Result<(), SandboxRpcError> {
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, SandboxRpcError> {
         let wire = DestroyExactManagedMcpSandboxSessionWire {
             request: request.clone(),
             fence: fence.clone(),
@@ -1333,7 +1343,14 @@ impl ManagedMcpSandboxSessionProvider for SandboxManagedMcpSessionProviderGrpcCl
         {
             Ok(prepared) => Ok(prepared),
             Err(error) => match self.destroy_remote(request, fence, None).await {
-                Ok(()) => Err(error),
+                Ok(outcome)
+                    if outcome
+                        .validate_for(request, fence, None, chrono::Utc::now())
+                        .is_ok() =>
+                {
+                    Err(error)
+                }
+                Ok(_) => Err(SandboxRpcError::InvalidEnvelope),
                 Err(cleanup) => Err(cleanup),
             },
         }
@@ -1373,13 +1390,41 @@ impl ManagedMcpSandboxSessionProvider for SandboxManagedMcpSessionProviderGrpcCl
         .await
     }
 
+    async fn observe_exact(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        activated: &ActivatedManagedMcpSandboxSession,
+    ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, Self::Error> {
+        let wire = ObserveExactManagedMcpSandboxSessionWire {
+            request: request.clone(),
+            fence: fence.clone(),
+            prepared: prepared.clone(),
+            activated: activated.clone(),
+        };
+        let evidence: ManagedMcpSandboxSessionLivenessEvidence = self
+            .unary(&wire, |client, request| {
+                Box::pin(client.observe_exact_managed_mcp_sandbox_session(request))
+            })
+            .await?;
+        evidence
+            .validate_for(request, fence, prepared, activated, chrono::Utc::now())
+            .map_err(|_| SandboxRpcError::InvalidEnvelope)?;
+        Ok(evidence)
+    }
+
     async fn destroy_exact(
         &self,
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
         prepared: Option<&PreparedManagedMcpSandboxSession>,
-    ) -> Result<(), Self::Error> {
-        self.destroy_remote(request, fence, prepared).await
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
+        let outcome = self.destroy_remote(request, fence, prepared).await?;
+        outcome
+            .validate_for(request, fence, prepared, chrono::Utc::now())
+            .map_err(|_| SandboxRpcError::InvalidEnvelope)?;
+        Ok(outcome)
     }
 }
 
@@ -2071,6 +2116,42 @@ where
         self.response(
             self.provider
                 .activate(&wire.request, &wire.fence, &wire.activation)
+                .await,
+        )
+    }
+
+    async fn observe_exact_managed_mcp_sandbox_session(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let wire: ObserveExactManagedMcpSandboxSessionWire =
+            decode(request.into_inner(), self.limits)?;
+        self.validate_cleanup_request(&wire.request, &wire.fence)?;
+        wire.prepared
+            .validate_for(
+                &wire.request,
+                &wire.fence,
+                &wire.prepared.executor_identity_digest,
+            )
+            .map_err(|_| {
+                Status::failed_precondition(
+                    "prepared Managed MCP microVM does not match the observation fence",
+                )
+            })?;
+        if wire.activated.identity != wire.request.identity
+            || wire.activated.request_digest != wire.request.request_digest
+            || wire.activated.worker_process_generation_id
+                != wire.fence.worker_process_generation_id
+            || wire.activated.lease_generation != wire.fence.lease_generation
+            || wire.activated.sandbox_identity_digest != wire.prepared.sandbox_identity_digest
+        {
+            return Err(Status::failed_precondition(
+                "activated Managed MCP microVM does not match the observation fence",
+            ));
+        }
+        self.response(
+            self.provider
+                .observe_exact(&wire.request, &wire.fence, &wire.prepared, &wire.activated)
                 .await,
         )
     }
@@ -3114,12 +3195,23 @@ mod tests {
             Err(SandboxRpcError::Rejected)
         }
 
+        async fn observe_exact(
+            &self,
+            _request: &ManagedMcpSandboxSessionRequest,
+            _fence: &JobFence,
+            _prepared: &PreparedManagedMcpSandboxSession,
+            _activated: &ActivatedManagedMcpSandboxSession,
+        ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, Self::Error> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Err(SandboxRpcError::Rejected)
+        }
+
         async fn destroy_exact(
             &self,
             _request: &ManagedMcpSandboxSessionRequest,
             _fence: &JobFence,
             _prepared: Option<&PreparedManagedMcpSandboxSession>,
-        ) -> Result<(), Self::Error> {
+        ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             Err(SandboxRpcError::Rejected)
         }

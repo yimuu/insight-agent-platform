@@ -1325,14 +1325,62 @@ impl ManagedMcpSandboxSessionProvider for RecordingManagedSessionProvider {
         .map_err(|_| ManagedSessionFixtureError)
     }
 
+    async fn observe_exact(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        activated: &ActivatedManagedMcpSandboxSession,
+    ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, Self::Error> {
+        self.events.lock().unwrap().push("provider_observe");
+        ManagedMcpSandboxSessionLivenessEvidence {
+            schema_version: 1,
+            identity: request.identity.clone(),
+            request_digest: request.request_digest.clone(),
+            worker_process_generation_id: fence.worker_process_generation_id.clone(),
+            provider_process_generation_id: prepared.provider_process_generation_id.clone(),
+            lease_generation: fence.lease_generation,
+            executor_identity_digest: prepared.executor_identity_digest.clone(),
+            sandbox_identity_digest: activated.sandbox_identity_digest.clone(),
+            liveness: ManagedMcpSandboxSessionLiveness::Alive,
+            observed_at: Utc::now(),
+            evidence_digest: sha('0'),
+        }
+        .seal()
+        .map_err(|_| ManagedSessionFixtureError)
+    }
+
     async fn destroy_exact(
         &self,
-        _request: &ManagedMcpSandboxSessionRequest,
+        request: &ManagedMcpSandboxSessionRequest,
         _fence: &JobFence,
-        _prepared: Option<&PreparedManagedMcpSandboxSession>,
-    ) -> Result<(), Self::Error> {
+        prepared: Option<&PreparedManagedMcpSandboxSession>,
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
         self.events.lock().unwrap().push("provider_destroy");
-        Ok(())
+        let prepared = prepared.ok_or(ManagedSessionFixtureError)?;
+        let cleanup = SandboxCleanupEvidence {
+            disposition: SandboxCleanupDisposition::Destroyed,
+            sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+            grants_revoked: true,
+            ephemeral_storage_destroyed: true,
+            observed_at: Utc::now(),
+            evidence_digest: sha('9'),
+        };
+        ManagedMcpSandboxSessionDestroyedEvidence {
+            schema_version: 1,
+            identity: request.identity.clone(),
+            request_digest: request.request_digest.clone(),
+            worker_process_generation_id: prepared.worker_process_generation_id.clone(),
+            provider_process_generation_id: prepared.provider_process_generation_id.clone(),
+            lease_generation: prepared.lease_generation,
+            executor_identity_digest: prepared.executor_identity_digest.clone(),
+            sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+            cleanup,
+            evidence_digest: sha('0'),
+        }
+        .seal()
+        .map(ManagedMcpSandboxSessionCleanupOutcome::Destroyed)
+        .map_err(|_| ManagedSessionFixtureError)
     }
 }
 
@@ -1447,6 +1495,72 @@ async fn managed_session_worker_activates_only_after_durable_ready_on_the_same_i
             .sandbox_identity_digest,
         established.activated.sandbox_identity_digest
     );
+}
+
+#[tokio::test]
+async fn managed_session_provider_observation_and_cleanup_are_exactly_fenced() {
+    let now = Utc::now();
+    let (authority, provider, command) = managed_session_worker_fixture(now, false);
+    let worker = ManagedMcpSandboxSessionWorker::new(authority, provider.clone(), limits());
+    let established = worker.establish(command).await.unwrap();
+    let observation = provider
+        .observe_exact(
+            &established.request,
+            &established.fence,
+            &established.prepared,
+            &established.activated,
+        )
+        .await
+        .unwrap();
+    observation
+        .validate_for(
+            &established.request,
+            &established.fence,
+            &established.prepared,
+            &established.activated,
+            Utc::now(),
+        )
+        .unwrap();
+    assert_eq!(
+        observation.liveness,
+        ManagedMcpSandboxSessionLiveness::Alive
+    );
+
+    let cleanup = provider
+        .destroy_exact(
+            &established.request,
+            &established.fence,
+            Some(&established.prepared),
+        )
+        .await
+        .unwrap();
+    cleanup
+        .validate_for(
+            &established.request,
+            &established.fence,
+            Some(&established.prepared),
+            Utc::now(),
+        )
+        .unwrap();
+    let ManagedMcpSandboxSessionCleanupOutcome::Destroyed(destroyed) = cleanup else {
+        panic!("a prepared session must produce destroyed evidence");
+    };
+    assert_eq!(
+        destroyed.cleanup.sandbox_identity_digest,
+        established.prepared.sandbox_identity_digest
+    );
+
+    let mut stale = established.fence;
+    stale.lease_generation += 1;
+    assert!(observation
+        .validate_for(
+            &established.request,
+            &stale,
+            &established.prepared,
+            &established.activated,
+            Utc::now(),
+        )
+        .is_err());
 }
 
 #[tokio::test]

@@ -19,12 +19,15 @@ use insight_platform_egress::{ManagedMcpSandboxSecretBroker, ManagedMcpSandboxSe
 use insight_platform_jobs::JobFence;
 use insight_platform_sandbox::{
     ActivatedManagedMcpSandboxSession, ManagedMcpSandboxOpaqueSessionClaims,
-    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSessionReadyEvidence,
-    ManagedMcpSandboxSessionRequest, ManagedMcpSandboxSessionStateSealError,
-    ManagedMcpSandboxSessionStateSealer, MicroVmArtifactBroker, MicroVmArtifactBrokerError,
-    MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest, MicroVmGrantRevoker,
-    MicroVmSandboxWorkloadKind, PreparedManagedMcpSandboxSession,
-    PreparedManagedMcpSandboxSessionActivation, RevokeMicroVmSandboxGrants,
+    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSessionAbsenceEvidence,
+    ManagedMcpSandboxSessionCleanupOutcome, ManagedMcpSandboxSessionDestroyedEvidence,
+    ManagedMcpSandboxSessionLiveness, ManagedMcpSandboxSessionLivenessEvidence,
+    ManagedMcpSandboxSessionReadyEvidence, ManagedMcpSandboxSessionRequest,
+    ManagedMcpSandboxSessionStateSealError, ManagedMcpSandboxSessionStateSealer,
+    MicroVmArtifactBroker, MicroVmArtifactBrokerError, MicroVmArtifactReadPurpose,
+    MicroVmArtifactReadRequest, MicroVmGrantRevoker, MicroVmSandboxWorkloadKind,
+    PreparedManagedMcpSandboxSession, PreparedManagedMcpSandboxSessionActivation,
+    RevokeMicroVmSandboxGrants, SandboxCleanupDisposition, SandboxCleanupEvidence,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -1320,6 +1323,85 @@ impl LinuxManagedMcpInstance {
         Ok(activated)
     }
 
+    async fn observe_liveness(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        activated: &ActivatedManagedMcpSandboxSession,
+    ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, MicroVmProviderFailure> {
+        let _operation = self.operation.lock().await;
+        let record = self.record.lock().await.clone();
+        if record.key != ManagedMcpMicroVmSessionKey::from_request(request, fence)
+            || record.sandbox_identity_digest != prepared.sandbox_identity_digest
+            || record.provider_process_generation_id != prepared.provider_process_generation_id
+            || record.executor_identity_digest != prepared.executor_identity_digest
+            || activated.sandbox_identity_digest != record.sandbox_identity_digest
+            || !matches!(
+                record.phase,
+                ManagedMcpFirecrackerPhase::Activated | ManagedMcpFirecrackerPhase::Destroyed
+            )
+        {
+            return Err(host_contract_failure(
+                "managed_mcp_microvm_observation_record_mismatch",
+            ));
+        }
+        let liveness = if record.phase == ManagedMcpFirecrackerPhase::Destroyed {
+            ManagedMcpSandboxSessionLiveness::Exited
+        } else {
+            let process_id = record.process_id.ok_or_else(|| {
+                uncertain_failure(
+                    "managed_mcp_microvm_observation_process_missing",
+                    Some(record.sandbox_identity_digest.clone()),
+                    true,
+                )
+            })?;
+            let exited = {
+                let mut child = self.child.lock().await;
+                match child.as_mut() {
+                    Some(child) => child
+                        .try_wait()
+                        .map_err(|_| {
+                            uncertain_failure(
+                                "managed_mcp_microvm_observation_wait_failed",
+                                Some(record.sandbox_identity_digest.clone()),
+                                true,
+                            )
+                        })?
+                        .is_some(),
+                    None => false,
+                }
+            };
+            if exited || process_absent(process_id).await? {
+                ManagedMcpSandboxSessionLiveness::Exited
+            } else {
+                if process_start_identity(process_id).await.ok() != record.process_start_identity {
+                    return Err(uncertain_failure(
+                        "managed_mcp_microvm_observation_process_identity_changed",
+                        Some(record.sandbox_identity_digest.clone()),
+                        true,
+                    ));
+                }
+                ManagedMcpSandboxSessionLiveness::Alive
+            }
+        };
+        ManagedMcpSandboxSessionLivenessEvidence {
+            schema_version: 1,
+            identity: request.identity.clone(),
+            request_digest: request.request_digest.clone(),
+            worker_process_generation_id: fence.worker_process_generation_id.clone(),
+            provider_process_generation_id: record.provider_process_generation_id,
+            lease_generation: fence.lease_generation,
+            executor_identity_digest: record.executor_identity_digest,
+            sandbox_identity_digest: record.sandbox_identity_digest,
+            liveness,
+            observed_at: Utc::now(),
+            evidence_digest: placeholder_digest(),
+        }
+        .seal()
+        .map_err(|_| host_contract_failure("managed_mcp_microvm_observation_seal_failed"))
+    }
+
     async fn kill_process_tree(&self) -> Result<bool, MicroVmProviderFailure> {
         let (process_id, process_start) = {
             let record = self.record.lock().await;
@@ -1400,10 +1482,11 @@ impl LinuxManagedMcpInstance {
         Ok(evidence.evidence_digest)
     }
 
-    async fn cleanup(&self) -> Result<(), MicroVmProviderFailure> {
+    async fn cleanup(&self) -> Result<SandboxCleanupEvidence, MicroVmProviderFailure> {
         let _operation = self.operation.lock().await;
         if self.record.lock().await.phase == ManagedMcpFirecrackerPhase::Destroyed {
-            return Ok(());
+            let record = self.record.lock().await;
+            return cleanup_evidence_from_managed_record(&record);
         }
         self.channel.lock().await.take();
         let grant_result = self.revoke_grants().await;
@@ -1433,7 +1516,7 @@ impl LinuxManagedMcpInstance {
             }
         }
         let destroyed_at = Utc::now();
-        {
+        let cleanup = {
             let mut record = self.record.lock().await;
             record.phase = ManagedMcpFirecrackerPhase::Destroyed;
             record.process_id = None;
@@ -1442,7 +1525,7 @@ impl LinuxManagedMcpInstance {
             record.updated_at = destroyed_at;
             record.activation = None;
             record.activated = None;
-            record.cleanup_evidence_digest = Some(digest(&serde_json::json!({
+            let evidence_digest = digest(&serde_json::json!({
                 "domain": "linux_firecracker_managed_mcp_destroyed",
                 "schema_version": 1,
                 "sandbox_identity_digest": record.sandbox_identity_digest,
@@ -1450,18 +1533,45 @@ impl LinuxManagedMcpInstance {
                 "process_tree_terminated": true,
                 "ephemeral_storage_destroyed": true,
                 "destroyed_at": destroyed_at,
-            }))?);
+            }))?;
+            record.cleanup_evidence_digest = Some(evidence_digest.clone());
             record.seal_in_place()?;
             persist_managed_record(&self.shared.config.state_directory, &record).await?;
-        }
+            SandboxCleanupEvidence {
+                disposition: SandboxCleanupDisposition::Destroyed,
+                sandbox_identity_digest: record.sandbox_identity_digest.clone(),
+                grants_revoked: true,
+                ephemeral_storage_destroyed: true,
+                observed_at: destroyed_at,
+                evidence_digest,
+            }
+        };
         self.destroyed_at_millis
             .store(destroyed_at.timestamp_millis(), Ordering::Release);
         self.destroyed.store(true, Ordering::Release);
         if !self.capacity_released.swap(true, Ordering::AcqRel) {
             self.shared.capacity.release();
         }
-        Ok(())
+        Ok(cleanup)
     }
+}
+
+fn cleanup_evidence_from_managed_record(
+    record: &ManagedMcpFirecrackerRecord,
+) -> Result<SandboxCleanupEvidence, MicroVmProviderFailure> {
+    Ok(SandboxCleanupEvidence {
+        disposition: SandboxCleanupDisposition::Destroyed,
+        sandbox_identity_digest: record.sandbox_identity_digest.clone(),
+        grants_revoked: true,
+        ephemeral_storage_destroyed: true,
+        observed_at: record.destroyed_at.ok_or_else(|| {
+            host_contract_failure("managed_mcp_microvm_cleanup_observation_missing")
+        })?,
+        evidence_digest: record
+            .cleanup_evidence_digest
+            .clone()
+            .ok_or_else(|| host_contract_failure("managed_mcp_microvm_cleanup_evidence_missing"))?,
+    })
 }
 
 #[async_trait]
@@ -1478,7 +1588,7 @@ impl ManagedMcpMicroVmSessionLifecyclePort for LinuxManagedMcpSessionFactory {
         match instance.ensure_prepared(request).await {
             Ok(prepared) => Ok(prepared),
             Err(error) => match instance.cleanup().await {
-                Ok(()) => Err(error),
+                Ok(_) => Err(error),
                 Err(cleanup) => Err(cleanup),
             },
         }
@@ -1518,16 +1628,47 @@ impl ManagedMcpMicroVmSessionLifecyclePort for LinuxManagedMcpSessionFactory {
         instance.activate(request, fence, activation).await
     }
 
+    async fn observe_exact(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        activated: &ActivatedManagedMcpSandboxSession,
+    ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, MicroVmProviderFailure> {
+        let key = ManagedMcpMicroVmSessionKey::from_request(request, fence);
+        let instance = self
+            .instances
+            .lock()
+            .await
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| host_contract_failure("managed_mcp_microvm_instance_not_found"))?;
+        instance
+            .observe_liveness(request, fence, prepared, activated)
+            .await
+    }
+
     async fn destroy_exact(
         &self,
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
         prepared: Option<&PreparedManagedMcpSandboxSession>,
-    ) -> Result<(), MicroVmProviderFailure> {
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, MicroVmProviderFailure> {
         let key = ManagedMcpMicroVmSessionKey::from_request(request, fence);
         let instance = self.instances.lock().await.get(&key).cloned();
         let Some(instance) = instance else {
-            return Ok(());
+            let evidence = ManagedMcpSandboxSessionAbsenceEvidence {
+                schema_version: 1,
+                identity: request.identity.clone(),
+                request_digest: request.request_digest.clone(),
+                worker_process_generation_id: fence.worker_process_generation_id.clone(),
+                lease_generation: fence.lease_generation,
+                observed_at: Utc::now(),
+                evidence_digest: placeholder_digest(),
+            }
+            .seal()
+            .map_err(|_| host_contract_failure("managed_mcp_microvm_absence_seal_failed"))?;
+            return Ok(ManagedMcpSandboxSessionCleanupOutcome::Absent(evidence));
         };
         if let Some(prepared) = prepared {
             let sandbox_identity_digest =
@@ -1538,7 +1679,23 @@ impl ManagedMcpMicroVmSessionLifecyclePort for LinuxManagedMcpSessionFactory {
                 ));
             }
         }
-        instance.cleanup().await
+        let cleanup = instance.cleanup().await?;
+        let record = instance.record.lock().await;
+        let evidence = ManagedMcpSandboxSessionDestroyedEvidence {
+            schema_version: 1,
+            identity: request.identity.clone(),
+            request_digest: request.request_digest.clone(),
+            worker_process_generation_id: fence.worker_process_generation_id.clone(),
+            provider_process_generation_id: record.provider_process_generation_id.clone(),
+            lease_generation: fence.lease_generation,
+            executor_identity_digest: record.executor_identity_digest.clone(),
+            sandbox_identity_digest: record.sandbox_identity_digest.clone(),
+            cleanup,
+            evidence_digest: placeholder_digest(),
+        }
+        .seal()
+        .map_err(|_| host_contract_failure("managed_mcp_microvm_destroyed_seal_failed"))?;
+        Ok(ManagedMcpSandboxSessionCleanupOutcome::Destroyed(evidence))
     }
 }
 

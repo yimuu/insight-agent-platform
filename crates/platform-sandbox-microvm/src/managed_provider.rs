@@ -4,6 +4,7 @@ use insight_platform_contracts::{ResourceKind, SandboxIsolationClass, Sha256Dige
 use insight_platform_jobs::JobFence;
 use insight_platform_sandbox::{
     ActivatedManagedMcpSandboxSession, InstalledSandboxBackendDescriptor,
+    ManagedMcpSandboxSessionCleanupOutcome, ManagedMcpSandboxSessionLivenessEvidence,
     ManagedMcpSandboxSessionProvider, ManagedMcpSandboxSessionRequest,
     PreparedManagedMcpSandboxSession, PreparedManagedMcpSandboxSessionActivation,
     SandboxCommandLimits, SandboxIsolationBackendKind,
@@ -36,12 +37,20 @@ pub trait ManagedMcpMicroVmSessionLifecyclePort: Send + Sync {
         activation: &PreparedManagedMcpSandboxSessionActivation,
     ) -> Result<ActivatedManagedMcpSandboxSession, MicroVmProviderFailure>;
 
+    async fn observe_exact(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        activated: &ActivatedManagedMcpSandboxSession,
+    ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, MicroVmProviderFailure>;
+
     async fn destroy_exact(
         &self,
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
         prepared: Option<&PreparedManagedMcpSandboxSession>,
-    ) -> Result<(), MicroVmProviderFailure>;
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, MicroVmProviderFailure>;
 }
 
 pub trait ManagedMcpProviderClock: Send + Sync {
@@ -244,12 +253,45 @@ where
         Ok(activated)
     }
 
+    async fn observe_exact(
+        &self,
+        request: &ManagedMcpSandboxSessionRequest,
+        fence: &JobFence,
+        prepared: &PreparedManagedMcpSandboxSession,
+        activated: &ActivatedManagedMcpSandboxSession,
+    ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, Self::Error> {
+        self.validate_cleanup(request, fence)?;
+        prepared
+            .validate_for(request, fence, &prepared.executor_identity_digest)
+            .map_err(|_| {
+                provider_contract_failure("managed_mcp_microvm_observation_identity_invalid")
+            })?;
+        if activated.identity != request.identity
+            || activated.request_digest != request.request_digest
+            || activated.worker_process_generation_id != fence.worker_process_generation_id
+            || activated.lease_generation != fence.lease_generation
+            || activated.sandbox_identity_digest != prepared.sandbox_identity_digest
+        {
+            return Err(provider_contract_failure(
+                "managed_mcp_microvm_observation_activation_invalid",
+            ));
+        }
+        let evidence = self
+            .lifecycle
+            .observe_exact(request, fence, prepared, activated)
+            .await?;
+        evidence
+            .validate_for(request, fence, prepared, activated, self.clock.now())
+            .map_err(|_| provider_contract_failure("managed_mcp_microvm_observation_invalid"))?;
+        Ok(evidence)
+    }
+
     async fn destroy_exact(
         &self,
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
         prepared: Option<&PreparedManagedMcpSandboxSession>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
         self.validate_cleanup(request, fence)?;
         if let Some(prepared) = prepared {
             prepared
@@ -258,6 +300,13 @@ where
                     provider_contract_failure("managed_mcp_microvm_cleanup_identity_invalid")
                 })?;
         }
-        self.lifecycle.destroy_exact(request, fence, prepared).await
+        let outcome = self
+            .lifecycle
+            .destroy_exact(request, fence, prepared)
+            .await?;
+        outcome
+            .validate_for(request, fence, prepared, self.clock.now())
+            .map_err(|_| provider_contract_failure("managed_mcp_microvm_cleanup_invalid"))?;
+        Ok(outcome)
     }
 }

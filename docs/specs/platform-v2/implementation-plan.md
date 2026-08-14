@@ -604,7 +604,10 @@ Managed session fenced lost authority随后贯穿domain、PostgreSQL与internal 
 四个terminal quota ledger identity共同绑定请求；单事务把旧物理Job推进为`Lost/ReconciliationRequired`并清除lease，保守结算未知
 CPU/output、确认Artifact grant已释放，随后清除逻辑opaque session/物理link、设置full reconcile、重排逻辑MCP Job并提交独立
 Receipt/Event/Outbox。domain 37项、MCP Host 61项、authority RPC 10项测试及目标strict Clippy已通过；扩展PostgreSQL fixture已编译，
-但`PLATFORM_TEST_DATABASE_URL`未设置且Docker daemon仍无响应，故不声明本次真实数据库运行证据。Provider liveness/cleanup RPC、长期
+但`PLATFORM_TEST_DATABASE_URL`未设置且Docker daemon仍无响应，故不声明本次真实数据库运行证据。Provider lifecycle随后补齐closed
+liveness与cleanup RPC：observation exact绑定session/request、Executor/Provider generation、lease和sandbox identity；Linux实现同时观察
+child exit和PID/start identity，RPC失败不能被解释为`Exited`。cleanup outcome显式区分未创建实例的`Absent`和可供terminal authority使用的
+`Destroyed(evidence)`，持久tombstone支持byte-stable evidence重放。Sandbox domain 38项、microVM 5项和RPC 10项定向测试通过。长期
 Executor supervisor与Managed expired-lease absence recovery仍Open。
 
 随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor

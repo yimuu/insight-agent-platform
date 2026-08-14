@@ -774,8 +774,9 @@ all-target/all-feature check、test、doc-test与strict Clippy及public API/cont
 Managed session的fenced lost authority现已交付：只有持有最新Job/version/lease/Worker/token fence且已经取得exact cleanup evidence的
 Executor才能在一个PostgreSQL事务中把旧物理Job推进为`Lost/ReconciliationRequired`、保守结算四条Sandbox quota、复验Artifact grant
 已释放、清除逻辑opaque session与物理link、设置`full_reconcile_required`并重排逻辑MCP Job，同时提交独立Receipt/Event/Outbox；重放返回
-同一终态。该路径继续复用23表与单一`0001`。Provider liveness/cleanup evidence尚未通过RPC交给长期Executor supervisor，expired lease的
-absence recovery也未交付，因此不能仅凭本切片创建replacement或关闭Phase 4。
+同一终态。该路径继续复用23表与单一`0001`。Provider现通过closed node-local RPC返回exact liveness observation，以及区分“从未创建”与
+“已销毁”的typed cleanup outcome；Linux实现同时校验PID/start identity，RPC不可达不能伪装成`Exited`，已销毁tombstone可重放同一cleanup
+evidence。长期Executor supervisor和expired lease的absence recovery仍未交付，因此不能仅凭本切片创建replacement或关闭Phase 4。
 
 ## 28. 明确推迟的工作
 
