@@ -1,10 +1,15 @@
 use crate::repository::{
     append_command_event, append_scheduler_event, claim_command_receipt, decode_deployment_closure,
-    decode_typed_payload, decode_versioned_payload, load_deployment, load_resource,
-    load_resource_for_update, load_task_for_update, payload_from_row, require_ready_run_artifact,
-    require_tenant_permission, task_projection, terminalize_command_receipt,
-    validate_deployment_closure_exists, validate_exact_secret_bindings_at_creation,
-    PgRegistryTransaction, PgRepository, RepositoryError, ResourceRecord, TaskRecord, TypedPayload,
+    decode_typed_payload, decode_versioned_payload, job_from_row, job_projection, load_deployment,
+    load_resource, load_resource_for_update, load_task_for_update, payload_from_row,
+    require_ready_run_artifact, require_tenant_permission, task_projection,
+    terminalize_command_receipt, validate_deployment_closure_exists,
+    validate_exact_secret_bindings_at_creation, PgRegistryTransaction, PgRepository,
+    RepositoryError, ResourceRecord, TaskRecord, TypedPayload,
+};
+use crate::sandbox_repository::{
+    lock_and_persist_managed_mcp_session_artifact_grants, lock_managed_mcp_session_secret_grants,
+    reserve_managed_mcp_session_quota, verify_managed_mcp_session_sandbox_bindings,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -15,7 +20,7 @@ use insight_platform_contracts::{
     ExactDeploymentRef, JobState, McpAuthorizationPrincipalKind, McpAuthorizationState,
     McpDeploymentClosure, McpProtocolPolicyDocument, McpServerExecutionContract, Permission,
     PolicyKind, PrincipalIdentityState, PrincipalKind, RegistryResourceKind, ResourceDocument,
-    ResourceId, Sha256Digest,
+    ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_jobs::{
     decide_expired_lease as decide_expired_job_lease,
@@ -57,6 +62,11 @@ use insight_platform_mcp_host::{
     ResolveMcpDiscoveryAttempt, ResolvedMcpDiscoveryExecution, ResolvedMcpOAuthAuthorizationStart,
     ResolvedMcpSubscriptionExecution, SaveMcpSubscriptionSession,
     TransitionMcpAuthorizationBinding, WakeMcpSubscriptionReconcile, MCP_OAUTH_PKCE_SECRET_PURPOSE,
+};
+use insight_platform_sandbox::{
+    decide_accept_managed_mcp_sandbox_session, AcceptManagedMcpSandboxSession,
+    AcceptedManagedMcpSandboxSession, ManagedMcpSandboxSessionGatewayAuthority,
+    ManagedMcpSandboxSessionJobPayload, SandboxCommandLimits, SandboxJobPayload,
 };
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
@@ -1954,6 +1964,18 @@ impl McpSubscriptionTransportTerminationAuthority for PgRepository {
         self.report_mcp_subscription_transport_termination(command)
             .await
             .map_err(map_mcp_subscription_persistence_error)
+    }
+}
+
+#[async_trait]
+impl ManagedMcpSandboxSessionGatewayAuthority for PgRepository {
+    type Error = RepositoryError;
+
+    async fn accept_managed_mcp_sandbox_session(
+        &self,
+        command: AcceptManagedMcpSandboxSession,
+    ) -> Result<CommandOutcome<AcceptedManagedMcpSandboxSession>, Self::Error> {
+        PgRepository::accept_managed_mcp_sandbox_session(self, command).await
     }
 }
 
@@ -4372,6 +4394,218 @@ impl PgRegistryTransaction {
 }
 
 impl PgRepository {
+    /// Atomically parks one logical MCP subscription Job and admits its exact-generation
+    /// physical Sandbox Job. No executor request is emitted before this transaction commits.
+    pub async fn accept_managed_mcp_sandbox_session(
+        &self,
+        command: AcceptManagedMcpSandboxSession,
+    ) -> Result<CommandOutcome<AcceptedManagedMcpSandboxSession>, RepositoryError> {
+        command
+            .validate_at(Utc::now(), self.sandbox_limits())
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command
+            .validate_at(database_now, self.sandbox_limits())
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let receipt_payload = managed_mcp_sandbox_session_receipt_payload(&command)?;
+        let identity = &command.request.identity;
+        if claim_mcp_subscription_worker_receipt(
+            &mut transaction,
+            &command.audit,
+            &identity.logical_job_id,
+            "mcp.subscription.managed_sandbox.schedule",
+            &receipt_payload,
+        )
+        .await?
+        {
+            let current = load_mcp_subscription(
+                &mut transaction,
+                &identity.tenant_id,
+                &identity.subscription_id,
+                false,
+                database_now,
+            )
+            .await?;
+            let (physical_job, physical_payload, usage_reservation_id) =
+                load_managed_mcp_sandbox_session_job(
+                    &mut transaction,
+                    &identity.tenant_id,
+                    &identity.physical_job_id,
+                    self.sandbox_limits(),
+                    false,
+                )
+                .await?;
+            require_managed_mcp_sandbox_session_replay(
+                &current,
+                &physical_job,
+                &physical_payload,
+                &usage_reservation_id,
+                &command,
+            )?;
+            let accepted = AcceptedManagedMcpSandboxSession {
+                logical_payload: current.payload,
+                logical_state: current.state,
+                physical_job,
+                physical_payload,
+            };
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(accepted));
+        }
+
+        let current = load_mcp_subscription(
+            &mut transaction,
+            &identity.tenant_id,
+            &identity.subscription_id,
+            true,
+            database_now,
+        )
+        .await?;
+        let logical_job = load_mcp_subscription_job(
+            &mut transaction,
+            &identity.tenant_id,
+            &identity.logical_job_id,
+            true,
+        )
+        .await?;
+        require_mcp_subscription_job_fence(
+            &logical_job,
+            &current,
+            &command.logical_fence,
+            database_now,
+        )?;
+        if current.version != identity.admitted_subscription_version
+            || logical_job.version != identity.admitted_logical_job_version
+            || current.payload.binding != command.request.subscription_binding
+        {
+            return Err(RepositoryError::StaleFence);
+        }
+
+        let binding = &current.payload.binding;
+        let resolved_contract = resolve_mcp_execution_contract(
+            &mut transaction,
+            &McpExecutionContractQuery {
+                schema_version: 1,
+                tenant_id: binding.tenant_id.clone(),
+                mcp_deployment: binding.mcp_deployment.clone(),
+                discovery_snapshot_id: binding.discovery_snapshot_id.clone(),
+                discovery_snapshot_digest: binding.discovery_snapshot_digest.clone(),
+                authorization_binding_id: binding.authorization_binding_id.clone(),
+                authorization_generation: binding.authorization_generation,
+                authorization_context_digest: binding.authorization_context_digest.clone(),
+                principal_id: binding.principal_id.clone(),
+            },
+            database_now,
+        )
+        .await?;
+        if resolved_contract != *command.request.mcp_contract {
+            return Err(RepositoryError::Conflict(
+                "Managed MCP Session execution contract",
+            ));
+        }
+        validate_mcp_subscription_context_binding(
+            &mut transaction,
+            &identity.tenant_id,
+            &binding.context_deployment,
+            &resolved_contract,
+        )
+        .await?;
+        verify_managed_mcp_session_sandbox_bindings(&mut transaction, &command.request).await?;
+        lock_and_persist_managed_mcp_session_artifact_grants(
+            &mut transaction,
+            &command.request,
+            database_now,
+        )
+        .await?;
+        lock_managed_mcp_session_secret_grants(&mut transaction, &command.request).await?;
+        reserve_managed_mcp_session_quota(
+            &mut transaction,
+            &command.request,
+            &command.usage_reservation_id,
+            &command.quota_entry_ids,
+            database_now,
+        )
+        .await?;
+
+        let accepted = decide_accept_managed_mcp_sandbox_session(
+            &current,
+            &command,
+            database_now,
+            self.sandbox_limits(),
+        )
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let next = update_mcp_subscription(
+            &mut transaction,
+            &current,
+            accepted.logical_state,
+            &accepted.logical_payload,
+            database_now,
+        )
+        .await?;
+        let stored_payload =
+            SandboxJobPayload::managed_mcp_subscription_session(accepted.physical_payload.clone());
+        let physical_typed = TypedPayload::from_versioned(1, &stored_payload, 1_048_576)?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.jobs (
+                tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+                state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
+                deadline, priority, request_digest, quota_reservation_id,
+                payload_schema_version, payload, payload_digest, created_at, updated_at
+            ) VALUES ($1, $2, 'sandbox', 'sandbox_job', $3, $4,
+                      'ready', 1, 0, 1, 0, $5, $6, 0, $7, $8,
+                      $9, $10, $11, $5, $5)
+            "#,
+        )
+        .bind(identity.tenant_id.to_string())
+        .bind(identity.physical_job_id.to_string())
+        .bind(identity.sandbox_job_id.to_string())
+        .bind(identity.subscription_id.to_string())
+        .bind(database_now)
+        .bind(command.request.deadline)
+        .bind(command.request.request_digest.to_string())
+        .bind(command.usage_reservation_id.to_string())
+        .bind(physical_typed.schema_version)
+        .bind(&physical_typed.value)
+        .bind(&physical_typed.digest)
+        .execute(&mut *transaction)
+        .await?;
+        park_mcp_subscription_job(&mut transaction, &logical_job, &next, database_now).await?;
+        append_scheduler_event(
+            &mut transaction,
+            &identity.tenant_id.to_string(),
+            &command.audit.event_id,
+            &command.audit.outbox_id,
+            "mcp_operation",
+            &identity.subscription_id.to_string(),
+            as_i64(next.version, "MCP subscription version")?,
+            None,
+            "mcp.managed_sandbox_session_scheduled",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "logical_job_id": identity.logical_job_id,
+                    "physical_job_id": identity.physical_job_id,
+                    "request_digest": command.request.request_digest,
+                    "sandbox_job_id": identity.sandbox_job_id,
+                    "session_generation": identity.session_generation,
+                    "subscription_id": identity.subscription_id,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_mcp_subscription_worker_receipt(
+            &mut transaction,
+            &command.audit,
+            &identity.logical_job_id,
+            "managed_sandbox_session_scheduled",
+            &identity.sandbox_job_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(accepted))
+    }
+
     pub async fn report_mcp_subscription_transport_termination(
         &self,
         command: ReportMcpSubscriptionTransportTermination,
@@ -5659,6 +5893,107 @@ async fn load_mcp_subscription_job(
     })
 }
 
+async fn load_managed_mcp_sandbox_session_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    job_id: &ResourceId,
+    limits: SandboxCommandLimits,
+    for_update: bool,
+) -> Result<
+    (
+        JobProjection,
+        ManagedMcpSandboxSessionJobPayload,
+        ResourceId,
+    ),
+    RepositoryError,
+> {
+    let query = if for_update {
+        "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2 FOR UPDATE"
+    } else {
+        "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2"
+    };
+    let row = sqlx::query(query)
+        .bind(tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound(
+            "Managed MCP physical Sandbox Job",
+        ))?;
+    let record = job_from_row(row)?;
+    let job = job_projection(&record)?;
+    let stored: SandboxJobPayload = decode_versioned_payload(&record.payload, "Sandbox Job")?;
+    let insight_platform_sandbox::SandboxJobWorkload::ManagedMcpSubscriptionSession(payload) =
+        stored.workload
+    else {
+        return Err(RepositoryError::CorruptRow(
+            "Managed MCP physical Job contains a different Sandbox workload".to_owned(),
+        ));
+    };
+    payload
+        .validate_for(&job, limits)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let usage_reservation_id = record
+        .quota_reservation_id
+        .as_deref()
+        .ok_or_else(|| {
+            RepositoryError::CorruptRow(
+                "Managed MCP physical Job has no quota reservation".to_owned(),
+            )
+        })?
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if usage_reservation_id.kind() != ResourceKind::UsageReservation
+        || record.invocation_id.as_deref()
+            != Some(
+                payload
+                    .request
+                    .identity
+                    .subscription_id
+                    .to_string()
+                    .as_str(),
+            )
+        || record.request_digest != payload.request.request_digest.to_string()
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Managed MCP physical Job binding is invalid".to_owned(),
+        ));
+    }
+    Ok((job, payload, usage_reservation_id))
+}
+
+fn require_managed_mcp_sandbox_session_replay(
+    current: &McpSubscriptionRecord,
+    physical_job: &JobProjection,
+    physical_payload: &ManagedMcpSandboxSessionJobPayload,
+    usage_reservation_id: &ResourceId,
+    command: &AcceptManagedMcpSandboxSession,
+) -> Result<(), RepositoryError> {
+    let identity = &command.request.identity;
+    let link = current
+        .payload
+        .managed_sandbox_session
+        .as_ref()
+        .ok_or(RepositoryError::IdempotencyConflict)?;
+    if current.tenant_id != identity.tenant_id
+        || current.subscription_id != identity.subscription_id
+        || current.job_id != identity.logical_job_id
+        || current.state != McpSubscriptionState::Pending
+        || current.payload.session.state != insight_platform_contracts::McpSessionState::Connecting
+        || link.identity != *identity
+        || link.sandbox_request_digest != command.request.request_digest
+        || physical_job.tenant_id != identity.tenant_id
+        || physical_job.job_id != identity.physical_job_id
+        || physical_job.owner.owner_id != identity.sandbox_job_id
+        || physical_job.owner.owner_kind != ResourceKind::SandboxJob
+        || physical_payload.request.as_ref() != &command.request
+        || usage_reservation_id != &command.usage_reservation_id
+    {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    Ok(())
+}
+
 fn require_mcp_subscription_job_fence(
     job: &LockedMcpSubscriptionJob,
     subscription: &McpSubscriptionRecord,
@@ -6141,6 +6476,32 @@ fn mcp_subscription_session_receipt_payload(
             "target": command.target,
         }),
         65_536,
+    )
+}
+
+fn managed_mcp_sandbox_session_receipt_payload(
+    command: &AcceptManagedMcpSandboxSession,
+) -> Result<TypedPayload, RepositoryError> {
+    if command.audit.request_digest != command.request.request_digest {
+        return Err(RepositoryError::InvalidInput(
+            "Managed MCP Sandbox Session request digest mismatch".to_owned(),
+        ));
+    }
+    TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "logical_fence": {
+                "expected_version": command.logical_fence.expected_version,
+                "lease_generation": command.logical_fence.lease_generation,
+                "token_digest": command.logical_fence.token_digest,
+                "worker_process_generation_id": command.logical_fence.worker_process_generation_id,
+            },
+            "quota_entry_ids": command.quota_entry_ids,
+            "request_digest": command.request.request_digest,
+            "session_identity": command.request.identity,
+            "usage_reservation_id": command.usage_reservation_id,
+        }),
+        131_072,
     )
 }
 

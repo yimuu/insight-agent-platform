@@ -529,7 +529,7 @@ impl SandboxExecutionOutcome {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SandboxJobPayload {
+pub struct SandboxExecutionJobPayload {
     pub schema_version: u32,
     pub request: Box<SandboxExecutionRequest>,
     pub submission_digest: Sha256Digest,
@@ -543,7 +543,7 @@ pub struct SandboxJobPayload {
     pub payload_digest: Sha256Digest,
 }
 
-impl SandboxJobPayload {
+impl SandboxExecutionJobPayload {
     pub fn seal(mut self) -> Result<Self, SandboxContractError> {
         self.payload_digest = digest_without_field(&self, "payload_digest")?;
         Ok(self)
@@ -657,6 +657,71 @@ impl SandboxJobPayload {
     }
 }
 
+/// Closed persistent payload for every `work_class=sandbox` Job.
+///
+/// The discriminator is mandatory so the shared Job table never guesses a workload contract from
+/// overlapping JSON fields. Adding a new Sandbox workload therefore extends this enum and its
+/// validators instead of adding a table or accepting arbitrary payloads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxJobPayload {
+    pub schema_version: u32,
+    #[serde(flatten)]
+    pub workload: SandboxJobWorkload,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "workload_kind", content = "workload", rename_all = "snake_case")]
+pub enum SandboxJobWorkload {
+    CapabilityExecution(Box<SandboxExecutionJobPayload>),
+    ManagedMcpSubscriptionSession(crate::ManagedMcpSandboxSessionJobPayload),
+}
+
+impl SandboxJobPayload {
+    pub fn capability_execution(payload: SandboxExecutionJobPayload) -> Self {
+        Self {
+            schema_version: 1,
+            workload: SandboxJobWorkload::CapabilityExecution(Box::new(payload)),
+        }
+    }
+
+    pub fn managed_mcp_subscription_session(
+        payload: crate::ManagedMcpSandboxSessionJobPayload,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            workload: SandboxJobWorkload::ManagedMcpSubscriptionSession(payload),
+        }
+    }
+
+    pub fn validate_for(
+        &self,
+        job: &JobProjection,
+        limits: SandboxCommandLimits,
+    ) -> Result<(), SandboxContractError> {
+        if self.schema_version != 1 {
+            return Err(SandboxContractError::InvalidJob);
+        }
+        match &self.workload {
+            SandboxJobWorkload::CapabilityExecution(payload) => payload.validate_for(job, limits),
+            SandboxJobWorkload::ManagedMcpSubscriptionSession(payload) => {
+                payload.validate_for(job, limits)
+            }
+        }
+    }
+
+    pub fn into_capability_execution(
+        self,
+    ) -> Result<SandboxExecutionJobPayload, SandboxContractError> {
+        match self.workload {
+            SandboxJobWorkload::CapabilityExecution(payload) => Ok(*payload),
+            SandboxJobWorkload::ManagedMcpSubscriptionSession(_) => {
+                Err(SandboxContractError::InvalidJob)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AcceptSandboxExecution {
     pub audit: CommandAudit,
@@ -695,7 +760,7 @@ impl AcceptSandboxExecution {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcceptedSandboxExecution {
     pub job: JobProjection,
-    pub payload: SandboxJobPayload,
+    pub payload: SandboxExecutionJobPayload,
 }
 
 pub fn decide_accept(
@@ -725,7 +790,7 @@ pub fn decide_accept(
     };
     job.validate()
         .map_err(|_| SandboxContractError::InvalidJob)?;
-    let payload = SandboxJobPayload {
+    let payload = SandboxExecutionJobPayload {
         schema_version: 1,
         request: Box::new(command.request.clone()),
         submission_digest: command.request.request_digest.clone(),
@@ -747,7 +812,7 @@ pub fn decide_accept(
 #[serde(deny_unknown_fields)]
 pub struct SandboxPhaseDecision {
     pub job: JobProjection,
-    pub payload: SandboxJobPayload,
+    pub payload: SandboxExecutionJobPayload,
 }
 
 /// Closed recovery action for one exact expired Sandbox lease generation.
@@ -773,7 +838,7 @@ pub enum SandboxLeaseRecoveryAction {
 
 pub fn decide_begin_execution(
     current_job: &JobProjection,
-    current_payload: &SandboxJobPayload,
+    current_payload: &SandboxExecutionJobPayload,
     fence: &JobFence,
     executor: crate::WasiExecutorProcessBinding,
     phase_evidence_digest: Sha256Digest,
@@ -799,7 +864,7 @@ pub fn decide_begin_execution(
 
 pub fn decide_advance_phase(
     current_job: &JobProjection,
-    current_payload: &SandboxJobPayload,
+    current_payload: &SandboxExecutionJobPayload,
     fence: &JobFence,
     target: SandboxJobState,
     phase_evidence_digest: Sha256Digest,
@@ -834,7 +899,7 @@ pub fn decide_advance_phase(
 #[allow(clippy::too_many_arguments)]
 pub fn decide_execution_outcome(
     current_job: &JobProjection,
-    current_payload: &SandboxJobPayload,
+    current_payload: &SandboxExecutionJobPayload,
     fence: &JobFence,
     outcome: SandboxExecutionOutcome,
     cleanup: SandboxCleanupEvidence,
@@ -921,7 +986,7 @@ pub fn decide_execution_outcome(
 /// physical path in `phase_sequence`; timeout is the direct `Accepted -> TimedOut` edge.
 pub fn decide_prestart_control(
     current_job: &JobProjection,
-    current_payload: &SandboxJobPayload,
+    current_payload: &SandboxExecutionJobPayload,
     reason: SandboxStopReason,
     source_event_payload_digest: Sha256Digest,
     limits: SandboxCommandLimits,
@@ -971,7 +1036,7 @@ pub fn decide_prestart_control(
 #[allow(clippy::too_many_arguments)]
 pub fn decide_expired_lease_recovery(
     current_job: &JobProjection,
-    current_payload: &SandboxJobPayload,
+    current_payload: &SandboxExecutionJobPayload,
     observed_job_version: u64,
     observed_lease_generation: u64,
     action: &SandboxLeaseRecoveryAction,

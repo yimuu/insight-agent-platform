@@ -21,13 +21,16 @@ use insight_platform_contracts::{
     SandboxPackageResourceSpec, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
     SandboxRuntimeFamily, SandboxRuntimeResourceSpec, SandboxSecretDeliveryMode,
     SandboxSecretResolutionPolicyDocument, SecretPurpose, SecretResolutionPolicy, ValueRef,
-    MCP_PROTOCOL_BASELINE,
+    WorkClass, MCP_PROTOCOL_BASELINE,
 };
 use insight_platform_invocations::{CapabilityOutputValue, DispatchOutcome};
 use insight_platform_jobs::{decide_claim, JobFence, LeasePolicy};
 use insight_platform_mcp_host::{
-    McpAuthorizationContext, McpHostExecutionContract, McpLogicalOperationRequest,
-    NewMcpAuthorizationContext, NewMcpHostExecutionContract,
+    ManagedMcpSandboxSessionIdentity, McpAuthorizationContext, McpHostExecutionContract,
+    McpLogicalOperationRequest, McpResourceSubscriptionBinding, McpSessionBindingKey,
+    McpSessionRecord, McpSubscriptionPayload, McpSubscriptionRecord, McpSubscriptionState,
+    McpSubscriptionWorkerAudit, NewMcpAuthorizationContext, NewMcpHostExecutionContract,
+    NewMcpResourceSubscriptionBinding,
 };
 use std::{
     collections::BTreeMap,
@@ -826,6 +829,241 @@ fn managed_mcp_submission_requires_exact_microvm_source_and_token_grant() {
     downgraded.isolation_class = SandboxIsolationClass::SandboxedContainer;
     downgraded = downgraded.seal().unwrap();
     assert!(downgraded.validate_submission_at(now, limits()).is_err());
+}
+
+#[test]
+fn managed_subscription_admission_binds_two_jobs_to_one_session_generation() {
+    let now = Utc::now();
+    let (record, command) = managed_mcp_session_fixture(now);
+    let accepted =
+        decide_accept_managed_mcp_sandbox_session(&record, &command, now, limits()).unwrap();
+    let link = accepted
+        .logical_payload
+        .managed_sandbox_session
+        .as_ref()
+        .unwrap();
+    assert_eq!(accepted.logical_state, McpSubscriptionState::Pending);
+    assert_eq!(link.identity, command.request.identity);
+    assert_eq!(link.sandbox_request_digest, command.request.request_digest);
+    assert_eq!(accepted.logical_payload.session.generation, 1);
+    assert_eq!(accepted.physical_job.work_class, WorkClass::Sandbox);
+    assert_eq!(
+        accepted.physical_job.job_id.uuid(),
+        accepted.physical_job.owner.owner_id.uuid()
+    );
+    accepted
+        .physical_payload
+        .validate_for(&accepted.physical_job, limits())
+        .unwrap();
+
+    let mut stale = command.clone();
+    stale.request.identity.admitted_subscription_version += 1;
+    stale.request.identity.canonical_digest =
+        insight_platform_contracts::canonical_digest(&serde_json::json!({
+            "admitted_logical_job_version": stale.request.identity.admitted_logical_job_version,
+            "admitted_subscription_version": stale.request.identity.admitted_subscription_version,
+            "logical_job_id": stale.request.identity.logical_job_id,
+            "physical_job_id": stale.request.identity.physical_job_id,
+            "sandbox_job_id": stale.request.identity.sandbox_job_id,
+            "schema_version": stale.request.identity.schema_version,
+            "session_generation": stale.request.identity.session_generation,
+            "subscription_binding_digest": stale.request.identity.subscription_binding_digest,
+            "subscription_id": stale.request.identity.subscription_id,
+            "tenant_id": stale.request.identity.tenant_id,
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+    stale.request = stale.request.seal().unwrap();
+    stale.audit.request_digest = stale.request.request_digest.clone();
+    assert!(decide_accept_managed_mcp_sandbox_session(&record, &stale, now, limits()).is_err());
+}
+
+fn managed_mcp_session_fixture(
+    now: DateTime<Utc>,
+) -> (McpSubscriptionRecord, AcceptManagedMcpSandboxSession) {
+    let operation_request = managed_mcp_request_at(now);
+    let SandboxExecutionSource::ManagedMcp { mcp_contract, .. } =
+        &operation_request.execution_source
+    else {
+        unreachable!();
+    };
+    let base = mcp_contract.as_ref();
+    let mut protocol = base.protocol_profile.clone();
+    protocol.allowed_server_capabilities.resources = true;
+    protocol.allowed_server_capabilities.subscriptions = true;
+    protocol.method_limits.insert(
+        PublishedMcpMethod::ResourcesRead,
+        *protocol
+            .method_limits
+            .get(&PublishedMcpMethod::ToolsCall)
+            .unwrap(),
+    );
+    let protocol_ref = ExactVersionRef::new(
+        base.server.protocol_policy.revision_id.clone(),
+        protocol.canonical_digest().unwrap(),
+    )
+    .unwrap();
+    let mut deployment_closure = base.deployment_closure.clone();
+    deployment_closure.protocol_policy = protocol_ref.clone();
+    let server = McpServerExecutionContract::build(
+        base.server.revision.clone(),
+        McpTransportKind::ManagedStdio,
+        protocol_ref.clone(),
+        base.server.deployment_credential_requirements.clone(),
+        base.server.authorization_credential_purpose.clone(),
+        base.server.limits,
+    )
+    .unwrap();
+    let mut negotiated = base.discovery.negotiated_capabilities.clone();
+    negotiated.resources = true;
+    negotiated.subscriptions = true;
+    let discovery = insight_platform_contracts::McpDiscoverySnapshot::build(
+        base.discovery.snapshot_id.clone(),
+        base.deployment.clone(),
+        base.server.revision.clone(),
+        protocol_ref,
+        base.authorization.canonical_digest.clone(),
+        base.discovery.negotiated_version.clone(),
+        negotiated,
+        base.discovery.objects_artifact.clone(),
+        now - ChronoDuration::seconds(1),
+        now + ChronoDuration::minutes(4),
+    )
+    .unwrap();
+    let contract = McpHostExecutionContract::build(NewMcpHostExecutionContract {
+        deployment: base.deployment.clone(),
+        deployment_closure,
+        server,
+        protocol_profile: protocol,
+        authorization: base.authorization.clone(),
+        discovery,
+    })
+    .unwrap();
+    let subscription_id = id(ResourceKind::McpOperation, 70);
+    let logical_job_id = id(ResourceKind::Job, 71);
+    let binding = McpResourceSubscriptionBinding::build(
+        NewMcpResourceSubscriptionBinding {
+            subscription_id: subscription_id.clone(),
+            job_id: logical_job_id.clone(),
+            context_deployment: deployment(ResourceKind::ContextDeployment, 72, '5'),
+            resource_uri: "mcp://catalog.example/items/42".to_owned(),
+        },
+        &contract,
+        now,
+    )
+    .unwrap();
+    let session =
+        McpSessionRecord::disconnected(McpSessionBindingKey::build(&contract).unwrap()).unwrap();
+    let record = McpSubscriptionRecord {
+        tenant_id: binding.tenant_id.clone(),
+        subscription_id,
+        job_id: logical_job_id,
+        logical_key: "managed-resource-items-42".to_owned(),
+        state: McpSubscriptionState::Pending,
+        version: 1,
+        payload: McpSubscriptionPayload::pending(binding.clone(), session).unwrap(),
+        deadline: operation_request.deadline,
+        created_at: now,
+        updated_at: now,
+        terminal_at: None,
+    };
+    let physical_job_id = id(ResourceKind::Job, 73);
+    let sandbox_job_id =
+        ResourceId::from_uuid_v7(ResourceKind::SandboxJob, physical_job_id.uuid()).unwrap();
+    let identity = ManagedMcpSandboxSessionIdentity::build(
+        &binding,
+        record.version,
+        7,
+        1,
+        sandbox_job_id.clone(),
+        physical_job_id,
+    )
+    .unwrap();
+    let runtime_artifact = operation_request.package.runtime_bundle_artifact.clone();
+    let artifact_grant = ScopedArtifactGrant {
+        schema_version: 1,
+        grant_id: id(ResourceKind::ArtifactGrant, 74),
+        tenant_id: identity.tenant_id.clone(),
+        sandbox_job_id: sandbox_job_id.clone(),
+        operation: ArtifactGrantOperation::ReadWhole,
+        port: "runtime_bundle".to_owned(),
+        artifact: Some(runtime_artifact.clone()),
+        staging_artifact_id: None,
+        byte_range: None,
+        maximum_bytes: runtime_artifact.byte_length(),
+        generation: 1,
+        expires_at: operation_request.deadline,
+        grant_digest: sha('0'),
+    }
+    .seal()
+    .unwrap();
+    let mut secret_grants = operation_request.secret_grants.clone();
+    for grant in &mut secret_grants {
+        grant.sandbox_job_id = sandbox_job_id.clone();
+        *grant = grant.clone().seal().unwrap();
+    }
+    let callback = ManagedMcpSandboxSessionCallback {
+        schema_version: 1,
+        session_identity_digest: identity.canonical_digest.clone(),
+        audience_identity_digest: sha('8'),
+        expires_at: operation_request.deadline,
+        binding_digest: sha('0'),
+    }
+    .seal()
+    .unwrap();
+    let request = ManagedMcpSandboxSessionRequest {
+        schema_version: 1,
+        protocol_version: SANDBOX_PROTOCOL_VERSION,
+        identity,
+        subscription_binding: binding,
+        mcp_contract: Box::new(contract),
+        runtime_revision: operation_request.runtime_revision,
+        runtime: operation_request.runtime,
+        package_revision: operation_request.package_revision,
+        package: operation_request.package,
+        profile_revision: operation_request.profile_revision,
+        profile: operation_request.profile,
+        policies: operation_request.policies,
+        isolation_class: operation_request.isolation_class,
+        executor_worker_manifest_digest: operation_request.executor_worker_manifest_digest,
+        isolation_backend_contract_digest: operation_request.isolation_backend_contract_digest,
+        classification: operation_request.classification,
+        artifact_grants: vec![artifact_grant],
+        secret_grants,
+        network_mode: operation_request.network_mode,
+        resources: operation_request.resources,
+        deadline: operation_request.deadline,
+        callback,
+        request_digest: sha('0'),
+    }
+    .seal()
+    .unwrap();
+    let worker = id(ResourceKind::WorkerProcessGeneration, 75);
+    let command = AcceptManagedMcpSandboxSession {
+        audit: McpSubscriptionWorkerAudit {
+            tenant_id: request.identity.tenant_id.clone(),
+            worker_process_generation_id: worker.clone(),
+            receipt_id: id(ResourceKind::Receipt, 76),
+            event_id: id(ResourceKind::Event, 77),
+            outbox_id: id(ResourceKind::OutboxEvent, 78),
+            idempotency_key_digest: sha('a'),
+            request_digest: request.request_digest.clone(),
+            receipt_expires_at: now + ChronoDuration::minutes(5),
+        },
+        logical_fence: JobFence {
+            expected_version: 7,
+            worker_process_generation_id: worker,
+            lease_generation: 3,
+            token_digest: sha('b'),
+        },
+        request,
+        usage_reservation_id: id(ResourceKind::UsageReservation, 79),
+        quota_entry_ids: (80..84)
+            .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+            .collect(),
+    };
+    (record, command)
 }
 
 #[test]
@@ -2224,7 +2462,7 @@ async fn control_router_rejects_stale_identity_and_preserves_timeout_reason() {
 struct InMemorySandboxAuthority {
     current: Mutex<(
         insight_platform_jobs::JobProjection,
-        SandboxJobPayload,
+        SandboxExecutionJobPayload,
         Vec<insight_platform_contracts::SandboxJobState>,
     )>,
 }
@@ -2675,7 +2913,10 @@ async fn worker_persists_cancelled_only_after_abort_and_cleanup_evidence() {
 }
 
 struct RejectStartingAuthority {
-    current: Mutex<(insight_platform_jobs::JobProjection, SandboxJobPayload)>,
+    current: Mutex<(
+        insight_platform_jobs::JobProjection,
+        SandboxExecutionJobPayload,
+    )>,
 }
 
 #[async_trait]

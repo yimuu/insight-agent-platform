@@ -38,7 +38,9 @@ use insight_platform_invocations::{
     ResolveCapabilityReconciliation, WakeCapabilityInvocation, CAPABILITY_QUOTA_LINES,
 };
 use insight_platform_jobs::{JobFence, LeasePolicy};
-use insight_platform_sandbox::{SandboxCommandLimits, SandboxExecutionSource, SandboxJobPayload};
+use insight_platform_sandbox::{
+    SandboxCommandLimits, SandboxExecutionJobPayload, SandboxExecutionSource, SandboxJobPayload,
+};
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
     TaskState,
@@ -380,7 +382,10 @@ fn classify_capability_owner_job(
         }
         WorkClass::Sandbox => {
             let projection = job_projection(job)?;
-            let payload: SandboxJobPayload = decode_versioned_payload(&job.payload, "Sandbox Job")?;
+            let payload: SandboxExecutionJobPayload =
+                decode_versioned_payload::<SandboxJobPayload>(&job.payload, "Sandbox Job")?
+                    .into_capability_execution()
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
             payload
                 .validate_for(&projection, sandbox_limits)
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;

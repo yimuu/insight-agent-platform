@@ -175,9 +175,10 @@ impl EstablishedMcpSubscription {
 
 /// Transport port for connect + initialize + `resources/subscribe`.
 ///
-/// Implementations own the live HTTP/SSE or managed-runner connection. They receive only the
-/// exact immutable contract and return an encrypted reconstructable handle; they cannot mutate
-/// durable subscription or Job state.
+/// Implementations own the live HTTP/SSE connection. Managed stdio subscriptions are admitted as
+/// physical Sandbox Jobs and never enter this Host-local transport boundary. Implementations
+/// receive only the exact immutable contract and return an encrypted reconstructable handle; they
+/// cannot mutate durable subscription or Job state.
 #[async_trait]
 pub trait McpSubscriptionTransport: Send + Sync {
     fn kind(&self) -> McpTransportKind;
@@ -945,7 +946,9 @@ impl McpSubscriptionWorker {
         resolved
             .validate_for(&command.query, Utc::now())
             .map_err(McpSubscriptionWorkerError::Contract)?;
-        if self.transport.kind() != resolved.contract.transport_kind() {
+        if resolved.contract.transport_kind() != McpTransportKind::StreamableHttp
+            || self.transport.kind() != McpTransportKind::StreamableHttp
+        {
             return Err(McpSubscriptionWorkerError::InvalidCommand);
         }
 

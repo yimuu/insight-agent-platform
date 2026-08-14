@@ -415,7 +415,7 @@ pub struct SandboxExecutionPolicyClosure {
 
 impl SandboxExecutionPolicyClosure {
     #[allow(clippy::too_many_arguments)]
-    fn validate_for(
+    pub(crate) fn validate_for(
         &self,
         profile: &SandboxProfileResourceSpec,
         runtime: &SandboxRuntimeResourceSpec,

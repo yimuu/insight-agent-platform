@@ -7,6 +7,7 @@
 mod backend;
 mod broker;
 mod control;
+mod managed_session;
 mod state;
 mod types;
 mod worker;
@@ -14,6 +15,7 @@ mod worker;
 pub use backend::*;
 pub use broker::*;
 pub use control::*;
+pub use managed_session::*;
 pub use state::*;
 pub use types::*;
 pub use worker::*;

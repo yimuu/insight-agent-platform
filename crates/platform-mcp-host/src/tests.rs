@@ -1943,6 +1943,13 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
 
 fn subscription_contract(now: DateTime<Utc>) -> McpHostExecutionContract {
     let base = fixture(false, Effect::ReadOnly, 5_000).contract;
+    subscription_contract_from(base, now)
+}
+
+fn subscription_contract_from(
+    base: McpHostExecutionContract,
+    now: DateTime<Utc>,
+) -> McpHostExecutionContract {
     let mut protocol = base.protocol_profile.clone();
     protocol.allowed_server_capabilities.resources = true;
     protocol.allowed_server_capabilities.subscriptions = true;
@@ -2086,6 +2093,7 @@ impl McpSubscriptionExecutionResolver for StaticSubscriptionResolver {
 }
 
 struct StaticSubscriptionTransport {
+    kind: McpTransportKind,
     outcome: Result<EstablishedMcpSubscription, McpTransportFailure>,
     calls: Mutex<u32>,
     session_generations: Mutex<Vec<u64>>,
@@ -2111,7 +2119,7 @@ impl McpSubscriptionActivation for RecordingSubscriptionActivation {
 #[async_trait]
 impl McpSubscriptionTransport for StaticSubscriptionTransport {
     fn kind(&self) -> McpTransportKind {
-        McpTransportKind::StreamableHttp
+        self.kind
     }
 
     async fn establish(
@@ -2306,6 +2314,48 @@ fn execute_subscription_command(
 }
 
 #[tokio::test]
+async fn subscription_worker_rejects_managed_stdio_before_transport_dispatch() {
+    let now = Utc::now();
+    let contract = subscription_contract_from(managed_stdio_fixture().contract, now);
+    let record = subscription_record(&contract, now);
+    let fence = subscription_fence(&record);
+    let authority = Arc::new(InMemorySubscriptionAuthority::new(record.clone()));
+    let transport = Arc::new(StaticSubscriptionTransport {
+        kind: McpTransportKind::ManagedStdio,
+        outcome: Err(McpTransportFailure::RetryableBeforeDispatch(
+            SafeMcpFailure {
+                safe_code: "managed_subscription_transport_must_not_run".to_owned(),
+                safe_message: "managed subscriptions require Sandbox admission".to_owned(),
+                evidence_digest: sha('9'),
+            },
+        )),
+        calls: Mutex::new(0),
+        session_generations: Mutex::new(Vec::new()),
+        activation_targets: None,
+    });
+    let worker = McpSubscriptionWorker::new(
+        Arc::new(StaticSubscriptionResolver {
+            resolved: ResolvedMcpSubscriptionExecution {
+                record: record.clone(),
+                contract,
+            },
+        }),
+        transport.clone(),
+        Arc::new(CapturingSubscriptionTarget::default()),
+        authority.clone(),
+    );
+
+    assert_eq!(
+        worker
+            .execute(execute_subscription_command(&record, fence, now))
+            .await,
+        Err(McpSubscriptionWorkerError::InvalidCommand)
+    );
+    assert_eq!(*transport.calls.lock().unwrap(), 0);
+    assert!(authority.targets.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn subscription_worker_persists_session_phases_before_ready() {
     let now = Utc::now();
     let contract = subscription_contract(now);
@@ -2313,6 +2363,7 @@ async fn subscription_worker_persists_session_phases_before_ready() {
     let fence = subscription_fence(&record);
     let authority = Arc::new(InMemorySubscriptionAuthority::new(record.clone()));
     let transport = Arc::new(StaticSubscriptionTransport {
+        kind: McpTransportKind::StreamableHttp,
         outcome: Ok(EstablishedMcpSubscription {
             transport_kind: McpTransportKind::StreamableHttp,
             binding_digest: record.payload.binding.canonical_digest.clone(),
@@ -2390,6 +2441,7 @@ async fn subscription_worker_terminalizes_permanent_establish_failure() {
             },
         }),
         Arc::new(StaticSubscriptionTransport {
+            kind: McpTransportKind::StreamableHttp,
             outcome: Err(McpTransportFailure::Permanent(SafeMcpFailure {
                 safe_code: "mcp_subscription_rejected".to_owned(),
                 safe_message: "MCP subscription was rejected".to_owned(),
@@ -2501,6 +2553,7 @@ async fn subscription_worker_acknowledges_only_after_durable_refresh_acceptance(
             },
         }),
         Arc::new(StaticSubscriptionTransport {
+            kind: McpTransportKind::StreamableHttp,
             outcome: Err(McpTransportFailure::RetryableBeforeDispatch(
                 SafeMcpFailure {
                     safe_code: "unused_transport".to_owned(),
@@ -2591,6 +2644,7 @@ async fn subscription_worker_periodic_reconcile_uses_the_durable_target() {
     let authority = Arc::new(InMemorySubscriptionAuthority::new(record.clone()));
     let target = Arc::new(CapturingSubscriptionTarget::default());
     let transport = Arc::new(StaticSubscriptionTransport {
+        kind: McpTransportKind::StreamableHttp,
         outcome: Err(McpTransportFailure::RetryableBeforeDispatch(
             SafeMcpFailure {
                 safe_code: "unused_transport".to_owned(),
@@ -2644,6 +2698,7 @@ async fn subscription_worker_rebuilds_lost_session_before_full_reconcile() {
     let authority = Arc::new(InMemorySubscriptionAuthority::new(record.clone()));
     let target = Arc::new(CapturingSubscriptionTarget::default());
     let transport = Arc::new(StaticSubscriptionTransport {
+        kind: McpTransportKind::StreamableHttp,
         outcome: Ok(EstablishedMcpSubscription {
             transport_kind: McpTransportKind::StreamableHttp,
             binding_digest: record.payload.binding.canonical_digest.clone(),

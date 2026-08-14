@@ -27,10 +27,11 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, ArtifactGrantOperation, ArtifactPurpose, ArtifactReferenceKind,
-    CommandOutcome, DeploymentClosure, EntityLifecycle, ExactVersionRef, Failure, FailureClass,
-    FailureCode, FailureSource, InvocationState, JobState, Permission, PlatformFailureCode,
-    PolicyKind, PolicyResourceSpec, QuotaDimension, RegistryResourceKind, ResourceDocument,
-    ResourceId, ResourceKind, Retryability, SandboxJobState, Sha256Digest, ValueRef, WorkClass,
+    CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle, ExactVersionRef,
+    Failure, FailureClass, FailureCode, FailureSource, InvocationState, JobState, Permission,
+    PlatformFailureCode, PolicyKind, PolicyResourceSpec, QuotaDimension, RegistryResourceKind,
+    ResourceDocument, ResourceId, ResourceKind, Retryability, SandboxJobState, Sha256Digest,
+    ValueRef, WorkClass,
 };
 use insight_platform_invocations::{
     decide_defer_to_sandbox, decide_detached_job_outcome, CapabilityControlKind,
@@ -48,20 +49,22 @@ use insight_platform_sandbox::{
     decide_accept, decide_advance_phase, decide_begin_execution, decide_execution_outcome,
     decide_expired_lease_recovery, decide_prestart_control, AcceptSandboxExecution,
     ClaimSandboxJobs, ClaimedSandboxJob, CommitSandboxOutcome, CommitSandboxPhase,
-    ExpiredSandboxLease, HeartbeatSandboxExecution, MergeSandboxCapabilityOutcome,
-    MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence, MicroVmGrantRevoker,
-    PendingSandboxCapabilityOutcome, RecoverExpiredSandboxLease, RecoverSandboxControlSignals,
-    ResolveSandboxControlEvent, RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants,
-    SandboxClaimAuthority, SandboxClaimFailure, SandboxCommandLimits, SandboxControlAuthority,
-    SandboxControlScanCursor, SandboxControlSignalPage, SandboxControlSignalSource,
-    SandboxExecutionAuthority, SandboxExecutionOutcome, SandboxExecutionRequest,
+    ExpiredSandboxLease, HeartbeatSandboxExecution, ManagedMcpSandboxSessionRequest,
+    MergeSandboxCapabilityOutcome, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
+    MicroVmGrantRevoker, PendingSandboxCapabilityOutcome, RecoverExpiredSandboxLease,
+    RecoverSandboxControlSignals, ResolveSandboxControlEvent, RevokeMicroVmSandboxGrants,
+    RevokeWasiSandboxGrants, SandboxClaimAuthority, SandboxClaimFailure, SandboxCommandLimits,
+    SandboxControlAuthority, SandboxControlScanCursor, SandboxControlSignalPage,
+    SandboxControlSignalSource, SandboxExecutionAuthority, SandboxExecutionJobPayload,
+    SandboxExecutionOutcome, SandboxExecutionPolicyClosure, SandboxExecutionRequest,
     SandboxExecutionSource, SandboxGatewayAuthority, SandboxJobPayload, SandboxLeaseRecoveryAction,
     SandboxLeaseRecoveryAuthority, SandboxLeaseRecoveryDisposition, SandboxLeaseRecoveryResult,
     SandboxPhaseDecision, SandboxPrestartControlOutcome, SandboxRecoveryAudit,
-    SandboxResourceUsage, SandboxStopReason, SandboxStopSignal, SandboxWorkerAudit,
-    StopUnclaimedSandboxJob, WasiArtifactReadPurpose, WasiArtifactReadRequest,
-    WasiGrantRevocationError, WasiGrantRevocationEvidence, WasiGrantRevoker, WasiValueDirection,
-    WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator, SANDBOX_QUOTA_LINES,
+    SandboxResourceEnvelope, SandboxResourceUsage, SandboxStopReason, SandboxStopSignal,
+    SandboxWorkerAudit, ScopedArtifactGrant, ScopedSecretGrant, StopUnclaimedSandboxJob,
+    WasiArtifactReadPurpose, WasiArtifactReadRequest, WasiGrantRevocationError,
+    WasiGrantRevocationEvidence, WasiGrantRevoker, WasiValueDirection, WasiValueValidationError,
+    WasiValueValidationRequest, WasiValueValidator, SANDBOX_QUOTA_LINES,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -1137,8 +1140,8 @@ impl PgRepository {
         for row in rows {
             let record = job_from_row(row)?;
             let job = job_projection(&record)?;
-            let payload: SandboxJobPayload =
-                decode_versioned_payload(&record.payload, "Sandbox Job")?;
+            let payload: SandboxExecutionJobPayload =
+                decode_sandbox_capability_payload(&record.payload)?;
             payload
                 .validate_for(&job, self.sandbox_limits())
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
@@ -1286,8 +1289,8 @@ impl PgRepository {
             };
             let current = job_from_row(row)?;
             let current_job = job_projection(&current)?;
-            let payload: SandboxJobPayload =
-                decode_versioned_payload(&current.payload, "Sandbox Job")?;
+            let payload: SandboxExecutionJobPayload =
+                decode_sandbox_capability_payload(&current.payload)?;
             payload
                 .validate_for(&current_job, self.sandbox_limits())
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
@@ -2023,7 +2026,7 @@ fn sandbox_stop_signal_from_row(
         ));
     }
     let job = job_projection(&record)?;
-    let payload: SandboxJobPayload = decode_versioned_payload(&record.payload, "Sandbox Job")?;
+    let payload = decode_sandbox_capability_payload(&record.payload)?;
     payload
         .validate_for(&job, limits)
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
@@ -2221,7 +2224,8 @@ impl SandboxGatewayAuthority for PgRepository {
             database_now,
         )?;
         update_capability_invocation(&mut transaction, &invocation, &deferred).await?;
-        let payload = TypedPayload::from_versioned(1, &accepted.payload, 1_048_576)?;
+        let stored_payload = SandboxJobPayload::capability_execution(accepted.payload.clone());
+        let payload = TypedPayload::from_versioned(1, &stored_payload, 1_048_576)?;
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
@@ -2644,7 +2648,7 @@ impl SandboxLeaseRecoveryAuthority for PgRepository {
 struct LockedSandboxJob {
     record: JobRecord,
     job: JobProjection,
-    payload: SandboxJobPayload,
+    payload: SandboxExecutionJobPayload,
 }
 
 fn sandbox_capability_outcome_candidate(
@@ -2688,7 +2692,7 @@ fn sandbox_capability_outcome_candidate(
         ));
     }
     let job = job_projection(&record)?;
-    let payload: SandboxJobPayload = decode_versioned_payload(&record.payload, "Sandbox Job")?;
+    let payload = decode_sandbox_capability_payload(&record.payload)?;
     payload
         .validate_for(&job, limits)
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
@@ -2922,7 +2926,7 @@ async fn terminalize_sandbox_outcome_merge_receipt(
 }
 
 fn normalize_sandbox_capability_outcome(
-    payload: &SandboxJobPayload,
+    payload: &SandboxExecutionJobPayload,
     database_now: DateTime<Utc>,
     invocation: &CapabilityInvocationRecord,
 ) -> Result<DetachedCapabilityJobOutcome, RepositoryError> {
@@ -3149,7 +3153,7 @@ async fn insert_sandbox_capability_value(
     transaction: &mut Transaction<'_, Postgres>,
     invocation: &CapabilityInvocationRecord,
     output: &CapabilityOutputValue,
-    sandbox_payload: &SandboxJobPayload,
+    sandbox_payload: &SandboxExecutionJobPayload,
     database_now: DateTime<Utc>,
 ) -> Result<(), RepositoryError> {
     let completed = match sandbox_payload.outcome.as_ref() {
@@ -3438,30 +3442,74 @@ async fn verify_sandbox_exact_bindings(
         ));
     }
 
-    let runtime = load_enabled_exact_published_version(
+    verify_sandbox_resource_closure(
         transaction,
         &request.tenant_id,
         &request.runtime_revision,
+        &request.runtime,
+        &request.package_revision,
+        &request.package,
+        &request.profile_revision,
+        &request.profile,
+        &request.policies,
+    )
+    .await
+}
+
+pub(crate) async fn verify_managed_mcp_session_sandbox_bindings(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ManagedMcpSandboxSessionRequest,
+) -> Result<(), RepositoryError> {
+    verify_sandbox_resource_closure(
+        transaction,
+        &request.identity.tenant_id,
+        &request.runtime_revision,
+        &request.runtime,
+        &request.package_revision,
+        &request.package,
+        &request.profile_revision,
+        &request.profile,
+        &request.policies,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn verify_sandbox_resource_closure(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    runtime_revision: &ExactVersionRef,
+    runtime_document: &insight_platform_contracts::SandboxRuntimeResourceSpec,
+    package_revision: &ExactVersionRef,
+    package_document: &insight_platform_contracts::SandboxPackageResourceSpec,
+    profile_revision: &ExactVersionRef,
+    profile_document: &insight_platform_contracts::SandboxProfileResourceSpec,
+    policies: &SandboxExecutionPolicyClosure,
+) -> Result<(), RepositoryError> {
+    let runtime = load_enabled_exact_published_version(
+        transaction,
+        tenant_id,
+        runtime_revision,
         RegistryResourceKind::SandboxRuntime,
     )
     .await?;
     let package = load_enabled_exact_published_version(
         transaction,
-        &request.tenant_id,
-        &request.package_revision,
+        tenant_id,
+        package_revision,
         RegistryResourceKind::SandboxPackage,
     )
     .await?;
     let profile = load_enabled_exact_published_version(
         transaction,
-        &request.tenant_id,
-        &request.profile_revision,
+        tenant_id,
+        profile_revision,
         RegistryResourceKind::SandboxProfile,
     )
     .await?;
-    if runtime.document != ResourceDocument::SandboxRuntime(request.runtime.clone())
-        || package.document != ResourceDocument::SandboxPackage(request.package.clone())
-        || profile.document != ResourceDocument::SandboxProfile(request.profile.clone())
+    if runtime.document != ResourceDocument::SandboxRuntime(runtime_document.clone())
+        || package.document != ResourceDocument::SandboxPackage(package_document.clone())
+        || profile.document != ResourceDocument::SandboxProfile(profile_document.clone())
     {
         return Err(RepositoryError::Conflict(
             "Sandbox frozen ResourceVersion snapshot",
@@ -3469,52 +3517,47 @@ async fn verify_sandbox_exact_bindings(
     }
     let isolation_policy = load_exact_sandbox_policy(
         transaction,
-        &request.tenant_id,
-        &request.profile.isolation_policy,
+        tenant_id,
+        &profile_document.isolation_policy,
         PolicyKind::Isolation,
     )
     .await?;
     let resource_policy = load_exact_sandbox_policy(
         transaction,
-        &request.tenant_id,
-        &request.profile.resource_policy,
+        tenant_id,
+        &profile_document.resource_policy,
         PolicyKind::Resource,
     )
     .await?;
     let network_policy = load_exact_sandbox_policy(
         transaction,
-        &request.tenant_id,
-        &request.profile.network_policy,
+        tenant_id,
+        &profile_document.network_policy,
         PolicyKind::Network,
     )
     .await?;
     let artifact_io_policy = load_exact_sandbox_policy(
         transaction,
-        &request.tenant_id,
-        &request.profile.artifact_io_policy,
+        tenant_id,
+        &profile_document.artifact_io_policy,
         PolicyKind::ArtifactIo,
     )
     .await?;
-    let secret_policy = match &request.profile.secret_policy {
+    let secret_policy = match &profile_document.secret_policy {
         Some(exact) => Some(
-            load_exact_sandbox_policy(
-                transaction,
-                &request.tenant_id,
-                exact,
-                PolicyKind::SecretResolution,
-            )
-            .await?,
+            load_exact_sandbox_policy(transaction, tenant_id, exact, PolicyKind::SecretResolution)
+                .await?,
         ),
         None => None,
     };
-    if isolation_policy.sandbox_isolation.as_ref() != Some(&request.policies.isolation)
-        || resource_policy.sandbox_resource.as_ref() != Some(&request.policies.resource)
-        || network_policy.sandbox_network.as_ref() != Some(&request.policies.network)
-        || artifact_io_policy.sandbox_artifact_io.as_ref() != Some(&request.policies.artifact_io)
+    if isolation_policy.sandbox_isolation.as_ref() != Some(&policies.isolation)
+        || resource_policy.sandbox_resource.as_ref() != Some(&policies.resource)
+        || network_policy.sandbox_network.as_ref() != Some(&policies.network)
+        || artifact_io_policy.sandbox_artifact_io.as_ref() != Some(&policies.artifact_io)
         || secret_policy
             .as_ref()
             .and_then(|policy| policy.sandbox_secret_resolution.as_ref())
-            != request.policies.secret_resolution.as_ref()
+            != policies.secret_resolution.as_ref()
     {
         return Err(RepositoryError::Conflict(
             "Sandbox frozen Policy document closure",
@@ -3553,7 +3596,42 @@ async fn lock_and_persist_artifact_grants(
     command: &AcceptSandboxExecution,
     database_now: DateTime<Utc>,
 ) -> Result<(), RepositoryError> {
-    for grant in &command.request.artifact_grants {
+    lock_and_persist_sandbox_artifact_grants(
+        transaction,
+        &command.request.tenant_id,
+        &command.request.sandbox_job_id,
+        command.request.classification,
+        &command.request.artifact_grants,
+        database_now,
+    )
+    .await
+}
+
+pub(crate) async fn lock_and_persist_managed_mcp_session_artifact_grants(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ManagedMcpSandboxSessionRequest,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    lock_and_persist_sandbox_artifact_grants(
+        transaction,
+        &request.identity.tenant_id,
+        &request.identity.sandbox_job_id,
+        request.classification,
+        &request.artifact_grants,
+        database_now,
+    )
+    .await
+}
+
+async fn lock_and_persist_sandbox_artifact_grants(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    sandbox_job_id: &ResourceId,
+    request_classification: DataClassification,
+    grants: &[ScopedArtifactGrant],
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    for grant in grants {
         let (source_artifact_id, target_artifact_id) = match grant.operation {
             ArtifactGrantOperation::ReadWhole | ArtifactGrantOperation::ReadRange => {
                 let artifact = grant.artifact.as_ref().ok_or_else(|| {
@@ -3574,7 +3652,7 @@ async fn lock_and_persist_artifact_grants(
                     FOR KEY SHARE OF artifact, blob
                     "#,
                 )
-                .bind(command.request.tenant_id.to_string())
+                .bind(tenant_id.to_string())
                 .bind(artifact.artifact_id().to_string())
                 .fetch_optional(&mut **transaction)
                 .await?
@@ -3615,7 +3693,7 @@ async fn lock_and_persist_artifact_grants(
                     FOR KEY SHARE
                     "#,
                 )
-                .bind(command.request.tenant_id.to_string())
+                .bind(tenant_id.to_string())
                 .bind(artifact_id.to_string())
                 .fetch_optional(&mut **transaction)
                 .await?
@@ -3631,7 +3709,7 @@ async fn lock_and_persist_artifact_grants(
                                 "Sandbox grant size exceeds bigint".to_owned(),
                             )
                         })?
-                    || classification.rank() < command.request.classification.rank()
+                    || classification.rank() < request_classification.rank()
                 {
                     return Err(RepositoryError::Conflict("Sandbox staging Artifact grant"));
                 }
@@ -3653,9 +3731,9 @@ async fn lock_and_persist_artifact_grants(
                       1, $7, $8, $9, $10, $11, $11)
             "#,
         )
-        .bind(command.request.tenant_id.to_string())
+        .bind(tenant_id.to_string())
         .bind(grant.grant_id.to_string())
-        .bind(command.request.sandbox_job_id.to_string())
+        .bind(sandbox_job_id.to_string())
         .bind(source_artifact_id)
         .bind(target_artifact_id)
         .bind(grant.grant_digest.to_string())
@@ -3674,7 +3752,32 @@ async fn lock_secret_grants(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AcceptSandboxExecution,
 ) -> Result<(), RepositoryError> {
-    for grant in &command.request.secret_grants {
+    lock_sandbox_secret_grants(
+        transaction,
+        &command.request.tenant_id,
+        &command.request.secret_grants,
+    )
+    .await
+}
+
+pub(crate) async fn lock_managed_mcp_session_secret_grants(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ManagedMcpSandboxSessionRequest,
+) -> Result<(), RepositoryError> {
+    lock_sandbox_secret_grants(
+        transaction,
+        &request.identity.tenant_id,
+        &request.secret_grants,
+    )
+    .await
+}
+
+async fn lock_sandbox_secret_grants(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    grants: &[ScopedSecretGrant],
+) -> Result<(), RepositoryError> {
+    for grant in grants {
         let row = sqlx::query(
             r#"
             SELECT purpose, state, generation
@@ -3683,7 +3786,7 @@ async fn lock_secret_grants(
             FOR KEY SHARE
             "#,
         )
-        .bind(command.request.tenant_id.to_string())
+        .bind(tenant_id.to_string())
         .bind(grant.secret_binding.secret_binding_id.to_string())
         .fetch_optional(&mut **transaction)
         .await?
@@ -3708,6 +3811,56 @@ async fn reserve_sandbox_quota(
     command: &AcceptSandboxExecution,
     database_now: DateTime<Utc>,
 ) -> Result<(), RepositoryError> {
+    reserve_sandbox_quota_bundle(
+        transaction,
+        &command.request.tenant_id,
+        &command.usage_reservation_id,
+        &command.quota_entry_ids,
+        &command.request.request_digest,
+        &command.request.resources,
+        database_now,
+    )
+    .await
+}
+
+pub(crate) async fn reserve_managed_mcp_session_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ManagedMcpSandboxSessionRequest,
+    usage_reservation_id: &ResourceId,
+    quota_entry_ids: &[ResourceId],
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    reserve_sandbox_quota_bundle(
+        transaction,
+        &request.identity.tenant_id,
+        usage_reservation_id,
+        quota_entry_ids,
+        &request.request_digest,
+        &request.resources,
+        database_now,
+    )
+    .await
+}
+
+async fn reserve_sandbox_quota_bundle(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    usage_reservation_id: &ResourceId,
+    quota_entry_ids: &[ResourceId],
+    request_digest: &Sha256Digest,
+    resources: &SandboxResourceEnvelope,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    if quota_entry_ids.len() != SANDBOX_QUOTA_LINES
+        || quota_entry_ids
+            .iter()
+            .any(|entry_id| entry_id.kind() != ResourceKind::QuotaLedgerEntry)
+        || quota_entry_ids.iter().collect::<BTreeSet<_>>().len() != quota_entry_ids.len()
+    {
+        return Err(RepositoryError::InvalidInput(
+            "Sandbox quota ledger identity bundle is invalid".to_owned(),
+        ));
+    }
     let expected_metrics = vec![
         QuotaDimension::SandboxConcurrentExecutions
             .as_str()
@@ -3727,36 +3880,22 @@ async fn reserve_sandbox_quota(
         FOR UPDATE
         "#,
     )
-    .bind(command.request.tenant_id.to_string())
+    .bind(tenant_id.to_string())
     .bind(&expected_metrics)
     .fetch_all(&mut **transaction)
     .await?;
     if rows.len() != SANDBOX_QUOTA_LINES {
         return Err(RepositoryError::QuotaExceeded);
     }
-    let payload = SandboxJobPayload {
-        schema_version: 1,
-        request: Box::new(command.request.clone()),
-        submission_digest: command.request.request_digest.clone(),
-        physical_state: SandboxJobState::Accepted,
-        phase_sequence: 0,
-        executor_identity_digest: None,
-        attestor_route: None,
-        phase_evidence_digest: None,
-        outcome: None,
-        cleanup: None,
-        payload_digest: command.request.request_digest.clone(),
-    }
-    .seal()?;
     let mut metrics = BTreeSet::new();
-    for (row, entry_id) in rows.iter().zip(&command.quota_entry_ids) {
+    for (row, entry_id) in rows.iter().zip(quota_entry_ids) {
         let metric: String = row.try_get("metric")?;
         if !metrics.insert(metric.clone()) {
             return Err(RepositoryError::CorruptRow(
                 "duplicate Sandbox quota metric".to_owned(),
             ));
         }
-        let amount = sandbox_reservation_amount(&metric, &payload)?;
+        let amount = sandbox_reservation_amount(&metric, resources)?;
         let version: i64 = row.try_get("version")?;
         let next_version: i64 = sqlx::query_scalar(
             r#"
@@ -3785,13 +3924,13 @@ async fn reserve_sandbox_quota(
             ) VALUES ($1, $2, $3, $4, 'reserve', $5, 0, $6, $7, $8)
             "#,
         )
-        .bind(command.request.tenant_id.to_string())
+        .bind(tenant_id.to_string())
         .bind(entry_id.to_string())
         .bind(row.try_get::<String, _>("quota_account_id")?)
-        .bind(command.usage_reservation_id.to_string())
+        .bind(usage_reservation_id.to_string())
         .bind(amount)
         .bind(next_version)
-        .bind(command.request.request_digest.to_string())
+        .bind(request_digest.to_string())
         .bind(database_now)
         .execute(&mut **transaction)
         .await?;
@@ -3814,7 +3953,7 @@ async fn load_sandbox_job(
         load_job_for_update_by_text(transaction, &tenant_id.to_string(), &job_id.to_string())
             .await?;
     let job = job_projection(&record)?;
-    let payload: SandboxJobPayload = decode_versioned_payload(&record.payload, "Sandbox Job")?;
+    let payload = decode_sandbox_capability_payload(&record.payload)?;
     payload
         .validate_for(&job, limits)
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
@@ -3823,6 +3962,14 @@ async fn load_sandbox_job(
         job,
         payload,
     })
+}
+
+fn decode_sandbox_capability_payload(
+    payload: &TypedPayload,
+) -> Result<SandboxExecutionJobPayload, RepositoryError> {
+    decode_versioned_payload::<SandboxJobPayload>(payload, "Sandbox Job")?
+        .into_capability_execution()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
 }
 
 async fn load_sandbox_decision(
@@ -4500,7 +4647,8 @@ async fn lock_sandbox_quota_bundle(
             || scope_id != current.record.tenant_id
             || work_class != "sandbox"
             || !metrics.insert(metric.clone())
-            || reserved_amount != sandbox_reservation_amount(&metric, &current.payload)?
+            || reserved_amount
+                != sandbox_reservation_amount(&metric, &current.payload.request.resources)?
             || row.try_get::<i64, _>("reservation_used_amount")? != 0
             || account_reserved < reserved_amount
         {
@@ -4659,9 +4807,8 @@ async fn release_and_confirm_sandbox_artifact_grants(
 
 fn sandbox_reservation_amount(
     metric: &str,
-    payload: &SandboxJobPayload,
+    resources: &SandboxResourceEnvelope,
 ) -> Result<i64, RepositoryError> {
-    let resources = &payload.request.resources;
     let amount = if metric == QuotaDimension::SandboxConcurrentExecutions.as_str() {
         1
     } else if metric == QuotaDimension::SandboxCpuSeconds.as_str() {
