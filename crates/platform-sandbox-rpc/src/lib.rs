@@ -1229,6 +1229,19 @@ impl ManagedMcpSandboxSessionExecutionAuthority for SandboxManagedMcpSessionAuth
         })
         .await
     }
+
+    async fn heartbeat_managed_mcp_sandbox_session(
+        &self,
+        command: HeartbeatSandboxExecution,
+    ) -> Result<ManagedMcpSandboxSessionPhaseDecision, Self::Error> {
+        command
+            .validate(self.limits.maximum_lease_milliseconds)
+            .map_err(|_| SandboxRpcError::InvalidEnvelope)?;
+        self.unary(&command, |client, request| {
+            Box::pin(client.heartbeat_managed_mcp_sandbox_session(request))
+        })
+        .await
+    }
 }
 
 #[async_trait]
@@ -2462,6 +2475,22 @@ where
             .map_err(authority_status)?;
         Ok(Response::new(encode(&result, self.limits)?))
     }
+
+    async fn heartbeat_managed_mcp_sandbox_session(
+        &self,
+        request: Request<ClosedSandboxEnvelope>,
+    ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+        let command: HeartbeatSandboxExecution = decode(request.into_inner(), self.limits)?;
+        command
+            .validate(self.limits.maximum_lease_milliseconds)
+            .map_err(|_| Status::invalid_argument("invalid Managed MCP Sandbox heartbeat"))?;
+        let result = self
+            .authority
+            .heartbeat_managed_mcp_sandbox_session(command)
+            .await
+            .map_err(authority_status)?;
+        Ok(Response::new(encode(&result, self.limits)?))
+    }
 }
 
 #[tonic::async_trait]
@@ -2930,6 +2959,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingAuthority {
         claims: AtomicUsize,
+        managed_heartbeats: AtomicUsize,
     }
 
     #[async_trait]
@@ -2995,6 +3025,14 @@ mod tests {
             &self,
             _command: CommitManagedMcpSandboxSessionReady,
         ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
+            Err(SandboxRpcError::Rejected)
+        }
+
+        async fn heartbeat_managed_mcp_sandbox_session(
+            &self,
+            _command: HeartbeatSandboxExecution,
+        ) -> Result<ManagedMcpSandboxSessionPhaseDecision, Self::Error> {
+            self.managed_heartbeats.fetch_add(1, Ordering::AcqRel);
             Err(SandboxRpcError::Rejected)
         }
     }
@@ -3630,6 +3668,32 @@ mod tests {
             .is_empty());
         assert_eq!(authority.claims.load(Ordering::Acquire), 1);
 
+        let heartbeat = HeartbeatSandboxExecution {
+            tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
+                .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(
+                ResourceKind::SandboxJob,
+                uuid::Uuid::now_v7(),
+            )
+            .unwrap(),
+            job_id: ResourceId::from_uuid_v7(ResourceKind::Job, uuid::Uuid::now_v7()).unwrap(),
+            fence: JobFence {
+                expected_version: 1,
+                worker_process_generation_id: command.worker_process_generation_id.clone(),
+                lease_generation: 1,
+                token_digest: command.lease_token_digests[0].clone(),
+            },
+            lease_milliseconds: 30_000,
+        };
+        assert_eq!(
+            client
+                .heartbeat_managed_mcp_sandbox_session(heartbeat.clone())
+                .await
+                .unwrap_err(),
+            SandboxRpcError::Rejected
+        );
+        assert_eq!(authority.managed_heartbeats.load(Ordering::Acquire), 1);
+
         let channel = mtls_channel(
             &endpoint,
             &fixture,
@@ -3644,6 +3708,14 @@ mod tests {
             .unwrap_err();
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
         assert_eq!(authority.claims.load(Ordering::Acquire), 1);
+        let rejected = unauthorized
+            .heartbeat_managed_mcp_sandbox_session(Request::new(
+                encode(&heartbeat, limits).unwrap(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
+        assert_eq!(authority.managed_heartbeats.load(Ordering::Acquire), 1);
 
         shutdown_sender.send(()).unwrap();
         server.await.unwrap();

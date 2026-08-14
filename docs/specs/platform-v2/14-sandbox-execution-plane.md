@@ -804,8 +804,10 @@ Executor library的专用claim driver与普通Sandbox共享同一`LocalWorkerPoo
 各自typed PostgreSQL authority。Managed session只可在`Starting`用exact active package grant读取runtime bundle；grant revoker按closed
 workload区分有限Capability与长生命周期session，并对Managed Job/request/attempt/lease/Executor及Ready sandbox identity执行幂等回收。
 全新PostgreSQL 16 Managed fixture及既有Sandbox回归fixture均实际通过，不增加表或migration。mTLS authority、Executor pool和Sandbox
-domain定向测试分别9、3、33项通过。该切片尚未把establishment Worker、真实Managed
-microVM session Provider和terminal supervisor组合进Executor进程，也没有heartbeat、terminal/session-loss recovery或真实进程资格，
+domain定向测试分别9、3、33项通过。真实Managed microVM session Provider、guest Artifact/Secret注入和同实例activation现已进入独立
+Provider进程；Managed authority新增非事件化exact-fence heartbeat，domain/RPC测试通过，fresh PostgreSQL fixture已编译但因本机Docker
+daemon无响应未取得实际运行证据。该切片尚未把establishment/heartbeat loop和terminal supervisor组合进Executor进程，也没有
+terminal/session-loss recovery或真实进程资格，
 因此不关闭Phase 4。
 
 Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身

@@ -18,6 +18,7 @@ service SandboxManagedMcpSessionAuthorityService {
   rpc ClaimManagedMcpSandboxSessions(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
   rpc CommitManagedMcpSandboxSessionPhase(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
   rpc CommitManagedMcpSandboxSessionReady(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
+  rpc HeartbeatManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
 service SandboxExecutorBrokerService {

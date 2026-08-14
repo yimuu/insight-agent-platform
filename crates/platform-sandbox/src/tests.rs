@@ -997,7 +997,7 @@ fn managed_subscription_commits_physical_phases_and_both_jobs_before_ready() {
     .unwrap();
     let mut ready = CommitManagedMcpSandboxSessionReady {
         audit: audit(88),
-        identity: admission.request.identity,
+        identity: admission.request.identity.clone(),
         fence: JobFence {
             expected_version: starting.physical_job.version,
             worker_process_generation_id: worker,
@@ -1034,6 +1034,58 @@ fn managed_subscription_commits_physical_phases_and_both_jobs_before_ready() {
         .physical_payload
         .validate_for(&ready.physical_job, limits())
         .unwrap();
+
+    let mut logical_ready = logical;
+    logical_ready.version += 1;
+    logical_ready.payload = ready.logical_payload.clone();
+    logical_ready.state = ready.logical_state;
+    let heartbeat_at = ready_at + ChronoDuration::seconds(2);
+    let heartbeat = HeartbeatSandboxExecution {
+        tenant_id: logical_ready.tenant_id.clone(),
+        sandbox_job_id: admission.request.identity.sandbox_job_id.clone(),
+        job_id: admission.request.identity.physical_job_id.clone(),
+        fence: JobFence {
+            expected_version: ready.physical_job.version,
+            worker_process_generation_id: ready
+                .physical_job
+                .lease
+                .as_ref()
+                .unwrap()
+                .worker_process_generation_id
+                .clone(),
+            lease_generation: ready.physical_job.lease_generation,
+            token_digest: sha('c'),
+        },
+        lease_milliseconds: 60_000,
+    };
+    let renewed = decide_managed_mcp_sandbox_session_heartbeat(
+        &logical_ready,
+        &ready.physical_job,
+        &ready.physical_payload,
+        &heartbeat,
+        heartbeat_at,
+        limits(),
+        60_000,
+    )
+    .unwrap();
+    assert_eq!(renewed.logical_payload, logical_ready.payload);
+    assert_eq!(renewed.logical_state, logical_ready.state);
+    assert_eq!(renewed.physical_payload, ready.physical_payload);
+    assert_eq!(renewed.physical_job.version, ready.physical_job.version + 1);
+    assert_eq!(
+        renewed.physical_job.lease.as_ref().unwrap().heartbeat_at,
+        heartbeat_at
+    );
+    assert!(decide_managed_mcp_sandbox_session_heartbeat(
+        &logical_ready,
+        &renewed.physical_job,
+        &renewed.physical_payload,
+        &heartbeat,
+        heartbeat_at,
+        limits(),
+        60_000,
+    )
+    .is_err());
 }
 
 #[derive(Debug)]
@@ -1124,6 +1176,26 @@ impl ManagedMcpSandboxSessionExecutionAuthority for RecordingManagedSessionAutho
         state.physical_job = decision.physical_job.clone();
         state.physical_payload = decision.physical_payload.clone();
         Ok(CommandOutcome::Applied(decision))
+    }
+
+    async fn heartbeat_managed_mcp_sandbox_session(
+        &self,
+        command: HeartbeatSandboxExecution,
+    ) -> Result<ManagedMcpSandboxSessionPhaseDecision, Self::Error> {
+        let now = Utc::now();
+        let mut state = self.state.lock().unwrap();
+        let decision = decide_managed_mcp_sandbox_session_heartbeat(
+            &state.logical,
+            &state.physical_job,
+            &state.physical_payload,
+            &command,
+            now,
+            limits(),
+            60_000,
+        )
+        .map_err(|_| ManagedSessionFixtureError)?;
+        state.physical_job = decision.physical_job.clone();
+        Ok(decision)
     }
 }
 

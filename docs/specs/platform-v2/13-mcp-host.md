@@ -759,8 +759,11 @@ Security Authority、KMS和Secret Provider解析明文；解析后Controller再�
 已经提交的重放不得再次返回明文。Controller永不接触明文，Egress没有数据库credential，Provider没有数据库、KMS或Secret Manager权限。
 `maximum_reads`由现有Receipt计数执行，不增加表或migration，也不修改Job version；`Starting` phase evidence改为提交包含Provider generation
 和sandbox identity的完整prepared canonical digest，防止交付时用较弱prepare evidence替换实际运行实例。
-该切片仍未把establishment Worker、真实microVM Managed session Provider和terminal supervisor组合进Executor进程；heartbeat、
-terminal/session-loss recovery以及真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未交付，因此该证据不关闭MCP或Phase 4，也不把本规范标记为
+真实microVM Managed session Provider、guest Artifact/一次性Secret注入和同实例activation现已进入独立Provider进程；Managed authority又新增
+非事件化、exact Job/version/lease/Worker/token fenced heartbeat，PostgreSQL只推进物理Job version与lease，不能延长request deadline或
+session expiry，也不创建Receipt/Event/Outbox。domain与gRPC测试已执行，fresh PostgreSQL fixture已编译；本机Docker daemon无响应，故本次不把
+该fixture声明为实际运行证据。establishment/heartbeat loop与terminal supervisor仍未组合进Executor进程，terminal/session-loss recovery以及
+真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未交付，因此该证据不关闭MCP或Phase 4，也不把本规范标记为
 Implemented/Verified。此前workspace
 all-target/all-feature check、test、doc-test与strict Clippy及public API/contract/schema/cutover门禁证据不自动覆盖本次变更；本次完整门禁
 结果以实施计划的最新记录为准。

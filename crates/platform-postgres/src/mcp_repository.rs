@@ -65,10 +65,11 @@ use insight_platform_mcp_host::{
     TransitionMcpAuthorizationBinding, WakeMcpSubscriptionReconcile, MCP_OAUTH_PKCE_SECRET_PURPOSE,
 };
 use insight_platform_sandbox::{
-    decide_accept_managed_mcp_sandbox_session, decide_managed_mcp_sandbox_session_phase,
-    decide_managed_mcp_sandbox_session_ready, AcceptManagedMcpSandboxSession,
-    AcceptedManagedMcpSandboxSession, ClaimSandboxJobs, ClaimedManagedMcpSandboxSession,
-    CommitManagedMcpSandboxSessionPhase, CommitManagedMcpSandboxSessionReady,
+    decide_accept_managed_mcp_sandbox_session, decide_managed_mcp_sandbox_session_heartbeat,
+    decide_managed_mcp_sandbox_session_phase, decide_managed_mcp_sandbox_session_ready,
+    AcceptManagedMcpSandboxSession, AcceptedManagedMcpSandboxSession, ClaimSandboxJobs,
+    ClaimedManagedMcpSandboxSession, CommitManagedMcpSandboxSessionPhase,
+    CommitManagedMcpSandboxSessionReady, HeartbeatSandboxExecution,
     ManagedMcpSandboxSessionClaimAuthority, ManagedMcpSandboxSessionExecutionAuthority,
     ManagedMcpSandboxSessionGatewayAuthority, ManagedMcpSandboxSessionJobPayload,
     ManagedMcpSandboxSessionPhaseDecision, SandboxClaimFailure, SandboxCommandLimits,
@@ -2013,6 +2014,13 @@ impl ManagedMcpSandboxSessionExecutionAuthority for PgRepository {
         command: CommitManagedMcpSandboxSessionReady,
     ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
         PgRepository::commit_managed_mcp_sandbox_session_ready(self, command).await
+    }
+
+    async fn heartbeat_managed_mcp_sandbox_session(
+        &self,
+        command: HeartbeatSandboxExecution,
+    ) -> Result<ManagedMcpSandboxSessionPhaseDecision, Self::Error> {
+        PgRepository::heartbeat_managed_mcp_sandbox_session(self, command).await
     }
 }
 
@@ -5003,6 +5011,72 @@ impl PgRepository {
         .await?;
         transaction.commit().await?;
         Ok(CommandOutcome::Applied(decision))
+    }
+
+    /// Renews the exact physical Managed-session Job without creating an audit event. The logical
+    /// subscription is locked first so a concurrent terminal/session-loss transition remains the
+    /// single first winner across both lifecycles.
+    pub async fn heartbeat_managed_mcp_sandbox_session(
+        &self,
+        command: HeartbeatSandboxExecution,
+    ) -> Result<ManagedMcpSandboxSessionPhaseDecision, RepositoryError> {
+        let maximum_lease_milliseconds =
+            u64::try_from(MAX_JOB_LEASE_MILLISECONDS).expect("positive Sandbox lease hard maximum");
+        command.validate(maximum_lease_milliseconds)?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        let subscription_id = sqlx::query_scalar::<_, Option<String>>(
+            r#"
+            SELECT invocation_id
+            FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND job_id = $2
+              AND work_class = 'sandbox' AND owner_kind = 'sandbox_job'
+            "#,
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.job_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .flatten()
+        .ok_or(RepositoryError::NotFound(
+            "Managed MCP physical Sandbox Job subscription",
+        ))?
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let current = load_mcp_subscription(
+            &mut transaction,
+            &command.tenant_id,
+            &subscription_id,
+            true,
+            database_now,
+        )
+        .await?;
+        let (physical_job, physical_payload, _) = load_managed_mcp_sandbox_session_job(
+            &mut transaction,
+            &command.tenant_id,
+            &command.job_id,
+            self.sandbox_limits(),
+            true,
+        )
+        .await?;
+        let decision = decide_managed_mcp_sandbox_session_heartbeat(
+            &current,
+            &physical_job,
+            &physical_payload,
+            &command,
+            database_now,
+            self.sandbox_limits(),
+            maximum_lease_milliseconds,
+        )?;
+        update_managed_mcp_sandbox_session_job(
+            &mut transaction,
+            &physical_job,
+            &decision,
+            database_now,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(decision)
     }
 
     pub async fn report_mcp_subscription_transport_termination(

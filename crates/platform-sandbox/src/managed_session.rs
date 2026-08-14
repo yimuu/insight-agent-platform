@@ -1,9 +1,10 @@
 use crate::{
-    digest_without_field, required_isolation, ClaimSandboxJobs, NodeAttestorRoute,
-    SandboxClaimFailure, SandboxCommandLimits, SandboxContractError, SandboxExecutionPolicyClosure,
-    SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit, SandboxWorkerCommitIdentity,
-    ScopedArtifactGrant, ScopedSecretGrant, MAX_SANDBOX_ARTIFACT_GRANTS, MAX_SANDBOX_SECRET_GRANTS,
-    SANDBOX_PROTOCOL_VERSION, SANDBOX_QUOTA_LINES,
+    digest_without_field, required_isolation, ClaimSandboxJobs, HeartbeatSandboxExecution,
+    NodeAttestorRoute, SandboxClaimFailure, SandboxCommandLimits, SandboxContractError,
+    SandboxExecutionPolicyClosure, SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit,
+    SandboxWorkerCommitIdentity, ScopedArtifactGrant, ScopedSecretGrant,
+    MAX_SANDBOX_ARTIFACT_GRANTS, MAX_SANDBOX_SECRET_GRANTS, SANDBOX_PROTOCOL_VERSION,
+    SANDBOX_QUOTA_LINES,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -13,7 +14,8 @@ use insight_platform_contracts::{
     SandboxRuntimeFamily, Sha256Digest, WorkClass,
 };
 use insight_platform_jobs::{
-    decide_observation_update, decide_start, JobFence, JobOwnerRef, JobProjection,
+    decide_heartbeat, decide_observation_update, decide_start, JobFence, JobOwnerRef,
+    JobProjection, LeasePolicy,
 };
 use insight_platform_mcp_host::{
     EncryptedMcpState, ManagedMcpSandboxSessionIdentity, McpHostExecutionContract,
@@ -733,6 +735,13 @@ pub trait ManagedMcpSandboxSessionExecutionAuthority: Send + Sync {
         &self,
         command: CommitManagedMcpSandboxSessionReady,
     ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error>;
+
+    /// Renews only the shared physical Job lease. It creates no Receipt/Event/Outbox and cannot
+    /// extend either the immutable Sandbox deadline or the Managed session expiry.
+    async fn heartbeat_managed_mcp_sandbox_session(
+        &self,
+        command: HeartbeatSandboxExecution,
+    ) -> Result<ManagedMcpSandboxSessionPhaseDecision, Self::Error>;
 }
 
 /// Exact mutation identities consumed while establishing one Managed MCP session. Long-lived
@@ -1934,6 +1943,57 @@ pub fn decide_managed_mcp_sandbox_session_ready(
         logical_state,
         physical_job,
         physical_payload,
+    })
+}
+
+pub fn decide_managed_mcp_sandbox_session_heartbeat(
+    current: &McpSubscriptionRecord,
+    current_job: &JobProjection,
+    current_payload: &ManagedMcpSandboxSessionJobPayload,
+    command: &HeartbeatSandboxExecution,
+    database_now: DateTime<Utc>,
+    limits: SandboxCommandLimits,
+    maximum_lease_milliseconds: u64,
+) -> Result<ManagedMcpSandboxSessionPhaseDecision, SandboxContractError> {
+    command
+        .validate(maximum_lease_milliseconds)
+        .map_err(|_| SandboxContractError::InvalidWorkerCommand)?;
+    validate_current_managed_session(
+        current,
+        current_job,
+        current_payload,
+        &current_payload.request.identity,
+        limits,
+    )?;
+    if command.tenant_id != current_payload.request.identity.tenant_id
+        || command.sandbox_job_id != current_payload.request.identity.sandbox_job_id
+        || command.job_id != current_payload.request.identity.physical_job_id
+        || !matches!(
+            current_payload.physical_state,
+            SandboxJobState::Accepted
+                | SandboxJobState::Preparing
+                | SandboxJobState::Starting
+                | SandboxJobState::Running
+        )
+    {
+        return Err(SandboxContractError::InvalidWorkerCommand);
+    }
+    let physical_job = decide_heartbeat(
+        current_job,
+        &command.fence,
+        database_now,
+        LeasePolicy {
+            requested_milliseconds: command.lease_milliseconds,
+            hard_maximum_milliseconds: maximum_lease_milliseconds,
+        },
+    )
+    .map_err(|_| SandboxContractError::StaleFence)?;
+    current_payload.validate_for(&physical_job, limits)?;
+    Ok(ManagedMcpSandboxSessionPhaseDecision {
+        logical_payload: current.payload.clone(),
+        logical_state: current.state,
+        physical_job,
+        physical_payload: current_payload.clone(),
     })
 }
 

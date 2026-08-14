@@ -92,8 +92,8 @@ ALLOWED_INTERNAL = {
     "sandbox_attestor": {"contracts", "sandbox_domain", "sandbox_rpc"},
     "sandbox_controller": {"artifact_broker", "contracts", "platform_postgres", "sandbox_domain", "sandbox_rpc"},
     "sandbox_executor": {"contracts", "sandbox_domain", "sandbox_rpc", "sandbox_wasi_executor", "platform_worker"},
-    "sandbox_rpc": {"contracts", "sandbox_domain"},
-    "sandbox_microvm_provider": {"capability_adapters", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "sandbox_domain", "sandbox_rpc"},
+    "sandbox_rpc": {"contracts", "jobs_domain", "sandbox_domain"},
+    "sandbox_microvm_provider": {"capability_adapters", "contracts", "egress_core", "egress_rpc", "invocations_domain", "jobs_domain", "mcp_host", "sandbox_domain", "sandbox_rpc"},
     "sandbox_wasi_executor": {"contracts", "sandbox_domain"},
     "platform_worker": {"contracts"},
 }

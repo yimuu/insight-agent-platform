@@ -49,15 +49,15 @@ use insight_platform_postgres::{
 };
 use insight_platform_sandbox::{
     AcceptManagedMcpSandboxSession, ClaimSandboxJobs, CommitManagedMcpSandboxSessionPhase,
-    CommitManagedMcpSandboxSessionReady, ManagedMcpSandboxSecretCommitOutcome,
-    ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryRequest,
-    ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSessionCallback,
-    ManagedMcpSandboxSessionReadyEvidence, ManagedMcpSandboxSessionRequest,
-    MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest, MicroVmGrantRevoker,
-    MicroVmSandboxWorkloadKind, NodeAttestorRoute, PreparedManagedMcpSandboxSession,
-    RevokeMicroVmSandboxGrants, SandboxExecutionPolicyClosure, SandboxNetworkMode,
-    SandboxResourceEnvelope, SandboxWorkerAudit, ScopedArtifactGrant, ScopedSecretGrant,
-    SANDBOX_PROTOCOL_VERSION,
+    CommitManagedMcpSandboxSessionReady, HeartbeatSandboxExecution,
+    ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryAuthority,
+    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
+    ManagedMcpSandboxSessionCallback, ManagedMcpSandboxSessionReadyEvidence,
+    ManagedMcpSandboxSessionRequest, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
+    MicroVmGrantRevoker, MicroVmSandboxWorkloadKind, NodeAttestorRoute,
+    PreparedManagedMcpSandboxSession, RevokeMicroVmSandboxGrants, SandboxExecutionPolicyClosure,
+    SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit, ScopedArtifactGrant,
+    ScopedSecretGrant, SANDBOX_PROTOCOL_VERSION,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use std::collections::BTreeMap;
@@ -3148,6 +3148,41 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         ready_decision.physical_payload.physical_state,
         SandboxJobState::Running
     );
+    let heartbeat = HeartbeatSandboxExecution {
+        tenant_id: winner.request.identity.tenant_id.clone(),
+        sandbox_job_id: winner.request.identity.sandbox_job_id.clone(),
+        job_id: winner.request.identity.physical_job_id.clone(),
+        fence: DomainJobFence {
+            expected_version: ready_decision.physical_job.version,
+            worker_process_generation_id: sandbox_worker.clone(),
+            lease_generation: ready_decision.physical_job.lease_generation,
+            token_digest: ready_decision
+                .physical_job
+                .lease
+                .as_ref()
+                .unwrap()
+                .token_digest
+                .clone(),
+        },
+        lease_milliseconds: 60_000,
+    };
+    let renewed = repository
+        .heartbeat_managed_mcp_sandbox_session(heartbeat.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        renewed.physical_job.version,
+        ready_decision.physical_job.version + 1
+    );
+    assert_eq!(renewed.physical_payload, ready_decision.physical_payload);
+    assert_eq!(renewed.logical_payload, ready_decision.logical_payload);
+    assert_eq!(renewed.logical_state, ready_decision.logical_state);
+    assert!(matches!(
+        repository
+            .heartbeat_managed_mcp_sandbox_session(heartbeat)
+            .await,
+        Err(RepositoryError::StaleFence)
+    ));
     let revoke = RevokeMicroVmSandboxGrants {
         workload_kind: MicroVmSandboxWorkloadKind::ManagedMcpSubscriptionSession,
         tenant_id: winner.request.identity.tenant_id.clone(),
@@ -3156,8 +3191,8 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         executor_worker_process_generation_id: sandbox_worker.clone(),
         provider_process_generation_id,
         sandbox_identity_digest,
-        attempt_no: ready_decision.physical_job.attempt_count,
-        lease_generation: ready_decision.physical_job.lease_generation,
+        attempt_no: renewed.physical_job.attempt_count,
+        lease_generation: renewed.physical_job.lease_generation,
     };
     let revoked = repository.revoke_exact(revoke.clone()).await.unwrap();
     assert_eq!(
