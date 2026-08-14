@@ -1097,6 +1097,69 @@ pub struct ExpiredManagedMcpSandboxSessionLeasePage {
     pub exhausted: bool,
 }
 
+impl ExpiredManagedMcpSandboxSessionLeasePage {
+    /// Validates the closed keyset-page response against the exact scan command. A transport or
+    /// authority cannot enlarge the requested batch, change the installed backend binding, route
+    /// started work to another node, or return an ambiguous cursor/exhaustion combination.
+    pub fn validate_for(
+        &self,
+        command: &ScanExpiredManagedMcpSandboxSessionLeases,
+        limits: SandboxCommandLimits,
+    ) -> Result<(), SandboxContractError> {
+        if self.records.len() > usize::from(command.limit)
+            || self.exhausted != (self.records.len() < usize::from(command.limit))
+            || self.exhausted != self.next_cursor.is_none()
+        {
+            return Err(SandboxContractError::InvalidOutcome);
+        }
+        let mut previous = command.after.as_ref().map(|cursor| {
+            (
+                cursor.lease_expires_at,
+                &cursor.tenant_id,
+                &cursor.physical_job_id,
+            )
+        });
+        let mut database_observed_at = None;
+        for expired in &self.records {
+            expired.validate(limits)?;
+            let key = (
+                expired.lease_expires_at,
+                &expired.request.identity.tenant_id,
+                &expired.request.identity.physical_job_id,
+            );
+            if previous.as_ref().is_some_and(|previous| key <= *previous)
+                || expired.request.executor_worker_manifest_digest
+                    != command.executor.worker_manifest_digest
+                || expired.request.isolation_backend_contract_digest
+                    != command.executor.isolation_backend_contract_digest
+                || (expired.physical_state != SandboxJobState::Accepted
+                    && expired.attestor_route.as_ref() != Some(&command.executor.attestor_route))
+                || (expired.request.identity.physical_job_id.uuid().as_u128()
+                    & u128::from(u32::MAX))
+                    % u128::from(command.shard.count)
+                    != u128::from(command.shard.index)
+                || database_observed_at
+                    .is_some_and(|observed_at| observed_at != expired.database_observed_at)
+            {
+                return Err(SandboxContractError::InvalidOutcome);
+            }
+            database_observed_at = Some(expired.database_observed_at);
+            previous = Some(key);
+        }
+        match (&self.next_cursor, self.records.last()) {
+            (Some(cursor), Some(last))
+                if cursor.lease_expires_at == last.lease_expires_at
+                    && cursor.tenant_id == last.request.identity.tenant_id
+                    && cursor.physical_job_id == last.request.identity.physical_job_id =>
+            {
+                cursor.validate()
+            }
+            (None, _) if self.exhausted => Ok(()),
+            _ => Err(SandboxContractError::InvalidOutcome),
+        }
+    }
+}
+
 /// Closed physical absence proof used by the expired-lease commit. `process_absent` requires a
 /// second, same-node Provider observation after the old process is gone. A sealed node quarantine
 /// is independently sufficient and therefore cannot be combined with a caller-fabricated

@@ -809,9 +809,8 @@ domain定向测试分别9、3、33项通过。真实Managed microVM session Prov
 Provider进程；Managed authority新增非事件化exact-fence heartbeat，domain/RPC测试通过，fresh PostgreSQL fixture已编译但因本机Docker
 daemon无响应未取得实际运行证据。Sandbox domain establishment Worker现会在Provider prepare/initialize/activate等待期间按profile
 续租，并把最新version fence串行传给下一phase；heartbeat失败后先等待Provider调用收敛，再对任何已创建实例执行exact destroy，避免
-取消中的RPC留下孤儿microVM。长期liveness heartbeat、terminal supervisor仍未组合进Executor进程，也没有terminal/session-loss recovery
-或真实进程资格，
-因此不关闭Phase 4。
+取消中的RPC留下孤儿microVM。长期liveness heartbeat、terminal supervisor及expired-lease recovery现均已组合进microVM Executor；真实
+Linux KVM互操作、process-kill、escape与饱和资格仍未完成，因此不关闭Phase 4。
 
 共享Sandbox Job表上的有限Capability expired-lease scan现强制按closed `workload_kind=capability_execution`过滤，不会把Managed session
 payload误送入有限执行解码器；Managed session仍须由其专用terminal/absence recovery扫描处理。
@@ -824,7 +823,7 @@ observation绑定逻辑/物理identity、两端process generation、lease与sand
 transport failure绝不等于`Exited`。cleanup closed outcome区分`Absent`与含完整`SandboxCleanupEvidence`的`Destroyed`，tombstone replay返回
 同一证据。microVM Executor现把Managed专用driver与有限执行driver、NATS control listener置于同一supervisor；两条lane共享
 `LocalWorkerPools`，Managed permit保留到cleanup与terminal commit得到durable disposition。长期循环按profile续租，guest退出、deadline、
-process drain或观察/heartbeat失败均先exact destroy，只有`Destroyed(evidence)`才可构造并提交lost。expired lease absence worker仍Open。
+process drain或观察/heartbeat失败均先exact destroy，只有`Destroyed(evidence)`才可构造并提交lost。
 
 作为absence worker的前置合同，`Starting`提交现把完整credential-free prepared binding与其canonical digest一并持久化；Job校验逐字段回绑
 request、旧Executor/Provider generation、lease和sandbox identity，replay也必须返回同一binding。此前仅保存不可展开摘要的状态不足以让
@@ -835,8 +834,14 @@ started候选返回给持有相同node-local attestor route的新Executor；curs
 commit以旧lease generation的stable key创建共享`JobCommit` Receipt并执行exact version/generation CAS：未启动Job可requeue或在deadline后
 TimedOut，started Job必须同时验证旧Executor process absence与随后发生的Provider `Absent | Destroyed`，一旦已有durable prepared binding则
 只接受逐字段相等的`Destroyed`。terminal事务与logical subscription/Job、quota、Artifact grant、Event及Outbox原子提交，不增表或migration。
-当前domain 40项测试通过，真实PostgreSQL fixture已编译但本机Docker daemon无响应；internal authority RPC和critical-control recovery driver
-仍Open。
+三条internal authority RPC分别承载bounded scan、旧process absence证明和recovery commit；closed envelope、exact microVM Executor URI SAN、
+当前recovery Executor registration及node-local attestor route在Controller逐层重验。Executor的专用driver只占
+`LocalWorkerPools` reserved critical-control permit，业务permit耗尽仍可推进；它重验完整page/cursor/backend/route，`Accepted`严格使用
+database observation决定requeue或timeout，started候选严格执行absence/quarantine → same-node Provider observation → CAS，证明不可用时不写
+durable状态。该driver已进入microVM Executor supervisor，与有限/Managed claim及NATS control共享shutdown fence。当前Sandbox 40项、Executor
+6项及authority RPC 10项定向测试通过，strict Clippy通过；microVM backend独立冻结recovery shard/scan/jitter/backoff，Helm正向及错误
+shard负向门禁通过，不复用业务claim轮询频率。真实PostgreSQL fixture已编译但本机Docker daemon无响应，本切片不登记fresh
+数据库证据，也不替代Linux Candidate recovery资格。
 
 Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身
 workload identity调用Sandbox Controller执行reserve与commit，并在两者之间通过既有Security Authority、KMS和Secret Provider解析材料。
@@ -845,7 +850,7 @@ sandbox identity、完整prepared canonical digest和active ScopedSecretGrant。
 任何重放、响应丢失、过期、generation/fence漂移或已达`maximum_reads`都fail closed。read次数使用共享`receipts` authority计数，commit写入
 同一Receipt及Event/Outbox，且不推进Job version，避免使正在执行的Worker fence失效。该设计保持Controller不见明文、Egress无数据库
 credential、Provider无数据库/KMS/Secret Manager权限，并继续保持23表与单一`0001` migration。guest内注入与真实Managed session
-Provider的生产组合仍未交付，因此本切片不关闭Phase 4。
+Provider生产组合已经交付；真实KMS/Secret Manager、Linux KVM与process-kill资格仍未完成，因此本切片不关闭Phase 4。
 
 process-generation isolation authority是独立于PostgreSQL lease、NATS和Controller进程的node/runtime attestor；数据库lease过期、NATS
 断连、Pod deletion request、Controller本地cache miss或对旧generation RPC超时都不是absence proof。其closed请求必须精确绑定

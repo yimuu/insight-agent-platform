@@ -102,7 +102,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   "backend" (dict
     "kind" "micro_vm"
     "provider_socket_path" .Values.microVmExecutor.provider.socketPath
-    "provider_tls_server_name" .Values.microVmExecutor.provider.tlsServerName)
+    "provider_tls_server_name" .Values.microVmExecutor.provider.tlsServerName
+    "managed_recovery" (dict
+      "shard_index" (int .Values.microVmExecutor.managedRecovery.shardIndex)
+      "shard_count" (int .Values.microVmExecutor.managedRecovery.shardCount)
+      "scan_milliseconds" (int .Values.microVmExecutor.managedRecovery.scanMilliseconds)
+      "scan_jitter_milliseconds" (int .Values.microVmExecutor.managedRecovery.scanJitterMilliseconds)
+      "failure_backoff_milliseconds" (int .Values.microVmExecutor.managedRecovery.failureBackoffMilliseconds)))
   "backend_contract_digest" .Values.microVmExecutor.backendContractDigest
   "authority_endpoint" (include "insight-platform-sandbox.controllerEndpoint" .)
   "authority_tls_server_name" (printf "%s.%s.svc" (include "insight-platform-sandbox.controllerName" .) .Values.namespaces.controller)

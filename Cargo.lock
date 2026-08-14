@@ -2719,6 +2719,7 @@ dependencies = [
  "chrono",
  "hyper-util",
  "insight-platform-contracts",
+ "insight-platform-jobs",
  "insight-platform-sandbox",
  "insight-platform-sandbox-rpc",
  "insight-platform-sandbox-wasi",

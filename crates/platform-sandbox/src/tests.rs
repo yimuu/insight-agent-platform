@@ -1857,6 +1857,35 @@ fn managed_expired_accepted_lease_requeues_before_deadline_and_times_out_after_i
         ready_binding: None,
     };
     let recovery_executor = managed_recovery_executor(&admission.request, 331, sha('b'));
+    let scan = ScanExpiredManagedMcpSandboxSessionLeases {
+        executor: recovery_executor.clone(),
+        shard: ManagedMcpSandboxSessionRecoveryShard { index: 0, count: 1 },
+        after: None,
+        limit: 1,
+    };
+    let cursor = ManagedMcpSandboxSessionRecoveryCursor {
+        lease_expires_at: expired.lease_expires_at,
+        tenant_id: expired.request.identity.tenant_id.clone(),
+        physical_job_id: expired.request.identity.physical_job_id.clone(),
+    };
+    let page = ExpiredManagedMcpSandboxSessionLeasePage {
+        records: vec![expired.clone()],
+        next_cursor: Some(cursor),
+        exhausted: false,
+    };
+    page.validate_for(&scan, limits()).unwrap();
+    let actual_shard =
+        (expired.request.identity.physical_job_id.uuid().as_u128() & u128::from(u32::MAX)) % 2;
+    let mut wrong_shard_scan = scan.clone();
+    wrong_shard_scan.shard = ManagedMcpSandboxSessionRecoveryShard {
+        index: u16::try_from(1 - actual_shard).unwrap(),
+        count: 2,
+    };
+    assert!(page.validate_for(&wrong_shard_scan, limits()).is_err());
+    let mut invalid_page = page;
+    invalid_page.next_cursor = None;
+    assert!(invalid_page.validate_for(&scan, limits()).is_err());
+
     let requeue = managed_recovery_command(
         expired.clone(),
         recovery_executor.clone(),

@@ -14,6 +14,12 @@ if helm template sandbox "$chart" \
   echo "sandbox deployment: microVM worker capacity drift was accepted" >&2
   exit 1
 fi
+if helm template sandbox "$chart" \
+  --set microVmExecutor.managedRecovery.shardIndex=1 \
+  --set microVmExecutor.managedRecovery.shardCount=1 >/dev/null 2>&1; then
+  echo "sandbox deployment: invalid Managed recovery shard was accepted" >&2
+  exit 1
+fi
 
 ruby -rjson -ryaml -e '
 docs = YAML.load_stream(File.read(ARGV.fetch(0))).compact
@@ -74,6 +80,10 @@ if controller && executor && microvm && attestor
   provider_config_map = docs.find { |doc| doc["kind"] == "ConfigMap" && doc.dig("metadata", "name")&.end_with?("-executor-microvm-provider") }
   provider_config = provider_config_map && JSON.parse(provider_config_map.fetch("data").fetch("provider.json"))
   failures << "microVM Provider config is missing exact Egress Broker routing" unless provider_config && provider_config["egress_broker_endpoint"]&.start_with?("https://") && !provider_config["egress_broker_tls_server_name"].to_s.empty?
+  executor_config_map = docs.find { |doc| doc["kind"] == "ConfigMap" && doc.dig("metadata", "name")&.end_with?("-executor-microvm") }
+  executor_config = executor_config_map && JSON.parse(executor_config_map.fetch("data").fetch("executor.json"))
+  recovery = executor_config&.dig("backend", "managed_recovery")
+  failures << "microVM Executor config is missing bounded Managed recovery controls" unless recovery && recovery["shard_index"] == 0 && recovery["shard_count"] == 1 && recovery["scan_milliseconds"] > recovery["scan_jitter_milliseconds"] && recovery["failure_backoff_milliseconds"].between?(1, recovery["scan_milliseconds"])
 
   images = workloads.flat_map { |doc| doc.dig("spec", "template", "spec", "containers").to_a + doc.dig("spec", "template", "spec", "initContainers").to_a }.map { |container| container["image"] }
   failures << "all Sandbox workload images must use immutable sha256 digests" unless images.all? { |image| image&.match?(/@sha256:[0-9a-f]{64}\z/) }

@@ -8,19 +8,26 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
     canonical_digest, CommandOutcome, HardLimitProfile, ResourceId, ResourceIdError, ResourceKind,
-    Sha256Digest, WorkClass,
+    SandboxJobState, Sha256Digest, WorkClass,
 };
 use insight_platform_sandbox::{
     ClaimSandboxJobs, ClaimedManagedMcpSandboxSession, ClaimedSandboxJob,
     CommitManagedMcpSandboxSessionLost, ExecuteManagedMcpSandboxSession, ExecuteSandboxJob,
+    ExpiredManagedMcpSandboxSessionLease, ExpiredManagedMcpSandboxSessionLeasePage,
     HeartbeatSandboxExecution, ManagedMcpSandboxSessionClaimAuthority,
     ManagedMcpSandboxSessionCleanupOutcome, ManagedMcpSandboxSessionExecutionAuthority,
-    ManagedMcpSandboxSessionLiveness, ManagedMcpSandboxSessionLivenessEvidence,
-    ManagedMcpSandboxSessionProvider, ManagedMcpSandboxSessionWorker,
-    ManagedMcpSandboxSessionWorkerAudits, SandboxClaimAuthority, SandboxClaimFailure,
+    ManagedMcpSandboxSessionExpiredLeaseEvidence, ManagedMcpSandboxSessionLeaseRecoveryAction,
+    ManagedMcpSandboxSessionLeaseRecoveryDisposition, ManagedMcpSandboxSessionLiveness,
+    ManagedMcpSandboxSessionLivenessEvidence, ManagedMcpSandboxSessionProvider,
+    ManagedMcpSandboxSessionRecoveryAudit, ManagedMcpSandboxSessionRecoveryAuthority,
+    ManagedMcpSandboxSessionRecoveryCursor, ManagedMcpSandboxSessionRecoveryExecutor,
+    ManagedMcpSandboxSessionRecoveryFailure, ManagedMcpSandboxSessionRecoveryShard,
+    ManagedMcpSandboxSessionWorker, ManagedMcpSandboxSessionWorkerAudits,
+    RecoverExpiredManagedMcpSandboxSessionLease, SandboxClaimAuthority, SandboxClaimFailure,
     SandboxCommandLimits, SandboxExecutionAuthority, SandboxExecutionControlRouter,
-    SandboxExecutorWorker, SandboxHeartbeatConfig, SandboxWorkerAudit, SandboxWorkerAuditBundle,
-    SandboxWorkerCommitIdentity, SANDBOX_QUOTA_LINES,
+    SandboxExecutorWorker, SandboxHeartbeatConfig, SandboxProcessGenerationIsolation,
+    SandboxProcessGenerationIsolationDisposition, SandboxWorkerAudit, SandboxWorkerAuditBundle,
+    SandboxWorkerCommitIdentity, ScanExpiredManagedMcpSandboxSessionLeases, SANDBOX_QUOTA_LINES,
 };
 use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
@@ -145,6 +152,90 @@ pub struct SandboxExecutorDriverConfig {
     receipt_ttl: Duration,
     minimum_receipt_ttl: Duration,
     timing: SandboxExecutorDriverTiming,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedMcpSandboxSessionRecoveryTiming {
+    pub scan_interval: Duration,
+    pub scan_jitter: Duration,
+    pub failure_backoff: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedMcpSandboxSessionRecoveryConfig {
+    shard: ManagedMcpSandboxSessionRecoveryShard,
+    batch_size: u16,
+    maximum_shards: u16,
+    limits: SandboxCommandLimits,
+    receipt_ttl: Duration,
+    minimum_receipt_ttl: Duration,
+    timing: ManagedMcpSandboxSessionRecoveryTiming,
+}
+
+impl ManagedMcpSandboxSessionRecoveryConfig {
+    pub fn from_profile(
+        profile: &HardLimitProfile,
+        shard: ManagedMcpSandboxSessionRecoveryShard,
+        receipt_ttl: Duration,
+        timing: ManagedMcpSandboxSessionRecoveryTiming,
+    ) -> Result<Self, SandboxExecutorDriverError> {
+        profile
+            .validate()
+            .map_err(|failure| SandboxExecutorDriverError::InvalidConfig(failure.to_string()))?;
+        let config = Self {
+            shard,
+            batch_size: u16::try_from(profile.control_data.recovery_batch.q1_default).map_err(
+                |_| {
+                    SandboxExecutorDriverError::InvalidConfig(
+                        "Managed MCP recovery batch exceeds u16".to_owned(),
+                    )
+                },
+            )?,
+            maximum_shards: u16::try_from(profile.control_data.recovery_shards.hard_max).map_err(
+                |_| {
+                    SandboxExecutorDriverError::InvalidConfig(
+                        "Managed MCP recovery shard count exceeds u16".to_owned(),
+                    )
+                },
+            )?,
+            limits: SandboxCommandLimits::from_profile(profile).map_err(|failure| {
+                SandboxExecutorDriverError::InvalidConfig(failure.to_string())
+            })?,
+            receipt_ttl,
+            minimum_receipt_ttl: Duration::from_secs(
+                profile
+                    .capability_sandbox
+                    .wall_seconds
+                    .hard_max
+                    .saturating_add(profile.capability_sandbox.cleanup_seconds.hard_max),
+            ),
+            timing,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(self) -> Result<(), SandboxExecutorDriverError> {
+        self.shard.validate(self.maximum_shards).map_err(|_| {
+            SandboxExecutorDriverError::InvalidConfig(
+                "Managed MCP recovery shard is invalid".to_owned(),
+            )
+        })?;
+        if self.batch_size == 0
+            || self.receipt_ttl.is_zero()
+            || self.receipt_ttl <= self.minimum_receipt_ttl
+            || ChronoDuration::from_std(self.receipt_ttl).is_err()
+            || self.timing.scan_interval.is_zero()
+            || self.timing.scan_jitter >= self.timing.scan_interval
+            || self.timing.failure_backoff.is_zero()
+            || self.timing.failure_backoff > self.timing.scan_interval
+        {
+            return Err(SandboxExecutorDriverError::InvalidConfig(
+                "Managed MCP recovery timing is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -979,6 +1070,361 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ManagedMcpSandboxSessionRecoveryCycleReport {
+    pub candidates: u64,
+    pub requeued: u64,
+    pub timed_out: u64,
+    pub lost: u64,
+    pub replayed: u64,
+    pub first_winner_lost: u64,
+    pub evidence_pending: u64,
+}
+
+/// Node-local, bounded recovery driver for expired Managed MCP Sandbox sessions. It uses only the
+/// Sandbox worker's reserved critical-control capacity; long-lived business permits are never
+/// required to prove an old process absent, destroy its exact Provider instance, or close its
+/// durable lease.
+pub struct ManagedMcpSandboxSessionRecoveryDriver<A, P, I> {
+    authority: Arc<A>,
+    provider: Arc<P>,
+    identities: Arc<I>,
+    pools: LocalWorkerPools,
+    binding: SandboxExecutorBinding,
+    config: ManagedMcpSandboxSessionRecoveryConfig,
+}
+
+impl<A, P, I> ManagedMcpSandboxSessionRecoveryDriver<A, P, I>
+where
+    A: ManagedMcpSandboxSessionRecoveryAuthority + SandboxProcessGenerationIsolation,
+    P: ManagedMcpSandboxSessionProvider,
+    I: ExecutorIdentityFactory + 'static,
+{
+    pub fn new(
+        authority: Arc<A>,
+        provider: Arc<P>,
+        identities: Arc<I>,
+        pools: LocalWorkerPools,
+        binding: SandboxExecutorBinding,
+        config: ManagedMcpSandboxSessionRecoveryConfig,
+    ) -> Result<Self, SandboxExecutorDriverError> {
+        config.validate()?;
+        let pool = pools.snapshot();
+        if pool.worker_role != "sandbox-executor.microvm"
+            || pool.work_class != WorkClass::Sandbox
+            || pool.critical_control_capacity == 0
+        {
+            return Err(SandboxExecutorDriverError::WrongWorkerManifest);
+        }
+        Ok(Self {
+            authority,
+            provider,
+            identities,
+            pools,
+            binding,
+            config,
+        })
+    }
+
+    pub async fn drive_once(
+        &self,
+        after: Option<ManagedMcpSandboxSessionRecoveryCursor>,
+    ) -> Result<
+        (
+            ExpiredManagedMcpSandboxSessionLeasePage,
+            ManagedMcpSandboxSessionRecoveryCycleReport,
+        ),
+        SandboxExecutorDriverError,
+    > {
+        let Some(_permit) = self
+            .pools
+            .try_acquire_critical_control()
+            .map_err(SandboxExecutorDriverError::LocalPool)?
+        else {
+            return Err(SandboxExecutorDriverError::CriticalControlCapacityBusy);
+        };
+        let scan = ScanExpiredManagedMcpSandboxSessionLeases {
+            executor: self.recovery_executor(),
+            shard: self.config.shard,
+            after,
+            limit: self.config.batch_size,
+        };
+        let page = self
+            .authority
+            .scan_expired_managed_mcp_sandbox_session_leases(scan.clone())
+            .await
+            .map_err(SandboxExecutorDriverError::Recovery)?;
+        page.validate_for(&scan, self.config.limits)
+            .map_err(|_| SandboxExecutorDriverError::CorruptRecoveryPage)?;
+        let mut report = ManagedMcpSandboxSessionRecoveryCycleReport {
+            candidates: page.records.len() as u64,
+            ..ManagedMcpSandboxSessionRecoveryCycleReport::default()
+        };
+        for expired in &page.records {
+            let Some(action) = self.recovery_action(expired).await? else {
+                report.evidence_pending = report.evidence_pending.saturating_add(1);
+                continue;
+            };
+            let expected_disposition = match &action {
+                ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted { .. } => {
+                    ManagedMcpSandboxSessionLeaseRecoveryDisposition::Requeued
+                }
+                ManagedMcpSandboxSessionLeaseRecoveryAction::TimeoutUnstarted { .. } => {
+                    ManagedMcpSandboxSessionLeaseRecoveryDisposition::TimedOut
+                }
+                ManagedMcpSandboxSessionLeaseRecoveryAction::MarkLost { .. } => {
+                    ManagedMcpSandboxSessionLeaseRecoveryDisposition::Lost
+                }
+            };
+            let command = self.recovery_command(expired.clone(), action)?;
+            match self
+                .authority
+                .recover_expired_managed_mcp_sandbox_session_lease(command)
+                .await
+            {
+                Ok(outcome) => {
+                    let (result, replayed) = match outcome {
+                        CommandOutcome::Applied(result) => (result, false),
+                        CommandOutcome::Replayed(result) => (result, true),
+                    };
+                    if result.tenant_id != expired.request.identity.tenant_id
+                        || result.subscription_id != expired.request.identity.subscription_id
+                        || result.physical_job_id != expired.request.identity.physical_job_id
+                        || result.recovered_lease_generation != expired.observed_lease_generation
+                        || result.disposition != expected_disposition
+                    {
+                        return Err(SandboxExecutorDriverError::InvalidRecoveryResult);
+                    }
+                    if replayed {
+                        report.replayed = report.replayed.saturating_add(1);
+                    }
+                    match result.disposition {
+                        ManagedMcpSandboxSessionLeaseRecoveryDisposition::Requeued => {
+                            report.requeued = report.requeued.saturating_add(1)
+                        }
+                        ManagedMcpSandboxSessionLeaseRecoveryDisposition::TimedOut => {
+                            report.timed_out = report.timed_out.saturating_add(1)
+                        }
+                        ManagedMcpSandboxSessionLeaseRecoveryDisposition::Lost => {
+                            report.lost = report.lost.saturating_add(1)
+                        }
+                    }
+                }
+                Err(ManagedMcpSandboxSessionRecoveryFailure::FirstWinnerLost) => {
+                    report.first_winner_lost = report.first_winner_lost.saturating_add(1);
+                }
+                Err(failure) => return Err(SandboxExecutorDriverError::Recovery(failure)),
+            }
+        }
+        Ok((page, report))
+    }
+
+    async fn recovery_action(
+        &self,
+        expired: &ExpiredManagedMcpSandboxSessionLease,
+    ) -> Result<Option<ManagedMcpSandboxSessionLeaseRecoveryAction>, SandboxExecutorDriverError>
+    {
+        if expired.physical_state == SandboxJobState::Accepted {
+            let recovery_evidence_digest = stable_unstarted_recovery_evidence_digest(expired)?;
+            return Ok(Some(
+                if expired.database_observed_at < expired.request.deadline {
+                    ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted {
+                        recovery_evidence_digest,
+                    }
+                } else {
+                    ManagedMcpSandboxSessionLeaseRecoveryAction::TimeoutUnstarted {
+                        recovery_evidence_digest,
+                    }
+                },
+            ));
+        }
+        let absence_request = expired
+            .process_absence_request(self.config.limits)
+            .map_err(|_| SandboxExecutorDriverError::CorruptRecoveryPage)?;
+        let process_absence = match self.authority.prove_absent(absence_request.clone()).await {
+            Ok(evidence) => evidence,
+            Err(_) => return Ok(None),
+        };
+        process_absence
+            .validate_for(&absence_request, Utc::now())
+            .map_err(|_| SandboxExecutorDriverError::InvalidRecoveryEvidence)?;
+        let provider_cleanup = match process_absence.disposition {
+            SandboxProcessGenerationIsolationDisposition::ProcessAbsent => {
+                let cleanup = match self.provider.recover_expired_exact(expired).await {
+                    Ok(cleanup) => cleanup,
+                    Err(_) => return Ok(None),
+                };
+                cleanup
+                    .validate_for_expired(expired, Utc::now())
+                    .map_err(|_| SandboxExecutorDriverError::InvalidRecoveryEvidence)?;
+                Some(cleanup)
+            }
+            SandboxProcessGenerationIsolationDisposition::NodeQuarantined => None,
+        };
+        let evidence = ManagedMcpSandboxSessionExpiredLeaseEvidence {
+            schema_version: 1,
+            process_absence,
+            provider_cleanup,
+            canonical_digest: placeholder_digest(),
+        }
+        .seal()
+        .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?;
+        evidence
+            .validate_for(expired, Utc::now(), self.config.limits)
+            .map_err(|_| SandboxExecutorDriverError::InvalidRecoveryEvidence)?;
+        Ok(Some(
+            ManagedMcpSandboxSessionLeaseRecoveryAction::MarkLost {
+                evidence: Box::new(evidence),
+            },
+        ))
+    }
+
+    fn recovery_command(
+        &self,
+        expired: ExpiredManagedMcpSandboxSessionLease,
+        action: ManagedMcpSandboxSessionLeaseRecoveryAction,
+    ) -> Result<RecoverExpiredManagedMcpSandboxSessionLease, SandboxExecutorDriverError> {
+        let now = Utc::now();
+        let receipt_expires_at = now
+            .checked_add_signed(
+                ChronoDuration::from_std(self.config.receipt_ttl)
+                    .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?,
+            )
+            .ok_or(SandboxExecutorDriverError::InvalidGeneratedCommand)?;
+        let terminal = !matches!(
+            action,
+            ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted { .. }
+        );
+        let mut quota_entry_ids = if terminal {
+            (0..SANDBOX_QUOTA_LINES)
+                .map(|_| {
+                    self.identities
+                        .new_resource_id(ResourceKind::QuotaLedgerEntry)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(SandboxExecutorDriverError::Identity)?
+        } else {
+            Vec::new()
+        };
+        quota_entry_ids.sort();
+        let mut command = RecoverExpiredManagedMcpSandboxSessionLease {
+            audit: ManagedMcpSandboxSessionRecoveryAudit {
+                tenant_id: expired.request.identity.tenant_id.clone(),
+                recovery_process_generation_id: self.pools.snapshot().worker_process_generation_id,
+                receipt_id: self.new_id(ResourceKind::Receipt)?,
+                event_id: self.new_id(ResourceKind::Event)?,
+                outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                idempotency_key_digest: placeholder_digest(),
+                request_digest: placeholder_digest(),
+                receipt_expires_at,
+            },
+            executor: self.recovery_executor(),
+            expired,
+            action,
+            quota_entry_ids,
+        };
+        command.audit.idempotency_key_digest = command
+            .canonical_idempotency_key_digest()
+            .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?;
+        command.audit.request_digest = command
+            .canonical_request_digest()
+            .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?;
+        command
+            .validate_at(now, self.config.limits)
+            .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?;
+        Ok(command)
+    }
+
+    fn recovery_executor(&self) -> ManagedMcpSandboxSessionRecoveryExecutor {
+        let pool = self.pools.snapshot();
+        ManagedMcpSandboxSessionRecoveryExecutor {
+            worker_process_generation_id: pool.worker_process_generation_id,
+            worker_manifest_digest: pool.worker_manifest_digest,
+            isolation_backend_contract_digest: self
+                .binding
+                .isolation_backend_contract_digest
+                .clone(),
+            executor_identity_digest: self.binding.executor_identity_digest.clone(),
+            attestor_route: self.binding.attestor_route.clone(),
+        }
+    }
+
+    fn new_id(&self, kind: ResourceKind) -> Result<ResourceId, SandboxExecutorDriverError> {
+        self.identities
+            .new_resource_id(kind)
+            .map_err(SandboxExecutorDriverError::Identity)
+    }
+
+    pub async fn run(
+        self,
+        cancellation: CancellationToken,
+    ) -> Result<(), SandboxExecutorDriverError> {
+        let first_tick = Instant::now()
+            .checked_add(deterministic_recovery_jitter(
+                &self.pools.snapshot().worker_process_generation_id,
+                self.config.timing.scan_jitter,
+            ))
+            .ok_or(SandboxExecutorDriverError::InvalidGeneratedCommand)?;
+        let mut scan = tokio::time::interval_at(first_tick, self.config.timing.scan_interval);
+        scan.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut cursor = None;
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => return Ok(()),
+                _ = scan.tick() => {
+                    match self.drive_once(cursor.clone()).await {
+                        Ok((page, _)) => cursor = page.next_cursor,
+                        Err(SandboxExecutorDriverError::CriticalControlCapacityBusy) => {}
+                        Err(SandboxExecutorDriverError::Recovery(
+                            ManagedMcpSandboxSessionRecoveryFailure::Unavailable
+                                | ManagedMcpSandboxSessionRecoveryFailure::FirstWinnerLost,
+                        )) => {
+                            tokio::select! {
+                                _ = cancellation.cancelled() => return Ok(()),
+                                _ = tokio::time::sleep(self.config.timing.failure_backoff) => {}
+                            }
+                        }
+                        Err(failure) => return Err(failure),
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn stable_unstarted_recovery_evidence_digest(
+    expired: &ExpiredManagedMcpSandboxSessionLease,
+) -> Result<Sha256Digest, SandboxExecutorDriverError> {
+    canonical_digest(&serde_json::json!({
+        "domain": "managed_mcp_sandbox_session_unstarted_lease_recovery",
+        "lease_expires_at": expired.lease_expires_at,
+        "observed_job_version": expired.observed_job_version,
+        "observed_lease_generation": expired.observed_lease_generation,
+        "physical_job_id": expired.request.identity.physical_job_id,
+        "request_digest": expired.request.request_digest,
+        "schema_version": 1,
+    }))
+    .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?
+    .parse()
+    .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)
+}
+
+fn deterministic_recovery_jitter(worker_id: &ResourceId, maximum: Duration) -> Duration {
+    if maximum.is_zero() {
+        return Duration::ZERO;
+    }
+    let maximum_nanos = maximum.as_nanos();
+    let sample = u128::from(worker_id.uuid().as_u128() as u64);
+    let nanos = sample % (maximum_nanos + 1);
+    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
+fn placeholder_digest() -> Sha256Digest {
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        .parse()
+        .expect("static SHA-256 placeholder is valid")
+}
+
 fn validate_managed_mcp_session_claims(
     claimed: &[ClaimedManagedMcpSandboxSession],
     pool: &insight_platform_worker::LocalWorkerPoolSnapshot,
@@ -1072,10 +1518,15 @@ pub enum SandboxExecutorDriverError {
     WrongWorkerManifest,
     InvalidGeneratedCommand,
     CorruptClaim,
+    CorruptRecoveryPage,
+    InvalidRecoveryEvidence,
+    InvalidRecoveryResult,
+    CriticalControlCapacityBusy,
     DrainRequiresProcessTermination,
     Identity(ExecutorIdentityError),
     LocalPool(LocalWorkerPoolError),
     Claim(SandboxClaimFailure),
+    Recovery(ManagedMcpSandboxSessionRecoveryFailure),
 }
 
 impl fmt::Display for SandboxExecutorDriverError {
@@ -1085,12 +1536,19 @@ impl fmt::Display for SandboxExecutorDriverError {
             Self::WrongWorkerManifest => "Sandbox Executor worker manifest is invalid",
             Self::InvalidGeneratedCommand => "Sandbox Executor generated an invalid command",
             Self::CorruptClaim => "Sandbox claim response is inconsistent",
+            Self::CorruptRecoveryPage => "Managed MCP recovery page is inconsistent",
+            Self::InvalidRecoveryEvidence => "Managed MCP recovery evidence is invalid",
+            Self::InvalidRecoveryResult => "Managed MCP recovery result is inconsistent",
+            Self::CriticalControlCapacityBusy => {
+                "Sandbox critical-control recovery capacity is busy"
+            }
             Self::DrainRequiresProcessTermination => {
                 "Sandbox drain grace expired; process-generation termination is required"
             }
             Self::Identity(_) => "Sandbox Executor identity generation failed",
             Self::LocalPool(_) => "Sandbox Executor local pool failed",
             Self::Claim(_) => "Sandbox claim authority failed",
+            Self::Recovery(_) => "Managed MCP recovery authority failed",
         })
     }
 }
@@ -1157,6 +1615,113 @@ mod tests {
             _cancellation: CancellationToken,
         ) -> SandboxExecutionDisposition {
             panic!("empty authority must not dispatch")
+        }
+    }
+
+    #[derive(Default)]
+    struct EmptyManagedRecoveryAuthority {
+        scan: Mutex<Option<ScanExpiredManagedMcpSandboxSessionLeases>>,
+    }
+
+    #[async_trait]
+    impl ManagedMcpSandboxSessionRecoveryAuthority for EmptyManagedRecoveryAuthority {
+        async fn scan_expired_managed_mcp_sandbox_session_leases(
+            &self,
+            command: ScanExpiredManagedMcpSandboxSessionLeases,
+        ) -> Result<ExpiredManagedMcpSandboxSessionLeasePage, ManagedMcpSandboxSessionRecoveryFailure>
+        {
+            *self.scan.lock().unwrap() = Some(command);
+            Ok(ExpiredManagedMcpSandboxSessionLeasePage {
+                records: Vec::new(),
+                next_cursor: None,
+                exhausted: true,
+            })
+        }
+
+        async fn recover_expired_managed_mcp_sandbox_session_lease(
+            &self,
+            _command: RecoverExpiredManagedMcpSandboxSessionLease,
+        ) -> Result<
+            CommandOutcome<insight_platform_sandbox::ManagedMcpSandboxSessionLeaseRecoveryResult>,
+            ManagedMcpSandboxSessionRecoveryFailure,
+        > {
+            unreachable!("an empty scan cannot submit recovery")
+        }
+    }
+
+    #[async_trait]
+    impl SandboxProcessGenerationIsolation for EmptyManagedRecoveryAuthority {
+        async fn prove_absent(
+            &self,
+            _request: insight_platform_sandbox::ProveSandboxProcessGenerationAbsent,
+        ) -> Result<
+            insight_platform_sandbox::SandboxProcessGenerationAbsenceEvidence,
+            insight_platform_sandbox::SandboxProcessGenerationIsolationError,
+        > {
+            unreachable!("an empty scan cannot request process evidence")
+        }
+    }
+
+    struct UnusedManagedRecoveryProvider;
+
+    #[async_trait]
+    impl ManagedMcpSandboxSessionProvider for UnusedManagedRecoveryProvider {
+        type Error = std::convert::Infallible;
+
+        async fn prepare(
+            &self,
+            _request: &insight_platform_sandbox::ManagedMcpSandboxSessionRequest,
+            _fence: &insight_platform_jobs::JobFence,
+            _executor_identity_digest: &Sha256Digest,
+        ) -> Result<insight_platform_sandbox::PreparedManagedMcpSandboxSession, Self::Error>
+        {
+            unreachable!("recovery provider cannot prepare")
+        }
+
+        async fn initialize(
+            &self,
+            _request: &insight_platform_sandbox::ManagedMcpSandboxSessionRequest,
+            _fence: &insight_platform_jobs::JobFence,
+            _prepared: &insight_platform_sandbox::PreparedManagedMcpSandboxSession,
+        ) -> Result<insight_platform_sandbox::PreparedManagedMcpSandboxSessionActivation, Self::Error>
+        {
+            unreachable!("recovery provider cannot initialize")
+        }
+
+        async fn activate(
+            &self,
+            _request: &insight_platform_sandbox::ManagedMcpSandboxSessionRequest,
+            _fence: &insight_platform_jobs::JobFence,
+            _activation: &insight_platform_sandbox::PreparedManagedMcpSandboxSessionActivation,
+        ) -> Result<insight_platform_sandbox::ActivatedManagedMcpSandboxSession, Self::Error>
+        {
+            unreachable!("recovery provider cannot activate")
+        }
+
+        async fn observe_exact(
+            &self,
+            _request: &insight_platform_sandbox::ManagedMcpSandboxSessionRequest,
+            _fence: &insight_platform_jobs::JobFence,
+            _prepared: &insight_platform_sandbox::PreparedManagedMcpSandboxSession,
+            _activated: &insight_platform_sandbox::ActivatedManagedMcpSandboxSession,
+        ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, Self::Error> {
+            unreachable!("recovery provider cannot observe a live session")
+        }
+
+        async fn destroy_exact(
+            &self,
+            _request: &insight_platform_sandbox::ManagedMcpSandboxSessionRequest,
+            _fence: &insight_platform_jobs::JobFence,
+            _prepared: Option<&insight_platform_sandbox::PreparedManagedMcpSandboxSession>,
+        ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
+            unreachable!("recovery provider cannot use the live-session destroy path")
+        }
+
+        async fn recover_expired_exact(
+            &self,
+            _expired: &ExpiredManagedMcpSandboxSessionLease,
+        ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
+            unreachable!("an empty scan cannot recover Provider state")
         }
     }
 
@@ -1286,6 +1851,91 @@ mod tests {
         assert_eq!(claim.limit, 2);
         assert_eq!(claim.lease_token_digests.len(), 2);
         assert_eq!(local_pools.snapshot().business_available, 2);
+    }
+
+    #[tokio::test]
+    async fn managed_recovery_uses_reserved_control_capacity_when_business_is_saturated() {
+        let authority = Arc::new(EmptyManagedRecoveryAuthority::default());
+        let local_pools = micro_vm_pools();
+        let reservation = local_pools
+            .reserve_claim_capacity(
+                WorkClass::Sandbox,
+                2,
+                ClaimBatchHardLimit::from_profile(&checked_in_hard_limit_profile()).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        let _business_permits = reservation
+            .bind_claimed_jobs(vec![
+                ClaimedJobIdentity {
+                    job_id: ResourceId::from_uuid_v7(ResourceKind::Job, Uuid::now_v7()).unwrap(),
+                    lease_generation: 1,
+                },
+                ClaimedJobIdentity {
+                    job_id: ResourceId::from_uuid_v7(ResourceKind::Job, Uuid::now_v7()).unwrap(),
+                    lease_generation: 1,
+                },
+            ])
+            .unwrap();
+        assert_eq!(local_pools.snapshot().business_available, 0);
+        let binding = SandboxExecutorBinding {
+            isolation_backend_contract_digest: digest('c'),
+            executor_identity_digest: digest('d'),
+            attestor_route: "https://10.0.0.7:9443".parse().unwrap(),
+        };
+        let config = ManagedMcpSandboxSessionRecoveryConfig::from_profile(
+            &checked_in_hard_limit_profile(),
+            ManagedMcpSandboxSessionRecoveryShard { index: 0, count: 1 },
+            Duration::from_secs(7_200),
+            ManagedMcpSandboxSessionRecoveryTiming {
+                scan_interval: Duration::from_millis(100),
+                scan_jitter: Duration::ZERO,
+                failure_backoff: Duration::from_millis(10),
+            },
+        )
+        .unwrap();
+        let driver = ManagedMcpSandboxSessionRecoveryDriver::new(
+            Arc::clone(&authority),
+            Arc::new(UnusedManagedRecoveryProvider),
+            Arc::new(UuidExecutorIdentityFactory),
+            local_pools.clone(),
+            binding.clone(),
+            config,
+        )
+        .unwrap();
+        let (page, report) = driver.drive_once(None).await.unwrap();
+        assert!(page.exhausted);
+        assert_eq!(
+            report,
+            ManagedMcpSandboxSessionRecoveryCycleReport::default()
+        );
+        let scan = authority.scan.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            scan.executor.worker_manifest_digest,
+            local_pools.snapshot().worker_manifest_digest
+        );
+        assert_eq!(
+            scan.executor.isolation_backend_contract_digest,
+            binding.isolation_backend_contract_digest
+        );
+        assert_eq!(
+            scan.executor.executor_identity_digest,
+            binding.executor_identity_digest
+        );
+        assert_eq!(scan.executor.attestor_route, binding.attestor_route);
+        assert_eq!(
+            scan.shard,
+            ManagedMcpSandboxSessionRecoveryShard { index: 0, count: 1 }
+        );
+        assert_eq!(
+            u64::from(scan.limit),
+            checked_in_hard_limit_profile()
+                .control_data
+                .recovery_batch
+                .q1_default
+        );
+        assert_eq!(local_pools.snapshot().business_available, 0);
+        assert_eq!(local_pools.snapshot().critical_control_available, 1);
     }
 
     #[test]

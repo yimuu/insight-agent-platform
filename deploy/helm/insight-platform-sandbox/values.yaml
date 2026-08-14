@@ -155,6 +155,12 @@ microVmExecutor:
     resources:
       requests: {cpu: 500m, memory: 256Mi}
       limits: {cpu: "2", memory: 1Gi}
+  managedRecovery:
+    shardIndex: 0
+    shardCount: 1
+    scanMilliseconds: 1000
+    scanJitterMilliseconds: 250
+    failureBackoffMilliseconds: 250
   resources:
     requests: {cpu: "1", memory: 512Mi}
     limits: {cpu: "4", memory: 2Gi}

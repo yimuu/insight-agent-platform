@@ -34,6 +34,12 @@
 {{- if gt (int .Values.microVmExecutor.workerManifest.max_concurrency) (int .Values.microVmExecutor.provider.maximumInstances) }}
 {{- fail "microVM worker concurrency cannot exceed provider instance capacity" }}
 {{- end }}
+{{- if or (lt (int .Values.microVmExecutor.managedRecovery.shardIndex) 0) (lt (int .Values.microVmExecutor.managedRecovery.shardCount) 1) (ge (int .Values.microVmExecutor.managedRecovery.shardIndex) (int .Values.microVmExecutor.managedRecovery.shardCount)) }}
+{{- fail "microVM Managed recovery requires a valid bounded shard" }}
+{{- end }}
+{{- if or (lt (int .Values.microVmExecutor.managedRecovery.scanMilliseconds) 1) (lt (int .Values.microVmExecutor.managedRecovery.scanJitterMilliseconds) 0) (ge (int .Values.microVmExecutor.managedRecovery.scanJitterMilliseconds) (int .Values.microVmExecutor.managedRecovery.scanMilliseconds)) (lt (int .Values.microVmExecutor.managedRecovery.failureBackoffMilliseconds) 1) (gt (int .Values.microVmExecutor.managedRecovery.failureBackoffMilliseconds) (int .Values.microVmExecutor.managedRecovery.scanMilliseconds)) }}
+{{- fail "microVM Managed recovery timing is invalid" }}
+{{- end }}
 {{- if empty .Values.controller.attestor.allowedNodeCidrs }}
 {{- fail "controller.attestor.allowedNodeCidrs is required" }}
 {{- end }}

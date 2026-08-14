@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Active / Phase 3 Functional Exit Closed / Phase 4 In Progress |
-| 日期 | 2026-08-13 |
+| 日期 | 2026-08-15 |
 | 输入 | Accepted 00～18、Cross-review、ADR-0001 |
 | 目标协议 | `insight.platform/v1`，公共路由 `/v1` |
 | 替换方式 | Clean replacement；无兼容层、双写、旧 migration 或 runtime fallback |
@@ -610,19 +610,26 @@ child exit和PID/start identity，RPC失败不能被解释为`Exited`。cleanup 
 `Destroyed(evidence)`，持久tombstone支持byte-stable evidence重放。Sandbox domain 38项、microVM 5项和RPC 10项定向测试通过。长期
 Executor supervisor随后也已组合：microVM进程同时运行有限和Managed两条closed claim driver，共享同一`LocalWorkerPools`；Managed
 future在整个session期间持有permit，按profile执行exact observation/heartbeat，并在guest退出、deadline、process drain或观察/续租失败时
-先取得`Destroyed(evidence)`，再生成fresh terminal audit/quota identity并以最新fence提交lost。Executor 5项、Sandbox 38项定向测试与strict
-Clippy通过；Managed expired-lease absence recovery仍Open。
+先取得`Destroyed(evidence)`，再生成fresh terminal audit/quota identity并以最新fence提交lost。该长期supervisor已交付；expired-lease路径的
+后续进度见下文。
 
 absence recovery前置的durable prepared binding也已补齐：`Starting` command、Job payload与replay现在保存并逐字段验证Provider generation、
-sandbox identity、旧Executor generation、lease及完整prepared canonical digest；opaque session仍只存在逻辑Invocation。Sandbox 38项测试及
-相关crate编译通过，不增加表或migration；专用scan/proof/recovery driver仍Open。
+sandbox identity、旧Executor generation、lease及完整prepared canonical digest；opaque session仍只存在逻辑Invocation。该路径不增加表或
+migration，专用scan/proof/recovery现已在下述切片闭合。
 
 Managed expired-lease的专用domain/PostgreSQL authority现已交付：scan按closed workload、manifest/backend、node-local route、bounded shard和
 包含tenant的keyset cursor返回token-free exact observation；commit使用旧lease generation的stable Receipt做CAS，支持Accepted requeue、
 deadline timeout零使用量结算，以及旧process absence后Provider exact observation的started Lost。业务request digest不绑定恢复Worker，但每次
 调用仍携带完整当前Executor registration供Controller重新鉴权；逻辑/物理Job、quota、grant、Receipt/Event/Outbox同事务提交，保持23表与单一
-`0001`。Sandbox domain增至40项并通过；PostgreSQL fixture已扩展scan/requeue/replay且可编译，但本机`PLATFORM_TEST_DATABASE_URL`未配置、
-Docker daemon无响应，故不登记fresh PG执行证据。Managed authority RPC与Executor recovery driver仍Open。
+`0001`。三条closed internal RPC现分别承载scan、旧process absence证明与recovery commit；Controller在scan/commit前重验当前recovery
+Executor registration和exact microVM URI SAN，absence只委托node-local attestor且不可由RPC失败推断。扫描page新增闭合cursor、batch、backend、
+route与database-observation重验。microVM Executor新增专用recovery driver，仅使用reserved critical-control permit；业务permit饱和时仍执行
+`Accepted -> Ready | TimedOut`，started候选严格执行`absence/quarantine -> same-node Provider observation -> CAS`，任何证明/Provider失败均保持
+durable状态不变。driver已组合进有限claim、Managed claim与NATS control所在的同一shutdown supervisor。Sandbox 40项、Executor package 6项、
+microVM backend配置独立冻结recovery shard/scan/jitter/backoff，Helm正向与错误shard负向门禁通过，避免复用100ms业务claim轮询频率。
+authority RPC 10项及相关strict Clippy实际通过；PostgreSQL fixture已扩展scan/requeue/replay且可编译，但本机
+`PLATFORM_TEST_DATABASE_URL`未配置、Docker daemon无响应，故不登记fresh PG执行证据。此功能切片已闭合，真实Linux KVM/process-kill/
+node-quarantine/escape/saturation Candidate资格仍属于Phase 4/6开放门禁。
 
 随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor
 只经node-local mTLS Unix socket调用同Pod的最小Provider。只有Provider容器挂载KVM、host cgroup、持久化jail/state并持有closed Linux

@@ -311,6 +311,7 @@ pub struct SandboxInternalRpcLimits {
     maximum_lease_milliseconds: u64,
     maximum_recovery_batch: u16,
     maximum_recovery_shards: u16,
+    sandbox_command_limits: SandboxCommandLimits,
 }
 
 impl SandboxInternalRpcLimits {
@@ -332,6 +333,8 @@ impl SandboxInternalRpcLimits {
             maximum_lease_milliseconds: profile.run_scheduler.lease_milliseconds.hard_max,
             maximum_recovery_batch,
             maximum_recovery_shards,
+            sandbox_command_limits: SandboxCommandLimits::from_profile(profile)
+                .map_err(|_| SandboxRpcError::InvalidConfiguration)?,
         };
         if maximum_message_bytes == 0
             || maximum_claim_batch == 0
@@ -1296,11 +1299,15 @@ impl ManagedMcpSandboxSessionRecoveryAuthority for SandboxManagedMcpSessionAutho
                 self.limits.maximum_recovery_shards,
             )
             .map_err(|_| ManagedMcpSandboxSessionRecoveryFailure::InvariantViolation)?;
-        self.unary(&command, |client, request| {
-            Box::pin(client.scan_expired_managed_mcp_sandbox_session_leases(request))
-        })
-        .await
-        .map_err(map_managed_recovery_client_error)
+        let page: ExpiredManagedMcpSandboxSessionLeasePage = self
+            .unary(&command, |client, request| {
+                Box::pin(client.scan_expired_managed_mcp_sandbox_session_leases(request))
+            })
+            .await
+            .map_err(map_managed_recovery_client_error)?;
+        page.validate_for(&command, self.limits.sandbox_command_limits)
+            .map_err(|_| ManagedMcpSandboxSessionRecoveryFailure::InvariantViolation)?;
+        Ok(page)
     }
 
     async fn recover_expired_managed_mcp_sandbox_session_lease(
@@ -2759,9 +2766,12 @@ where
             .map_err(registration_status)?;
         let result = self
             .authority
-            .scan_expired_managed_mcp_sandbox_session_leases(command)
+            .scan_expired_managed_mcp_sandbox_session_leases(command.clone())
             .await
             .map_err(managed_recovery_status)?;
+        result
+            .validate_for(&command, self.limits.sandbox_command_limits)
+            .map_err(|_| Status::failed_precondition("Managed MCP recovery page is invalid"))?;
         Ok(Response::new(encode(&result, self.limits)?))
     }
 

@@ -11,9 +11,11 @@ use insight_platform_sandbox::{
     WasiExecutorProcessRegistrar, WasiGrantRevoker, WasiValueValidator,
 };
 use insight_platform_sandbox_executor::{
-    ManagedMcpSandboxSessionExecutorDriver, RegisteredManagedMcpSandboxSessionExecutor,
-    RegisteredSandboxJobExecutor, SandboxExecutorBinding, SandboxExecutorDriver,
-    SandboxExecutorDriverConfig, SandboxExecutorDriverTiming, UuidExecutorIdentityFactory,
+    ManagedMcpSandboxSessionExecutorDriver, ManagedMcpSandboxSessionRecoveryConfig,
+    ManagedMcpSandboxSessionRecoveryDriver, ManagedMcpSandboxSessionRecoveryTiming,
+    RegisteredManagedMcpSandboxSessionExecutor, RegisteredSandboxJobExecutor,
+    SandboxExecutorBinding, SandboxExecutorDriver, SandboxExecutorDriverConfig,
+    SandboxExecutorDriverTiming, UuidExecutorIdentityFactory,
 };
 use insight_platform_sandbox_rpc::{
     NatsSandboxControlListener, NatsSandboxControlTransportConfig, SandboxAuthorityGrpcClient,
@@ -78,7 +80,29 @@ enum ExecutorBackendProcessConfig {
     MicroVm {
         provider_socket_path: String,
         provider_tls_server_name: String,
+        managed_recovery: ManagedMcpRecoveryProcessConfig,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedMcpRecoveryProcessConfig {
+    shard_index: u16,
+    shard_count: u16,
+    scan_milliseconds: u64,
+    scan_jitter_milliseconds: u64,
+    failure_backoff_milliseconds: u64,
+}
+
+impl ManagedMcpRecoveryProcessConfig {
+    fn validate(self) -> bool {
+        self.shard_count > 0
+            && self.shard_index < self.shard_count
+            && self.scan_milliseconds > 0
+            && self.scan_jitter_milliseconds < self.scan_milliseconds
+            && self.failure_backoff_milliseconds > 0
+            && self.failure_backoff_milliseconds <= self.scan_milliseconds
+    }
 }
 
 impl ExecutorBackendProcessConfig {
@@ -118,10 +142,21 @@ impl ExecutorBackendProcessConfig {
             Self::MicroVm {
                 provider_socket_path,
                 provider_tls_server_name,
+                managed_recovery,
             } => {
                 closed_unix_socket_path(provider_socket_path)
                     && stable_dns_name(provider_tls_server_name)
+                    && managed_recovery.validate()
             }
+        }
+    }
+
+    fn managed_recovery(&self) -> Option<ManagedMcpRecoveryProcessConfig> {
+        match self {
+            Self::Wasi { .. } => None,
+            Self::MicroVm {
+                managed_recovery, ..
+            } => Some(*managed_recovery),
         }
     }
 }
@@ -346,12 +381,12 @@ async fn run() -> Result<(), ProcessError> {
         driver_config,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let managed_driver = match (managed_authority, managed_provider) {
+    let (managed_driver, managed_recovery_driver) = match (managed_authority, managed_provider) {
         (Some(authority), Some(provider)) => {
             let executor = Arc::new(
                 RegisteredManagedMcpSandboxSessionExecutor::new(
                     Arc::clone(&authority),
-                    provider,
+                    Arc::clone(&provider),
                     Arc::clone(&identities),
                     limits,
                     heartbeat,
@@ -359,19 +394,45 @@ async fn run() -> Result<(), ProcessError> {
                 )
                 .map_err(|_| ProcessError::InvalidConfiguration)?,
             );
-            Some(
-                ManagedMcpSandboxSessionExecutorDriver::new(
-                    authority,
-                    executor,
-                    identities,
-                    pools,
-                    binding,
-                    driver_config,
-                )
-                .map_err(|_| ProcessError::InvalidConfiguration)?,
+            let managed_driver = ManagedMcpSandboxSessionExecutorDriver::new(
+                Arc::clone(&authority),
+                executor,
+                Arc::clone(&identities),
+                pools.clone(),
+                binding.clone(),
+                driver_config,
             )
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+            let recovery = config
+                .backend
+                .managed_recovery()
+                .ok_or(ProcessError::InvalidConfiguration)?;
+            let recovery_config = ManagedMcpSandboxSessionRecoveryConfig::from_profile(
+                &profile,
+                insight_platform_sandbox::ManagedMcpSandboxSessionRecoveryShard {
+                    index: recovery.shard_index,
+                    count: recovery.shard_count,
+                },
+                Duration::from_secs(config.receipt_ttl_seconds),
+                ManagedMcpSandboxSessionRecoveryTiming {
+                    scan_interval: Duration::from_millis(recovery.scan_milliseconds),
+                    scan_jitter: Duration::from_millis(recovery.scan_jitter_milliseconds),
+                    failure_backoff: Duration::from_millis(recovery.failure_backoff_milliseconds),
+                },
+            )
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+            let recovery_driver = ManagedMcpSandboxSessionRecoveryDriver::new(
+                authority,
+                provider,
+                identities,
+                pools,
+                binding,
+                recovery_config,
+            )
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+            (Some(managed_driver), Some(recovery_driver))
         }
-        (None, None) => None,
+        (None, None) => (None, None),
         _ => return Err(ProcessError::InvalidConfiguration),
     };
 
@@ -402,11 +463,22 @@ async fn run() -> Result<(), ProcessError> {
             }
         }
     });
+    let recovery_shutdown = shutdown.child_token();
+    let mut managed_recovery_task = tokio::spawn(async move {
+        match managed_recovery_driver {
+            Some(driver) => driver.run(recovery_shutdown).await,
+            None => {
+                recovery_shutdown.cancelled().await;
+                Ok(())
+            }
+        }
+    });
     let mut control_task = tokio::spawn(listener.run(shutdown.child_token()));
     let trigger = tokio::select! {
         signal = tokio::signal::ctrl_c() => SupervisorTrigger::Signal(signal.is_ok()),
         joined = &mut driver_task => SupervisorTrigger::Driver(joined),
         joined = &mut managed_driver_task => SupervisorTrigger::ManagedDriver(joined),
+        joined = &mut managed_recovery_task => SupervisorTrigger::ManagedRecovery(joined),
         joined = &mut control_task => SupervisorTrigger::Control(joined),
     };
     shutdown.cancel();
@@ -416,6 +488,7 @@ async fn run() -> Result<(), ProcessError> {
             let drained = tokio::time::timeout(grace, async {
                 map_driver_join((&mut driver_task).await)?;
                 map_driver_join((&mut managed_driver_task).await)?;
+                map_recovery_join((&mut managed_recovery_task).await)?;
                 map_control_join((&mut control_task).await)
             })
             .await
@@ -431,6 +504,7 @@ async fn run() -> Result<(), ProcessError> {
             let primary =
                 map_driver_join(joined).and(Err(ProcessError::ExecutorExitedUnexpectedly));
             await_driver_shutdown(&mut managed_driver_task, grace).await?;
+            await_recovery_shutdown(&mut managed_recovery_task, grace).await?;
             await_control_shutdown(&mut control_task, grace).await?;
             primary
         }
@@ -438,6 +512,15 @@ async fn run() -> Result<(), ProcessError> {
             let primary =
                 map_driver_join(joined).and(Err(ProcessError::ExecutorExitedUnexpectedly));
             await_driver_shutdown(&mut driver_task, grace).await?;
+            await_recovery_shutdown(&mut managed_recovery_task, grace).await?;
+            await_control_shutdown(&mut control_task, grace).await?;
+            primary
+        }
+        SupervisorTrigger::ManagedRecovery(joined) => {
+            let primary =
+                map_recovery_join(joined).and(Err(ProcessError::ExecutorExitedUnexpectedly));
+            await_driver_shutdown(&mut driver_task, grace).await?;
+            await_driver_shutdown(&mut managed_driver_task, grace).await?;
             await_control_shutdown(&mut control_task, grace).await?;
             primary
         }
@@ -446,6 +529,7 @@ async fn run() -> Result<(), ProcessError> {
                 map_control_join(joined).and(Err(ProcessError::ControlExitedUnexpectedly));
             await_driver_shutdown(&mut driver_task, grace).await?;
             await_driver_shutdown(&mut managed_driver_task, grace).await?;
+            await_recovery_shutdown(&mut managed_recovery_task, grace).await?;
             primary
         }
     }
@@ -468,6 +552,12 @@ enum SupervisorTrigger {
                 insight_platform_sandbox_executor::SandboxExecutorCycleReport,
                 insight_platform_sandbox_executor::SandboxExecutorDriverError,
             >,
+            tokio::task::JoinError,
+        >,
+    ),
+    ManagedRecovery(
+        Result<
+            Result<(), insight_platform_sandbox_executor::SandboxExecutorDriverError>,
             tokio::task::JoinError,
         >,
     ),
@@ -499,6 +589,18 @@ async fn await_control_shutdown(
         .await
         .map_err(|_| ProcessError::DrainRequiresProcessTermination)
         .and_then(map_control_join)
+}
+
+async fn await_recovery_shutdown(
+    task: &mut tokio::task::JoinHandle<
+        Result<(), insight_platform_sandbox_executor::SandboxExecutorDriverError>,
+    >,
+    grace: Duration,
+) -> Result<(), ProcessError> {
+    tokio::time::timeout(grace, task)
+        .await
+        .map_err(|_| ProcessError::DrainRequiresProcessTermination)
+        .and_then(map_recovery_join)
 }
 
 async fn connect_authority(config: &ExecutorProcessConfig) -> Result<Channel, ProcessError> {
@@ -577,6 +679,7 @@ async fn connect_isolation_provider(
     let ExecutorBackendProcessConfig::MicroVm {
         provider_socket_path,
         provider_tls_server_name,
+        ..
     } = &config.backend
     else {
         return Err(ProcessError::InvalidConfiguration);
@@ -735,6 +838,19 @@ fn map_control_join(
     }
 }
 
+fn map_recovery_join(
+    result: Result<
+        Result<(), insight_platform_sandbox_executor::SandboxExecutorDriverError>,
+        tokio::task::JoinError,
+    >,
+) -> Result<(), ProcessError> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(ProcessError::ExecutorFailed),
+        Err(_) => Err(ProcessError::ExecutorPanicked),
+    }
+}
+
 #[derive(Debug)]
 enum ProcessError {
     MissingConfiguration(&'static str),
@@ -870,8 +986,35 @@ mod tests {
         micro_vm.backend = ExecutorBackendProcessConfig::MicroVm {
             provider_socket_path: "/run/insight-sandbox-provider/provider.sock".to_owned(),
             provider_tls_server_name: "sandbox-provider.platform.svc".to_owned(),
+            managed_recovery: ManagedMcpRecoveryProcessConfig {
+                shard_index: 0,
+                shard_count: 1,
+                scan_milliseconds: 1_000,
+                scan_jitter_milliseconds: 250,
+                failure_backoff_milliseconds: 250,
+            },
         };
         micro_vm.validate().unwrap();
+
+        let mut invalid_recovery = micro_vm.clone();
+        let ExecutorBackendProcessConfig::MicroVm {
+            managed_recovery, ..
+        } = &mut invalid_recovery.backend
+        else {
+            unreachable!()
+        };
+        managed_recovery.shard_index = managed_recovery.shard_count;
+        assert!(invalid_recovery.validate().is_err());
+
+        let mut invalid_recovery = micro_vm.clone();
+        let ExecutorBackendProcessConfig::MicroVm {
+            managed_recovery, ..
+        } = &mut invalid_recovery.backend
+        else {
+            unreachable!()
+        };
+        managed_recovery.scan_jitter_milliseconds = managed_recovery.scan_milliseconds;
+        assert!(invalid_recovery.validate().is_err());
 
         micro_vm.worker_manifest.worker_role = "sandbox-executor.wasi".to_owned();
         assert!(micro_vm.validate().is_err());
