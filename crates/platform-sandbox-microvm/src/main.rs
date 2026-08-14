@@ -520,7 +520,7 @@ mod tests {
                 jailer_path: "/opt/insight/firecracker/jailer".into(),
                 jailer_digest: digest('d'),
                 chroot_base_directory: "/srv/insight-firecracker-jails".into(),
-                parent_cgroup: "insight-sandbox.slice".to_owned(),
+                parent_cgroup: "insight-sandbox".to_owned(),
             },
             runtimes: vec![InstalledMicroVmRuntime {
                 runtime_family: insight_platform_contracts::SandboxRuntimeFamily::Python,
