@@ -2933,14 +2933,15 @@ mod tests {
             artifact_bytes
         );
         assert_eq!(artifacts.calls.load(Ordering::Acquire), 1);
-        let translated = artifacts.requests.lock().unwrap();
-        assert_eq!(translated.len(), 1);
-        assert_eq!(
-            translated[0].worker_process_generation_id,
-            artifact_request.executor_worker_process_generation_id
-        );
-        assert_eq!(translated[0].artifact, artifact);
-        drop(translated);
+        {
+            let translated = artifacts.requests.lock().unwrap();
+            assert_eq!(translated.len(), 1);
+            assert_eq!(
+                translated[0].worker_process_generation_id,
+                artifact_request.executor_worker_process_generation_id
+            );
+            assert_eq!(translated[0].artifact, artifact);
+        }
 
         let channel = mtls_channel(
             &endpoint,
