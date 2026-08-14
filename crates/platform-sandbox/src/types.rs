@@ -654,16 +654,6 @@ impl SandboxExecutionRequest {
         ResourceDocument::SandboxProfile(self.profile.clone())
             .validate()
             .map_err(|_| SandboxContractError::InvalidResourceContract)?;
-        self.policies.validate_for(
-            &self.profile,
-            &self.runtime,
-            &self.package,
-            self.isolation_class,
-            self.network_mode,
-            &self.resources,
-            &self.artifact_grants,
-            &self.secret_grants,
-        )?;
         let (
             runtime,
             package,
@@ -901,6 +891,16 @@ impl SandboxExecutionRequest {
         {
             return Err(SandboxContractError::InvalidExecutionRequest);
         }
+        self.policies.validate_for(
+            &self.profile,
+            &self.runtime,
+            &self.package,
+            self.isolation_class,
+            self.network_mode,
+            &self.resources,
+            &self.artifact_grants,
+            &self.secret_grants,
+        )?;
         let mut required_secret_bindings = self
             .execution_source
             .capability_deployment_closure()
