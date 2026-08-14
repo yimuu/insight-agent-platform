@@ -564,8 +564,12 @@ Managed subscription的durable admission首片也已交付：Host删除直接Man
 Streamable HTTP；closed Sandbox payload新增Managed session workload，完整冻结双向Job/generation与MCP、Sandbox、grant、resource、callback
 closure。PostgreSQL以单事务锁定逻辑Invocation/MCP Job和全部exact authority，创建唯一Ready Sandbox Job，将逻辑Job停回Waiting，提交
 Artifact/Secret grant、四维quota reservation及Receipt/Event/Outbox。全新PostgreSQL 16并发fixture已实际通过唯一winner、exact replay、
-同idempotency key请求漂移冲突、双向身份、grant/quota和Secret canary，且仍为23表/单一baseline migration。该开发期证据仍不包含
-Managed session provider的Preparing→durable Ready→activation、terminal/session-loss recovery、真实Linux KVM/jailer/guest-agent互操作、
+同idempotency key请求漂移冲突、双向身份、grant/quota和Secret canary，且仍为23表/单一baseline migration。后续domain/repository切片
+已经交付专用Managed claim和`Preparing -> Starting -> Running` fenced phase authority：普通Sandbox claim不可见该workload，并发Managed
+claim只有一个winner；`Starting`与逻辑`Initializing`、Ready与逻辑`Active/Ready`分别在同一事务提交Receipt/Event/Outbox。加密opaque
+session只由逻辑Invocation保存，物理Job只保存credential-free ready binding。新的全新PostgreSQL 16 fixture实际覆盖队列隔离、并发claim、
+phase replay、stale fence、后续阶段的admission replay及双状态Ready原子性。该开发期证据仍不包含Managed session provider的实际prepare、
+durable Ready返回后的同实例activation、terminal/session-loss recovery、真实Linux KVM/jailer/guest-agent互操作、
 process-kill或escape/saturation资格，因此CR-131/CR-158和Phase 4继续保持Open。
 
 CR-159关闭Phase 6入口的CandidateManifest machine-contract空洞：closed Rust type与checked-in JSON Schema冻结full tagged Git object ID、

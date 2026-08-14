@@ -734,13 +734,14 @@ terminal Task及Pinned binding，Egress再删除exact Secret Manager version；�
 committed Event投影，临时/不确定失败退避重试，永久合同错误dead-letter。fresh PostgreSQL 16 fixture覆盖lease reclaim、stale fence拒绝和
 first-winner完成，双副本/PDB/default-deny NetworkPolicy部署合同也已通过，不增加表或migration。Managed stdio operation现已直接进入
 唯一Sandbox Job，并由production Firecracker Provider经Controller Artifact Broker取得exact Package/input、在private vsock中bounded
-materialize后才执行；Provider不再拒绝已安装的Managed MCP runtime。Managed subscription尚未建立MCP Job→Sandbox session Job的
-provider组合，但其durable admission authority已经交付：同一PostgreSQL事务锁定逻辑Invocation/MCP Job及exact contract closure，创建
-双向generation link和唯一`work_class=sandbox`物理Job，将逻辑Job停回Waiting，锁定Artifact/Secret grant，写入四维quota reservation及
-Receipt/Event/Outbox。共享Sandbox payload使用closed workload discriminator区分Capability execution与Managed MCP subscription session；
-MCP Host已删除Managed subscription直接broker入口。真实PostgreSQL 16并发fixture覆盖first-winner、exact replay、同key漂移冲突、双向Job
-绑定、grant/quota及Secret canary。prepared→durable Ready→activation、terminal/session-loss recovery以及真实Linux KVM/jailer/guest-agent、
-process-kill/recovery与escape/saturation资格仍未交付，因此该证据不关闭MCP或Phase 4，
+materialize后才执行；Provider不再拒绝已安装的Managed MCP runtime。Managed subscription的durable authority现已从原子admission继续到
+专用claim与阶段提交：普通Capability Sandbox claim不能看见session workload，两个Managed worker并发claim只有一个lease winner；
+`Preparing`绑定exact Executor/Attestor，`Starting`在同一事务把逻辑session推进到`Initializing`，Ready事务再同时提交逻辑
+`Active/Ready`与物理`Running`。加密opaque session只保存在逻辑Invocation这一处current-state authority；物理Job只保存无Secret的
+sandbox/protocol/ready-evidence digest binding。每一步均使用fenced Receipt、Event和Outbox，admission replay在后续阶段仍稳定。
+全新PostgreSQL 16 fixture实际覆盖普通/专用队列隔离、并发claim first-winner、phase replay、stale fence和双状态Ready原子性。
+这仍只是domain/repository authority；Managed session Provider的实际prepare、durable commit后的同实例activation、terminal/session-loss
+recovery以及真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格仍未交付，因此该证据不关闭MCP或Phase 4，
 也不把本规范标记为Implemented/Verified。此前workspace
 all-target/all-feature check、test、doc-test与strict Clippy及public API/contract/schema/cutover门禁证据不自动覆盖本次变更；本次完整门禁
 结果以实施计划的最新记录为准。

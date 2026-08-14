@@ -4371,7 +4371,7 @@ async fn append_sandbox_controller_event(
     .await
 }
 
-async fn claim_sandbox_worker_receipt(
+pub(crate) async fn claim_sandbox_worker_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     audit: &SandboxWorkerAudit,
     job_id: &ResourceId,
@@ -4545,7 +4545,7 @@ async fn terminalize_sandbox_recovery_receipt(
     Ok(())
 }
 
-async fn terminalize_sandbox_worker_receipt(
+pub(crate) async fn terminalize_sandbox_worker_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     audit: &SandboxWorkerAudit,
     job_id: &ResourceId,

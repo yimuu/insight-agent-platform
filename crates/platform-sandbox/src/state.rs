@@ -674,7 +674,7 @@ pub struct SandboxJobPayload {
 #[serde(tag = "workload_kind", content = "workload", rename_all = "snake_case")]
 pub enum SandboxJobWorkload {
     CapabilityExecution(Box<SandboxExecutionJobPayload>),
-    ManagedMcpSubscriptionSession(crate::ManagedMcpSandboxSessionJobPayload),
+    ManagedMcpSubscriptionSession(Box<crate::ManagedMcpSandboxSessionJobPayload>),
 }
 
 impl SandboxJobPayload {
@@ -690,7 +690,7 @@ impl SandboxJobPayload {
     ) -> Self {
         Self {
             schema_version: 1,
-            workload: SandboxJobWorkload::ManagedMcpSubscriptionSession(payload),
+            workload: SandboxJobWorkload::ManagedMcpSubscriptionSession(Box::new(payload)),
         }
     }
 

@@ -17,7 +17,7 @@ use insight_platform_contracts::{
     PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PublishedMcpMethod,
     PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
     SandboxAbiVersion, SandboxArtifactIoPolicyDocument, SandboxCleanupPolicy,
-    SandboxEntrypointKind, SandboxIsolationClass, SandboxIsolationPolicyDocument,
+    SandboxEntrypointKind, SandboxIsolationClass, SandboxIsolationPolicyDocument, SandboxJobState,
     SandboxNetworkPolicyDocument, SandboxPackageResourceSpec, SandboxProfileResourceSpec,
     SandboxResourcePolicyDocument, SandboxRuntimeFamily, SandboxRuntimeResourceSpec,
     SandboxSecretDeliveryMode, SandboxSecretResolutionPolicyDocument, SecretBindingPayload,
@@ -46,9 +46,11 @@ use insight_platform_postgres::{
     verify_schema,
 };
 use insight_platform_sandbox::{
-    AcceptManagedMcpSandboxSession, ManagedMcpSandboxSessionCallback,
-    ManagedMcpSandboxSessionRequest, SandboxExecutionPolicyClosure, SandboxNetworkMode,
-    SandboxResourceEnvelope, ScopedArtifactGrant, ScopedSecretGrant, SANDBOX_PROTOCOL_VERSION,
+    AcceptManagedMcpSandboxSession, ClaimSandboxJobs, CommitManagedMcpSandboxSessionPhase,
+    CommitManagedMcpSandboxSessionReady, ManagedMcpSandboxSessionCallback,
+    ManagedMcpSandboxSessionReadyEvidence, ManagedMcpSandboxSessionRequest, NodeAttestorRoute,
+    SandboxExecutionPolicyClosure, SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit,
+    ScopedArtifactGrant, ScopedSecretGrant, SANDBOX_PROTOCOL_VERSION,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use std::collections::BTreeMap;
@@ -2769,4 +2771,273 @@ async fn managed_mcp_sandbox_session_admission_fixture(
     .await
     .unwrap();
     assert_eq!(durable_rows, (1, 1, 1));
+
+    let executor_identity_digest = named_digest("managed-session-executor-identity");
+    let attestor_route: NodeAttestorRoute = "https://10.0.0.7:9443".parse().unwrap();
+    let generic_claim = repository
+        .claim_sandbox_jobs(ClaimSandboxJobs {
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x67f),
+            worker_manifest_digest: winner.request.executor_worker_manifest_digest.clone(),
+            isolation_backend_contract_digest: winner
+                .request
+                .isolation_backend_contract_digest
+                .clone(),
+            executor_identity_digest: executor_identity_digest.clone(),
+            attestor_route: attestor_route.clone(),
+            limit: 1,
+            lease_milliseconds: 60_000,
+            lease_token_digests: vec![named_digest("generic-worker-cannot-claim-session")],
+        })
+        .await
+        .unwrap();
+    assert!(generic_claim.is_empty());
+
+    let claim_command = ClaimSandboxJobs {
+        worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x680),
+        worker_manifest_digest: winner.request.executor_worker_manifest_digest.clone(),
+        isolation_backend_contract_digest: winner.request.isolation_backend_contract_digest.clone(),
+        executor_identity_digest: executor_identity_digest.clone(),
+        attestor_route: attestor_route.clone(),
+        limit: 1,
+        lease_milliseconds: 60_000,
+        lease_token_digests: vec![named_digest("managed-session-physical-lease-a")],
+    };
+    let mut competing_claim = claim_command.clone();
+    competing_claim.worker_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 0x681);
+    competing_claim.lease_token_digests = vec![named_digest("managed-session-physical-lease-b")];
+    let (claim_a, claim_b) = tokio::join!(
+        repository.claim_managed_mcp_sandbox_sessions(claim_command),
+        repository.claim_managed_mcp_sandbox_sessions(competing_claim),
+    );
+    let mut claimed = claim_a.unwrap();
+    claimed.extend(claim_b.unwrap());
+    assert_eq!(claimed.len(), 1, "only one Managed Session claim may win");
+    let claim = claimed.pop().unwrap();
+    let sandbox_worker = claim.fence.worker_process_generation_id.clone();
+    assert_eq!(claim.request, winner.request);
+    assert_eq!(claim.usage_reservation_id, winner.usage_reservation_id);
+
+    let phase_audit = |base: u16, key: &str| SandboxWorkerAudit {
+        tenant_id: fixture.subscription.tenant_id.clone(),
+        worker_process_generation_id: sandbox_worker.clone(),
+        receipt_id: id(ResourceKind::Receipt, base),
+        event_id: id(ResourceKind::Event, base + 1),
+        outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+        idempotency_key_digest: named_digest(key),
+        request_digest: named_digest("placeholder"),
+        receipt_expires_at: now + Duration::hours(2),
+    };
+    let mut preparing = CommitManagedMcpSandboxSessionPhase {
+        audit: phase_audit(0x690, "managed-session-preparing-key"),
+        identity: winner.request.identity.clone(),
+        fence: claim.fence.clone(),
+        target: SandboxJobState::Preparing,
+        executor_identity_digest: executor_identity_digest.clone(),
+        attestor_route: attestor_route.clone(),
+        phase_evidence_digest: named_digest("managed-session-preparing-evidence"),
+    };
+    preparing.audit.request_digest = preparing.canonical_request_digest().unwrap();
+    let prepared = match repository
+        .commit_managed_mcp_sandbox_session_phase(preparing.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(decision) => decision,
+        CommandOutcome::Replayed(_) => panic!("Managed MCP Preparing must apply"),
+    };
+    assert!(matches!(
+        repository
+            .commit_managed_mcp_sandbox_session_phase(preparing)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(_)
+    ));
+    assert_eq!(
+        prepared.physical_payload.physical_state,
+        SandboxJobState::Preparing
+    );
+    assert_eq!(prepared.logical_state.to_string(), "pending");
+
+    let mut stale_starting = CommitManagedMcpSandboxSessionPhase {
+        audit: phase_audit(0x6a0, "managed-session-stale-starting-key"),
+        identity: winner.request.identity.clone(),
+        fence: DomainJobFence {
+            expected_version: prepared.physical_job.version - 1,
+            worker_process_generation_id: sandbox_worker.clone(),
+            lease_generation: prepared.physical_job.lease_generation,
+            token_digest: claim.fence.token_digest.clone(),
+        },
+        target: SandboxJobState::Starting,
+        executor_identity_digest: executor_identity_digest.clone(),
+        attestor_route: attestor_route.clone(),
+        phase_evidence_digest: named_digest("managed-session-stale-starting-evidence"),
+    };
+    stale_starting.audit.request_digest = stale_starting.canonical_request_digest().unwrap();
+    assert!(matches!(
+        repository
+            .commit_managed_mcp_sandbox_session_phase(stale_starting)
+            .await,
+        Err(RepositoryError::StaleFence)
+    ));
+
+    let mut starting = CommitManagedMcpSandboxSessionPhase {
+        audit: phase_audit(0x6b0, "managed-session-starting-key"),
+        identity: winner.request.identity.clone(),
+        fence: DomainJobFence {
+            expected_version: prepared.physical_job.version,
+            worker_process_generation_id: sandbox_worker.clone(),
+            lease_generation: prepared.physical_job.lease_generation,
+            token_digest: claim.fence.token_digest.clone(),
+        },
+        target: SandboxJobState::Starting,
+        executor_identity_digest: executor_identity_digest.clone(),
+        attestor_route: attestor_route.clone(),
+        phase_evidence_digest: named_digest("managed-session-starting-evidence"),
+    };
+    starting.audit.request_digest = starting.canonical_request_digest().unwrap();
+    let started = match repository
+        .commit_managed_mcp_sandbox_session_phase(starting.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(decision) => decision,
+        CommandOutcome::Replayed(_) => panic!("Managed MCP Starting must apply"),
+    };
+    assert!(matches!(
+        repository
+            .commit_managed_mcp_sandbox_session_phase(starting)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(_)
+    ));
+    assert_eq!(
+        started.logical_payload.session.state,
+        McpSessionState::Initializing
+    );
+
+    let ready_evidence = ManagedMcpSandboxSessionReadyEvidence {
+        schema_version: 1,
+        session_identity_digest: winner.request.identity.canonical_digest.clone(),
+        sandbox_identity_digest: named_digest("managed-session-sandbox-identity"),
+        encrypted_opaque_session: EncryptedMcpState {
+            scheme: "aes256_gcm_v1".to_owned(),
+            ciphertext: vec![5, 8, 13, 21],
+            key_id: "managed-session-runtime-key".to_owned(),
+            key_reference_digest: named_digest("managed-session-runtime-key-reference"),
+            plaintext_digest: named_digest("managed-session-runtime-opaque-state"),
+        },
+        established_at: now,
+        expires_at: now + Duration::minutes(4),
+        protocol_evidence_digest: named_digest("managed-session-protocol-evidence"),
+        canonical_digest: named_digest("placeholder"),
+    }
+    .seal()
+    .unwrap();
+    let ready_evidence_digest = ready_evidence.canonical_digest.clone();
+    let mut ready = CommitManagedMcpSandboxSessionReady {
+        audit: phase_audit(0x6c0, "managed-session-ready-key"),
+        identity: winner.request.identity.clone(),
+        fence: DomainJobFence {
+            expected_version: started.physical_job.version,
+            worker_process_generation_id: sandbox_worker,
+            lease_generation: started.physical_job.lease_generation,
+            token_digest: claim.fence.token_digest,
+        },
+        ready: ready_evidence,
+        phase_evidence_digest: named_digest("managed-session-ready-phase-evidence"),
+    };
+    ready.audit.request_digest = ready.canonical_request_digest().unwrap();
+    let ready_decision = match repository
+        .commit_managed_mcp_sandbox_session_ready(ready.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(decision) => decision,
+        CommandOutcome::Replayed(_) => panic!("Managed MCP Ready must apply"),
+    };
+    assert!(matches!(
+        repository
+            .commit_managed_mcp_sandbox_session_ready(ready)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(_)
+    ));
+    assert_eq!(ready_decision.logical_state.to_string(), "active");
+    assert_eq!(
+        ready_decision.logical_payload.session.state,
+        McpSessionState::Ready
+    );
+    assert_eq!(
+        ready_decision.physical_payload.physical_state,
+        SandboxJobState::Running
+    );
+    assert!(matches!(
+        repository
+            .accept_managed_mcp_sandbox_session(winner.clone())
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(_)
+    ));
+
+    let final_states: (String, String, String, String, String, String, bool) = sqlx::query_as(
+        r#"
+        SELECT subscription.state,
+               subscription.payload #>> '{session,state}',
+               physical.state,
+               physical.payload #>> '{workload,physical_state}',
+               subscription.payload #>> '{session,encrypted_opaque_session,key_id}',
+               physical.payload #>> '{workload,ready_binding,ready_evidence_digest}',
+               physical.payload #> '{workload,ready_binding,encrypted_opaque_session}' IS NULL
+        FROM insight_platform.invocations AS subscription
+        JOIN insight_platform.jobs AS physical
+          ON physical.tenant_id = subscription.tenant_id
+         AND physical.job_id = $3
+        WHERE subscription.tenant_id = $1 AND subscription.invocation_id = $2
+        "#,
+    )
+    .bind(fixture.subscription.tenant_id.to_string())
+    .bind(fixture.subscription.subscription_id.to_string())
+    .bind(winner.request.identity.physical_job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        final_states,
+        (
+            "active".to_owned(),
+            "ready".to_owned(),
+            "running".to_owned(),
+            "running".to_owned(),
+            "managed-session-runtime-key".to_owned(),
+            ready_evidence_digest.to_string(),
+            true,
+        )
+    );
+    let lifecycle_durability: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM insight_platform.receipts
+             WHERE tenant_id = $1 AND receipt_id IN ($2, $3, $4) AND state = 'succeeded'),
+            (SELECT count(*) FROM insight_platform.events
+             WHERE tenant_id = $1 AND event_id IN ($5, $6, $7)
+               AND event_type IN ('mcp.managed_sandbox_session_phase_changed',
+                                  'mcp.managed_sandbox_session_ready')),
+            (SELECT count(*) FROM insight_platform.outbox_events
+             WHERE tenant_id = $1 AND outbox_id IN ($8, $9, $10))
+        "#,
+    )
+    .bind(fixture.subscription.tenant_id.to_string())
+    .bind(id(ResourceKind::Receipt, 0x690).to_string())
+    .bind(id(ResourceKind::Receipt, 0x6b0).to_string())
+    .bind(id(ResourceKind::Receipt, 0x6c0).to_string())
+    .bind(id(ResourceKind::Event, 0x691).to_string())
+    .bind(id(ResourceKind::Event, 0x6b1).to_string())
+    .bind(id(ResourceKind::Event, 0x6c1).to_string())
+    .bind(id(ResourceKind::OutboxEvent, 0x692).to_string())
+    .bind(id(ResourceKind::OutboxEvent, 0x6b2).to_string())
+    .bind(id(ResourceKind::OutboxEvent, 0x6c2).to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(lifecycle_durability, (3, 3, 3));
 }

@@ -776,14 +776,17 @@ private vsock依序交付一次性runtime/input materialization，最后才发�
 digest共同进入start evidence。已安装且合同闭合的`managed_mcp_server` runtime可由该Provider选择。定向domain/config/protocol/socket fixture
 实际通过，但尚无真实Linux KVM/jailer/guest-agent互操作、进程终止/恢复、escape或饱和证据，因此不把microVM backend或Phase 4/6标记为完成。
 
-Managed stdio Resource subscription的原子admission首片现已复用共享23表交付，不增加表或migration。closed `SandboxJobPayload`以
+Managed stdio Resource subscription的durable authority现已复用共享23表交付到Ready提交，不增加表或migration。closed `SandboxJobPayload`以
 `capability_execution | managed_mcp_subscription_session`区分两种物理workload；Managed variant冻结逻辑subscription/Job、session
 generation、MCP/Discovery/Auth closure、Runtime/Package/Profile/Policy、Artifact/Secret grant、四维资源reservation、deadline与callback。
 PostgreSQL在一个事务内验证并锁定全部exact authority，双向写入逻辑session link与唯一Sandbox Job，将逻辑MCP Job停回Waiting，并提交
-Receipt/Event/Outbox。真实PostgreSQL 16并发fixture覆盖唯一winner、replay、idempotency drift、反向payload identity、grant/quota与canary。
-普通MCP subscription Worker同时已fail closed为Streamable HTTP only。该首片尚未实现Managed session provider的Preparing/Ready evidence、
-双Job durable Ready提交后的activation、terminal/session-loss recovery或真实进程资格，因此不能据此领取或执行新Managed session Job，
-也不关闭Phase 4。
+Receipt/Event/Outbox。专用claim按closed workload discriminator领取，普通Sandbox claim对其不可见；并发claim只有一个lease winner。
+fenced `Preparing`提交Executor/Attestor evidence，`Starting`原子推进逻辑session为`Initializing`，Ready事务同时推进逻辑
+`Active/Ready`与物理`Running`。加密opaque session只存逻辑Invocation，物理Job只保留credential-free ready binding，避免复制current
+session状态。全新PostgreSQL 16 fixture覆盖admission唯一winner/replay/idempotency drift、双向identity、grant/quota/canary、队列隔离、
+claim first-winner、phase replay/stale fence与双状态Ready的Receipt/Event/Outbox原子性。普通MCP subscription Worker同时已fail closed为
+Streamable HTTP only。该切片尚未组合实际Managed session Provider prepare、durable commit后的同实例activation、terminal/session-loss
+recovery或真实进程资格，因此不关闭Phase 4。
 
 process-generation isolation authority是独立于PostgreSQL lease、NATS和Controller进程的node/runtime attestor；数据库lease过期、NATS
 断连、Pod deletion request、Controller本地cache miss或对旧generation RPC超时都不是absence proof。其closed请求必须精确绑定
