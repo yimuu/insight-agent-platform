@@ -1,0 +1,19 @@
+[package]
+name = "insight-platform-artifacts"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-jobs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+uuid.workspace = true
