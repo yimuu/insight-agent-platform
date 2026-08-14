@@ -577,6 +577,13 @@ activation及Ready提交失败时destroy且不activation。cleanup port现支持
 prepare响应丢失收敛保留closed路径。独立Managed session authority internal gRPC已由Controller以`PgRepository`和node attestor组合，只有
 exact microVM Executor URI SAN可调用claim/phase/Ready；Executor library专用claim driver与普通Sandbox共享`LocalWorkerPools`，执行
 reserve-before-claim并在长生命周期command future结束前持有permit。定向authority RPC、Executor和Sandbox domain测试分别9、3、33项通过。
+Controller的microVM Artifact RPC现保留完整closed请求与workload tag，不再转换成普通WASI读取；统一Artifact Broker为两种backend共享
+object-store/KMS/二次授权和一个in-flight bulkhead，同时调用各自typed PostgreSQL authority。Managed runtime bundle读取被限制为物理
+`Starting`、exact Executor lease、deadline和active `read_whole` package grant；grant回收按workload分流，并以Managed
+Job/request/attempt/lease/Executor及Ready sandbox identity幂等验证。全新PostgreSQL 16 Managed fixture和既有Sandbox回归fixture实际通过，
+错误Executor/workload均fail closed，重复回收返回相同evidence且active grant归零；不增加表或migration。
+本切片最终通过workspace all-target/all-feature test与doc-test、strict Clippy、public API baseline、crate boundary、cutover residual及
+Sandbox deployment合同门禁；两个显式ignored RustFS资格测试仍不计入证据。
 establishment Worker、实际Managed microVM session Provider与terminal supervisor仍未组合进Executor进程，heartbeat、terminal/session-loss
 recovery和真实资格也未交付，故上述开放项和Phase状态不变。
 

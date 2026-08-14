@@ -20,24 +20,25 @@ use insight_platform_sandbox::{
     HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor,
     ManagedMcpSandboxSessionClaimAuthority, ManagedMcpSandboxSessionExecutionAuthority,
     ManagedMcpSandboxSessionPhaseDecision, MicroVmArtifactBroker, MicroVmArtifactBrokerError,
-    MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest, MicroVmGrantRevocationError,
-    MicroVmGrantRevocationEvidence, MicroVmGrantRevoker, MicroVmIsolationProviderBackend,
-    MicroVmProviderExecutionFence, PreparedSandbox, ProveWasiProcessGenerationAbsent,
-    RegisterWasiExecutorProcessGeneration, RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants,
-    RunningSandbox, SandboxBackendFailure, SandboxBackendFailureStage, SandboxClaimAuthority,
-    SandboxClaimFailure, SandboxCleanupEvidence, SandboxCommandLimits, SandboxExecutionAuthority,
-    SandboxExecutionRequest, SandboxExecutorBackend, SandboxIsolationBackendKind,
-    SandboxLeaseRecoveryEvidence, SandboxPhaseDecision, SandboxTerminationEvidence,
-    TerminateSandbox, VerifyWasiExecutorProcessGeneration, WasiArtifactBroker,
-    WasiArtifactBrokerError, WasiArtifactReadPurpose, WasiArtifactReadRequest,
-    WasiExecutorProcessAttestationAuthority, WasiExecutorProcessIdentityEvidence,
-    WasiExecutorProcessRegistrar, WasiExecutorProcessRegistrationError,
-    WasiExecutorProcessRegistrationVerifier, WasiExecutorRegistrationPeer,
-    WasiGrantRevocationError, WasiGrantRevocationEvidence, WasiGrantRevoker,
-    WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolation,
+    MicroVmArtifactReadRequest, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
+    MicroVmGrantRevoker, MicroVmIsolationProviderBackend, MicroVmProviderExecutionFence,
+    PreparedSandbox, ProveWasiProcessGenerationAbsent, RegisterWasiExecutorProcessGeneration,
+    RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants, RunningSandbox, SandboxBackendFailure,
+    SandboxBackendFailureStage, SandboxClaimAuthority, SandboxClaimFailure, SandboxCleanupEvidence,
+    SandboxCommandLimits, SandboxExecutionAuthority, SandboxExecutionRequest,
+    SandboxExecutorBackend, SandboxIsolationBackendKind, SandboxLeaseRecoveryEvidence,
+    SandboxPhaseDecision, SandboxTerminationEvidence, TerminateSandbox,
+    VerifyWasiExecutorProcessGeneration, WasiArtifactBroker, WasiArtifactBrokerError,
+    WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
+    WasiExecutorProcessIdentityEvidence, WasiExecutorProcessRegistrar,
+    WasiExecutorProcessRegistrationError, WasiExecutorProcessRegistrationVerifier,
+    WasiExecutorRegistrationPeer, WasiGrantRevocationError, WasiGrantRevocationEvidence,
+    WasiGrantRevoker, WasiProcessGenerationAbsenceEvidence, WasiProcessGenerationIsolation,
     WasiProcessGenerationIsolationError, WasiValueValidationError, WasiValueValidationRequest,
     WasiValueValidator,
 };
+#[cfg(test)]
+use insight_platform_sandbox::{MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{error::Error, fmt, sync::Arc};
@@ -1270,7 +1271,7 @@ impl<B, G> SandboxMicroVmBrokerGrpcService<B, G> {
 #[tonic::async_trait]
 impl<B, G> SandboxMicroVmBrokerService for SandboxMicroVmBrokerGrpcService<B, G>
 where
-    B: WasiArtifactBroker + 'static,
+    B: MicroVmArtifactBroker + 'static,
     G: MicroVmGrantRevoker + 'static,
 {
     type ReadExactMicroVmArtifactStream = std::pin::Pin<
@@ -1291,26 +1292,11 @@ where
             .map_err(|_| Status::invalid_argument("invalid microVM Artifact read fence"))?;
         let artifact = request.artifact.clone();
         let maximum_bytes = request.maximum_bytes;
-        let wasi_request = WasiArtifactReadRequest {
-            tenant_id: request.tenant_id,
-            sandbox_job_id: request.sandbox_job_id,
-            request_digest: request.request_digest,
-            worker_process_generation_id: request.executor_worker_process_generation_id,
-            lease_generation: request.lease_generation,
-            artifact: artifact.clone(),
-            purpose: match request.purpose {
-                MicroVmArtifactReadPurpose::RuntimeBundle => WasiArtifactReadPurpose::RuntimeBundle,
-                MicroVmArtifactReadPurpose::InputValue => WasiArtifactReadPurpose::InputValue,
-            },
-            read_grant: request.read_grant,
-            maximum_bytes,
-            deadline: request.deadline,
-        };
         let value = self
             .artifacts
-            .read_exact(wasi_request)
+            .read_exact(request)
             .await
-            .map_err(artifact_status)?;
+            .map_err(micro_vm_artifact_status)?;
         if value.len() > maximum_bytes
             || u64::try_from(value.len()).ok() != Some(artifact.byte_length())
             || bytes_digest(&value)? != *artifact.content_digest()
@@ -2109,6 +2095,24 @@ fn artifact_status(error: WasiArtifactBrokerError) -> Status {
     }
 }
 
+fn micro_vm_artifact_status(error: MicroVmArtifactBrokerError) -> Status {
+    match error {
+        MicroVmArtifactBrokerError::Unavailable => {
+            Status::unavailable("microVM Artifact broker unavailable")
+        }
+        MicroVmArtifactBrokerError::Denied => {
+            Status::permission_denied("microVM Artifact read denied")
+        }
+        MicroVmArtifactBrokerError::NotFound => Status::not_found("microVM Artifact not found"),
+        MicroVmArtifactBrokerError::Integrity => {
+            Status::failed_precondition("microVM Artifact integrity failed")
+        }
+        MicroVmArtifactBrokerError::TooLarge => {
+            Status::resource_exhausted("microVM Artifact too large")
+        }
+    }
+}
+
 fn micro_vm_artifact_client_error(status: Status) -> MicroVmArtifactBrokerError {
     match status.code() {
         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
@@ -2443,15 +2447,15 @@ mod tests {
     struct RecordingArtifactBroker {
         calls: AtomicUsize,
         value: Vec<u8>,
-        requests: Mutex<Vec<WasiArtifactReadRequest>>,
+        requests: Mutex<Vec<MicroVmArtifactReadRequest>>,
     }
 
     #[async_trait]
-    impl WasiArtifactBroker for RecordingArtifactBroker {
+    impl MicroVmArtifactBroker for RecordingArtifactBroker {
         async fn read_exact(
             &self,
-            request: WasiArtifactReadRequest,
-        ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
+            request: MicroVmArtifactReadRequest,
+        ) -> Result<Vec<u8>, MicroVmArtifactBrokerError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             self.requests.lock().unwrap().push(request);
             Ok(self.value.clone())
@@ -3190,6 +3194,7 @@ mod tests {
         });
         let endpoint = format!("https://localhost:{}", address.port());
         let request = RevokeMicroVmSandboxGrants {
+            workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
             tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
                 .unwrap(),
             sandbox_job_id: ResourceId::from_uuid_v7(
@@ -3228,6 +3233,7 @@ mod tests {
         );
         assert_eq!(revoker.calls.load(Ordering::Acquire), 1);
         let artifact_request = MicroVmArtifactReadRequest {
+            workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
             tenant_id: request.tenant_id.clone(),
             sandbox_job_id: request.sandbox_job_id.clone(),
             request_digest: request.request_digest.clone(),
@@ -3251,10 +3257,7 @@ mod tests {
         {
             let translated = artifacts.requests.lock().unwrap();
             assert_eq!(translated.len(), 1);
-            assert_eq!(
-                translated[0].worker_process_generation_id,
-                artifact_request.executor_worker_process_generation_id
-            );
+            assert_eq!(translated[0], artifact_request);
             assert_eq!(translated[0].artifact, artifact);
         }
 

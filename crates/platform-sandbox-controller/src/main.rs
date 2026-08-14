@@ -6,7 +6,7 @@
 
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
-    BrokeredWasiArtifactBroker,
+    BrokeredSandboxArtifactBroker,
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
@@ -202,7 +202,8 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::ArtifactProviderUnavailable)?;
     let (unsealer, stores) = providers.into_components();
     let artifacts = Arc::new(
-        BrokeredWasiArtifactBroker::new(
+        BrokeredSandboxArtifactBroker::new(
+            repository.clone(),
             repository.clone(),
             unsealer,
             stores,

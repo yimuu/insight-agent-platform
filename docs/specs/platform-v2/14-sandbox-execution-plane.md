@@ -791,7 +791,12 @@ sandbox identity，任一post-prepare合同、authority或provider失败都必�
 销毁且不activation。cleanup port现可在prepare响应丢失时按exact request/fence、无prepared evidence执行销毁。独立Managed session
 authority internal gRPC已在Controller组合，先由node attestor校验登记，再只允许exact microVM Executor URI SAN执行claim/phase/Ready；
 Executor library的专用claim driver与普通Sandbox共享同一`LocalWorkerPools`，先保留本地容量再claim，并在长生命周期command future结束前
-保持permit。mTLS authority、Executor pool和Sandbox domain定向测试分别9、3、33项通过。该切片尚未把establishment Worker、真实Managed
+保持permit。microVM Artifact RPC现逐字转发closed请求，不再转换成会丢失Provider/sandbox/workload identity的WASI请求；统一
+`BrokeredSandboxArtifactBroker`为WASI与microVM共享object store、KMS unseal、两阶段authorization和单一in-flight bulkhead，但分别调用
+各自typed PostgreSQL authority。Managed session只可在`Starting`用exact active package grant读取runtime bundle；grant revoker按closed
+workload区分有限Capability与长生命周期session，并对Managed Job/request/attempt/lease/Executor及Ready sandbox identity执行幂等回收。
+全新PostgreSQL 16 Managed fixture及既有Sandbox回归fixture均实际通过，不增加表或migration。mTLS authority、Executor pool和Sandbox
+domain定向测试分别9、3、33项通过。该切片尚未把establishment Worker、真实Managed
 microVM session Provider和terminal supervisor组合进Executor进程，也没有heartbeat、terminal/session-loss recovery或真实进程资格，
 因此不关闭Phase 4。
 

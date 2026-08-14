@@ -11,6 +11,7 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_sandbox::{
+    MicroVmArtifactBroker, MicroVmArtifactBrokerError, MicroVmArtifactReadRequest,
     WasiArtifactBroker, WasiArtifactBrokerError, WasiArtifactReadRequest,
 };
 use serde::Deserialize;
@@ -250,24 +251,70 @@ impl InstalledArtifactObjectStoreCatalog {
     }
 }
 
-pub struct BrokeredWasiArtifactBroker {
-    authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
+pub struct BrokeredSandboxArtifactBroker {
+    wasi_authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
+    micro_vm_authority: Arc<dyn ArtifactObjectReadAuthority<MicroVmArtifactReadRequest>>,
     unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
     stores: InstalledArtifactObjectStoreCatalog,
     limits: ArtifactBrokerLimits,
     in_flight: Arc<Semaphore>,
 }
 
-impl BrokeredWasiArtifactBroker {
+trait SandboxArtifactReadRequest {
+    fn deadline(&self) -> chrono::DateTime<Utc>;
+    fn maximum_bytes(&self) -> usize;
+    fn artifact(&self) -> &insight_platform_contracts::ArtifactRef;
+}
+
+impl SandboxArtifactReadRequest for WasiArtifactReadRequest {
+    fn deadline(&self) -> chrono::DateTime<Utc> {
+        self.deadline
+    }
+
+    fn maximum_bytes(&self) -> usize {
+        self.maximum_bytes
+    }
+
+    fn artifact(&self) -> &insight_platform_contracts::ArtifactRef {
+        &self.artifact
+    }
+}
+
+impl SandboxArtifactReadRequest for MicroVmArtifactReadRequest {
+    fn deadline(&self) -> chrono::DateTime<Utc> {
+        self.deadline
+    }
+
+    fn maximum_bytes(&self) -> usize {
+        self.maximum_bytes
+    }
+
+    fn artifact(&self) -> &insight_platform_contracts::ArtifactRef {
+        &self.artifact
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactBrokerReadError {
+    Unavailable,
+    Denied,
+    NotFound,
+    TooLarge,
+    Integrity,
+}
+
+impl BrokeredSandboxArtifactBroker {
     pub fn new(
-        authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
+        wasi_authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
+        micro_vm_authority: Arc<dyn ArtifactObjectReadAuthority<MicroVmArtifactReadRequest>>,
         unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
         stores: InstalledArtifactObjectStoreCatalog,
         limits: ArtifactBrokerLimits,
     ) -> Result<Self, ArtifactBrokerConfigurationError> {
         limits.validate()?;
         Ok(Self {
-            authority,
+            wasi_authority,
+            micro_vm_authority,
             unsealer,
             stores,
             limits,
@@ -275,35 +322,39 @@ impl BrokeredWasiArtifactBroker {
         })
     }
 
-    async fn read_inner(
+    async fn read_inner<R>(
         &self,
-        request: &WasiArtifactReadRequest,
-    ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
-        if request.deadline <= Utc::now()
-            || request.maximum_bytes == 0
-            || request.maximum_bytes > self.limits.maximum_read_bytes
-            || u64::try_from(request.maximum_bytes)
-                .map_or(true, |maximum| maximum < request.artifact.byte_length())
+        authority: &dyn ArtifactObjectReadAuthority<R>,
+        request: &R,
+    ) -> Result<Vec<u8>, ArtifactBrokerReadError>
+    where
+        R: SandboxArtifactReadRequest + Sync,
+    {
+        let maximum_bytes = request.maximum_bytes();
+        if request.deadline() <= Utc::now()
+            || maximum_bytes == 0
+            || maximum_bytes > self.limits.maximum_read_bytes
+            || u64::try_from(maximum_bytes)
+                .map_or(true, |maximum| maximum < request.artifact().byte_length())
         {
-            return Err(WasiArtifactBrokerError::Denied);
+            return Err(ArtifactBrokerReadError::Denied);
         }
-        let authorized = self
-            .authority
+        let authorized = authority
             .authorize_object_read(request)
             .await
             .map_err(map_authority_error)?;
         authorized
             .validate()
-            .map_err(|_| WasiArtifactBrokerError::Integrity)?;
-        if authorized.artifact != request.artifact {
-            return Err(WasiArtifactBrokerError::Integrity);
+            .map_err(|_| ArtifactBrokerReadError::Integrity)?;
+        if &authorized.artifact != request.artifact() {
+            return Err(ArtifactBrokerReadError::Integrity);
         }
         let store = self
             .stores
             .get(&authorized.storage_binding_digest)
-            .ok_or(WasiArtifactBrokerError::Denied)?;
+            .ok_or(ArtifactBrokerReadError::Denied)?;
         if store.backend() != authorized.backend {
-            return Err(WasiArtifactBrokerError::Integrity);
+            return Err(ArtifactBrokerReadError::Integrity);
         }
         let plaintext = self
             .unsealer
@@ -312,66 +363,91 @@ impl BrokeredWasiArtifactBroker {
             .map_err(map_unseal_error)?;
         let locator = parse_locator(plaintext.expose())?;
         if !locator.validate_for(&authorized) {
-            return Err(WasiArtifactBrokerError::Integrity);
+            return Err(ArtifactBrokerReadError::Integrity);
         }
         let head = store
             .head_exact(&locator.object_key, &locator.object_generation)
             .await
             .map_err(map_store_error)?;
-        require_object_metadata(&authorized, &head, request.maximum_bytes)?;
+        require_object_metadata(&authorized, &head, maximum_bytes)?;
         let object = store
             .read_exact(
                 &locator.object_key,
                 &locator.object_generation,
-                request.maximum_bytes,
+                maximum_bytes,
             )
             .await
             .map_err(map_store_error)?;
-        require_object_metadata(&authorized, &object.metadata, request.maximum_bytes)?;
+        require_object_metadata(&authorized, &object.metadata, maximum_bytes)?;
         if sha256(object.expose()) != authorized.artifact.content_digest().clone() {
-            return Err(WasiArtifactBrokerError::Integrity);
+            return Err(ArtifactBrokerReadError::Integrity);
         }
 
         // The object I/O happened outside the database transaction. Re-authorize before release
         // so terminal/revoke/lease changes cannot race a successful read into the Executor.
-        let final_authorization = self
-            .authority
+        let final_authorization = authority
             .authorize_object_read(request)
             .await
             .map_err(map_authority_error)?;
         if final_authorization.authorization_digest != authorized.authorization_digest {
-            return Err(WasiArtifactBrokerError::Denied);
+            return Err(ArtifactBrokerReadError::Denied);
         }
         Ok(object.into_bytes())
     }
-}
 
-#[async_trait]
-impl WasiArtifactBroker for BrokeredWasiArtifactBroker {
-    async fn read_exact(
+    async fn read<R>(
         &self,
-        request: WasiArtifactReadRequest,
-    ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
+        authority: &dyn ArtifactObjectReadAuthority<R>,
+        request: &R,
+    ) -> Result<Vec<u8>, ArtifactBrokerReadError>
+    where
+        R: SandboxArtifactReadRequest + Sync,
+    {
         let permit = self
             .in_flight
             .clone()
             .try_acquire_owned()
-            .map_err(|_| WasiArtifactBrokerError::Unavailable)?;
+            .map_err(|_| ArtifactBrokerReadError::Unavailable)?;
         let deadline_budget = request
-            .deadline
+            .deadline()
             .signed_duration_since(Utc::now())
             .to_std()
-            .map_err(|_| WasiArtifactBrokerError::Denied)?;
+            .map_err(|_| ArtifactBrokerReadError::Denied)?;
         let budget = self.limits.operation_timeout.min(deadline_budget);
-        let result = timeout(budget, self.read_inner(&request))
+        let result = timeout(budget, self.read_inner(authority, request))
             .await
-            .map_err(|_| WasiArtifactBrokerError::Unavailable)?;
+            .map_err(|_| ArtifactBrokerReadError::Unavailable)?;
         drop(permit);
         result
     }
 }
 
-fn parse_locator(bytes: &[u8]) -> Result<ArtifactObjectLocator, WasiArtifactBrokerError> {
+#[async_trait]
+impl WasiArtifactBroker for BrokeredSandboxArtifactBroker {
+    async fn read_exact(
+        &self,
+        request: WasiArtifactReadRequest,
+    ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
+        self.read(self.wasi_authority.as_ref(), &request)
+            .await
+            .map_err(map_wasi_broker_error)
+    }
+}
+
+#[async_trait]
+impl MicroVmArtifactBroker for BrokeredSandboxArtifactBroker {
+    async fn read_exact(
+        &self,
+        request: MicroVmArtifactReadRequest,
+    ) -> Result<Vec<u8>, MicroVmArtifactBrokerError> {
+        request.validate()?;
+        self.read(self.micro_vm_authority.as_ref(), &request)
+            .await
+            .map_err(map_micro_vm_broker_error)
+    }
+}
+
+fn parse_locator(bytes: &[u8]) -> Result<ArtifactObjectLocator, ArtifactBrokerReadError> {
     let value = parse_strict_json(
         bytes,
         JsonLimits {
@@ -382,23 +458,23 @@ fn parse_locator(bytes: &[u8]) -> Result<ArtifactObjectLocator, WasiArtifactBrok
             max_string_bytes: MAX_ARTIFACT_OBJECT_KEY_BYTES,
         },
     )
-    .map_err(|_| WasiArtifactBrokerError::Integrity)?;
-    if serde_jcs::to_vec(&value).map_err(|_| WasiArtifactBrokerError::Integrity)? != bytes {
-        return Err(WasiArtifactBrokerError::Integrity);
+    .map_err(|_| ArtifactBrokerReadError::Integrity)?;
+    if serde_jcs::to_vec(&value).map_err(|_| ArtifactBrokerReadError::Integrity)? != bytes {
+        return Err(ArtifactBrokerReadError::Integrity);
     }
-    serde_json::from_value(value).map_err(|_| WasiArtifactBrokerError::Integrity)
+    serde_json::from_value(value).map_err(|_| ArtifactBrokerReadError::Integrity)
 }
 
 fn require_object_metadata(
     authorized: &AuthorizedArtifactObjectRead,
     metadata: &ArtifactObjectMetadata,
     maximum_bytes: usize,
-) -> Result<(), WasiArtifactBrokerError> {
+) -> Result<(), ArtifactBrokerReadError> {
     if metadata.object_generation != authorized.object_generation
         || metadata.byte_length != authorized.artifact.byte_length()
         || metadata.byte_length > u64::try_from(maximum_bytes).unwrap_or(u64::MAX)
     {
-        return Err(WasiArtifactBrokerError::Integrity);
+        return Err(ArtifactBrokerReadError::Integrity);
     }
     Ok(())
 }
@@ -434,30 +510,50 @@ fn lower_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-fn map_authority_error(error: ArtifactObjectReadAuthorityError) -> WasiArtifactBrokerError {
+fn map_authority_error(error: ArtifactObjectReadAuthorityError) -> ArtifactBrokerReadError {
     match error {
-        ArtifactObjectReadAuthorityError::Unavailable => WasiArtifactBrokerError::Unavailable,
-        ArtifactObjectReadAuthorityError::Denied => WasiArtifactBrokerError::Denied,
-        ArtifactObjectReadAuthorityError::NotFound => WasiArtifactBrokerError::NotFound,
-        ArtifactObjectReadAuthorityError::InvalidEvidence => WasiArtifactBrokerError::Integrity,
+        ArtifactObjectReadAuthorityError::Unavailable => ArtifactBrokerReadError::Unavailable,
+        ArtifactObjectReadAuthorityError::Denied => ArtifactBrokerReadError::Denied,
+        ArtifactObjectReadAuthorityError::NotFound => ArtifactBrokerReadError::NotFound,
+        ArtifactObjectReadAuthorityError::InvalidEvidence => ArtifactBrokerReadError::Integrity,
     }
 }
 
-fn map_unseal_error(error: ArtifactObjectReferenceUnsealError) -> WasiArtifactBrokerError {
+fn map_unseal_error(error: ArtifactObjectReferenceUnsealError) -> ArtifactBrokerReadError {
     match error {
-        ArtifactObjectReferenceUnsealError::Unavailable => WasiArtifactBrokerError::Unavailable,
-        ArtifactObjectReferenceUnsealError::Rejected => WasiArtifactBrokerError::Denied,
-        ArtifactObjectReferenceUnsealError::InvalidEvidence => WasiArtifactBrokerError::Integrity,
+        ArtifactObjectReferenceUnsealError::Unavailable => ArtifactBrokerReadError::Unavailable,
+        ArtifactObjectReferenceUnsealError::Rejected => ArtifactBrokerReadError::Denied,
+        ArtifactObjectReferenceUnsealError::InvalidEvidence => ArtifactBrokerReadError::Integrity,
     }
 }
 
-fn map_store_error(error: ArtifactObjectStoreError) -> WasiArtifactBrokerError {
+fn map_store_error(error: ArtifactObjectStoreError) -> ArtifactBrokerReadError {
     match error {
-        ArtifactObjectStoreError::Unavailable => WasiArtifactBrokerError::Unavailable,
-        ArtifactObjectStoreError::NotFound => WasiArtifactBrokerError::NotFound,
-        ArtifactObjectStoreError::Rejected => WasiArtifactBrokerError::Denied,
-        ArtifactObjectStoreError::TooLarge => WasiArtifactBrokerError::TooLarge,
-        ArtifactObjectStoreError::InvalidEvidence => WasiArtifactBrokerError::Integrity,
+        ArtifactObjectStoreError::Unavailable => ArtifactBrokerReadError::Unavailable,
+        ArtifactObjectStoreError::NotFound => ArtifactBrokerReadError::NotFound,
+        ArtifactObjectStoreError::Rejected => ArtifactBrokerReadError::Denied,
+        ArtifactObjectStoreError::TooLarge => ArtifactBrokerReadError::TooLarge,
+        ArtifactObjectStoreError::InvalidEvidence => ArtifactBrokerReadError::Integrity,
+    }
+}
+
+fn map_wasi_broker_error(error: ArtifactBrokerReadError) -> WasiArtifactBrokerError {
+    match error {
+        ArtifactBrokerReadError::Unavailable => WasiArtifactBrokerError::Unavailable,
+        ArtifactBrokerReadError::Denied => WasiArtifactBrokerError::Denied,
+        ArtifactBrokerReadError::NotFound => WasiArtifactBrokerError::NotFound,
+        ArtifactBrokerReadError::TooLarge => WasiArtifactBrokerError::TooLarge,
+        ArtifactBrokerReadError::Integrity => WasiArtifactBrokerError::Integrity,
+    }
+}
+
+fn map_micro_vm_broker_error(error: ArtifactBrokerReadError) -> MicroVmArtifactBrokerError {
+    match error {
+        ArtifactBrokerReadError::Unavailable => MicroVmArtifactBrokerError::Unavailable,
+        ArtifactBrokerReadError::Denied => MicroVmArtifactBrokerError::Denied,
+        ArtifactBrokerReadError::NotFound => MicroVmArtifactBrokerError::NotFound,
+        ArtifactBrokerReadError::TooLarge => MicroVmArtifactBrokerError::TooLarge,
+        ArtifactBrokerReadError::Integrity => MicroVmArtifactBrokerError::Integrity,
     }
 }
 

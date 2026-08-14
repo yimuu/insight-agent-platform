@@ -3,7 +3,7 @@ use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, ArtifactObjectBytes, ArtifactObjectMetadata,
     ArtifactObjectReferenceUnsealError, ArtifactObjectReferenceUnsealer, ArtifactObjectStoreError,
-    BrokeredWasiArtifactBroker, DecryptedArtifactObjectReference, InstalledArtifactObjectStore,
+    BrokeredSandboxArtifactBroker, DecryptedArtifactObjectReference, InstalledArtifactObjectStore,
     InstalledArtifactObjectStoreCatalog,
 };
 use insight_platform_artifacts::{ArtifactReferenceSnapshot, AuthorizedArtifactObjectRead};
@@ -43,12 +43,12 @@ use insight_platform_sandbox::{
     AcceptSandboxExecution, ClaimSandboxJobs, CollectedSandbox, CommitSandboxPhase, DestroySandbox,
     ExecuteSandboxJob, HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor,
     InstalledSandboxBackendRegistry, MergeSandboxCapabilityOutcome, MicroVmGrantRevoker,
-    PreparedSandbox, RecoverExpiredSandboxLease, RevokeMicroVmSandboxGrants,
-    RevokeWasiSandboxGrants, RunningSandbox, SafeSandboxTraceContext, SandboxBackendFailure,
-    SandboxCleanupDisposition, SandboxCleanupEvidence, SandboxCompletedOutput,
-    SandboxControlAuthority, SandboxControllerAudit, SandboxExecutionAuthority,
-    SandboxExecutionOutcome, SandboxExecutionPolicyClosure, SandboxExecutorBackend,
-    SandboxExecutorHost, SandboxExecutorWorker, SandboxGatewayAuthority,
+    MicroVmSandboxWorkloadKind, PreparedSandbox, RecoverExpiredSandboxLease,
+    RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants, RunningSandbox, SafeSandboxTraceContext,
+    SandboxBackendFailure, SandboxCleanupDisposition, SandboxCleanupEvidence,
+    SandboxCompletedOutput, SandboxControlAuthority, SandboxControllerAudit,
+    SandboxExecutionAuthority, SandboxExecutionOutcome, SandboxExecutionPolicyClosure,
+    SandboxExecutorBackend, SandboxExecutorHost, SandboxExecutorWorker, SandboxGatewayAuthority,
     SandboxIsolationBackendKind, SandboxLeaseRecoveryAction, SandboxLeaseRecoveryAuthority,
     SandboxLeaseRecoveryDisposition, SandboxNetworkMode, SandboxOutcomeMergeAudit,
     SandboxPrestartControlOutcome, SandboxRecoveryAudit, SandboxResourceEnvelope,
@@ -1849,6 +1849,7 @@ impl SandboxExecutorBackend for WasiBackend {
         command: DestroySandbox,
     ) -> Result<SandboxCleanupEvidence, SandboxBackendFailure> {
         let micro_vm_revoke = RevokeMicroVmSandboxGrants {
+            workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
             tenant_id: command.tenant_id.clone(),
             sandbox_job_id: command.sandbox_job_id.clone(),
             request_digest: command.request_digest.clone(),
@@ -2617,11 +2618,17 @@ async fn sandbox_fixture() {
         runtime_bundle_bytes: runtime_bundle_bytes(),
     });
     let artifact_broker = Arc::new(
-        BrokeredWasiArtifactBroker::new(
+        BrokeredSandboxArtifactBroker::new(
             Arc::clone(&repository)
                 as Arc<
                     dyn insight_platform_artifacts::ArtifactObjectReadAuthority<
                         WasiArtifactReadRequest,
+                    >,
+                >,
+            Arc::clone(&repository)
+                as Arc<
+                    dyn insight_platform_artifacts::ArtifactObjectReadAuthority<
+                        insight_platform_sandbox::MicroVmArtifactReadRequest,
                     >,
                 >,
             Arc::new(FixtureArtifactUnsealer),

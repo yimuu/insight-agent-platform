@@ -16,8 +16,8 @@ use insight_platform_sandbox::{
     AbortSandboxExecution, DestroySandbox, ExpiredSandboxLease, MicroVmArtifactBroker,
     MicroVmArtifactBrokerError, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
     MicroVmGrantRevocationEvidence, MicroVmGrantRevoker, MicroVmProviderExecutionFence,
-    RevokeMicroVmSandboxGrants, SandboxCleanupDisposition, SandboxExecutionRequest,
-    SandboxNetworkMode, ScopedArtifactGrant, TerminateSandbox,
+    MicroVmSandboxWorkloadKind, RevokeMicroVmSandboxGrants, SandboxCleanupDisposition,
+    SandboxExecutionRequest, SandboxNetworkMode, ScopedArtifactGrant, TerminateSandbox,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -581,6 +581,7 @@ impl LinuxFirecrackerInstance {
             .shared
             .artifact_broker
             .read_exact(MicroVmArtifactReadRequest {
+                workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
                 tenant_id: request.tenant_id.clone(),
                 sandbox_job_id: request.sandbox_job_id.clone(),
                 request_digest: request.request_digest.clone(),
@@ -827,6 +828,7 @@ impl LinuxFirecrackerInstance {
         self.shared
             .grant_authority
             .revoke_exact(RevokeMicroVmSandboxGrants {
+                workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
                 tenant_id: key.tenant_id,
                 sandbox_job_id: key.sandbox_job_id,
                 request_digest: key.request_digest,

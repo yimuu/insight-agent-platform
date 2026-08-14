@@ -6292,7 +6292,7 @@ async fn load_mcp_subscription_job(
     })
 }
 
-async fn load_managed_mcp_sandbox_session_job(
+pub(crate) async fn load_managed_mcp_sandbox_session_job(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
     job_id: &ResourceId,

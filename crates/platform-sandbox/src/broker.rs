@@ -222,9 +222,17 @@ pub trait WasiGrantRevoker: Send + Sync {
 /// Provider-side revocation command for one exact microVM physical attempt. The Executor
 /// generation is the PostgreSQL lease owner; the Provider generation and sandbox identity bind
 /// the independently deployed VMM process and jail that performed cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MicroVmSandboxWorkloadKind {
+    CapabilityExecution,
+    ManagedMcpSubscriptionSession,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RevokeMicroVmSandboxGrants {
+    pub workload_kind: MicroVmSandboxWorkloadKind,
     pub tenant_id: ResourceId,
     pub sandbox_job_id: ResourceId,
     pub request_digest: Sha256Digest,
@@ -284,6 +292,7 @@ pub enum MicroVmArtifactReadPurpose {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MicroVmArtifactReadRequest {
+    pub workload_kind: MicroVmSandboxWorkloadKind,
     pub tenant_id: ResourceId,
     pub sandbox_job_id: ResourceId,
     pub request_digest: Sha256Digest,
@@ -300,9 +309,23 @@ pub struct MicroVmArtifactReadRequest {
 
 impl MicroVmArtifactReadRequest {
     pub fn validate(&self) -> Result<(), MicroVmArtifactBrokerError> {
-        let grant_shape_valid = match self.purpose {
-            MicroVmArtifactReadPurpose::RuntimeBundle => self.read_grant.is_none(),
-            MicroVmArtifactReadPurpose::InputValue => self.read_grant.is_some(),
+        let grant_shape_valid = match (self.workload_kind, self.purpose) {
+            (
+                MicroVmSandboxWorkloadKind::CapabilityExecution,
+                MicroVmArtifactReadPurpose::RuntimeBundle,
+            ) => self.read_grant.is_none(),
+            (
+                MicroVmSandboxWorkloadKind::CapabilityExecution,
+                MicroVmArtifactReadPurpose::InputValue,
+            )
+            | (
+                MicroVmSandboxWorkloadKind::ManagedMcpSubscriptionSession,
+                MicroVmArtifactReadPurpose::RuntimeBundle,
+            ) => self.read_grant.is_some(),
+            (
+                MicroVmSandboxWorkloadKind::ManagedMcpSubscriptionSession,
+                MicroVmArtifactReadPurpose::InputValue,
+            ) => false,
         };
         if self.tenant_id.kind() != ResourceKind::Tenant
             || self.sandbox_job_id.kind() != ResourceKind::SandboxJob

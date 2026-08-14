@@ -1,5 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
-use insight_platform_artifacts::ArtifactReferenceSnapshot;
+use insight_platform_artifacts::{
+    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, ArtifactReferenceSnapshot,
+};
 use insight_platform_contracts::{
     canonical_digest, AllowedMcpServerCapabilities, ArtifactPurpose, ArtifactRef,
     ArtifactReferenceKind, AuthoringPackage, CapabilityEndpointScheme, CodeTrustClass,
@@ -48,7 +50,9 @@ use insight_platform_postgres::{
 use insight_platform_sandbox::{
     AcceptManagedMcpSandboxSession, ClaimSandboxJobs, CommitManagedMcpSandboxSessionPhase,
     CommitManagedMcpSandboxSessionReady, ManagedMcpSandboxSessionCallback,
-    ManagedMcpSandboxSessionReadyEvidence, ManagedMcpSandboxSessionRequest, NodeAttestorRoute,
+    ManagedMcpSandboxSessionReadyEvidence, ManagedMcpSandboxSessionRequest,
+    MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest, MicroVmGrantRevoker,
+    MicroVmSandboxWorkloadKind, NodeAttestorRoute, RevokeMicroVmSandboxGrants,
     SandboxExecutionPolicyClosure, SandboxNetworkMode, SandboxResourceEnvelope, SandboxWorkerAudit,
     ScopedArtifactGrant, ScopedSecretGrant, SANDBOX_PROTOCOL_VERSION,
 };
@@ -479,12 +483,18 @@ async fn insert_ready_artifact(
     tenant_id: &ResourceId,
     principal_id: &ResourceId,
     reference: &ArtifactRef,
+    purpose: ArtifactPurpose,
     retention_revision: &ExactVersionRef,
 ) {
     let blob_id =
         ResourceId::from_uuid_v7(ResourceKind::InternalBlob, reference.artifact_id().uuid())
             .unwrap();
     let now = Utc::now();
+    let metadata = TypedPayload::new(
+        1,
+        &serde_json::json!({"display_name": reference.display_name()}),
+    )
+    .unwrap();
     sqlx::query(
         r#"
         INSERT INTO insight_platform.artifact_blobs (
@@ -500,7 +510,7 @@ async fn insert_ready_artifact(
     .bind(named_digest("storage").to_string())
     .bind(named_digest("security-domain").to_string())
     .bind(vec![1_u8, 2, 3])
-    .bind(id(ResourceKind::Policy, 0x171).to_string())
+    .bind(id(ResourceKind::EncryptionDomain, 0x171).to_string())
     .bind(reference.content_digest().to_string())
     .bind(i64::try_from(reference.byte_length()).unwrap())
     .bind(now)
@@ -514,18 +524,21 @@ async fn insert_ready_artifact(
             expected_digest, declared_media_type, verified_media_type, state, version,
             metadata_schema_version, metadata, metadata_digest, retention_policy_revision_id,
             retain_until, created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, 'mcp_resource', $4, $5, $6, $7, $7, 'ready', 1,
-                  1, '{}'::jsonb, $8, $9, $10, $11, $12, $12)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, 'ready', 1,
+                  $9, $10, $11, $12, $13, $14, $15, $15)
         "#,
     )
     .bind(tenant_id.to_string())
     .bind(reference.artifact_id().to_string())
     .bind(blob_id.to_string())
+    .bind(purpose.as_str())
     .bind(reference.classification().as_str())
     .bind(i64::try_from(reference.byte_length()).unwrap())
     .bind(reference.content_digest().to_string())
     .bind(reference.media_type())
-    .bind(named_digest("artifact-metadata").to_string())
+    .bind(metadata.schema_version)
+    .bind(metadata.value)
+    .bind(metadata.digest)
     .bind(retention_revision.revision_id.to_string())
     .bind(now + Duration::days(1))
     .bind(principal_id.to_string())
@@ -856,7 +869,15 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
     .await;
 
     let objects = artifact(0x100, "mcp-discovery-objects");
-    insert_ready_artifact(pool, &tenant_id, &principal_id, &objects, &trust_policy).await;
+    insert_ready_artifact(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &objects,
+        ArtifactPurpose::McpResource,
+        &trust_policy,
+    )
+    .await;
     let mcp_endpoint = endpoint("mcp.example.test", "/mcp");
     let mcp_closure = insight_platform_contracts::McpDeploymentClosure {
         server_revision: server_revision.clone(),
@@ -1341,6 +1362,7 @@ async fn seed_managed_sandbox_variant(
         &base.tenant_id,
         &base.principal_id,
         &runtime_bundle,
+        ArtifactPurpose::Package,
         &trust_policy,
     )
     .await;
@@ -2915,10 +2937,52 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         McpSessionState::Initializing
     );
 
+    let provider_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 0x6b8);
+    let sandbox_identity_digest = named_digest("managed-session-sandbox-identity");
+    let artifact_read = MicroVmArtifactReadRequest {
+        workload_kind: MicroVmSandboxWorkloadKind::ManagedMcpSubscriptionSession,
+        tenant_id: winner.request.identity.tenant_id.clone(),
+        sandbox_job_id: winner.request.identity.sandbox_job_id.clone(),
+        request_digest: winner.request.request_digest.clone(),
+        executor_worker_process_generation_id: sandbox_worker.clone(),
+        provider_process_generation_id: provider_process_generation_id.clone(),
+        sandbox_identity_digest: sandbox_identity_digest.clone(),
+        lease_generation: started.physical_job.lease_generation,
+        artifact: winner.request.package.runtime_bundle_artifact.clone(),
+        purpose: MicroVmArtifactReadPurpose::RuntimeBundle,
+        read_grant: Some(winner.request.artifact_grants[0].clone()),
+        maximum_bytes: usize::try_from(
+            winner.request.package.runtime_bundle_artifact.byte_length(),
+        )
+        .unwrap(),
+        deadline: winner.request.deadline,
+    };
+    let authorized = repository
+        .authorize_object_read(&artifact_read)
+        .await
+        .unwrap();
+    assert_eq!(authorized.artifact, artifact_read.artifact);
+    assert_eq!(authorized.tenant_id, artifact_read.tenant_id);
+    let mut stale_artifact_read = artifact_read.clone();
+    stale_artifact_read.executor_worker_process_generation_id =
+        id(ResourceKind::WorkerProcessGeneration, 0x6b9);
+    assert!(matches!(
+        repository.authorize_object_read(&stale_artifact_read).await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
+    let mut wrong_workload_artifact_read = artifact_read.clone();
+    wrong_workload_artifact_read.workload_kind = MicroVmSandboxWorkloadKind::CapabilityExecution;
+    assert!(matches!(
+        repository
+            .authorize_object_read(&wrong_workload_artifact_read)
+            .await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
+
     let ready_evidence = ManagedMcpSandboxSessionReadyEvidence {
         schema_version: 1,
         session_identity_digest: winner.request.identity.canonical_digest.clone(),
-        sandbox_identity_digest: named_digest("managed-session-sandbox-identity"),
+        sandbox_identity_digest: sandbox_identity_digest.clone(),
         encrypted_opaque_session: EncryptedMcpState {
             scheme: "aes256_gcm_v1".to_owned(),
             ciphertext: vec![5, 8, 13, 21],
@@ -2939,7 +3003,7 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         identity: winner.request.identity.clone(),
         fence: DomainJobFence {
             expected_version: started.physical_job.version,
-            worker_process_generation_id: sandbox_worker,
+            worker_process_generation_id: sandbox_worker.clone(),
             lease_generation: started.physical_job.lease_generation,
             token_digest: claim.fence.token_digest,
         },
@@ -2971,6 +3035,35 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         ready_decision.physical_payload.physical_state,
         SandboxJobState::Running
     );
+    let revoke = RevokeMicroVmSandboxGrants {
+        workload_kind: MicroVmSandboxWorkloadKind::ManagedMcpSubscriptionSession,
+        tenant_id: winner.request.identity.tenant_id.clone(),
+        sandbox_job_id: winner.request.identity.sandbox_job_id.clone(),
+        request_digest: winner.request.request_digest.clone(),
+        executor_worker_process_generation_id: sandbox_worker.clone(),
+        provider_process_generation_id,
+        sandbox_identity_digest,
+        attempt_no: ready_decision.physical_job.attempt_count,
+        lease_generation: ready_decision.physical_job.lease_generation,
+    };
+    let revoked = repository.revoke_exact(revoke.clone()).await.unwrap();
+    assert_eq!(
+        repository.revoke_exact(revoke.clone()).await.unwrap(),
+        revoked
+    );
+    let mut stale_revoke = revoke;
+    stale_revoke.executor_worker_process_generation_id =
+        id(ResourceKind::WorkerProcessGeneration, 0x6ba);
+    assert!(repository.revoke_exact(stale_revoke).await.is_err());
+    let active_grants: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.artifact_links WHERE tenant_id = $1 AND owner_kind = 'sandbox_job' AND owner_id = $2 AND link_kind = 'grant' AND state = 'active'",
+    )
+    .bind(fixture.subscription.tenant_id.to_string())
+    .bind(winner.request.identity.sandbox_job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(active_grants, 0);
     assert!(matches!(
         repository
             .accept_managed_mcp_sandbox_session(winner.clone())

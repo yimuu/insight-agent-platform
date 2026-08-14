@@ -747,6 +747,11 @@ activate。cleanup port进一步改为按exact request/fence销毁，允许后�
 未登记的VM留在运行面。独立Managed session authority internal gRPC已接入Controller，并以node attestor登记和exact microVM Executor URI
 SAN限制claim/phase/Ready方法；Executor library也新增专用claim driver，与普通Sandbox共享同一`LocalWorkerPools`，先保留本地容量再claim，
 并在长生命周期command future结束前持续持有permit。mTLS authority、Executor pool及Sandbox domain定向测试分别9、3、33项通过。
+Controller的microVM Artifact RPC现保留closed workload tag，不再把Managed session请求降格为普通WASI请求；同一个无状态
+Artifact Broker按workload选择PostgreSQL authority并共享一个in-flight bulkhead。Managed runtime bundle只允许物理Job处于
+`Starting`、exact Executor lease仍有效且`read_whole` grant仍为active时读取，并在object I/O前后各授权一次。Provider销毁后的grant
+回收也按Managed workload、Job/request/attempt/lease/Executor及Ready后的sandbox identity幂等验证。全新PostgreSQL 16 fixture实际覆盖
+成功读取、错误Executor/workload拒绝、Ready后两次回收得到同一evidence及active grant归零；该切片不增加表或migration。
 该切片仍未把establishment Worker、真实microVM Managed session Provider和terminal supervisor组合进Executor进程；heartbeat、
 terminal/session-loss recovery以及真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未交付，因此该证据不关闭MCP或Phase 4，也不把本规范标记为
 Implemented/Verified。此前workspace

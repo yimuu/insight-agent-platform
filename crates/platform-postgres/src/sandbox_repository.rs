@@ -8,7 +8,7 @@ use crate::{
         load_capability_invocation, load_enabled_exact_published_version,
         load_exact_capability_interface_spec, validate_capability_value_against_schema,
     },
-    mcp_repository::resolve_mcp_execution_contract,
+    mcp_repository::{load_managed_mcp_sandbox_session_job, resolve_mcp_execution_contract},
     repository::{
         append_command_event, append_scheduler_event, claim_command_receipt,
         decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
@@ -50,8 +50,9 @@ use insight_platform_sandbox::{
     decide_expired_lease_recovery, decide_prestart_control, AcceptSandboxExecution,
     ClaimSandboxJobs, ClaimedSandboxJob, CommitSandboxOutcome, CommitSandboxPhase,
     ExpiredSandboxLease, HeartbeatSandboxExecution, ManagedMcpSandboxSessionRequest,
-    MergeSandboxCapabilityOutcome, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
-    MicroVmGrantRevoker, PendingSandboxCapabilityOutcome, RecoverExpiredSandboxLease,
+    MergeSandboxCapabilityOutcome, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
+    MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence, MicroVmGrantRevoker,
+    MicroVmSandboxWorkloadKind, PendingSandboxCapabilityOutcome, RecoverExpiredSandboxLease,
     RecoverSandboxControlSignals, ResolveSandboxControlEvent, RevokeMicroVmSandboxGrants,
     RevokeWasiSandboxGrants, SandboxClaimAuthority, SandboxClaimFailure, SandboxCommandLimits,
     SandboxControlAuthority, SandboxControlScanCursor, SandboxControlSignalPage,
@@ -367,9 +368,139 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
         authorize_wasi_artifact_purpose(&mut transaction, request, &leased_request, database_now)
             .await
             .map_err(classify_artifact_read_repository_error)?;
-        let authorized = load_authorized_artifact_object(&mut transaction, request, &current)
+        let projection = SandboxArtifactObjectReadProjection {
+            tenant_id: &request.tenant_id,
+            sandbox_job_id: &request.sandbox_job_id,
+            request_digest: &request.request_digest,
+            worker_process_generation_id: &request.worker_process_generation_id,
+            lease_generation: request.lease_generation,
+            artifact: &request.artifact,
+            purpose_domain: match request.purpose {
+                WasiArtifactReadPurpose::RuntimeBundle => "runtime_bundle",
+                WasiArtifactReadPurpose::InputValue => "input_value",
+            },
+            purpose_class: match request.purpose {
+                WasiArtifactReadPurpose::RuntimeBundle => SandboxArtifactReadClass::Package,
+                WasiArtifactReadPurpose::InputValue => SandboxArtifactReadClass::Input,
+            },
+            job_version: current.job.version,
+        };
+        let authorized = load_authorized_artifact_object(&mut transaction, projection)
             .await
             .map_err(classify_artifact_read_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        Ok(authorized)
+    }
+}
+
+#[async_trait::async_trait]
+impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
+    async fn authorize_object_read(
+        &self,
+        request: &MicroVmArtifactReadRequest,
+    ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
+        request
+            .validate()
+            .map_err(|_| ArtifactObjectReadAuthorityError::Denied)?;
+        if request.workload_kind == MicroVmSandboxWorkloadKind::CapabilityExecution {
+            let wasi_request = WasiArtifactReadRequest {
+                tenant_id: request.tenant_id.clone(),
+                sandbox_job_id: request.sandbox_job_id.clone(),
+                request_digest: request.request_digest.clone(),
+                worker_process_generation_id: request.executor_worker_process_generation_id.clone(),
+                lease_generation: request.lease_generation,
+                artifact: request.artifact.clone(),
+                purpose: match request.purpose {
+                    MicroVmArtifactReadPurpose::RuntimeBundle => {
+                        WasiArtifactReadPurpose::RuntimeBundle
+                    }
+                    MicroVmArtifactReadPurpose::InputValue => WasiArtifactReadPurpose::InputValue,
+                },
+                read_grant: request.read_grant.clone(),
+                maximum_bytes: request.maximum_bytes,
+                deadline: request.deadline,
+            };
+            return <Self as ArtifactObjectReadAuthority<WasiArtifactReadRequest>>::authorize_object_read(
+                self,
+                &wasi_request,
+            )
+            .await;
+        }
+        if request.purpose != MicroVmArtifactReadPurpose::RuntimeBundle {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        let grant = request
+            .read_grant
+            .as_ref()
+            .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
+        let job_id = ResourceId::from_uuid_v7(ResourceKind::Job, request.sandbox_job_id.uuid())
+            .map_err(|_| ArtifactObjectReadAuthorityError::Denied)?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        let database_now = database_now(&mut transaction)
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        let (job, payload, _) = load_managed_mcp_sandbox_session_job(
+            &mut transaction,
+            &request.tenant_id,
+            &job_id,
+            self.sandbox_limits(),
+            true,
+        )
+        .await
+        .map_err(classify_artifact_read_repository_error)?;
+        let lease = job
+            .lease
+            .as_ref()
+            .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
+        if payload.physical_state != SandboxJobState::Starting
+            || payload.request.identity.sandbox_job_id != request.sandbox_job_id
+            || payload.request.request_digest != request.request_digest
+            || lease.worker_process_generation_id != request.executor_worker_process_generation_id
+            || lease.lease_generation != request.lease_generation
+            || payload.request.deadline != request.deadline
+            || request.deadline <= database_now
+            || request.artifact != payload.request.package.runtime_bundle_artifact
+            || !payload
+                .request
+                .artifact_grants
+                .iter()
+                .any(|frozen| frozen == grant)
+        {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        require_active_sandbox_artifact_grant(
+            &mut transaction,
+            &request.tenant_id,
+            &request.sandbox_job_id,
+            &request.artifact,
+            grant,
+            database_now,
+        )
+        .await
+        .map_err(classify_artifact_read_repository_error)?;
+        let authorized = load_authorized_artifact_object(
+            &mut transaction,
+            SandboxArtifactObjectReadProjection {
+                tenant_id: &request.tenant_id,
+                sandbox_job_id: &request.sandbox_job_id,
+                request_digest: &request.request_digest,
+                worker_process_generation_id: &request.executor_worker_process_generation_id,
+                lease_generation: request.lease_generation,
+                artifact: &request.artifact,
+                purpose_domain: "managed_mcp_session_runtime_bundle",
+                purpose_class: SandboxArtifactReadClass::Package,
+                job_version: job.version,
+            },
+        )
+        .await
+        .map_err(classify_artifact_read_repository_error)?;
         transaction
             .commit()
             .await
@@ -407,48 +538,87 @@ async fn authorize_wasi_artifact_purpose(
             {
                 return Err(RepositoryError::PermissionDenied);
             }
-            let row = sqlx::query(
-                r#"
-                SELECT source_artifact_id, link_key_digest, state, version,
-                       payload_schema_version, payload, payload_digest, expires_at
-                FROM insight_platform.artifact_links
-                WHERE tenant_id = $1 AND artifact_link_id = $2
-                  AND link_kind = 'grant' AND owner_kind = 'sandbox_job'
-                  AND owner_id = $3
-                FOR UPDATE
-                "#,
+            require_active_sandbox_artifact_grant(
+                transaction,
+                &request.tenant_id,
+                &request.sandbox_job_id,
+                &request.artifact,
+                grant,
+                database_now,
             )
-            .bind(request.tenant_id.to_string())
-            .bind(grant.grant_id.to_string())
-            .bind(request.sandbox_job_id.to_string())
-            .fetch_optional(&mut **transaction)
-            .await?
-            .ok_or(RepositoryError::PermissionDenied)?;
-            let payload =
-                payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
-            let durable_grant: insight_platform_sandbox::ScopedArtifactGrant =
-                decode_versioned_payload(&payload, "Sandbox Artifact grant")?;
-            if row.try_get::<String, _>("state")? != "active"
-                || row.try_get::<i64, _>("version")? <= 0
-                || row
-                    .try_get::<Option<String>, _>("source_artifact_id")?
-                    .as_deref()
-                    != Some(request.artifact.artifact_id().to_string().as_str())
-                || row.try_get::<Option<DateTime<Utc>>, _>("expires_at")? != Some(grant.expires_at)
-                || durable_grant != *grant
-                || row.try_get::<String, _>("link_key_digest")? != grant.grant_digest.to_string()
-            {
-                return Err(RepositoryError::PermissionDenied);
-            }
+            .await?;
         }
     }
     Ok(())
 }
 
+async fn require_active_sandbox_artifact_grant(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    sandbox_job_id: &ResourceId,
+    artifact: &insight_platform_contracts::ArtifactRef,
+    grant: &ScopedArtifactGrant,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT source_artifact_id, link_key_digest, state, version,
+               payload_schema_version, payload, payload_digest, expires_at
+        FROM insight_platform.artifact_links
+        WHERE tenant_id = $1 AND artifact_link_id = $2
+          AND link_kind = 'grant' AND owner_kind = 'sandbox_job'
+          AND owner_id = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(grant.grant_id.to_string())
+    .bind(sandbox_job_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::PermissionDenied)?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let durable_grant: ScopedArtifactGrant =
+        decode_versioned_payload(&payload, "Sandbox Artifact grant")?;
+    if grant.operation != ArtifactGrantOperation::ReadWhole
+        || grant.artifact.as_ref() != Some(artifact)
+        || grant.expires_at <= database_now
+        || row.try_get::<String, _>("state")? != "active"
+        || row.try_get::<i64, _>("version")? <= 0
+        || row
+            .try_get::<Option<String>, _>("source_artifact_id")?
+            .as_deref()
+            != Some(artifact.artifact_id().to_string().as_str())
+        || row.try_get::<Option<DateTime<Utc>>, _>("expires_at")? != Some(grant.expires_at)
+        || durable_grant != *grant
+        || row.try_get::<String, _>("link_key_digest")? != grant.grant_digest.to_string()
+    {
+        return Err(RepositoryError::PermissionDenied);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxArtifactReadClass {
+    Package,
+    Input,
+}
+
+struct SandboxArtifactObjectReadProjection<'a> {
+    tenant_id: &'a ResourceId,
+    sandbox_job_id: &'a ResourceId,
+    request_digest: &'a Sha256Digest,
+    worker_process_generation_id: &'a ResourceId,
+    lease_generation: u64,
+    artifact: &'a insight_platform_contracts::ArtifactRef,
+    purpose_domain: &'static str,
+    purpose_class: SandboxArtifactReadClass,
+    job_version: u64,
+}
+
 async fn load_authorized_artifact_object(
     transaction: &mut Transaction<'_, Postgres>,
-    request: &WasiArtifactReadRequest,
-    current: &LockedSandboxJob,
+    request: SandboxArtifactObjectReadProjection<'_>,
 ) -> Result<AuthorizedArtifactObjectRead, RepositoryError> {
     let row = sqlx::query(
         r#"
@@ -483,9 +653,9 @@ async fn load_authorized_artifact_object(
         .value
         .get("display_name")
         .and_then(|value| value.as_str());
-    let expected_purpose = match request.purpose {
-        WasiArtifactReadPurpose::RuntimeBundle => ArtifactPurpose::Package,
-        WasiArtifactReadPurpose::InputValue => {
+    let expected_purpose = match request.purpose_class {
+        SandboxArtifactReadClass::Package => ArtifactPurpose::Package,
+        SandboxArtifactReadClass::Input => {
             let purpose = row
                 .try_get::<String, _>("purpose")?
                 .parse::<ArtifactPurpose>()
@@ -545,13 +715,14 @@ async fn load_authorized_artifact_object(
         "blob_id": blob_id,
         "blob_version": blob_version,
         "encryption_domain_id": encryption_domain_id,
-        "job_version": current.job.version,
+        "job_version": request.job_version,
         "key_id": key_id,
         "lease_generation": request.lease_generation,
         "object_generation": object_generation,
         "object_reference_ciphertext_digest": object_reference_ciphertext_digest,
-        "purpose": request.purpose,
+        "purpose": request.purpose_domain,
         "request_digest": request.request_digest,
+        "sandbox_job_id": request.sandbox_job_id,
         "schema_version": 1,
         "storage_binding_digest": storage_binding_digest,
         "tenant_id": request.tenant_id,
@@ -784,6 +955,9 @@ impl MicroVmGrantRevoker for PgRepository {
         request: RevokeMicroVmSandboxGrants,
     ) -> Result<MicroVmGrantRevocationEvidence, MicroVmGrantRevocationError> {
         request.validate()?;
+        if request.workload_kind == MicroVmSandboxWorkloadKind::ManagedMcpSubscriptionSession {
+            return revoke_managed_mcp_session_grants(self, request).await;
+        }
         let job_id = ResourceId::from_uuid_v7(ResourceKind::Job, request.sandbox_job_id.uuid())
             .map_err(|_| MicroVmGrantRevocationError::Rejected)?;
         let mut transaction = self
@@ -852,6 +1026,7 @@ impl MicroVmGrantRevoker for PgRepository {
             "sandbox_job_id": request.sandbox_job_id,
             "schema_version": 1,
             "tenant_id": request.tenant_id,
+            "workload_kind": request.workload_kind,
         }))
         .map_err(|_| MicroVmGrantRevocationError::Rejected)?
         .parse()
@@ -862,6 +1037,83 @@ impl MicroVmGrantRevoker for PgRepository {
             .map_err(|_| MicroVmGrantRevocationError::Unavailable)?;
         Ok(MicroVmGrantRevocationEvidence { evidence_digest })
     }
+}
+
+async fn revoke_managed_mcp_session_grants(
+    repository: &PgRepository,
+    request: RevokeMicroVmSandboxGrants,
+) -> Result<MicroVmGrantRevocationEvidence, MicroVmGrantRevocationError> {
+    let job_id = ResourceId::from_uuid_v7(ResourceKind::Job, request.sandbox_job_id.uuid())
+        .map_err(|_| MicroVmGrantRevocationError::Rejected)?;
+    let mut transaction = repository
+        .pool()
+        .begin()
+        .await
+        .map_err(|_| MicroVmGrantRevocationError::Unavailable)?;
+    let database_now = database_now(&mut transaction)
+        .await
+        .map_err(|_| MicroVmGrantRevocationError::Unavailable)?;
+    let (job, payload, _) = load_managed_mcp_sandbox_session_job(
+        &mut transaction,
+        &request.tenant_id,
+        &job_id,
+        repository.sandbox_limits(),
+        true,
+    )
+    .await
+    .map_err(classify_micro_vm_grant_repository_error)?;
+    let lease = job
+        .lease
+        .as_ref()
+        .ok_or(MicroVmGrantRevocationError::Rejected)?;
+    let ready_identity_matches = payload
+        .ready_binding
+        .as_ref()
+        .is_none_or(|ready| ready.sandbox_identity_digest == request.sandbox_identity_digest);
+    if payload.request.identity.sandbox_job_id != request.sandbox_job_id
+        || payload.request.request_digest != request.request_digest
+        || job.attempt_count != request.attempt_no
+        || lease.worker_process_generation_id != request.executor_worker_process_generation_id
+        || lease.lease_generation != request.lease_generation
+        || !matches!(
+            payload.physical_state,
+            SandboxJobState::Preparing | SandboxJobState::Starting | SandboxJobState::Running
+        )
+        || !ready_identity_matches
+    {
+        return Err(MicroVmGrantRevocationError::Rejected);
+    }
+    let expected = u64::try_from(payload.request.artifact_grants.len())
+        .map_err(|_| MicroVmGrantRevocationError::Rejected)?;
+    release_and_confirm_sandbox_artifact_grants(
+        &mut transaction,
+        &request.tenant_id.to_string(),
+        &request.sandbox_job_id.to_string(),
+        expected,
+        database_now,
+    )
+    .await
+    .map_err(classify_micro_vm_grant_repository_error)?;
+    let evidence_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+        "attempt_no": request.attempt_no,
+        "executor_worker_process_generation_id": request.executor_worker_process_generation_id,
+        "lease_generation": request.lease_generation,
+        "provider_process_generation_id": request.provider_process_generation_id,
+        "request_digest": request.request_digest,
+        "sandbox_identity_digest": request.sandbox_identity_digest,
+        "sandbox_job_id": request.sandbox_job_id,
+        "schema_version": 1,
+        "tenant_id": request.tenant_id,
+        "workload_kind": request.workload_kind,
+    }))
+    .map_err(|_| MicroVmGrantRevocationError::Rejected)?
+    .parse()
+    .map_err(|_| MicroVmGrantRevocationError::Rejected)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| MicroVmGrantRevocationError::Unavailable)?;
+    Ok(MicroVmGrantRevocationEvidence { evidence_digest })
 }
 
 fn classify_wasi_value_repository_error(error: RepositoryError) -> WasiValueValidationError {

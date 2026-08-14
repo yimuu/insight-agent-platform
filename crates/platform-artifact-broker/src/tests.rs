@@ -5,7 +5,10 @@ use insight_platform_artifacts::{
     EncryptedArtifactObjectReference,
 };
 use insight_platform_contracts::{ArtifactRef, DataClassification, ResourceId, ResourceKind};
-use insight_platform_sandbox::{WasiArtifactReadPurpose, WasiArtifactReadRequest};
+use insight_platform_sandbox::{
+    MicroVmArtifactBroker, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
+    MicroVmSandboxWorkloadKind, WasiArtifactReadPurpose, WasiArtifactReadRequest,
+};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Mutex,
@@ -62,6 +65,17 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for FixtureAuthority {
     async fn authorize_object_read(
         &self,
         _request: &WasiArtifactReadRequest,
+    ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.projection(self.drift_after_first && call > 0))
+    }
+}
+
+#[async_trait]
+impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for FixtureAuthority {
+    async fn authorize_object_read(
+        &self,
+        _request: &MicroVmArtifactReadRequest,
     ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.projection(self.drift_after_first && call > 0))
@@ -125,7 +139,7 @@ impl InstalledArtifactObjectStore for FixtureStore {
 }
 
 struct Fixture {
-    broker: BrokeredWasiArtifactBroker,
+    broker: BrokeredSandboxArtifactBroker,
     request: WasiArtifactReadRequest,
     store: Arc<FixtureStore>,
 }
@@ -166,7 +180,8 @@ fn fixture(
         }),
         bytes: Mutex::new(bytes.to_vec()),
     });
-    let broker = BrokeredWasiArtifactBroker::new(
+    let broker = BrokeredSandboxArtifactBroker::new(
+        authority.clone(),
         authority,
         Arc::new(FixtureUnsealer {
             plaintext: Mutex::new(plaintext),
@@ -211,7 +226,42 @@ async fn exact_object_is_returned_only_after_second_authorization() {
     assert!(parse_locator(&locator_bytes).is_ok());
     let fixture = fixture(bytes, locator_bytes, false, "version-1");
     assert_eq!(
-        fixture.broker.read_exact(fixture.request).await.unwrap(),
+        WasiArtifactBroker::read_exact(&fixture.broker, fixture.request)
+            .await
+            .unwrap(),
+        bytes
+    );
+}
+
+#[tokio::test]
+async fn micro_vm_reads_share_the_exact_object_pipeline() {
+    let bytes = b"microvm-runtime";
+    let fixture = fixture(
+        bytes,
+        locator(&digest('b'), "version-1"),
+        false,
+        "version-1",
+    );
+    let request = MicroVmArtifactReadRequest {
+        workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
+        tenant_id: fixture.request.tenant_id.clone(),
+        sandbox_job_id: fixture.request.sandbox_job_id.clone(),
+        request_digest: fixture.request.request_digest.clone(),
+        executor_worker_process_generation_id: fixture.request.worker_process_generation_id.clone(),
+        provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+        sandbox_identity_digest: digest('e'),
+        lease_generation: fixture.request.lease_generation,
+        artifact: fixture.request.artifact.clone(),
+        purpose: MicroVmArtifactReadPurpose::RuntimeBundle,
+        read_grant: None,
+        maximum_bytes: fixture.request.maximum_bytes,
+        deadline: fixture.request.deadline,
+    };
+
+    assert_eq!(
+        MicroVmArtifactBroker::read_exact(&fixture.broker, request)
+            .await
+            .unwrap(),
         bytes
     );
 }
@@ -226,7 +276,7 @@ async fn locator_generation_and_post_io_authority_drift_fail_closed() {
         "version-1",
     );
     assert_eq!(
-        wrong_locator.broker.read_exact(wrong_locator.request).await,
+        WasiArtifactBroker::read_exact(&wrong_locator.broker, wrong_locator.request).await,
         Err(WasiArtifactBrokerError::Integrity)
     );
 
@@ -237,16 +287,13 @@ async fn locator_generation_and_post_io_authority_drift_fail_closed() {
         "version-2",
     );
     assert_eq!(
-        wrong_generation
-            .broker
-            .read_exact(wrong_generation.request)
-            .await,
+        WasiArtifactBroker::read_exact(&wrong_generation.broker, wrong_generation.request).await,
         Err(WasiArtifactBrokerError::Integrity)
     );
 
     let drift = fixture(bytes, locator(&digest('b'), "version-1"), true, "version-1");
     assert_eq!(
-        drift.broker.read_exact(drift.request).await,
+        WasiArtifactBroker::read_exact(&drift.broker, drift.request).await,
         Err(WasiArtifactBrokerError::Denied)
     );
 }
@@ -265,7 +312,7 @@ async fn noncanonical_locator_and_content_digest_mismatch_fail_closed() {
         "version-1",
     );
     assert_eq!(
-        noncanonical.broker.read_exact(noncanonical.request).await,
+        WasiArtifactBroker::read_exact(&noncanonical.broker, noncanonical.request).await,
         Err(WasiArtifactBrokerError::Integrity)
     );
 
@@ -277,7 +324,7 @@ async fn noncanonical_locator_and_content_digest_mismatch_fail_closed() {
     );
     *corrupt.store.bytes.lock().unwrap() = b"wasm-modulf".to_vec();
     assert_eq!(
-        corrupt.broker.read_exact(corrupt.request).await,
+        WasiArtifactBroker::read_exact(&corrupt.broker, corrupt.request).await,
         Err(WasiArtifactBrokerError::Integrity)
     );
 }

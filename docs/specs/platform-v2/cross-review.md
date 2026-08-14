@@ -190,6 +190,14 @@ F-Q1       bulkhead、fairness、capacity、chaos、soak、DR
 
 任何为新增 ResourceKind、WorkClass、TaskKind、EventKind 或 ReceiptKind 而复制一组表的变更，直接视为 cross-review 回归。
 
+### 当前实施复核增量
+
+CR-158的Managed Artifact切片已确认：Controller不得把microVM请求转换成丢失workload、Provider或sandbox fence的WASI请求。
+统一无状态Broker可以共享object-store、KMS、二次授权与一个bulkhead，但WASI和microVM必须分别调用typed PostgreSQL authority。
+Managed bundle只可在物理`Starting`、exact Executor lease和active `read_whole` package grant下读取；回收按workload分流，并按
+Managed Job/request/attempt/lease/Executor及Ready sandbox identity幂等验证。全新PostgreSQL 16 Managed正负向fixture与有限Sandbox
+回归fixture均实际通过；保持23表与单一`0001`。真实Provider、heartbeat、terminal/absence及资格仍Open。
+
 ## 14. Implementation consistency review
 
 | Finding | Resolution |
