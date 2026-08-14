@@ -1,0 +1,141 @@
+image:
+  repository: insight-agent-platform
+  digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+namespaces:
+  controller: platform-sandbox
+  executor: platform-sandbox-exec
+
+controller:
+  replicas: 2
+  port: 7443
+  database:
+    existingSecret: insight-platform-sandbox-database
+    urlKey: database-url
+    maxConnections: 10
+  serviceAccount:
+    annotations: {}
+  workloadIdentity:
+    roleArn: arn:aws:iam::111122223333:role/insight-platform-sandbox-controller
+    audience: sts.amazonaws.com
+    tokenExpirationSeconds: 3600
+  artifactProviderCatalog:
+    schema_version: 1
+    s3_storage_bindings:
+      - schema_version: 1
+        storage_binding_digest: sha256:b5d4ea2254a7770284738b6ca76a8e7833899ebbe796d61a113f57bd5609b630
+        endpoint: https://s3.example.invalid
+        region: us-east-1
+        bucket: insight-platform
+        force_path_style: false
+        kms_binding_digest: sha256:ee8b022acf9fbbb8134127266a11a93cbca559aea8ff563d9cb95965e40719d8
+        connect_timeout_milliseconds: 5000
+        operation_timeout_milliseconds: 30000
+        maximum_object_bytes: 67108864
+    kms_key_bindings:
+      - schema_version: 1
+        kms_binding_digest: sha256:ee8b022acf9fbbb8134127266a11a93cbca559aea8ff563d9cb95965e40719d8
+        endpoint: https://kms.us-east-1.amazonaws.com
+        region: us-east-1
+        key_id: arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012
+        connect_timeout_milliseconds: 5000
+        operation_timeout_milliseconds: 30000
+  artifactBroker:
+    maximum_in_flight: 32
+    maximum_read_bytes: 67108864
+    operation_timeout_milliseconds: 30000
+  attestor:
+    tlsServerName: sandbox-attestor.insight.internal
+    identityDigest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    maximumCachedRoutes: 1024
+    allowedNodeCidrs: [10.0.0.0/8]
+  connectTimeoutMilliseconds: 5000
+  requestTimeoutMilliseconds: 30000
+  shutdownGraceMilliseconds: 30000
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+executor:
+  serviceAccount:
+    annotations: {}
+  nodeSelector:
+    insight.platform/sandbox-node: "true"
+  tolerations: []
+  workerManifest:
+    manifest_version: 1
+    worker_role: sandbox-executor.wasi
+    work_class: sandbox
+    adapter_runtime_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    protocol_version: 1
+    max_concurrency: 4
+    critical_control_reserved_slots: 1
+  runtimeVersion: 42.0.0
+  backendContractDigest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  natsEndpoint: tls://nats.platform-runtime.svc:4222
+  receiptTtlSeconds: 7200
+  claimScanMilliseconds: 100
+  claimFailureBackoffMilliseconds: 25
+  drainGraceMilliseconds: 30000
+  controlRequestTimeoutMilliseconds: 5000
+  connectTimeoutMilliseconds: 5000
+  requestTimeoutMilliseconds: 30000
+  resources:
+    requests: {cpu: "1", memory: 512Mi}
+    limits: {cpu: "4", memory: 2Gi}
+
+attestor:
+  controllerPort: 7444
+  maximumRegistrations: 10000
+  absentRetentionSeconds: 3900
+  tlsHandshakeTimeoutMilliseconds: 5000
+  shutdownGraceMilliseconds: 30000
+  hostPaths:
+    proc: /proc
+    nodeUid: /var/lib/insight/node-uid
+    registryDirectory: /var/lib/insight-sandbox-attestor
+    socketDirectory: /var/run/insight-sandbox-attestor
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+
+tls:
+  controllerSecret: insight-platform-sandbox-controller-tls
+  executorSecret: insight-platform-sandbox-executor-tls
+  attestorSecret: insight-platform-sandbox-attestor-tls
+  keys:
+    controllerServerCa: controller-server-ca.pem
+    executorClientCa: executor-client-ca.pem
+    controllerClientCa: controller-client-ca.pem
+    attestorServerCa: attestor-server-ca.pem
+    controllerServerCertificate: controller-server.pem
+    controllerServerPrivateKey: controller-server-key.pem
+    attestorCa: attestor-ca.pem
+    controllerClientCertificate: controller-client.pem
+    controllerClientPrivateKey: controller-client-key.pem
+    executorClientCertificate: executor-client.pem
+    executorClientPrivateKey: executor-client-key.pem
+    attestorServerCertificate: attestor-server.pem
+    attestorServerPrivateKey: attestor-server-key.pem
+
+natsTls:
+  existingSecret: insight-platform-sandbox-nats-tls
+  rootCertificateKey: ca.pem
+  clientCertificateKey: client.pem
+  clientPrivateKeyKey: client-key.pem
+
+networkPolicy:
+  enabled: true
+  dnsNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns
+  # Replace these non-routable-safe example ranges with the exact private
+  # endpoint CIDRs recorded in the CandidateManifest.
+  postgresCidrs: [10.10.0.0/24]
+  natsCidrs: [10.20.0.0/24]
+  artifactProviderCidrs: [10.30.0.0/24]
+  workloadIdentityCidrs: [10.40.0.0/24]
+  natsPort: 4222

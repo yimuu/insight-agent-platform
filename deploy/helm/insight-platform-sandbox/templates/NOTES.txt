@@ -1,0 +1,8 @@
+Sandbox execution plane rendered with separate controller and executor namespaces.
+
+Before install, replace every example CIDR/digest/endpoint and provide all referenced TLS,
+database, NATS, and workload-identity authorities. The chart intentionally creates no
+credentials, no RBAC Role/RoleBinding, and no attestor Service.
+
+The attestor is the only workload with hostPID and hostPath access. The WASI Executor remains
+non-root, has no Kubernetes API token, and can reach only Controller, DNS, and NATS.

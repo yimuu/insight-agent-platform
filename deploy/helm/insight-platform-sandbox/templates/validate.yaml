@@ -1,0 +1,39 @@
+{{- if eq .Values.namespaces.controller .Values.namespaces.executor }}
+{{- fail "controller and executor namespaces must be different" }}
+{{- end }}
+{{- if lt (int .Values.controller.replicas) 2 }}
+{{- fail "controller.replicas must be at least 2" }}
+{{- end }}
+{{- if or (lt (int .Values.attestor.controllerPort) 1) (gt (int .Values.attestor.controllerPort) 65535) }}
+{{- fail "attestor.controllerPort must be a valid fixed host port" }}
+{{- end }}
+{{- if lt (int .Values.attestor.absentRetentionSeconds) 3900 }}
+{{- fail "attestor.absentRetentionSeconds must cover the hard wall plus cleanup window" }}
+{{- end }}
+{{- if empty .Values.executor.nodeSelector }}
+{{- fail "executor.nodeSelector is required" }}
+{{- end }}
+{{- if empty .Values.controller.attestor.allowedNodeCidrs }}
+{{- fail "controller.attestor.allowedNodeCidrs is required" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.postgresCidrs }}
+{{- fail "networkPolicy.postgresCidrs is required" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.natsCidrs }}
+{{- fail "networkPolicy.natsCidrs is required" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.artifactProviderCidrs }}
+{{- fail "networkPolicy.artifactProviderCidrs is required" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.workloadIdentityCidrs }}
+{{- fail "networkPolicy.workloadIdentityCidrs is required" }}
+{{- end }}
+{{- if or (empty .Values.controller.workloadIdentity.roleArn) (empty .Values.controller.workloadIdentity.audience) }}
+{{- fail "controller.workloadIdentity roleArn and audience are required" }}
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+{{- fail "networkPolicy.enabled must remain true" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must be an immutable lowercase sha256 digest" }}
+{{- end }}

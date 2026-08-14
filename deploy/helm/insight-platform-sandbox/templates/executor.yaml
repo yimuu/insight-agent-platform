@@ -1,0 +1,73 @@
+{{- $config := include "insight-platform-sandbox.executorConfig" . -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "insight-platform-sandbox.executorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: executor-wasi
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: executor-wasi
+      annotations:
+        checksum/config: {{ $config | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "insight-platform-sandbox.executorName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 40
+      nodeSelector: {{ toYaml .Values.executor.nodeSelector | nindent 8 }}
+      tolerations: {{ toYaml .Values.executor.tolerations | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      initContainers:
+        - name: wait-for-node-attestor
+          image: {{ include "insight-platform-sandbox.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sh", "-ec", "until test -S /run/insight-sandbox-attestor/registration.sock; do sleep 1; done"]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+          volumeMounts:
+            - {name: socket, mountPath: /run/insight-sandbox-attestor, readOnly: true}
+      containers:
+        - name: executor
+          image: {{ include "insight-platform-sandbox.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-sandbox-executor"]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+          env:
+            - {name: PLATFORM_SANDBOX_EXECUTOR_CONFIG, value: /etc/insight/config/executor.json}
+            - {name: PLATFORM_SANDBOX_EXECUTOR_CONFIG_DIGEST, value: {{ printf "sha256:%s" ($config | sha256sum) | quote }}}
+            - {name: PLATFORM_SANDBOX_GRPC_CA_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.controllerServerCa }}}
+            - {name: PLATFORM_SANDBOX_GRPC_CERT_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.executorClientCertificate }}}
+            - {name: PLATFORM_SANDBOX_GRPC_KEY_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.executorClientPrivateKey }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_CA_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.attestorServerCa }}}
+            - {name: PLATFORM_SANDBOX_NATS_CA_PATH, value: /etc/insight/nats-tls/{{ .Values.natsTls.rootCertificateKey }}}
+            - {name: PLATFORM_SANDBOX_NATS_CERT_PATH, value: /etc/insight/nats-tls/{{ .Values.natsTls.clientCertificateKey }}}
+            - {name: PLATFORM_SANDBOX_NATS_KEY_PATH, value: /etc/insight/nats-tls/{{ .Values.natsTls.clientPrivateKeyKey }}}
+          startupProbe: {exec: {command: ["sh", "-ec", "kill -0 1 && test -S /run/insight-sandbox-attestor/registration.sock"]}, failureThreshold: 30, periodSeconds: 2}
+          readinessProbe: {exec: {command: ["sh", "-ec", "kill -0 1 && test -S /run/insight-sandbox-attestor/registration.sock"]}, periodSeconds: 5, timeoutSeconds: 2}
+          livenessProbe: {exec: {command: ["sh", "-ec", "kill -0 1"]}, periodSeconds: 10, timeoutSeconds: 2}
+          resources: {{ toYaml .Values.executor.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: tls, mountPath: /etc/insight/tls, readOnly: true}
+            - {name: nats-tls, mountPath: /etc/insight/nats-tls, readOnly: true}
+            - {name: socket, mountPath: /run/insight-sandbox-attestor, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, configMap: {name: {{ include "insight-platform-sandbox.executorName" . }}}}
+        - {name: tls, secret: {secretName: {{ .Values.tls.executorSecret }}, defaultMode: 0440}}
+        - {name: nats-tls, secret: {secretName: {{ .Values.natsTls.existingSecret }}, defaultMode: 0440}}
+        - {name: socket, hostPath: {path: {{ .Values.attestor.hostPaths.socketDirectory }}, type: Directory}}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}

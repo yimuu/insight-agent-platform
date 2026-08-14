@@ -1,0 +1,26 @@
+{{- $controllerConfig := include "insight-platform-sandbox.controllerConfig" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "insight-platform-sandbox.controllerName" . }}
+  namespace: {{ .Values.namespaces.controller }}
+data:
+  controller.json: {{ $controllerConfig | quote }}
+---
+{{- $attestorConfig := include "insight-platform-sandbox.attestorConfig" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "insight-platform-sandbox.attestorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+data:
+  attestor.json: {{ $attestorConfig | quote }}
+---
+{{- $executorConfig := include "insight-platform-sandbox.executorConfig" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "insight-platform-sandbox.executorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+data:
+  executor.json: {{ $executorConfig | quote }}

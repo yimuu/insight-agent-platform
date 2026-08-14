@@ -1,0 +1,105 @@
+{{- $config := include "insight-platform-sandbox.controllerConfig" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "insight-platform-sandbox.controllerName" . }}
+  namespace: {{ .Values.namespaces.controller }}
+spec:
+  replicas: {{ int .Values.controller.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: controller
+      annotations:
+        checksum/config: {{ $config | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "insight-platform-sandbox.controllerName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 40
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: controller
+      containers:
+        - name: controller
+          image: {{ include "insight-platform-sandbox.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-sandbox-controller"]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+          env:
+            - {name: PLATFORM_SANDBOX_CONTROLLER_CONFIG, value: /etc/insight/config/controller.json}
+            - {name: PLATFORM_SANDBOX_CONTROLLER_CONFIG_DIGEST, value: {{ printf "sha256:%s" ($config | sha256sum) | quote }}}
+            - name: PLATFORM_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.controller.database.existingSecret }}, key: {{ .Values.controller.database.urlKey }}}}
+            - {name: PLATFORM_SANDBOX_GRPC_CLIENT_CA_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.executorClientCa }}}
+            - {name: PLATFORM_SANDBOX_GRPC_CERT_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerServerCertificate }}}
+            - {name: PLATFORM_SANDBOX_GRPC_KEY_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerServerPrivateKey }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_CA_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.attestorServerCa }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_CERT_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerClientCertificate }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_KEY_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerClientPrivateKey }}}
+            - {name: AWS_ROLE_ARN, value: {{ .Values.controller.workloadIdentity.roleArn | quote }}}
+            - {name: AWS_WEB_IDENTITY_TOKEN_FILE, value: /var/run/secrets/insight-workload-identity/token}
+          ports: [{name: grpc, containerPort: {{ int .Values.controller.port }}}]
+          startupProbe: {tcpSocket: {port: grpc}, failureThreshold: 30, periodSeconds: 2}
+          readinessProbe: {tcpSocket: {port: grpc}, periodSeconds: 5, timeoutSeconds: 2}
+          livenessProbe: {tcpSocket: {port: grpc}, periodSeconds: 10, timeoutSeconds: 2}
+          resources: {{ toYaml .Values.controller.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: tls, mountPath: /etc/insight/controller-tls, readOnly: true}
+            - {name: workload-identity, mountPath: /var/run/secrets/insight-workload-identity, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: {{ include "insight-platform-sandbox.controllerName" . }}}}
+        - {name: tls, secret: {secretName: {{ .Values.tls.controllerSecret }}, defaultMode: 0440}}
+        - name: workload-identity
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.controller.workloadIdentity.audience | quote }}
+                  expirationSeconds: {{ int .Values.controller.workloadIdentity.tokenExpirationSeconds }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-sandbox.controllerName" . }}
+  namespace: {{ .Values.namespaces.controller }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: controller
+  ports: [{name: grpc, port: {{ int .Values.controller.port }}, targetPort: grpc}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "insight-platform-sandbox.controllerName" . }}
+  namespace: {{ .Values.namespaces.controller }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller

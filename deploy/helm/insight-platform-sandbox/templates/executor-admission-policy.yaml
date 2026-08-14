@@ -1,0 +1,63 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-executor-pods
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: Namespaced
+  validations:
+    - expression: >-
+        has(object.metadata.labels) &&
+        object.metadata.labels['app.kubernetes.io/name'] == {{ .Chart.Name | quote }} &&
+        object.metadata.labels['app.kubernetes.io/instance'] == {{ .Release.Name | quote }} &&
+        object.metadata.labels['app.kubernetes.io/component'] in ['attestor', 'executor-wasi']
+      message: only the installed attestor and WASI Executor pod roles are allowed
+    - expression: >-
+        object.spec.automountServiceAccountToken == false &&
+        !object.spec.hostNetwork && !object.spec.hostIPC &&
+        object.spec.nodeSelector['insight.platform/sandbox-node'] == 'true'
+      message: Sandbox execution pods require the exact node and API-token isolation contract
+    - expression: >-
+        object.metadata.labels['app.kubernetes.io/component'] != 'executor-wasi' ||
+        ((!has(object.spec.hostPID) || !object.spec.hostPID) &&
+         object.spec.serviceAccountName == {{ include "insight-platform-sandbox.executorName" . | quote }} &&
+         object.spec.containers.size() == 1 &&
+         object.spec.initContainers.size() == 1 &&
+         object.spec.volumes.filter(v, has(v.hostPath)).size() == 1 &&
+         object.spec.volumes.exists_one(v, v.name == 'socket' && has(v.hostPath) &&
+           v.hostPath.path == {{ .Values.attestor.hostPaths.socketDirectory | quote }} &&
+           v.hostPath.type == 'Directory') &&
+         object.spec.containers.all(c, !has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+         object.spec.containers.all(c, !has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0))
+      message: WASI Executor cannot receive host PID, extra host paths, privilege, or capabilities
+    - expression: >-
+        object.metadata.labels['app.kubernetes.io/component'] != 'attestor' ||
+        (object.spec.hostPID &&
+         object.spec.serviceAccountName == {{ include "insight-platform-sandbox.attestorName" . | quote }} &&
+         object.spec.containers.size() == 1 &&
+         object.spec.volumes.filter(v, has(v.hostPath)).size() == 4 &&
+         object.spec.volumes.exists_one(v, v.name == 'host-proc' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.proc | quote }} && v.hostPath.type == 'Directory') &&
+         object.spec.volumes.exists_one(v, v.name == 'node-uid' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.nodeUid | quote }} && v.hostPath.type == 'File') &&
+         object.spec.volumes.exists_one(v, v.name == 'registry' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.registryDirectory | quote }} && v.hostPath.type == 'DirectoryOrCreate') &&
+         object.spec.volumes.exists_one(v, v.name == 'socket' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.socketDirectory | quote }} && v.hostPath.type == 'DirectoryOrCreate') &&
+         object.spec.containers.all(c, !has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+         object.spec.containers.all(c, has(c.securityContext.capabilities.add) && c.securityContext.capabilities.add == ['SYS_PTRACE']))
+      message: attestor host authority must be the exact reviewed proc/node/registry/socket profile
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-executor-pods
+spec:
+  policyName: {{ include "insight-platform-sandbox.name" . }}-executor-pods
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        insight.platform/sandbox-executor-namespace: "true"
