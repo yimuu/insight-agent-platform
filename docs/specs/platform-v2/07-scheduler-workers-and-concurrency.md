@@ -4,7 +4,7 @@
 |---|---|
 | 状态 | Draft / Architecture Revision |
 | 日期 | 2026-08-15 |
-| 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) |
+| 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) |
 | 直接下游 | 08、10、12、14、16、17、18 |
 
 > Persistence ruling：Scheduler 只 claim 03 的共享 `Job`，配额只使用 04 的共享 quota 聚合，公平性只使用一个
@@ -101,20 +101,33 @@ struct ModelOutputMaterializationCapacity {
     aggregate_bytes: u64,
 }
 
+struct ModelOutputWorkerCapacityLimitV1 {
+    slots: u16,
+    aggregate_bytes: u64,
+}
+
 struct WorkerManifestV2 {
     // existing closed fields omitted
+    component_role: ComponentRole,
     model_output_materialization: Option<ModelOutputMaterializationCapacity>,
 }
 ```
 
-`work_class=Model`必须提供该字段，其他WorkClass必须不提供；两个值都必须为正，`slots <= max_concurrency`，并分别不超过18
-HardLimitProfile v5的`artifact.model_output_worker_slots`与`artifact.model_output_worker_aggregate_bytes`。它以canonical digest进入
+所有WorkClass的WorkerManifest都必须提供02 `component_role`；它标识部署镜像/startup scope，不与标识
+WorkerProcessGeneration/claim role的`worker_role`混为一个nominal，也不得靠字符串前缀猜测两者映射。只有
+`model_output_materialization`是conditional：`work_class=Model`必须提供，其他WorkClass必须完全省略且`null`非法。两个capacity值都必须
+为正，`slots <= max_concurrency`；nested object closed且
+`aggregate_bytes <= 9007199254740991`。它以canonical digest进入
 CandidateManifest，一份manifest不能把多个WorkClass映射到同一个semaphore。启动时schema、typed validator、
 WorkerProcessGeneration和Deployment binding任一不匹配都拒绝claim。当前checked-in v1 schema/validator没有该字段，只能证明现有
 Inline路径，不能作为Artifact-backed Model output的Candidate证据；实施必须原子升级schema、Rust type、fixture与Candidate closure。
 
-发布/激活Model Deployment时必须证明每个ArtifactCapable binding至少有一个匹配adapter、protocol与region的Model Worker manifest满足
-`slots >= 1 && aggregate_bytes >= maximum_materialized_bytes`；18还要同时证明Producer单请求容量。否则拒绝发布/激活，不能依赖deadline
+07冻结Worker本地shape，不依赖下游Candidate类型。`WorkerManifestV2::validate_against(ModelOutputWorkerCapacityLimitV1)`接收只含
+`slots`与`aggregate_bytes`上限的上游输入port；Model manifest两值必须分别不超过该port。部署资格层从其安装HardLimitProfile投影该port，
+并负责把Worker、image与startup scope闭合；Worker crate不读取Candidate，也不拥有其他组件的capacity identity。
+
+发布/激活Model Deployment时，16的installation capability port必须证明每个ArtifactCapable binding至少有一个匹配adapter、protocol与
+region的Model Worker manifest满足`slots >= 1 && aggregate_bytes >= maximum_materialized_bytes`，并同时证明Producer单请求容量。否则拒绝，不能依赖deadline
 清理一个永远无法被任何Worker领取的Ready Job。
 
 Model Worker的`model_output_materialization`是slot+weighted-bytes两级RAII容量；它与Model Provider stream、Model request read client、
@@ -142,7 +155,7 @@ Orchestration 的 claim loop 与 safety loop 是同一 Worker role 内的两个�
 后者只使用独立保留的critical-control permit/pool。safety loop依次驱动expired Job lease、due retry、cancel/timeout/deadline
 convergence和expired Task；四类扫描各自持有可丢失的进程内high-water cursor。满页推进cursor，短页清空cursor并从该shard起点
 回绕；进程重启也从起点重扫。每个page的候选数和mutation identity slot数严格等于`recovery_batch`请求，分片数量受
-`recovery_shards.hard_max`约束，Q1默认使用profile version 4的batch 1000、16 shards，最大256 shards。每次mutation仍在
+`recovery_shards.hard_max`约束，Q1默认使用profile version 5的batch 1000、16 shards，最大256 shards。每次mutation仍在
 caller-owned PostgreSQL事务复核current fact/fence并first-win；cursor、timer和wake hint都不是持久化authority。
 
 ## 6. Claim
@@ -287,7 +300,7 @@ policy version；整个 typed scheduler-state payload 由自身 canonical digest
 - lease duration 按 WorkClass 配置并有平台 hard max；
 - heartbeat 间隔小于 lease 的三分之一并带 jitter；调用方时间只能作为事件时间，start/heartbeat/Worker terminal还必须由
   PostgreSQL `clock_timestamp()`证明当前lease未到期，不能通过回填旧时间续租或提交结果；
-- versioned HardLimitProfile 必须对 hard maximum 和 Q1 default 同时验证上述严格比例；`q1-50` profile version 4 使用
+- versioned HardLimitProfile 必须对 hard maximum 和 Q1 default 同时验证上述严格比例；`q1-50` profile version 5 使用
   `lease=30000ms`、`heartbeat=8000ms`，实际带 jitter 的调度仍不得达到或越过 lease 的三分之一；
 - heartbeat 只更新当前 Job lease generation，不延长 Run deadline；
 - external backend 长任务必须能以 deferred task 释放 Worker，而不是无限 heartbeat；

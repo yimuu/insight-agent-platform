@@ -42,7 +42,7 @@ Platform v2 采用以下不可逆的架构决定：
 |---|---|---|---|
 | 00 | `00-overview.md` | Accepted / In Progress | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / In Progress | 系统架构、领域对象和所有权边界 |
-| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / In Progress | ID、Resource、Version、Deployment、Binding |
+| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Draft / Architecture Revision | ID、Resource、Version、Deployment、Binding |
 | 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / In Progress | PostgreSQL、事务、Outbox、Lease、恢复 |
 | 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / In Progress | 多租户、授权、Secret、Effect、Quota、Approval |
 | 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / In Progress | Agent Interface、Typed Plan、Model Loop |
@@ -55,7 +55,7 @@ Platform v2 采用以下不可逆的架构决定：
 | 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / In Progress | ContextSource、检索、引用和数据权限 |
 | 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / In Progress | MCP Transport、OAuth、投影、Task 和 Subscription |
 | 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / In Progress | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
-| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / In Progress | S3、内容寻址、上传、生命周期和内容安全 |
+| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Draft / Architecture Revision | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Draft / Architecture Revision | Provider、Model Profile、ModelTurn、流式响应和预算 |
 | 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / In Progress | 管理 API、Run API、事件流和错误模型 |
 | 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Draft / Architecture Revision | Kubernetes、指标、Tracing、压测、故障注入和验收 |
@@ -166,9 +166,9 @@ Draft
 
 ## 8. 本批次结论与下一步
 
-00～18 的 persistence architecture cross-review 已关闭；其余目标合同保持 Accepted / Implementation In Progress。CR-165 在实现前审计中
-发现全局HardLimitProfile版本、Candidate enablement、capacity isolation identity和RPC常量缺少机器闭包，因此07、16与18已按规范流程临时回退为
-Draft / Architecture Revision，修复并完成全量cross-review前不得作为实现输入。旧的专用
+00～18 的 persistence architecture cross-review 仍保持关闭；CR-165 的实现前machine审计扩大了非持久合同修订范围：02、07、15、16与18
+当前处于Draft / Architecture Revision，新增共享ComponentRole、Worker v2、Storage binding owner、Model installation capability fence、
+Candidate/startup-profile/capacity closure，并正在执行最后一轮全量cross-review。修订关闭前这些文件不得作为新代码实施输入。旧的专用
 表族、migration 1～35、177 表 catalog、checksum 和资格结论全部退出活动基线。物理模型由
 [`ADR-0001`](../../adr/0001-platform-v2-postgres-baseline.md)冻结为 23 张表，并已经形成单一 `0001`、共享 repository 与
 真实 PostgreSQL 16 foundation fixture。
@@ -188,8 +188,8 @@ committed SqlCatalog Observation 与 exact `database.query.readonly` Capability 
 CR-165 的Model Artifact-backed output架构方向仍是独立Model Artifact Producer，
 与只读Model Artifact Broker分离，且只有Model terminal PostgreSQL事务能够把Verified Artifact原子推进为Ready并提交Output Link、
 RunValue、usage/quota、Event与Outbox；pre-header transport timeout与storage write-quiescence barrier分别阻断slowloris容量占用和
-absence后迟到PUT。但Candidate显式enablement、digest集合边界、pool/semaphore alias closure与4096-byte RPC overhead尚未形成完整机器合同，
-故该项当前处于Architecture Revision。对应domain/schema/protobuf、Producer进程与权限、部署及
+absence后迟到PUT。Candidate显式enablement、digest集合边界、pool/semaphore alias closure与4096-byte RPC overhead已经形成Draft修订，
+仍须通过当前cross-review后才能成为Accepted目标合同；对应domain/schema/protobuf、Producer进程与权限、部署及
 real-process/故障/容量资格仍全部Open。当前Model output materializer仍为Inline-only，超过Inline能力时仍走开发期
 `model_output_artifact_required`防护；不得据此关闭Phase 4～6、任一Qualification Gate，或把Artifact-backed output声明为当前行为。
 实现已从04的closed Model-output ArtifactIo Policy Rust/JSON合同与pure checked retention timing helper开始；它尚未连接v5 limits、

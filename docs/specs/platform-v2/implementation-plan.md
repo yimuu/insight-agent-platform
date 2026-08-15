@@ -795,13 +795,14 @@ CR-165首个实现依赖已经交付：04的closed `ModelOutputArtifactIoPolicyD
 time closure。fixture覆盖unknown field、media/ID/digest、ceil+margin、staging窗口、Ready duration与terminal绝对时间；全workspace all-target
 compile保持通过。该证据只关闭typed Policy/时间公式基础，不表示Model Deployment、reservation、Producer或Artifact-backed current path已实现。
 
-实现前machine审计已将07、16、18与CR-165临时回退为Architecture Revision：全局q1-50 profile仍被07引用为v4，Candidate尚无显式Inline-only/Artifact-capable mode，两个新digest
-集合没有上限与空集语义，capacity enum/region/backend没有closed wire，opaque deployment digest不能证明局部pool/semaphore不别名，
-4096-byte protobuf overhead也尚未进入root machine contract。完成上游16→下游18修订及全量cross-review前，不得继续v5/v2代码接线。
+实现前machine审计正在按02→{07,15}→16→18依赖DAG修订并执行cross-review：Candidate草案显式冻结Inline-only/Artifact-capable mode，四个manifest
+digest集合具有required/空集/上下界/顺序/唯一语义，Component/Storage manifest wire closed，typed startup closure的role-scoped pool/semaphore identity执行全Candidate
+alias拒绝，4096-byte protobuf overhead由protocol document/schema进入root machine contract；02、07、15、16与18在终审关闭前仍不是实施输入。
 
-下一实现切片按依赖顺序交付：先修复18中Component/Storage manifest wire、集合上限、capacity identity和4096 constant closure的剩余
-machine空洞，再原子实现HardLimitProfile v5全部Model-output字段、WorkerManifest v2、
-ComponentCapacityManifest、ArtifactStorageBindingManifest与Candidate exact closure；closed Rust/protobuf success+tagged failure合同和两bundle reservation；Producer
+cross-review关闭后，下一实现切片按依赖顺序交付：原子实现HardLimitProfile v5全部Model-output字段、WorkerManifest v2、
+ComponentCapacityManifest、ArtifactStorageBindingManifest、ComponentStartupManifest、validated startup projection/capacity factory与Candidate exact
+closure；同时生成startup-profile registry、迁移每个production component的closed startup adapter并完成readiness exact reprojection，交付
+installation compatibility Aggregate generation/fence与并发activation/switch/admission fixture；再实现closed Rust/protobuf success+tagged failure合同和两bundle reservation；Producer
 core/RPC、two-phase admission、restricted PostgreSQL projection、S3/KMS/dedupe/checkpoint；Hybrid materializer与生产进程；owner-finalize、
 candidate/orphan cleanup、shared-Blob quota lifecycle及真实PostgreSQL并发/崩溃fixture；最后完成独立Helm/NetworkPolicy/credential互换、
 cross-lane饱和与真实S3/KMS资格。全部代码、部署和fixture落地前，checked-in profile v4/WorkerManifest v1及Inline output仍是当前证据，

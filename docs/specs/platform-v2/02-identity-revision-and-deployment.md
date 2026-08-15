@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-09 |
+| 状态 | Draft / Architecture Revision |
+| 日期 | 2026-08-15 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) |
 | 直接下游 | 03、04、05、09、11、12、13、14、16、17、18 |
 
@@ -60,6 +60,18 @@ security classification。边界必须同时验证prefix、UUID形状和字段�
 新增或改变prefix是公共machine-contract变更。`PlanNodeId`、`SlotId`、`FieldId`和`ModelCallId`只在owner内稳定，
 使用owner ID加bounded local key，不冒充全局资源。External task identity、provider ID、object generation、cursor、ETag、
 idempotency key和digest也不是ResourceId。
+
+部署组件角色统一使用本规范拥有的nominal `ComponentRole`，不能由Worker、Candidate或Helm各自复制字符串validator：
+
+```rust
+#[serde(transparent)]
+struct ComponentRole(String);
+```
+
+wire必须是1～128 ASCII bytes并匹配`^[a-z][a-z0-9_.-]{0,127}$`；构造时不做大小写、Unicode或别名归一化。公共machine
+schema固定为`contracts/platform-v1/schemas/common/component-role.schema.json`并进入根contract digest，所有下游schema必须引用同一
+定义。`ComponentRole`标识稳定的安装Deployment逻辑scope，同一scope的replica共享该值；它不等于Pod名、临时副本ID、
+WorkerProcessGeneration的`worker_role`或component kind。
 
 除installation-scoped singleton外，每个持久对象都有`tenant_id`。Repository predicate必须同时使用tenant和object ID；
 公开404不区分不存在与跨租户不可见。

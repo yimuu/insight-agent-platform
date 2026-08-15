@@ -104,8 +104,10 @@ struct CandidateManifest {
     database_schema_version: SchemaVersion,
     component_images: BTreeMap<ComponentRole, ImageDigest>,
     worker_manifests: Vec<WorkerManifestDigest>,
+    model_output_materialization_mode: ModelOutputMaterializationMode,
     component_capacity_manifests: Vec<ComponentCapacityManifestDigest>,
     artifact_storage_binding_manifests: Vec<ArtifactStorageBindingManifestDigest>,
+    component_startup_manifests: Vec<ComponentStartupManifestDigest>,
     deployment_config_digest: Digest,
     hard_limit_profile_digest: Digest,
     policy_baseline_digest: Digest,
@@ -120,24 +122,137 @@ struct ReleaseManifest {
     approval_receipt_id: ApprovalReceiptId,
     created_at: DateTime<Utc>,
 }
+
+enum ModelOutputMaterializationMode {
+    InlineOnly,
+    ArtifactCapable,
+}
+
+struct CapacityPrimitiveIdentityV1 {
+    primitive_name: String,
+    identity_digest: Digest,
+}
+
+struct CapacityIsolationIdentitySetV1 {
+    schema_version: u32, // const 1
+    pool_identities: Vec<CapacityPrimitiveIdentityV1>,
+    semaphore_identities: Vec<CapacityPrimitiveIdentityV1>,
+}
+
+struct ComponentStartupManifestV1 {
+    manifest_version: u32, // const 1
+    component_role: ComponentRole,
+    startup_profile_id: ComponentStartupProfileId,
+    startup_schema_digest: Digest,
+    startup_config_digest: Digest,
+    capacity_isolation: Option<CapacityIsolationIdentitySetV1>,
+}
+
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum StartupCapacityRequirementV1 {
+    CapacityFree,
+    Isolated {
+        pool_primitive_names: Vec<String>,
+        semaphore_primitive_names: Vec<String>,
+    },
+}
+
+struct ComponentStartupProfileV1 {
+    profile_id: ComponentStartupProfileId,
+    startup_schema_digest: Digest,
+    capacity_requirement: StartupCapacityRequirementV1,
+}
+
+struct ComponentStartupProfileRegistryV1 {
+    schema_version: u32, // const 1
+    profiles: Vec<ComponentStartupProfileV1>,
+}
 ```
 
 `GitCommit` wire值必须是带算法标签的完整小写object ID：`sha1:<40-hex>`或`sha256:<64-hex>`；分支、tag、缩写SHA和
-`latest`均非法。`ComponentRole`是稳定的小写部署角色键，必须匹配`[a-z][a-z0-9_.-]{0,127}`，不得用临时Pod名或副本名。
+`latest`均非法。`ComponentRole`只使用02的共享nominal；`component_images`的key就是Candidate计划安装的完整Deployment logical scope集合，
+不得用临时Pod名或副本名。
 `database_schema_version`精确表示`insight-platform-postgres`导出的schema contract version（当前候选基线为`6`），不是
 migration文件数量、数据库产品版本或payload schema version。Candidate创建器必须从实际安装的closed `WorkerManifest`集合和
-`HardLimitProfile`计算canonical digest closure；worker、component-capacity与artifact-storage-binding digest各自按字节升序且唯一。每个需要本地容量的exact
-component image/Deployment role必须恰有一份对应manifest，manifest role必须与image、Deployment及startup config逐字段匹配；重复role、
+`HardLimitProfile`计算canonical digest closure；worker、component-capacity、artifact-storage-binding与component-startup digest各自按字节
+升序且唯一。每个component image/Deployment role必须恰有一份`ComponentStartupManifestV1`；每个由WorkerManifest或当前已注册
+ComponentCapacityManifest variant管理的role还必须恰有一份对应manifest。manifest role必须与image、Deployment及startup config逐字段匹配；重复role、
 缺失或额外manifest、limit digest漂移均拒绝。Candidate schema/builder/runtime readiness必须执行同一closure，不能只在文档或Helm lint检查。
+
+四个digest数组始终是required字段。machine constants固定
+`MAX_CANDIDATE_WORKER_MANIFESTS=512`、`MAX_CANDIDATE_COMPONENT_CAPACITY_MANIFESTS=256`、
+`MAX_CANDIDATE_ARTIFACT_STORAGE_BINDING_MANIFESTS=MAX_INSTALLATION_ARTIFACT_STORAGE_BINDINGS`、
+`MAX_CANDIDATE_COMPONENT_STARTUP_MANIFESTS=256`；`worker_manifests`固定
+1～512项，`component_capacity_manifests`固定0～256项，`artifact_storage_binding_manifests`固定1～64项，
+`component_startup_manifests`固定1～256项且与`component_images` role集合exact相等。storage manifest wire与64项hard max只由15拥有；18
+只验证其digest closure。catalog独立服务Package、request Artifact与Model output，不随Model output mode清空，也不要求每个binding已被某个动态Deployment引用。
+JSON Schema执行对应`minItems/maxItems/uniqueItems`，Rust additionally执行raw digest bytes严格升序；component-capacity空数组是显式状态，
+不是unknown或unconfigured。
+
+`model_output_materialization_mode` wire只允许`inline_only | artifact_capable`，并且只能由Candidate builder从release installation closure派生，
+不能由调用者布尔值、Policy baseline digest、动态Model Deployment catalog或opaque `deployment_config_digest`声称：
+
+- `inline_only`当且仅当不存在任何`ModelArtifactProducer` ComponentCapacityManifest或使用
+  `model_artifact_producer/v1` startup profile的component scope；storage catalog仍必须有1～64项；
+- `artifact_capable`当且仅当存在一至多个完整Producer logical scope；每个scope在`component_images`、一个
+  `ModelArtifactProducer` capacity manifest和一个`model_artifact_producer/v1` startup manifest三处exact出现，并且至少存在一份匹配
+  Model Worker v2 manifest。即使当前没有任何Model Deployment也合法；
+- 每个Producer scope的storage binding集合必须非空、是15 Candidate catalog子集且全部region匹配；不同scope的binding集合不得重叠。
+  未分配给Producer的binding仍可服务其他Artifact路径。任一scope partial/orphan、同binding路由到多个scope或capacity/startup role错配都拒绝；
+  runtime readiness还必须证明实际Deployment、image与startup document逐值匹配。
+
+同一Producer logical scope的replica使用同一`ComponentRole`、byte-identical startup config和logical capacity identities；“2 per storage
+region/boundary”表示该scope内副本数，不是两个manifest。不同region/boundary使用不同opaque `ComponentRole`和不同manifest/identity，
+component kind仍由`kind=model_artifact_producer`表达，不能把所有boundary挤进一个固定role。
+
+`ComponentStartupManifestV1`是capacity identity的共同machine carrier，closed schema路径固定为
+`contracts/platform-v1/schemas/component-startup-manifest.schema.json`。唯一role/profile registry document与schema固定为
+`contracts/platform-v1/deployment/component-startup-profiles.json`及
+`contracts/platform-v1/schemas/deployment/component-startup-profiles.schema.json`，两者进入根contract digest。registry最多256个profile，
+按`profile_id` UTF-8 bytes严格升序且唯一；ID为1～128 ASCII bytes并匹配`^[a-z][a-z0-9_.\/-]{0,127}$`。每个entry冻结exact
+`startup_schema_digest`与closed tagged capacity requirement；`isolated`的pool/semaphore name数组各0～16、严格升序且唯一且不能同时为空，
+`capacity_free`不得携带数组。unknown profile、schema digest漂移或unknown registry字段fail closed。
+
+`startup_config_digest`必须是该role实际closed startup document的canonical digest，`startup_profile_id`必须在registry中且
+`startup_schema_digest`逐值相等。registry要求`isolated`时，startup document与manifest都必须携带非空、非null
+`capacity_isolation`，且pool/semaphore `primitive_name`集合分别exact等于profile；`capacity_free`时必须完全省略property。每个identity entry
+是closed object；`primitive_name`是1～64 bytes的ASCII stable key，pattern固定`^[a-z][a-z0-9_.-]{0,63}$`。两数组按name严格升序；identity
+digest在单项、单role和全Candidate范围都必须唯一。
+
+contracts crate不导入各binary的startup config。它只定义sealed `ValidatedComponentStartupV1`值、registry validator及
+`CandidateStartupProjectionV1` port；每个deployable component crate负责用registry锁定的closed schema把typed startup config验证并投影为
+`(component_role, canonical_startup_bytes, ComponentStartupManifestV1)`。Candidate builder只接收这些validated projection，自行复算
+`startup_config_digest`和manifest digest；不能接收预计算digest、未验证JSON或调用者预投影的identity集合。readiness由同一component adapter
+对进程实际启动document重新投影并与Candidate exact compare，projection逻辑不得在builder与binary各复制一份。每个Candidate image的
+signed build provenance还必须声明其compile-time `startup_profile_id/startup_schema_digest`，并与对应manifest exact相等；错误image/profile
+组合不能只等到进程启动才发现。
+
+`CapacityPrimitiveFactoryV1`是production composition创建本地pool、semaphore和weighted permit registry的唯一port：每次构造必须按
+`component_role + kind + primitive_name`恰消费manifest中的一个identity，重复、缺失、kind/name不匹配或启动结束后存在未消费entry都使
+readiness失败；architecture gate禁止production component绕过该port直接构造未登记primitive。因此startup manifest是运行时capacity
+identity的输入authority，不是从任意binary内部状态事后猜测的摘要；checked-in profile registry是唯一role/schema/capacity注册authority，
+不得再由binary或Helm维护第二份列表。
+
+把全部startup manifest的pool与semaphore identity digests合并后，每个identity在整个Candidate中必须恰出现一次，包括同role的
+pool↔semaphore；任何alias都fail closed。identity表示role-scoped logical allocation family，不是容量值、整组config digest或Pod/进程实例；
+不同logical primitive必须有不同identity，同一role的replica各自实例化physical member但共享该role family identity。`model_artifact_producer/v1`
+固定pool names `{database,kms,object_store}`及semaphore names
+`{declared_bytes,global_stream,per_tenant_stream_registry,wire_buffer}`；其他profile的exact集合也只来自registry并由上述factory逐项消费，
+不能以generic runtime map、未消费entry或直接构造primitive绕过。
 
 只要Candidate包含MCP OAuth绑定，`deployment_config_digest`覆盖的closed Egress配置还必须包含exact Auth Policy revision、完整
 Auth Profile、允许的非对称JWT算法、public JWKS及其canonical digest，以及OAuth写入所用ServiceIdentity Principal。运行时不得从
 issuer动态补齐、刷新或替换该信任根；key rotation通过新Candidate发布并重新资格，而不是在旧Candidate内静默漂移。
 
 `WorkerManifestDigest`必须是`contracts/platform-v1/schemas/worker-manifest.schema.json` closed document的canonical digest。
-Accepted目标使用07的`manifest_version=2`：每份document只允许一个exact WorkClass，并冻结`worker_role`、
+Accepted目标使用07的`manifest_version=2`：每份document只允许一个exact WorkClass，并冻结`component_role`、`worker_role`、
 `adapter_runtime_digest`、协议版本、业务最大并发和正数`critical_control_reserved_slots`；Model role还必须且只有它可以携带closed
 `model_output_materialization { slots, aggregate_bytes }`。CandidateManifest中的不同digest不能在运行时合并成共享semaphore。当前
+wire对非Model必须完全省略该property，`null`非法；Model必须提供closed object，两个值为正、`slots <= max_concurrency`、
+`aggregate_bytes <= 9007199254740991`，并分别不超过Candidate profile的effective worker slots/aggregate bytes。`component_role`必须存在于
+`component_images`且在WorkerManifest集合中唯一，并与对应startup manifest逐值相等；`worker_role`独立标识claim role且仍须唯一。任一
+capacity变化都必须改变canonical WorkerManifest digest。
+当前
 checked-in v1 contract不具备该字段，不能证明Artifact-backed output；本地pool primitive的unit evidence也不是CandidateManifest，
 不能替代Gate E/Q1负载证据。
 
@@ -145,6 +260,7 @@ checked-in v1 contract不具备该字段，不能证明Artifact-backed output；
 `deployment_config_digest`中。首个variant固定为：
 
 ```rust
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ComponentCapacityManifest {
     ModelArtifactProducer(ModelArtifactProducerCapacityV1),
 }
@@ -153,7 +269,9 @@ enum AdmissionQueueMode { RejectWhenSaturated }
 
 struct ModelArtifactProducerCapacityV1 {
     manifest_version: u32, // const 1
-    component_role: ComponentRole, // exact model-artifact-producer
+    component_role: ComponentRole,
+    region: CanonicalRegion,
+    storage_binding_digests: Vec<Digest>,
     admission_queue_mode: AdmissionQueueMode, // exact RejectWhenSaturated
     transport_accept_backlog: u32,
     transport_accept_timeout_milliseconds: u32,
@@ -165,31 +283,25 @@ struct ModelArtifactProducerCapacityV1 {
     object_store_connections: u16,
     kms_connections: u16,
 }
-
-enum ObjectWriteMode { ConditionalCreateVersioned }
-enum ExactKeyObservationContract { StrongAfterWriteQuiescence }
-
-struct ArtifactStorageBindingManifestV1 {
-    manifest_version: u32, // const 1
-    backend: StorageBackend, // exact s3
-    region: CanonicalRegion,
-    endpoint_identity_digest: Digest,
-    kms_binding_digest: Digest,
-    write_mode: ObjectWriteMode, // exact ConditionalCreateVersioned
-    exact_key_observation: ExactKeyObservationContract, // exact StrongAfterWriteQuiescence
-    maximum_put_completion_uncertainty_milliseconds: u64,
-}
 ```
 
+`ComponentCapacityManifest`使用flat internally-tagged JSON；首个variant的discriminator exact为
+`"kind":"model_artifact_producer"`，其`manifest_version=1`与`admission_queue_mode="reject_when_saturated"`为const，不能用外层
+`spec`、untagged shape或`null`代替；`component_role`使用02 nominal并与对应startup/image scope相等，不再固定为单一literal。
+`region`使用15 `CanonicalRegion`并与16 `DataRegion`按exact bytes比较。`storage_binding_digests` required 1～64项，按raw bytes严格升序且
+唯一；每项必须存在于Candidate的15 storage catalog且manifest region逐值相等，不同Producer scope不得重复认领。所有object
+`additionalProperties=false`，所有JSON u64数值还必须不超过`9007199254740991`。
+
 除`admission_queue_mode`外所有容量值必须为正；Producer不允许application admission queue，饱和必须立即返回16的typed transient
-failure。`transport_accept_backlog <= in_flight_streams`、`streams_per_tenant <= in_flight_streams`；transport及三项global值分别不超过
-HardLimitProfile v5同名effective字段。checked
+failure。`transport_accept_backlog <= in_flight_streams`、`streams_per_tenant <= in_flight_streams`；backlog、accept timeout、streams、
+declared bytes、buffer bytes与per-tenant streams六项分别不超过HardLimitProfile v5同名Candidate effective字段。checked
 `in_flight_streams * (effective model_output_chunk_bytes + protobuf_envelope_hard_overhead)`不得超过`in_flight_buffer_bytes`；
 `in_flight_declared_bytes`是按每个header声明总量加权的并发准入，不代表把完整response聚合进内存。DB pool必须同时不超过该组件stream
 上限、effective `control_data.database_connections`及installation DB总连接预算；object-store/KMS pool各不超过stream上限。所有角色的
-DB pool总和加migration/incident reserve仍须低于DB max connections。manifest digest、三个role-scoped pool/semaphore identity digest和
-exact startup config一并进入Candidate closure；任一identity与Model read Broker、Sandbox Broker、Model Worker或control pool重复均拒绝
-Candidate。目标schema路径为`contracts/platform-v1/schemas/component-capacity-manifest.schema.json`；当前尚未checked in，故现有
+DB pool总和加migration/incident reserve仍须低于DB max connections。manifest digest、上述canonical
+`component_startup_manifests`与exact startup config一并进入Candidate closure；Candidate必须拒绝任一局部pool/semaphore identity重复，单个
+整组摘要或opaque `deployment_config_digest`不能证明该不变量。目标schema路径为
+`contracts/platform-v1/schemas/component-capacity-manifest.schema.json`；当前尚未checked in，故现有
 Candidate证据不适用于Model Artifact Producer。
 
 `transport_accept_timeout_milliseconds`不是只用于配置检查的数字。transport front在连接进入bounded accepted backlog时立即记录
@@ -199,21 +311,27 @@ handshake/idle timeout不得大于同一effective值。到期必须取消transpo
 body-free status，不创建/修改Receipt或其他数据库事实。valid Header完成current授权并取得冻结Attempt absolute deadline后，后续Data、
 Terminal、DB/S3/KMS等待改由该Attempt deadline封顶，不能用重新计时延长它。
 
-`ArtifactStorageBindingManifestDigest`是上述closed manifest canonical bytes的digest，也就是04/15中的`storage_binding_digest`；不能用
-opaque deployment config或endpoint字符串代替。uncertainty必须为正，且checked换算后小于effective `artifact.staging_seconds`。其machine
-语义是：所有conditional PUT都携带不晚于Attempt deadline的write deadline；从该deadline起经过
-`maximum_put_completion_uncertainty_milliseconds`后，任何此前admitted write都不可能再创建新generation，exact-key HEAD/DELETE/HEAD对
-该locator给出稳定观察。Candidate只接受能以生产等价backend/proxy资格证明这一属性的binding；不满足时禁止Artifact-backed output。
-目标schema路径为`contracts/platform-v1/schemas/artifact-storage-binding-manifest.schema.json`，当前也未checked in，因此既有Candidate不能
-作为该write-quiescence合同的实现证据。
+`ArtifactStorageBindingManifestDigest`是15 closed manifest canonical bytes的digest，也就是04/15中的`storage_binding_digest`；不能用
+opaque deployment config或endpoint字符串代替。Candidate使用15的pure timing validator，以effective `artifact.staging_seconds`和所有引用
+Policy重验strict quiescence/grace关系；不满足生产等价backend/proxy合同的binding不得进入Candidate。目标schema尚未checked in，因此既有
+Candidate不能作为该write-quiescence合同的实现证据。
 
 其中`protobuf_envelope_hard_overhead`不是自由配置：16 RPC machine contract固定
-`MODEL_OUTPUT_PROTOBUF_ENVELOPE_OVERHEAD_BYTES=4096`并进入contract digest，Candidate builder用该常量做checked multiplication。
-当Candidate或任一允许的Model Deployment启用Artifact-backed output时，必须同时存在exact Model Worker v2 manifest与唯一Producer
-component-capacity manifest；未部署该role时不得把孤立manifest计作可用容量。每个ArtifactCapable binding在发布/激活时必须证明至少一个
+`MODEL_OUTPUT_PROTOBUF_ENVELOPE_OVERHEAD_BYTES=4096`。其当前machine carrier是closed
+`contracts/platform-v1/protocol/model-output-rpc.json`与对应schema，两者必须进入root contract digest；公开Rust const与后续protobuf逐值
+复验同一document。Candidate builder只能用该const做checked add/multiplication，环境变量、Helm与HardLimitProfile均不能覆盖。
+Candidate的installation mode为`artifact_capable`时，必须同时存在exact Model Worker v2 manifest及至少一个完整Producer scope；未部署
+scope时不得把孤立capacity/startup manifest计作可用容量。18把Candidate投影为16 `InstalledModelOutputCapabilitiesV1`实现；每个
+ArtifactCapable Model Deployment在创建/激活/Run admission时通过该port证明其Policy storage digest路由到exact Producer scope，并证明至少一个
 匹配adapter/region的Model Worker满足`slots >= 1 && aggregate_bytes >= maximum_materialized_bytes`，且Producer满足
 `in_flight_declared_bytes >= maximum_materialized_bytes`与
-`in_flight_buffer_bytes >= effective model_output_chunk_bytes + 4096`；否则拒绝发布/激活，不能让Job永久Ready到deadline。
+`in_flight_buffer_bytes >= effective model_output_chunk_bytes + 4096`，15 binding还必须满足
+`maximum_object_bytes >= maximum_materialized_bytes`；否则拒绝Deployment激活、Release切换或Run admission，不能让Job永久Ready到deadline。
+
+Release切换必须实现16的共享compatibility generation协议：在03既有installation-scoped Aggregate row的同一`FOR UPDATE`事务内，把incoming
+Candidate投影为port、重验全部active Model Deployment、CAS exact旧generation并提交新Candidate digest/generation；与并发Deployment
+activation互斥。Runtime API在创建Run的事务中按同一row做共享锁或等价CAS，重新调用port并冻结Candidate digest/generation。Kubernetes
+rollout/readiness只能在该durable fence之后推进流量，不能用先扫描后异步写pointer的两阶段窗口代替；不新增release compatibility表。
 
 ### 4.1 当前证据边界（非规范性）
 
@@ -227,9 +345,11 @@ Contract/Functional子证据：尚未绑定immutable CandidateManifest、product
 因此不能声明Gate D/E、Q1或Release资格。Artifact/Invocation、外部backend、50 active Runs、跨WorkClass饱和、24小时soak与DR
 证据必须在对应实现阶段重新产生，不能沿用已撤销设计的数字或报告。
 
-CandidateManifest的closed Rust type、checked-in JSON Schema、canonical digest与实际Worker/HardLimit exact-closure validator已经交付，
-并进入`insight.platform/v1`根合同digest。当前尚未生成绑定production-equivalent images/config/topology的Candidate实例，也没有任何
-Gate A～G结果或ReleaseManifest；因此这项machine-contract foundation本身不构成资格证据。
+此前CandidateManifest基础的closed Rust type、checked-in JSON Schema、canonical digest与WorkerManifest v1/HardLimitProfile v4
+exact-closure validator已经交付并进入`insight.platform/v1`根合同digest；它们尚无本节新增的materialization mode、component-capacity、
+storage-binding、component-startup digest集合或全Candidate capacity alias验证，不能证明CR-165目标合同。当前也未生成绑定
+production-equivalent images/config/topology的Candidate实例，没有任何Gate A～G结果或ReleaseManifest；因此旧foundation本身不构成新合同
+或资格证据。
 
 Sandbox expired-lease runtime现也有独立`WorkClass::Sandbox` business/critical-control permit、分片scan、backend evidence与fenced
 commit driver；unit fixture证明Sandbox业务permit耗尽时critical-control scan仍运行。Core NATS control adapter也已实现exact
@@ -597,11 +717,35 @@ CR-165的Accepted目标合同要求下一revision固定为`profile_version=5`并
 | `artifact.model_output_producer_streams_per_tenant` | count | 1024 | 8 | `temporarily_unavailable` |
 | `artifact.ready_retention_seconds` | seconds | 315576000 | 2592000 | `invalid_request` |
 
+上述十个tuple在profile v5中逐字段exact，不能只验证正数或`q1_default <= hard_max`；所有Limit的`hard_max/q1_default`还必须不超过
+JSON safe integer。Candidate qualification的installation effective值就是其exact profile的`q1_default`；Deployment/tenant/Attempt只能在
+typed closure中进一步收紧，不能扩大或静默改写Candidate manifest。Worker/Component manifest因此与Candidate effective值比较，而不是直接
+借用`hard_max`。profile validator还必须以checked arithmetic同时证明hard/Q1两组关系：
+
+```text
+model_output_chunk_bytes <= model_context_mcp.response_bytes
+model_output_worker_aggregate_bytes
+  == model_output_worker_slots * model_context_mcp.response_bytes
+model_output_producer_in_flight_declared_bytes
+  == model_output_producer_in_flight_streams * model_context_mcp.response_bytes
+model_output_producer_transport_backlog <= model_output_producer_in_flight_streams
+model_output_producer_streams_per_tenant <= model_output_producer_in_flight_streams
+model_output_producer_in_flight_buffer_bytes
+  >= model_output_producer_in_flight_streams
+     * (model_output_chunk_bytes + MODEL_OUTPUT_PROTOBUF_ENVELOPE_OVERHEAD_BYTES)
+```
+
+任一add/multiply溢出都拒绝profile/Candidate，不能saturate。Q1对应关系固定为
+`16*4194304=67108864`、`64*4194304=268435456`和`64*(65536+4096)=4456448 <= 16777216`；hard关系固定为
+`1024*16777216=17179869184`、`4096*16777216=68719476736`和
+`4096*(262144+4096)=1090519040 <= 4294967296`。这些等式是machine invariant，不是解释性示例。
+
 chunk字段冻结`StageModelOutput` canonical data frame大小；有效值只能进一步收紧且不能超过该Attempt的
 `maximum_materialized_bytes`。Worker两字段封顶07 manifest的slot+weighted bytes；Producer transport与四项in-flight字段封顶上述ComponentCapacityManifest和
 每个RPC的双层weighted admission；Ready retention封顶16 Model Deployment的exact duration。当前checked-in `profile_version=4`没有这些
 字段，现有schema/Q1/Candidate证据不能证明Artifact-backed Model output；实现该路径时必须原子升级schema、Q1实例、Rust exact
-validator、WorkerManifest v2、ComponentCapacityManifest、Candidate digest和正负向fixture，不能以环境变量或Helm自由值补字段。
+validator、WorkerManifest v2、15 ArtifactStorageBindingManifest、ComponentCapacityManifest、ComponentStartupManifest/profile registry/
+projection/factory、16 installation compatibility port/generation、RPC protocol carrier、Candidate digest和正负向fixture，不能以环境变量或Helm自由值补字段。
 
 ### 14.2 Capacity contract
 
@@ -889,6 +1033,17 @@ Qualification使用协议真实fake Provider/MCP/remote service确保可重复�
 
 fake服务也必须实现bounded、versioned协议和错误，不在测试中给平台额外内部hook绕过生产路径。
 
+Gate A的CR-165 machine fixture还必须覆盖：v4/v6 profile与十个tuple任一unit/value/outcome漂移；Worker v1、缺/错component role、Model缺capacity、非Model
+额外/null capacity、slot/aggregate越界；Component unknown kind/field、错误const role/queue mode、零值、backlog/per-tenant/pool越界、
+wire-buffer checked add/multiply溢出；Storage空catalog、错误backend/region/addressing/write/observation、零timeout/object limit、超safe
+uncertainty/object limit及quiescence边界；Candidate两个mode、
+四个digest数组缺字段/无序/重复/超限/missing/extra、Producer三处partial/orphan closure、worker/startup/component role与image不匹配、
+unknown/duplicate startup profile、schema/provenance drift、capacity property缺失/null/多余、primitive name set偏差、inner set无序/重复/空/超限、
+未消费entry/绕过factory及任意跨role或pool↔semaphore alias；Producer多scope role/region/binding重叠与错误路由；协议document/schema/Rust常量与
+4096值漂移。正向fixture必须分别证明纯Inline Candidate、零Model Deployment的Artifact-capable Candidate及后续Inline/ArtifactCapable
+Deployment反向激活验证稳定，readiness对实际manifest/startup closure exact复验；并发Deployment activation/Candidate switch/Run admission
+必须由同一compatibility generation产生单一winner且每个admitted Run冻结兼容digest。
+
 ### 27.1 共享 Conformance Fixture Manifest
 
 所有规范共享`contracts/platform-v1/fixtures/manifest.json`，不允许各crate复制一套稍有不同的expected value。
@@ -1028,6 +1183,9 @@ Built -> Staged -> Qualifying -> Qualified -> Approved -> Deploying -> Active ->
 - CI构建一次immutable image，环境间只promotion digest，不重建；
 - image/package有signature、SBOM、provenance，admission按digest验证；
 - promotion检查 CandidateManifest 与 qualification bundle 中的 digest 完全匹配，再生成 ReleaseManifest；
+- immutable ReleaseManifest不充当mutable active pointer；唯一current release/Candidate digest与16
+  `installation_compatibility_generation`保存在03既有installation-scoped Release aggregate payload中，promotion、rollback、Model Deployment
+  activation与Run admission都锁定/复验同一row，禁止ConfigMap、Helm value或进程cache形成第二current authority；
 - canary只接synthetic/allowlistedtenant，验证后逐步扩大；
 - rollout期间持续检查SLO/error budget/invariant/outbox/reconciliation；
 - rollback停新版本traffic并恢复schema-compatible旧image，不能down migrate或改写Run；

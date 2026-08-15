@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
+| 状态 | Draft / Architecture Revision |
 | 日期 | 2026-08-15 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md)、[`12-context-and-retrieval.md`](12-context-and-retrieval.md) |
 | 直接下游 | 14、16、17、18 |
@@ -210,8 +210,54 @@ sentinel或虚构generation绕过未知状态；真实零字节对象仍以`Some
 - Artifact 与 Blob 分离：不同 purpose/retention/provenance 的 Artifact 可以在允许域内引用同一 Blob；
 - Object version/generation 固定，禁止 overwrite existing key；
 - object lock/versioning 是防御层，PostgreSQL 仍是 Artifact lifecycle 权威。
-- `storage_binding_digest`引用18 CandidateManifest中的installation-scoped storage/region/KMS binding，不是tenant
-  Revision或可运行时选择的backend ID；
+- `storage_binding_digest`引用本规范的installation-scoped storage/region/KMS binding，不是tenant
+  Revision或可运行时选择的backend ID；本规范是该catalog与1～64 hard max的owner，Model output是否Inline-only
+  不影响Package、request Artifact及其他Artifact路径对该catalog的需求；
+
+### 6.1 Installation storage binding机器合同
+
+```rust
+#[serde(transparent)]
+struct CanonicalRegion(String);
+
+enum StorageBackend { S3 }
+enum S3AddressingMode { VirtualHosted, PathStyle }
+enum ObjectWriteMode { ConditionalCreateVersioned }
+enum ExactKeyObservationContract { StrongAfterWriteQuiescence }
+
+struct ArtifactStorageBindingManifestV1 {
+    manifest_version: u32, // const 1
+    backend: StorageBackend, // exact s3
+    region: CanonicalRegion,
+    endpoint_identity_digest: Digest,
+    bucket_binding_digest: Digest,
+    addressing_mode: S3AddressingMode,
+    request_timeout_milliseconds: u32,
+    maximum_object_bytes: u64,
+    kms_binding_digest: Digest,
+    write_mode: ObjectWriteMode, // exact ConditionalCreateVersioned
+    exact_key_observation: ExactKeyObservationContract, // exact StrongAfterWriteQuiescence
+    maximum_put_completion_uncertainty_milliseconds: u64,
+}
+```
+
+schema路径固定为`contracts/platform-v1/schemas/artifact-storage-binding-manifest.schema.json`，所有object closed。
+`StorageBackend::S3`、`S3AddressingMode`、`ObjectWriteMode`与`ExactKeyObservationContract`的wire分别exact为`s3`、
+`virtual_hosted | path_style`、`conditional_create_versioned`与`strong_after_write_quiescence`。`CanonicalRegion`是1～63 bytes的transparent ASCII string，pattern固定
+`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`；不做lowercase、provider alias或Unicode normalization。uncertainty必须为正且不超过
+`9007199254740991`，request timeout与maximum object bytes也必须为正，后者不超过JSON safe integer；所有digest必须使用02 exact wire。
+endpoint/bucket/KMS字段引用Candidate安装的exact private endpoint、opaque bucket/prefix与workload-identity/KMS binding，不携带hostname、
+bucket name、access key或Secret正文；runtime按digest解析后仍须逐字段复验region/addressing/timeout/byte limit。
+
+`MAX_INSTALLATION_ARTIFACT_STORAGE_BINDINGS=64`由本规范唯一拥有。每个生产Candidate必须安装1～64份canonical manifest；digest按raw
+bytes严格升序且唯一。未被某一时刻动态Deployment引用的binding不是orphan，因为同一catalog还服务Package、request Artifact及其他
+Artifact路径。
+
+纯`ArtifactStorageBindingManifestV1::validate_timing(StorageBindingTimingLimitsV1)`使用checked arithmetic计算
+`required_write_quiescence_seconds = ceil(uncertainty_milliseconds / 1000) + 1`；任何add或换算溢出都拒绝。调用方提供的installation
+`staging_seconds`必须严格大于该结果，引用该binding的ArtifactIo Policy `staging_grace_seconds`必须大于等于该结果。所有conditional PUT都
+携带不晚于Attempt deadline的write deadline；从该deadline经过uncertainty后，不得再有此前admitted write创建新generation，exact-key
+HEAD/DELETE/HEAD必须提供稳定观察。不满足该生产等价backend/proxy合同的binding不得进入Candidate。
 
 ## 7. 状态机
 

@@ -180,7 +180,7 @@ Provider extension 不可由 Agent JSON 透传。
 
 `ModelArtifactDeliveryContract`只描述 Model request 中显式 image/audio/document Artifact 如何交给 Provider；它不决定完整
 canonical response 因 Inline threshold 而采用的存储形状，也不授权 Provider 或 Model Worker 创建 output Artifact。完整逻辑
-response 的 Inline/Artifact选择只由本规范的 output materialization closure、15的Artifact状态机与18的HardLimitProfile决定。
+response 的 Inline/Artifact选择只由本规范的 output materialization closure、15的Artifact状态机与下述installation capability port决定。
 
 该schema以及Model structured output/tool arguments统一使用05的`insight.closed-json-schema/1`。Provider原生
 schema dialect只由adapter从此profile做能力映射，永远不成为第二权威。
@@ -201,9 +201,7 @@ struct ModelDeployment {
     budget_policy_revision_id: RevisionId,
     generation_defaults: ClosedJsonValue,
     public_projection_policy_revision_id: RevisionId,
-    model_output_retention_policy_revision_id: RevisionId,
-    model_output_artifact_io_policy_revision_id: RevisionId,
-    model_output_ready_retention_seconds: u64,
+    model_output: ModelOutputDeploymentClosureV1,
     deployment_digest: Digest,
 }
 
@@ -222,8 +220,8 @@ struct ModelBindingSet {
 - Model Deployment 的 Provider Deployment 必须引用与 Model Profile 相同的 Provider Revision，并通过 compatibility
   与 conformance 检查；
 - Provider Deployment Policy closure固定`protocol/network/tls/trust/data`，其中protocol必须exact等于Provider Revision；
-  Model Deployment固定`data/budget/public_projection/model_output_retention/model_output_artifact_io`，一个Policy Revision不能填
-  多个role；后两者必须分别引用04的exact `Retention`与`ArtifactIo` Policy Revision；
+  Model Deployment固定`data/budget/public_projection`与closed tagged `model_output` closure；一个Policy Revision不能填多个role。
+  `model_output.mode=inline_only`不得携带output Policy，`artifact_capable`必须分别引用04的exact `Retention`与`ArtifactIo` Policy Revision；
 - Run admission 复制 exact candidate IDs/digest，之后 active head/catalog变化不影响 Run；
 - runtime selection 只在候选内，输入是 requirement、policy、remaining budget 和健康门；
 - health/circuit 可以使候选不可用，但不会自动选择未绑定 Provider；
@@ -232,12 +230,73 @@ struct ModelBindingSet {
 - 已发送 request 后不能以 failover 重放可能仍在执行的 Attempt，必须先应用 retry/uncertainty规则。
 
 Provider Deployment closure按角色分别冻结`protocol/network/tls/trust/data`五个exact Policy Revision、region与conformance
-Artifact；同一Policy Revision不能兼任多个role。Model Deployment closure分别冻结
-`data/budget/public_projection/model_output_retention/model_output_artifact_io`五个exact Policy Revision与`ClosedJsonValue`
-generation defaults。Retention closure必须给出15要求的Ready `RunOutput` minimum retention、tombstone与hold规则；Deployment的
-`model_output_ready_retention_seconds`必须为正、不短于该minimum且不长于18 effective `artifact.ready_retention_seconds`。ArtifactIo
+Artifact；同一Policy Revision不能兼任多个role。Model Deployment closure分别冻结`data/budget/public_projection`三个exact Policy
+Revision、`ClosedJsonValue` generation defaults与以下closed internally-tagged output closure；wire discriminator固定为`mode`，unknown字段、
+`null`、跨variant字段和未知mode均拒绝：
+
+```rust
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum ModelOutputDeploymentClosureV1 {
+    InlineOnly {
+        schema_version: u32, // const 1
+    },
+    ArtifactCapable {
+        schema_version: u32, // const 1
+        retention_policy: ExactVersionRef,
+        artifact_io_policy: ExactVersionRef,
+        ready_retention_seconds: u64,
+    },
+}
+
+struct InlineOutputCompatibilityRequestV1 {
+    maximum_canonical_response_bytes: u64,
+}
+
+struct ArtifactOutputCompatibilityRequestV1 {
+    storage_binding_digest: Digest,
+    adapter_runtime_digest: Digest,
+    protocol_version: u32,
+    region: DataRegion,
+    maximum_materialized_bytes: u64,
+    ready_retention_seconds: u64,
+}
+
+struct InstalledModelOutputCompatibilityReceiptV1 {
+    installation_compatibility_generation: u64,
+    installation_digest: Digest,
+}
+
+trait InstalledModelOutputCapabilitiesV1 {
+    fn validate_inline(
+        &self,
+        request: InlineOutputCompatibilityRequestV1,
+    ) -> Result<InstalledModelOutputCompatibilityReceiptV1, ModelDeploymentError>;
+    fn validate_artifact(
+        &self,
+        request: ArtifactOutputCompatibilityRequestV1,
+    ) -> Result<InstalledModelOutputCompatibilityReceiptV1, ModelDeploymentError>;
+}
+```
+
+Model Deployment是installation发布后仍可创建/激活的domain catalog，不能参与immutable installation manifest构造。16只依赖上述
+contracts-owned pure port，不导入下游Candidate类型。`InlineOnly`在创建及每次激活时都必须通过`validate_inline`证明最大合法canonical
+response不超过当前installation Inline threshold，且不得携带output Policy。
+`ArtifactCapable`的Retention closure必须给出15要求的Ready `RunOutput` minimum retention、tombstone与
+hold规则；`ready_retention_seconds`必须为正且不短于该minimum。ArtifactIo
 closure必须是04 exact `ModelOutputArtifactIoPolicyDocument`，固定staging grace、唯一verified media、classification ceiling、maximum
-materialized bytes、storage/encryption binding与content-validation contract。`ClosedJsonValue`携带schema digest、canonical digest并执行统一
+materialized bytes、storage/encryption binding与content-validation contract。创建及每次激活ArtifactCapable Deployment都必须调用
+`validate_artifact`；port实现同时检查installation mode、15 storage catalog/region、ready-retention limit、07 Worker匹配及Producer scope的
+单请求容量。下游Candidate builder不得读取Model Deployment/Policy catalog，也不冻结某一时刻的tenant/domain集合。
+
+Model Deployment activation、installation Release切换与Run admission共享一个installation-scoped
+`model-output-compatibility` Aggregate generation/fence，复用03 `aggregates`表而不新增表。activation与Release切换都必须在同一事务`FOR UPDATE`
+该row、对exact generation执行上述port验证并在成功mutation时递增generation；Release切换还在锁内对全部active Model Deployment重跑验证。
+Run admission以同一row的current generation/digest和所选exact Deployment调用port，在提交Run前持有共享锁或执行等价CAS，并把receipt的
+generation/digest冻结进Run binding。这样activation与切换不能各自读取旧快照后同时成功；每个新Run仍拒绝mode、Inline threshold、storage、
+Worker或Producer capacity漂移。existing Run继续使用已冻结installation closure，不追随新generation。
+generation CAS失败复用17 `etag_mismatch`，兼容性失败复用`invalid_state_transition`并返回body-free safe field error；activation/Release原有
+Event与Outbox必须携带新generation/digest，不新增EventKind、错误码、表或第二active-Candidate authority。
+`ClosedJsonValue`携带schema digest、canonical digest并执行统一
 bytes/depth/object/array/string hard limit；Deployment不能只
 保存opaque digest后在dispatch时读取mutable defaults，运行时也不能重新追随任一Policy active head。
 
@@ -703,6 +762,13 @@ struct StageModelOutputTransientFailure {
 }
 ```
 
+该常量的当前machine authority是由`insight-platform-contracts`同源生成的closed
+`contracts/platform-v1/protocol/model-output-rpc.json`及
+`contracts/platform-v1/schemas/protocol/model-output-rpc.schema.json`：document固定
+`{schema_version:1,stage_model_output_protocol_version:1,protobuf_envelope_hard_overhead_bytes:4096}`，两文件都必须进入根
+`contract_digest`。公开Rust常量、Candidate checked arithmetic与后续`StageModelOutput` protobuf生成/fixture必须逐值等于该document；
+在protobuf尚未交付时该document是唯一机器载体，不能从环境变量、Helm或HardLimitProfile覆盖。
+
 Blob disposition cross-field规则是closed：`CandidateWinner`要求candidate=resolved、`new_physical_bytes=byte_length`且所有cleanup字段为
 zero/None；`PreexistingHit`要求candidate!=resolved、candidate未创建、`new_physical_bytes=0`且cleanup字段为zero/None；
 `RacingCandidateLoser`要求candidate!=resolved、`new_physical_bytes=0`、cleanup bytes等于byte length且generation digest/预留cleanup Job ID
@@ -1107,6 +1173,11 @@ Deployment/activate/suspend、credential grant、high-risk data transfer和break
 - 至少两个Provider adapter通过同一message/stream/tool/schema/usage/error conformance fixture；
 - catalog discovery不会自动publish/deploy/activate，model alias漂移可检测/标记；
 - active head/catalog切换不改变existing Run/Turn binding；
+- Model Deployment output closure覆盖InlineOnly/ArtifactCapable两个tag、unknown/null/cross-variant字段、重复Policy role、Inline悬空Policy、
+  Artifact缺Retention/ArtifactIo/Ready duration、storage binding drift及全部retention上下界；创建/激活/Run admission通过同一installation
+  capability port验证，activation与Release切换共享generation/fence并覆盖并发TOCTOU；零Model Deployment的installation构造保持稳定；
+- `model-output-rpc.json`、其closed schema、Rust公开常量及后续protobuf/receive-limit fixture逐值证明4096-byte overhead一致，任一载体漂移使
+  root contract check失败；
 - unknownProvider field、finish reason、tool/schema、usage和oversized delta fail closed；
 - stream Worker kill、duplicate/late frame、timeout/cancel/retry竞态只有一个terminal output；
 - Inline threshold前一字节/恰好阈值/后一字节、Model response Q1/hard boundary分别证明Inline、Artifact晋升和稳定拒绝；每条路径
