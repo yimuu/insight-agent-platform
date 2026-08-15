@@ -245,12 +245,10 @@ trait CapabilityBackend {
     async fn cancel(&self, request: CancelRequest) -> CancelOutcome;
 }
 
-trait ContextBackend {
-    async fn search(&self, request: ContextRequest) -> ContextResult;
-}
 ```
 
 接口返回值必须是闭合枚举，不允许以任意 JSON 状态字符串扩展状态机。
+Context backend port不在本架构总览重复声明；其唯一trait、request/outcome与continuation/cancel合同由12 `ContextBackend`拥有，组合层只依赖该port。
 
 ## 8. 端到端调用
 

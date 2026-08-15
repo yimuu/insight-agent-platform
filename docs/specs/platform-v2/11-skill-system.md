@@ -63,7 +63,7 @@ system contract 的优先级始终高于 Skill 内容。
 
 ```rust
 struct SkillRevision {
-    skill_revision_id: RevisionId,
+    skill_revision_id: ResourceVersionId,
     skill_id: SkillId,
     interface: SkillInterface,
     manifest: SkillManifest,
@@ -86,7 +86,7 @@ struct SkillInterface {
     purpose: String,
     task_input_schema: ClosedJsonSchema,
     produced_guidance_schema: ClosedJsonSchema,
-    compatible_agent_interfaces: Vec<RevisionId>,
+    compatible_agent_interfaces: Vec<ResourceVersionId>,
 }
 ```
 
@@ -156,7 +156,7 @@ Skill 只能在平台定义的 phase 中提供内容，不能声明 `system`/`de
 ```rust
 struct CapabilityRequirement {
     alias: RequirementAlias,
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     required_effect_ceiling: Effect,
     required_features: BTreeSet<CapabilityFeature>,
     optional: bool,
@@ -164,7 +164,7 @@ struct CapabilityRequirement {
 
 struct ContextRequirement {
     alias: RequirementAlias,
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     required_classification_ceiling: DataClassification,
     optional: bool,
 }
@@ -193,7 +193,7 @@ struct SkillBindingSet {
     required: Vec<BoundSkill>,
     candidates: Vec<BoundSkill>,
     requirement_bindings: Vec<SkillRequirementBinding>,
-    selection_policy_revision_id: RevisionId,
+    selection_policy_revision_id: ResourceVersionId,
     closure_digest: Digest,
 }
 ```
@@ -242,7 +242,7 @@ struct SkillActivation {
     tenant_id: TenantId,
     run_id: RunId,
     scope_instance_id: ScopeInstanceId,
-    skill_revision_id: RevisionId,
+    skill_revision_id: ResourceVersionId,
     selection_mode: SkillSelectionMode,
     selection_evidence_ref: ValueRef,
     state: SkillActivationState,

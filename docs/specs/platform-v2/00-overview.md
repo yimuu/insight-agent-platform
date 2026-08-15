@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
+| 状态 | Draft / Cross-review Reopened |
 | 日期 | 2026-08-15 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -13,8 +13,9 @@
 > conformance tests 与资格验收完成前都不是当前平台合同。
 
 > 2026-08-09 persistence reset：此前 migration 1～35 及 177 表候选把行为不变量过度绑定为专用表、evidence 表和
-> deferred trigger，已经停止继续实施。00～18 曾全部退回 Architecture Revision；在共享
-> Resource/Aggregate/Job/Task/Event/Receipt 模型完成全量 cross-review 后已重新 Accepted。旧候选不得作为新实现兼容基线。
+> deferred trigger，已经停止继续实施。共享 Resource/Job/Task/Event/Receipt 模型的首轮cross-review曾完成；2026-08-15因
+> CR-165发现Installation Release current authority及其Run/Model/Artifact闭包未完整定义，相关上游和下游规范已重新退回Draft。
+> 旧候选不得作为新实现兼容基线，当前修订在全量cross-review关闭前也不得作为实现输入。
 
 ## 1. 决策摘要
 
@@ -40,28 +41,29 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Accepted / In Progress | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | Draft / Cross-review Reopened | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / In Progress | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Draft / Architecture Revision | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / In Progress | PostgreSQL、事务、Outbox、Lease、恢复 |
-| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / In Progress | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / In Progress | Agent Interface、Typed Plan、Model Loop |
-| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / In Progress | Run、NodeExecution、暂停、重试、取消 |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Draft / Architecture Revision | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Draft / Architecture Revision | 多租户、授权、Secret、Effect、Quota、Approval |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Draft / Architecture Revision | Agent Interface、Typed Plan、Model Loop |
+| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Draft / Architecture Revision | Run、NodeExecution、暂停、重试、取消 |
 | 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Draft / Architecture Revision | Scheduler、Worker、Lease、背压和隔舱并发 |
-| 08 | [`08-subagent.md`](08-subagent.md) | Accepted / In Progress | Child Run、父子通信、取消传播和循环限制 |
-| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / In Progress | Capability Interface、Implementation、Registry |
-| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / In Progress | 调用协议、幂等、同步快路径、异步恢复 |
+| 08 | [`08-subagent.md`](08-subagent.md) | Draft / Architecture Revision | Child Run、父子通信、取消传播和循环限制 |
+| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Draft / Architecture Revision | Capability Interface、Implementation、Registry |
+| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Draft / Architecture Revision | 调用协议、幂等、同步快路径、异步恢复 |
 | 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / In Progress | Skill Package、发现、选择、绑定和依赖 |
-| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / In Progress | ContextSource、检索、引用和数据权限 |
+| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Draft / Architecture Revision | ContextSource、检索、引用和数据权限 |
 | 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / In Progress | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / In Progress | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Draft / Architecture Revision | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Draft / Architecture Revision | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Draft / Architecture Revision | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / In Progress | 管理 API、Run API、事件流和错误模型 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Draft / Architecture Revision | 管理 API、Run API、事件流和错误模型 |
 | 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Draft / Architecture Revision | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
-Planned 文件不得被实现或其他规范作为已确定合同引用。一个文件只有进入 Draft 并给出完整状态机、
-不变量和验收条款后，才能成为实施输入。
+Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
+cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得
+由既有Accepted状态旁路生成代码。
 
 ## 3. 实施依赖
 
@@ -78,10 +80,11 @@ Planned 文件不得被实现或其他规范作为已确定合同引用。一个
 02 + 04 + 05 + 06 + 07 + 10 + 15 -> 16
 04 + 09 + 10 + 12 + 16 -> 13
 04 + 07 + 09 + 10 + 13 + 15 -> 14
-02～16 all domain contracts -> 17 API/Events -> 18 Qualification
+02～16 all domain contracts -> 18 deployment/release contract -> 17 API/Events -> 18 qualification gates
 ```
 
-这是有向无环依赖；下游可以实现上游port，但上游domain不能为了某个下游adapter反向依赖。例如Artifact Scanner
+这是按合同章节而不是文件编号排序的有向无环依赖。18的deployment/release、Candidate和installation-authority章节是17的上游；18的
+qualification章节才消费17的API/Event合同。下游可以实现上游port，但上游domain不能为了某个下游adapter反向依赖。例如Artifact Scanner
 可以用Sandbox实现，Artifact contract仍不依赖Sandbox；MCP Sampling可以调用Model port，Model domain不依赖MCP。
 
 后续规范可以收紧上游合同，但不能隐式改变已经 Accepted 的上游不变量。需要改变时必须先更新上游
@@ -166,12 +169,22 @@ Draft
 
 ## 8. 本批次结论与下一步
 
-00～18 的 persistence architecture cross-review 仍保持关闭；CR-165 的实现前machine审计扩大了非持久合同修订范围：02、07、15、16与18
-当前处于Draft / Architecture Revision，新增共享ComponentRole、Worker v2、Storage binding owner、Model installation capability fence、
-Candidate/startup-profile/capacity closure，并正在执行最后一轮全量cross-review。修订关闭前这些文件不得作为新代码实施输入。旧的专用
-表族、migration 1～35、177 表 catalog、checksum 和资格结论全部退出活动基线。物理模型由
-[`ADR-0001`](../../adr/0001-platform-v2-postgres-baseline.md)冻结为 23 张表，并已经形成单一 `0001`、共享 repository 与
-真实 PostgreSQL 16 foundation fixture。
+CR-165已重新打开全量cross-review。修订范围不是非持久合同：它新增一个installation-scoped current Release/Candidate authority，并使
+02、03、04、05、06、07、08、09、10、12、14、15、16、17、18及ADR-0001回到Draft。目标新增`InstallationId`、统一
+`CanonicalRegion`、RunBindings v2、WorkerManifest v2、Storage binding owner、Model installation compatibility port、
+Candidate/startup/runtime-capacity closure、closed content/semantic evidence及其response-contract equality、current encryption read fence、
+Gateway-only proxied download、closed ArtifactGrant capability/state、三个隔离read Broker、ordinary-output Workload Producer、Maintenance Authority、
+Model Producer及物理拆分的public Upload/Download Gateway八个Artifact role、typed encryption-domain Approval API、
+content-addressed qualification/approval supply-chain resolver和
+Receipt-first capture→resolver/scan→final有界Release切换；10同时把Invocation的Approval/Input引用收紧为03 shared Task authority的
+`ApprovalTaskId(apr_)`/`InteractionId(int_)` closed state合同，并只允许owner JobCommit first-winner事务分配Input `int_`。
+修订关闭前这些文件不得作为新代码实施输入。
+
+旧的专用表族、migration 1～35、177表catalog、checksum和资格结论仍全部退出活动基线。当前已实现的物理基线仍是23张总表、
+22张业务表、schema contract v6及单一`0001_platform_baseline.sql`；[`ADR-0001`](../../adr/0001-platform-v2-postgres-baseline.md)
+的clean-cut目标修订为24张总表、23张业务表和schema contract v7；ADR把逻辑`InstallationReleaseState`映射为恰好一个新增singleton，
+具体物理名称、列和约束只由ADR-0001拥有。目标migration/verifier/fixture落地前，
+24张表与v7都不是当前行为。
 
 这只表示 persistence foundation 已实现，不表示 00～18 的全部 API、Worker、Sandbox、MCP、SLO 或部署拓扑已经实现。
 后续按新的[实施计划](implementation-plan.md)继续 domain service、execution integration、public `/v1` 和 qualification。
@@ -181,19 +194,27 @@ Candidate/startup-profile/capacity closure，并正在执行最后一轮全量cr
 旧 migration 1～35、177 表 catalog、专用表族及其 checksum、fixture 和资格结论已经全部撤销；详细演变只保留在
 Git 历史，不再复制到活动规范。它们不能证明当前 schema、API、Worker、部署或容量行为。
 
-当前 persistence baseline 只有 ADR-0001 冻结的 23 张表和单一 `0001_platform_baseline.sql`。Phase 1、Phase 2 与 Phase 3
+当前 persistence baseline 只有23张总表、22张业务表、schema contract v6和单一 `0001_platform_baseline.sql`。Phase 1、Phase 2 与 Phase 3
 functional exit 已关闭；Phase 3 的 Artifact transaction/worker、generic Invocation、Capability execution、ModelTurn、Context 与
 Text2SQL domain/repository 已在 fresh PostgreSQL 16 上作为同一全量 fixture suite 实际执行。Text2SQL admission 还在同一事务锁定
 committed SqlCatalog Observation 与 exact `database.query.readonly` Capability Interface/Deployment/ReadOnly Effect，不建立专用表。
+当前Invocation实现仍以generic `ResourceId`承载Approval/Input引用、允许normalized backend request携带Input ID并做runtime kind检查；目标
+nominal `ApprovalTaskId`/`InteractionId`字段、owner-side Input ID allocation/replay、禁止internal `tsk_`的machine schema及逐状态
+跨aggregate fixture尚未交付，既有Phase 3证据不能把10的本次修订声明为当前行为。
 CR-165 的Model Artifact-backed output架构方向仍是独立Model Artifact Producer，
 与只读Model Artifact Broker分离，且只有Model terminal PostgreSQL事务能够把Verified Artifact原子推进为Ready并提交Output Link、
 RunValue、usage/quota、Event与Outbox；pre-header transport timeout与storage write-quiescence barrier分别阻断slowloris容量占用和
-absence后迟到PUT。Candidate显式enablement、digest集合边界、pool/semaphore alias closure与4096-byte RPC overhead已经形成Draft修订，
+absence后迟到PUT。Candidate显式enablement、digest集合边界、pool/semaphore alias closure、installation state与4096-byte RPC overhead
+已经形成Draft修订，
 仍须通过当前cross-review后才能成为Accepted目标合同；对应domain/schema/protobuf、Producer进程与权限、部署及
 real-process/故障/容量资格仍全部Open。当前Model output materializer仍为Inline-only，超过Inline能力时仍走开发期
 `model_output_artifact_required`防护；不得据此关闭Phase 4～6、任一Qualification Gate，或把Artifact-backed output声明为当前行为。
 实现已从04的closed Model-output ArtifactIo Policy Rust/JSON合同与pure checked retention timing helper开始；它尚未连接v5 limits、
 Candidate storage binding、Model Deployment或任何写路径，因此不改变上述当前行为边界。
+普通Registry/Capability/Context/MCP/Sandbox Artifact output的Draft目标同样不是generic Worker直写：五个exact client-stream method统一进入独立
+Artifact Workload Producer，使用每physical-attempt的新Artifact/Blob/Grant/ArtifactVerify Operation/scan Job/Receipt identity，并在Uploaded winner
+事务创建唯一scan Job与`artifact.uploaded` Event/Outbox；它与三个read Broker、Maintenance、Model Producer及两个public Gateway物理隔离。
+当前代码、protobuf、runtime manifest、restricted DB/storage role、Helm与资格fixture均未交付，不能把既有generic producer或Sandbox Broker证据视为该目标。
 精确完成度和下一门禁只以 [`implementation-plan.md`](implementation-plan.md) 为准。Phase 4～6 尚未完成，Phase 7 还要求
 用户对 clean replacement 单独明确授权。
 

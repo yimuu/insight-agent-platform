@@ -66,10 +66,10 @@ resource/audience 规则、Tools、Resources、Prompts、Elicitation、Sampling 
 
 ```rust
 struct McpServerRevision {
-    server_revision_id: RevisionId,
+    server_revision_id: ResourceVersionId,
     mcp_server_id: McpServerId,
     transport_kind: McpTransportKind,
-    protocol_profile_revision_id: RevisionId,
+    protocol_profile_revision_id: ResourceVersionId,
     deployment_credential_requirements: Vec<SecretPurpose>,
     authorization_credential_purpose: Option<SecretPurpose>,
     limits: McpServerLimits,
@@ -78,12 +78,12 @@ struct McpServerRevision {
 
 struct McpDeployment {
     mcp_deployment_id: DeploymentId,
-    server_revision_id: RevisionId,
+    server_revision_id: ResourceVersionId,
     canonical_server_identity: CanonicalServerIdentity,
     transport: McpTransportDescriptor,
-    auth_profile_revision_id: Option<RevisionId>,
-    network_policy_revision_id: RevisionId,
-    trust_profile_revision_id: RevisionId,
+    auth_profile_revision_id: Option<ResourceVersionId>,
+    network_policy_revision_id: ResourceVersionId,
+    trust_profile_revision_id: ResourceVersionId,
     deployment_secret_bindings: Vec<ExactSecretBindingRef>,
     conformance_evidence_id: EvidenceId,
     deployment_digest: Digest,
@@ -231,8 +231,8 @@ prompts 和 server metadata。结果写入：
 struct McpDiscoverySnapshot {
     snapshot_id: DiscoverySnapshotId,
     mcp_deployment_id: DeploymentId,
-    server_revision_id: RevisionId,
-    protocol_profile_revision_id: RevisionId,
+    server_revision_id: ResourceVersionId,
+    protocol_profile_revision_id: ResourceVersionId,
     authorization_context_digest: Digest,
     negotiated_version: ExactProtocolVersion,
     negotiated_capabilities: ClosedNegotiatedCapabilities,
@@ -265,7 +265,7 @@ struct McpToolBackend {
     discovery_snapshot_id: DiscoverySnapshotId,
     remote_tool_name: String,
     remote_schema_digest: Digest,
-    protocol_profile_revision_id: RevisionId,
+    protocol_profile_revision_id: ResourceVersionId,
     supports_task: bool,
     supports_progress: bool,
 }

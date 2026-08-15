@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-07 |
+| 状态 | Draft / Architecture Revision |
+| 日期 | 2026-08-15 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
 
@@ -65,7 +65,7 @@ DataAccessGrant，并在 commit 时再次验证 policy generation。
 
 ```rust
 struct ContextInterfaceRevision {
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     context_source_id: ContextSourceId,
     qualified_name: ContextSourceName,
     query_schema: ClosedJsonSchema,
@@ -95,9 +95,9 @@ endpoint、tenant、principal、ACL、index name 和 credential 不属于模型�
 
 ```rust
 struct ContextImplementationRevision {
-    implementation_revision_id: RevisionId,
+    implementation_revision_id: ResourceVersionId,
     implementation_id: ContextImplementationId,
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     backend_contract: ContextBackendContract,
     credential_requirements: Vec<SecretPurpose>,
     backend_limits: ContextBackendLimits,
@@ -135,14 +135,14 @@ projection必须消费同一registry，不得保留大小写variant或自由字�
 ```rust
 struct ContextDeployment {
     context_deployment_id: DeploymentId,
-    interface_revision_id: RevisionId,
-    implementation_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
+    implementation_revision_id: ResourceVersionId,
     backend_binding: ContextBackendBinding,
     secret_bindings: Vec<ExactSecretBindingRef>,
-    network_policy_revision_id: Option<RevisionId>,
-    parser_profile_revision_id: RevisionId,
-    ranking_profile_revision_id: RevisionId,
-    data_policy_revision_ids: Vec<RevisionId>,
+    network_policy_revision_id: Option<ResourceVersionId>,
+    parser_profile_revision_id: ResourceVersionId,
+    ranking_profile_revision_id: ResourceVersionId,
+    data_policy_revision_ids: Vec<ResourceVersionId>,
     conformance_evidence_id: EvidenceId,
     deployment_digest: Digest,
 }
@@ -194,6 +194,9 @@ canonical endpoint，ManagedIndex绑定exact index service/region。RunBindings�
 并增加本Run的consistency/dataset/projection选择；runtime不得从Implementation Revision重新解析source、credential、
 network或active head。
 
+所有Context contract、Deployment和observation中的region字段只使用02 `CanonicalRegion`及其common schema；clean-cut目标删除
+字符集不同的`DataRegion`。同一exact binding内的region逐字段比较，不做provider alias或大小写归一化。
+
 Deployment validation除backend variant一致外，还必须执行contract/binding字段级兼容校验；例如`SqlCatalog`的dialect必须
 与Implementation contract完全一致。只比较`backend_kind`不能证明exact binding，任何不匹配均在publish/admission时fail closed。
 
@@ -234,10 +237,10 @@ struct DatasetGeneration {
     tenant_id: TenantId,
     context_deployment_id: DeploymentId,
     source_manifest_digest: Digest,
-    parser_profile_revision_id: RevisionId,
-    chunker_profile_revision_id: RevisionId,
+    parser_profile_revision_id: ResourceVersionId,
+    chunker_profile_revision_id: ResourceVersionId,
     embedding_model_deployment_id: Option<DeploymentId>,
-    ranking_profile_revision_id: RevisionId,
+    ranking_profile_revision_id: ResourceVersionId,
     index_manifest_artifact_id: ArtifactId,
     validation_evidence_id: EvidenceId,
     created_by_operation_id: OperationId,
@@ -374,7 +377,7 @@ RunValue创建一个exact ArtifactLink；不得为逃避大小、授权或retent
 ```rust
 struct Citation {
     context_deployment_id: DeploymentId,
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     dataset_view: DatasetView,
     locator: CitationLocator,
     content_digest: Digest,
@@ -555,6 +558,8 @@ generation 的受控 hash 和 rejection class，不记录正文、filter value �
 - archive bomb、恶意 parser input、oversized item 和 Prompt injection fixture fail closed；
 - Dataset build kill/restart 后从 durable stage 恢复且不会发布半成品；
 - Text2SQL fixture 证明 Context 只读 catalog，SQL 执行只能经 ReadOnly Capability；
+- Context contract/Deployment/observation的每个region字段都引用02 CanonicalRegion common schema并逐字段exact compare；覆盖1/63-byte、排序/
+  唯一约束及空/64/大写/下划线/Unicode/provider alias/旧DataRegion负向，不允许大小写归一化或adapter alias；
 - Secret、ACL、query 和 content canary 不进入 public event、metric 或默认日志。
 
 ### 23.1 当前实施证据边界（非规范性）
@@ -579,5 +584,6 @@ Phase 6 qualification。
 
 ## 25. 未决问题
 
-没有阻止 MCP、Artifact 或 API 设计的未决问题。具体索引引擎、embedding provider 与 reranker 可以替换，但
-不得改变本规范的逐条授权、dataset view、observation、citation 和只读边界。
+CR-165的CanonicalRegion common schema与跨Context binding exact-match合同仍需与02/07/09/15/16/18共同完成cross-review；关闭前本规范保持
+Draft且不得作为实现输入。具体索引引擎、embedding provider与reranker可以替换，但不得改变本规范的逐条授权、dataset view、observation、
+citation和只读边界。

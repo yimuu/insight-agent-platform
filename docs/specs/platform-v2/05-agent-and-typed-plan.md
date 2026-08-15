@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-07 |
+| 状态 | Draft / Architecture Revision |
+| 日期 | 2026-08-15 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
 
@@ -43,7 +43,7 @@ authoring surface；运行时只执行Plan。Agent Deployment再把全部depende
 
 ```rust
 struct AgentInterfaceRevision {
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     agent_id: AgentId,
     input_schema: ClosedJsonSchema,
     output_schema: ClosedJsonSchema,
@@ -188,7 +188,7 @@ RunBindings固定该结果。运行时只能在已经绑定的候选集合中选
 ```rust
 struct TypedPlan {
     plan_version: PlanVersion,
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     entry_node_id: PlanNodeId,
     nodes: BTreeMap<PlanNodeId, PlanNode>,
     control_edges: Vec<ControlEdge>,
@@ -203,9 +203,9 @@ struct TypedPlan {
 
 ```rust
 struct AgentPlanRevision {
-    plan_revision_id: RevisionId,
+    plan_revision_id: ResourceVersionId,
     agent_id: AgentId,
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     author_document_artifact_id: ArtifactId,
     typed_plan_artifact_id: ArtifactId,
     compiler_manifest_digest: Digest,
@@ -216,12 +216,12 @@ struct AgentPlanRevision {
 struct AgentDeployment {
     agent_deployment_id: DeploymentId,
     agent_id: AgentId,
-    interface_revision_id: RevisionId,
-    plan_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
+    plan_revision_id: ResourceVersionId,
     resolved_slots: Vec<FrozenSlotBinding>,
-    policy_revision_ids: Vec<RevisionId>,
-    execution_profile_revision_id: RevisionId,
-    public_projection_policy_revision_id: RevisionId,
+    policy_revision_ids: Vec<ResourceVersionId>,
+    execution_profile_revision_id: ResourceVersionId,
+    public_projection_policy_revision_id: ResourceVersionId,
     validation_evidence_id: EvidenceId,
     deployment_digest: Digest,
 }
@@ -385,8 +385,8 @@ struct PromptAssetRef {
 }
 
 enum PromptAssetOwner {
-    AgentPlanRevision(RevisionId),
-    SkillRevision(RevisionId),
+    AgentPlanRevision(ResourceVersionId),
+    SkillRevision(ResourceVersionId),
 }
 
 enum PromptTrustTag { AuthorReviewed, TenantProvided, ExternalUntrusted }
@@ -467,7 +467,9 @@ diagnostic 保存为 immutable Artifact，ResourceVersion 只保存 bounded type
 Run admission 把完整 binding closure 复制成 02 的 `RunBindingsSnapshot`。数据库只需保证 tenant/FK/版本不可变与 CAS；
 对Context的`PinAtRunAdmission`，RunBindings还必须保存按`context_binding_id`规范排序的exact dataset-view；该view由Run admission
 在同一事务从ContextDataset active version解析并进入RunBindings canonical digest，后续ContextQuery不得重新追随active head。
-slot 连续性、kind/schema/digest 匹配、validation completeness 和 bindability 由 Rust closed types 在同一事务校验。
+root Run还必须冻结当前02 `InstallationReleaseBindingV1`；同一snapshot内所有Model slot的全部候选都在admission时通过16的同一
+Candidate compatibility port，runtime Selection Policy只能在已经完整验证的集合内选择。slot 连续性、kind/schema/digest 匹配、
+validation completeness、全Run候选上限和bindability由Rust closed types在同一事务校验。
 
 ## 17. 错误合同
 
@@ -484,7 +486,7 @@ struct Failure {
 enum FailureCode {
     Platform(PlatformFailureCode),
     Declared {
-        interface_revision_id: RevisionId,
+        interface_revision_id: ResourceVersionId,
         code: DeclaredFailureCode,
     },
 }
@@ -561,6 +563,8 @@ live observation 丢失不改变结果。
 - v2 code path 不包含 terminal-only/volatile wait 分支；
 - fuzz/property tests 覆盖 schema、expression、scope、graph cycle 和 verifier；
 - PlanNodeKind exhaustive match 由编译器与 architecture test 强制。
+- root Run admission fixture从18 current InstallationReleaseState冻结完整02 installation binding，并对Plan closure中的全部Model candidates使用
+  同一16 port验证；任一非首选candidate不兼容时整个admission回滚且没有Run/Receipt成功结果；
 
 ## 20. 明确推迟的工作
 
@@ -573,5 +577,6 @@ live observation 丢失不改变结果。
 
 ## 21. 未决问题
 
-没有阻止 Run 与 Scheduler 设计的未决问题。05 冻结 Plan 语义，Model Provider/ModelTurn 由 16 冻结；具体
-authoring 表面可以在不改变 Plan 节点代数、类型和恢复语义的前提下单独演进。
+CR-165的root current installation binding与全Model-candidate admission仍需与02/06/08/16/17/18共同完成cross-review；关闭前本规范保持
+Draft且不得作为实现输入。05冻结Plan语义，Model Provider/ModelTurn由16冻结；具体authoring表面只能在不改变Plan节点代数、类型和恢复语义的
+前提下单独演进。

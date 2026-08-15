@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-09 |
+| 状态 | Draft / Architecture Revision |
+| 日期 | 2026-08-15 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) |
 | 直接下游 | 08、13、14、16、17、18 |
 
@@ -11,7 +11,8 @@
 
 每次Capability调用先创建一个durable Invocation aggregate，再创建或复用共享Job dispatch。Invocation只拥有逻辑调用、
 frozen admission、当前Job引用和最终结果；Job拥有lease、attempt generation、backend handle、poll/callback wait和recovery。
-Approval/Input复用Task，幂等/callback复用Receipt，transition/outcome/rejection/audit复用Event。
+Approval/Input复用Task；Invocation分别只保存公开nominal `ApprovalTaskId(apr_)`与`InteractionId(int_)`引用，
+幂等/callback复用Receipt，transition/outcome/rejection/audit复用Event。
 
 不再建立Capability专用policy-binding、transition、outcome、remote-task、resume或callback-rejection表。相同正确性由一个
 Invocation current row、一个Job current row、typed immutable snapshots和原子Event/Receipt提交保证。
@@ -52,8 +53,8 @@ struct CapabilityInvocation {
     version: u64,
     admission: AdmissionSnapshot,
     current_job_id: Option<JobId>,
-    approval_task_id: Option<TaskId>,
-    input_task_id: Option<TaskId>,
+    approval_task_id: Option<ApprovalTaskId>,
+    input_task_id: Option<InteractionId>,
     result: Option<InvocationResult>,
     failure: Option<Failure>,
     reconciliation: Option<ReconciliationSnapshot>,
@@ -71,6 +72,16 @@ enum InvocationOrigin {
 
 Invocation state、result和failure只在该aggregate保存一次。Event记录历史但不能直接编辑current state。Job result先作为
 physical outcome提交，再由Invocation application service验证和归并；Worker/backend不能直接terminalize Invocation。
+
+两个Task字段都是对03 shared Task current authority的typed reference，不是自由`TaskId`、internal `tsk_` alias或第二套Task state：
+
+- `approval_task_id`若存在，必须逐值命中同tenant `TaskKind::Approval`，其closed owner必须是本Run/Invocation、exact owner version与
+  admission digest；它只在admission事务创建一次，随后保持immutable历史引用；
+- `input_task_id`若存在，必须逐值命中同tenant `TaskKind::InteractionForm | InteractionUrlConsent | InteractionBusinessInput`；它只能由
+  owner service在处理normalized `InputRequired`的first-winner事务分配，closed owner同时固定本Invocation、current Job、wake generation、
+  request digest、response schema与opaque-state digest；它只表示当前Pending interaction，离开`AwaitingInput`时清空，历史由Task/Event保留；
+- 任一字段收到错误prefix/kind、跨tenant ID、`tsk_`、malformed value或与owner snapshot不一致时，都必须在任何current mutation、
+  Receipt或Event提交前fail closed。
 
 ## 4. Admission snapshot
 
@@ -154,6 +165,17 @@ Terminal不可离开。每个command以expected state/version CAS并由Rust exha
 positive version、terminal shape和CAS affected-row。ReconciliationRequired不占execution permit，但占unresolved-effect quota。
 Cancelled/TimedOut仅在没有未决Effect，或已原子记录Reconciliation snapshot时允许。
 
+Task引用与Invocation state的closed shape如下；Task state只从03 authority读取，Invocation payload不得复制它：
+
+| Invocation shape | Task约束 |
+|---|---|
+| `AwaitingApproval` | `approval_task_id=Some(apr_)`、对应Approval Task为`Pending`，`input_task_id=None`且没有current Job |
+| `AwaitingInput` | `input_task_id=Some(int_)`、对应interaction Task为`Pending`，并逐值绑定current Job/wake generation |
+| 其他所有state | `input_task_id=None`；若曾要求Approval，immutable `approval_task_id`可保留，但对应Task必须已经terminal |
+
+Approval与Invocation transition、Interaction response与owner wake都必须在各自first-winner事务中同时CAS Task generation/state与
+Invocation version/state；不得先terminalize Task再由best-effort消息推进Invocation。Task/Event可保留历史，不能据其反向覆盖Invocation current state。
+
 ## 6. 创建与Approval
 
 Admission command在一个事务中：
@@ -166,11 +188,13 @@ Admission command在一个事务中：
 6. 锁定input ValueRef并验证tenant/schema/classification/digest；
 7. 计算Effect/idempotency keys、deadline和attempt-limit intersection；
 8. 构造AdmissionSnapshot；
-9. 根据Approval Policy创建Task或推进Ready；
+9. 根据Approval Policy创建exact `ApprovalTaskId`的shared Approval Task或推进Ready；
 10. 与Invocation、Event、Outbox和Receipt原子提交。
 
-Approval Task绑定Invocation version、admission digest、input digest、Effect、deadline和eligible principal rule。Response与Task terminal、
-Invocation Ready/Failed和Event同事务first-winner。Backend不能返回`ApprovalRequired`决定平台审批。
+Approval Task使用public `apr_` ID并绑定Invocation version、admission digest、input digest、Effect、deadline和eligible principal rule。Response/
+cancel/expiry与Task terminal、Invocation `Ready | Failed | Cancelled | TimedOut`和Event同事务first-winner。Backend不能返回
+`ApprovalRequired`决定平台审批。closed映射固定为`Approved -> Ready`、`Rejected -> Failed`、`Cancelled -> Cancelled`、
+`Expired -> TimedOut`；不得把deny/expiry归一成generic completion。
 
 ## 7. Job dispatch
 
@@ -208,12 +232,13 @@ operation/continuation和Managed Runner Package/Runtime/Profile/Policy；Executo
 
 普通Sandbox Implementation同样因独立isolation bulkhead直接创建`work_class=sandbox`的同一个共享Job，不得先创建
 `CapabilityRemote`父Job。Managed stdio Resource Subscription保留一个`work_class=mcp`逻辑subscription Job，并为每个有界live
-session创建一个独立`work_class=sandbox`物理session Job；两者分别拥有逻辑subscription恢复与microVM生命周期，不得复制session
+session创建一个独立`work_class=sandbox`物理session child Job；父MCP Job以03唯一`current_child_job_id`拥有它，child immutable owner exact为
+`TypedOwnerRef::Job { parent_job_id }`。两者分别拥有逻辑subscription恢复与microVM生命周期，不得复制session
 generation、process lease或terminal authority。逻辑Job只有在exact Sandbox session进入已证明的Running/prepared状态后才能提交Ready；
 Sandbox terminal或session loss必须使逻辑Job按同一generation重建，不能在未知旧进程状态下并行创建replacement。
 Sandbox admission在一个事务中锁定Ready Invocation，验证其expected version和exact frozen
 admission，创建共享Sandbox Job，并把Invocation推进为Deferred、`current_job_id`绑定该Job；因此等待Sandbox容量或执行时不持有
-Capability Worker permit。`SandboxJobId`只是该Job的typed owner identity，必须与`JobId`使用相同UUID，不拥有第二条生命周期。
+Capability Worker permit。该物理执行唯一ID就是共享`JobId`，owner exact为该CapabilityInvocation；不存在`SandboxJobId`、同UUID typed alias或第二条生命周期。
 Sandbox terminal physical outcome由独立Capability owner controller依据当前Invocation、同一Job及Effect归并为逻辑outcome；
 Sandbox Executor不得直接修改Invocation，也不得为归并创建第二个Job。
 owner controller只消费精确terminal Event绑定并执行optimistic merge；它不得选择绝对`retry_at`或使用副本本地策略。
@@ -238,7 +263,7 @@ enum DispatchOutcome {
 ```
 
 Outcome首先以Job lease fence和JobCommit Receipt提交。Owner service随后在同一事务或可恢复的下一command中根据frozen admission
-处理：Completed验证输出；Deferred保存encrypted backend state和WakeContract；InputRequired创建Task；RetryableFailure重新计算
+处理：Completed验证输出；Deferred保存encrypted backend state和WakeContract；InputRequired由owner分配`InteractionId`并创建Task；RetryableFailure重新计算
 retry intersection；Uncertain按Effect进入reconciliation。未知tag/schema fail closed。
 
 ## 9. 同步路径
@@ -300,7 +325,10 @@ backend允许Gateway在due retry admission事务内直接执行`RetryScheduled -
 
 ## 12. InputRequired与Task
 
-BackendInputRequest只能包含closed request kind、safe prompt key、closed response schema、deadline hint和opaque bounded state。
+BackendInputRequest只能包含closed request kind、safe prompt key、closed response schema、deadline hint和opaque bounded state，不能携带、建议或
+预留Task/Interaction ID。owner service以normalized request digest及exact Invocation/Job/wake generation claim同一JobCommit Receipt，并在
+first-winner事务分配public `InteractionId(int_)`、创建shared Task、写`Invocation.input_task_id`及Event/Outbox；exact replay从该
+Receipt/result ref读取同一ID，不能重新分配。
 平台Policy决定eligible principal、presentation和classification。Task response验证tenant/principal/generation/schema后唤醒同一Job。
 不得索取Secret value、平台token、任意文件路径或扩大网络权限。
 
@@ -308,7 +336,7 @@ BackendInputRequest只能包含closed request kind、safe prompt key、closed re
 `attempt_count`，因此`attempt_limit=1`的非幂等调用仍可完成同一次已Started物理attempt。缺少exact Task/owner/wake/state绑定时
 不得退化为新attempt，必须整体拒绝或进入owner reconciliation。
 
-Interaction Task必须冻结Invocation owner version、admission digest、Job ID与wake generation、opaque-state digest、eligible-principal
+Interaction Task使用public `int_` ID，并必须冻结Invocation owner version、admission digest、Job ID与wake generation、opaque-state digest、eligible-principal
 rule和response schema。Response first-winner同事务写Task terminal、exact RunValue、Job wake、Invocation state、Event/Outbox和Receipt；
 任一owner/wake/schema漂移都整体回滚。
 
@@ -352,7 +380,8 @@ external identity、last known Job generation、safe observations、Policy path�
 
 ## 17. 持久化边界
 
-Capability domain只需要Invocation aggregate的current storage。Physical execution复用Job，Approval/Input复用Task，callback与
+Capability domain只需要Invocation aggregate的current storage。Physical execution复用Job，Approval/Input复用同一Task authority并只保存
+`ApprovalTaskId`/`InteractionId` typed references，callback与
 idempotency复用Receipt，历史/evidence/audit复用Event，delivery复用Outbox。Admission、backend state、result、failure和
 reconciliation是versioned bounded typed snapshots；不得因新增backend/outcome/rejection reason增加Capability专用表。
 
@@ -400,6 +429,11 @@ tenant、Capability名称、Invocation ID、endpoint和error body不进入label�
 - stale lease progress/outcome被拒绝；
 - NonIdempotentWrite dispatch后断线进入reconciliation；
 - Approval固定admission digest，参数变化不能复用；
+- Approval只接受`ApprovalTaskId(apr_)`，Input只接受`InteractionId(int_)`；二者互换、internal `tsk_`、错误kind与跨tenant owner均在写入前拒绝；
+- `AwaitingApproval`/`AwaitingInput`与对应Pending Task、Job/wake generation满足§5 closed shape；Task resolution、Invocation transition、
+  Receipt/Event/Outbox在并发approve/reject/respond/decline/cancel/expiry下只有一个事务winner；
+- BackendInputRequest尝试携带/建议Task ID必须在JobCommit前拒绝；同一normalized request与JobCommit Receipt的exact replay返回同一
+  `InteractionId`且不创建第二Task/Event/Outbox；
 - cancel/completed竞态保留Effect uncertainty；
 - Model伪造completion无法成为结果；
 - 新backend/outcome不新增专用持久化表；
@@ -420,6 +454,12 @@ reconciliation、cancel/completed并发first-winner以及全部quota归零。Tex
 `database.query.readonly` Interface/Deployment/ReadOnly Effect与committed SqlCatalog Observation未漂移；错误引用不留下Invocation或Receipt。
 pure Job fixture同时证明RetryScheduled start消耗新的物理attempt。
 
+上述当前实现仍用generic `ResourceId`字段承载Approval/Input引用，并允许normalized backend input request携带该ID，再在Rust
+command/payload validation中检查
+`ResourceKind::ApprovalTask | Interaction`；它没有交付本次目标中的`ApprovalTaskId`/`InteractionId` nominal field type、禁止`tsk_`的完整
+machine schema、owner-side ID allocation/replay与§5逐状态跨aggregate fixture。因此既有Phase 3证据只继续证明当前v6实现的runtime kind gate和
+first-winner语义，不能证明CR-165新增的typed-ID/closed-state目标，也不能使本规范越过Draft门禁。
+
 Phase 4的Capability Worker组合现也已交付：claim事务返回exact ExecutionContract/Input与Job fence，组合层重验Running state、
 Invocation/Job/attempt/lease/Worker identity后生成credential-free adapter request；process-installed dispatcher执行adapter，结果只经
 `CapabilityExecutionAuthority`提交同一fenced PostgreSQL transaction。NonIdempotentWrite的dispatch后失败不能被transport标成安全重试，
@@ -431,9 +471,9 @@ frozen backend timeout派生、平台hard limit封顶的cleanup window提交同�
 terminal/cancellation commit、Receipt/Event/Outbox、quota settle、幂等replay和cancel/completed first-winner；Egress其中8项覆盖Capability
 HTTP/gRPC exact catalog、DNS/Secret、bounded framing/response、Effect/idempotency failure和stale exact cancel。
 
-上述证据关闭Phase 3的Capability synchronous/deferred/input/progress/reconcile domain交付项并推进Phase 4，但不替代HTTP/gRPC/MCP
+上述证据关闭既有Phase 3的Capability synchronous/deferred/input/progress/reconcile domain交付项并推进Phase 4，但不替代HTTP/gRPC/MCP
 真实远端服务、Secret Manager/TLS/mTLS、callback ingress与部署资格；也不覆盖公共`/v1`、production topology、
-capacity/soak/DR，因此本规范仍是Implementation In Progress而非Implemented/Verified。
+capacity/soak/DR，也不覆盖本次typed Task引用修订；本规范当前是Draft / Architecture Revision而非Implemented/Verified。
 
 ## 21. 明确推迟
 
@@ -446,5 +486,5 @@ capacity/soak/DR，因此本规范仍是Implementation In Progress而非Implemen
 
 ## 22. 未决问题
 
-没有阻止下游cross-review的问题。Backend-specific transport只能由新版本typed adapter映射到本规范closed envelope/outcome，不能
-通过generic extension bag改变Invocation状态机。
+CR-165仍需以§20新增typed-ID/state fixture完成终审；终审前不得据此生成目标实现或恢复Accepted。Backend-specific transport只能由
+新版本typed adapter映射到本规范closed envelope/outcome，不能通过generic extension bag改变Invocation状态机。

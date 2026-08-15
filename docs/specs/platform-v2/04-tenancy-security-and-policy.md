@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
+| 状态 | Draft / Architecture Revision |
 | 日期 | 2026-08-15 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) |
 | 直接下游 | 05、09、11、12、13、14、15、16、17、18 |
@@ -155,7 +155,7 @@ enum PrincipalBindingState { Active, Revoked }
 - bootstrap固定创建`InstallationOperator`，permission精确为`installation.manage`与`installation.support`，调用方不能
   自定义或扩大集合；后续变更全部走正常generation/ETag CAS与CommandReceipt；
 - 创建前Principal identity、tenant binding、installation binding三个authority集合必须都为空；事务同时持有bootstrap
-  advisory lock和三张authority表的写隔离锁，禁止与普通Principal创建竞态；
+  advisory lock和三个authority集合的写隔离锁，禁止与普通Principal创建竞态；
 - identity、binding和append-only `installation.bootstrap` audit必须同事务提交。因为首个Principal创建前无法形成正常
   authenticated CommandReceipt，只有该部署入口按03定义豁免receipt；
 - 只允许相同Principal、认证digest、固定permission、RequestId和audit evidence的精确重放。authority已被使用、对象被
@@ -177,7 +177,8 @@ enum PrincipalBindingState { Active, Revoked }
 
 - ArtifactRef 永远 tenant-scoped；
 - object key 不使用用户文件名、email、Run ID 明文或可猜 tenant 名；
-- 下载使用短期、单对象、受 audience 和 method 限制的 signed URL/token；
+- 下载只使用短期、单对象、受 audience 和 method 限制的Artifact Gateway token并由Gateway逐请求重新授权；不签发可绕过current
+  encryption-domain fence或content-evidence freshness的object-store URL；
 - cross-tenant dedup 即使 digest 相同也不能暴露对象存在性；
 - filename 只作为经过规范化的 presentation metadata，不决定 object key。
 
@@ -196,7 +197,7 @@ Policy由不可变Policy Revision表示，Deployment与RunBindings固定所用�
 
 ```rust
 struct PolicyRevision {
-    policy_revision_id: RevisionId,
+    policy_revision_id: ResourceVersionId,
     policy_id: PolicyId,
     kind: PolicyKind,
     document: ClosedPolicyDocument,
@@ -253,6 +254,126 @@ resource等非领域资源的`*_profile_revision_id`，都必须引用`prev`并�
 一个字段允许多个Policy Revision时，每个元素也必须是该role允许的kind，集合规范排序且不允许同kind冲突；合法的多层
 policy组合使用发布时编译的deterministic intersection/join receipt，不能依赖运行时“最后一个覆盖”。
 
+Artifact encryption domain的tenant current binding由Tenant aggregate的bounded security configuration拥有，不创建domain专用表或让
+Candidate枚举动态tenant：
+
+```rust
+enum EncryptionDomainBindingState { Active, Revoked }
+
+const MAX_TENANT_ENCRYPTION_DOMAIN_BINDINGS: usize = 64;
+const MAX_TENANT_ENCRYPTION_DOMAIN_BINDINGS_CANONICAL_BYTES: u32 = 65536;
+
+struct EncryptionDomainId(ResourceId); // exact registry kind/prefix encryption_domain/enc
+
+struct TenantEncryptionDomainBindingV1 {
+    schema_version: u32, // const 1
+    tenant_id: TenantId,
+    encryption_domain_id: EncryptionDomainId,
+    storage_binding_digest: Digest,
+    kms_binding_digest: Digest,
+    state: EncryptionDomainBindingState,
+    generation: u64,
+    binding_digest: Digest,
+}
+
+struct TenantEncryptionDomainBindingsV1 {
+    schema_version: u32, // const 1
+    entries: Vec<TenantEncryptionDomainBindingV1>,
+    canonical_size_bytes: u32,
+    canonical_digest: Digest,
+}
+
+struct ValidatedCurrentTenantEncryptionDomainFenceV1 {
+    tenant_aggregate_version: u64,
+    binding: TenantEncryptionDomainBindingV1,
+}
+
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum EncryptionDomainChangeProposalV1 {
+    Add {
+        schema_version: u32, // const 1
+        storage_binding_digest: Digest,
+        kms_binding_digest: Digest,
+    },
+    Rebind {
+        schema_version: u32, // const 1
+        encryption_domain_id: EncryptionDomainId,
+        storage_binding_digest: Digest,
+        kms_binding_digest: Digest,
+    },
+    Revoke {
+        schema_version: u32, // const 1
+        encryption_domain_id: EncryptionDomainId,
+    },
+}
+
+#[serde(tag = "rule_kind", rename_all = "snake_case", deny_unknown_fields)]
+enum TenantEncryptionDomainApproverRuleV1 {
+    SingleHumanApprover {
+        requester_must_differ: bool,
+        minimum_authn_strength: AuthnStrength,
+    },
+}
+
+struct TenantEncryptionDomainApprovalPolicyV1 {
+    schema_version: u32, // const 1
+    add_rule: TenantEncryptionDomainApproverRuleV1,
+    rebind_rule: TenantEncryptionDomainApproverRuleV1,
+    revoke_rule: TenantEncryptionDomainApproverRuleV1,
+}
+
+struct TenantEncryptionDomainApprovalPolicyBindingV1 {
+    policy_revision_id: ResourceVersionId,
+    policy_semantic_digest: Digest,
+}
+```
+
+`EncryptionDomainId`是02公共ID合同的nominal wrapper；inner ResourceId必须逐值命中唯一machine registry中的
+`kind=encryption_domain,prefix=enc`和canonical UUIDv7，其他kind/prefix及自由字符串均拒绝。ID自身全局opaque，tenant ownership仍由包含它的
+Tenant aggregate决定；wrapper排序使用完整canonical ID bytes。15只能引用该04 nominal，不得另建ID语法或把ID降级为tenant-local name。
+
+唯一machine schema路径为`contracts/platform-v1/schemas/tenant-encryption-domain-bindings.schema.json`并进入根contract digest。wrapper的
+entries required且允许空集，最多64项，按`encryption_domain_id`严格升序且唯一；canonical preimage排除wrapper的size/digest字段，JCS bytes
+必须与`canonical_size_bytes`相等且不超过65536，SHA-256必须与`canonical_digest`相等。每项tenant必须与owner Tenant相同，generation必须
+为正；`binding_digest`是排除自身后的完整entry JCS digest。unknown/null/重复field、非canonical顺序和超限全部fail closed。
+
+`ValidatedCurrentTenantEncryptionDomainFenceV1`是非持久、sealed authorization ticket，只能由领域repository从current Tenant aggregate
+构造；它要求entry为Active并携带读取时的Tenant aggregate version和完整binding。调用方、grant token、Worker stream或缓存不能提交/伪造该
+ticket。15 read/download与16 Producer/owner terminal复用同一nominal，并各自在自己的授权边界逐字段比较tenant/domain/storage/KMS/
+generation/binding digest。
+
+Tenant security aggregate在wrapper之外还拥有恰好一个current `TenantEncryptionDomainApprovalPolicyBindingV1`；它不是第二Policy authority，
+只能逐值引用同tenant、已发布且current-active的immutable `PolicyKind::Approval` Revision。该Revision的closed document必须是本节唯一
+`TenantEncryptionDomainApprovalPolicyV1` variant，binding中的semantic digest必须与Revision重算值相等。Add、Rebind、Revoke分别选择
+`add_rule`、`rebind_rule`、`revoke_rule`；rule是完整closed value，不能只保存opaque digest、自由表达式或由请求覆盖。该domain首版每个Task只允许
+`SingleHumanApprover` first-winner；`requester_must_differ=true`表达requester/approver职责分离，不存在同一Task内隐式累计多人票数的状态。
+Revoke rule必须固定`requester_must_differ=true`，否则Policy publication/binding fail closed；Add/Rebind可由exact Policy决定该布尔值。
+tenant policy binding改变必须推进Tenant aggregate version，因此已创建Task的owner snapshot和collection ETag都会失效。
+
+状态机固定为：absent通过Add创建`Active/generation=1`；Active可Rebind为不同storage/KMS exact binding并generation加一，或Revoked并
+generation加一；Revoked是终态且不能恢复、rebind或复用同一`EncryptionDomainId`。新idempotency key提交与current逐字段相同的Add/Rebind或
+重复Revoke返回`invalid_state_transition`；相同Receipt key/digest仍优先exact replay。
+
+Add/Rebind要求tenant principal同时拥有`tenant.manage + secret.bind`，其Effect固定为`IdempotentWrite`；Revoke要求
+`tenant.manage + secret.revoke`，其Effect固定为`Irreversible`。三者都必须通过上述exact tenant Approval Policy创建03 shared Approval Task，
+Policy不能降低Effect或绕过Task。approval-request从current tenant policy binding解析对应rule，并在Task中冻结requester、完整proposal、Effect、
+Policy Revision ID/semantic digest、完整approver rule与observed collection ETag；缺失、错误kind、非active或不满足Revoke职责分离下界的Policy
+fail closed。`tenant.emergency_stop`只提升tenant安全gate，不能隐式执行不可逆domain Revoke。三种mutation均使用
+17以独立approval-request command创建existing shared Task；apply command只接受approved Task ID并重新验证完整owner snapshot，
+不能在一个长期Processing Receipt里等待人工响应，也不能让approval改写proposal。三种apply mutation均使用03 tenant Command Receipt；同一事务分别追加tenant-scoped `tenant.encryption_domain.added|rebound|revoked.v1` Event/Outbox，以及
+installation-scoped `installation.compatibility_invalidated.v1` Event/Outbox，各自回绑对应aggregate version且不得混用scope。它们先按03全局rank锁InstallationReleaseState，再锁Tenant aggregate并执行expected-version CAS、推进
+该项generation，同时保持active Model count不变但推进installation compatibility generation/state digest；由此锁外Release preflight和并发
+root admission的旧结果必然失效。`Active`项才能被新Policy/Deployment/Run引用。Model Deployment冻结完整exact projection而非裸ID；
+新admission复验current state/generation/digest。
+既有Run继续持有冻结projection，但Rebind与Revoke都是current security fence：尚未开始leaf拒绝，已dispatch工作进入cancel/reconciliation，
+Producer各checkpoint和Model owner terminal都不能再推进Verified/Ready。
+`storage_binding_digest/kms_binding_digest`必须与15/18安装manifest逐字段匹配；不能靠运行时KMS错误发现漂移。
+
+17 route-to-Receipt registry为该工作流保留六个互不相等的03 `ClosedOperation` wire discriminator：
+`tenant.encryption_domain.approval_request.v1`、`tenant.encryption_domain.add.v1`、
+`tenant.encryption_domain.rebind.v1`、`tenant.encryption_domain.revoke.v1`、`approval_task.approve.v1`与
+`approval_task.deny.v1`。approval-request、三个apply和approve/deny不得共享generic operation；Receipt dedupe key必须包含exact discriminator。
+
 Artifact-backed Model response使用`ClosedPolicyDocument::ModelOutputArtifactIo`这一closed typed variant；它不能用generic
 JSON、另一个Artifact purpose的Policy body或只含opaque digest的摘要替代：
 
@@ -270,9 +391,12 @@ struct ModelOutputArtifactIoPolicyDocument {
 ```
 
 `staging_grace_seconds`与`maximum_materialized_bytes`必须为正，media必须exact为`application/json`；storage、encryption与
-validation profile必须能在18的Candidate closure中解析为一个exact、可用且同region的binding。storage binding还必须冻结正数
-`maximum_put_completion_uncertainty_milliseconds`及strong-after-quiescence exact-key observation合同；checked计算
-`required_write_quiescence_seconds = ceil(milliseconds / 1000) + 1`，并要求`staging_grace_seconds >= required_write_quiescence_seconds`。
+validation profile必须分别解析为当前Active `TenantEncryptionDomainBindingV1`和18 Producer startup projection中的exact、可用能力；
+encryption projection的storage/KMS必须与Candidate storage manifest相等，validation digest必须被该storage route唯一Producer scope支持。
+storage binding还必须冻结正数`maximum_put_completion_uncertainty_milliseconds`及strong-after-quiescence exact-key observation合同。
+本规范不复制其时间算法：admission把effective `artifact.staging_seconds`与本document的`staging_grace_seconds`组装为15
+`StorageBindingTimingLimitsV1`，调用exact storage manifest唯一`validate_timing`并消费`ValidatedStorageBindingTimingV1`；由15统一检查
+write-quiescence下界、effective staging严格大于该下界，以及grace大于等于下界且严格小于staging。任何checked arithmetic失败都拒绝。
 Model output classification不得高于
 ceiling，所有bytes/time值还必须被18的effective HardLimitProfile收紧。该document只允许出现在`PolicyKind::ArtifactIo`的
 Policy Revision中，`rules_digest`必须等于完整closed document的canonical digest。Producer只能重验冻结revision/body/digest，不能
@@ -344,15 +468,31 @@ runtime policy取Interface声明、Implementation实际行为与已知backend能
 Approval 是 durable task，不是一次同步弹窗：
 
 ```rust
+#[serde(tag = "owner_kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ApprovalTaskOwnerV1 {
+    CapabilityInvocation {
+        run_id: RunId,
+        invocation_id: InvocationId,
+        owner_version: u64,
+        owner_snapshot_digest: Digest,
+    },
+    TenantEncryptionDomainChange {
+        tenant_aggregate_version: u64,
+        proposal: EncryptionDomainChangeProposalV1,
+        owner_snapshot_digest: Digest,
+    },
+}
+
 struct ApprovalTask {
     approval_task_id: ApprovalTaskId,
     tenant_id: TenantId,
-    run_id: RunId,
-    invocation_id: InvocationId,
+    owner: ApprovalTaskOwnerV1,
     state: ApprovalState,
     effect: Effect,
     input_digest: Digest,
-    policy_revision_id: RevisionId,
+    requester_principal_id: PrincipalId,
+    policy_revision_id: ResourceVersionId,
+    policy_semantic_digest: Digest,
     approver_rule: ApproverRule,
     deadline: DateTime<Utc>,
     generation: u64,
@@ -362,16 +502,28 @@ struct ApprovalTask {
 enum ApprovalState { Pending, Approved, Rejected, Expired, Cancelled }
 ```
 
+`ApprovalTaskId`逐值命中02 registry的public `approval_task/apr`，并直接标识03 shared Task authority；不存在第二Approval表、独立state或
+public `tsk_` alias。`ApprovalState`是shared `TaskState`对`TaskKind::Approval`允许值的exact nominal projection，同名wire值逐值相等。
+`TenantEncryptionDomainChange`把完整bounded closed `EncryptionDomainChangeProposalV1`保存在shared Task current payload中：Add没有
+`encryption_domain_id`字段，Rebind/Revoke要求非null 04 `EncryptionDomainId`；任何cross-variant、unknown或null字段均拒绝。
+`input_digest = SHA-256(JCS(proposal))`并在create/read/apply逐次重算，不能只存hash或在apply body补回storage/KMS字段；
+`owner_snapshot_digest`绑定tenant、aggregate version、current wrapper digest、operation、target以及current tenant Approval Policy binding。
+当owner为`TenantEncryptionDomainChange`时，`effect`只能由proposal映射：Add/Rebind=`IdempotentWrite`、Revoke=`Irreversible`；
+`requester_principal_id`来自已验证PrincipalContext，`policy_revision_id/policy_semantic_digest/approver_rule`逐值来自上述current exact
+`TenantEncryptionDomainApprovalPolicyV1`，请求body不能提交或覆盖这些字段。shared `ApproverRule`对该owner保存完整
+`TenantEncryptionDomainApproverRuleV1` nominal value；公共projection只公开其digest。
+
 ```text
 Pending -> Approved | Rejected | Expired | Cancelled
 ```
 
-- task 固定 Run、Invocation、Effect、参数摘要、policy revision、approver rule 和 deadline；
+- task固定closed owner（Capability路径为Run/Invocation；encryption-domain路径为Tenant aggregate/change）、Effect、参数摘要、owner snapshot、
+  policy revision、approver rule和deadline；
 - 参数摘要是平台生成的安全视图，Secret 和大正文使用受控 Artifact；
 - 修改调用参数会使旧 approval 失效；
 - response 使用 task generation 与 CAS，first-winner；
 - self-approval、双人规则、工作时间和金额阈值由 Policy 表达；
-- approval 只授权一次固定 Invocation，不产生永久 Capability permission；
+- approval只授权一次固定owner command，不产生永久Capability或tenant permission；
 - timeout 不自动视为批准。
 
 InputRequired 与 ApprovalRequired 是不同状态：前者补充业务输入，后者授权已固定的高风险操作。
@@ -398,7 +550,7 @@ struct SecretBinding {
 
 enum SecretResolutionPolicy {
     Pinned { opaque_version_identity: OpaqueSecretVersionIdentity },
-    FollowProviderRotation { rotation_policy_revision_id: RevisionId },
+    FollowProviderRotation { rotation_policy_revision_id: ResourceVersionId },
 }
 
 enum SecretBindingState { Active, Revoked }
@@ -411,7 +563,19 @@ struct ExactSecretBindingRef {
     resolution_policy: SecretResolutionPolicy,
     resolution_policy_digest: Digest,
 }
+
+struct TrustedSecretBindingResolutionProjectionV1 {
+    schema_version: u32, // const 1
+    exact_binding: ExactSecretBindingRef,
+    sealed_opaque_reference: SecretBytes,
+    sealed_reference_digest: Digest,
+    reference_key_id: KmsKeyId,
+}
 ```
+
+`TrustedSecretBindingResolutionProjectionV1`是logical SecretBinding aggregate的closed、non-public、non-persistent trusted projection，只有
+Security Authority能在重验current Active binding与exact ref后构造。`sealed_reference_digest`必须从实际sealed bytes计算；projection及其字段不能
+进入Management response、Receipt/Event、日志或普通Worker。物理列、grant与repository映射只由ADR/database contract决定。
 
 `Active -> Revoked`是唯一状态转换，Revoked不可恢复；需要重新授权时创建新Binding。Deployment保存Binding ID、
 创建时观察到的binding generation、provider、purpose、完整resolution policy和其canonical digest，统一封装为
@@ -567,7 +731,7 @@ enum QuotaReservationState { Open, Closed, Expired }
 
 struct QuotaBudgetKey {
     tenant_id: TenantId,
-    quota_policy_revision_id: PolicyRevisionId,
+    quota_policy_revision_id: ResourceVersionId,
     dimension: QuotaDimension,
     scope: QuotaScope,
     window_key_digest: Digest,
@@ -600,7 +764,7 @@ Producer创建该same ID，或由owner按no-object evidence关闭bundle；不能
 `Open`直到自己全部line终结；line settlement状态由现有reservation line/ledger表达，不增加新的`cleanup-required` quota state或表。
 
 `QuotaScope`是closed tagged union，只允许Tenant、AgentDeployment、WorkClass、CapabilityDeployment、
-ModelDeployment、ContextDeployment、McpDeployment、SandboxProfileRevision、Run或Principal；每个variant验证exact ID prefix，
+ModelDeployment、ContextDeployment、McpDeployment、SandboxProfile ResourceVersion、Run或Principal；每个variant验证exact ID prefix，
 WorkClass命中07的machine registry。Quota Policy固定每个dimension允许的scope和window；reservation不能把一个scope的额度
 转给另一个scope。`QuotaWindowKind`闭合为`current`、`run`、`utc_day`、`utc_month`、`lifetime`：Leased只使用
 `current`，Reclaimable只使用`lifetime`，Consumable只能使用`run/utc_day/utc_month`；window key与起止时间必须按kind
@@ -747,6 +911,11 @@ repository必须在执行permission判断的同一事务中从active Principal�
 digest必须相互一致，unknown字段和值fail closed。需要记录认证方法、session或token期限时写入同一Event的独立bounded认证
 evidence，不把可续期的session状态变成PrincipalSnapshot的第二个current authority。
 
+该payload在03 `VersionedSnapshot`中的schema ID exact为`security.principal-snapshot.v1`、version 1、path exact
+`contracts/platform-v1/schemas/security/principal-snapshot.schema.json`、canonical maximum 32768 bytes；`canonical_digest`按排除自身后的完整
+strict JCS计算。所有Principal-owned Command Receipt的dedupe owner都使用这一完整snapshot registry entry，不得只存principal ID、permission digest、
+token/session或当前Principal外键。目标schema当前尚未checked in，属于CR-165 Draft交付物。
+
 ## 17. 审计、日志与隐私
 
 Audit 记录：谁、何时、对哪个 opaque ID、执行什么操作、结果、policy revision、request digest 和来源
@@ -813,6 +982,13 @@ idempotency_conflict
 - package/image signature 与 digest 不匹配时 publication 失败；
 - approval 参数变化、过期、重复和错误 approver 全部被拒绝；
 - egress 测试覆盖 redirect、DNS rebinding、IPv4/IPv6 private ranges 和 proxy bypass。
+- Tenant encryption-domain wrapper覆盖空集、64/N+1、canonical size 65536/N+1、排序/重复/tenant mismatch、entry/wrapper digest及generation；
+  state fixture覆盖Add、Rebind、Revoke、Revoked terminal、same-key replay/new-key no-op拒绝、permission/Approval，以及emergency-stop不产生
+  隐式Revoke；Approval fixture覆盖exact tenant Policy binding kind/digest/current-state、Add/Rebind=`IdempotentWrite`、Revoke=`Irreversible`、
+  三条rule选择、Revoke requester separation、requester/policy/rule冻结及六个Receipt operation互不碰撞；
+- encryption Add/Rebind/Revoke与Release scan/final CAS、root/child admission、Producer pre-I/O/checkpoint/post-I/O及Model owner terminal并发时，
+  installation generation使旧preflight失效，current fence阻止旧binding形成Verified/Ready；每个winner只提交一个tenant Receipt、一个tenant
+  Event/Outbox和一个installation compatibility-invalidated Event/Outbox，重放不重复投递；
 - quota fixture证明`maximum_materialized_bytes <= Inline threshold`不创建Artifact Reclaimable reservation，越过threshold才按最坏合法
   count/bytes预留；Producer credential的全部quota mutation和retention deadline修改被拒绝，只有owner terminal可把staging retention
   切换为ready retention，并对Artifact/Inline/失败竞态只结算或释放一次；Blob bind前失败可零actual关闭，bind/PUT后的cancel/loser及
@@ -835,5 +1011,6 @@ Deployment closure或reservation，也不启用Artifact-backed output；这些�
 
 ## 22. 未决问题
 
-没有阻止运行内核的安全未决问题。具体认证协议、默认数值、Sandbox 产品和 Secret Manager provider 由
-17、18、14 的部署规范选择，但不得削弱本规范的信任边界与强制策略。
+Tenant encryption-domain wrapper、状态机、permission及installation compatibility fence仍随CR-165处于Architecture Revision；完成全量
+cross-review前不得生成schema或实现。具体认证协议、默认数值、Sandbox产品和Secret Manager provider由17、18、14的部署规范选择，但不得
+削弱本规范的信任边界与强制策略。

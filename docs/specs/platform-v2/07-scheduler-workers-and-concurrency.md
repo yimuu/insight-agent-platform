@@ -63,9 +63,9 @@ CapabilityImplementation 可以进一步定义 backend concurrency key，但不�
 Capability backend 到 WorkClass 的映射同样是闭合合同：Native 使用`CapabilityNative`，HTTP/gRPC及由Capability adapter
 调用MCP Host的Tool使用`CapabilityRemote`，Sandbox code直接使用`Sandbox`。`Mcp`只承载discovery、subscription等Host自有
 durable work。Sandbox不得先创建一个`CapabilityRemote` Job再创建Sandbox Job；一次物理执行始终只有一个共享Job、一个
-attempt counter、一个lease/epoch/fence authority。
+attempt counter和一组`lease_generation`/token/Worker fence authority。
 
-WorkClass与父aggregate的closed owner-kind pair同样进入machine registry；`work_id`必须由03/06的typed-source verifier
+WorkClass与父aggregate的closed owner-kind pair同样进入machine registry；`JobId`与immutable `TypedOwnerRef`必须由03/06的typed-source verifier
 回查，Scheduler不得创建generic Work resource或把任意合法prefix当作可claim work。
 
 ## 4. Scheduler 与 Worker 角色
@@ -91,7 +91,7 @@ Worker：
 - heartbeat、发布受控 progress、提交闭合 outcome；
 - 不决定下游控制流。
 
-Worker capability manifest使用`contracts/platform-v1/schemas/worker-manifest.schema.json`的closed shape；Accepted目标把该machine
+Worker capability manifest使用`contracts/platform-v1/schemas/worker-manifest.schema.json`的closed shape；CR-165 Draft目标把该machine
 contract升级为`manifest_version=2`。每份manifest只声明一个exact WorkClass、adapter/runtime digest、协议版本、业务最大并发、正数
 `critical_control_reserved_slots`与以下conditional字段：
 
@@ -106,14 +106,20 @@ struct ModelOutputWorkerCapacityLimitV1 {
     aggregate_bytes: u64,
 }
 
+struct WorkerRole(String);
+
 struct WorkerManifestV2 {
     // existing closed fields omitted
     component_role: ComponentRole,
+    region: CanonicalRegion,
     model_output_materialization: Option<ModelOutputMaterializationCapacity>,
 }
 ```
 
-所有WorkClass的WorkerManifest都必须提供02 `component_role`；它标识部署镜像/startup scope，不与标识
+`WorkerRole`是claim/deployment role的nominal wire：1～128 ASCII bytes，必须匹配`^[a-z][a-z0-9_.-]{0,127}$`，其值来自已验证
+WorkerManifest且进入canonical digest；请求、header或环境变量不能在claim时另行自报。
+
+所有WorkClass的WorkerManifest都必须提供02 `component_role`与`region`且两者`null`非法；role标识部署镜像/startup scope，不与标识
 WorkerProcessGeneration/claim role的`worker_role`混为一个nominal，也不得靠字符串前缀猜测两者映射。只有
 `model_output_materialization`是conditional：`work_class=Model`必须提供，其他WorkClass必须完全省略且`null`非法。两个capacity值都必须
 为正，`slots <= max_concurrency`；nested object closed且
@@ -122,12 +128,17 @@ CandidateManifest，一份manifest不能把多个WorkClass映射到同一个sema
 WorkerProcessGeneration和Deployment binding任一不匹配都拒绝claim。当前checked-in v1 schema/validator没有该字段，只能证明现有
 Inline路径，不能作为Artifact-backed Model output的Candidate证据；实施必须原子升级schema、Rust type、fixture与Candidate closure。
 
+`region`只引用02 `CanonicalRegion` common schema并进入Worker canonical digest。它必须由18要求的同一typed component startup
+projection产生，并与同role ComponentStartupManifest逐值相等；Worker schema、Helm或进程参数不得各自维护第二份值。Model compatibility的
+exact match是`adapter_runtime_digest + protocol_version + region`三元组；readiness用同一adapter重投影实际startup document，region漂移时
+在claim前fail closed。
+
 07冻结Worker本地shape，不依赖下游Candidate类型。`WorkerManifestV2::validate_against(ModelOutputWorkerCapacityLimitV1)`接收只含
 `slots`与`aggregate_bytes`上限的上游输入port；Model manifest两值必须分别不超过该port。部署资格层从其安装HardLimitProfile投影该port，
 并负责把Worker、image与startup scope闭合；Worker crate不读取Candidate，也不拥有其他组件的capacity identity。
 
 发布/激活Model Deployment时，16的installation capability port必须证明每个ArtifactCapable binding至少有一个匹配adapter、protocol与
-region的Model Worker manifest满足`slots >= 1 && aggregate_bytes >= maximum_materialized_bytes`，并同时证明Producer单请求容量。否则拒绝，不能依赖deadline
+02 `CanonicalRegion`的Model Worker manifest满足`slots >= 1 && aggregate_bytes >= maximum_materialized_bytes`，并同时证明Producer单请求容量。否则拒绝，不能依赖deadline
 清理一个永远无法被任何Worker领取的Ready Job。
 
 Model Worker的`model_output_materialization`是slot+weighted-bytes两级RAII容量；它与Model Provider stream、Model request read client、
@@ -164,8 +175,8 @@ Claim 使用 PostgreSQL 单事务和 `FOR UPDATE SKIP LOCKED` 或等价 CAS：
 
 ```rust
 struct WorkClaim {
-    worker_id: WorkerId,
-    worker_generation: u64,
+    worker_role: WorkerRole,
+    worker_process_generation_id: WorkerProcessGenerationId,
     work_class: WorkClass,
     supported_binding_digests: BindingCapabilitySet,
     available_slots: u16,
@@ -184,7 +195,7 @@ struct WorkClaim {
 - attempt limit。
 
 claim由所属work application service调用03的共享 Job repository primitive，在一个事务中原子创建/推进 Job、预留
-quota、增加epoch、设置lease和父work/in-flight counters。Scheduler只选择候选，不直接改写其他domain父聚合，也不维护
+quota、严格增加`lease_generation`、设置lease和父work/in-flight counters。Scheduler只选择候选，不直接改写其他domain父聚合，也不维护
 第二套durable permit counter。派发前必须依据Worker
 advertised capacity预留本地slot；领取后本地slot获取失败属于实现错误，Worker必须立即走typed release/shorten路径，不能持有工作
 等待本地容量。
@@ -198,8 +209,9 @@ terminal、Artifact stage后的owner terminal或typed generation release；进�
 同时归还两级容量且禁止整数下溢/重复释放。Producer仍在独立进程用自己的服务端permit再次准入，这两个进程内permit不是同一authority。
 
 Job generation 次数使用跨WorkClass的`run_scheduler.attempts_per_work` hard limit；不能以Node专用字段约束RegistryValidation、
-Model、Capability、MCP、Context、Sandbox、Interaction、Artifact或Recovery work。共享 Job 只保存 current epoch/ordinal，业务Ready、
-RetryScheduled、Effect与terminal仍由typed父aggregate handler拥有。
+Model、Capability、MCP、Context、Sandbox、Interaction、Artifact或Recovery work。共享Job唯一拥有物理`Ready/Leased/Running/Waiting/
+RetryScheduled/terminal` state、`attempt_count`、`lease_generation`、lease、retry time与terminal outcome；typed父aggregate只拥有业务state、Effect和exact
+current Job pointer，不复制这些物理字段。父业务transition与Job transition由owner handler在同一事务协调，但不能把父state当作Job claim truth。
 
 ## 7. 层级并发
 
@@ -256,7 +268,7 @@ Artifact Producer或critical-control池。
 - 公平算法及参数必须有 deterministic simulation tests。
 
 Q1实现固定使用weighted deficit round-robin（WDRR）：每轮按稳定TenantId顺序从上次cursor之后开始，先给候选tenant累加
-weight，再在其burst与deficit范围内选取work；tenant内按effective priority、最早enqueue round和WorkId稳定排序。aging每经过
+weight，再在其burst与deficit范围内选取work；tenant内按effective priority、最早enqueue round和JobId稳定排序。aging每经过
 配置的正整数round提升一级，最高只到`high`，不能把业务work提升为`critical_control`。算法接收并返回完整显式state，任何计数
 溢出、重复tenant窗口、未来enqueue round、零cost或越界batch/window/burst都fail closed；相同输入与state必须得到逐字节相同结果。
 
@@ -433,7 +445,7 @@ backend/tenant 具体 ID 不进入 label；高 cardinality 诊断通过受控 tr
 ## 19. 验收标准
 
 - 两个以上 runtime 并发 claim 时一个 logical work 只有一个当前 lease；
-- 旧 epoch completion 被拒绝；
+- 旧 `lease_generation` completion 被拒绝；
 - NATS 全丢失时 safety scan 恢复；
 - 100% Sandbox permit 占用下，API p95、Scheduler drive 和 Model admission 保持资格阈值；
 - 单 tenant 大 backlog 不使其他 tenant 饥饿；
@@ -443,6 +455,10 @@ backend/tenant 具体 ID 不进入 label；高 cardinality 诊断通过受控 tr
 - circuit open 只影响对应 backend，不移动 binding、不击穿其他 work class；
 - Model output materialization permit为零时，`ArtifactCapable` Model候选保持Ready且不取得lease；`InlineOnly`候选、Model request read、
   Sandbox与critical-control仍可准入，claim失败、少领、drop和durable defer均精确释放成对的本地slot；
+- WorkerManifest v2 fixture要求所有WorkClass都有non-null component role与02 CanonicalRegion，覆盖1/63合法region及空/64/大写/下划线/
+  Unicode/旧DataRegion负向；Model conditional capacity与其他WorkClass省略/null规则逐值验证；
+- 同一typed startup document投影WorkerManifest与ComponentStartupManifest，role/region/startup digest必须exact；adapter runtime、protocol或region
+  任一漂移使readiness与Model compatibility在claim前fail closed；
 - 负载测试证明 coordinator wake 合并和 claim batch 不造成数据库轮询风暴。
 
 ## 20. 明确推迟的工作

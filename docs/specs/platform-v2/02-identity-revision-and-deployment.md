@@ -5,7 +5,7 @@
 | 状态 | Draft / Architecture Revision |
 | 日期 | 2026-08-15 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) |
-| 直接下游 | 03、04、05、09、11、12、13、14、16、17、18 |
+| 直接下游 | 03、04、05、07、09、11、12、13、14、15、16、17、18 |
 
 ## 1. 决策摘要
 
@@ -48,18 +48,29 @@ security classification。边界必须同时验证prefix、UUID形状和字段�
 
 | 类别 | Prefix |
 |---|---|
-| Tenant / Principal / PrincipalSnapshot | `ten` / `prn` / `psn` |
+| Installation / Tenant / Principal / PrincipalSnapshot | `ins` / `ten` / `prn` / `psn` |
 | Resource | `agt`、`skl`、`cap`、`cim`、`ctx`、`xim`、`mcp`、`mpr`、`mdl`、`pol`、`srt`、`spk`、`sxp` |
 | ResourceVersion | `aif`、`arev`、`srev`、`cirev`、`cimp`、`xirev`、`ximp`、`mrev`、`mprev`、`mdrev`、`prev`、`srrev`、`sprev`、`sxrev` |
 | Deployment | `adep`、`cdep`、`xdep`、`mcdep`、`mpdep`、`mdep` |
-| Runtime | `run`、`nex`、`inv`、`job`、`tsk`、`evt`、`rcp` |
+| Runtime | `run`、`nex`、`inv`、`job`、`evt`、`rcp` |
+| Human Task | `apr` / `int` |
 | Artifact / Blob | `art` / `blb` |
 | Secret | `spr` / `sbd` |
+| Tenant security | `enc` |
 | Correlation | `req` |
 
 新增或改变prefix是公共machine-contract变更。`PlanNodeId`、`SlotId`、`FieldId`和`ModelCallId`只在owner内稳定，
 使用owner ID加bounded local key，不冒充全局资源。External task identity、provider ID、object generation、cursor、ETag、
 idempotency key和digest也不是ResourceId。
+
+平台不存在generic `RevisionId` alias。所有共享Resource不可变版本的裸nominal统一为`ResourceVersionId`，并在字段边界按expected
+`ResourceKind`与prefix registry复验；凡授权、binding、publish或recovery还需要防止同ID正文漂移时，必须使用本规范`ExactVersionRef`
+同时携带version ID与canonical digest。domain行文中的“revision”只是不可变ResourceVersion的业务名称，不能生成第二套ID/type/schema。
+
+CR-165 clean-cut目标把`encryption_domain/enc` exposure从internal改为public，因为04/17会在tenant-authorized Management DTO中返回/接收该
+opaque nominal；同时从目标registry删除没有shared Task owner的internal `task/tsk` kind。03共享human Task直接按kind使用public
+`approval_task/apr`或`interaction/int`，不存在`tsk_` alias或第二ID。当前checked-in registry尚未应用这两个Draft变更，因此新增
+encryption-domain route仍不是当前API；实施时必须在同一registry/schema/Rust exhaustive fixture切片原子替换，不能保留双ID兼容。
 
 部署组件角色统一使用本规范拥有的nominal `ComponentRole`，不能由Worker、Candidate或Helm各自复制字符串validator：
 
@@ -73,6 +84,32 @@ schema固定为`contracts/platform-v1/schemas/common/component-role.schema.json`
 定义。`ComponentRole`标识稳定的安装Deployment逻辑scope，同一scope的replica共享该值；它不等于Pod名、临时副本ID、
 WorkerProcessGeneration的`worker_role`或component kind。
 
+installation current-state owner和所有跨领域region字段同样只使用本规范拥有的公共nominal：
+
+```rust
+#[serde(transparent)]
+struct InstallationId(ResourceId); // inner ID registry kind/prefix exact installation/ins；不是tenant Resource aggregate kind
+
+#[serde(transparent)]
+struct CanonicalRegion(String);
+
+#[serde(transparent)]
+struct Etag(String); // etg1_<43-char base64url-no-pad SHA-256>
+```
+
+`InstallationId`的wire使用`ins_` UUIDv7；它唯一标识一个安装，不是workload/service identity、tenant、Release或临时集群实例。
+旧`installation_service/svc`没有独立生命周期且当前未被业务authority使用，clean-cut目标直接由`installation/ins`替换，不能同时保留
+两个ID表示同一安装。`CanonicalRegion`必须为1～63 ASCII bytes并匹配
+`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`；不做lowercase、provider alias、Unicode normalization或`_`兼容。
+公共schema固定为`contracts/platform-v1/schemas/common/installation-id.schema.json`和
+`contracts/platform-v1/schemas/common/canonical-region.schema.json`并进入根contract digest。Capability、Context、Worker、Artifact、Model、
+Candidate与startup document的region必须复用该nominal/schema，不得再定义字符集不同的`DataRegion`。
+
+`Etag`是全平台唯一opaque strong-validator nominal，value exact为`etg1_`加32-byte SHA-256的43字符无padding base64url；domain owner定义
+versioned closed preimage并使用domain separator，调用方不得解析。JSON/内部DTO只保存该value；HTTP `ETag`/`If-Match`必须使用一个RFC 9110 quoted
+strong tag `"<value>"`，禁止weak tag、`*`、comma list、裸值、转义别名或多header合并。schema固定为
+`contracts/platform-v1/schemas/common/etag.schema.json`并进入root contract digest。03/04/15/17/18都复用这一nominal，不得再以自由String定义ETag。
+
 除installation-scoped singleton外，每个持久对象都有`tenant_id`。Repository predicate必须同时使用tenant和object ID；
 公开404不区分不存在与跨租户不可见。
 
@@ -84,8 +121,9 @@ enum ResourceKind {
     Skill,
     CapabilityInterface,
     CapabilityImplementation,
-    ContextInterface,
-    ContextImplementation,
+    ContextSourceInterface,
+    ContextSourceImplementation,
+    ContextDataset,
     McpServer,
     ModelProvider,
     ModelProfile,
@@ -112,6 +150,10 @@ struct Resource {
 }
 ```
 
+`ResourceKind`的wire名称与prefix只由`contracts/platform-v1/registries.json`拥有；上述Context variants精确编码为
+`context_source_interface`、`context_source_implementation`与`context_dataset`。12为行文使用的`ContextInterface*`领域类型是前两种
+Resource/Version payload，不得依赖serde默认生成另一个`context_interface` kind；Dataset Generation是`ContextDataset` root下的immutable Version。
+
 唯一生命周期：
 
 ```text
@@ -131,7 +173,7 @@ Lifecycle、gate和active target是Resource aggregate的三个独立字段，不
 
 ```rust
 struct VersionedDocument {
-    schema_version: u32,
+    schema_version: u32, // const 1; wrapper contract, ResourceSpec has its own registered version
     document: ResourceSpec,
     canonical_digest: Digest,
     size_bytes: u32,
@@ -164,6 +206,18 @@ struct ResourceVersion {
     created_by: PrincipalSnapshotRef,
     created_at: DateTime<Utc>,
 }
+
+struct ResourceSpecDigestPreimageV1 {
+    schema_version: u32, // const 1
+    resource_kind: ResourceKind,
+    spec: ResourceSpec,
+}
+
+struct ExactVersionRef {
+    version_id: ResourceVersionId,
+    resource_kind: ResourceKind,
+    semantic_digest: Digest,
+}
 ```
 
 - version发布后immutable；修正产生新version；
@@ -172,6 +226,13 @@ struct ResourceVersion {
 - validation summary与spec/digest一起immutable；
 - metadata-only display修改留在Resource，不改变运行语义；
 - version被Run、Deployment或保留期内Event引用时不可hard delete。
+
+`VersionedDocument.canonical_digest`与`ResourceVersion.semantic_digest`唯一使用同一公式：
+`SHA-256(UTF8("insight.resource-spec.v1") || 0x00 || JCS(ResourceSpecDigestPreimageV1))`。preimage中的kind从owner Resource读取，
+`spec`必须是该kind唯一registered `ResourceSpec` variant；两种digest逐值相等。`VersionedDocument.size_bytes` exact为`JCS(spec)` byte length，
+不含preimage wrapper。formula排除digest自身、Resource/version ID、tenant、ordinal、validation、creator/time、display metadata、lifecycle/gate/active target；
+这些wrapper/current facts不能改变payload semantic identity。`ExactVersionRef`必须逐值匹配same-tenant immutable row的ID、kind和重算digest；只匹配
+ID或调用方digest都不足。schema固定为`contracts/platform-v1/schemas/common/exact-version-ref.schema.json`，preimage/所有Spec schema进入root digest。
 
 ## 7. Deployment
 
@@ -189,12 +250,31 @@ struct Deployment {
     gate: AdministrativeGate,
     version: u64,
 }
+
+struct DeploymentDigestPreimageV1 {
+    schema_version: u32, // const 1
+    resource_kind: ResourceKind,
+    resource_version: ExactVersionRef,
+    spec: DeploymentSpec,
+}
+
+struct ExactDeploymentRef {
+    deployment_id: DeploymentId,
+    resource_kind: ResourceKind,
+    deployment_digest: Digest,
+}
 ```
 
 DeploymentSpec至少包含适用的exact dependency versions、implementation、adapter/protocol、endpoint identity hash、
 04定义的`ExactSecretBindingRef`、runtime/image/module digest、Policy versions、network/isolation/resource limits和
 conformance summary。
 不保存Secret value、短期token或实时health。
+
+`deployment_digest = SHA-256(UTF8("insight.deployment.v1") || 0x00 || JCS(DeploymentDigestPreimageV1))`；preimage使用同一row解析并
+重验的exact ResourceVersion ref与该kind唯一closed DeploymentSpec。它排除deployment ID、tenant、digest自身、mutable gate/version、health、time与审计字段。
+`ExactDeploymentRef`必须逐值匹配same-tenant Deployment ID、kind和重算digest；schema固定为
+`contracts/platform-v1/schemas/common/exact-deployment-ref.schema.json`。DeploymentSpec或dependency中的每个exact ref必须先按其owner公式重验，
+不得把嵌套caller digest当事实。unknown/null/cross-kind、self digest、field omission或canonical set排序漂移都fail closed。
 
 需要Deployment的kind由closed matrix规定。Skill、Policy及纯作者资产通常直接引用ResourceVersion；Agent、Capability、Context、
 MCP、Model以及带环境执行的Sandbox必须通过Deployment。运行时不能把失败自动路由到未冻结Deployment。
@@ -218,15 +298,29 @@ ResourceKind决定允许的target kind。Publish/deploy不自动activate；activ
 Run admission把解析结果写入一个bounded immutable snapshot，而不是为slot、candidate、policy和reference分别复制projection：
 
 ```rust
+struct InstallationReleaseBindingV1 {
+    schema_version: u32, // const 1
+    installation_id: InstallationId,
+    release_id: ReleaseId,
+    release_manifest_digest: Digest,
+    candidate_id: ReleaseCandidateId,
+    candidate_manifest_digest: Digest,
+    compatibility_generation: u64,
+    installation_state_digest: Digest,
+}
+
 struct RunBindingsSnapshot {
-    schema_version: u32,
+    schema_version: u32, // const 2
+    installation_release: InstallationReleaseBindingV1,
     agent: ExactDeploymentRef,
     agent_interface: ExactVersionRef,
     plan: ExactVersionRef,
-    principal: PrincipalSnapshotRef,
+    principal: PrincipalSnapshot,
     slots: Vec<FrozenSlotBinding>,
+    context_dataset_views: Vec<RunContextDatasetView>,
     policies: Vec<ExactVersionRef>,
     execution_profile: ExactVersionRef,
+    canonical_size_bytes: u32,
     canonical_digest: Digest,
 }
 ```
@@ -234,12 +328,38 @@ struct RunBindingsSnapshot {
 `FrozenSlotBinding`继续使用`contracts/platform-v1/schemas/frozen-slot-binding.schema.json`的closed discriminator。Model、
 Capability、ChildAgent和Skill候选必须同时冻结Selection Policy；Context冻结exact binding。集合规范排序且受HardLimitProfile约束。
 
+`installation_release`对每个Run都required且`null`非法。ID kind必须分别为`ins/rel/cand`，generation必须为正；ReleaseManifest中的
+Candidate ID/digest、两个manifest canonical digest及18 current-state digest必须逐字段匹配。没有Active Release的installation不能创建
+root Run。`RunBindingsSnapshot` clean-cut只接受version 2，不保留version 1 reader、optional field或fallback。
+
+RunBindings canonical preimage包含`installation_release`、`context_dataset_views`及其余业务字段，但排除
+`canonical_size_bytes/canonical_digest`；前者等于JCS preimage byte length，后者为其SHA-256。machine常量
+`MAX_RUN_BINDINGS_CANONICAL_BYTES=1048576`和`MAX_RUN_MODEL_DEPLOYMENT_REFS=512`分别约束完整snapshot及跨全部Model slot按
+Deployment ID去重后的候选集合。候选数组按Deployment ID严格升序且唯一；偏好、权重或随机语义只能来自exact Selection Policy，不能来自
+偶然输入顺序。同一Deployment ID若在多个slot出现可以只验证一次，但digest必须一致。
+
+公共machine schema固定为`contracts/platform-v1/schemas/common/installation-release-binding.schema.json`和
+`contracts/platform-v1/schemas/run-bindings-snapshot.schema.json`并进入根contract digest。
+
 Admission事务：
 
-1. 锁定Resource active target/gate与exact version/deployment；
-2. 验证tenant、kind、digest、dependency closure和当前bindability；
-3. 构造typed snapshot并计算canonical digest；
-4. 与Run、Receipt和Event原子提交。
+1. 在mutation transaction外先拒绝非version 2 shape，按exact ID/digest解析immutable Release/Candidate及其依赖正文并做bounded pure
+   prevalidation；构造按Deployment ID排序去重的确定性Model candidate集合，先拒绝同ID/different digest、超过512项、canonical size超过
+   1 MiB及算术溢出。root只捕获一个observed current binding，child只读取parent snapshot。该阶段不决定current bindability、不写Receipt，
+   也不持有数据库锁；
+2. 下游Run command进入03 caller-owned transaction并先claim/replay Receipt。root随后按全局rank先锁18唯一current
+   InstallationReleaseState并逐字段匹配observed binding；child不锁current installation authority，而是准备在Tenant security rank之后锁parent Run；
+3. 按03 rank锁定current Tenant security aggregate，再锁parent Run及按kind/ID排序的Resource gate/exact version/deployment。root验证current
+   active target/bindability；child从已锁parent bindings继承同一exact `InstallationReleaseBindingV1`，复用parent frozen closure并重验current
+   security fence，不要求这些exact ref仍是current head或对current Release bindable；
+4. 对步骤1同一确定集逐项复验exact Deployment generation/digest；锁后重算canonical set/count/size必须byte-identical，否则回滚；
+5. 对集合中每个Model Deployment的tagged output closure调用16同一installation compatibility port。任一候选不兼容时整个admission
+   回滚；不得静默删候选、提前选择一个候选或改写Selection Policy；
+6. 所有validation结果必须返回与步骤2/3逐字段相同的installation binding；构造typed snapshot并计算canonical size/digest；
+7. root在提交前对已锁InstallationReleaseState复验generation/state digest；child对已锁parent binding复验一致，并确认对应immutable Candidate
+   仍可由18 resolver读取且历史runtime/adapter仍在保留期；
+8. 与Run、Receipt和Event原子提交。serializable/internal竞态按17规则bounded retry，任何路径都不得先锁tenant Resource再反向取得
+   InstallationReleaseState。
 
 Run之后只读取snapshot中的exact ref；active target变化、重新发布或discovery均不改变该Run。
 
@@ -291,6 +411,16 @@ column或index是物理优化，不获得新的domain写入口。
 - publish/deploy/activate重放不产生重复逻辑对象；
 - 每个ResourceKind的错误spec由typed validator拒绝；
 - Run admission与active切换并发时只冻结一个完整snapshot；
+- Run admission验证全部Model候选，任一非首选候选不兼容也不能创建Run；
+- root Run与Release切换并发时只得到完整旧或完整新installation binding；child Run始终继承parent exact binding；
+- InstallationId fixture接受`ins_<UUIDv7>`且kind为exact `installation`，拒绝旧`svc_`/`installation_service`、其他prefix/kind、非UUIDv7、
+  大写或双解析alias；
+- target registry exhaustive fixture接受public exact `encryption_domain/enc`、`approval_task/apr`与`interaction/int` kind/exposure，拒绝
+  `task/tsk`、错误exposure、prefix/kind swap和兼容alias；checked-in JSON、Rust exhaustive enum/parser与公共SDK投影必须逐值一致；
+- CanonicalRegion fixture覆盖1/63-byte合法边界与内部连字符，拒绝空/64-byte、首尾连字符、大写、下划线、Unicode、provider alias及任何
+  lowercase/normalization后才“合法”的输入；两个common schema与Rust/SDK validator逐值一致；
+- 没有Active Release、错误installation/release/candidate kind、零generation或manifest/state digest漂移均fail closed；
+- RunBindings version 1、超过1 MiB或超过512个distinct Model Deployment refs在取得大批行锁前稳定拒绝；
 - Run运行期间任何resource变化不改变bindings digest；
 - 跨租户ID在resolve/activate/admit中返回不可区分404；
 - published version/deployment不能更新；
@@ -307,5 +437,6 @@ column或index是物理优化，不获得新的domain写入口。
 
 ## 16. 未决问题
 
-没有阻止03一致性重写的问题。ResourceKind新增时必须先提供typed spec、schema、validation和allowed active target matrix，
-不得以generic JSON绕过本规范。
+本次architecture revision要求03补齐installation-scoped aggregate/Receipt/Event/Outbox scope，05/06/08/17补齐root与child Run的
+installation binding边界，07/09/12/15/16/18统一`CanonicalRegion`。这些下游完成cross-review前本规范不能恢复Accepted。
+ResourceKind新增时仍必须先提供typed spec、schema、validation和allowed active target matrix，不得以generic JSON绕过本规范。

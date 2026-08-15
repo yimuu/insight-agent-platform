@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-07 |
+| 状态 | Draft / Architecture Revision |
+| 日期 | 2026-08-15 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 10、11、13、14、15、17、18 |
 
@@ -42,7 +42,7 @@ Implementation Revision、Policy 和运行证据。Registry 不执行调用，�
 
 ```rust
 struct CapabilityInterfaceRevision {
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     capability_id: CapabilityId,
     qualified_name: CapabilityName,
     input_schema: ClosedJsonSchema,
@@ -81,7 +81,7 @@ struct CapabilityArtifactContract {
 struct CapabilityDataFlowPolicy {
     maximum_input_classification: DataClassification,
     maximum_output_classification: DataClassification,
-    allowed_regions: Vec<DataRegion>,
+    allowed_regions: Vec<CanonicalRegion>,
     declassification_policy: Option<ExactVersionRef>,
 }
 
@@ -99,7 +99,8 @@ bytes均为正，`single <= total <= single * count`；所有port count之和必
 `maximum_artifacts`，避免两个容量authority。Interface input/output分别不超过16/64 MiB，execution不超过1小时，且仍受18
 CandidateManifest HardLimitProfile进一步收紧。
 
-`allowed_regions`非空、严格排序唯一且最多32个。实际input不能高于input ceiling；实际output不能高于output ceiling，也不能
+`allowed_regions`只使用02 `CanonicalRegion`，非空、按canonical bytes严格排序唯一且最多32个；旧的32-byte且允许下划线的
+`DataRegion` validator在clean-cut目标中删除。实际input不能高于input ceiling；实际output不能高于output ceiling，也不能
 低于实际input classification，除非冻结exact Declassification Policy Revision并由04授权、记录转换Evidence。Implementation和
 Deployment可以进一步收紧这些合同，不能扩大。Invocation admission完整冻结Artifact/DataFlow/Interface limits和三个schema
 digest；exact Interface ResourceVersion保存三个完整`ClosedJsonSchema` validation snapshot。
@@ -200,9 +201,9 @@ Implementation 只能通过 scoped Artifact protocol 读取/写入声明端口�
 
 ```rust
 struct CapabilityImplementationRevision {
-    implementation_revision_id: RevisionId,
+    implementation_revision_id: ResourceVersionId,
     implementation_id: CapabilityImplementationId,
-    interface_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
     backend_contract: BackendContractDescriptor,
     credential_requirements: Vec<SecretPurpose>,
     backend_limits: BackendLimits,
@@ -338,14 +339,14 @@ Implementation 只实现一个精确 Interface Revision。升级 Interface 必�
 ```rust
 struct CapabilityDeployment {
     capability_deployment_id: DeploymentId,
-    interface_revision_id: RevisionId,
-    implementation_revision_id: RevisionId,
+    interface_revision_id: ResourceVersionId,
+    implementation_revision_id: ResourceVersionId,
     backend_binding: CapabilityBackendBinding,
     secret_bindings: Vec<ExactSecretBindingRef>,
-    network_policy_revision_id: Option<RevisionId>,
-    isolation_policy_revision_id: Option<RevisionId>,
-    resource_profile_revision_id: Option<RevisionId>,
-    policy_revision_ids: Vec<RevisionId>,
+    network_policy_revision_id: Option<ResourceVersionId>,
+    isolation_policy_revision_id: Option<ResourceVersionId>,
+    resource_profile_revision_id: Option<ResourceVersionId>,
+    policy_revision_ids: Vec<ResourceVersionId>,
     conformance_evidence_id: EvidenceId,
     deployment_digest: Digest,
 }
@@ -376,7 +377,7 @@ Model 可见工具从已绑定 Interface 生成：
 ```rust
 struct ModelToolProjection {
     tool_name: ModelToolName,
-    capability_interface_revision_id: RevisionId,
+    capability_interface_revision_id: ResourceVersionId,
     description: String,
     input_schema: ClosedJsonSchema,
     safe_output_summary: Option<ClosedJsonSchema>,
@@ -436,6 +437,8 @@ SecretBinding ID/opaque reference不进入label。publish/activate/suspend产生
 - malformed/oversized output 在进入 Plan Value 前失败；
 - 任意 Shell 字符串、动态库上传和 mutable image tag publication 被拒绝；
 - Secret canary 不进入 revision digest、API、日志、event 或错误；
+- `allowed_regions`只接受02 CanonicalRegion common schema，覆盖非空、1/32项、canonical bytes排序唯一及33项/重复/乱序；大写、下划线、
+  Unicode、provider alias和旧DataRegion合法但CanonicalRegion非法的输入均拒绝，不做归一化；
 - backend 增加时 exhaustive protocol/conformance gate 生效。
 
 ### 21.1 当前实施证据边界（非规范性）
@@ -452,7 +455,8 @@ Egress另有29项unit，其中8项覆盖Capability HTTP/gRPC exact catalog、DNS
 Effect/idempotency failure与stale exact cancel；不增加表或migration。
 
 该证据证明当前Native执行/取消组合及HTTP/gRPC生产Egress代码边界，不证明所有backend已完成真实进程conformance。真实远端服务、
-Secret Manager/TLS/mTLS composition、callback、Sandbox实现和Phase 6 qualification完成前，本规范仍是Implementation In Progress。
+Secret Manager/TLS/mTLS composition、callback、Sandbox实现和Phase 6 qualification尚未完成；这只是当前实施证据边界。本规范因CR-165保持
+Draft / Architecture Revision，不能用“Implementation In Progress”替代规范状态或绕过Reviewed/Accepted门禁。
 
 ## 22. 明确推迟的工作
 
@@ -465,5 +469,5 @@ Secret Manager/TLS/mTLS composition、callback、Sandbox实现和Phase 6 qualifi
 
 ## 23. 未决问题
 
-没有阻止 Invocation 设计的未决问题。具体 HTTP/gRPC wire envelope 与 Sandbox protocol 分别由 10、14
-冻结，但必须实现本规范的统一 Interface 和安全合同。
+CR-165的CanonicalRegion与Model candidate installation compatibility仍需与02/07/12/16/18共同完成cross-review；关闭前本规范保持Draft且不得
+作为实现输入。具体HTTP/gRPC wire envelope与Sandbox protocol分别由10、14冻结，但必须实现本规范的统一Interface和安全合同。
