@@ -12,10 +12,11 @@
 
 ## 1. 决策摘要
 
-Model 是独立执行隔舱，不是 Capability backend。Model Provider Revision 固定 adapter、protocol 与 credential
-requirements；Model Provider Deployment 固定 endpoint、Secret、network、TLS 与 region policy；Model Profile Revision
-固定模型身份、modalities、context、tool/structured-output 能力和数据策略；Model Deployment 固定 exact Provider
-Deployment、Profile、预算和 policy。RunBindings 只能引用 exact Model Deployment 候选。
+Model 是独立执行隔舱，不是 Capability backend。Model Provider ResourceVersion 的`ModelProviderSpecV1`固定 adapter、protocol 与
+credential requirements；Model Provider Deployment 的`ModelProviderDeploymentSpecV1`固定 endpoint、Secret、network、TLS 与
+region policy；Model Profile ResourceVersion 的`ModelProfileSpecV1`固定模型身份、modalities、context、tool/structured-output 能力和
+数据策略；Model Profile Deployment 的`ModelDeploymentSpecV1`固定 exact Provider Deployment、预算和 policy。RunBindings 只能引用
+exact Model Profile Deployment 候选；领域行文可继续简称它为Model Deployment，但不能形成第二种aggregate或wrapper。
 
 ModelLoop 的每一次推理调用是 durable ModelTurn，拥有 Attempt、lease、deadline、token/cost reservation、stream
 assembly、output validation 和 first-winner。流式 delta 只是可丢失观察，只有完整、通过本地 schema 与 policy 的
@@ -61,11 +62,11 @@ fingerprint/evidence；若 Provider 发生不可验证漂移，明确标记为 e
 
 | 术语 | 含义 |
 |---|---|
-| Provider Entity | 可管理的外部/内部模型服务身份 |
-| Provider Revision | immutable adapter、credential requirements、request limits 和 wire protocol |
-| Provider Deployment | Provider Revision 与 endpoint、Secret、network、TLS、region policy 的 exact binding |
-| Model Profile Revision | 某 Provider 下一个 exact model identity 与平台能力声明 |
-| Model Deployment | Provider Deployment + Profile + data/budget/policy 的 exact binding |
+| Provider Resource | 02 `ResourceKind::ModelProvider`管理的外部/内部模型服务身份 |
+| Provider Revision | 02 ModelProvider ResourceVersion的领域简称；payload是immutable `ModelProviderSpecV1` |
+| Provider Deployment | 02 ModelProvider Deployment；payload是`ModelProviderDeploymentSpecV1` |
+| Model Profile Revision | 02 ModelProfile ResourceVersion的领域简称；payload是`ModelProfileSpecV1` |
+| Model Deployment | 02 ModelProfile Deployment；payload是`ModelDeploymentSpecV1` |
 | Model Requirement | Agent/Skill 对 modality、context、tools、schema 和 policy 的需求 |
 | Model Binding Set | Deployment 允许的 exact Model Deployment 候选及选择策略 |
 | ModelTurn | ModelLoop 某一 round 的 durable 逻辑推理调用 |
@@ -89,7 +90,7 @@ struct ModelRequirement {
     structured_output: StructuredOutputRequirement,
     streaming: StreamingRequirement,
     data_classification_ceiling: DataClassification,
-    allowed_regions: BTreeSet<DataRegion>,
+    allowed_regions: BTreeSet<CanonicalRegion>,
     provider_retention_ceiling: Duration,
     provider_training: ProviderTrainingPolicy,
     determinism: DeterminismRequirement,
@@ -100,41 +101,50 @@ Model requirement 是 Agent/Skill 的 interface slot，不含 provider 名、end
 Deployment verifier 从已发布 Model Deployment 中选择满足全部 requirement/policy 的候选；运行时不能以 feature
 fallback 静默弱化 modality、data policy、tool schema 或 context limit。
 
-## 5. Provider Revision
+## 5. Provider ResourceVersion 与 Deployment payload
 
 ```rust
-struct ModelProviderRevision {
-    provider_revision_id: RevisionId,
-    provider_id: ModelProviderId,
+struct ModelProviderSpecV1 {
+    schema_version: u32, // const 1
     adapter: InstalledModelAdapter,
-    protocol_profile_revision_id: RevisionId,
+    protocol_profile: ExactVersionRef,
     credential_requirements: Vec<SecretPurpose>,
     request_limits: ProviderRequestLimits,
-    semantic_digest: Digest,
 }
 
-struct ModelProviderDeployment {
-    provider_deployment_id: DeploymentId,
-    provider_revision_id: RevisionId,
+struct ModelProviderDeploymentSpecV1 {
+    schema_version: u32, // const 1
     canonical_endpoint: CanonicalEndpoint,
     secret_bindings: Vec<ExactSecretBindingRef>,
-    network_policy_revision_id: RevisionId,
-    tls_policy_revision_id: RevisionId,
+    protocol_policy: ExactVersionRef,
+    network_policy: ExactVersionRef,
+    tls_policy: ExactVersionRef,
+    trust_policy: ExactVersionRef,
+    data_policy: ExactVersionRef,
     provider_region_policy: ProviderRegionPolicy,
     conformance_evidence_id: EvidenceId,
-    deployment_digest: Digest,
 }
 ```
+
+这两个类型只是02 closed `ResourceSpec::ModelProvider`与`DeploymentSpec::ModelProvider` payload。它们不拥有root/version/deployment
+ID、tenant、ordinal、gate、CAS version、`semantic_digest`或`deployment_digest`。唯一当前管理authority与不可变wrapper分别是02
+`Resource`、`ResourceVersion`与`Deployment`；尤其Provider Deployment所部署的Provider ResourceVersion只由
+`Deployment.resource_version_id/resource_kind`关联，payload不得再保存一个`provider_revision_id`或等价alias。
+
+`ModelProviderSpecV1.protocol_profile`必须是expected `ResourceKind::Policy`且document kind为`PolicyKind::Protocol`的
+`ExactVersionRef`。`ModelProviderDeploymentSpecV1`的`protocol_policy/network_policy/tls_policy/trust_policy/data_policy`也都必须是
+expected `ResourceKind::Policy`，document kind依次为`Protocol/Network/Tls/Trust/DataFlow`；`protocol_policy`必须与被部署
+`ModelProviderSpecV1.protocol_profile`逐值相等。任一kind、ID或digest不匹配都fail closed。
 
 - Adapter 是平台安装、签名并报告 module digest 的静态实现，Registry 不接受用户动态库；
 - Adapter不是新的tenant ResourceKind：Provider Revision固定qualified adapter name、signed WorkerManifest digest与
   adapter contract digest，validation/conformance必须证明候选worker manifest精确包含它；运行时worker manifest不匹配时
   fail closed，不能按adapter名称选择“当前版本”；
-- Revision 只固定 adapter、protocol、credential requirements 与 request limits；
-- endpoint canonicalization、TLS、redirect、proxy、DNS、auth、region 与 SecretBinding 由 Provider Deployment 固定；
+- `ModelProviderSpecV1`只固定 adapter、protocol、credential requirements 与 request limits；
+- endpoint canonicalization、TLS、redirect、proxy、DNS、auth、region 与 SecretBinding 由`ModelProviderDeploymentSpecV1`固定；
 - HTTP redirect 默认禁止，允许时逐 hop 重做 endpoint/network policy；
 - Provider 原生 header/parameter allowlist 在 protocol profile 固定；
-- Secret value 不进入 Revision/Deployment digest；04的`ExactSecretBindingRef`进入Deployment digest，Worker只通过
+- Secret value 不进入wrapper semantic/deployment digest；04的`ExactSecretBindingRef`进入Deployment payload及其wrapper digest，Worker只通过
   受信Secret broker按exact generation/policy late resolve；
 - Provider health、rate-limit window、circuit、credential revoke 和 suspension 是独立动态状态；
 - adapter/protocol/credential requirement 改变必须新 Revision；endpoint/Secret/network/TLS/region 改变必须新
@@ -145,13 +155,12 @@ digest；`ProviderRequestLimits`逐项冻结request/response/message/part/tool/d
 credential requirements是按wire排序、无重复的`SecretPurpose`集合。任一字段缺失、为零、越过platform hard max，或局部timeout
 不严格小于total timeout都fail closed。
 
-## 6. Model Profile Revision
+## 6. Model Profile ResourceVersion payload
 
 ```rust
-struct ModelProfileRevision {
-    model_profile_revision_id: RevisionId,
-    model_profile_id: ModelProfileId,
-    provider_revision_id: RevisionId,
+struct ModelProfileSpecV1 {
+    schema_version: u32, // const 1
+    provider: ExactVersionRef,
     provider_model_identity: ProviderModelIdentity,
     modalities: ModelModalities,
     context_contract: ContextWindowContract,
@@ -163,9 +172,12 @@ struct ModelProfileRevision {
     data_handling: ProviderDataHandlingContract,
     model_limits: ModelLimits,
     catalog_evidence_id: EvidenceId,
-    semantic_digest: Digest,
 }
 ```
+
+`ModelProfileSpecV1`只是02 closed `ResourceSpec::ModelProfile` payload，不拥有Model Profile root/version ID、tenant、ordinal或
+`semantic_digest`。`provider`必须是expected `ResourceKind::ModelProvider`的`ExactVersionRef`，并解析为同tenant的
+`ModelProviderSpecV1`；它不能是active/latest selector或裸`ResourceVersionId`。
 
 Provider model identity 是 exact published string/version/profile，不使用 `latest`、alias 或运行时 catalog lookup。
 若 Provider 只提供可能漂移的别名，Profile 必须标记 `ExternallyMutable`，保存 discovery evidence/observed_at，
@@ -185,7 +197,7 @@ response 的 Inline/Artifact选择只由本规范的 output materialization clos
 该schema以及Model structured output/tool arguments统一使用05的`insight.closed-json-schema/1`。Provider原生
 schema dialect只由adapter从此profile做能力映射，永远不成为第二权威。
 
-首版closed Profile payload必须逐字段保存`ProviderModelIdentity`、input/output `ModelModalities`、`ContextWindowContract`、
+首版closed `ModelProfileSpecV1` payload必须逐字段保存`ProviderModelIdentity`、input/output `ModelModalities`、`ContextWindowContract`、
 `ModelToolContract`、`StructuredOutputContract`、generation parameter schema digest、`ModelArtifactDeliveryContract`、
 `ModelUsageContract`、`ProviderDataHandlingContract`、`ModelLimits`与bounded `ModelCatalogEvidence`。这些不是可选extension bag；
 input modalities必须包含text，所有集合按wire排序且无重复，limit之间必须交叉验证。
@@ -193,31 +205,44 @@ input modalities必须包含text，所有集合按wire排序且无重复，limit
 ## 7. Model Deployment 与 Binding
 
 ```rust
-struct ModelDeployment {
-    model_deployment_id: DeploymentId,
-    model_profile_revision_id: RevisionId,
-    provider_deployment_id: DeploymentId,
-    data_policy_revision_ids: Vec<RevisionId>,
-    budget_policy_revision_id: RevisionId,
+struct ModelDeploymentSpecV1 {
+    schema_version: u32, // const 1
+    provider_deployment: ExactDeploymentRef,
+    data_policy: ExactVersionRef,
+    budget_policy: ExactVersionRef,
     generation_defaults: ClosedJsonValue,
-    public_projection_policy_revision_id: RevisionId,
+    public_projection_policy: ExactVersionRef,
     model_output: ModelOutputDeploymentClosureV1,
-    deployment_digest: Digest,
 }
 
 struct ModelBindingSet {
     candidates: Vec<ExactDeploymentRef>,
-    selection_policy: ExactRevisionRef,
+    selection_policy: ExactVersionRef,
     model_slot_mappings: Vec<ModelSlotMapping>,
     binding_digest: Digest,
 }
 ```
 
+`ModelDeploymentSpecV1`只是02 closed `DeploymentSpec::ModelProfile` payload，不拥有Model Profile root/version ID、Deployment ID、tenant、
+gate、CAS version或`deployment_digest`；其所部署的exact Model Profile ResourceVersion只由02 Deployment wrapper关联。
+`provider_deployment`必须是expected `ResourceKind::ModelProvider`的`ExactDeploymentRef`；`data_policy/budget_policy/
+public_projection_policy`必须分别是expected `ResourceKind::Policy`且document kind为`PolicyKind::DataFlow/Budget/PublicProjection`的
+`ExactVersionRef`。`ModelBindingSet.candidates`中的每一项必须是expected `ResourceKind::ModelProfile`的`ExactDeploymentRef`，
+`selection_policy`必须是expected `ResourceKind::Policy`且document kind为`PolicyKind::Selection`的`ExactVersionRef`。
+
+四个payload都使用strict JCS，digest只使用02的domain-separated公式。`ResourceVersion.semantic_digest`必须从wrapper
+`resource_kind`与同一完整`ModelProviderSpecV1`或`ModelProfileSpecV1`构造02 `ResourceSpecDigestPreimageV1`后重算；引用该版本的每个
+`ExactVersionRef`必须逐值匹配同一wrapper的version ID、kind和重算digest。`Deployment.deployment_digest`必须从wrapper
+`resource_kind`、该row关联并重验的`ExactVersionRef`及同一完整`ModelProviderDeploymentSpecV1`或`ModelDeploymentSpecV1`构造02
+`DeploymentDigestPreimageV1`后重算；引用该Deployment的每个`ExactDeploymentRef`必须逐值匹配同一wrapper的Deployment ID、kind和重算
+digest。解析ref与payload时必须同时比较wrapper、ref与canonical bytes；payload不得嵌入自摘要，也不得另存第二个Model
+revision/deployment aggregate来证明相同事实。
+
 `ModelBindingSet`是authoring/deployment verifier视图，持久化时必须逐字段编码为02的
 `FrozenSlotTarget::Model`；不能形成第二种Run binding schema。
 
 - Agent Deployment 固定候选 Model Deployment 和 slot mapping；
-- Model Deployment 的 Provider Deployment 必须引用与 Model Profile 相同的 Provider Revision，并通过 compatibility
+- `ModelDeploymentSpecV1`的Provider Deployment必须引用与Model Profile `provider`相同的Provider ResourceVersion，并通过compatibility
   与 conformance 检查；
 - Provider Deployment Policy closure固定`protocol/network/tls/trust/data`，其中protocol必须exact等于Provider Revision；
   Model Deployment固定`data/budget/public_projection`与closed tagged `model_output` closure；一个Policy Revision不能填多个role。
@@ -229,8 +254,8 @@ struct ModelBindingSet {
 - 自动 failover 只有全部候选、顺序/规则、data policy 和预算已冻结才允许；
 - 已发送 request 后不能以 failover 重放可能仍在执行的 Attempt，必须先应用 retry/uncertainty规则。
 
-Provider Deployment closure按角色分别冻结`protocol/network/tls/trust/data`五个exact Policy Revision、region与conformance
-Artifact；同一Policy Revision不能兼任多个role。Model Deployment closure分别冻结`data/budget/public_projection`三个exact Policy
+`ModelProviderDeploymentSpecV1`按角色分别冻结`protocol/network/tls/trust/data`五个exact Policy Revision、region与conformance
+Artifact；同一Policy Revision不能兼任多个role。`ModelDeploymentSpecV1`分别冻结`data/budget/public_projection`三个exact Policy
 Revision、`ClosedJsonValue` generation defaults与以下closed internally-tagged output closure；wire discriminator固定为`mode`，unknown字段、
 `null`、跨variant字段和未知mode均拒绝：
 
@@ -243,7 +268,7 @@ enum ModelOutputDeploymentClosureV1 {
     ArtifactCapable {
         schema_version: u32, // const 1
         retention_policy: ExactVersionRef,
-        artifact_io_policy: ExactVersionRef,
+        artifact_io: ResolvedModelOutputArtifactIoPolicyV1,
         ready_retention_seconds: u64,
     },
 }
@@ -252,50 +277,139 @@ struct InlineOutputCompatibilityRequestV1 {
     maximum_canonical_response_bytes: u64,
 }
 
-struct ArtifactOutputCompatibilityRequestV1 {
-    storage_binding_digest: Digest,
-    adapter_runtime_digest: Digest,
-    protocol_version: u32,
-    region: DataRegion,
-    maximum_materialized_bytes: u64,
-    ready_retention_seconds: u64,
+struct ResolvedModelOutputArtifactIoPolicyV1 {
+    revision: ExactVersionRef,
+    rules_digest: Digest,
+    document: ModelOutputArtifactIoPolicyDocument,
+    encryption_domain_binding: TenantEncryptionDomainBindingV1,
 }
 
-struct InstalledModelOutputCompatibilityReceiptV1 {
-    installation_compatibility_generation: u64,
-    installation_digest: Digest,
+struct ArtifactOutputCompatibilityRequestV1 {
+    artifact_io: ResolvedModelOutputArtifactIoPolicyV1,
+    deployment_maximum_materialized_bytes: u64,
+    effective_artifact_staging_seconds: u64,
+    adapter_runtime_digest: Digest,
+    protocol_version: u32,
+    region: CanonicalRegion,
+    ready_retention_seconds: u64,
+    canonical_response_contract_digest: Digest,
+}
+
+struct ExactModelArtifactProducerRuntimeBindingV1 {
+    component_role: ComponentRole,
+    runtime_manifest_digest: Digest,
+    region: CanonicalRegion,
+    storage_binding_manifest_digest: Digest,
+    content_validation_profile_digest: Digest,
+    canonical_response_contract_digest: Digest,
+}
+
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum ValidatedInstalledModelOutputCompatibilityV1 {
+    InlineOnly {
+        schema_version: u32, // const 1
+        installation_release: InstallationReleaseBindingV1,
+        compatibility_request_digest: Digest,
+        validated_maximum_materialized_bytes: u64,
+    },
+    ArtifactCapable {
+        schema_version: u32, // const 1
+        installation_release: InstallationReleaseBindingV1,
+        compatibility_request_digest: Digest,
+        validated_maximum_materialized_bytes: u64,
+        artifact_io: ResolvedModelOutputArtifactIoPolicyV1,
+        producer: ExactModelArtifactProducerRuntimeBindingV1,
+        storage: ResolvedArtifactStorageBindingV1,
+        storage_timing: ValidatedStorageBindingTimingV1,
+    },
+}
+
+enum ModelOutputCompatibilityFailureReasonV1 {
+    InstallationMode,
+    StorageBinding,
+    EncryptionDomain,
+    ContentValidationProfile,
+    Region,
+    AdapterRuntime,
+    Protocol,
+    WorkerCapacity,
+    ProducerCapacity,
+    Retention,
+    Timing,
+    Arithmetic,
+}
+
+enum ModelOutputCompatibilityFieldV1 {
+    Mode,
+    ArtifactIo,
+    MaximumMaterializedBytes,
+    EffectiveArtifactStagingSeconds,
+    AdapterRuntimeDigest,
+    ProtocolVersion,
+    Region,
+    ReadyRetentionSeconds,
+    CanonicalResponseContractDigest,
+}
+
+struct ModelOutputCompatibilityErrorV1 {
+    field: ModelOutputCompatibilityFieldV1,
+    reason: ModelOutputCompatibilityFailureReasonV1,
 }
 
 trait InstalledModelOutputCapabilitiesV1 {
     fn validate_inline(
         &self,
         request: InlineOutputCompatibilityRequestV1,
-    ) -> Result<InstalledModelOutputCompatibilityReceiptV1, ModelDeploymentError>;
+    ) -> Result<ValidatedInstalledModelOutputCompatibilityV1, ModelOutputCompatibilityErrorV1>;
     fn validate_artifact(
         &self,
         request: ArtifactOutputCompatibilityRequestV1,
-    ) -> Result<InstalledModelOutputCompatibilityReceiptV1, ModelDeploymentError>;
+    ) -> Result<ValidatedInstalledModelOutputCompatibilityV1, ModelOutputCompatibilityErrorV1>;
 }
 ```
 
 Model Deployment是installation发布后仍可创建/激活的domain catalog，不能参与immutable installation manifest构造。16只依赖上述
 contracts-owned pure port，不导入下游Candidate类型。`InlineOnly`在创建及每次激活时都必须通过`validate_inline`证明最大合法canonical
 response不超过当前installation Inline threshold，且不得携带output Policy。
+`ResolvedModelOutputArtifactIoPolicyV1`必须重验revision expected `PolicyKind::ArtifactIo`、exact Revision digest、
+`rules_digest == document.canonical_digest()`，且document的tenant encryption domain ID/storage digest与04 current Active binding逐字段相等；
+binding digest/generation、storage/KMS digest任一漂移都拒绝。`deployment_maximum_materialized_bytes`是Provider/Profile/envelope/
+HardLimit/budget的正数checked intersection，必须不大于document ceiling，不能用Policy ceiling替代实际Deployment上限。
+
 `ArtifactCapable`的Retention closure必须给出15要求的Ready `RunOutput` minimum retention、tombstone与
 hold规则；`ready_retention_seconds`必须为正且不短于该minimum。ArtifactIo
 closure必须是04 exact `ModelOutputArtifactIoPolicyDocument`，固定staging grace、唯一verified media、classification ceiling、maximum
 materialized bytes、storage/encryption binding与content-validation contract。创建及每次激活ArtifactCapable Deployment都必须调用
 `validate_artifact`；port实现同时检查installation mode、15 storage catalog/region、ready-retention limit、07 Worker匹配及Producer scope的
-单请求容量。下游Candidate builder不得读取Model Deployment/Policy catalog，也不冻结某一时刻的tenant/domain集合。
+单请求容量、04 binding的KMS digest以及Producer startup projection安装的content-validation profile。匹配storage route在Candidate中只能归属
+一个Producer scope，因此Artifact结果返回唯一producer、被选择的content-validation profile digest、该descriptor的
+`canonical_response_contract_digest`与完整resolved storage manifest。port必须解析15 exact profile并要求其canonical response digest与request中由
+16 sealed semantic validator提供的digest逐值相等；不允许两个不同但各自合法的response contract分别通过Producer content validation和owner semantic
+validation。该字段进入compatibility request/result digest。port还必须
+把request的effective staging和Policy grace传给15 exact storage manifest的唯一`validate_timing`，并把返回的
+`ValidatedStorageBindingTimingV1`放入validation result；不能复制ceil/margin算法或只检查grace下界。下游Candidate builder不得读取Model
+Deployment/Policy/tenant catalog，也不冻结某一时刻的tenant/domain集合。
 
-Model Deployment activation、installation Release切换与Run admission共享一个installation-scoped
-`model-output-compatibility` Aggregate generation/fence，复用03 `aggregates`表而不新增表。activation与Release切换都必须在同一事务`FOR UPDATE`
-该row、对exact generation执行上述port验证并在成功mutation时递增generation；Release切换还在锁内对全部active Model Deployment重跑验证。
-Run admission以同一row的current generation/digest和所选exact Deployment调用port，在提交Run前持有共享锁或执行等价CAS，并把receipt的
-generation/digest冻结进Run binding。这样activation与切换不能各自读取旧快照后同时成功；每个新Run仍拒绝mode、Inline threshold、storage、
-Worker或Producer capacity漂移。existing Run继续使用已冻结installation closure，不追随新generation。
-generation CAS失败复用17 `etag_mismatch`，兼容性失败复用`invalid_state_transition`并返回body-free safe field error；activation/Release原有
-Event与Outbox必须携带新generation/digest，不新增EventKind、错误码、表或第二active-Candidate authority。
+`ValidatedInstalledModelOutputCompatibilityV1`是pure validation result，不是03 durable Receipt；它不持有ReceiptId，也不能作为幂等或
+current-state authority。compatibility request digest覆盖完整resolved Policy、effective maximum、effective staging、adapter/protocol/region/
+retention；Artifact
+result还逐字段返回18 exact producer/storage projection。所有结果必须携带与调用方预期完全相同的02
+`InstallationReleaseBindingV1`，不能只返回含义不明的`installation_digest`。
+
+Model Deployment activation、installation Release切换与root Run admission共同消费18唯一
+`InstallationReleaseStateV1` generation/digest，16不规定物理表名或复制active Candidate pointer。使Deployment变得可/不可bind的
+activate/deactivate/suspend/resume/archive/retire在03短事务中先锁该authority、按current Candidate重验必要closure、修改tenant
+Resource并原子推进active count与generation。创建inactive Deployment只按读取到的current Candidate验证，不改变active set；后续activate必须
+重新验证。
+
+Release切换按18的有界preflight scan和最终短CAS执行，不能在持锁事务中遍历catalog。root Run admission先构造不超过02上限的全部Model
+候选确定性集合，对每个tagged closure调用同一port，再在提交Run前复验current generation/state digest；runtime只能在该完整验证集合内选择。
+child Run使用parent冻结Candidate，不追随current state。这样并发mutation只能产生完整旧或完整新binding；existing Run继续使用冻结closure。
+
+wire/schema错误映射400 `schema_validation_failed`，不可见exact ref映射404，确定性installation不兼容映射409
+`invalid_state_transition`且不可重试。只有public `If-Match`失配返回412 `etag_mismatch`；内部generation竞态先bounded retry，耗尽或authority
+不可用返回503 `temporarily_unavailable`，未知invariant返回500。ApiProblem `detail=None`且safe message为空；至多一个allowlisted
+field path/reason，不回显ID、digest、region或catalog存在性。失败不得写成功Event/Outbox。
 `ClosedJsonValue`携带schema digest、canonical digest并执行统一
 bytes/depth/object/array/string hard limit；Deployment不能只
 保存opaque digest后在dispatch时读取mutable defaults，运行时也不能重新追随任一Policy active head。
@@ -303,17 +417,17 @@ bytes/depth/object/array/string hard limit；Deployment不能只
 ## 8. Catalog、Discovery 与发布
 
 ```text
-Provider Draft
+Provider Resource Draft
  -> author/protocol validation
- -> Provider Revision
+ -> Provider ResourceVersion (ModelProviderSpecV1)
  -> Provider Deployment Candidate/Resolution
  -> connectivity/auth/conformance validation
- -> Provider Deployment
+ -> Provider Deployment (ModelProviderDeploymentSpecV1)
  -> catalog discovery candidate
  -> Model Profile Draft
  -> capability/data/limit conformance
- -> Model Profile Revision
- -> Model Deployment
+ -> Model Profile ResourceVersion (ModelProfileSpecV1)
+ -> Model Profile Deployment (ModelDeploymentSpecV1)
  -> Active Head / Suspension
 ```
 
@@ -388,6 +502,8 @@ Cancelling -> Cancelled | Failed | TimedOut
 
 ```rust
 struct CanonicalModelRequest {
+    tenant_id: TenantId,
+    job_id: JobId,
     model_turn_id: ModelTurnId,
     messages: Vec<CanonicalMessage>,
     tools: Vec<ModelToolProjection>,
@@ -397,21 +513,59 @@ struct CanonicalModelRequest {
     max_output_tokens: u32,
     deadline: DateTime<Utc>,
     trace_context: SafeTraceContext,
+    model_request_core_binding_digest: Digest,
+}
+
+struct ModelArtifactInput {
+    artifact_input_ordinal: u32,
+    model_request_value_id: RunValueId,
+    artifact: ArtifactRef,
+    artifact_link_id: ArtifactLinkId,
+    artifact_link_digest: Digest,
+    artifact_grant_id: ArtifactGrantId,
+    grant_generation: u64,
+    grant_authorization_binding_digest: Digest,
+    port: ArtifactPortName,
+    purpose: ArtifactPurpose,
+    maximum_bytes: u64,
+    artifact_input_binding_digest: Digest,
 }
 ```
+
+Model Artifact request digest按以下唯一拓扑构造，禁止互相引用：
+
+1. 在同一admission事务先分配Job、ArtifactLink与ArtifactGrant ID，并为每个grant冻结初始generation `1`；
+2. 从待构造`CanonicalModelRequest`建立core projection：保留tenant/Job/Turn、全部message/tool/response/generation/deadline语义，以及每个input的
+   ordinal、RunValue、Artifact、Link ID/digest、Grant ID/generation、port/purpose、implicit exact `Whole` scope与maximum bytes；只排除
+   `model_request_core_binding_digest`本身，以及每个input尚未生成的`grant_authorization_binding_digest`和`artifact_input_binding_digest`；
+3. `model_request_core_binding_digest = SHA-256(JCS(core projection))`；15 `JobRequest + WorkloadBound` subject/delivery只绑定这个core digest，
+   不绑定最终request digest，也不生成bearer；
+4. 创建全部Grant并计算各自authorization binding digest；填入input后，逐项计算
+   `artifact_input_binding_digest = SHA-256(JCS(ModelArtifactInput without artifact_input_binding_digest))`；
+5. 填入全部input digest，最终`canonical_model_request_digest = SHA-256(JCS(CanonicalModelRequest))`并与Job payload原子持久化。
+
+Broker必须从持久化request重算core并逐值匹配Grant subject，再重算Grant authorization、input binding与最终request digest；current claim只追加到15
+`ModelArtifactReadRequestV1`，不进入stable core。任一层缺失、重复、顺序漂移或把自身digest纳入输入都fail closed。
 
 Assembler 使用 05/11/12/15 的 fixed source map、trust tags、classification 和 token estimator。提交前必须：
 
 1. 验证当前 Run/Node/round 和 exact Model binding；
-2. 验证 Provider region/retention/training 与每个 message/Artifact classification；
+2. 验证 Provider region/retention/training 与每个 message/Artifact classification；为每个Artifact input在同一admission事务冻结
+   唯一ordinal、RunValue、active ModelTurn ArtifactLink ID/digest及audience exact为`ModelWorker`、subject/delivery exact为
+   `JobRequest + WorkloadBound`的`ReadWhole` ArtifactGrant
+   ID/generation/authorization binding digest；
 3. 固定 tool name/schema/call limits；
 4. 对 provider tokenizer/profile 计算 bounded input estimate；
 5. 应用版本化 truncation/summarization policy；
 6. reserve request/token/cost budget；
 7. 保存 canonical request digest、source map 与安全 projection；
-8. 写 Ready work/outbox。
+8. 把每个`ModelArtifactInput`及其binding digest写入canonical request/Job payload，再写 Ready work/outbox。
 
 无法在 context window 内安全装配时明确失败；不能静默删除 platform/Agent contract 或把 untrusted content 提升。
+`artifact_input_ordinal`必须从0连续递增且与`artifact_inputs`顺序相等；ID/digest/port/purpose、implicit exact `Whole` scope与maximum bytes全部进入
+`artifact_input_binding_digest`和整个canonical request digest。Job创建后签发的tokenless grant subject必须绑定同一Job/core binding；Worker/Broker RPC
+只能追加current Job version/lease/WorkerProcessGeneration fence，不能选择另一个合法grant。任一重复ID、ordinal gap、generation/binding漂移、
+`null`或cross-input字段交换都在Provider dispatch前fail closed。
 
 ## 12. Message 与 Multimodal Contract
 
@@ -489,7 +643,44 @@ struct CanonicalModelResponse {
     usage: ModelUsage,
     observation: ModelObservation,
 }
+
+struct ModelResponseSemanticEvidenceV1 {
+    schema_version: u32, // const 1
+    canonical_response_digest: Digest,
+    canonical_response_byte_length: u64,
+    output_schema_digest: Digest,
+    canonical_response_contract_digest: Digest,
+    tool_contract_digest: Digest,
+    usage_contract_digest: Digest,
+    safety_policy_digest: Digest,
+    data_flow_policy_digest: Digest,
+    finish_reason: CanonicalFinishReason,
+    message_digest: Option<Digest>,
+    tool_intents_digest: Digest,
+    usage_digest: Digest,
+    observation_digest: Digest,
+}
 ```
+
+Canonical response合同的唯一machine authority目标路径为
+`contracts/platform-v1/schemas/model/canonical-model-response.schema.json`。该文件是一个self-contained、closed JSON Schema 2020-12
+document：所有`$ref`只能指向本文件`$defs`，完整内联`CanonicalAssistantMessage`、`ModelToolIntent`、`CanonicalFinishReason`、`ModelUsage`与
+`ModelObservation`，所有object关闭unknown/duplicate/null歧义并遵守00 closed-schema profile，canonical JCS不超过256 KiB。
+`canonical_response_contract_digest = SHA-256(JCS(parsed schema document))`；它不是Rust type name、整个root `contract_digest`、文件原始格式hash、
+Provider schema或调用方提交值。`tool_contract_digest`与`usage_contract_digest`分别是同一parsed document中`$defs.model_tool_intent`和
+`$defs.model_usage`子document的JCS digest；missing/duplicate/external ref或子digest漂移使合同加载失败。
+
+该schema path必须作为唯一entry进入`contracts/platform-v1/manifest.json`及root manifest生成输入。Candidate builder先以Candidate
+`contract_digest`解析exact root manifest，再按path取得文件、验证manifest raw SHA/length、解析closed schema并重算上述JCS digest，最终只把sealed
+结果交给compatibility/validator；仅比较一个任意Digest或从aggregate root digest猜测component digest均非法。当前文件尚未checked in，因此这是
+CR-165 Draft目标而非当前machine behavior。
+
+`ModelResponseSemanticEvidenceV1`只能由contracts crate的sealed pure validator构造。输入是exact canonical response bytes、冻结output schema和
+Model response/tool/usage/safety/data-flow contract closure；函数重新strict decode正文并完成§14～16全部校验后，才从正文及各closed contract
+canonical bytes派生上列字段。`message_digest`在无message时省略且`null`非法；tool intents按正文顺序编码。evidence canonical JCS不超过4096
+bytes，不包含自身digest、stage framing、Receipt、Job expected version或时间；
+`model_response_semantic_evidence_digest = SHA-256(JCS(ModelResponseSemanticEvidenceV1))`。Worker与owner terminal必须调用同一versioned函数但
+分别执行验证；只持有裸Digest或调用方构造的struct不能形成validated ticket，正文不随evidence持久化。
 
 Commit 前验证：current attempt/epoch、response bytes/parts、role、tool calls、schema、finish reason、usage bounds、
 Artifact handles、safety/data policy 和 model fingerprint。成功事务同时写 ModelTurn output/usage、Node/ModelLoop wake、
@@ -504,12 +695,10 @@ Model start transaction先计算冻结合法response上限与effective Inline th
 response合同可能越过Inline threshold时，才创建完整Artifact reservation。不能为了实现方便让全部小响应强制写对象存储，也不能等
 付费请求返回后再判断本次输出是否有Artifact身份、存储容量或retention权限：
 
-```rust
-enum ModelOutputStorageReservation {
-    InlineOnly,
-    ArtifactCapable(ModelOutputArtifactReservation),
-}
-```
+每次`NewPhysicalAttempt`必须在递增attempt count、提交Running fence与任何Artifact-capable reservation的同一事务构造并安装下述完整
+`ModelJobAttemptBindingV1`。Inline分支同样必须有snapshot，只是不得创建Artifact资源；Artifact分支必须把完整reservation嵌入snapshot。
+`ResumePhysicalAttempt`只能逐字节复用已经安装的snapshot；新lease/Worker fence不修改snapshot，Provider是否允许continuation则由其中冻结的
+recovery contract与Job encrypted backend state共同裁定。
 
 ```rust
 struct ModelOutputArtifactReservation {
@@ -520,15 +709,12 @@ struct ModelOutputArtifactReservation {
     model_turn_id: ModelTurnId,
     expected_model_turn_version: u64,
     job_id: JobId,
-    claim_job_version: u64,
     attempt_no: u32,
-    lease_generation: u64,
-    lease_token_digest: Digest,
-    worker_process_generation_id: WorkerProcessGenerationId,
     admission_digest: Digest,
     request_digest: Digest,
     model_deployment_digest: Digest,
     hard_limit_profile_digest: Digest,
+    installed_output_compatibility: ValidatedInstalledModelOutputCompatibilityV1,
     output_schema_digest: Digest,
     output_classification: DataClassification,
     artifact_id: ArtifactId,
@@ -540,13 +726,8 @@ struct ModelOutputArtifactReservation {
     upload_grant_id: ArtifactGrantId,
     stage_receipt_id: ReceiptId,
     artifact_quota: ModelOutputArtifactQuotaIdentities,
-    maximum_materialized_bytes: u64,
     maximum_chunk_bytes: u32,
-    verified_media_type: MediaType,
-    retention_policy_revision_id: RevisionId,
-    artifact_io_policy_revision_id: RevisionId,
-    storage_binding_digest: Digest,
-    maximum_put_completion_uncertainty_milliseconds: u64,
+    retention_policy_revision_id: ResourceVersionId,
     staging_retain_until: DateTime<Utc>,
     ready_retention_seconds: u64,
     deadline: DateTime<Utc>,
@@ -577,24 +758,169 @@ struct ModelOutputCandidateBlobBundleQuotaIdentities {
     candidate_cleanup_settlement_id: QuotaLedgerEntryId,
     blob_delete_refund_settlement_id: QuotaLedgerEntryId,
 }
+
+#[serde(tag = "output_mode", rename_all = "snake_case", deny_unknown_fields)]
+enum ModelJobAttemptOutputBindingV1 {
+    InlineOnly {
+        schema_version: u32, // const 1
+        installed_output_compatibility: ValidatedInstalledModelOutputCompatibilityV1,
+        maximum_canonical_response_bytes: u64,
+    },
+    ArtifactCapable {
+        schema_version: u32, // const 1
+        reservation: ModelOutputArtifactReservation,
+    },
+}
+
+struct ModelJobAttemptBindingV1 {
+    schema_version: u32, // const 1
+    tenant_id: TenantId,
+    run_id: RunId,
+    node_execution_id: NodeExecutionId,
+    model_turn_id: ModelTurnId,
+    expected_model_turn_version: u64,
+    job_id: JobId,
+    attempt_no: u32,
+    attempt_start_job_version: u64,
+    workload_role_identity_digest: Digest,
+    admission_digest: Digest,
+    canonical_model_request_digest: Digest,
+    model_binding_digest: Digest,
+    model_deployment_digest: Digest,
+    provider_deployment_digest: Digest,
+    provider_request_identity_digest: Digest,
+    hard_limit_profile_digest: Digest,
+    output_schema_digest: Digest,
+    output_classification: DataClassification,
+    backend_recovery_contract_digest: Digest,
+    output: ModelJobAttemptOutputBindingV1,
+    deadline: DateTime<Utc>,
+}
+
+struct ProviderRequestIdentityPreimageV1 {
+    schema_version: u32, // const 1
+    tenant_id: TenantId,
+    model_turn_id: ModelTurnId,
+    job_id: JobId,
+    attempt_no: u32,
+    model_binding_digest: Digest,
+    model_deployment_digest: Digest,
+    provider_deployment_digest: Digest,
+    canonical_model_request_digest: Digest,
+}
 ```
 
 两个bundle及其中line按04 fixed owner/dimension顺序canonical编码；Artifact bundle只服务count/logical与Artifact deletion，candidate Blob
 bundle只服务upload/staging/physical、candidate cleanup与最后alias物理删除。所有ID必须互异并与各自owner、Attempt及reservation digest
 绑定。自由`Vec`、运行时临时生成settlement ID、dedupe后把candidate bundle转给resolved Blob或把一个ID跨owner generation复用均非法；
 未用到的预留ID保留为空洞，不得改作其他ledger操作。
+`reservation_digest = SHA-256(JCS(ModelOutputArtifactReservation without reservation_digest))`，输入必须包含所有scalar字段、完整
+`installed_output_compatibility`与两个nested quota bundle/全部预留ID；禁止把自身digest、调用方摘要或局部projection放回输入。
+
+每个`JobKind::Model + owner=ModelTurn + WorkClass::Model`的`NewPhysicalAttempt`都必须在03
+`current_attempt_snapshot`保存schema ID exact `model.job-attempt.binding.v1`、schema version 1的完整`ModelJobAttemptBindingV1`；目标schema路径固定为
+`contracts/platform-v1/schemas/bindings/model-job-attempt-binding.schema.json`并注册到03唯一binding registry。
+`model_job_attempt_binding_digest = SHA-256(JCS(ModelJobAttemptBindingV1))`，逐值等于该`VersionedSnapshot.canonical_payload_digest`。
+`InlineOnly`必须且只能嵌入`ValidatedInstalledModelOutputCompatibilityV1::InlineOnly`，不得出现Artifact/Blob/Grant/Receipt/Link/quota identity；
+`ArtifactCapable`必须且只能嵌入一份完整reservation，其tenant/Run/Node/Turn/version/Job/attempt、admission、`request_digest ==
+canonical_model_request_digest`、deployment、hard-limit、schema、classification
+与外层逐值相等，并要求compatibility exact为`ArtifactCapable`。unknown/null/cross-variant字段、缺snapshot、只保存reservation digest或把两种variant注册成
+两个可任选schema都fail closed。
+
+该snapshot只含跨合法continuation稳定的attempt admission与预分配identity，禁止写入lease generation/token digest或Worker process generation。
+`attempt_start_job_version`只是start提交时的正数lower-bound evidence，不要求Resume时current Job version仍相等。当前lease/Worker fence必须由每次Provider、
+Artifact Broker或Model Artifact Producer request单独携带并从current Job重验；Grant的stable attempt subject绑定上述snapshot digest。
+`provider_request_identity_digest = SHA-256(UTF8("insight.model.provider-request-identity.v1") || 0x00 ||
+JCS(ProviderRequestIdentityPreimageV1))`，preimage逐值复制同一attempt binding中的exact字段且不含该digest自身；调用方摘要、lease/Worker fence、
+Provider handle或response不得进入。实际Provider handle、
+last accepted transport sequence与continuation cursor只进入Job的bounded encrypted backend state，并回绑snapshot digest与
+`backend_recovery_contract_digest`。Inline/Artifact physical outcome分别进入Job terminal result及共享Receipt/Event；不得反写snapshot或建立Model Attempt表。
 
 Producer数据库读取只能物化以下closed、row-scoped projection；调用方必须提供全部exact key，repository不得暴露generic SQL/filter或
 prompt/request/output正文：
 
 ```rust
-struct ModelOutputStageAuthorizationProjection {
-    schema_version: u32,
+struct ModelOutputJobAttemptFenceV1 {
+    schema_version: u32, // const 1
+    job_id: JobId,
+    attempt_no: u32,
+    lease_generation: u64,
+    lease_token_digest: Digest,
+    worker_process_generation_id: WorkerProcessGenerationId,
+    expected_job_version_lower_bound: u64,
+}
+
+struct ModelOutputCandidateBlobStageProjectionV1 {
+    schema_version: u32, // const 1
+    blob_id: InternalBlobId,
+    integrity_state: BlobIntegrityState,
+    state_version: u64,
+    security_domain_digest: Digest,
+    object_reference_ciphertext: Option<SecretBytes>,
+    object_reference_ciphertext_digest: Option<Digest>,
+    object_generation: Option<ObjectGeneration>,
+    content_digest: Option<Digest>,
+    byte_length: Option<u64>,
+}
+
+struct ModelOutputReusableBlobStageProjectionV1 {
+    schema_version: u32, // const 1
+    blob_id: InternalBlobId,
+    state_version: u64,
+    security_domain_digest: Digest,
+    object_reference_ciphertext: SecretBytes,
+    object_reference_ciphertext_digest: Digest,
+    object_generation: ObjectGeneration,
+    content_digest: Digest,
+    byte_length: u64,
+}
+
+struct ModelOutputArtifactGrantStageProjectionV1 {
+    schema_version: u32, // const 1
+    artifact_grant_id: ArtifactGrantId,
+    state: ArtifactGrantState,
+    projection_version: u64,
+    generation: u64,
+    owner: ArtifactOwner,
+    audience: ArtifactWorkloadAudience,
+    subject: ArtifactGrantSubjectV1,
+    capability: ArtifactGrantCapabilityV1,
+    delivery: ArtifactGrantDeliveryV1,
+    authorization_binding_digest: Digest,
+    expires_at: DateTime<Utc>,
+}
+
+struct ModelOutputQuotaStageProjectionV1 {
+    schema_version: u32, // const 1
+    usage_reservation_id: UsageReservationId,
+    owner_resource_id: ResourceId,
+    state: QuotaReservationState,
+    generation: u64,
+    frozen_lines_digest: Digest,
+    limit_digest: Digest,
+    reserved_maximum_bytes: u64,
+    deadline: DateTime<Utc>,
+}
+
+struct ModelOutputReceiptStageProjectionV1 {
+    schema_version: u32, // const 1
+    receipt_id: ReceiptId,
+    state: ReceiptState,
+    request_digest: Digest,
+    claim_generation: u64,
+    processing_lease_expires_at: Option<DateTime<Utc>>,
+    result_digest: Option<Digest>,
+}
+
+struct ModelOutputStageAuthorizationProjectionV1 {
+    schema_version: u32, // const 1
     tenant_id: TenantId,
     model_turn_id: ModelTurnId,
     model_turn_state: ModelTurnState,
     model_turn_version: u64,
-    job_fence: JobFence,
+    current_job_state: JobState,
+    current_job_version: u64,
+    job_attempt_fence: ModelOutputJobAttemptFenceV1,
     request_digest: Digest,
     binding_digest: Digest,
     reservation_digest: Digest,
@@ -602,35 +928,52 @@ struct ModelOutputStageAuthorizationProjection {
     artifact_state: ArtifactState,
     artifact_version: u64,
     bound_blob_id: Option<InternalBlobId>,
-    blob_state_version_generation: Option<BlobStageProjection>,
-    exact_reusable_verified_blob: Option<ReusableBlobStageProjection>,
-    grant_id_state_version_digest: ArtifactGrantStageProjection,
-    retention_policy_revision_id: RevisionId,
+    candidate_blob: Option<ModelOutputCandidateBlobStageProjectionV1>,
+    exact_reusable_verified_blob: Option<ModelOutputReusableBlobStageProjectionV1>,
+    grant: ModelOutputArtifactGrantStageProjectionV1,
+    retention_policy_revision_id: ResourceVersionId,
     retention_policy_digest: Digest,
-    artifact_io_policy_revision_id: RevisionId,
-    artifact_io_policy_digest: Digest,
-    artifact_quota_state_generation_limit_digest: QuotaStageProjection,
-    candidate_blob_quota_state_generation_limit_digest: QuotaStageProjection,
+    installed_output_compatibility: ValidatedInstalledModelOutputCompatibilityV1,
+    current_encryption_domain_fence: ValidatedCurrentTenantEncryptionDomainFenceV1,
+    artifact_quota: ModelOutputQuotaStageProjectionV1,
+    candidate_blob_quota: ModelOutputQuotaStageProjectionV1,
     stage_receipt_id: ReceiptId,
-    stage_receipt_state_claim_digest: Option<ReceiptStageProjection>,
+    stage_receipt: Option<ModelOutputReceiptStageProjectionV1>,
     deadline: DateTime<Utc>,
 }
 ```
 
-这些嵌套projection同样是closed nominal type，只含完成授权/CAS所需的state、version、generation、digest、limit和opaque locator
-ciphertext；不含Principal资料、RunValue正文、Provider request/response、Policy外的Secret或可枚举object key。Producer role只能通过
+上述全部`schema_version` exact为1，version/generation/attempt均为正，byte上限不超过reservation/Candidate hard limit；所有object都
+deny unknown/null（只有显式`Option`可省略）。candidate Blob的locator/generation/content四项必须按未物化全None或已物化全Some闭合；reusable
+projection只允许Verified Blob且其ciphertext digest由repository从actual sealed bytes重算。Grant必须是15 exact
+`Active + ModelArtifactProducer + JobAttempt + WorkloadBound + StagingWrite`；两个quota projection必须分别回绑reservation预留的Artifact/Blob
+owner、Open state、完整frozen-line digest/limit与maximum。Receipt Processing必须有lease且无result，terminal必须无lease且有result。projection
+canonical digest为`SHA-256(JCS(ModelOutputStageAuthorizationProjectionV1))`并只用于本次进程内sealed authorization ticket，不持久化或进入wire。
+这些projection只含完成授权/CAS所需的state、version、generation、digest、limit和opaque locator ciphertext；不含Principal资料、RunValue正文、
+Provider request/response、Policy外的Secret或可枚举object key。Producer role只能通过
 固定repository query/受限column projection按exact tenant/Turn/Job/Artifact/Receipt加载它，不能拥有任意Run/Invocation/Quota/Event查询API。
+04的`ValidatedCurrentTenantEncryptionDomainFenceV1`只能由该query从已锁current Tenant aggregate构造，调用方/stream不得提交；它必须把current
+Active binding与`installed_output_compatibility`内冻结binding逐字段比较后才可返回。
 
 `ArtifactCapable`事务在一个savepoint内重验当前Run/Node/Turn、exact Model binding、Job/lease/Worker generation、remaining deadline、
 Retention/ArtifactIo closure与HardLimitProfile，并只使用本事务PostgreSQL `db_now`按04公式冻结`staging_retain_until`与
 Model Deployment的`ready_retention_seconds`；intent当前`retain_until`必须等于前者，Ready absolute time此时尚不存在。
-事务同时创建audience为exact Model Artifact Producer的
-`WriteStaging | CommitStaging` grant、预留的candidate Blob/duplicate-cleanup Job/RunValue/Output Link/Receipt identity和04 exact
+事务同时创建subject/delivery为exact `JobAttempt + WorkloadBound`、audience为exact Model Artifact Producer、capability为15唯一closed
+`StagingWrite` variant的grant；该variant逐值冻结exact staging
+identity、maximum bytes、optional expected digest与multipart contract digest，并由同一issuance Receipt、generation及multipart state约束resume/commit。
+该Grant的`JobAttempt.attempt_binding_digest`与`WorkloadBound.request_binding_digest`必须逐值等于同一事务安装的
+`ModelJobAttemptBindingV1` snapshot digest；它们不得绑定会随claim旋转的fence或稍后才产生的stage header/body/content digest。repository按
+“完整reservation去self digest → `reservation_digest` → 完整Model attempt binding digest → Grant authorization binding → stage request digest”
+的顺序重算，禁止任何反向引用或调用方摘要替代。
+事务还创建预留的candidate Blob/duplicate-cleanup Job/RunValue/Output Link/Receipt identity和04 exact
 Artifact-owned count/logical、candidate-Blob-owned upload/staging/physical两个quota bundle；Model Worker只有调用
 Producer的mTLS权限，不取得write bearer。此时Artifact允许`blob_id=NULL`，物理
 Blob只能由Producer在首次stage时按预留`candidate_blob_id`建立，或在完整stream验证后绑定同安全域existing Verified Blob。
 `blob_security_domain_digest`必须由tenant、classification、Retention、storage与encryption closure canonical派生，不能由Worker覆盖。
-`maximum_materialized_bytes`是冻结Provider
+`installed_output_compatibility`必须是`ArtifactCapable` variant；其installation binding、完整resolved ArtifactIo revision/body/rules digest、
+04 encryption-domain generation/binding digest、Producer role/runtime manifest digest、15 storage manifest/body digest以及content-validation
+profile都进入reservation digest，并由Producer authorization projection逐字段重验。Header只携带同一reservation，不能用另一个合法Policy、
+storage或Producer projection替换。variant中的`validated_maximum_materialized_bytes`是冻结Provider
 response上限、canonical response envelope上限、Model response hard limit、Artifact single/staging limit与Run剩余预算的checked
 intersection；所有加法/转换溢出都fail closed。两个output quota bundle按该最坏值在同一savepoint预留，不能仅按期望平均输出或
 Inline threshold预留。
@@ -644,7 +987,7 @@ terminal事务只有在证明预留Artifact未绑定Blob/locator且candidate/obj
 output quota bundle、撤销grant，
 并把未使用的Staging intent推进`Deleting`交给15的
 GC；不得为了已预留Artifact而强制小值走对象存储。超过Inline threshold但不超过reservation时必须走Artifact，不能返回
-`model_output_artifact_required`。response超过`maximum_materialized_bytes`或ArtifactIo/hard limit时是稳定content rejection，不能
+`model_output_artifact_required`。response超过validated maximum或ArtifactIo/hard limit时是稳定content rejection，不能
 截断、拆成多个未建模值或提高本次上限。
 
 ### 16.2 Model Artifact Producer wire 与权限
@@ -663,16 +1006,32 @@ enum StageModelOutputFrame {
 
 const MODEL_OUTPUT_PROTOBUF_ENVELOPE_OVERHEAD_BYTES: u64 = 4096;
 
-struct StageModelOutputHeader {
-    schema_version: u32,
-    reservation: ModelOutputArtifactReservation,
-    initial_fence: JobFence,
+struct StageModelOutputRequestPreimageV1 {
+    schema_version: u32, // const 1
+    reservation_digest: Digest,
+    job_id: JobId,
+    attempt_no: u32,
+    lease_generation: u64,
+    lease_token_digest: Digest,
+    worker_process_generation_id: WorkerProcessGenerationId,
     content_digest: Digest,
     byte_length: u64,
     media_type: MediaType,
     classification: DataClassification,
     output_schema_digest: Digest,
-    validation_evidence_digest: Digest,
+    model_response_semantic_evidence_digest: Digest,
+}
+
+struct StageModelOutputHeader {
+    schema_version: u32,
+    reservation: ModelOutputArtifactReservation,
+    initial_fence: ModelOutputJobAttemptFenceV1,
+    content_digest: Digest,
+    byte_length: u64,
+    media_type: MediaType,
+    classification: DataClassification,
+    output_schema_digest: Digest,
+    model_response_semantic_evidence_digest: Digest,
     stage_request_digest: Digest,
 }
 
@@ -685,7 +1044,7 @@ struct StageModelOutputData {
 
 struct StageModelOutputTerminal {
     schema_version: u32,
-    final_fence: JobFence,
+    final_fence: ModelOutputJobAttemptFenceV1,
     chunk_count: u32,
     byte_length: u64,
     content_digest: Digest,
@@ -709,7 +1068,8 @@ struct StageModelOutputReceipt {
     byte_length: u64,
     media_type: MediaType,
     classification: DataClassification,
-    validation_evidence_digest: Digest,
+    model_response_semantic_evidence_digest: Digest,
+    producer_content_evidence_digest: Digest,
     stage_request_digest: Digest,
     receipt_digest: Digest,
 }
@@ -750,6 +1110,7 @@ struct StageModelOutputTerminalFailure {
     reason: StageModelOutputFailureReason,
     disposition: StageModelOutputFailureDisposition,
     safe_evidence_digest: Option<Digest>,
+    stage_request_digest: Digest,
     receipt_digest: Digest,
 }
 
@@ -760,14 +1121,38 @@ struct StageModelOutputTransientFailure {
     disposition: StageModelOutputFailureDisposition,
     retry_after_milliseconds: Option<u32>,
 }
+
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum StageModelOutputTerminalResultV1 {
+    Succeeded {
+        schema_version: u32, // const 1
+        receipt: StageModelOutputReceipt,
+    },
+    Failed {
+        schema_version: u32, // const 1
+        failure: StageModelOutputTerminalFailure,
+    },
+}
 ```
 
-该常量的当前machine authority是由`insight-platform-contracts`同源生成的closed
+`stage_request_digest = SHA-256(JCS(StageModelOutputRequestPreimageV1))`。preimage逐值取自完整reservation与initial fence，但只复制上述字段；
+它显式不含digest自身、chunk framing、`expected_job_version_lower_bound`及final fence，因此合法heartbeat只提升version lower bound，不改变幂等identity。
+Terminal必须保持Job/attempt/lease token/Worker generation与initial fence相等，只允许final
+`expected_job_version_lower_bound >= initial`，并回绑同一stage request digest、累计chunk count、actual length/digest。
+
+03 Receipt result只编码closed tagged `StageModelOutputTerminalResultV1`，RPC transient不能进入terminal Receipt。success
+`receipt_digest = SHA-256(JCS(StageModelOutputReceipt without receipt_digest))`；terminal failure
+`receipt_digest = SHA-256(JCS(StageModelOutputTerminalFailure without receipt_digest))`。两种preimage都要求`schema_version=1`并覆盖全部其余字段；
+success通过`stage_request_digest`回绑正文identity，terminal failure也必须携带同一字段。Transient没有receipt digest且不是terminal Receipt result。
+repository在persist/replay时重算对应preimage，unknown/null/self-inclusion、不同request digest或调用方预计算receipt digest均fail closed。
+
+该常量的目标machine authority将由`insight-platform-contracts`同源生成到closed
 `contracts/platform-v1/protocol/model-output-rpc.json`及
 `contracts/platform-v1/schemas/protocol/model-output-rpc.schema.json`：document固定
 `{schema_version:1,stage_model_output_protocol_version:1,protobuf_envelope_hard_overhead_bytes:4096}`，两文件都必须进入根
-`contract_digest`。公开Rust常量、Candidate checked arithmetic与后续`StageModelOutput` protobuf生成/fixture必须逐值等于该document；
-在protobuf尚未交付时该document是唯一机器载体，不能从环境变量、Helm或HardLimitProfile覆盖。
+`contract_digest`。公开Rust常量、Candidate checked arithmetic与后续`StageModelOutput` protobuf生成/fixture必须逐值等于该document。
+这两个目标文件当前尚未checked in，现有Rust常量不能单独冒充该authority；交付后document才是唯一机器载体，且不能从环境变量、Helm或
+HardLimitProfile覆盖。
 
 Blob disposition cross-field规则是closed：`CandidateWinner`要求candidate=resolved、`new_physical_bytes=byte_length`且所有cleanup字段为
 zero/None；`PreexistingHit`要求candidate!=resolved、candidate未创建、`new_physical_bytes=0`且cleanup字段为zero/None；
@@ -783,7 +1168,8 @@ envelope开销后的wire message hard maximum。
 该4096-byte envelope overhead是proto/schema生成与server receive-limit fixture共同验证的machine constant并进入contract digest，不是部署
 自由值；每条encoded Header/Data/Terminal超过相应payload bound加该常量都在解码前拒绝。
 
-容量准入分两阶段。exact TLS/service-role authorization后、读取bounded header前先取得18 ComponentCapacityManifest冻结的global stream与
+容量准入分两阶段。exact TLS/service-role authorization后、读取bounded header前先取得18 `ComponentRuntimeManifest`中
+`ModelArtifactProducerRuntimeManifestV1`冻结的global stream与
 唯一per-stream wire-buffer weighted permit，weight exact为`effective model_output_chunk_bytes + 4096`且三个frame variant复用；不足时尚无
 valid stage identity，只返回固定body-free unavailable status。解析valid header、完成terminal Receipt replay/current pre-authorization并得到
 trusted tenant/declared length后，在读取首个data frame前再原子取得declared bytes与per-tenant
@@ -812,18 +1198,20 @@ Artifact Rejected；current Integrity原子写Receipt Failed，并将candidate A
 Blob/Artifact Verified与Receipt Succeeded。final guard竞争失败时Stale优先于content/integrity结果。
 Model owner cancel/timeout/cleanup可把遗留Processing按same key/digest终结为Rejected，Producer不能把transient Dependency持久化为Failed。
 
-`stage_request_digest`是reservation digest、正文digest/length/media/classification、output schema与validation evidence的canonical
-digest；它排除自身字段、chunk framing以及允许heartbeat旋转的initial/final Job expected version，因此同Attempt同正文在上传期间的
-合法heartbeat不会改变幂等identity。任何其他immutable字段变化都必须产生不同digest并被同一预留Receipt判定为conflict。
+`stage_request_digest`只能按上述versioned preimage计算；任何其他immutable字段变化都必须产生不同digest并被同一预留Receipt判定为conflict。
 
 Worker只有在完整Provider terminal response已通过§14～16的schema/tool/finish/usage/safety/data-flow校验后，才把整个
-`CanonicalModelResponse`编码为strict canonical JCS bytes并调用Producer。header的digest/length/media/classification/schema/evidence
-必须由Worker从真实正文计算，不能来自Provider声明。显式image/audio/document `ModelArtifactOutput`仍是response正文中的nominal
+`CanonicalModelResponse`编码为strict canonical JCS bytes并调用Producer。header的digest/length/media/classification/schema/
+`model_response_semantic_evidence_digest`必须来自上述pure validator，不能来自Provider声明。Producer不解析或认可该evidence，只把digest逐值
+绑定到stage request/Receipt；它不是15 content evidence，也不能被Producer写入Artifact security projection。显式image/audio/document
+`ModelArtifactOutput`仍是response正文中的nominal
 ArtifactRef及独立Output Link，不得与承载整个canonical response的Artifact/Link复用identity或quota。
 
 Producer在任何KMS或object I/O前使用自己的restricted PostgreSQL pool，在同一repeatable-read snapshot中重验header全部字段、current
 `InFlight` ModelTurn、Running Job、expected-version lower bound、attempt/lease token digest、Worker generation、request/binding/profile、未过期
-deadline、open quota reservation、Staging intent、active exact grant及两个Policy revision。它只接受exact
+deadline、open quota reservation、Staging intent、active exact grant及两个Policy revision，并从current Tenant aggregate读取
+`ValidatedCurrentTenantEncryptionDomainFenceV1`：binding必须仍为Active，tenant/domain/storage/KMS/generation/binding digest必须与冻结
+compatibility逐字段相等。它只接受exact
 `spiffe://insight.platform/workload/model-worker.artifact-output` mTLS URI SAN，并拒绝Model read使用的`.../model-worker`身份；
 tenant、owner、port、purpose、Artifact ID、classification、retention、storage binding或deadline均不能由stream body覆盖。
 
@@ -846,23 +1234,29 @@ guard提交`Staging -> Uploaded`checkpoint，再提交`Uploaded -> Verifying`che
 每个conditional PUT都必须携带不晚于Attempt deadline的write deadline并使用reservation冻结的storage-binding quiescence合同；本地timeout
 只表示结果未知，不能当作backend absence或释放Blob bundle的证据。
 验证覆盖exact generation、长度/SHA-256、`application/json` media、strict canonical JCS、固定Model-response nominal decoder、ArtifactIo
-content policy和KMS encryption context。
+content policy和KMS encryption context。Producer在validator I/O前再次解析selected profile并要求其
+`canonical_response_contract_digest`与冻结`installed_output_compatibility.producer.canonical_response_contract_digest`逐值相等；Producer从实际
+stream/object、selected content-validation profile及冻结runtime/ArtifactIo/storage/
+encryption closure计算15 `AcceptedArtifactContentEvidenceV1::ModelOutputProducer`；该evidence及其digest不接受Worker字段或Provider声明。
 Agent/ModelLoop的exact output schema仍由Worker与terminal repository各自重验；Producer不读取Artifact-backed request正文，也不能凭一个
 schema digest伪造语义验证成功。object I/O完成后、提交Verified前必须使用
 terminal frame的`final_fence`和同一closed header再次授权。initial/final supplied `expected_version`是current Job version的单调lower
 bound而不是Producer CAS值：final不得小于initial，pre/post snapshot的current version必须分别大于等于对应lower bound；frame捕获后
 并发成功的合法heartbeat可以使数据库current version更大而不使stage失效。Producer仍必须要求current Running/InFlight state、tenant/
 Turn/Job/attempt、lease generation/token、Worker generation、request、reservation、grant与policy closure全部exact；generation/token、
-cancel/terminal state或任一immutable业务字段漂移都拒绝当前提交。最终post-I/O短事务必须持有同样的Job共享serialization guard，并按
+cancel/terminal state、current Tenant encryption binding revoke/rebind或任一immutable业务字段漂移都拒绝当前提交。最终post-I/O短事务必须
+重新锁定并复验Tenant security aggregate、持有同样的Job共享serialization guard，并按
 CR-119完整security-domain key取得transaction advisory fence。candidate是唯一winner时将candidate Blob与Artifact推进Verified；若此时已有
 racing Verified winner，则Artifact改绑resolved winner、candidate推进Deleting并记录exact cleanup bytes/generation/预留Job ID；预命中路径
-直接绑定existing winner。三条路径都把Artifact Verified evidence和stage Receipt `Processing -> Succeeded`在同一commit中CAS current
+直接绑定existing winner。三条路径都把Producer计算的tagged Artifact content evidence、Artifact Verified状态和stage Receipt
+`Processing -> Succeeded`在同一commit中CAS current
 `claim_generation`；不存在terminal Receipt但Artifact未Verified或Verified却无可重放terminal Receipt的可提交窗口。Producer不创建cleanup
 Job/Event；Model terminal或bounded Artifact cleanup reconciler必须从stage Receipt用预留same ID幂等创建exact InternalBlob cleanup Job。
 
 Processing claim、Blob bind、Uploaded checkpoint、Verifying checkpoint与final Verified每一个短事务都必须遵守03/04的同一锁序：stage
-Receipt与current `claim_generation`，两个bundle按ID及BudgetKey排序的`FOR SHARE`，current ModelTurn/Job serialization guard，最后
-Artifact/Blob。每次都在锁后重验冻结的`UsageReservationId/generation`、Open state与line closure；Quota owner的Close/Expiry/settlement使用
+Receipt与current `claim_generation`，Tenant security aggregate，两个bundle按ID及BudgetKey排序的`FOR SHARE`，current ModelTurn/Job
+serialization guard，最后Artifact/Blob。每次都在锁后重验current encryption binding仍Active且与冻结projection逐字段相等，并重验
+`UsageReservationId/generation`、Open state与line closure；Quota owner的Close/Expiry/settlement使用
 冲突锁并递增generation。不能以repeatable-read snapshot或一次pre-I/O检查代替这些事务内guard，任何S3/KMS/validator I/O均在锁外。
 
 `StageModelOutput`使用03的`JobCommit` Receipt，operation固定为`model_output.stage`；dedupe key是tenant、Job、lease generation与
@@ -885,15 +1279,19 @@ Worker取得Verified stage receipt后，以最新Job fence提交同一个`Commit
 PostgreSQL transaction按03全局锁序完成，至少必须原子执行：
 
 1. 按ID排序锁定stage与terminal JobCommit Receipt，claim/replay terminal Receipt，并从已锁stage Receipt确定candidate disposition与可选
-   cleanup Job ID；按04 canonical顺序锁定Model quota、Artifact-owned count/logical bundle与candidate-Blob-owned upload/staging/physical
-   bundle，再锁current Run/Node/ModelTurn parent aggregate；
+   cleanup Job ID；随后锁Tenant security aggregate并复验current encryption binding仍Active且与冻结projection逐字段相等，再按04 canonical
+   顺序锁定Model quota、Artifact-owned count/logical bundle与candidate-Blob-owned upload/staging/physical bundle，最后锁current
+   Run/Node/ModelTurn parent aggregate；
 2. 取得任何Job-rank锁之前，把current Model Job与可选`RacingCandidateLoser` cleanup Job组成canonical sorted-unique集合，在同一个Job-rank
    阶段依ID顺序lock existing或create-or-lock。cleanup Job必须使用预留ID、exact `InternalBlob` owner并逐字段匹配candidate bytes/generation；
    随后重验current Job、Attempt、lease token、Worker generation、request、binding、output reservation及全部identity。reconciler先创建或
    已terminal的same Job/Receipt可以复用，different payload是invariant failure；禁止先锁current Job再补锁排序更小的cleanup Job；
-3. 锁定同tenant预留Artifact、resolved Verified Blob、可选Deleting/Deleted candidate、active grant和Retention/ArtifactIo revision，逐项比较
-   Artifact/Blob与canonical response的
-   digest、length、media、classification、schema与validation evidence；
+3. owner terminal在事务外已对exact canonical response bytes调用同一sealed validator获得validated semantic ticket；事务内锁定同tenant预留
+   Artifact、resolved Verified Blob、可选Deleting/Deleted candidate、active grant和Retention/ArtifactIo revision，逐项比较Artifact/Blob与
+   canonical response的digest、length、media、classification、schema，并要求重算的semantic evidence digest等于stage Receipt/header；validated semantic
+   ticket的`canonical_response_contract_digest`还必须逐值等于冻结compatibility中Producer profile的同名字段，并重新解析该
+   exact profile验证descriptor字段相同；同时验证Artifact current
+   security projection是Producer计算、与stage Receipt逐字段相同的15 tagged content evidence；
 4. 将exact Artifact `Verified -> Ready`，以本事务唯一PostgreSQL `db_now` checked-add冻结的`ready_retention_seconds`，把
    `retain_until`从`staging_retain_until`切换为新absolute `ready_retain_until`并写入terminal Receipt；撤销写grant并创建唯一
    `owner=ModelTurn, reference_kind=Output, purpose=RunOutput, port=model_response`的预留Output Link；
@@ -1101,12 +1499,17 @@ first-winner、state/fence/budget/outbox；orchestrator负责ModelLoop纯决策�
 
 ## 25. Persistence、Artifact 与事件
 
-Provider、Profile 与 Deployment 使用共享 Resource/ResourceVersion/Deployment。ModelTurn 是
-`InvocationKind::Model`；selection、canonical request digest、usage observation、provider handle 与安全 projection 保存在
-Invocation/Job 的 bounded typed payload，物理调用、stream 与 recovery 使用 Job。超限 request/response 写入 Artifact，
+`ModelProviderSpecV1`与`ModelProfileSpecV1`只由共享ResourceVersion承载；`ModelProviderDeploymentSpecV1`与
+`ModelDeploymentSpecV1`只由共享Deployment承载，Resource current state继续只由共享Resource拥有。ModelTurn 是
+`InvocationKind::Model`；Invocation bounded typed payload只保存逻辑selection/binding、canonical request digest、output closure、业务state与
+terminal usage/result。Job是每Attempt事实的唯一aggregate：03 `current_attempt_snapshot`以`ModelJobAttemptBindingV1`保存稳定admission/output
+reservation，Job encrypted backend state保存回绑snapshot的Provider handle与stream/continuation recovery，Job result及共享Receipt/Event保存physical
+outcome；这些都不是新表或第二current-state aggregate。
+两者以03 exact current Job pointer/immutable back-reference关联，不复制attempt事实。超限 request/response 写入 Artifact，
 usage settlement 使用共享 quota ledger，历史进入 Event。不得建立 Model 专用 lifecycle、turn、usage 或 handle 表族。
 
-output reservation保存在该Attempt的Job/Invocation bounded typed payload及共享Quota/Artifact/Link/Receipt行中，不建立
+output reservation只保存在该Attempt的Job `ModelJobAttemptBindingV1::ArtifactCapable` payload，并引用共享Quota/Artifact/Link/Receipt事实；Invocation只保存逻辑output
+closure和current Job pointer，不复制reservation。不建立
 `model_outputs`、producer session或stage proof专用表。Producer只提交Artifact/Blob current state和共享JobCommit Receipt；Verified
 stage不是第二份Model current state。Artifact-backed terminal transaction复用同一RunValue、ArtifactLink、Quota、Receipt、Event与Outbox
 聚合，将Verified提升Ready并写唯一Model output。Inline terminal必须同时释放预留Artifact事实，不能让reservation或Staging intent成为
@@ -1173,7 +1576,7 @@ Deployment/activate/suspend、credential grant、high-risk data transfer和break
 - 至少两个Provider adapter通过同一message/stream/tool/schema/usage/error conformance fixture；
 - catalog discovery不会自动publish/deploy/activate，model alias漂移可检测/标记；
 - active head/catalog切换不改变existing Run/Turn binding；
-- Model Deployment output closure覆盖InlineOnly/ArtifactCapable两个tag、unknown/null/cross-variant字段、重复Policy role、Inline悬空Policy、
+- `ModelDeploymentSpecV1.model_output`覆盖InlineOnly/ArtifactCapable两个tag、unknown/null/cross-variant字段、重复Policy role、Inline悬空Policy、
   Artifact缺Retention/ArtifactIo/Ready duration、storage binding drift及全部retention上下界；创建/激活/Run admission通过同一installation
   capability port验证，activation与Release切换共享generation/fence并覆盖并发TOCTOU；零Model Deployment的installation构造保持稳定；
 - `model-output-rpc.json`、其closed schema、Rust公开常量及后续protobuf/receive-limit fixture逐值证明4096-byte overhead一致，任一载体漂移使
@@ -1185,6 +1588,12 @@ Deployment/activate/suspend、credential grant、high-risk data transfer和break
 - `StageModelOutput` contract覆盖unknown/duplicate frame field、sequence gap、empty/short-nonterminal/chunk/total overflow、final fence
   version倒退、错误URI SAN、
   tenant/Turn/Job/Attempt/lease/Worker/request/policy/grant/quota swap、digest/length/media/classification/JCS/object generation/KMS context漂移；
+- `ModelResponseSemanticEvidenceV1`覆盖每个字段、4096/N+1、unknown/null、canonical digest fixture；Worker与owner terminal对同一正文/closure
+  产生相同digest，正文、schema/tool/finish/usage/safety/data-flow任一漂移均拒绝；Producer profile descriptor、compatibility request/result与semantic
+  evidence的canonical response contract digest必须逐值相等，任一合法但不同的contract drift都在Deployment activation/Run admission/Producer/
+  owner terminal分别fail closed；Producer只绑定semantic digest且不能把它冒充content evidence；
+- canonical response schema fixture覆盖唯一path/root-manifest entry、self-contained local refs、256 KiB边界、raw manifest SHA与parsed JCS digest、
+  tool/usage `$defs` subdigest；缺失/重复path、external ref、仅root digest相等或格式/语义漂移均fail closed；
 - fresh PostgreSQL 16与真实S3-compatible/KMS test provider覆盖preauthorize→PUT/HEAD、crash后同reservation exact staging GET复验、
   Uploaded/Verifying/Verified→reauthorize→
   Ready/Output Link/RunValue/Model terminal全过程，并在每个DB/object I/O/response-loss窗口kill进程；任何窗口都无双Ready、双Link、双usage/
@@ -1202,6 +1611,9 @@ Deployment/activate/suspend、credential grant、high-risk data transfer和break
   Verifying三种来源状态；
 - 数据库权限和mTLS负向fixture证明Producer不能更新Run/Node/Invocation/Job/RunValue/Quota/Event/Outbox，Broker不能stage，Producer不能read
   Model request或调用Sandbox RPC，Model Worker没有locator/S3/KMS credential；
+- Model Artifact input fixture覆盖连续ordinal、exact RunValue/ArtifactLink、ModelWorker audience、`JobRequest + WorkloadBound`、ReadWhole grant ID/generation/
+  authorization binding、port/purpose/range/maximum bytes及Job/request subject；多个同时合法grant时只能消费Job冻结者，任一字段交换、stale
+  generation、use耗尽、revoke或RPC替换都在object I/O和Provider dispatch前拒绝；
 - Producer、Model Broker与Sandbox Broker分别100% permit/DB-pool/S3 lane饱和或rolling restart时，其他两个audience/lane及API/Scheduler
   admission仍满足18的隔舱；Producer saturation不得形成无界gRPC buffer、staging、连接或quota reservation；
 - 客户端SSE断开不取消Turn，live delta丢失后durableterminal可校准；
@@ -1220,7 +1632,7 @@ Deployment/activate/suspend、credential grant、high-risk data transfer和break
 
 CR-124对应的Resource foundation已经交付：`insight-platform-contracts`为Provider/Profile/两级Deployment提供本次架构修订前的closed Rust
 payload、canonical generation defaults、sorted-set与cross-field hard-limit验证。它尚不包含§7新增的Model output Retention/ArtifactIo
-exact binding/Ready duration，也不包含§16.1/18要求的HardLimitProfile v5、WorkerManifest v2、ComponentCapacityManifest或Candidate
+exact binding/Ready duration，也不包含§16.1/18要求的HardLimitProfile v5、WorkerManifest v2、ComponentRuntimeManifest或Candidate
 closure。CR-125进一步交付`insight-platform-models`的
 canonical request/response、stream fence、tool/schema validation、retry/control/cancellation与attempt accounting，以及caller-owned
 PostgreSQL adapter；shared Invocation/Job/RunValue/ArtifactLink/Receipt/Event/Outbox和四维Quota bundle均未增加专用表。fresh PostgreSQL 16
@@ -1232,9 +1644,10 @@ CR-132进一步交付Phase 4的首个adapter-host slice：独立`insight-platfor
 exact process-local resolution，消费closed normalized stream并强制Provider级delta/first-byte/idle/total timeout、sequence、terminal、
 response local validation、cancel与panic containment。worker materializer和PostgreSQL authority之间只有fenced
 `CommitModelOutcome`；claim显式返回fence、usage reservation、quota ledger identity与exact request input，后者逐字段回绑冻结
-RunValue；Inline正文复核canonical digest。Artifact-backed request现由closed `ModelArtifactReadRequest`绑定tenant、ModelTurn、
-当前Job version/lease/fence/Worker generation、request digest、deadline、exact RunValue与active ModelTurn ArtifactLink；PostgreSQL
-authority在Broker I/O前后重验同一请求，Worker再复核canonical JSON与逻辑content digest。terminal command还在Provider I/O前
+RunValue；Inline正文复核canonical digest。Artifact-backed request现由旧closed `ModelArtifactReadRequest`绑定tenant、ModelTurn、
+当前Job version/lease/fence/Worker generation、request digest、deadline、exact RunValue与active ModelTurn ArtifactLink，但尚未冻结目标
+ArtifactGrant ID/generation/authorization binding，因此多个合法grant时不能构造15的唯一`AuthorizedArtifactObjectRead`，该既有fixture不证明
+CR-165目标。PostgreSQL authority在Broker I/O前后重验同一旧请求，Worker再复核canonical JSON与逻辑content digest。terminal command还在Provider I/O前
 拒绝复用reservation ledger identity。独立`insight-platform-model-worker`现在先预留本地Model permit再claim，逐项回绑WorkerManifest、
 Job/lease/request/quota identity，并在materialize与Provider stream期间按统一HardLimitProfile heartbeat；heartbeat只推进Job version，
 已经规范化的响应刷新到新fence后再提交，不因续租重放Provider调用。未知dispatch按冻结token/cost ceiling保守结算。
@@ -1264,7 +1677,8 @@ Cancelling Turn/Job，调用Egress exact cancel后用旋转fence提交保守usag
 bytes、把容量permit保留到有界批次flush结束的non-blocking队列投影到TLS/mTLS NATS tenant/run scoped subject；tool argument与Provider metadata不发布，NATS不可用、背压或单帧
 超限只丢live observation，不影响durable执行。真实Secret Manager provider、生产storage/KMS catalog provisioning、Artifact-backed output IO、
 公开SSE消费与live-gap/backpressure资格、real-process Provider conformance、跨work-class饱和隔舱和Phase 6 fault fixture仍未交付，因此
-CR-132/CR-136和本规范状态保持进行中。
+CR-132/CR-136对应的既有implementation slices仍保持进行中；本规范因CR-165 Architecture Revision仍为Draft，不能据此恢复旧
+`Implementation In Progress`状态。
 
 04的closed Model-output ArtifactIo Policy Rust/JSON合同与pure checked staging/Ready时间计算已经交付，但尚未接入Model Deployment或
 admission。`ModelOutputArtifactReservation`、最坏Artifact quota预留、`StageModelOutput` client-stream机器合同、独立Model Artifact
@@ -1291,5 +1705,6 @@ in-flight request；cancel必须携带相同完整identity并且只能终止该g
 
 ## 30. 未决问题
 
-没有阻止API或Qualification设计的未决问题。Provider adapter和模型能力可以通过新Revision扩展，但不能改变
-durable ModelTurn、本地schema/tool验证、exact binding、数据策略和独立Model隔舱。
+CR-165的semantic/content evidence、current encryption fence与Artifact-capable installation closure仍需与04/07/15/17/18共同完成cross-review；
+关闭前本规范保持Draft且不得作为实现输入。Provider adapter和模型能力可以通过新Revision扩展，但不能改变durable ModelTurn、本地
+schema/tool验证、exact binding、数据策略和独立Model隔舱。

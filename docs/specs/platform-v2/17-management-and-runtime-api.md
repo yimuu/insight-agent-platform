@@ -2,10 +2,10 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
+| 状态 | Draft / Architecture Revision |
 | 日期 | 2026-08-15 |
-| 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)～[`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) 的全部领域合同 |
-| 直接下游 | 18 |
+| 依赖 | 02～16全部领域合同，以及18的deployment/release、Candidate与InstallationReleaseState章节 |
+| 直接下游 | 18的qualification/API conformance章节 |
 
 > Persistence ruling：API 不拥有第二套业务状态。operation 使用共享 Job/Invocation，idempotency/callback 使用 Receipt，
 > public stream 使用 Run 上的 sequence 与共享 Event/Outbox；历史 API audit/operation/stream-head 专用表已废止。
@@ -85,14 +85,22 @@ https://manage.example/v1/...    Management API
 https://artifacts.example/v1/... Artifact transfer API
 ```
 
-可以共用同一外部域名与Gateway，但后端Service、route permission、rate bucket、DB pool、timeout和readiness必须分离。
+可以共用同一外部域名与edge Ingress，但后端Service、route permission、rate bucket、DB pool、timeout和readiness必须分离。
 Runtime token不能访问Management route；Operator token默认不能代表tenant运行Agent。Artifact transfer credential只对
 exact operation/object有效。
 
+`artifacts.example`是一个public hostname与HTTP contract，不是一个共享进程。Ingress的closed route+method registry把只接受15
+`Principal + OpaqueBearer`的StagingWrite/upload stream路由到`Artifact Upload Gateway` Deployment，把opaque read grant对应的
+GET/HEAD/Range只路由到`Artifact Download Gateway` Deployment；public Upload不得接受workload mTLS、`JobAttempt + WorkloadBound`或internal
+request binding。不能根据body、token内容或运行时header动态选后端。两者使用不同Service、ServiceAccount、数据库pool、S3/KMS identity、
+permit与HPA，且都不redirect到object store或返回direct object URL。
+
 公共health route不放在 `/v1` resource namespace：`/health/live`、`/health/ready`。Metrics、debug、pprof、admin
-repair和internal gRPC不经公共Ingress。`ArtifactModelBrokerService`、`ArtifactSandboxBrokerService`与
-`ModelArtifactProducerService`都没有public route、OpenAPI operation、外部LoadBalancer或Ingress/Gateway映射；内部Kubernetes
-Service discovery不能被投影为tenant API。
+repair和internal gRPC不经公共Ingress。`ArtifactWorkloadBrokerService`、`ArtifactModelBrokerService`、
+`ArtifactSandboxBrokerService`、`ArtifactWorkloadProducerService`、`ArtifactMaintenanceAuthorityService`与
+`ModelArtifactProducerService`六者都没有public route、
+OpenAPI operation、外部LoadBalancer或Ingress/Gateway映射；内部Kubernetes Service discovery不能被投影为tenant API。
+public `Artifact Gateway`只指上述统一hostname/HTTP合同；其Upload与Download Gateway都不注册或转发上述任一internal gRPC service/method。
 
 ## 5. Authentication 与 Principal
 
@@ -128,6 +136,8 @@ OpenAPI `operationId -> Permission` registry是启动与CI校验的唯一route�
 | Artifact read/prepare-delete/hold/rescan | `artifact.read/write/delete/hold/rescan`逐项 |
 | Operation read/cancel | `operation.read/cancel`逐项 |
 | SecretBinding metadata/create-rotate-revoke | `secret.inspect/bind/rotate/revoke`逐项 |
+| Tenant encryption-domain read/add-rebind/revoke | read要求`tenant.read`；add/rebind要求`tenant.manage + secret.bind`；revoke要求`tenant.manage + secret.revoke` |
+| Installation Release read/promote/rollback | `installation.support`读取；`InstallationOperator + installation.manage`变更 |
 
 Internal claim/invoke另要求workload audience与service authorization，并分别映射`capability.invoke`、`context.query`、
 `mcp.invoke`、`model.invoke`、`sandbox.execute`或`skill.activate`；public token即使带同名permission也不能调用internal
@@ -157,7 +167,8 @@ X-Request-Id: <optional client correlation>  # untrusted, bounded
 ```
 
 - server生成canonical request ID；client correlation不替代idempotency key；
-- Idempotency-Key按tenant + principal class + route command scope隔离；
+- Idempotency-Key按03 `AuthorityScope` + principal class + route command scope隔离；普通command使用tenant scope，只有exact Installation Release
+  promote/rollback使用configured `InstallationId` scope，不能伪造tenant或让NULL唯一键绕过dedupe；
 - request digest包含canonical method/path/query/body和影响语义的header，不含Authorization/request ID；
 - body、query、header count/length、URL length、decompression ratio和total deadline有硬限制；
 - request timeout不自动cancel已提交Run/Operation；客户端读取receipt后决定后续command；
@@ -190,6 +201,12 @@ ETag是opaque strong validator，由resource identity、generation和canonical r
 - If-Match与Idempotency-Key共同存在：先命中完全相同receipt，否则对current state执行CAS；
 - retry不能通过省略ETag覆盖并发编辑；
 - active head activate请求必须同时携带expected generation/ETag并固定target exact Revision/Deployment ID。
+- installation Release promote/rollback必须`If-Match`18 current state ETag；只有该public precondition失配才返回`etag_mismatch`。root Run
+  admission等内部generation race不得伪装为客户端ETag错误。
+- Artifact public prepare是创建新Artifact，固定不接收`If-Match`；`issue-download`只创建独立Grant且在winner事务重验current Artifact/policy，
+  也固定不接收`If-Match`。这是首批closed例外，不允许扩展到已有Artifact的state mutation。
+- Artifact complete-upload、rescan和delete都要求path中current Artifact的strong `If-Match`；missing header在Receipt claim前返回400，terminal
+  same-key/same-digest replay先于current ETag/state，只有新claim的stale header才terminalize `etag_mismatch`/412。
 
 ## 9. Idempotency
 
@@ -197,12 +214,13 @@ ETag是opaque strong validator，由resource identity、generation和canonical r
 Idempotency-Key。规范行为：
 
 ```text
-first request -> InProgress receipt -> committed response/failure
+first request -> Processing receipt -> committed response/failure
 same key + same digest -> same logical receipt/response
 same key + different digest -> idempotency_conflict
 ```
 
-- receipt在执行业务mutation前同事务创建；
+- 普通短command在业务mutation的同一事务claim并terminalize Receipt；03注册的可恢复长preflight（首个为Installation Release）可先用短事务
+  提交Processing Receipt/lease/capture，但最终业务mutation、success Receipt、Event与Outbox仍在同一final winner事务；
 - 确定性validation、已认证后的authorization/policy failure可保存bounded stable receipt；unauthenticated或body无法安全
   解析时不创建receipt；
 - transient gateway/DB unavailable且未提交receipt时不声称成功，客户端可重试；
@@ -210,6 +228,145 @@ same key + different digest -> idempotency_conflict
 - receipt retention至少覆盖客户端最大retry window和资源业务要求；
 - Idempotency-Key不成为公开resource ID或metric label；
 - GET/HEAD天然安全，不使用Idempotency-Key改变cache。
+
+下列API command使用03 `ReceiptKind::Command`与tenant `AuthorityScope`，并在首版closed route-to-operation registry中固定为互不相等的
+`ClosedOperation` wire discriminator；method/path相近、共享DTO或共享Task aggregate都不得合并operation：
+
+| API command | Receipt operation |
+|---|---|
+| `POST /v1/encryption-domain-change-approvals` | `tenant.encryption_domain.approval_request.v1` |
+| `POST /v1/encryption-domains` | `tenant.encryption_domain.add.v1` |
+| `POST /v1/encryption-domains/{encryption_domain_id}:rebind` | `tenant.encryption_domain.rebind.v1` |
+| `POST /v1/encryption-domains/{encryption_domain_id}:revoke` | `tenant.encryption_domain.revoke.v1` |
+| `POST /v1/approvals/{approval_task_id}:approve` | `approval_task.approve.v1` |
+| `POST /v1/approvals/{approval_task_id}:deny` | `approval_task.deny.v1` |
+
+exact discriminator进入Receipt dedupe key及request-digest domain separator；同一Idempotency-Key用于表中不同command不会命中同一Receipt。
+
+这六项tenant command与§13.2两项installation command使用以下closed Receipt payload；它们不是第二套API状态：
+
+```rust
+struct TenantCommandDedupeOwnerV1 {
+    schema_version: u32, // const 1
+    tenant_id: TenantId,
+    principal: PrincipalSnapshot,
+}
+
+struct ApprovalCommandDedupeOwnerV1 {
+    schema_version: u32, // const 1
+    tenant_id: TenantId,
+    approval_task_id: ApprovalTaskId,
+    task_generation: u64,
+    principal: PrincipalSnapshot,
+}
+
+struct InstallationCommandDedupeOwnerV1 {
+    schema_version: u32, // const 1
+    installation_id: InstallationId,
+    principal: PrincipalSnapshot,
+}
+
+struct RequestEncryptionDomainApprovalReceiptV1 {
+    schema_version: u32, // const 1
+    tenant_id: TenantId,
+    proposal: EncryptionDomainChangeProposalV1,
+    if_match: Etag,
+}
+
+#[serde(tag = "change_kind", rename_all = "snake_case", deny_unknown_fields)]
+enum EncryptionDomainApplyTargetV1 {
+    Add,
+    Rebind { encryption_domain_id: EncryptionDomainId },
+    Revoke { encryption_domain_id: EncryptionDomainId },
+}
+
+struct ApplyEncryptionDomainChangeReceiptV1 {
+    schema_version: u32, // const 1
+    tenant_id: TenantId,
+    target: EncryptionDomainApplyTargetV1,
+    request: ApplyApprovedEncryptionDomainChangeV1,
+    if_match: Etag,
+}
+
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+enum ApprovalResolutionDecisionV1 { Approve, Deny }
+
+struct ResolveApprovalTaskReceiptV1 {
+    schema_version: u32, // const 1
+    tenant_id: TenantId,
+    approval_task_id: ApprovalTaskId,
+    decision: ApprovalResolutionDecisionV1,
+    request: ResolveApprovalTaskRequestV1,
+    if_match: Etag,
+}
+
+#[serde(tag = "transition", rename_all = "snake_case", deny_unknown_fields)]
+enum InstallationReleaseTransitionV1 { Promote, Rollback }
+
+struct ChangeInstallationReleaseReceiptV1 {
+    schema_version: u32, // const 1
+    installation_id: InstallationId,
+    transition: InstallationReleaseTransitionV1,
+    request: ChangeInstallationReleaseRequestV1,
+    if_match: Etag,
+}
+
+#[serde(tag = "result_kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ApiCommandReceiptResultV1 {
+    ApprovalTaskCreated {
+        status: u16,
+        task: ApprovalTaskViewV1,
+        etag: Etag,
+    },
+    EncryptionDomainChanged {
+        status: u16,
+        binding: EncryptionDomainBindingViewV1,
+        collection_etag: Etag,
+    },
+    ApprovalTaskResolved {
+        status: u16,
+        task: ApprovalTaskViewV1,
+        etag: Etag,
+    },
+    InstallationReleaseChanged {
+        status: u16,
+        release: InstallationReleaseViewV1,
+        etag: Etag,
+    },
+    Rejected { status: u16, problem: ApiProblem },
+}
+```
+
+03 registry的八个exact entry如下；表中的名字均为schema ID，version固定1：
+
+| ClosedOperation | scope | dedupe owner schema | request schema |
+|---|---|---|---|
+| `tenant.encryption_domain.approval_request.v1` | Tenant | `api.tenant-command.dedupe-owner.v1` | `api.encryption-domain-approval-request.v1` |
+| `tenant.encryption_domain.add.v1` | Tenant | `api.tenant-command.dedupe-owner.v1` | `api.encryption-domain-apply-request.v1` |
+| `tenant.encryption_domain.rebind.v1` | Tenant | `api.tenant-command.dedupe-owner.v1` | `api.encryption-domain-apply-request.v1` |
+| `tenant.encryption_domain.revoke.v1` | Tenant | `api.tenant-command.dedupe-owner.v1` | `api.encryption-domain-apply-request.v1` |
+| `approval_task.approve.v1` | Tenant | `api.approval-command.dedupe-owner.v1` | `api.approval-resolution-request.v1` |
+| `approval_task.deny.v1` | Tenant | `api.approval-command.dedupe-owner.v1` | `api.approval-resolution-request.v1` |
+| `installation.release.promote.v1` | Installation | `api.installation-command.dedupe-owner.v1` | `api.installation-release-change-request.v1` |
+| `installation.release.rollback.v1` | Installation | `api.installation-command.dedupe-owner.v1` | `api.installation-release-change-request.v1` |
+
+所有entry均为`ReceiptKind::Command`、`CompleteAtClaim`，result schema均为
+`api.command-receipt-result.v1`/version 1/path
+`contracts/platform-v1/schemas/api/command-receipt-result.schema.json`/131072 canonical bytes。三个owner schema path依次为
+`contracts/platform-v1/schemas/api/tenant-command-dedupe-owner.schema.json`、
+`contracts/platform-v1/schemas/api/approval-command-dedupe-owner.schema.json`、
+`contracts/platform-v1/schemas/api/installation-command-dedupe-owner.schema.json`，canonical maximum均为65536 bytes。四个request schema path依次为
+`contracts/platform-v1/schemas/api/encryption-domain-approval-request.schema.json`（131072 bytes）、
+`contracts/platform-v1/schemas/api/encryption-domain-apply-request.schema.json`（65536 bytes）、
+`contracts/platform-v1/schemas/api/approval-resolution-request.schema.json`（65536 bytes）与
+`contracts/platform-v1/schemas/api/installation-release-change-request.schema.json`（65536 bytes）。operation与request中的change/decision/transition
+必须逐值相等；不允许用共享request schema把add/rebind/revoke或approve/deny/promote/rollback互换。
+
+result允许矩阵固定为：approval-request只允许`ApprovalTaskCreated | Rejected`，三项encryption apply只允许
+`EncryptionDomainChanged | Rejected`，approval resolution只允许`ApprovalTaskResolved | Rejected`，installation change只允许
+`InstallationReleaseChanged | Rejected`。status只能是对应章节声明的成功码或稳定problem码；Receipt replay从result完整重建status/body/Location/ETag，
+其中approval Location只由result内`approval_task_id`按固定route模板重建，不保存自由路径；不得重读current aggregate。所有schema及八个registry entry进入
+root contract digest；缺失entry、schema、上限或错误scope时Candidate/server启动失败。
 
 ## 10. Management 生命周期 API
 
@@ -299,6 +456,59 @@ POST /v1/secret-bindings/{secret_binding_id}:revoke
 响应只含04允许的safe metadata projection；`opaque_reference`、Secret value和resolver response永不回读。create/rotate/
 revoke要求Idempotency-Key，rotate/revoke还要求If-Match；Revoked不可恢复。
 
+04 Tenant encryption-domain binding同样不套用Resource/Draft/Revision，使用tenant-scoped专用API；tenant只从verified principal membership派生，
+普通route不接受tenant path/header override：
+
+```text
+GET  /v1/encryption-domains
+GET  /v1/encryption-domains/{encryption_domain_id}
+POST /v1/encryption-domain-change-approvals
+POST /v1/encryption-domains
+POST /v1/encryption-domains/{encryption_domain_id}:rebind
+POST /v1/encryption-domains/{encryption_domain_id}:revoke
+```
+
+```rust
+struct ApplyApprovedEncryptionDomainChangeV1 {
+    schema_version: u32, // const 1
+    approval_task_id: ApprovalTaskId,
+}
+
+struct EncryptionDomainBindingViewV1 {
+    schema_version: u32, // const 1
+    encryption_domain_id: EncryptionDomainId,
+    storage_binding_digest: Digest,
+    kms_binding_digest: Digest,
+    state: EncryptionDomainBindingState,
+    generation: u64,
+}
+```
+
+`GET` list返回04 bounded wrapper的safe entries和strong collection ETag；item GET返回同一entry projection，ETag仍派生自current Tenant aggregate
+version与wrapper digest，因此任一domain变更都会使旧precondition失效。read要求`tenant.read`。四个POST都要求Idempotency-Key、If-Match、
+`management_mutation` rate class与closed body；approval-request body逐值复用04唯一`EncryptionDomainChangeProposalV1` schema，并按proposal要求
+add/rebind的`tenant.manage + secret.bind`或revoke的
+`tenant.manage + secret.revoke`。17不重新定义proposal nominal或Effect：Add/Rebind固定`IdempotentWrite`，Revoke固定`Irreversible`；服务从04
+Tenant security aggregate的current exact `PolicyKind::Approval` binding选择对应`TenantEncryptionDomainApprovalPolicyV1` rule并创建03 shared
+Approval Task，不创建EncryptionDomain change aggregate/table。Task typed owner冻结tenant、requester principal、完整proposal及canonical digest、
+固定Effect、observed collection ETag、Policy Revision ID/semantic digest、完整approver rule和deadline；请求不得提交或覆盖这些字段。缺失、错误
+kind、非active、digest漂移或不能满足04 Revoke职责分离下界的tenant Approval Policy返回403 `policy_denied`且不创建Task；成功同步返回201 `ApprovalTaskViewV1`及
+`Location: /v1/approvals/{approval_task_id}`，same key/digest exact replay返回同一status/body/Location且只创建一个Task，body/ETag漂移产生冲突。
+
+三个apply route只接受`approval_task_id`，不能重复提交或覆盖proposal字段；application service从shared Task加载04 frozen typed proposal并重算
+`input_digest`。Task必须`Approved`且其tenant、operation、path target、proposal digest、
+owner snapshot、generation、policy与current If-Match逐值相等；add的`enc_<uuidv7>`只在final transaction由服务端分配并由Command Receipt保证重放稳定。
+apply按04锁序在一个事务完成Tenant aggregate CAS、installation compatibility generation推进、terminal Command Receipt及两scope Event/Outbox；
+成功add返回201，rebind/revoke返回200及`EncryptionDomainBindingViewV1`和新collection ETag。判定顺序固定为terminal Receipt replay、public
+If-Match、Approval Task、domain validation：header与current collection ETag不相等才terminalize 412 `etag_mismatch`；header仍current但Task冻结的
+tenant version/wrapper/policy/owner snapshot已陈旧，或Task为Rejected/Expired/Cancelled、Revoked key复用、same-binding rebind、错误operation/target，
+都terminalize 409 `invalid_state_transition`并要求新proposal+Approval；Task仍Pending返回409 `approval_required`。不存在或不可见的exact storage/KMS
+binding返回404 `resource_not_found`且不泄露catalog。两个binding都已知但其组合与current installed storage/KMS manifest不兼容，或Add后的
+wrapper会超过04的64项/65536 canonical-byte hard bound，固定terminalize 422 `invalid_request`、`retryable=false`；该映射同时用于
+approval-request的当前proposal validation和apply的锁后domain validation，不能压成409/413/500。approval-request的确定性422不创建Task；apply的
+确定性422不修改Tenant/installation/Event，只terminalize其Command Receipt。terminal same-key/same-digest replay仍先于current ETag/Task重验；
+response、problem、Task/Event均不含KMS key、object locator或tenant Secret。
+
 ## 12. Discovery、Build 与 Dataset API
 
 耗时管理操作统一创建Operation：
@@ -323,14 +533,16 @@ POST /v1/artifacts/{id}:rescan
 ## 13. Operation 资源
 
 ```rust
-struct ManagementOperation {
+struct ManagementOperationAggregateV1 { // internal durable aggregate; not a wire DTO
     operation_id: OperationId,
     tenant_id: TenantId,
     kind: ManagementOperationKind,
-    target: OperationTarget,
+    target: ManagementOperationTargetV1,
+    binding_snapshot: VersionedSnapshot,
+    current_job_id: Option<JobId>,
     state: ManagementOperationState,
-    progress: Option<SafeOperationProgress>,
-    result: Option<OperationResultRef>,
+    progress: Option<SafeOperationProgressV1>,
+    result: Option<OperationResultRefV1>,
     failure: Option<Failure>,
     created_at: DateTime<Utc>,
     deadline: DateTime<Utc>,
@@ -343,16 +555,54 @@ enum ManagementOperationKind {
     Import,
     Discovery,
     Build,
-    ArtifactUpload,
     ArtifactVerify,
     ArtifactRescan,
     ArtifactDelete,
     Export,
 }
 
-struct ManagementOperationTarget {
-    resource_kind: ResourceKind,
-    resource_id: ResourceId,
+#[serde(tag = "target_kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ManagementOperationTargetV1 {
+    Artifact { artifact_id: ArtifactId },
+    ResourceVersion { version: ExactVersionRef },
+    McpDeployment { deployment: ExactDeploymentRef },
+    ModelProviderDeployment { deployment: ExactDeploymentRef },
+    ContextDataset {
+        dataset_resource_id: ResourceId,
+        context_deployment: ExactDeploymentRef,
+    },
+    SandboxPackage { package_version: ExactVersionRef },
+}
+
+struct SafeOperationProgressV1 {
+    schema_version: u32, // const 1
+    stage_index: u16,
+    stage_count: u16,
+    completed_units: u64,
+    total_units: Option<u64>,
+    updated_at: DateTime<Utc>,
+}
+
+#[serde(tag = "result_kind", rename_all = "snake_case", deny_unknown_fields)]
+enum OperationResultRefV1 {
+    ResourceVersion { version: ExactVersionRef },
+    DiscoverySnapshot {
+        snapshot_id: DiscoverySnapshotId,
+        snapshot_digest: Digest,
+    },
+    Evidence { evidence_id: EvidenceId, evidence_digest: Digest },
+    Artifact {
+        artifact_id: ArtifactId,
+        artifact_projection_version: u64,
+    },
+}
+
+struct FailureProjectionV1 {
+    code: FailureCode,
+    class: FailureClass,
+    retryability: Retryability,
+    safe_message: Option<SafeMessage>,
+    source: FailureSource,
 }
 
 enum ManagementOperationState {
@@ -364,12 +614,69 @@ enum ManagementOperationState {
     Cancelled,
     TimedOut,
 }
+
+struct ManagementOperationViewV1 { // public GET/list projection
+    operation_id: OperationId,
+    tenant_id: TenantId,
+    kind: ManagementOperationKind,
+    target: ManagementOperationTargetV1,
+    state: ManagementOperationState,
+    binding_schema_version: u32,
+    binding_digest: Digest,
+    progress: Option<SafeOperationProgressV1>,
+    result: Option<OperationResultRefV1>,
+    failure: Option<FailureProjectionV1>,
+    created_at: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+    terminal_at: Option<DateTime<Utc>>,
+    projection_version: u64,
+}
 ```
 
-Operation kind进入machine registry。Target永远是预分配的typed ResourceId；目标aggregate尚不存在时，Operation handler必须在
-同一事务创建目标row并由deferred typed-source constraint闭合。禁止target携带任意表名、qualified name、URL、backend handle
-或开放JSON。首个Artifact批次只开放`ArtifactUpload | ArtifactVerify | ArtifactRescan | ArtifactDelete`到`ArtifactId`的
-组合，其他kind在各自typed target verifier交付前fail closed。
+Operation kind与target组合进入machine registry；首版合法矩阵固定为：
+
+| kind | 合法target |
+|---|---|
+| `Validation` | `ResourceVersion` |
+| `Discovery` | `McpDeployment \| ModelProviderDeployment` |
+| `Build` | `ContextDataset \| SandboxPackage` |
+| `ArtifactVerify \| ArtifactRescan \| ArtifactDelete` | `Artifact` |
+
+`Import | Export`在v1只保留枚举值，没有合法target，admission必须fail closed。每个exact ref还必须匹配该variant要求的
+`ResourceKind`：MCP/Model deployment、Context deployment、ContextDataset root和SandboxPackage version不得互换。裸ID、
+`ResourceKind + ResourceId`开放pair、`resource` alias、`null`或额外字段都非法。Target永远是预分配的typed nominal；目标aggregate尚不存在时，
+Operation handler必须在同一事务建立目标aggregate并验证typed source完整性。禁止target携带任意表名、qualified name、URL、backend handle或
+开放JSON。首版没有`ArtifactUpload` kind，upload只是`ArtifactVerify`开始执行前的Staging阶段。
+
+`SafeOperationProgressV1`要求`stage_count > 0`、`stage_index < stage_count`、`total_units=None | Some(n >= completed_units)`；stage文案由
+client按`kind + stage_index`映射，服务端不返回backend文本。`OperationResultRefV1`是唯一public/internal result union，所有digest与projection
+version必须在terminal winner事务从authoritative row派生。`FailureProjectionV1`只复制05 `Failure`的safe字段，永不投影`details_ref`正文。
+
+`binding_snapshot`必须是03同一closed、bounded、versioned snapshot envelope并保存完整typed payload及其canonical digest，不能只保存target、
+散落列或运行时重查current Policy。ordinary Attempt start只在source Job attempt snapshot中预分配Operation/scan Job ID并冻结15
+`ArtifactVerifyOperationBindingV1` preimage；此时不创建ManagementOperation或scan Job row。preimage只含当时已知的Artifact/candidate Blob identity、
+`staging_artifact_version`、scan policy/rules、deadline与预分配ID，`scan_operation_binding_digest`逐值等于其canonical digest；未知的actual object
+generation和`uploaded_artifact_version`不得伪造进preimage。任何pre-success失败只按15 stage/cleanup flow收敛，不留下Queued Operation orphan。
+
+ordinary Workload stage success取得actual object generation与Uploaded version后，必须在同一事务创建exact `ArtifactVerify` Operation、把start冻结的
+同一preimage安装为immutable `binding_snapshot`、构造15 closed `ArtifactVerifyJobBindingV1`、创建由该Operation拥有的唯一scan Job，并设置
+`current_job_id=Some(scan_job_id)`。public prepare则在自己的winner事务已经创建同kind Operation及immutable binding，并以该Operation作为
+Staging Artifact的exact owner；public `CompleteUpload` winner只能在该既有Operation上构造同一Job binding、创建预分配的唯一scan Job并设置pointer，
+不得创建或替换第二个Operation。两条路径的Job binding都回绑Operation ID/binding digest并追加actual generation、
+`uploaded_artifact_version`、length与digest，不能修改Operation binding。Scanner claim同时验证Operation仍为exact owner、pointer、Operation binding
+digest、Job snapshot、actual generation及Job fence。
+target只定位aggregate，不能替代执行授权与幂等binding。其他Operation
+kind在其owner定义并注册typed binding schema前不得用开放JSON或空snapshot启动。公共create request不能提交/覆盖snapshot；
+`ManagementOperationAggregateV1`不是OpenAPI DTO，`GET /v1/operations/{operation_id}`只返回closed `ManagementOperationViewV1`中的safe
+binding schema version与digest，不回显可能含Policy、locator或backend细节的snapshot正文。
+
+`current_job_id`是03 owner→Job current pointer的唯一落点。创建/切换Job必须在同一事务写Job immutable owner与Operation pointer；Job terminal不自动
+清pointer，Operation merge事务锁定两者、验证exact ID/version/binding后才推进Operation并清空或原子切到下一Job。`Queued | Running | Cancelling`
+凡需要后台执行都必须为`Some`且指向同tenant、owner为本Operation的非已消费Job。唯一`Queued + None`例外是public prepare创建、仍在deadline内、
+作为同tenant exact Staging Artifact owner且仍绑定matching active public UploadGrant的`ArtifactVerify` Operation；其binding已冻结预分配scan Job ID，
+但Job row尚不存在。upload放弃、失败后未重试或超时必须由15的deadline/delete authority把该Operation与Artifact/Grant一起收敛到匹配terminal状态，
+不得永久保留Queued orphan；`CompleteUpload`成功后例外立即结束并原子设置`Some`。terminal Operation必须为`None`。pointer missing/mismatch、同一
+Operation两个live Job、单边创建/清除或从Job表反查“最新”都属于invariant failure。
 
 `result`只表示Operation新产生或选定的typed resource，而不是“成功”本身。产生资源的Succeeded Operation必须返回exact
 typed reference；`ArtifactDelete`这类破坏性Operation的Succeeded终态必须保持`result=None`，由target标识被删资源，并由领域
@@ -395,11 +702,82 @@ validation、build、scan和export。非空Operation result必须是typed resour
 
 ### 13.1 已撤销 persistence 记录（非规范性）
 
-旧 migration 24～28 与 Artifact-specific ManagementOperation 实施 checkpoint 已撤销，不属于当前 baseline、API 行为
-或资格证据；详细记录只保留在 Git 历史。
+旧Artifact-specific ManagementOperation持久化设计与实施checkpoint已撤销，不属于当前baseline、API行为或资格证据；具体物理记录只保留在
+Git历史与ADR。
 
 Operation 的目标持久化统一复用 03 的共享 `Job`、`Invocation`、`Receipt`、`Event` 与对应领域聚合。
 Phase 5 尚未开放任何公共 Operation route；只有完成本规范的实现与资格门禁后，才能把它声明为 `/v1` 当前行为。
+
+### 13.2 Installation Release API目标
+
+```text
+GET  /v1/installation/release
+POST /v1/installation/release:promote
+POST /v1/installation/release:rollback
+```
+
+GET只对`installation.support | installation.manage`返回18 safe current state、strong ETag及exact Release/Candidate ID/digest/generation；
+Uninitialized为显式状态，不返回null局部binding。两个command只允许`InstallationOperator + installation.manage`，必须携带
+Idempotency-Key、If-Match和closed target：
+
+```rust
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+enum InstallationReleaseViewV1 {
+    Uninitialized {
+        schema_version: u32, // const 1
+        installation_id: InstallationId,
+        compatibility_generation: u64,
+    },
+    Active {
+        schema_version: u32, // const 1
+        installation_id: InstallationId,
+        compatibility_generation: u64,
+        release_id: ReleaseId,
+        release_manifest_digest: Digest,
+        candidate_id: ReleaseCandidateId,
+        candidate_manifest_digest: Digest,
+        active_model_deployment_count: u32,
+    },
+}
+
+struct ChangeInstallationReleaseRequestV1 {
+    release_id: ReleaseId,
+    release_manifest_digest: Digest,
+    candidate_id: ReleaseCandidateId,
+    candidate_manifest_digest: Digest,
+}
+```
+
+GET与两个成功command都返回同一closed `InstallationReleaseViewV1`、strong ETag和`Cache-Control: no-store`。DTO不公开内部
+`state_digest`、scan evidence、catalog或qualification正文；ETag以current installation identity/generation/state digest派生但保持opaque。
+
+`promote`允许`Uninitialized -> Active`或`Active -> Active`切换到不同的approved target。`rollback`只允许从`Active`切到不同的approved、
+database schema-compatible旧target；该机器判定与promote相同，均要求incoming Candidate的`database_schema_version`逐值等于18 startup verifier
+产生的`ValidatedInstalledDatabaseSchemaVersion`，首版不接受compatibility range或down-migration。rollback不要求扫描Event证明target曾经Active。
+rollback在Uninitialized、或任一新key指向current exact target，
+固定返回409 `invalid_state_transition`。同key同digest的terminal Receipt必须在重新检查If-Match/current state前返回原结果，因此即使安装后来
+再次切换也保持exact replay；同key请求漂移仍返回409 `idempotency_conflict`。两条command都是同步current-state command，不创建
+ManagementOperation；Receipt operation和Release Event discriminator分别固定为`installation.release.promote.v1`与
+`installation.release.rollback.v1`。
+
+服务端按完整ID+digest解析approved immutable manifests并执行18 bounded scan/final CAS；rollback与promote使用同一请求/验证路径，区别只进入
+上述closed Receipt/Event discriminator，不能down-migrate或采用未批准manifest。成功同步返回200及新state/ETag；同key同digest重放返回同一结果，同key请求
+漂移返回409 `idempotency_conflict`。wire/schema错误返回400 `schema_validation_failed`；不存在、digest不匹配或不可见的exact manifest ref返回404
+`resource_not_found`；已知但未批准的target、Candidate database schema version与startup-verified exact version不相等，或任一active Model
+Deployment与目标Candidate确定性不兼容，都返回409
+`invalid_state_transition`且不可重试。ApiProblem固定`detail=None`、safe message为空，至多包含一个allowlisted field path/reason和opaque
+request ID，不含ID、digest、region、manifest正文、tenant catalog或backend detail。public If-Match在capture或final CAS失配都返回412
+`etag_mismatch`并把同一Receipt terminalize为稳定Rejected结果；active-set或encryption mutation造成的generation/ETag漂移不能内部重试成503。
+claim/capture后的deadline、transient dependency或serializable/CAS race只有经Receipt→InstallationReleaseState classification证明public ETag仍
+相等时，才能在规定重试后返回503 `temporarily_unavailable`；state保持旧值且可以保留一个可续租/接管的非终态Processing Receipt，但不存在terminal
+command winner。唯一例外是观察到另一个未过期same-key/same-digest Processing claim时返回的in-progress 503：它发生在If-Match前、只表示已有
+命令仍在执行，不启动resolver/scan或第二claim，也不把dependency/CAS结果归类为可重试。该目标路由在实现、OpenAPI、安全和
+PostgreSQL fixture完成前不是当前API。
+
+稳定的state/count/EOF invariant损坏返回500 `internal_error`并阻止切换，不能伪装为可重试503。GET使用§27 closed `query_list` rate class，
+promote/rollback使用closed `management_mutation` rate class；不创建未登记的installation专用class、limit authority或隐藏reserve。每个成功
+state-transition winner都在同一事务写03 installation-scoped Command Receipt、Release Event与Outbox；稳定Rejected只terminalize bounded
+Receipt结果且不追加Release Event，exact replay也不重复Event。
 
 ## 14. List、Filter、Sort 与 Cursor
 
@@ -441,11 +819,17 @@ enum AgentAdmissionSelector {
 }
 ```
 
-Admission同一事务中验证principal、tenant、input/Artifact、quota、suspension、deadline和Deployment closure，固定完整
-RunBindings并创建Queued Run/outbox。ActiveHead selector只在该事务读取一个CAS generation，receipt返回exact
-Deployment和bindings digest。expected generation不匹配显式失败。
-该事务固定使用PostgreSQL serializable isolation；所有参与admission的Principal generation、tenant/Agent gate和exact
-binding closure读取都进入SSI依赖，序列化失败按同一Idempotency-Key重试，不能降级为read-committed的check-then-insert。
+Admission先按02在事务外拒绝错误schema version、超过1 MiB、超过512个distinct Model refs及非法candidate set，并解析immutable exact
+manifest closure。mutation transaction验证principal、tenant、input/Artifact、quota、suspension、deadline和Deployment closure，固定version 2
+RunBindings后创建Queued Run/outbox。
+ActiveHead selector只读取一个CAS generation，receipt返回exact Deployment、installation binding和bindings digest；任一非首选Model候选不兼容
+也使整个admission失败，不能删候选或提前选择。
+该事务固定使用PostgreSQL serializable isolation；Receipt claim/replay后按03 rank先锁18 Active InstallationReleaseState，再锁Tenant security
+与按kind/ID排序的Resource/Deployment，逐项复验事务外确定集并调用16 compatibility port。所有Principal generation、tenant/Agent gate和
+exact binding closure读取都进入SSI依赖，提交前再次比较已锁installation generation/state digest。序列化或internal generation失败按
+同一Idempotency-Key最多重试18规定次数，耗尽返回503而不是412；不能降级为read-committed的check-then-insert。
+installation为Uninitialized时返回409 `invalid_state_transition`且不创建Run/Receipt成功结果。`expected_head_generation`与current Agent head
+不匹配同样是409 domain conflict，不是HTTP If-Match，因此不能返回412。
 
 成功admission固定返回`201 Created`、RunSnapshot、`Location: /v1/runs/{run_id}`和ETag；Run执行异步不等于
 admission Operation，因此不返回202。只有尚未创建目标resource的durable ManagementOperation返回202。
@@ -454,6 +838,9 @@ admission Operation，因此不返回202。只有尚未创建目标resource的du
 input必须通过Agent input schema。`service_class`是policy可选请求，只能选择公开closed等级，不能请求07的
 `critical_control`或扩大quota。ServiceClass machine wire固定为`low | normal | high`；它只是受policy约束的公开请求，
 不能直接写Scheduler Priority。Runtime API不接受client-supplied Run ID；Idempotency-Key保证重试只创建一个Run。
+Child Run不是公共create route；08的内部child admission必须逐字段继承parent冻结的installation Release/Candidate binding，不能读取当前
+installation state、重新选择Candidate或把历史binding替换为current head；它仍须针对该historical Candidate验证child的全部Model candidates，
+并复验exact manifest resolver和所需runtime/adapter仍在retention内。
 
 ## 16. Run Query 与 Result API
 
@@ -500,12 +887,85 @@ POST /v1/runs/{run_id}/signals
 GET  /v1/interactions/{interaction_id}
 POST /v1/interactions/{interaction_id}:respond
 POST /v1/interactions/{interaction_id}:decline
-POST /v1/approvals/{approval_id}:approve
-POST /v1/approvals/{approval_id}:deny
+GET  /v1/approvals?state=<approval_state>&limit=<page_size>&cursor=<opaque_cursor>
+GET  /v1/approvals/{approval_task_id}
+POST /v1/approvals/{approval_task_id}:approve
+POST /v1/approvals/{approval_task_id}:deny
 ```
 
-- task/approval projection显示请求来源、safe prompt key、schema、Effect summary、deadline和可选ArtifactRefs；
-- response绑定tenant、principal capability、interaction generation、Run/Invocation和request schema；
+```rust
+#[serde(tag = "subject_kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ApprovalSubjectViewV1 {
+    CapabilityInvocation {
+        run_id: RunId,
+        invocation_id: InvocationId,
+        input_digest: Digest,
+    },
+    TenantEncryptionDomainAdd {
+        storage_binding_digest: Digest,
+        kms_binding_digest: Digest,
+    },
+    TenantEncryptionDomainRebind {
+        encryption_domain_id: EncryptionDomainId,
+        storage_binding_digest: Digest,
+        kms_binding_digest: Digest,
+    },
+    TenantEncryptionDomainRevoke {
+        encryption_domain_id: EncryptionDomainId,
+    },
+}
+
+struct ApprovalTaskViewV1 {
+    schema_version: u32, // const 1
+    approval_task_id: ApprovalTaskId,
+    state: ApprovalState,
+    subject: ApprovalSubjectViewV1,
+    effect: Effect,
+    safe_prompt_key: BoundedKey,
+    policy_revision_id: ResourceVersionId,
+    approver_rule_digest: Digest,
+    evidence_artifacts: Vec<ArtifactRef>,
+    deadline: DateTime<Utc>,
+    generation: u64,
+    projection_version: u64,
+}
+
+struct ResolveApprovalTaskRequestV1 {
+    schema_version: u32, // const 1; no optional fields
+}
+
+struct ApprovalTaskListEntryV1 {
+    task: ApprovalTaskViewV1,
+    etag: Etag,
+}
+
+struct ApprovalTaskListPageV1 {
+    schema_version: u32, // const 1
+    items: Vec<ApprovalTaskListEntryV1>,
+    next_cursor: Option<OpaqueListCursor>,
+}
+```
+
+- interaction GET要求`interaction.read`，Approval exact GET要求`approval.read`，respond/decline与approve/deny分别要求
+  `interaction.respond`/`approval.respond`；task/approval projection显示请求来源、safe prompt key、schema、Effect summary、deadline和可选ArtifactRefs，
+  Tenant encryption-domain projection只显示04允许的safe change kind/target与binding digest，不显示KMS key/locator/Secret；
+- Approval list是eligible approver的durable discovery surface：tenant只从verified active TenantPrincipalBinding派生，不接受tenant path/header/query
+  override；调用者必须同时是该tenant的`HumanApprover`、拥有`approval.read + approval.respond`、满足Task冻结的完整approver rule与minimum authn，且
+  rule要求职责分离时不能是Task冻结的requester。返回值只含同时满足这些条件的Task，不得把“知道`apr_` ID”当作assignment或授权证据；
+- list只允许`state`、`limit`、`cursor`三个query字段。`state`省略时固定为`Pending`，提供时只能是04 `ApprovalState`单值；page size受18 effective
+  `list_page_items` default/hard max约束，顺序固定为`(created_at DESC, approval_task_id DESC)`，不返回total count。cursor按§14绑定tenant、principal
+  permission digest、state、page size、snapshot和expiry；每页仍重验current principal binding及各Task冻结rule，continuation参数漂移返回
+  `cursor_invalid`。响应为closed `ApprovalTaskListPageV1`、使用`query_list` rate class并强制`Cache-Control: no-store`；entry携带当次观察到的
+  strong ETag，后续approve/deny仍以If-Match复验，竞态返回412；
+- `ApprovalTaskViewV1`是04 shared Task current authority的closed read projection，不是第二state；`evidence_artifacts`为0～8个同tenant Ready
+  `ArtifactRef`并按Artifact ID严格升序且唯一，`safe_prompt_key`为1～128 byte machine key而非自由prompt。GET返回strong ETag与`no-store`；
+  unknown/null/cross-subject字段、`tsk_` ID、正文、owner snapshot、raw approver rule或Policy expression均不进入public DTO；
+- approve/deny都要求Idempotency-Key、If-Match和exact `ResolveApprovalTaskRequestV1`；ETag由ApprovalTask ID、generation、projection version、
+  state与payload digest派生。missing If-Match在进入Receipt前拒绝，stale ETag terminalize 412 `etag_mismatch`；terminal same-key/same-digest
+  replay先于current ETag/state，new key对非Pending Task稳定409，body不能携带comment、proposal、generation或approver override；approve/deny的
+  Receipt operation分别固定为`approval_task.approve.v1`/`approval_task.deny.v1`，不能使用generic `approval.resolve`；
+- response绑定tenant、principal capability、Task generation与closed owner variant：Capability Approval校验Run/Invocation及owner snapshot，
+  Tenant encryption-domain Approval校验Tenant aggregate/change owner snapshot且不得伪造Run/Invocation；interaction另校验request schema；
 - 错误 approver、过期、已响应、跨 Run/tenant 或 body digest 变化被拒绝；
 - Form interaction禁止Secret/password/token/payment credential；URL interaction遵守13的consent/origin规则；
 - approval固定input/binding/effect digest，任何变化需要新approval；
@@ -522,16 +982,42 @@ POST /v1/artifacts:prepare
 POST /v1/artifacts/{artifact_id}:complete-upload
 GET  /v1/artifacts/{artifact_id}
 POST /v1/artifacts/{artifact_id}:issue-download
+POST /v1/artifacts/{artifact_id}:rescan
 POST /v1/artifacts/{artifact_id}:delete
 ```
 
-Prepare/complete/delete要求Idempotency-Key。transfer response `Cache-Control: no-store`，grant只对exact object/
-operation/audience/deadline有效。普通client不能调用Finalize/Reference或指定object key、Ready state、classification
-override、bucket/KMS。Range/download由Artifact Gateway验证current permission。
+Prepare/complete/issue-download/rescan/delete都要求Idempotency-Key并逐项使用15 §9 Receipt table的exact request/result schema；operation依次固定为
+`artifact.upload.prepare.v1`、`artifact.upload.complete.v1`、`artifact.download_grant.issue.v1`、`artifact.rescan.v1`、`artifact.delete.v1`。
+transfer response `Cache-Control: no-store`，grant只对exact object/
+closed capability/audience/subject/deadline有效。`issue-download` same key/digest
+逐字节重放由15 deterministic sealed-token contract生成的同一grant/token，不创建第二能力，different digest返回409 `idempotency_conflict`。
+`issue-download`只返回平台Artifact Download Gateway address + opaque token，绝不返回object-store URL/credential。
+`rescan`要求`artifact.rescan`、Idempotency-Key、current Artifact strong If-Match、closed `ArtifactRescanRequestV1`与
+`management_mutation` rate class；Receipt operation exact为`artifact.rescan.v1`。winner事务按15把Ready Artifact推进Quarantined，创建
+`ArtifactRescan` ManagementOperation及其immutable binding、唯一scan Job并设置`current_job_id`；成功返回202及
+`Location: /v1/operations/{operation_id}`。terminal same-key/same-digest重放同一202/Location且不创建第二Operation/Job，request或target漂移返回
+`idempotency_conflict`，If-Match失配返回412，非Ready/hold/policy不允许的状态按closed transition错误拒绝。
+`complete-upload`与`delete`都必须使用15 registered receipt request把path `artifact_id`、closed body及exact If-Match纳入request digest；缺header在
+Receipt前拒绝，new claim的header与current strong ETag不等时把该Receipt terminalize为稳定412。`complete-upload`只允许current Staging、matching active
+public upload Grant/owner/deadline；`delete`按15 legal hold/reference/retention transition guard。terminal replay在任何current Artifact/Grant/Operation
+读取和If-Match检查之前只从Receipt result返回原status/body/Location/ETag，因此后来state或权限漂移都不改写既有response；new key遇到非允许state返回
+closed 409/422，不得伪装成412。
+普通client不能调用Finalize/Reference或指定object key、Ready state、classification override、bucket/KMS。每次Range/download都由Artifact
+Download Gateway逐字段重验current permission、Principal subject、public-download port/purpose、single-use Active read variant、token/binding digest、
+generation/version/use ordinal、encryption-domain fence和content-evidence freshness；token只放Authorization header，不放query/cookie，每个Range/
+重连必须重新issue且旧token重放稳定拒绝。read-use耗尽不阻止并发revoke提升generation；I/O后还要用sealed ticket复验全部current事实。
 
-Prepare同步提交Upload ManagementOperation、Staging Artifact与UploadGrant时返回201，`Location`指向Artifact且closed
-response包含Operation reference；complete-upload、rescan和需要异步引用/物理处理的delete返回202，`Location`指向统一
-`/v1/operations/{operation_id}`。不存在第二套Artifact专用Operation状态机或ID。Operation成功只表示15规定
+Prepare winner在一个事务内创建Staging Artifact、以该Artifact为target的durable `ArtifactVerify` ManagementOperation、其immutable
+`ArtifactVerifyOperationBindingV1`、public UploadGrant及对应Receipt，并使该Operation成为Staging Artifact的initial owner；Operation初始为
+`Queued`且`current_job_id=None`，binding已冻结预分配的唯一scan
+Job ID，但此时不得创建Job row。prepare返回201，`Location`指向Artifact，response body同时返回该可查询Verify Operation的typed reference；
+same-key/same-digest replay只从`ArtifactPrepareTerminalResultV1`重建同一Artifact safe view、byte-identical upload token、Grant和Operation identity，
+不读取current aggregate/config。public `CompleteUpload` winner取得actual object facts后，在同一事务只创建由该
+既有Operation拥有的预分配scan Job、安装`ArtifactVerifyJobBindingV1`并设置`current_job_id=Some(scan_job_id)`，不得创建第二个Operation；成功返回202，
+返回Uploaded Artifact的新strong ETag，`Location`指向该既有`/v1/operations/{operation_id}`。上传放弃、持续失败至deadline或delete必须由15的deadline/delete authority在Operation仍为
+`Queued + None`时terminalize该Verify Operation并收敛Artifact/Grant，不得遗留可永久查询的Queued orphan。rescan和需要异步引用/物理处理的delete也
+固定异步delete总是创建`ArtifactDelete` Operation并返回202、新Artifact ETag及统一Operation Location；不提供同一路由的204/sync隐式分支。
+rescan也返回202及新Artifact ETag/统一Operation Location。不存在第二套Artifact专用Operation状态机或ID。Operation成功只表示15规定
 的目标状态已提交，不能绕过Verified/Ready、reference、retention或legal hold门。
 
 ## 20. Run SSE
@@ -719,7 +1205,7 @@ internal_error
 ```
 
 `ApiProblem.code`只描述当前HTTP/gRPC command是否被接受或完成；Run、ManagementOperation和leaf terminal resource中的
-业务失败使用05的`Failure`/safe `FailureProjection`。二者即使文本相似也不共享enum，Gateway不得把terminal Failure
+业务失败内部使用05的`Failure`，公开投影使用本规范`FailureProjectionV1`。二者即使文本相似也不共享enum，Gateway不得把terminal Failure
 伪造成请求级500，也不得把未提交command错误写入Run。
 
 跨tenant、不可见资源和部分授权枚举统一404。detail/field error不回显Secret、policy expression、endpoint、SQL、
@@ -746,11 +1232,11 @@ command/Effect语义。
 | 422 | schema合法但domain validation失败 |
 | 429 | rate/quota暂时限制，可能含Retry-After |
 | 500 | 未分类platform invariant failure |
-| 503 | 依赖/容量暂不可用且没有已提交receipt |
+| 503 | 依赖/容量暂不可用；可有非终态Processing receipt，但没有已提交terminal winner |
 | 504 | gateway deadline，不能推断backend command未提交 |
 
 API Gateway不能把所有domain failure压成200或500。同一`ApiProblem.code`在REST/internal gRPC/SDK中语义一致；SSE和
-terminal resource使用05的`FailureProjection`，即使某个code拼写相同也必须保留layer/discriminator，不能混为同一enum。
+terminal resource使用本规范`FailureProjectionV1`，即使某个code拼写相同也必须保留layer/discriminator，不能混为同一enum。
 
 ## 25. Internal gRPC
 
@@ -764,33 +1250,94 @@ WorkerClaimCommitService
 ModelExecutionService
 McpHostService
 SandboxGatewayService
+ArtifactWorkloadBrokerService
 ArtifactModelBrokerService
 ArtifactSandboxBrokerService
+ArtifactWorkloadProducerService
+ArtifactMaintenanceAuthorityService
 ModelArtifactProducerService
 SecretBrokerService
 CallbackInboxService
 ```
 
-Artifact internal gRPC必须注册为三个不可合并的exact service，不能保留generic `ArtifactBrokerService`、按header/body动态选择
-audience，或在同一listener上用method alias扩大权限：
+Artifact internal gRPC必须注册为以下六个不可合并的exact service，不能保留generic `ArtifactBrokerService`、按header/body动态选择
+audience，或在同一listener上用method alias扩大权限。public Upload/Download Gateway都不是internal service；它们只实现各自§19 HTTPS transfer：
 
 | Service | 唯一首版方法 | exact client mTLS URI SAN | authority上限 |
 |---|---|---|---|
+| `ArtifactWorkloadBrokerService` | `ReadRuntimeArtifact` | `spiffe://insight.platform/workload/runtime-worker` | 只读15 `workload_kind=Runtime`的exact Artifact request；返回bounded bytes，不返回locator/KMS plaintext |
+| `ArtifactWorkloadBrokerService` | `ReadRegistryArtifact` | `spiffe://insight.platform/workload/registry-validation-worker` | 只读15 `workload_kind=RegistryValidation`的exact Artifact request；返回bounded bytes，不返回locator/KMS plaintext |
+| `ArtifactWorkloadBrokerService` | `ReadCapabilityArtifact` | `spiffe://insight.platform/workload/capability-worker` | 只读15 `workload_kind=Capability`的exact Artifact request；返回bounded bytes，不返回locator/KMS plaintext |
+| `ArtifactWorkloadBrokerService` | `ReadContextArtifact` | `spiffe://insight.platform/workload/context-worker` | 只读15 `workload_kind=Context`的exact Artifact request；返回bounded bytes，不返回locator/KMS plaintext |
+| `ArtifactWorkloadBrokerService` | `ReadMcpArtifact` | `spiffe://insight.platform/workload/mcp-host` | 只读15 `workload_kind=Mcp`的exact Artifact request；返回bounded bytes，不返回locator/KMS plaintext |
 | `ArtifactModelBrokerService` | `ReadModelRequest` | `spiffe://insight.platform/workload/model-worker` | 只读exact Model request Artifact；数据库SELECT-only，对象存储只允许HEAD/GET与KMS decrypt |
 | `ArtifactSandboxBrokerService` | `ReadWasiArtifact`、`ReadMicroVmArtifact` | `spiffe://insight.platform/workload/sandbox-controller` | 只读exact Sandbox Job/package/input Artifact；数据库SELECT-only，对象存储只允许HEAD/GET与KMS decrypt |
+| `ArtifactWorkloadProducerService` | client-streaming `StageRegistryArtifact` | `spiffe://insight.platform/workload/registry-validation-worker` | 只写exact Registry Validation Job Attempt的Staging Artifact，最多推进到Uploaded并触发既有scan Job |
+| `ArtifactWorkloadProducerService` | client-streaming `StageCapabilityOutput` | `spiffe://insight.platform/workload/capability-worker` | 只写exact Capability Job Attempt output，最多推进到Uploaded并触发既有scan Job |
+| `ArtifactWorkloadProducerService` | client-streaming `StageContextOutput` | `spiffe://insight.platform/workload/context-worker` | 只写exact Context Job Attempt output，最多推进到Uploaded并触发既有scan Job |
+| `ArtifactWorkloadProducerService` | client-streaming `StageMcpOutput` | `spiffe://insight.platform/workload/mcp-host` | 只写exact MCP Job Attempt output，最多推进到Uploaded并触发既有scan Job |
+| `ArtifactWorkloadProducerService` | client-streaming `StageSandboxOutput` | `spiffe://insight.platform/workload/sandbox-controller` | 只写exact Sandbox Job Attempt output，最多推进到Uploaded并触发既有scan Job |
+| `ArtifactMaintenanceAuthorityService` | `ReadForScan` | `spiffe://insight.platform/workload/artifact-scanner-finalizer` | 只对exact scanner Job/fence流式读取15 `ScanRead`正文；不返回locator/KMS plaintext |
+| `ArtifactMaintenanceAuthorityService` | `HeadExactGeneration` | `spiffe://insight.platform/workload/artifact-scanner-finalizer`或`spiffe://insight.platform/workload/artifact-gc-reconciler` | 只对各自exact Job/fence返回bounded HEAD evidence；两项是该method的完整closed allowlist |
+| `ArtifactMaintenanceAuthorityService` | `DeleteExactGeneration` | `spiffe://insight.platform/workload/artifact-gc-reconciler` | 只执行15 lifecycle guard已授权的exact generation delete并返回bounded deletion/absence evidence |
 | `ModelArtifactProducerService` | client-streaming `StageModelOutput` | `spiffe://insight.platform/workload/model-worker.artifact-output` | 只为exact Model Attempt写staging并最多推进`Staging -> Uploaded -> Verifying -> Verified` |
 
-三者都必须在TLS握手后的service authorization再次比较exact URI SAN；CN、DNS SAN、bearer/human token、tenant header、forwarded
+15 `ArtifactWorkloadStageKindV1`到Workload Producer method/audience/owner/Job/port的唯一机器映射固定在
+`contracts/platform-v1/protocol/artifact-workload-stage-routes.json`及其closed schema
+`contracts/platform-v1/schemas/protocol/artifact-workload-stage-routes.schema.json`。registry `schema_version=1`且恰有以下五行；按下表固定ordinal
+顺序、无重复，全部字段required，purpose/WorkClass集合按wire bytes严格升序且唯一。stage-kind wire依次exact为
+`registry_artifact | capability_output | context_output | mcp_output | sandbox_output`：
+
+| stage kind | exact method | client startup profile set / exact URI SAN | Grant audience | Artifact owner / Job typed owner | JobKind / WorkClass | exact port source / purpose |
+|---|---|---|---|---|---|---|
+| `RegistryArtifact` | `StageRegistryArtifact` | `registry_validation_worker/v1` / `spiffe://insight.platform/workload/registry-validation-worker` | `RegistryWorker` | `Revision` / `ManagementOperation` | `RegistryValidation` / `RegistryValidation` | frozen Registry artifact slot / `Package \| Sbom \| BackendBinding` |
+| `CapabilityOutput` | `StageCapabilityOutput` | `capability_native_worker/v1 \| capability_remote_worker/v1` / `spiffe://insight.platform/workload/capability-worker` | `CapabilityWorker` | `CapabilityInvocation` / `CapabilityInvocation` | `Capability` / `CapabilityNative \| CapabilityRemote` | frozen Interface output port / `CapabilityOutput` |
+| `ContextOutput` | `StageContextOutput` | `context_worker/v1` / `spiffe://insight.platform/workload/context-worker` | `ContextWorker` | `ContextObservation` / `ContextQuery` | `Context` / `Context` | frozen Context output port / `ContextDerived \| McpResource` |
+| `McpOutput` | `StageMcpOutput` | `mcp_host/v1` / `spiffe://insight.platform/workload/mcp-host` | `McpHost` | `CapabilityInvocation` / `CapabilityInvocation` | `Capability` / `CapabilityRemote` | frozen MCP-backed Interface output port / `CapabilityOutput` |
+| `SandboxOutput` | `StageSandboxOutput` | `sandbox_controller/v1` / `spiffe://insight.platform/workload/sandbox-controller` | `SandboxGateway` | `CapabilityInvocation` / `CapabilityInvocation` | `Sandbox` / `Sandbox` | frozen Sandbox output port / `SandboxOutput` |
+
+表中`|`表示closed set membership而非数组顺序；机器数组仍按wire bytes严格升序。enum wire、owner nominal、JobKind、WorkClass、port/purpose均直接
+复用03/07/15定义，registry不得复制宽松字符串validator。每行`client_startup_profile_ids`为1～2项、严格升序且唯一，不同stage kind不得复用profile。
+这些profile同时是18判断stage kind是否enabled的唯一输入：同一Candidate只要安装至少一个引用该行任一profile的client startup manifest，
+对应kind即enabled；不能由Helm、环境变量、RPC字段或Producer配置增删。所有生产Candidate至少启用`RegistryArtifact`，Q1启用全部五项。
+root `contract_digest`、Candidate builder、client/Producer readiness必须解析同一registry并逐值复验protobuf descriptor、profile、method、URI SAN、
+audience、Artifact/Job owner、JobKind、WorkClass、port和purpose；不存在基于method字符串或相邻合法enum的fallback。
+
+六个service都必须在TLS握手后的service authorization再次比较method-specific exact URI SAN；CN、DNS SAN、bearer/human token、tenant header、forwarded
 identity、自报workload字段或拥有同名permission都不能替代该audience。请求tenant、Run/ModelTurn/Sandbox Job、Artifact、attempt/lease/
 Worker generation、grant/reservation、purpose、Policy closure和deadline只能从durable command与current fence派生，stream body不能覆盖。
 错误service、method、URI SAN或audience组合在解析正文、访问PostgreSQL/S3/KMS前拒绝，并形成body-free受限audit。
 Model Worker必须使用不同client SVID与连接池访问read Broker和Producer：`.../model-worker`只能调用`ReadModelRequest`，
 `.../model-worker.artifact-output`只能调用`StageModelOutput`；任一凭证互换都在进入authority前拒绝。
 
-`ArtifactModelBrokerService`与`ArtifactSandboxBrokerService`是两个独立只读进程边界，不得注册write/stage/upload/complete/
-verify/finalize方法。`ModelArtifactProducerService`不得注册任一read Broker方法、Sandbox方法、generic object API或公共HTTP route；
+`ArtifactWorkloadBrokerService`、`ArtifactModelBrokerService`与`ArtifactSandboxBrokerService`是三个独立只读进程边界，不得注册
+write/stage/upload/complete/verify/finalize/delete方法。Workload Broker的五个method都消费15同一closed
+`ArtifactWorkloadReadRequestV1`，method discriminator、`workload_kind`、URI SAN和durable owner/Job必须逐值对应；任一role不能调用相邻method，
+也不能通过请求字段把一种workload投影为另一种。
+
+`ArtifactWorkloadProducerService`是独立ordinary-workload staging进程边界。五个client-stream method都只接受15 exact
+`JobAttempt + WorkloadBound + StagingWrite`，并逐值比较method、URI SAN、Artifact audience/port/purpose、typed owner、Job/attempt、lease token/
+generation、WorkerProcessGeneration、request binding、grant generation、exact staging identity、byte/digest ceiling与deadline；public
+`Principal + OpaqueBearer`、`JobRequest`、错误method/SAN/owner或Model-output request全部在读取stream body和访问DB/S3/KMS前拒绝。
+成功stream只能对exact staging generation执行有界写入并最多提交`Staging -> Uploaded`，随后通过15现有Artifact scan Job/Receipt流程创建或重放
+同一scan work；它不能读取业务Artifact、执行scan、推进Verified/Ready、finalize/reference、处理Model output、修改owner Job terminal state，
+也不能注册generic object API或public HTTP route。public Artifact Upload Gateway反向只接受`Principal + OpaqueBearer`，两条写入路径的
+credential、grant delivery和request envelope不可互换。
+
+`ArtifactMaintenanceAuthorityService`是独立maintenance进程边界，只接受15 closed `ArtifactMaintenanceRequestV1`：`ReadForScan`、
+`HeadExactGeneration`和`DeleteExactGeneration`分别只匹配`ScanRead`、`HeadExactGeneration`和`DeleteExactGeneration` variant。它可以在
+exact Job/lifecycle fence下使用受限对象存储/KMS identity执行该次操作，但只向worker返回bytes或bounded typed evidence；永不返回明文locator、
+KMS plaintext、bucket credential，不注册业务read、upload/stage/finalize或generic object API。Artifact Scanner/Finalizer与GC/Reconciler
+worker自身不得持有S3/KMS identity或直接调用object store。
+
+`ModelArtifactProducerService`不得注册任一read Broker方法、Workload Producer方法、Maintenance方法、Sandbox方法、generic object API或公共HTTP route；
 其restricted数据库角色不能修改Run、RunNode、Invocation/ModelTurn、Job current state、RunValue、业务Artifact Output Link、quota余额、
 Event或Outbox。
+
+六个internal service必须使用六组不可互换的Deployment、ServiceAccount、mTLS server identity、restricted数据库credential/pool、
+storage/KMS identity、connection pool和process-local permit；同一binary/library可以复用无状态代码，但任一进程/listener只能安装一个service。
+Artifact Upload Gateway与Artifact Download Gateway再使用两个独立Deployment、ServiceAccount、数据库credential/pool、storage/KMS identity、
+connection pool、permit与HPA，且不复用任一internal service identity/listener或彼此凭证；统一hostname不改变这两个物理failure domain。
 
 `StageModelOutput`必须使用15/16的closed header/chunk/terminal与same-Attempt `JobCommit` Receipt，在object I/O前后分别重验exact
 current Job fence。Producer receipt只证明预留Artifact bytes已经Verified，不是Model terminal result。Producer无权将Artifact推进
@@ -805,7 +1352,7 @@ ModelTurn/Job terminal、quota settlement、Event与Outbox；任一步失败全�
 - callback使用scoped one-time identity/inbox dedupe；
 - Secret value只在专用broker response且不进入generic envelope；
 - gRPC retry仅对明确idempotent method和stable request ID；
-- public Ingress/Gateway不能路由任何internal service，三个Artifact service也不得出现在OpenAPI或公共service registry；
+- public Ingress/Gateway不能路由任何internal service，六个Artifact internal service也不得出现在OpenAPI或公共service registry；
 - internal API不绕过PostgreSQL transaction/outboxauthority。
 
 ## 26. Security Headers 与 Gateway
@@ -816,19 +1363,38 @@ ModelTurn/Job terminal、quota settlement、Event与Outbox；任一步失败全�
 - request smuggling、ambiguous Content-Length/Transfer-Encoding、header normalization和duplicate authheader在edge拒绝；
 - decompression在size/rate limit下进行；
 - Artifact/upload/download使用独立origin或path policy，防止active content污染API origin；
-- redirect只用于明确OAuth/Artifact transfer flow，不用302隐藏mutation result；
+- redirect只用于明确OAuth flow，不用302隐藏mutation result；Artifact download不得redirect到object store，必须经15 Gateway/Broker代理逐请求授权；
 - error页面不返回HTML stack/debug；
 - source IP仅作rate/safety signal，不作为Principal identity；
 - Gateway不能注入tenant/permission结论，backend重新验证signed identity context。
 
 ## 27. Rate Limit、Quota 与 Backpressure
 
-层级限制：
+首版machine contract只定义每个请求恰好扣减一个`service/rate-class/scope/principal` composite短窗口bucket，不宣称存在未建模的
+hierarchical token bucket；tenant/resource durable限制由04 Quota与各domain admission拥有，connection/in-flight总量由本规范bulkhead拥有。
 
-```text
-installation -> service/route class -> tenant -> principal/workload -> resource/Run
+```rust
+struct ApiRateClassLimitV1 {
+    rate_class: ApiRateClassV1,
+    requests_per_window: u32,
+    window_milliseconds: u32,
+}
+
+struct GatewayRateLimitProfileV1 {
+    schema_version: u32, // const 1
+    limits: Vec<ApiRateClassLimitV1>,
+}
 ```
 
+- `ApiRateClassV1` wire闭集固定为`management_mutation | run_admission | query_list | sse | interaction | artifact_transfer |
+  internal_callback`；route registry/OpenAPI的`x-insight-rate-class`必须逐值命中其一，unknown class使startup失败；
+- 唯一schema路径为`contracts/platform-v1/schemas/gateway-rate-limit-profile.schema.json`并进入root contract digest；`limits`必须恰有七项，按
+  rate-class wire bytes严格升序且唯一，两个数值都为正。Candidate `deployment_config_digest`覆盖exact profile canonical bytes；请求、tenant
+  resource、route handler和环境变量不能临时创建class或放宽Candidate值；
+- tenant route的limiter key包含service/class、TenantId与principal/workload stable digest；Installation Release route没有tenant维度，key改为
+  service/class、configured InstallationId与installation principal stable digest，不能填fake tenant或与tenant bucket共享identity；
+- 每个请求只扣上述唯一composite key；不得暗中增加使用同一profile数值的installation/tenant/resource父bucket，也不得把一个principal的剩余额度
+  转给另一个principal。需要新的聚合短窗口scope时必须扩展closed profile/schema/route registry后再发布；
 - management mutation、Run admission、query/list、SSE、interaction、Artifact transfer和internal callback独立bucket；
 - rate limit是短窗口保护，Quota是durable业务预算，两者错误码不同；
 - admission在内存queue前做auth/size/rate，在DB transaction内做durable quota reservation；
@@ -867,10 +1433,15 @@ hash、route template、Operation/Run opaque ID和outcome，不记录Authorizati
 
 ## 30. 配置与部署
 
-- Management API、Runtime API、SSE Gateway、Artifact Gateway和internal gRPC role独立Deployment/DB pool/HPA；
-- `ArtifactModelBrokerService`、`ArtifactSandboxBrokerService`与`ModelArtifactProducerService`分别使用独立Deployment、
-  ServiceAccount、mTLS identity/CA allowlist、restricted DB credential/pool、storage/KMS identity、permit与NetworkPolicy；三者不得
-  共享Pod或用一个process-wide listener/semaphore模拟隔离，Producer也不得借用read Broker的SELECT-only credential；
+- Management API、Runtime API、SSE Gateway、Artifact Upload Gateway、Artifact Download Gateway和每个internal gRPC role独立
+  Deployment/DB pool/HPA；
+- `ArtifactWorkloadBrokerService`、`ArtifactModelBrokerService`、`ArtifactSandboxBrokerService`、
+  `ArtifactWorkloadProducerService`、`ArtifactMaintenanceAuthorityService`与`ModelArtifactProducerService`分别使用独立Deployment、
+  ServiceAccount、mTLS identity/method allowlist、restricted DB credential/pool、storage/KMS identity、permit与NetworkPolicy；六者不得共享Pod或用一个
+  process-wide listener/semaphore模拟隔离，Maintenance不得把delete identity借给worker，Producer也不得借用read Broker的SELECT-only credential；
+- public Artifact Upload Gateway与Artifact Download Gateway分别使用独立Deployment、ServiceAccount、连接池、DB/storage/KMS identity、
+  permit、HPA与readiness；两者只共享外部hostname/HTTP contract，且与六个internal service完全隔离；public Upload只安装
+  `Principal + OpaqueBearer` adapter，Workload Producer只安装`JobAttempt + WorkloadBound` adapter；
 - OpenAPI/event/error schema随image构建并暴露受控static endpoint，digest进入release evidence；
 - server启动校验route/permission/schema/error registry完整性，unknown config fail fast；
 - readiness检查自身DB pool、policy resolver和command path；不因任一Provider/MCP/Sandbox远端失败全局unready；
@@ -887,20 +1458,82 @@ hash、route template、Operation/Run opaque ID和outcome，不记录Authorizati
 - Draft/head/suspension并发If-Match/ETag first-winner；
 - cross-tenant ID/list/cursor/SSE/Artifact/Operation/Interaction不可见且404不可区分；
 - Run admission与head切换并发只冻结一个完整binding；
+- encryption-domain list/item与add/rebind/revoke OpenAPI覆盖tenant-derived scope、permission组合、closed proposal/apply DTO、collection ETag、
+  Idempotency-Key和`management_mutation` rate class；approval request 201/Location/body及same-key exact replay只创建一个Task，proposal/ETag漂移冲突；
+  proposal/effect/policy/rule/requester均由04 authority冻结，missing/wrong/inactive Approval Policy稳定403；六个Receipt operation discriminator逐route
+  唯一且不同command复用同一Idempotency-Key不碰撞；64/N+1、65536/N+1及known-incompatible storage/KMS pair稳定422 `invalid_request`；
+- Approval list/GET/approve/deny覆盖`apr_` kind、tenant-derived eligible discovery、state默认/闭集、page hard max、stable order、cursor
+  tenant/principal/filter/rule-generation绑定、no-store、entry ETag、read/respond permission、requester separation、owner subject四variant、
+  Pending/Approved/Rejected/Expired/Cancelled、strong ETag、
+  missing/stale If-Match、same-key terminal replay、new-key terminal conflict、bounded evidence ArtifactRef及unknown/null/cross-variant/`tsk_`/
+  sensitive-field负例；
+- encryption-domain apply覆盖Pending/Approved/Rejected/Expired/Cancelled、approval tenant/operation/target/generation/policy swap、unknown storage/KMS、
+  lower/equal/stale collection ETag、same-binding rebind、Revoked key复用及add ID response-loss replay；stale header稳定412，而header=current但Approval
+  snapshot陈旧稳定409且两者均exact replay；并发domain mutation、Release preflight、Model
+  terminal和Artifact read只能观察完整旧或新security/compatibility generation，成功只追加一次tenant+installation Event/Outbox；
+- root Run admission对不超过02上限的全部Model candidates执行同一16 compatibility port；任一非首选candidate失败时整体拒绝，child Run只继承
+  parent exact installation binding；
+- Installation Release GET覆盖Uninitialized/Active safe projection与strong ETag；promote/rollback覆盖permission、If-Match缺失/失配、
+  Idempotency-Key同请求重放/请求漂移、unknown/unapproved manifest和detail-free安全ApiProblem；
+- installation GET分别覆盖support/manage正向及ServiceIdentity/tenant token负向；command覆盖exact InstallationOperator+manage正向和其余
+  audience/principal负向，并验证query/control rate bucket与Receipt/Event discriminator；
+- promote覆盖首次Uninitialized激活和Active切换；rollback覆盖Uninitialized拒绝、current target拒绝、approved旧target成功；已有terminal
+  Receipt在state再次变化后仍原样重放且不追加第二Event；
+- promote/rollback在resolver/scan前完成terminal Receipt replay/conflict与capture；Processing crash/lease takeover复用同一Receipt与递增
+  `claim_generation`，resolver/scan期间不持有数据库事务或行锁，capture/final/classification transaction严格按
+  Receipt→InstallationReleaseState锁序；
+- promote/rollback都把与startup-verified installed database schema version不相等的Candidate terminalize为同Receipt稳定409
+  `invalid_state_transition`；覆盖lower/higher/equal三种fixture，没有range、rollback特例或down-migration；
+- 18最大4096项/每页256项的active Model scan覆盖零项、边界项、count不一致、任一项不兼容、deadline与最终state CAS失败；promotion、
+  activate/deactivate/suspend/resume/archive/retire和root Run admission并发时只能提交完整旧或完整新generation；
+- captured state未变时active Model不兼容terminalize同一Receipt为稳定409且不写Release Event；response loss后exact replay不重扫catalog；
+- capture时rollback@Uninitialized/current-target等transition guard失败terminalize稳定409；capture后active-set/encryption mutation改变public
+  ETag时稳定terminal replay 412；resolver/scan transient与serialization race都只有在classification证明ETag未变时才可在三次后返回带Processing
+  Receipt的503；active same-key Processing observation单独覆盖其pre-If-Match in-progress 503且不产生第二scan；
+- Installation Release GET/promote/rollback在OpenAPI分别精确声明`query_list`/`management_mutation`，unknown或自造rate class不能启动；
+- Gateway rate profile覆盖七项exact set、排序/重复、零值/overflow、unknown/null与Candidate deployment-config digest漂移；installation key不含
+  fake tenant且不会与tenant route碰撞；
+- child的全部Model candidates针对parent inherited historical Candidate校验；current Candidate已切换时也不得fallback，resolver/runtime
+  retention缺失时fail closed；
 - cancel/pause/resume/signal/interaction/timeout/result 竞态；
 - SSE snapshot/replay/live gap/slow client/disconnect/reconnect/cursor expiry/permission revoke；
 - outbox/NATS 丢失、重复、乱序下 SSE durable sequence 收敛；
+- ManagementOperation target fixture覆盖三个Artifact kind与`Artifact { artifact_id }`正向组合，证明首版不存在`ArtifactUpload` kind，并覆盖unknown/null/裸ID、
+  `ResourceKind + ResourceId`、错prefix、额外字段、非Artifact kind↔target组合负例；DTO、schema、Rust nominal与kind-target registry逐值一致；
+- ArtifactVerify Operation fixture逐字段比较15 `ArtifactVerifyOperationBindingV1` snapshot、canonical digest与
+  `scan_operation_binding_digest`，覆盖target-only/空snapshot、schema version、Artifact/Blob/policy/rules/deadline/scan Job swap、
+  start preimage伪造actual generation/uploaded version、client snapshot override和GET正文泄漏负例；ordinary workload pre-success所有失败均证明无
+  Operation/scan Job row，stage success证明同一事务创建Operation+immutable binding、15 `ArtifactVerifyJobBindingV1`及唯一Job/pointer；public prepare
+  则证明同一事务创建由Staging Artifact owner回绑的Queued Verify Operation、immutable binding与Grant，`current_job_id=None`且无Job row，201/replay都返回
+  同一Artifact/Grant/Operation reference。public `CompleteUpload`证明只在既有Operation上创建preallocated scan Job、exact冻结actual generation/
+  uploaded version、回绑Operation ID/binding digest并设置唯一pointer，不创建第二Operation；abandon、失败至deadline和delete fixture证明Queued-none
+  例外被terminalize并cleanup。Job terminal/Operation merge、clear/switch及response-loss replay均保持pointer双向一致且不修改Operation binding；
 - Operation worker/API crash、cancel、deadline和result receipt恢复；
 - Error code/HTTP mapping无raw backend/Secret/policy/stack泄漏；
 - rate/connection/payload/list/filter/cursor/backpressure hard limit；
 - Management/Runtime/Operator/workload token audience和route隔离；
 - Artifact transfer grant no-store/exact audience和active content origin隔离。
-- 三个Artifact internal service均无OpenAPI/public route/Ingress/外部LoadBalancer，公共Gateway探测service/method均不可达；
-- Model Worker、Sandbox Controller、human token、CN/DNS SAN和相邻ServiceAccount对三个Artifact service逐项做URI SAN/service/method
-  互换负向fixture；未授权组合在DB/S3/KMS访问前拒绝；
-- 两个read Broker的数据库写入与S3 PUT/KMS encrypt被权限拒绝；Producer只能PUT/HEAD及对同reservation exact staging generation
-  做恢复GET，任意Ready object GET/list与Run/ModelTurn/Job/RunValue/Output Link/quota/Event/Outbox写入都被权限拒绝；单服务饱和、
-  重启或DB pool耗尽不消耗另外两个服务容量；
+- Artifact rescan OpenAPI/fixture覆盖exact route、`artifact.rescan`、`management_mutation`、closed body、If-Match、
+  `artifact.rescan.v1` Receipt replay/conflict、Ready→Quarantined与202 Operation Location；response loss/并发请求只形成一个Operation/current scan Job；
+- 六个Artifact internal service均无OpenAPI/public route/Ingress/外部LoadBalancer，Artifact Upload/Download Gateway探测任一internal
+  service/method均不可达；统一public hostname按closed route/method分别只到两个HTTP Gateway，任一Gateway都不能注册另一个lane或internal RPC；
+- Artifact Upload/Download Gateway的route、token、ServiceAccount、DB credential、S3/KMS identity、permit与HPA逐项互换均fail closed；Upload
+  只接受`Principal + OpaqueBearer`并拒绝workload mTLS/`WorkloadBound`；饱和/kill/rollout时Download仍可GET/HEAD/Range，Download
+  饱和/kill/rollout时Upload仍可StagingWrite，且两侧都不返回object-store URL；
+- Runtime、Registry Validation、Capability、Context、MCP、Model、Sandbox、Artifact scanner/GC的exact workload身份，以及human token、
+  CN/DNS SAN和相邻ServiceAccount，对六个Artifact service逐项做URI SAN/service/method/variant互换负向fixture；未授权组合在
+  DB/S3/KMS访问前拒绝；
+- 三个read Broker的数据库写入与S3 PUT/DELETE/KMS encrypt被权限拒绝；Artifact Scanner/Finalizer和GC/Reconciler直接S3/KMS请求均被
+  NetworkPolicy/cloud IAM拒绝，Maintenance只允许`ReadForScan`/`HeadExactGeneration`/`DeleteExactGeneration`各自closed Job、owner、generation、
+  policy、Receipt与method-specific URI SAN，且不返回locator/credential；Workload Producer只能对exact staging generation执行PUT/HEAD，
+  任意GET/list均被拒绝；Model Producer仅可额外执行16定义的same-reservation exact staging recovery GET。两者对任意Ready object GET/list与
+  Run/ModelTurn/Job/RunValue/Output Link/quota/Event/Outbox写入都被权限拒绝；
+- Workload Producer五个method逐项覆盖exact URI SAN、`JobAttempt + WorkloadBound + StagingWrite`、attempt/lease/worker/request/grant/staging
+  fence与stream顺序/size/digest；stage kind、startup profile、Grant audience、Artifact/Job owner、JobKind、WorkClass、port、purpose、method或SAN任一逐字段
+  互换都在Data/DB/S3/KMS前拒绝，尤其`RegistryArtifact`不得借用只属于scan/rescan/delete/blob-cleanup的`JobKind::Artifact`。public
+  Principal/bearer、`JobRequest`、跨method/role/owner/Attempt、Model output全部拒绝。成功最多Uploaded且只
+  创建或重放既有scan Job/Receipt；GET/list/scan/Verified/Ready/finalize/reference/owner terminal mutation均被DB/storage权限拒绝；单服务饱和、
+  重启或DB pool耗尽不消耗另外五个internal service、Artifact Upload/Download Gateway或API/control容量；
 - `StageModelOutput` pre/post Job-fence、same-Attempt replay/conflict、cancel/lease takeover/terminal first-winner竞态证明Producer最多Verified，
   owner terminal事务要么同时提交Ready/Output Link/RunValue/quota/outbox，要么全部回滚并保留非Ready orphan。
 
@@ -911,16 +1544,31 @@ hash、route template、Operation/Run opaque ID和outcome，不记录Authorizati
 - mutation在response丢失/并发重放时只产生一个逻辑结果；
 - mutable resource无法无If-Match覆盖，immutableRevision无法update；
 - long work全部返回durableOperation，不在HTTP request内持有后台future；
-- Run create事务同时固定exactBindings并返回digest；
+- root Run create事务同时固定version 2 exactBindings、current installation generation/state digest和全部Model candidate validation集合并返回
+  bindings digest；child Run逐字段继承parent exact installation binding；
 - public Run snapshot/result/event在终态和故障恢复后完全一致；
 - SSE无per-client DB listener/NATS connection，slow client不会造成无界buffer；
 - 跨 tenant、Secret、backend handle、Prompt/正文 canary 不进入 response/event/error/log/metric；
 - API各bulkhead饱和/远端故障不破坏cancel、安全控制和其他route readiness；
 - generated SDK/conformance suite在至少Rust/TypeScript两个client实现通过；
 - route/error/event breaking change在CI被识别并阻止静默改变同一`insight.platform/v1`合同。
-- Artifact internal gRPC只存在三个exact service及其列明方法；它们具有不可互换的mTLS audience、部署与最小权限，且均无public route/Ingress；
+- Artifact internal gRPC只存在六个exact service及其列明方法；它们具有method-specific不可互换的mTLS audience、部署与最小权限，且均无
+  public route/Ingress；public Artifact contract由独立Upload与Download Gateway只提供各自HTTPS transfer，不能互相借权或代理internal method；
+- 六个internal service加Artifact Upload/Download Gateway形成八类物理lane；Q1单storage boundary中恰有八个独立
+  Deployment/ServiceAccount/credential/pool/permit/HPA logical scope，多region/boundary按lane类增加独立scope而不合并；任一Q1 lane饱和或滚动
+  不消耗另外七类lane及API/control准入容量；
+- 每个Candidate至少安装一个完整Artifact Workload Producer scope；18从上述route registry与startup manifests派生enabled stage-kind集合，
+  并要求它与全部Candidate storage binding的笛卡尔积恰被Workload Producer scopes覆盖一次。零scope、漏/重binding、漏/重route或运行时投影漂移
+  均fail closed；
+- Runtime/Registry/Capability/Context/MCP只经Workload Broker取得bounded bytes，scanner/GC只经Maintenance Authority取得scan/head/delete
+  结果；这些调用方均无法取得object locator、S3/KMS credential或绕过exact Job/grant/lifecycle fence；
+- Registry/Capability/Context/MCP/Sandbox普通输出只经Workload Producer写到Uploaded并进入既有scan flow；不能使用public bearer、read Broker或
+  Model Producer，也不能绕过scan/finalize owner形成Ready Artifact；
 - `ModelArtifactProducerService`无法创建可读或业务可引用的Model output；只有owner terminal单事务能形成Ready Artifact、Output Link与
   Artifact-backed RunValue，失败或stale输出只能保持非Ready并由GC收敛。
+- Installation Release三个目标route具有closed OpenAPI/permission/error/ETag/idempotency合同；promote/rollback通过18 bounded scan与最终短CAS，
+  不在锁内执行无界catalog遍历；public If-Match对应state漂移返回412，只有ETag未变的internal race或无public If-Match的root admission race
+  才能在有界重试后返回503。
 
 ## 33. 明确推迟的工作
 
@@ -935,5 +1583,7 @@ hash、route template、Operation/Run opaque ID和outcome，不记录Authorizati
 
 ## 34. 未决问题
 
-没有阻止部署和资格验收的未决问题。具体SDK生成器、Ingress产品和OIDC provider可以替换，但 `/v1` typed
-resource/command、Idempotency、ETag、Operation、SSE cursor、错误模型和服务bulkhead不得改变。
+CR-165相关Installation Release route、RunBindings v2以及全Model candidate admission仍处于Architecture Revision；在02/03/04/05/06/07/08/
+09/12/15/16/18与本规范完成全量cross-review并恢复Accepted前，它们不得生成OpenAPI、DTO或实现，也不得声明为当前`/v1`行为。具体SDK
+生成器、Ingress产品和OIDC provider可以替换，但已接受后的`/v1` typed resource/command、Idempotency、ETag、Operation、SSE cursor、
+错误模型和服务bulkhead不得改变。
