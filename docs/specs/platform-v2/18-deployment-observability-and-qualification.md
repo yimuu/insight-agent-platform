@@ -146,9 +146,21 @@ Gate A～G结果或ReleaseManifest；因此这项machine-contract foundation本�
 Sandbox expired-lease runtime现也有独立`WorkClass::Sandbox` business/critical-control permit、分片scan、backend evidence与fenced
 commit driver；unit fixture证明Sandbox业务permit耗尽时critical-control scan仍运行。Core NATS control adapter也已实现exact
 WorkerProcessGeneration subject、bounded closed request/reply和signal-digest binding。Helm已把WASI与microVM拆为独立DaemonSet/node
-selector；microVM Pod内又把非root Executor和唯一持有KVM/cgroup/jail/state权限的Provider按volume、credential与capability拆开，并由
-default-deny NetworkPolicy和ValidatingAdmissionPolicy锁定。该渲染合同已通过静态门禁，但仍未在authenticated NATS、真实KVM node、
-PostgreSQL故障窗口或Q1饱和环境资格化，因此只属于开发期Contract/Functional子证据。
+selector；microVM Pod内又把非root Executor和唯一持有KVM/cgroup/jail/state权限的Provider按volume、credential与capability拆开。CR-164
+进一步要求Executor、Provider和shared control-plane使用不同immutable image，冻结builder/runtime base digest并按target platform构建；每个
+microVM target只复制自己的平台可执行文件。执行pool固定Linux与单一`amd64 | arm64`架构及NodeRestriction保护的exact selector；KVM pool另有
+exact taint/toleration，attestor以独立selector覆盖两个pool。Provider独占彼此不重叠的exact hostPath及预安装、root-owned、Kubernetes 1.33+
+递归只读runtime-assets。部署声明只接受Firecracker `1.16.1`且version与Firecracker/jailer路径segment必须
+一致；该静态规则不替代per-arch asset bytes/digest证明。全部workload/NATS Secret名称互异，ValidatingAdmissionPolicy覆盖Pod与ephemeral
+container子资源并锁定exact volume source、mount、image、command、env/probe、CPU/memory resource和security context；`runtimeClassName`、
+DRA claim、Pod-level resource、extended-resource device request、secondary-CNI annotation及其他非允许metadata均关闭；全部Binding使用
+Kubernetes维护的exact namespace-name label，受限子资源policy恒拒绝Executor namespace的exec/attach/port-forward/resize。Pod固定default
+scheduler；binding只接受Candidate配置中经cluster audit确认的exact scheduler identity、Node target、空annotation及region/zone topology
+label。Pod CREATE只接受同样经audit确认的exact DaemonSet controller identity和唯一role ownerReference，UPDATE保持该ownerReference逐字段不变，
+阻止复制或孤立合法spec产生额外root authority。Dockerfile instruction closure、Pod security-projection mutation、Helm负向门禁及
+Kubernetes 1.35.6 server-side CEL编译检测缺失Provider、共享/mutable image、build-host binary、credential/hostPath alias、非递归只读asset mount、
+node/version/path漂移。该证据只证明静态部署与启动依赖合同；真实Admission Deny与cluster audit identity fixture、asset实物与ancestor/TOCTOU、node image、签名/SBOM/provenance、authenticated NATS、真实KVM
+node、Linux capability充分性、PostgreSQL故障窗口和Q1饱和仍未绑定同一Candidate资格，因此只属于开发期Contract/Functional子证据。
 
 Model执行面现有OpenAI Responses与Anthropic Messages两个wire adapter的共同开发期fixture，覆盖固定protocol request、text/tool/schema/
 usage normalization与未知Provider字段拒绝；credential-free brokered connector还覆盖incremental SSE、总量边界、重复JSON key、closed

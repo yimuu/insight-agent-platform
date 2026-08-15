@@ -799,13 +799,35 @@ private vsock依序交付一次性runtime/input materialization，最后才发�
 digest共同进入start evidence。已安装且合同闭合的`managed_mcp_server` runtime可由该Provider选择。定向domain/config/protocol/socket fixture
 实际通过，但尚无真实Linux KVM/jailer/guest-agent互操作、进程终止/恢复、escape或饱和证据，因此不把microVM backend或Phase 4/6标记为完成。
 
-生产部署合同现增加独立`executor-microvm` DaemonSet，只调度到带专用label与taint的KVM Linux node pool。非root Executor与root
-Firecracker Provider在同一node-local Pod内仅共享mTLS保护的Unix socket；只有Provider挂载`/dev/kvm`、host cgroup、持久化jail/state
-目录并取得逐项allowlist的Linux capability，Executor不挂载这些路径或Provider credential，Provider也不挂载Executor/NATS/attestor
-credential。两者使用不同mTLS Secret，Pod不挂service-account token；默认deny NetworkPolicy只开放Controller、NATS、DNS以及为Managed
-Secret预留的Egress Broker边。ValidatingAdmissionPolicy逐容器拒绝KVM、hostPath、capability或credential边界漂移，静态部署门禁同时验证
-四个workload、六条NetworkPolicy、immutable image、closed JSON及`max_concurrency <= maximum_instances`。这只是production-equivalent
-topology合同，未在CandidateManifest绑定的真实KVM node上运行，不能替代上述Linux资格证据。
+生产部署合同现增加独立`executor-microvm` DaemonSet，只调度到带exact Linux OS、单一`amd64 | arm64`架构、NodeRestriction保护的专用label与taint的KVM
+node pool。非root Executor与root Firecracker Provider在同一node-local Pod内仅共享mTLS保护的Unix socket；两者使用不同repository和
+immutable image digest，Docker builder按target platform执行，builder/runtime base均冻结multi-arch digest。两个runtime target各只复制自己的
+平台可执行文件且不复制对方或shared platform payload；默认shared image也不得包含root Provider。只有Provider挂载exact `/dev/kvm`、host
+cgroup、彼此分离的jail/state目录及固定root-owned `/opt/insight/microvm-runtime-assets`；任一hostPath别名、祖先扩大或设备替换均拒绝。
+runtime asset目录必须预先存在，并按[Kubernetes recursive read-only mounts](https://kubernetes.io/docs/concepts/storage/volumes/#recursive-read-only-mounts)
+在1.33+以`readOnly: true`、`recursiveReadOnly: Enabled`递归只读挂入，防止asset root下的
+descendant submount保留写权限；部署声明固定Firecracker `1.16.1`，Firecracker/jailer路径必须带同一version segment，kernel与
+rootfs也必须位于asset root下。该版本基线用于拒绝已知受影响或未经复审的版本声明，依据[Firecracker v1.16.1 release](https://github.com/firecracker-microvm/firecracker/releases/tag/v1.16.1)、
+[CVE-2026-1386公告](https://aws.amazon.com/security/security-bulletins/2026-003-AWS/)和[CVE-2026-5747公告](https://aws.amazon.com/security/security-bulletins/2026-015-aws/)；
+它不把自报version当作asset bytes证明。Provider在开放listener前仍逐文件验证root ownership、mode、length和exact SHA-256。
+
+Executor不挂载上述Provider路径或credential，Provider也不挂载Executor/NATS/attestor credential；Controller、WASI Executor、microVM
+Executor、Provider、attestor和NATS Secret名称必须全部不同。Pod不挂service-account token；默认deny NetworkPolicy只开放Controller、
+NATS、DNS及Managed Secret所需Egress Broker边。ValidatingAdmissionPolicy覆盖`pods`与`pods/ephemeralcontainers`，逐角色锁定exact
+volume source、mount tuple、image、command、env、probe、Secret、CPU/memory resource、node placement及完整security context，并拒绝
+`subPath`、lifecycle、额外env/envFrom、`runtimeClassName`、Pod/container DRA claim、extended-resource device request、nodeName直绑和
+Pod-level resource authority及ephemeral debugger；Pod label/annotation只接受逐角色config checksum及DaemonSet controller元数据，不能请求
+secondary CNI。全部Binding以Kubernetes自动维护的`kubernetes.io/metadata.name`锁定exact Executor namespace；受限子资源admission
+policy对该namespace的`pods/exec`、`pods/attach`、`pods/portforward` CONNECT及`pods/resize` UPDATE恒拒绝，删除自定义namespace label或利用既有RBAC grant
+均不能绕过command/resource闭包。Pod固定`default-scheduler`；`pods/binding`仅接受Candidate配置中经过cluster audit确认的exact scheduler
+username、Node target、空annotation及可选`topology.kubernetes.io/region | zone` label。Pod CREATE同时要求经过audit确认的exact DaemonSet
+controller username和唯一对应DaemonSet ownerReference（nonempty UID、`controller=true`、`blockOwnerDeletion=true`）；UPDATE要求ownerReference
+与old object逐字段相同，普通`pods/create | update`主体不能复制合法spec或孤立既有Provider/attestor。
+静态门禁以Dockerfile instruction closure、Pod security-projection mutation及Helm错误override检测Provider漏装、共享或
+mutable image、跨架构构建、credential/hostPath别名、非递归只读asset mount、runtime版本/路径漂移与`max_concurrency > maximum_instances`；最终CEL
+已由Kubernetes 1.35.6 server-side dry-run编译。这只是production-equivalent topology与启动依赖合同；真实per-arch asset bytes、asset root
+全部ancestor ownership/TOCTOU、node provisioning、签名/SBOM/provenance、Linux capability充分性及CandidateManifest绑定的KVM运行仍须在
+Phase 4/6资格环境证明，不能由静态门禁替代。
 
 Managed stdio Resource subscription的durable authority现已复用共享23表交付到Ready提交，不增加表或migration。closed `SandboxJobPayload`以
 `capability_execution | managed_mcp_subscription_session`区分两种物理workload；Managed variant冻结逻辑subscription/Job、session

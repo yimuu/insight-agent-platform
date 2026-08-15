@@ -738,6 +738,29 @@ Broker与Executor从同一Candidate profile读取effective limit且只能收紧�
 Rust exact validation、Candidate digest门禁及fresh PostgreSQL缺失/状态/digest/size/swap正负fixture已通过；真实执行与Phase 4/Gate A/E其余资格
 仍Open。复用ResourceVersion/Artifact，不增加表或migration。
 
+CR-164修复microVM候选部署闭包：此前Helm直接执行`platform-sandbox-microvm-provider`并引用Firecracker/kernel/rootfs路径，但默认
+Dockerfile既未构建/复制该Provider，也没有为runtime bytes声明image或mount，旧静态检查会把必然启动失败的Pod误判为合格。现在
+Dockerfile提供`sandbox-microvm-executor-runtime`和`sandbox-microvm-provider-runtime`目标；builder/runtime base冻结multi-arch digest，builder
+直接运行于requested target platform，每个target只复制自己的平台可执行文件且不复制对方或shared platform payload。shared image明确不含
+root Provider；Helm要求三者使用不同repository与immutable digest。WASI、attestor与microVM node selector改用kubelet不可自贴的
+`*.node-restriction.kubernetes.io/*`标签，三者固定同一Linux `amd64 | arm64`架构；attestor有独立selector并只额外容忍microVM taint，因而
+覆盖两个执行pool而WASI Executor不能进入KVM pool。全部workload/NATS Secret名称互异。Provider的KVM、runtime asset、jail、state与cgroup
+hostPath固定且互不别名；只有Provider在Kubernetes 1.33+递归只读挂载root-owned `/opt/insight/microvm-runtime-assets`。部署声明只接受Firecracker `1.16.1`并将
+Firecracker/jailer路径绑定同一version segment，kernel/rootfs保持在asset root；Provider ready前复验leaf owner、mode、length和exact SHA-256，
+但version字符串不替代真实per-arch bytes证明。
+
+AdmissionPolicy现覆盖`pods`与`pods/ephemeralcontainers`，逐角色闭合volume source/mount、image/command、env/probe、credential、CPU/memory
+resource、nodeName和Pod/container seccomp/AppArmor/SELinux/capability边界，拒绝额外volume、`subPath`、lifecycle、envFrom、runtimeClass、
+Pod-level/DRA/extended-resource device、secondary-CNI metadata和debugger注入；全部Binding使用Kubernetes维护的exact namespace-name label，
+受限子资源policy恒拒绝Executor namespace的exec/attach/port-forward/resize；Pod固定default scheduler，binding只接受Candidate配置中经cluster
+audit确认的exact scheduler identity、Node target、空annotation及region/zone topology label，CREATE只接受经audit确认的exact DaemonSet
+controller identity与唯一role ownerReference，UPDATE保持owner逐字段不变。部署门禁通过4 workload、
+6 NetworkPolicy正向渲染；Dockerfile instruction及Pod security-projection mutation和Helm错误override覆盖Provider build/copy/leak、mutable
+base、build-host binary、shared image/Secret、hostPath alias、非递归只读asset mount、错误node/version/asset path，最终CEL由Kubernetes 1.35.6 server-side dry-run编译。
+当前Dockerfile的两个release target已按默认`linux/amd64`实际构建并检查arch、platform binary inventory与UID/GID；相关22项定向测试及strict
+Clippy通过。该切片只关闭静态启动依赖与已知准入绕过；真实Admission Deny与cluster audit identity fixture、runtime asset bytes及ancestor/TOCTOU、node
+provisioning、镜像签名/SBOM/provenance、Linux capability充分性、KVM/jailer/guest-agent与Candidate资格仍Open，Phase 4/6状态不变。
+
 clean-cut baseline现由部署期独立provisioning流程对fresh PostgreSQL target一次性安装；Platform运行时crate已删除DDL apply入口，
 API/Scheduler/Worker只做read-only schema verification。旧`coordinator.rs`实现路径改为role-neutral orchestration模块，cutover gate
 不再把Accepted ADR中的外部migration ledger表名误判为运行时migration authority，但会继续拒绝任何Rust `apply_migrations`或旧
