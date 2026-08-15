@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-11 |
+| 日期 | 2026-08-15 |
 | 依赖 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md)、[`10-capability-invocation.md`](10-capability-invocation.md)、[`13-mcp-host.md`](13-mcp-host.md)、[`15-artifacts-and-files.md`](15-artifacts-and-files.md) |
 | 直接下游 | 17、18 |
 
@@ -583,10 +583,11 @@ global isolation class
 
 admission按ceiling reserve四维quota；terminal必须在同一事务释放concurrent/memory reservation，并以可信usage结算CPU/output。
 失败或不确定且缺少完整usage时按已冻结ceiling保守结算，不能以0掩盖已消耗资源。`artifact_links`是本Job grant撤销的唯一
-durable authority：Broker在生成`Destroyed`/cleanup evidence前，以exact tenant、Sandbox Job、request digest、attempt、
-WorkerProcessGeneration和lease generation幂等地把本Job的active grant推进为released；相同物理attempt重放必须得到等价evidence。
-terminal事务释放任何尚未released的剩余grant，并断言本Job恰有request冻结的全部released grant；数量或owner不匹配时整笔
-terminal commit失败。Broker先撤销与terminal收口不是两套authority，也不得因重复撤销把合法terminal拒绝。
+durable authority。只读Sandbox Artifact Broker只返回绑定exact tenant、Sandbox Job、request digest、attempt、
+WorkerProcessGeneration、lease generation、Artifact/grant和bytes digest的bounded read receipt，不修改`artifact_links`。Sandbox owner/
+Controller authority必须在提交`Destroyed`/cleanup evidence前，以该receipt和current Job fence幂等地把本Job active grant推进为released；
+terminal事务再释放任何尚未released的剩余grant，并断言本Job恰有request冻结的全部released grant。数量、owner或receipt不匹配时整笔
+事务失败；pre-destroy release与terminal收口是同一Sandbox owner authority的两个idempotent command，不是Broker的第二写authority。
 
 ## 21. Secret
 

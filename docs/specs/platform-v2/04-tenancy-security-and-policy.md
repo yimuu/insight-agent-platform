@@ -253,6 +253,31 @@ resource等非领域资源的`*_profile_revision_id`，都必须引用`prev`并�
 一个字段允许多个Policy Revision时，每个元素也必须是该role允许的kind，集合规范排序且不允许同kind冲突；合法的多层
 policy组合使用发布时编译的deterministic intersection/join receipt，不能依赖运行时“最后一个覆盖”。
 
+Artifact-backed Model response使用`ClosedPolicyDocument::ModelOutputArtifactIo`这一closed typed variant；它不能用generic
+JSON、另一个Artifact purpose的Policy body或只含opaque digest的摘要替代：
+
+```rust
+struct ModelOutputArtifactIoPolicyDocument {
+    schema_version: u32, // const 1
+    staging_grace_seconds: u64,
+    verified_media_type: MediaType, // exact application/json
+    classification_ceiling: DataClassification,
+    maximum_materialized_bytes: u64,
+    storage_binding_digest: Digest,
+    encryption_domain_id: EncryptionDomainId,
+    content_validation_profile_digest: Digest,
+}
+```
+
+`staging_grace_seconds`与`maximum_materialized_bytes`必须为正，media必须exact为`application/json`；storage、encryption与
+validation profile必须能在18的Candidate closure中解析为一个exact、可用且同region的binding。storage binding还必须冻结正数
+`maximum_put_completion_uncertainty_milliseconds`及strong-after-quiescence exact-key observation合同；checked计算
+`required_write_quiescence_seconds = ceil(milliseconds / 1000) + 1`，并要求`staging_grace_seconds >= required_write_quiescence_seconds`。
+Model output classification不得高于
+ceiling，所有bytes/time值还必须被18的effective HardLimitProfile收紧。该document只允许出现在`PolicyKind::ArtifactIo`的
+Policy Revision中，`rules_digest`必须等于完整closed document的canonical digest。Producer只能重验冻结revision/body/digest，不能
+提交、选择或覆盖任一字段。
+
 `Network`是MCP、Model、Capability与Sandbox共享的PolicyKind，而不是Sandbox私有资源。通用Network Policy Revision可以只以
 closed AuthoringPackage和`rules_digest`承诺其领域正文，Resource合同不得强制它携带Sandbox专用typed body。只有当Sandbox
 Profile引用某个Network Policy Revision时，该exact revision才必须同时携带完整`SandboxNetworkPolicyDocument`，且Sandbox
@@ -506,6 +531,28 @@ Quota Policy Revision使用machine-readable `QuotaDimension`闭集。每个dimen
 - Artifact count、single size、tenant storage；
 - HumanTask pending count 和 retention。
 
+Artifact-backed Model output不能默认预留output quota。只有typed owner从exact output schema、Provider/adapter contract、
+HardLimitProfile与剩余Run预算计算出的冻结legal maximum（16的`maximum_materialized_bytes`）严格大于effective Inline threshold时，
+才允许在dispatch前原子创建下述Artifact与candidate Blob两个bundle及其ledger identity；小于或等于threshold时必须冻结`InlineOnly`，
+不得创建任一output quota identity。调用方、Worker与materialization Producer均不能提交或放大这两个边界；预留量必须覆盖冻结合同允许的最坏合法正文，
+不能按平均响应或Inline threshold少留额度。
+
+同一Model Artifact-capable start必须冻结`staging_retain_until`与`ready_retention_seconds`，而不是预先计算Ready绝对时间。start事务
+只使用自己的PostgreSQL `db_now`，按checked arithmetic计算
+`staging_retain_until = attempt_deadline + ArtifactIo.staging_grace_seconds`；结果必须晚于attempt deadline，且
+`staging_retain_until - db_now <= effective artifact.staging_seconds`，溢出或窗口不足均在Provider dispatch前fail closed。
+同一事务还要冻结storage binding digest与其`maximum_put_completion_uncertainty_milliseconds`；上述grace下界保证
+`staging_retain_until`严格晚于所有deadline前admitted PUT的write-quiescence boundary。candidate的physical delete、stable absence evidence、
+Blob Closed/Expired或quota释放在candidate row/locator已绑定、Processing write已admit或PUT仍有可能时一律不得早于该绝对时间；到点后仍须
+重新观察exact locator/generation，不能复用更早的absence结果。bind前同一事务能够证明没有candidate row、locator、admitted write且PUT不可能
+时，仍按下文no-object分支立即Close Blob bundle，不制造无意义的grace占用。
+`ready_retention_seconds`来自Model Deployment，必须不短于exact `RunOutput` Retention policy的
+`minimum_retention_seconds`且不长于effective `artifact.ready_retention_seconds`。`Staging | Uploaded | Verifying | Verified`
+candidate的current retention只能是冻结的`staging_retain_until`；Producer只能重验，不能修改、延长、缩短或把它换成Ready期限。
+只有typed owner terminal把Artifact推进Ready的同一事务，才能以该事务自己的PostgreSQL `db_now`执行checked
+`ready_retain_until = db_now + ready_retention_seconds`，持久化该绝对时间并建立业务Reference/RunValue；terminal响应丢失重放已保存的
+绝对时间。Inline、失败、取消、超时或loser不执行该切换，继续按staging/orphan policy收敛。
+
 其中single size、per-operation size和retention是HardLimit/Retention Policy约束，不创建虚假usage ledger；active、并发、
 累计使用和可回收占用才进入共享Quota authority。dimension的accounting mode闭合为：
 
@@ -536,6 +583,22 @@ struct UsageReservation {
 }
 ```
 
+CR-165的Model output quota closure在同一start事务原子创建两个、且只能两个共享Quota bundle，以匹配Artifact与Blob独立生命周期：
+
+- Artifact bundle：`owner_resource_id=预留ArtifactId`，只含`ArtifactCount(Reclaimable, 1)`与
+  `ArtifactLogicalBytes(Reclaimable, maximum_materialized_bytes)`；Ready时消费，exact Artifact删除时Refund；
+- candidate Blob bundle：`owner_resource_id=预留candidate BlobId`，只含`ArtifactUploads(Leased, 1)`、
+  `ArtifactStagingBytes(Leased, maximum_materialized_bytes)`与
+  `ArtifactPhysicalBytes(Reclaimable, maximum_materialized_bytes)`；new Blob winner的physical占用跟随Blob直到最后一个alias删除，
+  preexisting/race-loser candidate则由candidate cleanup关闭。
+
+两个bundle owner从创建起固定，不是Model Worker、Job或Producer，也不能在dedupe时转给resolved Blob、另一个Artifact或新cleanup
+reservation。existing Verified Blob沿用其最初创建时的physical bundle；复用它的新Artifact只消费自己的Artifact bundle，并关闭未创建
+candidate的Blob bundle。candidate Blob ID是在同一output reservation中预分配的typed future owner：Blob row尚未创建期间只能由exact
+Producer创建该same ID，或由owner按no-object evidence关闭bundle；不能把它当generic polymorphic owner或改绑另一Blob。缺bundle/line、
+重复dimension、错误mode/unit/scope/window或调用方增加line均拒绝start。两个header分别保持
+`Open`直到自己全部line终结；line settlement状态由现有reservation line/ledger表达，不增加新的`cleanup-required` quota state或表。
+
 `QuotaScope`是closed tagged union，只允许Tenant、AgentDeployment、WorkClass、CapabilityDeployment、
 ModelDeployment、ContextDeployment、McpDeployment、SandboxProfileRevision、Run或Principal；每个variant验证exact ID prefix，
 WorkClass命中07的machine registry。Quota Policy固定每个dimension允许的scope和window；reservation不能把一个scope的额度
@@ -552,17 +615,47 @@ authority row后传入。Gateway、Worker或客户端不得直接构造`QuotaSco
 `quota_reservation_lines`按canonical BudgetKey排序保存各层amount。共享primitive在03 `TenantQuotaPolicy` lock rank一次锁定
 全部budget，任一层不足则整包不写；禁止逐层提交、内存补偿或先入队后补reserve。
 
+把reservation作为后续domain mutation前提的短事务，必须在Receipt rank之后、parent aggregate/Job rank之前，对请求冻结的exact
+`(UsageReservationId, generation)` header按ID排序取得`FOR SHARE`，并按canonical BudgetKey对全部line取得同等级锁；锁后重新验证
+tenant、owner、Open state、deadline、generation、dimension/mode/amount与未settle事实。Model Artifact Producer的Processing claim、
+candidate Blob bind、Uploaded checkpoint、Verifying checkpoint与final Verified事务都必须以这种方式锁定exact两个bundle，不能只做
+无锁snapshot读取。`Consume/Close/Refund/Expiry`及safety owner对同一header/line取得冲突的`FOR UPDATE`、CAS current generation并在成功
+时递增generation，因此不能在Producer验证Open后先释放额度、再让Producer提交物理状态。外部对象/KMS I/O期间不持有这些锁。
+
 settlement是append-only、以stable settlement key与canonical request digest去重的bundle操作：
 
-- `Consume`允许Model等多Attempt工作从同一reservation envelope分次消耗；Reclaimable资源在Ready时也用它把
-  reserved amount转成占用，并让reservation保持Open直至资源生命周期结束；
-- `Close`原子消费最终actual并释放剩余额度，终结Consumable/Leased reservation；Leased line的actual必须为零；
+- `Consume`允许Model等多Attempt工作从同一reservation envelope分次消耗；混合mode bundle的一次原子settlement可以把
+  Reclaimable line的exact actual转成占用并释放余量，同时以`actual=0`终结已无物理/并发责任的Leased line；仍承担candidate cleanup的
+  Leased line不写settlement，保持原reserved/Open事实，不产生actual、不过期也不释放；只要任一Reclaimable占用或Leased cleanup责任仍
+  存活，bundle header就保持Open；
+- `Close`只在该bundle所有Reclaimable line尚未`Consume`时以全line `actual=0`终结；Leased line的actual永远必须为零。未Ready
+  Artifact bundle可由owner terminal直接Close；candidate Blob bundle只有在证明candidate row/locator/object均不存在，或cleanup已提交
+  exact generation deletion/absence evidence时才可Close；已经形成Reclaimable占用后只能先走`Refund`；
 - `Refund`只允许Reclaimable line，由拥有原资源lifecycle的domain在删除/GC事实同一事务调用，并可在净占用归零时
   同时把reservation置为Closed；
 - actual超过reservation时仍必须记录已发生用量；超过budget limit的部分标为overage、阻止该window的新reservation并产生
   quota incident，不能因拒绝settlement而丢失计费事实；
-- Expiry只释放尚未settle的reserved amount，不撤销已发生Consumable/Reclaimable consumption；safety scan与业务close竞争
-  使用generation/ETag first-winner fence。
+- Expiry只释放尚未settle且已证明没有物理对象可能性的reserved amount，不撤销已发生Consumable/Reclaimable consumption。candidate Blob
+  bundle若已绑定locator或存在PUT可能性，deadline只使Artifact/Blob lifecycle派生出`cleanup_required`分类，bundle仍为Open，不能释放或
+  改为Expired；cleanup必须先用exact generation deletion/absence evidence闭合candidate，再Close未Consume line。new Blob winner因hold/
+  live alias保留时，PhysicalBytes保持Consume占用，直到最后alias删除才Refund。
+  safety scan与业务close竞争使用generation/ETag first-winner fence。
+
+Materialization Producer不是quota owner。它只能为exact attempt授权读取预留identity、open state与上限，数据库role必须拒绝其
+reserve、`Consume`、`Close`、`Refund`、`Expiry`或直接修改balance/ledger。typed owner terminal按stage disposition结算：
+
+- 所有Artifact winner在Artifact bundle消费`Count=1`、`LogicalBytes=exact canonical bytes`并释放余量；该bundle保持Open到Artifact删除
+  Refund，不负责physical bytes；
+- `PreexistingHit`关闭candidate Blob bundle的三条line为0，resolved Blob原physical bundle不变；
+- `CandidateWinner`在candidate Blob bundle把Uploads/StagingBytes以0终结，消费`PhysicalBytes=exact new bytes`并释放余量；该bundle随
+  resolved Blob保持Open，最后一个live alias删除及physical deletion/absence后才Refund/Closed；
+- `RacingCandidateLoser`只把Uploads以0终结，StagingBytes保持reserved/Open且PhysicalBytes不Consume；candidate exact cleanup后把剩余两条
+  以0终结并Closed。race loser bytes由StagingBytes覆盖，不伪装为Ready physical占用。
+
+Inline或失败owner可把未Ready Artifact bundle以0关闭；candidate row/locator/object完全不存在时也关闭Blob bundle。只要candidate已绑定或
+可能PUT，Blob bundle就保留到exact cleanup，`cleanup_required`只是Artifact/Blob lifecycle分类。Ready Artifact删除只Refund自己的
+Count/Logical bundle；shared Blob仍有alias时不得动Physical，最后alias删除才由Blob lifecycle Refund最初winner的Physical bundle。Producer
+不得提前结算或释放任一bundle。
 
 每个限制都有tenant value、platform hard maximum、window和overflow behavior。budget物化必须绑定exact Quota Policy
 Revision与HardLimitProfile digest，并证明effective limit等于各层最小值；policy/head或capacity变化不改写既有reservation。
@@ -720,6 +813,10 @@ idempotency_conflict
 - package/image signature 与 digest 不匹配时 publication 失败；
 - approval 参数变化、过期、重复和错误 approver 全部被拒绝；
 - egress 测试覆盖 redirect、DNS rebinding、IPv4/IPv6 private ranges 和 proxy bypass。
+- quota fixture证明`maximum_materialized_bytes <= Inline threshold`不创建Artifact Reclaimable reservation，越过threshold才按最坏合法
+  count/bytes预留；Producer credential的全部quota mutation和retention deadline修改被拒绝，只有owner terminal可把staging retention
+  切换为ready retention，并对Artifact/Inline/失败竞态只结算或释放一次；Blob bind前失败可零actual关闭，bind/PUT后的cancel/loser及
+  reservation expiry持续占worst-case staging额度，直到exact generation deletion/absence evidence与释放同事务提交。
 
 ## 21. 明确推迟的工作
 

@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-09 |
+| 日期 | 2026-08-15 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
 
@@ -263,6 +263,19 @@ Scheduler 通过持久化 control token 决定 readiness：
 - ValueRef不新增global ResourceKind/ID；它以`(tenant_id, run_id, value_key)`作为owner-local identity，并以
   `(owner_kind, owner_id, owner_port)`唯一绑定typed owner，因此一个Node可按多个output port分别产值；
 - 小值内联并受大小限制，大值使用 ArtifactRef；
+- Artifact-backed Model output只有在typed owner计算的冻结合法输出上限严格大于effective Inline threshold时，才可预留
+  Artifact/candidate Blob/duplicate-cleanup Job/Output Link/stage Receipt和04固定的Artifact-owned count/logical bundle及
+  candidate-Blob-owned upload/staging/physical bundle；上限小于或
+  等于threshold时必须是`InlineOnly`。预留ID只属于exact owner/Job/attempt/lease，尚未插入的
+  RunValue ID不构成RunValue，实际小值仍必须由owner terminal写Inline值并释放整组未用Artifact预留；
+- Model output的`Staging | Uploaded | Verifying | Verified` Artifact candidate及materialization/stage Receipt都不是ValueRef，
+  不能满足data port、
+  产生control token、唤醒consumer、进入public output或被恢复流程当作continuation/terminal outcome；
+- 只有Model typed output owner的first-winner terminal事务可以在同一原子提交中把exact Verified candidate推进`Ready`、建立唯一
+  `Reference`/Output Link、用该事务PostgreSQL time加冻结`ready_retention_seconds`计算并保存absolute `ready_retain_until`、把retention从
+  冻结`staging_retain_until`切到该值并插入immutable RunValue的
+  `ValueRef::Artifact`。Producer只能形成Verified candidate与digest-bound receipt，
+  不能创建RunValue、建立Reference或推进Ready；任一检查失败必须使上述事实全部不可见；
 - immutable RunValue的`schema_digest`是trusted producer对逻辑值正文已通过exact schema的承诺，不是
   客户端可自由声明的metadata。Inline producer必须对本地正文验证；Artifact-backed producer必须在读取并核对
   exact content digest/length后对物化正文验证，再与RunValue原子提交。consumer仍在自己的trust boundary可见正文时
@@ -494,6 +507,8 @@ Run/node ID 不进入 metric label。Trace span 可以携带 opaque IDs，但不
 - parallel/map cancel 后父 scope 等待安全 drain；
 - signal/callback/timeout 竞态只有一个 first-winner；
 - terminal output schema failure 不能提交 Succeeded；
+- Artifact output fixture证明Staging/Verified candidate与stage Receipt永远不满足ValueRef；只有owner terminal可以原子产生
+  Ready Artifact、ready retention、唯一Output Reference和RunValue，crash/stale/cancel/timeout任一窗口都不存在这些事实的部分可见组合；
 - 所有 v2 Run 都能在不同 runtime 实例恢复，不存在 volatile 分支。
 
 ## 21. 明确推迟的工作

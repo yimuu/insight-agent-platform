@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-10 |
+| 日期 | 2026-08-15 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) |
 | 直接下游 | 08、10、12、14、16、17、18 |
 
@@ -91,10 +91,35 @@ Worker：
 - heartbeat、发布受控 progress、提交闭合 outcome；
 - 不决定下游控制流。
 
-Worker capability manifest使用`contracts/platform-v1/schemas/worker-manifest.schema.json`的closed shape；每份manifest只声明
-一个exact WorkClass、adapter/runtime digest、协议版本、业务最大并发和正数`critical_control_reserved_slots`。它以canonical
-digest进入CandidateManifest，一份manifest不能把多个WorkClass映射到同一个semaphore。启动时schema、typed validator、
-WorkerProcessGeneration和Deployment binding任一不匹配都拒绝claim。
+Worker capability manifest使用`contracts/platform-v1/schemas/worker-manifest.schema.json`的closed shape；Accepted目标把该machine
+contract升级为`manifest_version=2`。每份manifest只声明一个exact WorkClass、adapter/runtime digest、协议版本、业务最大并发、正数
+`critical_control_reserved_slots`与以下conditional字段：
+
+```rust
+struct ModelOutputMaterializationCapacity {
+    slots: u16,
+    aggregate_bytes: u64,
+}
+
+struct WorkerManifestV2 {
+    // existing closed fields omitted
+    model_output_materialization: Option<ModelOutputMaterializationCapacity>,
+}
+```
+
+`work_class=Model`必须提供该字段，其他WorkClass必须不提供；两个值都必须为正，`slots <= max_concurrency`，并分别不超过18
+HardLimitProfile v5的`artifact.model_output_worker_slots`与`artifact.model_output_worker_aggregate_bytes`。它以canonical digest进入
+CandidateManifest，一份manifest不能把多个WorkClass映射到同一个semaphore。启动时schema、typed validator、
+WorkerProcessGeneration和Deployment binding任一不匹配都拒绝claim。当前checked-in v1 schema/validator没有该字段，只能证明现有
+Inline路径，不能作为Artifact-backed Model output的Candidate证据；实施必须原子升级schema、Rust type、fixture与Candidate closure。
+
+发布/激活Model Deployment时必须证明每个ArtifactCapable binding至少有一个匹配adapter、protocol与region的Model Worker manifest满足
+`slots >= 1 && aggregate_bytes >= maximum_materialized_bytes`；18还要同时证明Producer单请求容量。否则拒绝发布/激活，不能依赖deadline
+清理一个永远无法被任何Worker领取的Ready Job。
+
+Model Worker的`model_output_materialization`是slot+weighted-bytes两级RAII容量；它与Model Provider stream、Model request read client、
+Model Artifact Producer服务端permit、Sandbox Artifact Broker以及`critical_control` reserve均为不同容量事实，不能别名到同一semaphore、
+借位或在运行时动态重分配。
 
 ## 5. Coordinator
 
@@ -151,6 +176,14 @@ quota、增加epoch、设置lease和父work/in-flight counters。Scheduler只选
 advertised capacity预留本地slot；领取后本地slot获取失败属于实现错误，Worker必须立即走typed release/shorten路径，不能持有工作
 等待本地容量。
 
+Model typed claim必须从exact output contract与HardLimitProfile推导`InlineOnly | ArtifactCapable`，不能接受调用方hint。对冻结合法输出
+上限可能超过effective Inline threshold的`ArtifactCapable`候选，capacity-aware claim在数据库领取前必须同时预留一个Model business
+slot、一个`model_output_materialization.slots` permit和恰好`maximum_materialized_bytes`的weighted byte permit；repository返回的每个此类
+`(JobId, lease_generation)`必须一一绑定三者，任一容量不可用时该候选保持Ready。不能先claim再等待materialization容量，也不能借用Model
+request read Broker permit、Sandbox permit、Producer服务端permit或`critical_control` permit。slot与bytes permit持有至Inline owner
+terminal、Artifact stage后的owner terminal或typed generation release；进入durable defer/retry前必须与business slot一起释放，drop必须
+同时归还两级容量且禁止整数下溢/重复释放。Producer仍在独立进程用自己的服务端permit再次准入，这两个进程内permit不是同一authority。
+
 Job generation 次数使用跨WorkClass的`run_scheduler.attempts_per_work` hard limit；不能以Node专用字段约束RegistryValidation、
 Model、Capability、MCP、Context、Sandbox、Interaction、Artifact或Recovery work。共享 Job 只保存 current epoch/ordinal，业务Ready、
 RetryScheduled、Effect与terminal仍由typed父aggregate handler拥有。
@@ -183,7 +216,9 @@ budget locators。
 
 ```text
 orchestration
-model
+model provider
+model request materialization
+model output materialization
 remote capability
 mcp
 context
@@ -191,7 +226,8 @@ sandbox
 artifact
 ```
 
-配置不能把 Sandbox 与 Orchestration/Model 合并为同一池。
+配置不能把Sandbox与Orchestration/Model合并为同一池，也不能把Model output materialization合并到request read、Sandbox、
+Artifact Producer或critical-control池。
 
 ## 8. 公平性与优先级
 
@@ -392,6 +428,8 @@ backend/tenant 具体 ID 不进入 label；高 cardinality 诊断通过受控 tr
 - deferred task 释放 Worker permit，等待期间没有常驻 future/连接；
 - rolling shutdown 不制造假 failure 或双 commit；
 - circuit open 只影响对应 backend，不移动 binding、不击穿其他 work class；
+- Model output materialization permit为零时，`ArtifactCapable` Model候选保持Ready且不取得lease；`InlineOnly`候选、Model request read、
+  Sandbox与critical-control仍可准入，claim失败、少领、drop和durable defer均精确释放成对的本地slot；
 - 负载测试证明 coordinator wake 合并和 claim batch 不造成数据库轮询风暴。
 
 ## 20. 明确推迟的工作
@@ -429,3 +467,7 @@ business connection pool 100%占用期间，独立Sandbox-role pool的20次probe
 Phase 2 domain/runtime functional exit据此关闭。仍未完成的是Phase 6资格：同一CandidateManifest、production-equivalent topology、
 完整跨WorkClass混合负载、30分钟持续吞吐和18定义的全部SLI/Gate E证据。开发期fixture不得登记为Gate E，也不得把本规范标记为
 Verified；这些边界不得通过调用方自由候选/参数或复制Ready authority规避。
+
+CR-165新增的Model output materialization本地permit、Artifact-capable capacity-aware claim与跨read/Sandbox/control lane隔舱目前只有
+合同，尚无WorkerManifest、Coordinator、真实PostgreSQL claim或饱和fixture证据；既有通用RAII business slot与Phase 2证据不能替代它，
+也不得据此关闭Artifact-backed Model output、Phase 4/6或任何资格Gate。

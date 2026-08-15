@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-09 |
+| 日期 | 2026-08-15 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)～[`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) 的全部领域合同 |
 | 直接下游 | 18 |
 
@@ -90,7 +90,9 @@ Runtime token不能访问Management route；Operator token默认不能代表tena
 exact operation/object有效。
 
 公共health route不放在 `/v1` resource namespace：`/health/live`、`/health/ready`。Metrics、debug、pprof、admin
-repair和internal gRPC不经公共Ingress。
+repair和internal gRPC不经公共Ingress。`ArtifactModelBrokerService`、`ArtifactSandboxBrokerService`与
+`ModelArtifactProducerService`都没有public route、OpenAPI operation、外部LoadBalancer或Ingress/Gateway映射；内部Kubernetes
+Service discovery不能被投影为tenant API。
 
 ## 5. Authentication 与 Principal
 
@@ -762,10 +764,39 @@ WorkerClaimCommitService
 ModelExecutionService
 McpHostService
 SandboxGatewayService
-ArtifactBrokerService
+ArtifactModelBrokerService
+ArtifactSandboxBrokerService
+ModelArtifactProducerService
 SecretBrokerService
 CallbackInboxService
 ```
+
+Artifact internal gRPC必须注册为三个不可合并的exact service，不能保留generic `ArtifactBrokerService`、按header/body动态选择
+audience，或在同一listener上用method alias扩大权限：
+
+| Service | 唯一首版方法 | exact client mTLS URI SAN | authority上限 |
+|---|---|---|---|
+| `ArtifactModelBrokerService` | `ReadModelRequest` | `spiffe://insight.platform/workload/model-worker` | 只读exact Model request Artifact；数据库SELECT-only，对象存储只允许HEAD/GET与KMS decrypt |
+| `ArtifactSandboxBrokerService` | `ReadWasiArtifact`、`ReadMicroVmArtifact` | `spiffe://insight.platform/workload/sandbox-controller` | 只读exact Sandbox Job/package/input Artifact；数据库SELECT-only，对象存储只允许HEAD/GET与KMS decrypt |
+| `ModelArtifactProducerService` | client-streaming `StageModelOutput` | `spiffe://insight.platform/workload/model-worker.artifact-output` | 只为exact Model Attempt写staging并最多推进`Staging -> Uploaded -> Verifying -> Verified` |
+
+三者都必须在TLS握手后的service authorization再次比较exact URI SAN；CN、DNS SAN、bearer/human token、tenant header、forwarded
+identity、自报workload字段或拥有同名permission都不能替代该audience。请求tenant、Run/ModelTurn/Sandbox Job、Artifact、attempt/lease/
+Worker generation、grant/reservation、purpose、Policy closure和deadline只能从durable command与current fence派生，stream body不能覆盖。
+错误service、method、URI SAN或audience组合在解析正文、访问PostgreSQL/S3/KMS前拒绝，并形成body-free受限audit。
+Model Worker必须使用不同client SVID与连接池访问read Broker和Producer：`.../model-worker`只能调用`ReadModelRequest`，
+`.../model-worker.artifact-output`只能调用`StageModelOutput`；任一凭证互换都在进入authority前拒绝。
+
+`ArtifactModelBrokerService`与`ArtifactSandboxBrokerService`是两个独立只读进程边界，不得注册write/stage/upload/complete/
+verify/finalize方法。`ModelArtifactProducerService`不得注册任一read Broker方法、Sandbox方法、generic object API或公共HTTP route；
+其restricted数据库角色不能修改Run、RunNode、Invocation/ModelTurn、Job current state、RunValue、业务Artifact Output Link、quota余额、
+Event或Outbox。
+
+`StageModelOutput`必须使用15/16的closed header/chunk/terminal与same-Attempt `JobCommit` Receipt，在object I/O前后分别重验exact
+current Job fence。Producer receipt只证明预留Artifact bytes已经Verified，不是Model terminal result。Producer无权将Artifact推进
+Ready、创建Output Link/RunValue、推进ModelTurn/Job/Node/Run、settle quota或发布`model.completed`。只有Model owner repository的单一
+PostgreSQL terminal first-winner事务可以原子完成Verified -> Ready、唯一ModelTurn Output Link、immutable Artifact-backed RunValue、
+ModelTurn/Job terminal、quota settlement、Event与Outbox；任一步失败全部回滚，stale/cancel/timeout/loser仍保持非Ready并进入orphan GC。
 
 - protobuf package/version固定，unknown enum fail closed；
 - 所有 call 使用 mTLS workload identity、service authorization、deadline、message size 和 retry policy；
@@ -774,7 +805,7 @@ CallbackInboxService
 - callback使用scoped one-time identity/inbox dedupe；
 - Secret value只在专用broker response且不进入generic envelope；
 - gRPC retry仅对明确idempotent method和stable request ID；
-- publicIngress不能路由internal service；
+- public Ingress/Gateway不能路由任何internal service，三个Artifact service也不得出现在OpenAPI或公共service registry；
 - internal API不绕过PostgreSQL transaction/outboxauthority。
 
 ## 26. Security Headers 与 Gateway
@@ -837,6 +868,9 @@ hash、route template、Operation/Run opaque ID和outcome，不记录Authorizati
 ## 30. 配置与部署
 
 - Management API、Runtime API、SSE Gateway、Artifact Gateway和internal gRPC role独立Deployment/DB pool/HPA；
+- `ArtifactModelBrokerService`、`ArtifactSandboxBrokerService`与`ModelArtifactProducerService`分别使用独立Deployment、
+  ServiceAccount、mTLS identity/CA allowlist、restricted DB credential/pool、storage/KMS identity、permit与NetworkPolicy；三者不得
+  共享Pod或用一个process-wide listener/semaphore模拟隔离，Producer也不得借用read Broker的SELECT-only credential；
 - OpenAPI/event/error schema随image构建并暴露受控static endpoint，digest进入release evidence；
 - server启动校验route/permission/schema/error registry完整性，unknown config fail fast；
 - readiness检查自身DB pool、policy resolver和command path；不因任一Provider/MCP/Sandbox远端失败全局unready；
@@ -861,6 +895,14 @@ hash、route template、Operation/Run opaque ID和outcome，不记录Authorizati
 - rate/connection/payload/list/filter/cursor/backpressure hard limit；
 - Management/Runtime/Operator/workload token audience和route隔离；
 - Artifact transfer grant no-store/exact audience和active content origin隔离。
+- 三个Artifact internal service均无OpenAPI/public route/Ingress/外部LoadBalancer，公共Gateway探测service/method均不可达；
+- Model Worker、Sandbox Controller、human token、CN/DNS SAN和相邻ServiceAccount对三个Artifact service逐项做URI SAN/service/method
+  互换负向fixture；未授权组合在DB/S3/KMS访问前拒绝；
+- 两个read Broker的数据库写入与S3 PUT/KMS encrypt被权限拒绝；Producer只能PUT/HEAD及对同reservation exact staging generation
+  做恢复GET，任意Ready object GET/list与Run/ModelTurn/Job/RunValue/Output Link/quota/Event/Outbox写入都被权限拒绝；单服务饱和、
+  重启或DB pool耗尽不消耗另外两个服务容量；
+- `StageModelOutput` pre/post Job-fence、same-Attempt replay/conflict、cancel/lease takeover/terminal first-winner竞态证明Producer最多Verified，
+  owner terminal事务要么同时提交Ready/Output Link/RunValue/quota/outbox，要么全部回滚并保留非Ready orphan。
 
 ## 32. 验收标准
 
@@ -876,6 +918,9 @@ hash、route template、Operation/Run opaque ID和outcome，不记录Authorizati
 - API各bulkhead饱和/远端故障不破坏cancel、安全控制和其他route readiness；
 - generated SDK/conformance suite在至少Rust/TypeScript两个client实现通过；
 - route/error/event breaking change在CI被识别并阻止静默改变同一`insight.platform/v1`合同。
+- Artifact internal gRPC只存在三个exact service及其列明方法；它们具有不可互换的mTLS audience、部署与最小权限，且均无public route/Ingress；
+- `ModelArtifactProducerService`无法创建可读或业务可引用的Model output；只有owner terminal单事务能形成Ready Artifact、Output Link与
+  Artifact-backed RunValue，失败或stale输出只能保持非Ready并由GC收敛。
 
 ## 33. 明确推迟的工作
 

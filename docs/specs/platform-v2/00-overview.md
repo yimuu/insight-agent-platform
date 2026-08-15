@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-10 |
+| 日期 | 2026-08-15 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -183,6 +183,12 @@ Git 历史，不再复制到活动规范。它们不能证明当前 schema、API
 functional exit 已关闭；Phase 3 的 Artifact transaction/worker、generic Invocation、Capability execution、ModelTurn、Context 与
 Text2SQL domain/repository 已在 fresh PostgreSQL 16 上作为同一全量 fixture suite 实际执行。Text2SQL admission 还在同一事务锁定
 committed SqlCatalog Observation 与 exact `database.query.readonly` Capability Interface/Deployment/ReadOnly Effect，不建立专用表。
+CR-165 已将 Model Artifact-backed output 的目标合同完成 cross-review并冻结为Accepted：写路径使用独立Model Artifact Producer，
+与只读Model Artifact Broker分离，且只有Model terminal PostgreSQL事务能够把Verified Artifact原子推进为Ready并提交Output Link、
+RunValue、usage/quota、Event与Outbox；pre-header transport timeout与storage write-quiescence barrier分别阻断slowloris容量占用和
+absence后迟到PUT。该结论只表示目标合同可实施；对应domain/schema/protobuf、Producer进程与权限、部署及
+real-process/故障/容量资格仍全部Open。当前Model output materializer仍为Inline-only，超过Inline能力时仍走开发期
+`model_output_artifact_required`防护；不得据此关闭Phase 4～6、任一Qualification Gate，或把Artifact-backed output声明为当前行为。
 精确完成度和下一门禁只以 [`implementation-plan.md`](implementation-plan.md) 为准。Phase 4～6 尚未完成，Phase 7 还要求
 用户对 clean replacement 单独明确授权。
 

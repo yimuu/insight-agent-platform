@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-09 |
+| 日期 | 2026-08-15 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) |
 | 直接下游 | 04、06、07、08、10、12、13、14、15、16、17、18 |
 
@@ -238,7 +238,9 @@ struct Receipt {
 
 相同key/digest重放返回同一terminal result；不同digest返回`idempotency_conflict`。Callback先做body size/media type和认证，再创建
 Receipt；payload正文使用bounded encrypted value或ArtifactRef。Receipt result可包含typed rejection reason与observation snapshot，
-不为late rejection另建表。Processing receipt使用短lease并可恢复，不能跨外部I/O长期占用。
+不为late rejection另建表。Processing receipt使用短lease并可恢复；bounded外部I/O可以跨越Receipt lease，但不能持有数据库事务或
+行锁，长操作必须续租且所有最终mutation回绑current `claim_generation`。terminal Receipt的同key/digest重放先于current aggregate
+authorization并且不重做I/O；只有新建或Processing lease过期接管才重新授权，接管必须递增claim generation。
 
 ## 9. Event与Outbox
 
@@ -304,7 +306,24 @@ Callback不能覆盖tenant、Run、Deployment、Policy或Secret binding。Capabi
 ## 13. Artifact一致性
 
 Artifact写入使用prepare/upload/verify/finalize：数据库先创建bounded upload intent，bytes写staging object，Worker验证digest/media/
-content policy，业务事务只引用Finalized Artifact。S3成功而DB失败产生可GC orphan；DB不得提交指向Staging或缺失object的引用。
+content policy。公共上传可以先完成独立owner finalize；Capability/Sandbox/Model等受信producer输出则最多留下不可读的Verified candidate，
+由消费owner事务在同一lock order中执行`Verified -> Ready`、Reference/RunValue与业务terminal first-winner。S3成功而DB失败产生可GC
+orphan；DB不得提交指向Staging/Verified、缺失object或没有同事务业务Reference的RunValue。
+
+Model Artifact Producer的stage Receipt只证明exact Attempt bytes已Verified，不是Model outcome。Model terminal事务仍按
+`Receipt -> quota -> parent/child aggregate -> Job -> Artifact -> Run sequence -> Event/Outbox`锁序提交；Producer不得在对象I/O期间持有
+数据库事务，也不得修改ModelTurn/Job、quota余额、Event或Outbox。Inline/cancel/timeout/first-winner loser必须让非Ready candidate进入
+Artifact GC，不能用bucket/object事实反推业务成功；quota服从04双bundle：未Ready Artifact count/logical bundle可Close，candidate Blob/
+PUT不可能时upload/staging/physical bundle也可Close，已有candidate/object或dedupe race loser时Blob bundle保持Open到exact
+deletion/absence evidence，不能先释放再GC。
+
+Model output stage是明确的physical sub-protocol例外：Blob bind以及Artifact/Blob到Verified的内部物理transition不逐步追加
+Event/Outbox，durable审计由claim-generation-bound JobCommit Receipt与Verified evidence承担；最终Ready或cleanup/incident owner事务
+必须在自己的Event中回绑该evidence digest。Producer的Processing claim、Blob-bind、Uploaded/Verifying checkpoint与final-Verified短事务
+都要按上述锁序先锁stage Receipt，再按04 canonical顺序对冻结的两个quota bundle header/line取得`FOR SHARE`并锁后重验exact generation，
+然后对current ModelTurn/Job取得会阻塞cancel/lease/terminal更新的共享serialization guard，最后锁Artifact/Blob；quota Close/Expiry/
+settlement取得冲突锁，外部I/O期间不持锁。
+最终Verified evidence、Artifact/Blob状态和Receipt terminal必须同事务提交。该例外不允许silent业务transition或Producer写业务Event。
 
 ## 14. 典型故障语义
 

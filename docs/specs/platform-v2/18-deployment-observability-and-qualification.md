@@ -18,10 +18,17 @@ transport、外部 Secret Manager 作为 Secret value 权威。Control（其中R
 Sandbox、Artifact 与 Recovery 使用独立 Deployment、service account、DB/connection pool、queue、permit 和
 autoscaling policy。
 
-Artifact受信物化进一步按调用audience物理切分：Model Artifact Broker与Sandbox Artifact Broker必须是不同进程、
-Deployment、ServiceAccount、restricted PostgreSQL credential/pool和process-local permit。Model Broker只暴露Model RPC；Sandbox
-Broker只暴露WASI与microVM RPC，后两者可以共享Sandbox audience自己的bulkhead。两个Broker不得共Pod、共pool或通过单listener动态
-选择audience；一侧饱和、重启或泄露不能消耗另一侧准入容量。
+Artifact受信读取进一步按调用audience物理切分：Model Artifact Broker与Sandbox Artifact Broker必须是不同进程、
+Deployment、ServiceAccount、restricted PostgreSQL credential/pool和process-local permit。Model Broker保持read-only且只暴露
+`ReadModelRequest`；Sandbox Broker只暴露WASI与microVM read RPC，后两者可以共享Sandbox audience自己的bulkhead。两个Broker不得
+共Pod、共pool或通过单listener动态选择audience；一侧饱和、重启或泄露不能消耗另一侧准入容量。
+
+Artifact-backed Model output由第三个独立组件Model Artifact Producer承载，不扩展上述read Broker。Producer使用独立进程、
+Deployment、ServiceAccount、write-limited PostgreSQL credential/pool、S3/KMS write workload identity、client-stream endpoint和
+write permit；它不得与Model read Broker或Sandbox Broker共享Pod、ServiceAccount、数据库credential/pool、storage identity、
+connection pool或semaphore。Model Worker使用与Model read client分离的exact
+`spiffe://insight.platform/workload/model-worker.artifact-output` mTLS client、连接池和有界stream调用Producer；Producer
+饱和、滚动或失败不得耗尽Model request读取、Sandbox读取、Model Worker control/cancel或控制面容量。
 
 普通 workload 遵守 Kubernetes Restricted security baseline。Sandbox controller 与 KVM Executor 位于独立 namespace/
 node pool；只有最小 Executor Agent 能访问 `/dev/kvm`，user code 只在14定义的WASM/gVisor/microVM边界执行。
@@ -45,6 +52,7 @@ Release只有通过Contract、Functional、Security、Recovery、Capacity、Soak
 - 提供real-process、故障注入、容量、soak、DR与安全资格矩阵；
 - 让每次资格报告绑定commit、image/schema/config/dataset/命令和原始证据；
 - 证明Sandbox/MCP/Provider/Artifact任一隔舱饱和或失败不会拖垮控制面；
+- 证明Model Artifact Producer、Model read Broker与Sandbox Broker任一单独饱和、失败或滚动不会消耗另外两条Artifact lane；
 - 明确何时00～18可从Draft进入Verified并同步 `docs/current`。
 
 ### 2.2 非目标
@@ -96,6 +104,8 @@ struct CandidateManifest {
     database_schema_version: SchemaVersion,
     component_images: BTreeMap<ComponentRole, ImageDigest>,
     worker_manifests: Vec<WorkerManifestDigest>,
+    component_capacity_manifests: Vec<ComponentCapacityManifestDigest>,
+    artifact_storage_binding_manifests: Vec<ArtifactStorageBindingManifestDigest>,
     deployment_config_digest: Digest,
     hard_limit_profile_digest: Digest,
     policy_baseline_digest: Digest,
@@ -116,16 +126,94 @@ struct ReleaseManifest {
 `latest`均非法。`ComponentRole`是稳定的小写部署角色键，必须匹配`[a-z][a-z0-9_.-]{0,127}`，不得用临时Pod名或副本名。
 `database_schema_version`精确表示`insight-platform-postgres`导出的schema contract version（当前候选基线为`6`），不是
 migration文件数量、数据库产品版本或payload schema version。Candidate创建器必须从实际安装的closed `WorkerManifest`集合和
-`HardLimitProfile`计算canonical digest closure；worker digest按字节升序且唯一，重复role、缺失或额外manifest、limit digest漂移均拒绝。
+`HardLimitProfile`计算canonical digest closure；worker、component-capacity与artifact-storage-binding digest各自按字节升序且唯一。每个需要本地容量的exact
+component image/Deployment role必须恰有一份对应manifest，manifest role必须与image、Deployment及startup config逐字段匹配；重复role、
+缺失或额外manifest、limit digest漂移均拒绝。Candidate schema/builder/runtime readiness必须执行同一closure，不能只在文档或Helm lint检查。
 
 只要Candidate包含MCP OAuth绑定，`deployment_config_digest`覆盖的closed Egress配置还必须包含exact Auth Policy revision、完整
 Auth Profile、允许的非对称JWT算法、public JWKS及其canonical digest，以及OAuth写入所用ServiceIdentity Principal。运行时不得从
 issuer动态补齐、刷新或替换该信任根；key rotation通过新Candidate发布并重新资格，而不是在旧Candidate内静默漂移。
 
 `WorkerManifestDigest`必须是`contracts/platform-v1/schemas/worker-manifest.schema.json` closed document的canonical digest。
-每份document只允许一个exact WorkClass，并冻结`worker_role`、`adapter_runtime_digest`、协议版本、业务最大并发和正数
-`critical_control_reserved_slots`；CandidateManifest中的不同digest不能在运行时合并成共享semaphore。当前本地pool primitive
-的unit evidence不是CandidateManifest，也不能替代Gate E/Q1负载证据。
+Accepted目标使用07的`manifest_version=2`：每份document只允许一个exact WorkClass，并冻结`worker_role`、
+`adapter_runtime_digest`、协议版本、业务最大并发和正数`critical_control_reserved_slots`；Model role还必须且只有它可以携带closed
+`model_output_materialization { slots, aggregate_bytes }`。CandidateManifest中的不同digest不能在运行时合并成共享semaphore。当前
+checked-in v1 contract不具备该字段，不能证明Artifact-backed output；本地pool primitive的unit evidence也不是CandidateManifest，
+不能替代Gate E/Q1负载证据。
+
+非Job-claim服务的本地容量使用独立closed `ComponentCapacityManifest`，不能伪装成WorkerManifest或只藏在opaque
+`deployment_config_digest`中。首个variant固定为：
+
+```rust
+enum ComponentCapacityManifest {
+    ModelArtifactProducer(ModelArtifactProducerCapacityV1),
+}
+
+enum AdmissionQueueMode { RejectWhenSaturated }
+
+struct ModelArtifactProducerCapacityV1 {
+    manifest_version: u32, // const 1
+    component_role: ComponentRole, // exact model-artifact-producer
+    admission_queue_mode: AdmissionQueueMode, // exact RejectWhenSaturated
+    transport_accept_backlog: u32,
+    transport_accept_timeout_milliseconds: u32,
+    in_flight_streams: u32,
+    in_flight_declared_bytes: u64,
+    in_flight_buffer_bytes: u64,
+    streams_per_tenant: u32,
+    database_connections: u16,
+    object_store_connections: u16,
+    kms_connections: u16,
+}
+
+enum ObjectWriteMode { ConditionalCreateVersioned }
+enum ExactKeyObservationContract { StrongAfterWriteQuiescence }
+
+struct ArtifactStorageBindingManifestV1 {
+    manifest_version: u32, // const 1
+    backend: StorageBackend, // exact s3
+    region: CanonicalRegion,
+    endpoint_identity_digest: Digest,
+    kms_binding_digest: Digest,
+    write_mode: ObjectWriteMode, // exact ConditionalCreateVersioned
+    exact_key_observation: ExactKeyObservationContract, // exact StrongAfterWriteQuiescence
+    maximum_put_completion_uncertainty_milliseconds: u64,
+}
+```
+
+除`admission_queue_mode`外所有容量值必须为正；Producer不允许application admission queue，饱和必须立即返回16的typed transient
+failure。`transport_accept_backlog <= in_flight_streams`、`streams_per_tenant <= in_flight_streams`；transport及三项global值分别不超过
+HardLimitProfile v5同名effective字段。checked
+`in_flight_streams * (effective model_output_chunk_bytes + protobuf_envelope_hard_overhead)`不得超过`in_flight_buffer_bytes`；
+`in_flight_declared_bytes`是按每个header声明总量加权的并发准入，不代表把完整response聚合进内存。DB pool必须同时不超过该组件stream
+上限、effective `control_data.database_connections`及installation DB总连接预算；object-store/KMS pool各不超过stream上限。所有角色的
+DB pool总和加migration/incident reserve仍须低于DB max connections。manifest digest、三个role-scoped pool/semaphore identity digest和
+exact startup config一并进入Candidate closure；任一identity与Model read Broker、Sandbox Broker、Model Worker或control pool重复均拒绝
+Candidate。目标schema路径为`contracts/platform-v1/schemas/component-capacity-manifest.schema.json`；当前尚未checked in，故现有
+Candidate证据不适用于Model Artifact Producer。
+
+`transport_accept_timeout_milliseconds`不是只用于配置检查的数字。transport front在连接进入bounded accepted backlog时立即记录
+`accepted_monotonic_at`，并以effective manifest/HardLimit较小值建立唯一monotonic deadline；TLS handshake、service-role authorization、
+backlog/global-stream/wire-buffer permit等待以及完整首个Header的bounded decode都必须在该deadline内完成。kernel/listener backlog和ingress
+handshake/idle timeout不得大于同一effective值。到期必须取消transport、释放已取得的全部permit且在尚无valid Header identity时只返回
+body-free status，不创建/修改Receipt或其他数据库事实。valid Header完成current授权并取得冻结Attempt absolute deadline后，后续Data、
+Terminal、DB/S3/KMS等待改由该Attempt deadline封顶，不能用重新计时延长它。
+
+`ArtifactStorageBindingManifestDigest`是上述closed manifest canonical bytes的digest，也就是04/15中的`storage_binding_digest`；不能用
+opaque deployment config或endpoint字符串代替。uncertainty必须为正，且checked换算后小于effective `artifact.staging_seconds`。其machine
+语义是：所有conditional PUT都携带不晚于Attempt deadline的write deadline；从该deadline起经过
+`maximum_put_completion_uncertainty_milliseconds`后，任何此前admitted write都不可能再创建新generation，exact-key HEAD/DELETE/HEAD对
+该locator给出稳定观察。Candidate只接受能以生产等价backend/proxy资格证明这一属性的binding；不满足时禁止Artifact-backed output。
+目标schema路径为`contracts/platform-v1/schemas/artifact-storage-binding-manifest.schema.json`，当前也未checked in，因此既有Candidate不能
+作为该write-quiescence合同的实现证据。
+
+其中`protobuf_envelope_hard_overhead`不是自由配置：16 RPC machine contract固定
+`MODEL_OUTPUT_PROTOBUF_ENVELOPE_OVERHEAD_BYTES=4096`并进入contract digest，Candidate builder用该常量做checked multiplication。
+当Candidate或任一允许的Model Deployment启用Artifact-backed output时，必须同时存在exact Model Worker v2 manifest与唯一Producer
+component-capacity manifest；未部署该role时不得把孤立manifest计作可用容量。每个ArtifactCapable binding在发布/激活时必须证明至少一个
+匹配adapter/region的Model Worker满足`slots >= 1 && aggregate_bytes >= maximum_materialized_bytes`，且Producer满足
+`in_flight_declared_bytes >= maximum_materialized_bytes`与
+`in_flight_buffer_bytes >= effective model_output_chunk_bytes + 4096`；否则拒绝发布/激活，不能让Job永久Ready到deadline。
 
 ### 4.1 当前证据边界（非规范性）
 
@@ -177,20 +265,23 @@ stale cancel。但该证据尚未经过真实Secret Manager provider、真实Pro
 故障注入、独立Pod/NetworkPolicy或同一CandidateManifest，因此不能登记为Gate B、C、D或E。
 
 Model Worker现在已有独立候选binary和静态Kubernetes拓扑：进程启动复验config/WorkerManifest/两个adapter descriptor，使用独立bounded
-PostgreSQL pool、Model Worker mTLS Egress客户端和独立Model Artifact Broker mTLS客户端；chart提供双副本rolling Deployment、PDB、HPA、topology spread、Restricted Pod、
+PostgreSQL pool、Model Worker mTLS Egress客户端和独立Model Artifact Broker read mTLS客户端；chart提供双副本rolling Deployment、PDB、HPA、topology spread、Restricted Pod、
 无入站的default-deny NetworkPolicy及只到DNS/Egress/PostgreSQL和配置allowlist NATS TLS端口的出口。CI同时拒绝mutable image、单副本、
 空PostgreSQL/NATS allowlist、缺失NATS TLS Secret key和非法
 HPA。durable cancel driver现使用reserved critical-control permit，把当前generation的bounded PostgreSQL safety scan、Egress exact cancel和
 旋转fence下的保守terminal结算组合起来；unit fixture证明业务permit饱和不阻止取消，数据库fixture覆盖取消/完成first-winner。Artifact-backed
 request已经由生产进程通过对应audience的Artifact Broker RPC物化；既有双副本、Restricted Pod、只读PostgreSQL与loopback mTLS证据证明最小authority和
 错误workload role拒绝，但旧单Broker拓扑已被本次architecture revision取代，不能作为新目标证据。
-当前实施批将Model与Sandbox Broker拆成不同进程/Deployment/ServiceAccount/DB credential/pool/permit，并分别收窄为Model-only与
-WASI+microVM-only RPC surface；Sandbox Controller仍移除provider catalog、AWS workload token、S3/KMS client与对应直出网络。双向
+当前实施批将Model与Sandbox Broker拆成不同进程/Deployment/ServiceAccount/DB credential/pool/permit，并分别收窄为Model-only read与
+WASI+microVM-only read RPC surface；Sandbox Controller仍移除provider catalog、AWS workload token、S3/KMS client与对应直出网络。双向
 Helm/mTLS/DB credential互换、独立饱和和rolling restart门禁未全部形成Candidate evidence前，该切分只是target/implementation slice，
-不登记Gate或Phase完成。该组合未绑定真实CandidateManifest，
-Artifact output仍为Inline。Model text delta内部publisher已有exact fence、canonical credential-free envelope、将容量permit
+不登记Gate或Phase完成。独立Model Artifact Producer尚无domain/RPC实现、binary、Model Worker client-stream组合、Deployment、ServiceAccount、
+write-limited数据库role/pool、S3/KMS write identity、NetworkPolicy、autoscaling或故障/容量fixture；现有Model Worker也没有独立Producer
+mTLS client、连接池或permit。该组合未绑定真实CandidateManifest，Artifact output仍为Inline，read Broker不得被临时扩权为output writer。
+Model text delta内部publisher已有exact fence、canonical credential-free envelope、将容量permit
 保留到有界批次flush结束的双重有界non-blocking queue和TLS/mTLS NATS组合；它不发布tool argument/Provider metadata，NATS故障不阻断durable执行。但Artifact-backed
-output、真实S3/KMS、公开SSE消费、真实NATS/Provider/process-kill/cross-workclass saturation资格证据仍缺失，因此只属于Contract/Functional输入，不能登记Gate B～E通过。
+output、Model Artifact Producer三lane隔舱、真实S3/KMS、公开SSE消费、真实NATS/Provider/process-kill/cross-workclass saturation资格证据仍缺失，
+因此只属于Contract/Functional输入，不能关闭Phase 4/6或登记Gate A～E通过。
 
 Capability Worker的开发期Functional证据现把fresh PostgreSQL 16 claim、exact Native adapter dispatch/cancel和fenced terminal/
 cancellation commit连成同一可复现fixture，并覆盖durable control后的Job version fence旋转、完整物理身份重验、write reconciliation、
@@ -207,7 +298,7 @@ RunValue、Receipt、Event、Outbox、quota settle/replay、reserve/settle ledge
 platform-control       Management API, Registry validators
 platform-runtime       Runtime API, SSE, Scheduler, Recovery, regular Workers
 platform-integrations  Model Workers, MCP Hosts, remote adapters
-platform-artifacts     Model/Sandbox Artifact Brokers, Artifact Gateway, scanner controller, GC
+platform-artifacts     Model/Sandbox Artifact read Brokers, Model Artifact Producer, Artifact Gateway, scanner controller, GC
 platform-sandbox       Sandbox Gateway/Controller, Secret/Egress proxies
 platform-sandbox-exec  gVisor/microVM/WASM Executors on dedicated nodes
 platform-observability OTel Collectors and telemetry agents
@@ -238,7 +329,8 @@ Q1生产最小topology：
 | Outbox Dispatcher | 2 | active-active claim | PostgreSQL、NATS | 否 |
 | Recovery/Deadline Worker | 2 | active-active shard lease | PostgreSQL | 否 |
 | Model Worker | 2 per required adapter/region | queue worker | PostgreSQL、Provider、Secret | 否，生产绑定存在时 |
-| Model Artifact Broker | 2 per storage region/boundary | stateless Model-only internal gRPC | exact Model Worker mTLS、Model专用restricted PostgreSQL pool、S3、KMS | 否，存在Artifact-backed Model绑定时 |
+| Model Artifact Broker | 2 per storage region/boundary | stateless Model-only read gRPC | exact Model Worker read mTLS、Model专用read-only PostgreSQL pool、S3/KMS read identity | 否，存在Artifact-backed Model request时 |
+| Model Artifact Producer | 2 per storage region/boundary | stateless Model-output client-stream gRPC | exact Model Worker output mTLS、独立write-limited PostgreSQL pool、S3/KMS write identity | 否，允许Artifact-backed Model output时 |
 | Sandbox Artifact Broker | 2 per storage region/boundary | stateless WASI+microVM internal gRPC | exact Sandbox Controller mTLS、Sandbox专用restricted PostgreSQL pool、S3、KMS | 否，存在Sandbox Package/Artifact绑定时 |
 | Egress Broker | 2 per external region/boundary | stateless internal gRPC | Security Authority RPC、private DNS、KMS/Secret Manager、exact remote endpoints | 否，生产外部绑定存在时 |
 | Security Authority | 2 | stateless internal gRPC | PostgreSQL restricted role、Policy | 否 |
@@ -290,8 +382,11 @@ Workers -> credential-free closed request -> Egress Broker
 Egress Broker -> Security Authority RPC -> PostgreSQL restricted Secret authority
 Egress Broker -> KMS/Secret Manager/private DNS/exact Provider/MCP/remote capability
 Model Worker -> exact mTLS -> Model Artifact Broker
+Model Worker -> separate exact mTLS client-stream -> Model Artifact Producer
 Sandbox Controller -> exact mTLS -> Sandbox Artifact Broker
-each Artifact Broker -> its own restricted PostgreSQL pool / private S3 / KMS identity
+Model Artifact Broker -> its own read-only PostgreSQL pool / private S3/KMS read identity
+Model Artifact Producer -> its own write-limited PostgreSQL pool / private S3/KMS write identity
+Sandbox Artifact Broker -> its own restricted PostgreSQL pool / private S3/KMS read identity
 Sandbox Provider -> private guest materialization channel
 OTel SDK -> local/central Collector
 ```
@@ -304,8 +399,18 @@ OTel SDK -> local/central Collector
   resolution调用不改变数据库；prepared registration只能复用04冻结的Receipt/Event/Outbox原子事务，不能成为通用业务mutation API；
 - Provider/MCP/remote/Sandbox egress按Revision/tenant policy经过proxy、DNS/TLS/allowlist；
 - Sandbox Controller不得直连S3、KMS或workload-identity endpoint；只有Sandbox Artifact Broker持有相应物理读取identity；
-- Model与Sandbox Artifact Broker使用不同Service、ServiceAccount、数据库credential/pool、mTLS server identity、NetworkPolicy和
-  in-flight permit；Model Broker拒绝Sandbox Controller，Sandbox Broker拒绝Model Worker；
+- Model read Broker保持read-only且只注册`ReadModelRequest`；其数据库role不得写Artifact或共享聚合，storage identity不得PUT、
+  删除或枚举bucket，进程不得注册output upload/finalize或generic object RPC；
+- Model Artifact Producer只注册closed Model-output client-stream RPC，只接受exact `model-worker.artifact-output` URI SAN并拒绝read
+  client的`model-worker` URI SAN；stream
+  header、chunk、总bytes、deadline、attempt/lease和idempotency均有硬界，Provider正文、object locator和storage credential不回传Worker；
+- Model read Broker、Model Artifact Producer与Sandbox Broker使用三个不同Service、ServiceAccount、数据库credential/pool、mTLS server
+  identity、storage workload identity、NetworkPolicy、connection pool和in-flight permit；Model read Broker拒绝Producer/Sandbox调用，
+  Producer拒绝Sandbox Controller及read RPC，Sandbox Broker拒绝Model Worker与Producer；
+- Producer的write-limited数据库role只能读取16的closed `ModelOutputStageAuthorizationProjection`（覆盖exact Model admission/Job fence、
+  policy、quota、Artifact/Blob/grant与stage Receipt safe state），并通过closed repository command写预留Artifact/Blob/grant与
+  stage Receipt；它不得写ManagementOperation/Artifact Job、修改quota余额、Event/Outbox、Run、NodeExecution、ModelTurn、Model Job、
+  RunValue、业务Output Link或CapabilityInvocation authority；`artifact.ready`和业务事件只由Model terminal事务产生；
 - PostgreSQL/NATS/S3/Secret Manager只接受workload identity/private endpoint；
 - cloud metadata、Kubernetes API、node/kubelet、container runtime和cluster DNS敏感域默认阻断；
 - Executor只能通过同节点Unix socket调用attestor的generation登记端点；该listener同时要求mTLS exact Executor role，并从内核
@@ -326,8 +431,14 @@ OTel SDK -> local/central Collector
 - authority query、claim、CAS、Run snapshot和mutation receipt只读writer，不从可能陈旧replica做授权/状态决定；
 - read replica只允许离线analytics/qualification且不回写业务；
 - 使用fresh `platform` database/schema ownership；旧实现不与新schema dual-write；
-- connection pool按role硬隔离，Model与Sandbox Artifact Broker即使具有相同只读表集合也必须使用不同credential和pool；所有pool最大值总和 +
+- connection pool按role硬隔离；Model read Broker与Sandbox Broker即使具有相同只读表集合也必须使用不同credential和pool，Model Artifact
+  Producer还必须使用第三套write-limited credential/pool，不能借用任一read Broker或Model Worker pool；所有pool最大值总和 +
   migration/admin reserve必须低于DB max connections；
+- Producer role对Model/Run/Policy/Quota/Artifact/Blob/grant/Receipt只有构造16 closed row-scoped projection所需的column-level SELECT或
+  security-barrier view权限；同安全域dedupe只允许在Attempt+quota授权后按完整tenant/backend/storage/encryption/security-domain/content-digest
+  key执行constant-shape exact Verified Blob lookup，不得list/prefix/filter。对Artifact/Blob/stage Receipt只有closed command所需的最小INSERT/UPDATE；不得授予正文/Secret列、generic list/
+  filter query、ManagementOperation/Artifact Job/Quota/Event/Outbox mutation、schema ownership、DDL、table-wide
+  DELETE/TRUNCATE或ModelTurn/Model Job mutation，实际grant集合进入Candidate证据；
 - Q1至少保留20% connections给critical control、failover、migration check和incident；
 - statement/lock/idle transaction timeout、batch、claim和transaction duration按role固定；
 - PgBouncer/代理如使用必须验证transaction/session语义，不破坏advisory lock、prepared statement或RLS假设；
@@ -382,6 +493,15 @@ Q1使用3节点multi-AZ NATS cluster：
 
 - private S3-compatible backend，多AZdurability，versioning和按policy的object lock；
 - bucket/object无public ACL/website，访问只给Artifact service workload identity；
+- Model Artifact Producer使用独立write-limited identity执行exact staging PUT/HEAD、仅对同reservation exact staging generation执行
+  verifier/recovery所需的GET，并按exact context执行KMS seal/unseal；它不能list tenant prefix、读取任意Ready object或复用Model/Sandbox
+  read identity。Model与Sandbox read Broker只能对已授权exact generation执行HEAD/GET与KMS unseal，不能PUT；
+- Producer write permit、S3/KMS client、连接池、byte budget和timeout与两个read Broker全部分离；partial upload、Producer crash或Model
+  terminal first-winner失败必须由durable staging fact、同Attempt stage Receipt和bounded GC收敛；Producer不创建或claim Artifact Job，
+  也不能留下无PostgreSQL locator的不可清理对象；
+- Producer的每次conditional PUT必须使用Candidate冻结binding的write deadline/quiescence合同；candidate cleanup在冻结
+  `staging_retain_until`之前不得执行或采纳DELETE/absence，也不得Close candidate Blob quota。到点后仍须对exact locator/generation执行
+  DELETE/HEAD并取得稳定evidence；client timeout、连接关闭或一次早期HEAD absence都不是write quiescence；
 - tenant/security-domain scoped encryption context，KMS key rotation不改Artifact digest；
 - lifecycle rule不能早于PostgreSQL Reference/retention/hold/GC决定删除；
 - staging、ready、quarantine、diagnostic可使用独立prefix/bucket policy但不泄露公开object key；
@@ -461,6 +581,28 @@ overflow_outcome:"content_rejected"}`。SandboxPackage发布必须从Ready `runt
 schema/Q1实例、Rust exact validator、Package publication fixture和Candidate closure门禁已经通过；这只构成该合同切片的实现证据，不单独构成Phase或Gate完成证据。
 Deferred execution、callback ingress、timer/wake Worker 与 Q1 资格必须在对应 Phase 3～6 重新生成证据，不得沿用旧候选记录。
 
+CR-165的Accepted目标合同要求下一revision固定为`profile_version=5`并新增以下全部必填字段；数字是目标machine contract，不是当前
+运行行为：
+
+| 字段路径 | unit | hard_max | Q1 default | overflow outcome |
+|---|---:|---:|---:|---|
+| `artifact.model_output_chunk_bytes` | bytes | 262144 | 65536 | `content_rejected` |
+| `artifact.model_output_worker_slots` | count | 1024 | 16 | `temporarily_unavailable` |
+| `artifact.model_output_worker_aggregate_bytes` | bytes | 17179869184 | 67108864 | `temporarily_unavailable` |
+| `artifact.model_output_producer_transport_backlog` | count | 4096 | 64 | `temporarily_unavailable` |
+| `artifact.model_output_producer_transport_timeout_milliseconds` | milliseconds | 60000 | 1000 | `temporarily_unavailable` |
+| `artifact.model_output_producer_in_flight_streams` | count | 4096 | 64 | `temporarily_unavailable` |
+| `artifact.model_output_producer_in_flight_declared_bytes` | bytes | 68719476736 | 268435456 | `temporarily_unavailable` |
+| `artifact.model_output_producer_in_flight_buffer_bytes` | bytes | 4294967296 | 16777216 | `temporarily_unavailable` |
+| `artifact.model_output_producer_streams_per_tenant` | count | 1024 | 8 | `temporarily_unavailable` |
+| `artifact.ready_retention_seconds` | seconds | 315576000 | 2592000 | `invalid_request` |
+
+chunk字段冻结`StageModelOutput` canonical data frame大小；有效值只能进一步收紧且不能超过该Attempt的
+`maximum_materialized_bytes`。Worker两字段封顶07 manifest的slot+weighted bytes；Producer transport与四项in-flight字段封顶上述ComponentCapacityManifest和
+每个RPC的双层weighted admission；Ready retention封顶16 Model Deployment的exact duration。当前checked-in `profile_version=4`没有这些
+字段，现有schema/Q1/Candidate证据不能证明Artifact-backed Model output；实现该路径时必须原子升级schema、Q1实例、Rust exact
+validator、WorkerManifest v2、ComponentCapacityManifest、Candidate digest和正负向fixture，不能以环境变量或Helm自由值补字段。
+
 ### 14.2 Capacity contract
 
 | 字段族 | 必须冻结的上限 |
@@ -470,7 +612,7 @@ Deferred execution、callback ingress、timer/wake Worker 与 Q1 资格必须在
 | Run/Scheduler | active/waiting Run、descendants、ready rows、inline Value bytes、ValueRef count、claim batch、attempts、lease/heartbeat、deferred poll base/max、wake contracts |
 | Model/Context/MCP | request/response/delta、tokens、tool calls、candidates/items/pages、sessions/tasks/subscriptions |
 | Capability/Sandbox | input/runtime bundle/output/progress、queue、CPU/memory/pids/files/IO/network、wall time、cleanup deadline |
-| Artifact | single/total bytes、parts、references/grants、scan expansion/page/object、staging/retention batch |
+| Artifact | single/total bytes、parts、references/grants、Model output canonical chunk/Worker slot+bytes/Producer streams+declared+buffer bytes/per-tenant streams、scan expansion/page/object、staging/Ready retention/batch |
 | Durable Quota | Agent/work-class/Capability/Sandbox并发、CPU/memory/output、Model token/cost/request、Context usage、Artifact占用、HumanTask |
 | Control/Data | DB connections/transactions、outbox/callback/recovery batch、NATS payload、telemetry buffer/cardinality |
 
@@ -491,7 +633,7 @@ HPA/cluster autoscaler信号：
 | Context | query ready age、candidate throughput、index latency |
 | MCP | operation ready age、sessions、remote tasks、connections |
 | Sandbox | weighted queued resource units、slots、startup latency |
-| Artifact | Model Broker与Sandbox Broker各自的in-flight/bytes/DB pool、upload/scan/download/GC backlog、bytes/IO |
+| Artifact | Model read Broker、Model Artifact Producer、Sandbox Broker三者各自的in-flight/bytes/DB pool；Producer staging/upload/verifier backlog；独立scanner/download/GC backlog与bytes/IO |
 
 - autoscaling不能超过DB connection、Provider quota、node/KVM、NATS/S3和tenant hard capacity；
 - scale-up前保留control/cancel/cleanup slots；
@@ -500,6 +642,14 @@ HPA/cluster autoscaler信号：
 - Sandbox warm pool有独立memory ceiling且不挤占running capacity；
 - node pressure/eviction/spot只允许经过failure qualification的worker pool；
 - 单workclass的HPA不能使用全平台共享queue长度导致连锁扩容；
+- Model Artifact Producer按自己的active stream、weighted declared/buffer bytes、durable staging/cleanup backlog、oldest production age、write permit、DB pool和S3/KMS latency扩缩；
+  它不得消费Model read或Sandbox read指标、semaphore与扩缩容预算，任一lane达到hard capacity不得触发另外两条lane连锁扩容或拒绝；
+- Producer在TLS/service-role authorization后、读取bounded header前先取得global stream与weight exact为
+  `effective model_output_chunk_bytes + 4096`的唯一per-stream wire-buffer permit，所有frame复用该buffer；解析并授权valid header后、
+  读取首个data frame前再取得declared bytes与tenant stream permit，不重复取得data buffer。全部持有到唯一terminal、stream drop或absolute deadline；
+  第一阶段饱和返回body-free unavailable，第二阶段返回`DependencyUnavailable + RetrySameAttempt`，不得进入application queue。DB/S3/KMS
+  pool waiters受global stream permit封顶，client library不得再建立无界内部队列；transport accept开始的同一monotonic timeout必须同时覆盖
+  TLS、bounded backlog、第一阶段permit等待和完整Header decode，silent/fragmented pre-header流到期释放全部资源；
 - capacity configuration和实际limit进入Q1 evidence。
 
 ## 16. Availability 与滚动发布
@@ -512,7 +662,8 @@ HPA/cluster autoscaler信号：
 - old worker adapter/runtime digest在历史binding仍有ready/in-flight work时保留兼容pool；
 - canary按role和workclass逐步放量，不把所有Scheduler/Recovery同时替换；
 - release失败先停promotion，应用rollback只使用schema-compatibleimage；
-- Provider/MCP/Sandbox/Artifact单pool rollout不触发无关服务rollout；Model与Sandbox Artifact Broker必须可以独立rollout，不通过共享Pod联动；
+- Provider/MCP/Sandbox/Artifact单pool rollout不触发无关服务rollout；Model read Broker、Model Artifact Producer与Sandbox Broker必须可以
+  分别独立rollout，不通过共享Pod、ServiceAccount、pool或readiness联动；
 - deployment controller/API不通过active head自动改变RunBindings。
 
 ## 17. `/v1` Clean Replacement
@@ -702,7 +853,9 @@ Q1基线manifest：
 200 concurrent SSE clients with reconnect churn
 mixed durable waits, Model, Capability, Context, Subagent and Artifact work
 10 concurrent Sandbox jobs, then 100% Sandbox slot saturation for 30 minutes
-100% Sandbox Artifact Broker permit/DB-pool saturation while Model Artifact reads remain admissible
+100% Sandbox Artifact Broker permit/DB-pool saturation while Model Artifact reads and output production remain admissible
+100% Model Artifact Broker read permit/DB-pool saturation while Model output production and Sandbox reads remain admissible
+100% Model Artifact Producer write permit/DB-pool saturation while Model/Sandbox reads and Model control/cancel remain admissible
 20 concurrent Artifact transfers, typical 10 MiB, boundary fixture 100 MiB
 two or more Scheduler/Runtime instances claiming concurrently
 ```
@@ -767,10 +920,14 @@ kill -9 Management API / Runtime API / SSE Gateway
 kill Scheduler / Outbox / Recovery owner during claim/commit
 kill Model / Capability / Context / MCP Worker before and after external dispatch
 kill Sandbox Controller / Executor / microVM during start/run/result/cleanup
-kill or saturate only one Artifact Broker audience while the other continues exact authorized reads
+kill or saturate Model Artifact read Broker while Model Artifact Producer and Sandbox Broker remain admissible
+kill or saturate Model Artifact Producer before/during/after staging PUT while both read Brokers remain admissible and cleanup converges
+kill or saturate Sandbox Artifact Broker while Model read Broker and Model Artifact Producer remain admissible
 PostgreSQL primary failover and connection reset
 NATS total outage, duplicate and reordered hints/events
 S3 timeout, partial upload, missing object, digest/KMS failure
+PUT在Attempt deadline前发出、client timeout/取消后迟到成功；barrier前HEAD absence不得删除/Close，write-quiescence后exact delete/absence收敛
+TLS完成后不发送Header、逐字节Header、bounded accept backlog饱和；monotonic timeout释放stream/wire buffer且不创建Receipt
 Secret Manager timeout, rotate and revoke
 Provider/MCP/remote 429/5xx/hang/late callback/protocol drift
 network partition and DNS rebinding
@@ -802,7 +959,7 @@ Artifact Ready-only、Secret不泄漏、control reserved capacity和最终收敛
 24小时Q1 soak要求：
 
 - 不中断产生混合 Run，维持 50 active target 并记录 arrival/completion；
-- 周期执行 Worker kill、NATS outage、backend 429、Sandbox saturation 和 SSE reconnect；
+- 周期执行 Worker kill、NATS outage、backend 429、Sandbox saturation、Model Artifact Producer/read Broker独立饱和和 SSE reconnect；
 - 无 unbounded memory/connection/task/queue/Artifact staging/outbox/reconciliation 增长；
 - 无 stuck nonterminal 超过其 deadline + recovery SLO；
 - 无双 terminal、lost committed result、stale outcome commit 或 cross-tenant error；
@@ -827,11 +984,16 @@ Gate A Contract
 - Gate B：全部real-process E2E/adapter/conformance通过；
 - Gate C：security matrix/red-team无open blocker；
 - Gate D：fault matrix全部收敛且invariant通过；
-- Gate E：Q1容量、fairness、bulkhead和SLO达标，包括Model/Sandbox Artifact Broker双向独立饱和；
+- Gate E：Q1容量、fairness、bulkhead和SLO达标，包括Model read Broker、Model Artifact Producer与Sandbox Broker三lane逐一独立饱和，
+  每次故障时另外两lane及Model control/cancel仍满足其准入与延迟门槛；
 - Gate F：连续24小时soak达标；
 - Gate G：从正式backup恢复并达到RPO/RTO；
 - 任何Gate失败使后续证据无效或需要从受影响Gate重跑；
 - approval不允许覆盖correctness/security failure。
+
+当前独立Model Artifact Producer尚未实现，既有Inline output、Model request read Broker、Sandbox Broker或静态NetworkPolicy证据均不能
+替代Producer的RPC、write-limited数据库role、S3/KMS write identity、durable cleanup、三lane故障和Q1容量证据。在这些证据绑定同一
+CandidateManifest并通过对应Gate前，不得关闭Phase 4/6，也不得登记Gate A、B、C、D或E通过。
 
 ## 32. Qualification Evidence
 

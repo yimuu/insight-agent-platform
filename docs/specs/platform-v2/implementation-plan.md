@@ -118,7 +118,7 @@ HardLimitProfile heartbeat续租，heartbeat只旋转Job optimistic version，�
 进程drain超时要求终止整代Worker，使未完成lease由恢复扫描接管。Inline request/output实现已有明确上限；当冻结的Provider响应上限无法由
 Inline承载时，在Provider dispatch前提交`model_output_artifact_required`拒绝，不产生调用或保守计费。Artifact-backed request现由生产进程
 通过独立versioned Model Artifact Broker RPC读取：`ArtifactModelBrokerService`只暴露一个closed Model read方法，exact Model Worker URI SAN在
-进入authority前完成门禁，Worker再逐片复验bounded stream。Artifact-backed output仍未交付。Model stream中通过完整fence校验的text delta现在被编码为credential-free canonical内部envelope，并经
+进入authority前完成门禁，Worker再逐片复验bounded stream。Artifact-backed output的目标合同已由CR-165冻结，但实现仍未交付。Model stream中通过完整fence校验的text delta现在被编码为credential-free canonical内部envelope，并经
 双重message/byte有界、non-blocking队列投影到TLS/mTLS NATS tenant/run scoped subject；容量permit保留到有界批次flush结束，不能被NATS
 客户端内部缓冲绕过。tool argument与Provider metadata不会进入该通道，
 NATS断连、背压或单帧超限只丢弃live observation，不阻断PostgreSQL中的ModelTurn/Job执行。20项adapter、11项worker、7项Model Artifact Broker与
@@ -760,6 +760,42 @@ base、build-host binary、shared image/Secret、hostPath alias、非递归只�
 当前Dockerfile的两个release target已按默认`linux/amd64`实际构建并检查arch、platform binary inventory与UID/GID；相关22项定向测试及strict
 Clippy通过。该切片只关闭静态启动依赖与已知准入绕过；真实Admission Deny与cluster audit identity fixture、runtime asset bytes及ancestor/TOCTOU、node
 provisioning、镜像签名/SBOM/provenance、Linux capability充分性、KVM/jailer/guest-agent与Candidate资格仍Open，Phase 4/6状态不变。
+
+CR-165关闭Model Artifact-backed output的合同空洞，但尚未登记实现完成。现有Model Artifact Broker继续保持
+`ReadModelRequest`单RPC、restricted read-only PostgreSQL role与独立read permit；不得把object write、KMS seal、Artifact mutation或大正文
+上传塞入该进程。新增目标角色Model Artifact Producer只接受exact
+`spiffe://insight.platform/workload/model-worker.artifact-output` mTLS的closed client-stream stage RPC并拒绝read client身份，同时使用独立进程、
+Deployment、ServiceAccount、write-limited PostgreSQL credential/pool、S3/KMS write identity和process-local permit；它也不得注册Model/Sandbox
+read RPC或推进Model current state。
+
+Model claim必须在Provider dispatch前冻结04 typed Model-output ArtifactIo revision、Retention revision、Model Deployment exact Ready duration、
+effective Inline/response/Artifact上限与最坏staging容量；start事务用数据库时钟计算`attempt_deadline + staging_grace`，预留Artifact、candidate
+Blob、duplicate-cleanup Job、grant、stage/terminal Receipt、Output Link/RunValue，以及Artifact-owned count/logical和candidate-Blob-owned
+upload/staging/physical两个Quota bundle。Job `expected_version`只作为同generation单调lower bound；Producer每个短事务仍重验immutable
+attempt、lease generation/token、WorkerProcessGeneration、request/admission/binding/deadline并取得会与cancel/takeover/terminal冲突的共享guard。
+Candidate还要冻结closed storage-binding manifest及最大PUT completion uncertainty；staging grace必须严格越过write-quiescence boundary，
+cleanup在`staging_retain_until`前不能采纳delete/absence或释放Blob bundle。Producer transport timeout从accepted backlog开始覆盖TLS、permit等待与
+完整Header decode，valid Header后才切换到Attempt deadline，防止pre-header slowloris占满stream/buffer。
+
+Producer执行`Staging -> Uploaded -> Verifying -> Verified`受限physical protocol与closed failure矩阵：Processing transient
+Dependency/InProgress只缩短/观察lease，Conflict不改existing Receipt，fresh stale/deadline不由Producerterminalize，TooLarge/Invalid写Rejected，
+Integrity写Failed并允许candidate从current Staging/Uploaded/Verifying进入Quarantined，成功把Verified evidence与Succeeded Receipt原子提交。完整security-domain dedupe区分
+`PreexistingHit | CandidateWinner | RacingCandidateLoser`；receipt返回candidate/resolved Blob、新增physical bytes及candidate cleanup
+generation/Job ID。race loser由预留InternalBlob cleanup Job收敛；Producer不创建业务Reference、Ready、RunValue、quota settlement、Event或
+Outbox，也没有application queue。
+
+Model terminal仍是唯一caller-owned PostgreSQL first-winner：按Receipt、Model+两个output quota bundle、current/cleanup Job、Artifact/Blob的
+排序锁序，原子执行`Verified -> Ready`、以terminal数据库时钟加冻结duration保存absolute retention、建立Output Link/RunValue、提交
+ModelTurn/Job/Receipt/Event/Outbox并按dedupe disposition结算两个bundle。Artifact删除只Refund count/logical；new-winner Blob的physical
+bundle跟随Blob到最后alias物理删除，preexisting/race candidate按无对象/cleanup evidence Close。Inline/no-object关闭两bundle；已有candidate
+时只先关闭Artifact bundle，Blob bundle保持到GC。该设计保持23表和单一`0001`，不新增Model output表、第二Artifact lifecycle或terminal authority。
+
+下一实现切片按依赖顺序交付：04 typed Policy/时间公式；HardLimitProfile v5全部Model-output字段、WorkerManifest v2、
+ComponentCapacityManifest、ArtifactStorageBindingManifest与Candidate exact closure；closed Rust/protobuf success+tagged failure合同和两bundle reservation；Producer
+core/RPC、two-phase admission、restricted PostgreSQL projection、S3/KMS/dedupe/checkpoint；Hybrid materializer与生产进程；owner-finalize、
+candidate/orphan cleanup、shared-Blob quota lifecycle及真实PostgreSQL并发/崩溃fixture；最后完成独立Helm/NetworkPolicy/credential互换、
+cross-lane饱和与真实S3/KMS资格。全部代码、部署和fixture落地前，checked-in profile v4/WorkerManifest v1及Inline output仍是当前证据，
+`model_output_artifact_required`仍是缺功能的pre-dispatch拒绝；CR-132/CR-148、Phase 4及Gate B～E继续Open，generic Capability producer不由本切片替代。
 
 clean-cut baseline现由部署期独立provisioning流程对fresh PostgreSQL target一次性安装；Platform运行时crate已删除DDL apply入口，
 API/Scheduler/Worker只做read-only schema verification。旧`coordinator.rs`实现路径改为role-neutral orchestration模块，cutover gate

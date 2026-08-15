@@ -20,6 +20,11 @@ S3-compatible object store 保存 blob 正文。业务对象只持有 ArtifactRe
 content policy 后成为 Verified，最后在引用者的 PostgreSQL 事务中同时变为 Ready 并建立 ArtifactReference。只有
 Ready Artifact 可读取。删除使用引用图、retention、legal hold 和两阶段 GC，不使用简单引用计数或立即物理删除。
 
+Model canonical response 的 Artifact-backed 输出使用独立 Model Artifact Producer。它不是只读 Model Artifact Broker 的
+写方法，也不是 Model Worker 内嵌 SDK：Producer 只接受 exact Model Attempt 的有界 canonical JSON stream，并且最多把预留
+Artifact 推进到 Verified。只有 Model owner 的 terminal PostgreSQL 事务可以同时完成 Verified -> Ready、Output Link、RunValue、
+ModelTurn/Job first-winner、quota settlement 与 outbox；任何失败窗口都不能产生可读的半成品 Model 输出。
+
 内容寻址用于完整性与 tenant 内受控复用，不作为公开身份。平台禁止跨 tenant blob dedupe，避免存在性、大小、
 digest、加密和访问时序侧信道。
 
@@ -76,6 +81,7 @@ struct ArtifactRecord {
     purpose: ArtifactPurpose,
     expected_size: BoundedSize,
     expected_digest: Option<Digest>,
+    blob_id: Option<InternalBlobId>,
     verified_content: Option<VerifiedArtifactContent>,
     retention_policy_revision_id: RevisionId,
     retain_until: DateTime<Utc>,
@@ -88,10 +94,13 @@ struct VerifiedArtifactContent {
     content_digest: Digest,
     byte_length: u64,
     verified_media_type: MediaType,
-    blob_id: InternalBlobId,
     encryption_domain_id: EncryptionDomainId,
 }
 ```
+
+`blob_id`与`verified_content`是不同阶段的事实：Staging Artifact可在PUT前绑定`Some(blob_id)`而
+`verified_content=None`；未开始物化时两者都为空。`Verified | Ready`必须同时具有`blob_id`和完整verified content，并与同tenant
+Verified Blob的digest/length/encryption domain一致；`blob_id=None, verified_content=Some`及任何sentinel组合均非法。
 
 Artifact相关分类不是自由字符串，统一使用以下machine registry：
 
@@ -175,15 +184,21 @@ Blob 是内部物理对象：
 struct BlobRecord {
     blob_id: InternalBlobId,
     tenant_id: TenantId,
-    content_digest: Digest,
-    byte_length: u64,
+    content_digest: Option<Digest>,
+    byte_length: Option<u64>,
     storage_binding_digest: Digest,
     opaque_object_key: EncryptedObjectKey,
-    object_generation: ObjectGeneration,
+    object_generation: Option<ObjectGeneration>,
     encryption_domain_id: EncryptionDomainId,
     integrity_state: BlobIntegrityState,
+    verified_at: Option<DateTime<Utc>>,
 }
 ```
+
+Staging Blob在唯一opaque locator封印后即可存在，因此`content_digest`、`byte_length`、`object_generation`和`verified_at`在
+`Staging`可以为空；Uploaded/Verifying按已观察事实逐步填充。进入`Verified`后四者必须全部非空并与exact object generation、Artifact
+verified content和HEAD evidence一致，数据库CHECK与domain validator共同强制该closed state/field invariant。不得用空digest、零长度
+sentinel或虚构generation绕过未知状态；真实零字节对象仍以`Some(0)`表达并受purpose/content policy决定是否合法。
 
 规则：
 
@@ -216,9 +231,9 @@ enum ArtifactState {
 ```
 
 ```text
-Staging -> Uploaded | Rejected | Deleting
-Uploaded -> Verifying | Rejected | Deleting
-Verifying -> Verified | Quarantined | Rejected
+Staging -> Uploaded | Quarantined | Rejected | Deleting
+Uploaded -> Verifying | Quarantined | Rejected | Deleting
+Verifying -> Verified | Quarantined | Rejected | Deleting
 Verified -> Ready | Quarantined | Rejected | Deleting
 Ready -> Quarantined | Deleting | Corrupt
 Quarantined -> Ready | Rejected | Deleting | Corrupt
@@ -230,6 +245,12 @@ Corrupt -> Quarantined | Deleting
 `Ready` 之后 content、digest、size、media、classification、purpose 和 Blob 不可修改；修改 metadata 需要新
 Artifact 或独立 display projection。Quarantine 恢复为 Ready 需要新的 security evidence、授权 principal 和
 generation CAS。Deleted 终态不可离开；物理 version 尚可由管理员灾难恢复时，也必须创建新 Artifact ID。
+
+`Quarantined -> Ready`还有purpose-specific guard：对`purpose=RunOutput`且由16 Model output reservation/stage Receipt标识、但不存在
+匹配的terminal Receipt、active ModelTurn Output Link与immutable RunValue三项证据的candidate，generic scan/rescan/security authority
+禁止把它推进Ready，只能保持Quarantined、Reject或Delete。只有一个Artifact在此前曾由Model owner terminal原子形成Ready三元组，且
+当前仍存在逐字段匹配的业务Link/RunValue/terminal Receipt时，rescan才可在同一事务恢复`Quarantined -> Ready`并保留既有Ready
+retention。该guard阻止Producer integrity failure或orphan绕过Model first-winner形成孤立Ready。
 
 Artifact metadata的current security projection必须包含最近一次accepted scan的exact scan Policy revision、scanner contract
 digest、ruleset digest、object generation、evidence digest、observed/expiry time与disposition。它与Artifact version一起CAS，
@@ -267,6 +288,10 @@ object generation、digest、evidence、tenant、classification、retention、ow
 verify成功后该Operation finalize/reference并返回ArtifactRef，之后Agent Run/Revision创建新Reference，不复制正文。
 对于Capability/Sandbox输出，owner transaction是Invocation output commit。首版不存在UploadObject、WorkspaceAttachment
 或其他未注册owner kind。
+
+Model output是同一状态机的受限内部路径：claim/start预留Staging intent与全部identity，独立Model Artifact Producer只推进到
+Verified，随后由Model terminal owner transaction执行Ready/reference/RunValue/terminal commit。该路径不开放公共prepare/finalize，
+也不允许Producer成为第二个Model current-state authority。
 
 ## 9. Upload 协议
 
@@ -324,8 +349,14 @@ Scanner/parser 不在 API 或 Artifact Gateway 进程运行；复杂解析进入
 14的typed Sandbox Capability执行，但Artifact domain、状态机和Scanner port不依赖Sandbox协议。扫描工具
 失败、超时、OOM、未知格式或 evidence 过期默认 Quarantined/失败，不以“无法扫描”等于安全。
 
-`CompleteUpload`只提交Uploaded事实。随后durable scheduler command把Uploaded原子推进Verifying并创建
-`WorkClass::Artifact` scan Job；Job payload冻结exact Artifact/Blob/object generation、scan Policy、scanner contract与ruleset。
+公共上传、Capability/Sandbox及其他普通producer的`CompleteUpload`只提交Uploaded事实。随后durable scheduler command把Uploaded原子
+推进Verifying并创建`WorkClass::Artifact` scan Job；Job payload冻结exact Artifact/Blob/object generation、scan Policy、scanner contract
+与ruleset。
+
+exact `purpose=RunOutput + owner=ModelTurn + ModelOutputArtifactReservation + ModelArtifactProducer`组合是唯一首版例外：它不调用generic
+`CompleteUpload`、不创建或claim Artifact scan Job，而由§15.1/16的同Attempt Producer执行固定canonical Model-response同步verifier并以
+stage Receipt `claim_generation`推进到Verified。generic scheduler/scanner必须拒绝该route，Producer也必须拒绝所有其他purpose/owner/
+audience；routing predicate与negative fixture进入machine contract，防止两个verifier对同一Artifact竞推进。
 rescan创建独立`ArtifactRescan` ManagementOperation和同结构Job；Ready Artifact在rescan排队事务先进入Quarantined，避免旧证据
 过期期间继续读取。scan/rescan物理结果必须由exact WorkerProcessGeneration lease fence和`JobCommit` Receipt提交。
 
@@ -381,6 +412,7 @@ enum ArtifactWorkloadAudience {
     CapabilityWorker,
     ContextWorker,
     ModelWorker,
+    ModelArtifactProducer,
     McpHost,
     SandboxGateway,
     ArtifactWorker,
@@ -413,6 +445,8 @@ Grant 是 capability-style authorization，不是 ArtifactRef：
 - 签发前验证 current principal/workload、owner permission、state、classification、port、deadline 和 policy；
 - 绑定单 Artifact/Intent、operation、audience/workload identity、purpose 和短 deadline；
 - Sandbox、MCP、Context、remote Capability 获得的 grant 彼此不可替换；
+- Model output staging grant只绑定exact `ModelArtifactProducer` identity和Model Attempt fence；Model Worker只持有
+  `StageModelOutput`调用权，不取得object locator、S3/KMS credential或可转交的write bearer；
 - download grant 默认单 audience、短期、可撤销，不作为分享链接；
 - grant token 使用 opaque signed/encrypted form，数据库保存 receipt/digest 而非 bearer value；
 - revoke、Run/Invocation terminal、Secret/network kill switch 可提升 generation；
@@ -488,6 +522,10 @@ Artifact Broker是共享协议/实现族，不是共享运行时。生产物理�
 无状态library与相同machine schema，但每个进程只能安装自己的RPC surface、mTLS allowlist、storage-binding catalog、workload identity和
 bounded resources。
 
+本节两个 Broker 都是只读服务。它们的数据库角色只能执行授权读取，RPC surface、protobuf service 和listener均不得注册
+upload、stage、complete、verify、finalize或generic object-write方法。Model output写入由§15.1的独立Model Artifact Producer承担；
+“复用Broker library”不得被解释为复用Broker进程、ServiceAccount、数据库credential/pool、storage identity或permit。
+
 每个Artifact Broker从CandidateManifest安装的closed storage-binding catalog按exact digest选择client；catalog
 只含endpoint/region/bucket/path-style、timeout和hard byte limit，不含静态access key。生产S3/KMS client
 只能使用该Pod的短期workload identity/default credential chain和private endpoint。读取必须对exact
@@ -532,6 +570,231 @@ struct ArtifactProvenanceEdge {
 Model adapter 只获得 Provider 支持且 data policy 允许的 Artifact grant/bytes。平台固定是否内联、上传 Provider file、
 转码或提取文本；Provider file ID 是 encrypted backend handle，不是 ArtifactRef。Provider retention/region 进入 policy。
 
+完整`CanonicalModelResponse`超过冻结Inline threshold时必须成为一个`purpose=RunOutput`、verified media为
+`application/json`的Artifact-backed `RunValue`。正文必须先完成16的完整response/tool/schema/usage/safety验证，再编码为strict
+canonical JCS；不能把ArtifactRef metadata当逻辑response做schema validation，不能截断、拆分成多个未建模值或把Provider原始
+wire/hidden reasoning写入Artifact。
+
+#### 15.1.1 Claim前 reservation
+
+Model Worker领取每批Model Job前必须先预留独立的本地output-materialization RAII slot和有界ID bundle；实际claim少领、失败、
+identity不匹配或slot drop时立即释放未使用容量与ID。这个本地slot不是durable authority，也不能借用Model request、只读Broker、
+Sandbox或critical-control permit。
+
+只有冻结合法response上限可能越过effective Inline threshold时，Model start transaction才为该物理Attempt原子冻结16的exact
+`ModelOutputArtifactReservation`：tenant/Run/Node/ModelTurn与expected version、Job/version/attempt/lease token/Worker generation、
+request/admission/Model Deployment/HardLimitProfile/output schema digest、classification、Artifact/RunValue/Output Link/grant/stage
+Receipt IDs、候选Blob与duplicate-cleanup Job ID、Artifact-owned与candidate-Blob-owned两个quota bundle、最大materialized bytes、media、Retention/ArtifactIo Policy
+revision、Blob security-domain digest、`staging_retain_until`、`ready_retention_seconds`、deadline与整个reservation digest。该事务创建同Attempt的Staging Artifact intent，
+其当前`retain_until`只能是冻结的`staging_retain_until`；事务同时创建受限write grant，并按最坏合法response bytes/count预留quota；
+Artifact bundle的owner从创建起是预留Artifact ID，candidate Blob bundle的owner是预留candidate Blob ID，dedupe/cleanup均不得转移；
+此时Artifact允许尚未绑定Blob。两个bundle必须分别是04规定的count+logical与uploads+staging+physical exact line。合法response上限完全落在
+Inline内时冻结16的`InlineOnly`分支，不创建虚假Artifact/Blob/quota预留。
+Artifact-capable分支任一项不能完整预留时不得start该Attempt、不得调用Provider，也不得形成Provider usage。
+
+预留ID本身不授权读取、写入或finalize。Retry/failover的新物理Attempt必须使用新Artifact、grant、Receipt、Link、RunValue和quota
+identity；旧Attempt的任何ID或receipt都不能被新lease接管。结果最终可Inline时，Model terminal必须证明Artifact仍未绑定Blob/locator，
+才能以零actual关闭两个bundle、撤销grant并把未使用intent标为可GC，而不是为了复用预留强制写对象存储；一旦candidate已绑定或可能
+PUT，失败owner仍可关闭未Consume的Artifact bundle，但candidate Blob bundle必须保留到cleanup取得exact deletion/absence evidence。
+
+#### 15.1.2 独立 Model Artifact Producer
+
+Model Artifact Producer是独立进程、Deployment、ServiceAccount、mTLS server identity、restricted PostgreSQL write
+credential/pool、S3/KMS workload identity、two-phase admission permit与transport backlog hard cap。它不与Model Worker、只读Model Artifact Broker、Sandbox Artifact
+Broker、Artifact Gateway或Scanner共享Pod、ServiceAccount、DB pool、storage identity或process-local semaphore；其饱和、重启或
+对象存储故障不能占用read Broker、Model Provider stream、API、Scheduler或其他WorkClass的准入容量。
+
+Producer只注册versioned client-streaming `StageModelOutput`，只接受exact
+`spiffe://insight.platform/workload/model-worker.artifact-output` URI SAN；Model read使用的`.../model-worker`身份必须被拒绝。首帧必须是一个closed header，
+随后只能出现严格递增、非空且按16 canonical chunking的data frame，最后是唯一terminal frame；协议不定义`FenceRefresh`或任意metadata
+frame，terminal只携带客户端最后观察到的fence lower bound。空首帧、重复header/terminal、sequence gap、短非末片、单片/总量越界、
+terminal后数据、未知字段/enum、声明与实测length/digest/media/classification/schema/evidence不一致全部fail closed。它不注册
+`ReadModelRequest`、WASI/microVM、generic upload/read/finalize或公共HTTP方法。Model Worker不能取得object locator、bucket credential、
+KMS plaintext或Producer数据库credential。
+
+`StageModelOutput`的closed header/receipt只使用16的同名machine contract，不在Artifact实现另建第二套DTO。header至少完整回绑
+reservation、正文SHA-256/byte length、`application/json`、classification、output schema、validation evidence与stage request digest；
+receipt只返回exact Artifact/candidate+resolved Blob/object generation的脱敏digest、Verified version、新增physical bytes、正文事实和receipt digest，不返回object key、URL、
+grant token或业务Output Link。stream body、metadata或调用方header均不能覆盖tenant、owner、purpose、classification、retention、
+storage binding、KMS context、deadline或预留ID。
+
+容量准入分两阶段：exact TLS/service-role authorization后、读取bounded header前先取得18 ComponentCapacityManifest的global stream与
+唯一per-stream wire-buffer weighted permit，后者weight exact为`effective model_output_chunk_bytes + 4096`并由Header/Data/Terminal复用；
+所有后续DB/S3/KMS waiter都必须位于该global slot内。解析valid header并完成Receipt replay/pre-authorization、得到trusted tenant与declared
+length后，在读取首个data frame前再原子取得声明总bytes与tenant stream permit，不另取第二份data buffer。全部permit持有到
+terminal response、stream drop或absolute deadline。第一阶段不足返回固定body-free unavailable status；第二阶段不足走16 transient
+`DependencyUnavailable + RetrySameAttempt`，若已claim Processing则缩短lease。两者都不能排入application queue、先读正文或借用
+DB/S3/KMS/read Broker容量。
+
+transport front必须在连接进入bounded accepted backlog时启动18冻结的monotonic accept deadline；TLS/service-role、backlog与第一阶段permit
+等待、以及完整Header decode共享该deadline。silent/fragmented Header到期后body-free关闭连接、释放stream/wire-buffer permit且不创建
+Receipt。只有valid Header完成current授权后才切换到冻结Attempt absolute deadline；不能以流仍存活、重试解析或重新取得permit延长任一期限。
+
+Producer执行以下唯一写入协议：
+
+```text
+0. exact mTLS + closed key/digest lookup
+   -> terminal same-key/same-digest Receipt: replay without I/O
+   -> same-key/different-digest: idempotency conflict
+   -> active Processing Receipt: bounded in-progress/defer
+1. new/expired Processing claim
+   -> pre-I/O current Job-fence authorization
+   -> claim/reclaim same-attempt model_output.stage Receipt and increment claim_generation
+   -> validate reserved Staging intent, grant, quota and Policy closure
+2. exact security-domain dedupe lookup after authorization/quota
+   -> existing Verified Blob: stream+validate all bytes without object write, then bind as resolved Blob
+   -> no winner: create/load reserved candidate Blob and KMS-seal one exact opaque locator
+3. candidate path streams exact bytes to one unique staging object
+   -> conditional create; never overwrite an existing generation
+   -> HEAD exact object generation/KMS context, then guarded Staging -> Uploaded checkpoint
+4. guarded Uploaded -> Verifying checkpoint; perform bounded verification outside DB transaction
+5. final PostgreSQL transaction under current claim_generation and dedupe advisory fence
+   -> revalidate Attempt/reservation/grant/Policy and final Job authorization
+   -> preexisting hit: bind resolved Blob and apply Artifact Staging -> Uploaded -> Verifying -> Verified in this transaction
+   -> racing Verified winner: rebind Artifact to resolved winner; candidate -> Deleting if it has an object
+   -> candidate winner: candidate Blob -> Verified and keep it as resolved Blob
+   -> Artifact Verifying -> Verified + evidence + Processing -> Succeeded Receipt atomically
+   -> return resolved Blob, new physical bytes, candidate-cleanup bytes/generation and optional preallocated cleanup Job identity after commit
+6. no Ready, business Reference, RunValue, quota settlement or Model transition
+```
+
+两次授权都必须从PostgreSQL current authority读取完整Job fence：tenant、ModelTurn/Job、state、attempt、lease generation/token digest、
+WorkerProcessGeneration、request/admission/binding、reservation、grant、Policy closure、deadline与cancel/terminal状态。header/terminal
+提供的`expected_version`只是同generation当前事实的单调lower bound：final不得小于initial，且每次授权读取的current Job version必须
+大于等于相应lower bound；Producer不以两者做Job CAS。合法heartbeat可在frame捕获前后继续推进current version，只要Running/InFlight
+state、lease generation/token、Worker generation及全部immutable字段仍exact就不能误判stale。lease接管、Worker替换、
+request/reservation漂移、cancel/timeout/terminal first-winner或deadline到期一律返回stale，不得提交Uploaded/Verified。对象I/O不在数据库
+事务内。Processing claim、Blob bind、Uploaded/Verifying checkpoint与最终Verified事务必须按03锁序先锁stage Receipt并CAS
+`claim_generation`，再按04 canonical顺序对Artifact与candidate Blob两个exact quota bundle header/line取得`FOR SHARE`，锁后重验冻结的
+`UsageReservationId/generation`、Open state及全部line，随后对current ModelTurn/Job取得会与cancel/lease-takeover/terminal UPDATE冲突的
+共享serialization guard，最后锁Artifact/Blob并提交。Quota Close/Expiry/settlement必须取得冲突锁并提升generation；Producer不更新Job，
+heartbeat只会在这些短事务窗口等待。guard取得后仍要重验全部current事实；post-I/O CAS失败时对象仍是不可读staging orphan。
+
+PUT只能对数据库中已绑定的exact opaque locator执行conditional create。Processing lease接管递增`claim_generation`；旧claimant即使
+晚到完成PUT，也不能通过后续数据库CAS。新claimant先加载既有locator并HEAD exact generation：同一header digest/length/KMS context可继续
+验证，不同generation、metadata或bytes进入integrity isolation，绝不生成第二locator、覆盖对象或把冲突对象提升Verified。
+
+dedupe key固定为`tenant/backend/storage_binding/encryption_domain/security_domain/content_digest`。Producer只有在exact Attempt授权与
+quota reservation成立后才能用完整key做常量shape查询，不能list/prefix search，也不能通过状态、时序或错误泄露跨tenant/安全域命中。
+即使命中existing Verified Blob也必须读取并验证调用方本次完整stream；命中只跳过object write。并发candidate在final transaction按该key
+取得与CR-119相同的transaction advisory fence：唯一candidate成为Verified winner；loser Artifact改绑winner，stage Receipt记录
+`new_physical_bytes=0`。Receipt必须把结果闭合区分为`PreexistingHit | CandidateWinner | RacingCandidateLoser`；最后一种还记录candidate
+exact bytes与object-generation digest。若loser candidate已经有object，则同事务把它推进Deleting并回绑预留
+`duplicate_blob_cleanup_job_id`，但Producer不得创建Job/Event；随后Model owner terminal或bounded Artifact cleanup reconciler必须以该
+same ID幂等创建exact `InternalBlob`-owned cleanup Job。stage Receipt/Deleting candidate是崩溃后的恢复authority，不能留下无定位的object。
+
+Producer verifier固定为无脚本、无Provider扩展的closed Model response profile：UTF-8、strict JSON、拒绝duplicate key/尾随字节/NaN/
+Infinity、输入bytes必须已经等于其JCS canonical serialization、反序列化为16当前`CanonicalModelResponse` nominal shape并重新执行
+depth/object/array/string/total-byte limit及固定Secret/data-flow/classification规则。Agent/ModelLoop的exact output schema由Worker在stage前
+和Model terminal repository在Ready前各自重验；Producer不能读取Artifact-backed request正文，也不能用调用方提供的schema digest冒充
+语义验证。Producer同时重算digest/length，核对exact
+S3 generation、storage-binding digest、tenant/security-domain KMS context和冻结ArtifactIo Policy。validator/profile/ruleset digest与
+evidence schema version进入Verified evidence；Producer不能运行Skill/script/package manager或把任意content-type交给动态parser。
+
+Producer最多写Artifact/Blob/Grant current fact与stage Receipt；数据库role必须在权限层拒绝修改Run、RunNode、Invocation/ModelTurn、
+Job current state/lease、RunValue、业务Output Link、quota余额、Event或Outbox。`artifact.ready`和业务事件只能由owner terminal事务产生。
+Producer不能将Artifact推进Ready、建立业务
+Reference、settle Model/Artifact quota、推进Model/Node/Run，亦不能发布`model.completed`。只读Broker继续保持SELECT-only，不能通过
+共享repository、stored procedure或数据库函数间接获得上述写权限。
+
+#### 15.1.3 同Attempt幂等与 owner terminal
+
+`StageModelOutput`使用03共享`JobCommit` Receipt，operation固定为`model_output.stage`；dedupe key严格为tenant、Job、lease generation与
+commit request ID，其中commit request ID就是预留的`stage_receipt_id`。attempt必须与该Job generation的durable reservation一致，但
+`stage_request_digest`不进入key，而是作为Receipt的独立`request_digest`保存。相同key/digest重放返回同一Verified receipt，不重复PUT、
+Artifact/Blob、quota reservation或evidence；相同key不同digest稳定返回`idempotency_conflict`。Processing stage receipt使用短且不超过
+Job lease/deadline的可恢复lease，可在同Attempt/current fence下有界续租；它不得跨对象I/O持有数据库事务或行锁。响应丢失或lease过期后的
+恢复先按同一key/digest读取Receipt：`Succeeded | Failed | Rejected`直接返回既有safe terminal result，即使Job随后terminal或lease已被
+接管也不重新授权、不做I/O；active Processing只返回bounded in-progress/defer。只有不存在Receipt或Processing lease过期的接管才重做
+current pre/post fence授权；接管必须递增`claim_generation`，后续Blob bind、Artifact/Blob Verified及Receipt terminal commit全部CAS该值。
+
+failure persistence是closed合同，不允许实现自行选择是否terminalize：
+
+| 条件（按优先级） | Receipt持久化 | Artifact/Blob mutation | wire结果与后续 |
+|---|---|---|---|
+| existing terminal same key/digest | 不变 | 不变 | replay原Succeeded或terminal failure |
+| same key/different digest | 不修改existing Receipt | 无 | transient envelope中的`IdempotencyConflict + Conflict`；该digest不得重试 |
+| fresh stale fence / deadline | Producer不得新建或terminalize Receipt；已有Processing保持原状态 | 无 | transient `StaleFence/DeadlineExceeded + RejectStale`；Model owner cancel/timeout/cleanup事务可按同key/digest把已有Processing终结为Rejected |
+| dependency/capacity unavailable且剩余deadline允许 | 保持Processing，lease缩短为`min(db_now + retry_after, Job deadline)` | 不推进 | transient `DependencyUnavailable + RetrySameAttempt`；lease后同Attempt递增claim_generation并按exact object HEAD恢复 |
+| dependency失败且已无合法正retry窗口 | 按上一行deadline规则，不伪装transient retry | 无 | transient `DeadlineExceeded + RejectStale` |
+| TooLarge / Invalid且final current guard仍成立 | `Processing -> Rejected`并保存bounded failure result | `Artifact -> Rejected`、撤销grant；candidate/object若存在只进入cleanup，不释放quota | terminal failure：`RejectResponse`，禁止重试该response |
+| IntegrityFailure且final current guard仍成立 | `Processing -> Failed`并保存bounded evidence | candidate Artifact current `Staging | Uploaded | Verifying -> Quarantined`并撤销grant；仅在exact candidate generation证据充分时Blob -> Corrupt，否则由incident authority判定 | terminal failure：`IntegrityIncident`；只允许incident/cleanup |
+| Success | `Processing -> Succeeded` | resolved Blob/Artifact -> Verified及evidence | success receipt；交给owner terminal |
+
+最后三条terminal mutation必须与Receipt结果在同一事务CAS current `claim_generation`；取得final guard前若同时发生stale，stale优先且Producer
+不得写Artifact/Receipt。`DependencyUnavailable`永远不能保存为terminal Failed，否则会永久阻断同Attempt恢复；Conflict也永远不能改写
+original Receipt。Producer之外的Model owner/cleanup只能按该矩阵terminalize stale Processing，不能把transient dependency改写为业务成功。
+
+Producer返回Verified receipt后，只有Model owner repository可在一个PostgreSQL terminal first-winner事务中：
+
+1. 按ID排序锁定terminal与stage两个Receipt并claim/replay terminal Receipt，从已锁stage Receipt确定candidate disposition与可选预留
+   cleanup Job ID；再按03顺序锁定Model quota、Artifact bundle与candidate Blob bundle以及current Run/Node/ModelTurn parent aggregate；
+2. 在取得任何Job-rank锁之前，把current Model Job与可选`RacingCandidateLoser` cleanup Job组成canonical sorted-unique Job集合，并在同一个
+   Job-rank阶段依ID顺序逐一lock existing或create-or-lock。cleanup Job必须是预留ID、exact `InternalBlob` owner且payload逐字段匹配stage
+   receipt的candidate bytes/generation；随后重验current Job fence、Attempt、request/binding及全部identity。已经terminal的same cleanup
+   Job/Receipt按原结果复验，different payload是invariant failure；不得先锁current Job再补锁排序更小的cleanup Job；
+3. 锁定同tenant预留Artifact、resolved Verified Blob、可选Deleting/Deleted candidate、active write grant与冻结Policy，逐项比较digest、length、media、classification、schema、
+   validation evidence、retention和object generation；
+4. 将exact Artifact `Verified -> Ready`，以本事务单一PostgreSQL `db_now` checked-add冻结的`ready_retention_seconds`，把当前
+   `retain_until`从`staging_retain_until`切换为计算出的`ready_retain_until`，并把该绝对值写入terminal Receipt；撤销write grant，创建预留且唯一的
+   `owner=ModelTurn/reference_kind=Output/purpose=RunOutput/port=model_response` Artifact Link；
+5. 用预留RunValue ID写immutable `model_response` `ValueRef::Artifact`，其schema/content digest与classification和Ready Artifact、已验证
+   canonical response逐字段一致；
+6. 提交ModelTurn/Job first-winner、Node/ModelLoop wake、Provider usage与Model quota settlement；Artifact bundle消费count=1与
+   logical=canonical bytes并保持Open到该Artifact删除。candidate Blob bundle按04分支：PreexistingHit全line Close(0)；CandidateWinner把
+   Uploads/StagingBytes以0终结并消费physical=new bytes，保持Open到resolved Blob最后alias物理删除；RacingCandidateLoser只终结Uploads，
+   StagingBytes与未Consume Physical保留到同一cleanup Job exact deletion/absence后Close(0)；若cleanup Receipt已先提交则复验已Closed事实；
+7. 追加Artifact Ready、Model terminal Event与Outbox；该Event回绑stage Receipt、candidate-cleanup/evidence digest。
+
+锁序遵守03全局顺序，多Artifact时按tenant/Artifact ID排序；S3/KMS I/O不得进入该事务。任一CAS、policy、quota、Artifact或Receipt检查
+失败必须回滚全部步骤；不存在Ready但无Output Link/RunValue、Model succeeded但Artifact未Ready、或已创建业务Reference却未settle quota的
+可提交状态。重复terminal commit只返回既有receipt，不重复Ready、Link、RunValue、Event、Outbox或结算。
+
+Producer的Blob bind及`Staging -> Uploaded -> Verifying -> Verified`是一个受限physical sub-protocol，不是业务aggregate command；为维持
+restricted role，它不单独追加Event/Outbox。其durable审计由claim-generation-bound stage Receipt和Verified evidence承担；最终Ready事务
+或orphan cleanup/incident事务必须把该Receipt/evidence digest写入各自Event。除此特例外仍遵守03的业务mutation+Event+Outbox规则，Producer
+不得借此写任意silent业务状态。
+
+#### 15.1.4 orphan、retention、错误与恢复
+
+Model output的classification、exact Retention/ArtifactIo Policy、storage/KMS binding、`staging_retain_until`和
+binding的`maximum_put_completion_uncertainty_milliseconds`、`ready_retention_seconds`来自Model Deployment/admission closure，Producer和Worker
+都不能降低、延长或互换。未terminal的Staging/Uploaded/Verifying/Verified output
+只使用冻结的短期`staging_retain_until`与GC grace；其deadline必须覆盖合法Provider/Producer/terminal恢复窗口，删除仍要重验active
+grant、Job generation、hold和exact object generation。只有owner terminal进入Ready时才使用该事务database time计算并原子切换为
+`RunOutput`的absolute `ready_retain_until`，随Artifact/terminal Receipt和业务Reference保存；重放不重新计算。04两个quota bundle在
+claim/start时按最坏值预留。Inline或Producer bind前Reject可在同事务证明`blob_id=NULL`后零actual关闭两者；bind/PUT后的Reject/cancel/
+timeout/first-winner loser可关闭未Consume Artifact bundle，但不得释放candidate Blob bundle，`cleanup_required`只是Artifact/Blob lifecycle
+分类。所有conditional PUT都必须使用不晚于Attempt deadline的write deadline；candidate物理cleanup不得在`staging_retain_until`前执行或
+采纳DELETE/absence，也不得Close/Expire其Blob bundle。到点后仍须对exact locator/generation重新执行DELETE/HEAD并取得18 binding保证的
+stable evidence；更早的client timeout、连接关闭或HEAD absence都不能复用。只有该evidence成立时，GC事务才能Close其未Consume line。Ready Artifact删除Refund count/logical；只有
+resolved Blob最后alias物理删除才Refund其original PhysicalBytes bundle。进程内Producer permit在RPC结束/失败时立即释放，不能代替durable quota。
+
+稳定错误至少使用以下closed reason class；公共错误、Event和metric不得包含正文、object key、grant、digest、Policy内容或跨tenant存在性：
+
+| reason class | 语义与重试 |
+|---|---|
+| `model_output_capacity_unavailable` | claim/start前无法预留本地future-stage slot、IDs或durable quota；不dispatch Provider，可按deadline安全重试 |
+| `model_output_artifact_too_large` | 实测bytes超过冻结maximum；永久content rejection，不截断或提高本Attempt上限 |
+| `model_output_artifact_invalid` | digest/media/JCS/schema/evidence/Policy不匹配；永久拒绝当前response |
+| `model_output_artifact_stale_fence` | 任一pre/post authorization或terminal CAS已失效；旧Attempt永不重试提交或提升Ready |
+| `model_output_artifact_deadline_exceeded` | stage或post-authorization已越过冻结deadline；当前Attempt永久RejectStale，后续只服从Model owner的总体deadline/retry policy |
+| `model_output_artifact_conflict` | 同一stage identity携带不同request/content digest；映射`idempotency_conflict`且必须人工/代码缺陷调查 |
+| `model_output_artifact_unavailable` | Producer、DB、S3或KMS短暂不可用；原Attempt仍current且exact bytes/digest可证明时只在同Attempt有界重试stage；Attempt失效后由冻结Model retry/budget policy决定是否创建新Attempt并记录可能重复费用，禁止在同Attempt仅为物化重放Provider |
+| `model_output_artifact_integrity_failure` | exact object generation、KMS context、HEAD或存储正文漂移；隔离对象并触发Artifact incident |
+
+恢复按事实窗口收敛：
+
+- Staging intent已提交但没有object：deadline/active grant到期后进入Deleting/GC；
+- PUT成功但Uploaded未提交：staging inventory只以opaque staging identity与exact generation创建cleanup候选，不推断Model成功；
+- Uploaded/Verifying已提交但未Verified：Producer只按同Attempt stage Receipt、current Model Job fence与exact object generation重放
+  受限同步verifier；它不创建或claim Artifact Job。无法证明exact bytes时Reject/GC；
+- Verified receipt已提交但Model terminal响应丢失：先重放terminal Receipt；若terminal尚未提交且fence仍current，可重试同一owner事务；
+- lease丢失、cancel、timeout、worker crash、terminal commit失败或另一first-winner已提交：对象保持非Ready且无业务Reference/RunValue，撤销/
+  过期grant后按bounded orphan流程进入Deleting/GC；
+- terminal事务已提交但响应丢失：重放同一terminal receipt，不重新stage、调用Provider或结算；
+- 新Attempt不能adopt旧Attempt的Verified artifact、grant或receipt；GC/Producer/late Worker也不得在ModelTurn terminal后回写output。
+
 ### 15.2 Context
 
 Context ingest 只接受 Ready Artifact，Dataset Generation 建立 durable Reference。ContextItem/Citation 记录使用的
@@ -545,9 +808,9 @@ MCP embedded resource/resource link 经过 size/media/URI/auth policy后 ingest 
 ### 15.4 Sandbox
 
 Sandbox input/output 使用 14 的 per-Job grant，并只经Sandbox Artifact Broker物化。Guest 只能读声明 input、写 staging output；不能指定 Artifact ID、
-object key、classification 或 Ready 状态。`artifact_links`是撤销的唯一durable fact：Broker在Sandbox销毁证据形成前按exact
-Job/attempt/Worker generation/lease幂等推进`active -> released`，Job terminal事务释放遗漏项并核对request冻结的完整grant集合。
-重复撤销不得形成第二状态或阻止terminal；未 finalize output 进入 staging GC。
+object key、classification 或 Ready 状态。`artifact_links`是撤销的唯一durable fact：只读Broker返回exact read receipt，Sandbox owner/
+Controller authority在销毁证据形成前按Job/attempt/Worker generation/lease幂等推进`active -> released`，Job terminal事务释放遗漏项并
+核对request冻结的完整grant集合。重复撤销不得形成第二状态或阻止terminal；未 finalize output 进入 staging GC。
 
 Sandbox runtime bundle虽是普通Ready Artifact，其发布边界由18的HardLimitProfile version 4额外收紧：byte length必须非零且不超过
 `capability_sandbox.runtime_bundle_bytes.hard_max=67108864`，Q1 effective limit为33554432，溢出稳定为`content_rejected`。
@@ -602,7 +865,7 @@ Receipt/Event。provenance 或 approval 条件缺少完整证据时 fail closed�
 ```text
 mark GC candidate with scan generation
  -> recheck all predicates under lock
- -> Ready/Rejected/Quarantined/Corrupt -> Deleting
+ -> Staging/Uploaded/Verifying/Verified/Ready/Rejected/Quarantined/Corrupt -> Deleting
  -> lock all same-Blob Artifact aliases
  -> other live alias: preserve Blob + exact alias witness
  -> no other live alias: delete exact object generation/version + verify absence/deletion marker
@@ -610,9 +873,18 @@ mark GC candidate with scan generation
 ```
 
 - 不使用最终一致的 cached refcount 单独决定删除；
+- 非Ready candidate只有在没有业务Reference、write grant已撤销/过期、没有current Producer/scan claim且exact retention/hold允许时才能
+  进入Deleting；stale/cancelled `Verifying`允许直接到Deleting，不必伪造Rejected/Quarantined或scan evidence；
+- Model output candidate在冻结`staging_retain_until`前不得开始physical DELETE或采纳absence，即使Attempt已cancel、Receipt已terminal或
+  client已报告PUT timeout；到点后cleanup必须丢弃任何早期观察，按exact locator/generation重新DELETE/HEAD。该时间已按04严格越过
+  Candidate-qualified write-quiescence boundary，因此不会在quota Close后出现迟到PUT；
 - `artifact_references` 是权威，引用数量可以是加速 projection；
 - staging/abandoned multipart 使用更短独立 TTL，但仍验证 active grant/generation；
 - Blob 只有在没有其他未删除Artifact alias时才物理删除；每个Artifact自己的Reference、Retention与Hold资格仍独立判定；
+- 每个Ready Artifact删除只Refund以该Artifact ID为owner的Count/LogicalBytes bundle；即使它最初创建了Blob，只要仍有live alias就不得
+  Refund PhysicalBytes；
+- 最后一个alias删除并取得exact physical deletion/absence evidence时，Blob lifecycle按Blob ID查找最初winner的physical bundle并Refund；
+  duplicate/race/orphan candidate从未Consume Physical时则Close其Staging/Physical line为0。resolved Blob的physical owner不会随alias转移；
 - `artifact_only`回执必须绑定一个仍存活的same-Blob Artifact ID/version且不得包含backend deletion evidence；
 - `blob_generation`回执必须证明无其他未删除alias并包含exact backend receipt与absence/deletion-marker evidence；
 - legal hold 只能由授权 compliance principal 设/解并审计；
@@ -661,6 +933,8 @@ egress/download bytes
 ```
 
 - Prepare 时 reservation，Verified/Ready 时结算，Reject/GC 时释放；
+- Model output在Provider dispatch前按最大合法canonical response预留Artifact bytes/count和exact IDs；Verified不结算，只有Model
+  terminal owner transaction按actual bytes结算，Inline/失败/取消/loser由terminal或GC释放；
 - reservation 有 deadline，不能无限占额度；
 - dedupe 不允许绕过 logical byte/Artifact count quota；
 - Artifact Gateway、scanner、transformer、GC、download 使用独立队列、permit、连接池和 autoscaling；
@@ -668,7 +942,9 @@ egress/download bytes
 - large transfer 使用 streaming backpressure，不在内存缓冲全文件；
 - control/quarantine/revoke/delete 使用保留 capacity；
 - Artifact/S3 饱和不能耗尽 API/Scheduler/Model/MCP/Sandbox control DB pool；Sandbox Artifact Broker的permit/DB pool耗尽也不能
-  占用Model Artifact Broker的permit/DB pool，反向同理。
+  占用Model Artifact Broker或Model Artifact Producer的permit/DB pool，三者反向同理。Worker在claim前必须持有本地future-stage slot和
+  durable reservation；独立Producer仍在真正stage时以自己的服务端permit准入。dispatch后发生的Producer瞬时饱和只能在同Attempt、
+  同bytes/digest内有界重试stage，不能借用其他lane、形成无界客户端buffer或仅为物化重放Provider。
 
 ## 21. 安全、租户与加密
 
@@ -701,7 +977,18 @@ trait BlobStore {
     async fn read(&self, request: BlobReadRequest) -> ByteStream;
     async fn delete_generation(&self, request: DeleteBlobGeneration) -> DeleteBlobReceipt;
 }
+
+trait ModelArtifactProducer {
+    async fn stage_model_output(
+        &self,
+        stream: ClientStream<StageModelOutputFrame>,
+    ) -> Result<StageModelOutputReceipt, StageModelOutputFailure>;
+}
 ```
+
+`ModelArtifactProducer`只表达§15.1的内部client-streaming port；frame/header/receipt必须是closed nominal type，不能退化为
+`Stream<Bytes>`加任意metadata map，也不能由只读Artifact Broker实现该trait。failure必须使用16的closed reason/disposition DTO，
+并与§15.1错误表一一映射；自由错误文本、backend状态、locator、grant或正文不得进入wire。
 
 Artifact Worker只调用两个typed backend port：`ArtifactScanner::scan(exact request)`与
 `BlobStore::delete_generation(exact request)`。网络/对象读取/扫描发生在数据库事务外；backend返回bounded evidence后，worker用原
@@ -768,6 +1055,11 @@ storage binding 与由classification、exact retention revision、encryption dom
 ArtifactRef 时 join exact tenant-scoped Blob，不在 Artifact 重复保存 Blob digest/size。该修正不增加表，baseline 仍为23张表。
 Retention bootstrap FK与closed policy payload进入schema contract version 5；Blob安全域进入version 6。
 
+Model Artifact Producer不增加领域表：预留/Staging/Verified事实仍写上述三张Artifact表与04两个共享Quota bundle，stage幂等写共享
+`Receipt`；需要持久化的历史/安全证据只能由Model terminal或既有Artifact cleanup/incident authority写共享`Event/Outbox`，Producer
+本身不得写二者。Model terminal事务复用既有Invocation/Job/RunValue/ArtifactLink/Receipt/Event/Outbox。
+不得为Producer另建attempt、upload session、transition、evidence、orphan或terminal表，也不得把object store tag/queue消息当current authority。
+
 ### 24.1 已撤销 persistence 记录（非规范性）
 
 旧 migration 24～28、Artifact 专用 Operation/Attempt/transition/evidence 表族及其 repository checkpoint 已撤销，
@@ -790,7 +1082,10 @@ read RPC，Sandbox进程只注册WASI与microVM两个RPC。双向mTLS/NetworkPol
 restart门禁全部通过前，这一新拓扑仍只是target/implementation slice，不登记Gate或Phase完成。Sandbox Controller仍不得持有
 object-store/KMS credential或对应直出网络。该切片没有新增表或migration。Artifact-backed output、真实
 object-store/KMS负向资格、scanner/GC provider、公开 `/v1` 和对应qualification尚未交付，不能由当前
-开发期fixture或旧候选记录推断为当前行为。
+开发期fixture或旧候选记录推断为当前行为。尤其是本次新增的Model Artifact Producer进程、`StageModelOutput`、restricted DB write
+role、独立S3/KMS identity/two-phase permit、expected-version lower-bound+generation authorization、canonical JSON verifier、dedupe/
+failure/双quota-bundle closure以及Model terminal Artifact first-winner事务均为
+Accepted目标合同但当前不存在交付证据。既有Model Artifact Broker仍只证明read authority/SELECT-only边界；不得扩展其RPC或数据库权限来冒充Producer。
 
 ## 25. 可观测性与隐私
 
@@ -814,6 +1109,9 @@ share/export、quarantine release、hold、delete 和 break-glass。
 - PostgreSQL 是 metadata/reference/grant/lifecycle 权威；S3-compatible store 是 blob 权威；
 - Model Artifact Broker与Sandbox Artifact Broker分别使用独立Deployment、ServiceAccount、restricted DB pool、storage identity和permit；
   Artifact Gateway、Upload Finalizer、Scanner、Transformer、Download Gateway、GC/Reconciler也各自使用独立Deployment/permit；
+- Model Artifact Producer使用第三个独立Deployment、ServiceAccount、restricted DB write pool、S3/KMS workload identity、mTLS endpoint、
+  two-phase admission permit与transport backlog hard cap，只允许exact Model Worker调用`StageModelOutput`；它与两个只读Broker及Model Worker
+  均不得同Pod或共享credential/pool；
 - scanner/transformer 使用 14 Sandbox node pool，不在 Gateway/API 解析复杂文件；
 - bucket 默认 private、versioning/object-lock/replication 按环境 policy，禁止静态 public website；
 - Artifact service 使用最小 bucket/KMS identity，不与 Sandbox/Model/MCP 共享 credential；
@@ -832,8 +1130,23 @@ share/export、quarantine release、hold、delete 和 break-glass。
 - finalize/quarantine、read/revoke、reference/GC、legal hold/delete、restore/delete竞态；
 - Sandbox/MCP/Context/Model grant audience/port/purpose swap；
 - Model/Sandbox Broker endpoint、URI SAN、ServiceAccount、DB credential和config互换，以及单audience饱和/重启；
+- Model output claim前slot+weighted bytes/ID/双bundle quota预留失败不会claim/start或调用Provider；少领、claim失败、Inline/取消和crash
+  按no-object/candidate cleanup事实释放，不泄漏或提前释放reservation；
+- `StageModelOutput` exact `model-worker.artifact-output` URI SAN、client-stream header/chunk/terminal顺序、chunk/total limit，以及read Broker/Producer
+  endpoint、ServiceAccount、DB role、S3/KMS identity和permit互换的负向门禁；
+- Model output duplicate JSON key、尾随字节、非canonical JCS、schema/evidence/media/classification/digest/length/KMS context/object
+  generation漂移全部fail closed；secret/content canary不进入日志、错误、Event或receipt；
+- Producer pre-I/O授权后cancel/heartbeat/lease takeover/Worker restart/terminal first-winner的竞态，以及post-I/O fresh fence规则；
+- PUT成功/DB失败、Uploaded后crash、Verified receipt响应丢失、Model terminal commit冲突/响应丢失、stale Verified orphan与exact-generation GC；
+- preexisting Blob hit、并发candidate new/race winner、candidate cleanup先于/晚于Model terminal、Artifact先删但shared Blob仍有alias、最后alias
+  physical refund分别验证两个quota owner与settlement identity，不双退、不泄漏；
+- InProgress/Dependency transient、fresh Stale/Deadline、TooLarge/Invalid Rejected、Integrity Failed+Quarantined及Conflict不改existing Receipt
+  的每个failure persistence分支均覆盖response loss与claim-generation takeover；Integrity分别从candidate current Staging、Uploaded、
+  Verifying进入Quarantined，且都不能绕过incident/rescan guard晋升Ready；
+- 同Attempt相同stage digest重放得到同一receipt，不同digest冲突；新Attempt不能adopt旧Attempt Artifact/grant/receipt；
+- Producer饱和、DB/S3/KMS timeout与rolling restart不耗尽Model read Broker、Provider stream、Sandbox、API或Scheduler容量；
 - derived Artifact classification/provenance/citation 和 source deletion；
-- quota reservation leak、staging TTL、abandoned multipart、logical vs physical quota；
+- quota reservation leak、staging TTL、abandoned multipart、Artifact logical vs Blob physical quota lifecycle；
 - S3 version/object missing/corrupt、KMS revoke/rotation、backup restore reconciliation；
 - scan/download saturation时 API/Scheduler/control capacity 不受影响；
 - filename、Secret、URL、object key、grant/content canary 不进入 public event/metric/log/error。
@@ -853,6 +1166,11 @@ share/export、quarantine release、hold、delete 和 break-glass。
 - Reference/retention/hold/grant 任一存在时 GC 无法删除；
 - Sandbox 输出只能写 staging，不能自置 Ready/classification/object key；
 - Model与Sandbox Artifact Broker不能共享进程、Pod、ServiceAccount、DB pool或permit，任一audience饱和不阻断另一方；
+- Model Artifact Producer只接受exact Model Worker的`StageModelOutput`并最多推进到Verified；只读Broker保持SELECT-only且不能注册写RPC；
+- 每个Model Attempt在Provider dispatch前已有exact output IDs、Artifact+candidate Blob两个quota bundle与本地materialization slot+weighted
+  bytes；预留失败时Provider调用数为零；
+- Model Artifact只有在单一terminal PostgreSQL事务同时完成Ready、Output Link、RunValue、Model/Job first-winner、quota与outbox后才可读；
+- stale/cancel/timeout/commit失败的Model Staging/Uploaded/Verifying/Verified对象无业务Reference且只能进入bounded orphan GC；
 - derived content 产生新 Artifact/Provenance，不覆盖 source；
 - object missing/corrupt 被检测、隔离并有恢复/incident runbook；
 - 大文件 streaming 不形成无界内存/DB/event，饱和不拖垮控制面。
