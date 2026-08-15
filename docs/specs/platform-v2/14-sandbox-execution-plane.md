@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
+| 状态 | Draft / Architecture Revision |
 | 日期 | 2026-08-15 |
 | 依赖 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md)、[`10-capability-invocation.md`](10-capability-invocation.md)、[`13-mcp-host.md`](13-mcp-host.md)、[`15-artifacts-and-files.md`](15-artifacts-and-files.md) |
 | 直接下游 | 17、18 |
@@ -67,7 +67,7 @@ IsolationBackend Revision。普通 namespace/seccomp/runc 组合不满足用户�
 Platform Orchestration Plane
   -> authenticated Sandbox API
 Sandbox Gateway / Controller
-  -> durable SandboxJob + bounded queue
+  -> durable shared Job + bounded queue
 Dedicated Executor Node Pool
   -> WASI instance | gVisor sandbox | microVM
 Egress Proxy + Sandbox Artifact Broker + Secret Broker
@@ -90,21 +90,21 @@ account、node credential、container runtime socket、cloud metadata 或平台�
 ## 5. Runtime Catalog
 
 ```rust
-struct SandboxRuntimeRevision {
-    runtime_revision_id: RevisionId,
-    runtime_id: SandboxRuntimeId,
-    family: RuntimeFamily,
-    runtime_version: ExactVersion,
+struct SandboxRuntimeSpec {
+    schema_version: u32, // const 1
+    family: SandboxRuntimeFamily,
+    runtime_version: SandboxRuntimeVersion,
     image_or_module_digest: Digest,
     guest_kernel_digest: Option<Digest>,
     guest_agent_digest: Digest,
-    supported_isolation: BTreeSet<IsolationClass>,
+    supported_isolation: BTreeSet<SandboxIsolationClass>,
     supported_abi: SandboxAbiVersion,
     builtin_modules_manifest_digest: Digest,
     sbom_artifact_id: ArtifactId,
     provenance_evidence_id: EvidenceId,
-    semantic_digest: Digest,
 }
+
+struct SandboxRuntimeVersion(String);
 
 enum SandboxRuntimeFamily {
     Python,
@@ -115,9 +115,16 @@ enum SandboxRuntimeFamily {
 }
 ```
 
+`SandboxRuntimeSpec`、`SandboxPackageSpec`与`SandboxProfileSpec`只分别是02 `ResourceSpec`中
+`SandboxRuntime | SandboxPackage | SandboxProfile`的closed payload，不拥有root ID、tenant、ordinal或version ID。唯一wrapper始终是02
+`Resource`/`ResourceVersion`；发布值通过`ExactVersionRef`引用wrapper，并把同一canonical payload交给Executor。任何
+`Sandbox*Revision`第二aggregate、`Sandbox*ResourceSpec`别名或在payload内重复root/version ID都禁止。三个Spec也不含`semantic_digest`/
+`package_digest`自摘要；唯一payload canonical/semantic digest由02 ResourceVersion wrapper和ExactVersionRef拥有并覆盖完整Spec JCS。
+
 Machine wire固定为`python | node_js | wasm_wasi | reviewed_shell | managed_mcp_server`；supported isolation固定为
 `wasm | sandboxed_container | micro_vm`，Sandbox ABI v1固定为`v1`。数组按wire value排序、无重复，未知值不得由
 runtime manifest、Draft或Worker动态扩展。
+`SandboxRuntimeVersion`为1～128 ASCII bytes，只允许字母、数字、`_`、`.`、`-`；它是不透明exact version，不执行semver range、alias或trim。
 
 - Runtime Catalog 只接受平台构建、签名、扫描并 attested 的 exact digest；
 - Runtime authority按tenant保存可引用的exact发布投影，但tenant author不能上传或替换runtime binary/image；只有
@@ -132,23 +139,37 @@ runtime manifest、Draft或Worker动态扩展。
 ## 6. Code Package 与 Build
 
 ```rust
-struct SandboxPackageRevision {
-    package_revision_id: RevisionId,
-    package_id: SandboxPackageId,
+struct SandboxPackageSpec {
+    schema_version: u32, // const 1
     source_artifact_id: ArtifactId,
     source_digest: Digest,
-    runtime_revision_id: RevisionId,
-    entrypoint: Entrypoint,
+    runtime_revision: ExactVersionRef,
+    entrypoint: SandboxEntrypoint,
     dependency_lock_digest: Digest,
     runtime_bundle_artifact: ArtifactRef,
     build_evidence_id: EvidenceId,
     trust_class: CodeTrustClass,
-    package_digest: Digest,
+}
+
+enum SandboxEntrypointKind {
+    PythonModule,
+    NodeModule,
+    WasmExport,
+    ReviewedExecutable,
+    ManagedMcpServer,
+}
+
+struct SandboxEntrypoint {
+    kind: SandboxEntrypointKind,
+    value: String,
 }
 ```
 
 Entrypoint kind固定为`python_module | node_module | wasm_export | reviewed_executable | managed_mcp_server`，并分别使用
 closed字段保存module/export或规范化relative path；不存在generic command、shell string、任意argv prefix或未知kind。
+`SandboxEntrypoint` object deny unknown/null；value为1～512 ASCII bytes且无control/NUL。Python module只允许点分identifier，WASM export只允许
+identifier，Node/Reviewed/Managed路径必须是无绝对前缀、空segment、`.`/`..`、反斜线或重复separator的规范化relative path；kind必须分别与
+`Python | NodeJs | WasmWasi | ReviewedShell | ManagedMcpServer` runtime family exact匹配。
 
 Package publish pipeline 在独立受限 Build Sandbox 中完成：archive validation、source scan、lock validation、离线
 dependency fetch、license/malware policy、build、SBOM、签名和 execution conformance。Runtime Job 只挂载生成的
@@ -173,20 +194,18 @@ immutable bundle，不访问 package registry。
 Sandbox Profile把可复用执行安全策略发布为immutable Revision；它不是容器/microVM实例，也没有独立Deployment：
 
 ```rust
-struct SandboxProfileRevision {
-    profile_revision_id: RevisionId,
-    profile_id: SandboxProfileId,
+struct SandboxProfileSpec {
+    schema_version: u32, // const 1
     allowed_trust_classes: BTreeSet<CodeTrustClass>,
-    allowed_runtime_families: BTreeSet<RuntimeFamily>,
-    minimum_isolation: IsolationClass,
-    isolation_policy_revision_id: RevisionId,
-    resource_profile_revision_id: RevisionId,
-    network_policy_revision_id: RevisionId,
-    artifact_io_policy_revision_id: RevisionId,
-    secret_policy_revision_id: Option<RevisionId>,
+    allowed_runtime_families: BTreeSet<SandboxRuntimeFamily>,
+    minimum_isolation: SandboxIsolationClass,
+    isolation_policy: ExactVersionRef,
+    resource_policy: ExactVersionRef,
+    network_policy: ExactVersionRef,
+    artifact_io_policy: ExactVersionRef,
+    secret_policy: Option<ExactVersionRef>,
     cleanup_policy: SandboxCleanupPolicy,
     max_job_duration: Duration,
-    semantic_digest: Digest,
 }
 ```
 
@@ -197,12 +216,12 @@ Profile policy closure固定Resource/Network/ArtifactIO/Isolation四个exact Pol
 Capability Deployment的`ExactSandboxBinding`必须固定exact Package、Runtime和Sandbox Profile Revision，并验证ABI、
 runtime family、code trust、entrypoint、Effect、Artifact ports、Secret purpose、network和minimum isolation兼容。Profile
 只能收紧04/14平台硬策略；DynamicCode、ReviewedShell、任意Secret或external network都不能通过Profile降到低于本规范
-矩阵的IsolationClass。Profile active head只帮助未来authoring/deploy resolution，Run/Job不追随head。
+矩阵的SandboxIsolationClass。Profile active head只帮助未来authoring/deploy resolution，Run/Job不追随head。
 
 ## 8. Isolation Class 选择
 
 ```rust
-enum IsolationClass {
+enum SandboxIsolationClass {
     Wasm,
     SandboxedContainer,
     MicroVm,
@@ -214,7 +233,7 @@ Machine wire使用`wasm | sandboxed_container | micro_vm`；安全强度顺序�
 
 最小隔离矩阵：
 
-| 条件 | 最低 IsolationClass |
+| 条件 | 最低 SandboxIsolationClass |
 |---|---|
 | 已验证 WASM、无 Secret、默认无网络 | Wasm |
 | 平台审核 immutable Python/Node、无 Secret、无网络、固定依赖 | SandboxedContainer |
@@ -232,24 +251,61 @@ Secret、network、data classification、tenant policy 和 platform hard policy 
 ## 9. Execution Request
 
 ```rust
-struct SandboxExecutionRequest {
-    schema_version: u32,
+#[serde(tag = "source_kind", rename_all = "snake_case", deny_unknown_fields)]
+enum SandboxExecutionSourceV1 {
+    Capability {
+        invocation_id: InvocationId,
+        expected_invocation_version: u64,
+        capability_deployment: ExactDeploymentRef,
+        capability_binding: CapabilityBackendBinding,
+    },
+    ManagedMcpTool {
+        invocation_id: InvocationId,
+        expected_invocation_version: u64,
+        capability_deployment: ExactDeploymentRef,
+        capability_binding: CapabilityBackendBinding,
+        mcp_deployment: ExactDeploymentRef,
+        discovery_snapshot_digest: Digest,
+        authorization_binding_digest: Digest,
+        protocol_operation_digest: Digest,
+        continuation_digest: Option<Digest>,
+    },
+    ManagedMcpSubscriptionSession {
+        parent_mcp_job_id: JobId,
+        expected_parent_job_version: u64,
+        mcp_operation_id: McpOperationId,
+        mcp_deployment: ExactDeploymentRef,
+        discovery_snapshot_digest: Digest,
+        authorization_binding_digest: Digest,
+        subscription_generation: u64,
+        protocol_operation_digest: Digest,
+        continuation_digest: Option<Digest>,
+    },
+}
+
+struct ResolvedSandboxPolicyClosureV1 {
+    schema_version: u32, // const 1
+    isolation_policy: ExactVersionRef,
+    resource_policy: ExactVersionRef,
+    network_policy: ExactVersionRef,
+    artifact_io_policy: ExactVersionRef,
+    secret_policy: Option<ExactVersionRef>,
+    closure_digest: Digest,
+}
+
+struct SandboxAdmissionBindingV1 {
+    schema_version: u32, // const 1
     protocol_version: SandboxAbiVersion,
     tenant_id: TenantId,
-    sandbox_job_id: SandboxJobId,
-    invocation_id: CapabilityInvocationId,
     job_id: JobId,
-    expected_invocation_version: u64,
     attempt_no: u32,
-    lease_generation: u64,
-    capability_deployment: ExactDeploymentRef,
-    capability_binding: CapabilityBackendBinding,
+    source: SandboxExecutionSourceV1,
     runtime_revision: ExactVersionRef,
-    runtime: SandboxRuntimeResourceSpec,
+    runtime: SandboxRuntimeSpec,
     package_revision: ExactVersionRef,
-    package: SandboxPackageResourceSpec,
+    package: SandboxPackageSpec,
     profile_revision: ExactVersionRef,
-    profile: SandboxProfileResourceSpec,
+    profile: SandboxProfileSpec,
     isolation_class: SandboxIsolationClass,
     executor_worker_manifest_digest: Sha256Digest,
     isolation_backend_contract_digest: Sha256Digest,
@@ -264,23 +320,82 @@ struct SandboxExecutionRequest {
     secret_grants: Vec<ScopedSecretGrant>,
     network_mode: SandboxNetworkMode,
     resources: SandboxResourceEnvelope,
+    resolved_policy: ResolvedSandboxPolicyClosureV1,
+    retry_backoff_milliseconds: u64,
     deadline: DateTime<Utc>,
     callback: ScopedSandboxCallback,
     trace_context: SafeSandboxTraceContext,
-    request_digest: Sha256Digest,
+    admission_digest: Digest,
+}
+
+struct SandboxExecutionCommandV1 {
+    schema_version: u32, // const 1
+    admission: SandboxAdmissionBindingV1,
+    current_job_version: u64,
+    lease_generation: u64,
+    lease_token_digest: Digest,
+    worker_process_generation_id: WorkerProcessGenerationId,
+    command_digest: Digest,
+}
+
+#[serde(tag = "artifact_stage_mode", rename_all = "snake_case", deny_unknown_fields)]
+enum SandboxAttemptArtifactStageV1 {
+    None {
+        schema_version: u32, // const 1
+    },
+    CapabilityOutput {
+        schema_version: u32, // const 1
+        stage_binding: ArtifactStageAttemptBindingV1,
+    },
+}
+
+struct SandboxJobAttemptBindingV1 {
+    schema_version: u32, // const 1
+    tenant_id: TenantId,
+    job_id: JobId,
+    attempt_no: u32,
+    immutable_owner: TypedOwnerRef,
+    admission_digest: Digest,
+    workload_role_identity_digest: Digest,
+    executor_worker_manifest_digest: Digest,
+    isolation_backend_contract_digest: Digest,
+    backend_recovery_contract_digest: Digest,
+    artifact_stage: SandboxAttemptArtifactStageV1,
+    deadline: DateTime<Utc>,
 }
 ```
 
-Gateway根据exact Capability Deployment/RunBindings派生Package、Runtime、Sandbox Profile及其resolved policy和grant。
+Gateway根据closed `source`与其exact Capability/MCP Deployment、Discovery/Authorization/RunBindings派生Package、Runtime、Sandbox Profile及其resolved policy和grant。
 客户端input不能覆盖
 tenant、runtime、entrypoint、resources、network、Secret、callback 或 isolation。Request 使用 mTLS workload
 identity 和 canonical body digest；Executor RPC仅接受leaf certificate中恰好一个
 `spiffe://insight.platform/workload/sandbox-executor.<backend>` URI SAN，WASI v1的exact identity为
 `spiffe://insight.platform/workload/sandbox-executor.wasi`。CN、DNS SAN、自报header或payload中的Worker ID都不能替代该传输身份；
-业务命令还必须独立通过WorkerProcessGeneration与lease fence。重放绑定Invocation expected version、sandbox
-job/attempt/epoch/deadline。`SandboxJobId`、`JobId`与
-预留的output `RunValueId`使用同一个UUID的不同typed prefix，使Job主键同时预留唯一输出identity；input Value/Schema、output
+业务命令还必须独立通过WorkerProcessGeneration与lease fence。重放绑定source owner expected version、Job/attempt/deadline和完整admission。
+物理执行只使用`JobId`；预留output `RunValueId`是独立nominal identity，不共享UUID或伪装成Job。input Value/Schema、output
 Schema和ValueRef必须与Invocation frozen admission及已提交input RunValue逐字段一致。
+
+`admission_digest = SHA-256(JCS(SandboxAdmissionBindingV1 without admission_digest))`；`command_digest =
+SHA-256(JCS(SandboxExecutionCommandV1 without command_digest))`。两者都是closed strict JCS，所有version/count/duration/byte limit为正且受18
+hard limit；`ResolvedSandboxPolicyClosureV1.closure_digest`排除自身覆盖五个exact ref的完整JCS。source variant字段不得交换；Capability/ManagedMcpTool
+的Job owner必须是exact CapabilityInvocation，ManagedMcpSubscriptionSession的owner必须是exact parent Job且双向child pointer匹配。
+runtime/package/profile的ExactVersionRef必须分别指向02 matching ResourceKind的ResourceVersion，并使引用digest逐值等于随请求携带的同一Spec
+canonical JCS；executor不得从active head补字段。unknown/null/cross-variant、调用方digest、missing resolved policy或ref/document漂移全部fail closed。
+
+`SandboxAdmissionBindingV1`是03 Sandbox Job immutable `binding_snapshot` payload，schema ID exact `sandbox.job-binding.v1`、version 1、path exact
+`contracts/platform-v1/schemas/bindings/sandbox-job-binding.schema.json`、canonical maximum 131072 bytes；03 registry分别为
+`JobKind::Sandbox + owner=CapabilityInvocation + WorkClass::Sandbox`与`JobKind::Sandbox + owner=Job + WorkClass::Sandbox`注册同一schema。
+`admission_digest`按上述self-excluded公式重算；snapshot payload digest则覆盖包含该字段的完整payload。二者用途不同但必须由同一canonical payload
+确定，repository不得接受调用方任一摘要或另存第三个request摘要。
+
+每个Sandbox `NewPhysicalAttempt`还必须原子安装`SandboxJobAttemptBindingV1`作为03 `current_attempt_snapshot`，schema ID exact
+`sandbox.job-attempt-binding.v1`、version 1、path exact
+`contracts/platform-v1/schemas/bindings/sandbox-job-attempt-binding.schema.json`、canonical maximum 196608 bytes；同样为上述两个owner triple分别注册
+`BindingSnapshotUseV1::JobAttempt` entry。其digest为完整strict JCS SHA-256并作为15 `JobAttempt.attempt_binding_digest`。
+普通Capability source允许`None | CapabilityOutput`；ManagedMcpTool是否允许Artifact output由frozen Interface port决定；
+ManagedMcpSubscriptionSession必须为`None`且不得调用15 `StageSandboxOutput`。`CapabilityOutput.stage_binding`必须是15 exact
+`stage_kind=SandboxOutput`、same tenant/CapabilityInvocation/Job/attempt/deadline的完整binding。snapshot不含lease/token/Worker fence；Resume复用exact
+bytes，NewPhysicalAttempt重分配全部attempt/output identity。缺Job或JobAttempt registry entry、owner/source错配、nested stage swap都使Candidate/start失败。
 
 `executor_identity_digest`不是WorkerManifest或镜像摘要。Executor启动后必须先向同节点node/runtime attestor登记
 `worker_process_generation_id`、WorkerManifest digest和isolation backend contract digest。登记端点只能通过node-local Unix socket
@@ -292,54 +407,59 @@ PID namespace与process-start tick，返回覆盖登记请求、workload identit
 Job/lease/current-state authority；进程存活期间不得因TTL删除，确认generation消失后至少保留到平台hard maximum wall + cleanup窗口结束，
 随后必须有界回收。
 
-提交时`lease_generation`必须为0；generic Job claim成功后才把返回的exact generation绑定到Executor command。Runtime、
-Package与Profile同时携带exact ref和closed document，Executor不允许按mutable current head重新解析。Artifact read grant固定
-Ready `ArtifactRef`，可选exact byte range；write/commit grant固定Staging Artifact ID、port、generation、byte ceiling和expiry，
-两种形状不能混用。grant、Secret和callback到期时间不得晚于Job deadline，也不得在admission时已经过期。
+Gateway admission只持久化`SandboxAdmissionBindingV1`，其中不存在lease/Worker字段；generic Job claim/start成功后才以current Job fence构造
+`SandboxExecutionCommandV1`并发送Executor。Runtime、Package与Profile同时携带exact ref和closed document，Executor不允许按mutable current head重新解析。首版Sandbox只完整物化runtime bundle与input
+logical value，不提供range request carrier；Artifact read grant因此固定Ready `ArtifactRef`并只使用15 `JobRequest + WorkloadBound + ReadWhole`。
+admission只预分配write grant/staging identity，claim/start事务取得
+exact attempt/lease/Worker fence后才创建15 `JobAttempt + WorkloadBound + StagingWrite`，固定Staging Artifact ID、port、generation、byte ceiling和
+expiry。read/write两种形状不能混用。grant、Secret和callback到期时间不得晚于Job deadline，也不得在创建时已经过期。
 
-## 10. Admission 与 Job 状态机
+## 10. Admission、统一Job状态与Sandbox phase
 
 ```rust
-enum SandboxJobState {
+enum SandboxPhysicalPhaseV1 {
     Accepted,
     Preparing,
     Starting,
-    Running,
+    GuestRunning,
     Collecting,
-    Cancelling,
-    Succeeded,
-    Failed,
-    Cancelled,
-    TimedOut,
-    Lost,
+    Cleanup,
+    LostEvidence,
+}
+
+struct SandboxPhysicalStateV1 {
+    schema_version: u32, // const 1
+    admission_digest: Digest,
+    phase: SandboxPhysicalPhaseV1,
+    phase_generation: u64,
+    provider_binding_digest: Option<Digest>,
+    phase_evidence_digest: Digest,
 }
 ```
 
-```text
-Accepted -> Preparing | Cancelling | TimedOut | Failed
-Preparing -> Starting | Cancelling | TimedOut | Failed | Lost
-Starting -> Running | Cancelling | TimedOut | Failed | Lost
-Running -> Collecting | Cancelling | TimedOut | Failed | Lost
-Collecting -> Succeeded | Cancelling | TimedOut | Failed | Lost
-Cancelling -> Cancelled | Failed | TimedOut | Lost
-```
+03 `JobState`是唯一物理lifecycle；`SandboxPhysicalStateV1`只是同一Job bounded backend state中的fenced progress，不是第二状态机、aggregate或表。
+合法组合固定为：`Ready -> Accepted`；`Leased -> Accepted | Preparing`；`Running -> Preparing | Starting | GuestRunning | Collecting | Cleanup`；
+`Cancelling -> Preparing | Starting | GuestRunning | Collecting | Cleanup`；`ReconciliationRequired -> LostEvidence | Cleanup`；terminal
+`Succeeded | Failed | Cancelled | TimedOut`只保留最后已提交phase/evidence且不得再变。Waiting/RetryScheduled不得携带live Provider binding；只有cleanup
+和03 NewPhysicalAttempt规则收敛后才能重排。phase只能按`Accepted -> Preparing -> Starting -> GuestRunning -> Collecting -> Cleanup`前进；
+任何active phase都可在fenced failure observation下进入`LostEvidence`并原子把Job置`ReconciliationRequired`，但`LostEvidence`本身不是terminal。
+每次phase CAS同时匹配Job ID/version、attempt、lease/Worker fence、admission digest与严格递增phase generation。
 
-SandboxJob 是 03 共享 Job 的 `work_class=sandbox` typed view，复用统一 lease/epoch/fence；它不是Capability Job的child，也没有
-第二个attempt、lease或terminal authority。`Lost` 表示
-guest/executor结果不可恢复；owner Invocation 必须依据 Effect、cleanup 和 recovery 事实显式决定逻辑状态。
+普通Sandbox/ManagedMcpTool执行就是`work_class=sandbox`的一个03共享Job，owner为CapabilityInvocation；它不是Capability Job的child，也没有
+第二attempt、lease或terminal authority。guest/executor结果不可恢复时，owner Invocation必须依据Effect、cleanup和recovery事实显式决定逻辑状态。
 
 这里的“不是Capability Job的child”同时约束MCP Managed stdio operation：其Capability Implementation逻辑kind仍为`Mcp`，但exact
-transport要求代码执行时，Gateway必须跳过`CapabilityRemote` Job并把同一个物理attempt直接表示为SandboxJob。request使用closed tagged
+transport要求代码执行时，Gateway必须跳过`CapabilityRemote` Job并把同一个物理attempt直接表示为Sandbox Job。request使用closed tagged
 source区分普通`Sandbox` Implementation与`ManagedMcp` Implementation；后者额外冻结exact MCP Deployment、Discovery、Authorization、
 protocol operation/continuation，且Package Runtime family必须为`managed_mcp_server`、entrypoint必须为`managed_mcp_server`、最终
 isolation必须为`micro_vm`。不能用两个Capability/Sandbox Job、Runner内存状态或RPC request ID表达同一个物理attempt。
 
-Managed stdio Resource subscription例外地同时存在逻辑MCP subscription Job与物理Sandbox session Job，因为notification/reconcile等待与
+Managed stdio Resource subscription例外地同时存在逻辑MCP subscription parent Job与物理Sandbox session child Job，因为notification/reconcile等待与
 microVM process/cleanup是两个独立生命周期。Sandbox Job只能通过逻辑Job冻结的exact generation创建；逻辑Job保存关联Sandbox Job identity，
 Sandbox payload反向保存逻辑subscription/generation digest。任一方向不匹配、旧session仍Running、或absence/quarantine证据不足都fail
-closed。该例外不允许第二套session、lease或terminal表，仍只使用共享Job typed payload。
+closed。双向关系只使用03 parent `current_child_job_id`/child `TypedOwnerRef::Job`，该例外不允许SandboxJob ID、第二套session/lease/terminal表。
 
-终态不可离开。`Lost` 表示执行边界无法证明代码是否完成或产生外部 Effect；Controller 把 safe uncertainty 回传
+03 Job终态不可离开。`ReconciliationRequired + LostEvidence`表示执行边界无法证明代码是否完成或产生外部 Effect；Controller 把 safe uncertainty 回传
 CapabilityInvocation，由 10 决定 retry/reconciliation。没有网络/Secret且 Interface 为 Pure 的 Job lost 可以按
 平台 policy 创建新 Attempt，但不能修改旧 Job。
 
@@ -349,7 +469,7 @@ deadline、Artifact/Secret grant、resource、network、isolation capacity 和 i
 control-plane硬上限约束，不在Capability Worker内等待slot，也不创建`CapabilityRemote` Job。
 
 数据库时间是admission与phase提交的唯一时钟。一个admission事务锁定Capability Invocation和exact Capability Deployment，
-校验Deployment gate/closure以及active Runtime/Package/Profile revision document，建立Artifact grant link，reserve
+校验Deployment gate/closure以及active Runtime/Package/Profile revision document，为每个runtime/input exact Artifact建立15的closed ArtifactGrant，reserve
 `concurrent_jobs`、`sandbox_cpu_seconds`、`sandbox_memory_mebibytes`、`sandbox_output_bytes`四条quota line，并原子写Invocation、Job、
 Command Receipt、Event和Outbox。任何一步失败都不留下部分Invocation transition、reservation、grant或Job。
 
@@ -419,7 +539,7 @@ Agent 读取；额外文件只有在声明 Artifact output port 下收集。禁�
   multi-value、tail-call和exception均不属于v1；
 - `insight_alloc(i32 input_len) -> i32 input_ptr`返回guest memory中的可写区；Executor写入canonical input envelope；
 - `run(i32 input_ptr, i32 input_len) -> i64`返回`(output_ptr << 32) | output_len`，两个字段按unsigned 32-bit解释；
-- input envelope固定为`{"schema_version":1,"request_digest":...,"input_value_id":...,
+- input envelope固定为`{"schema_version":1,"admission_digest":...,"input_value_id":...,
   "input_schema_digest":...,"value":...}`；Artifact-backed input必须由唯一`read_whole` exact grant读取，
   重新核对content digest/length、strict JSON和exact input schema后按同一形状传入；不得把ArtifactRef
   metadata作为正文通过input schema validator；
@@ -445,7 +565,8 @@ import/resource conformance，不能静默加入v1 allowlist。当前WASI backen
 - 不挂载 hostPath、workspace、Docker socket、`/proc` host view、`/sys` device、tenant bucket 或共享 PVC；
 - input Artifact 通过 15 的 grant broker materialize，验证 tenant/digest/media/size；结构化主输入还必须在
   Executor/Controller trust boundary使用exact Interface input schema重新验证；
-- output 先写 staging grant，Guest 不能指定 object key、Artifact ID、classification 或 public URL；
+- output由Controller以exact `StageSandboxOutput`把有界stream交给Artifact Workload Producer及上述Attempt-bound staging grant；Guest不能指定
+  object key、Artifact ID、classification、grant或public URL，Controller/Executor也不取得S3/KMS credential；
 - symlink/hardlink/device/FIFO/socket/path traversal 和 sparse quota bypass 被拒绝；
 - result commit 前执行 file count/size/media/malware/archive/content policy；
 - stdout/stderr 分别限 byte/rate，截断形成 private diagnostic，不作为 success output；
@@ -456,17 +577,50 @@ import/resource conformance，不能静默加入v1 allowlist。当前WASI backen
 默认网络为 `None`。启用时所有流量经过平台 Egress Proxy：
 
 ```rust
+enum SandboxNetworkMode {
+    None,
+    BrokeredEgress,
+}
+
+enum SandboxEgressMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+struct SandboxCanonicalDestination {
+    host: String,
+    port: u16,
+    path_prefix: String,
+    methods: Vec<SandboxEgressMethod>,
+}
+
 struct SandboxNetworkPolicyDocument {
-    mode: NetworkMode,
-    destinations: Vec<CanonicalDestination>,
-    methods_or_protocols: BTreeSet<AllowedProtocol>,
-    max_connections: u32,
-    max_request_bytes: u64,
-    max_response_bytes: u64,
-    dns_policy: DnsPolicy,
-    tls_policy: TlsPolicy,
+    schema_version: u32, // const 1
+    destinations: Vec<SandboxCanonicalDestination>,
+    maximum_redirects: u8,
+    maximum_dns_answers: u16,
+    maximum_response_bytes: u64,
+    require_https: bool,
+    require_tls12_or_newer: bool,
+    deny_private_addresses: bool,
+    deny_link_local_addresses: bool,
+    deny_metadata_addresses: bool,
+    deny_proxy_environment: bool,
+    deny_connect_tunnel: bool,
+    deny_listen: bool,
+    deny_udp: bool,
 }
 ```
+
+`SandboxNetworkMode` machine wire只允许`none | brokered_egress`；它属于resolved execution request，不是Policy的第二个开关。empty destinations派生
+`None`，non-empty destinations只可派生`BrokeredEgress`；请求、Profile或Worker不能覆盖。`SandboxCanonicalDestination` exact含canonical lowercase
+DNS host（非IP、总长≤253、label≤63）、nonzero port、≤1024-byte canonical absolute path prefix及按wire严格排序唯一的
+`SandboxEgressMethod::{Get,Post,Put,Patch,Delete}`。destinations最多64项并按完整struct严格排序唯一；redirect为0～8，DNS answers为1～64，
+response bytes为正。上述九个require/deny bool必须全部为true；缺失、false、额外协议或自由TLS/DNS object均fail closed。
+policy digest exact为`SHA-256(JCS(SandboxNetworkPolicyDocument))`并逐值等于Revision `rules_digest`。
 
 `PolicyKind::Network`是平台共享策略类型；Sandbox Profile引用的exact Network Policy Revision必须携带上述完整typed body，并使其
 canonical digest与Revision的`rules_digest`一致。只有AuthoringPackage与通用摘要、但没有该typed body的Network Revision可以服务其他
@@ -539,17 +693,17 @@ Sandbox `Succeeded` 只表示受控执行完成，不直接把 Invocation/Run �
 
 ## 19. 幂等与恢复
 
-- Gateway 以 `(tenant, execution_id, request_digest)` 幂等，digest 冲突 fail closed；
+- Gateway 以 `(tenant, job_id, admission_digest)` 幂等，digest 冲突 fail closed；
 - 同一 Invocation Attempt 重复 submit 返回已有 Job/terminal receipt；
 - safe retry到期后，Gateway在单事务内执行`RetryScheduled -> Deferred`并创建新的Sandbox Job；旧terminal Job永久保留，
   request中的全局`attempt_no`必须恰好递增且不得超过Invocation冻结的attempt limit；
 - safe retry的相对退避必须从Capability admission snapshot复制进每个Sandbox request，范围为`1..=60000ms`。owner controller不得提交
   绝对时间或本地退避配置；repository使用transaction database clock派生`retry_at`并与Invocation deadline求交；
-- Controller/Executor crash 后由bounded expired-lease scan推进：仍为`Accepted`且deadline未到的Job清除旧lease并回到Ready，
+- Controller/Executor crash 后由bounded expired-lease scan推进：仍为`JobState::Ready + phase=Accepted`且deadline未到的Job清除旧lease并保持Ready，
   因为Executor必须先提交`Preparing`才允许调用backend；仍为`Accepted`但deadline已到的Job以无执行证据的`TimedOut`终结；
   已提交`Preparing`或更晚phase的Job只有在旧sandbox已销毁或对应node identity已隔离、grant已撤销并提交closed recovery
-  evidence后才能标记`Lost`。旧generation随Job version/lease generation fence失效，迟到结果不能覆盖恢复结果；
-- 可证明的既有sandbox可以由实现了相同exact generation owner-token协议的新owner重连；不能证明时必须走上述`Lost`路径，
+  evidence后才能提交`JobState::ReconciliationRequired + phase=LostEvidence`。旧generation随Job version/lease generation fence失效，迟到结果不能覆盖恢复结果；
+- 可证明的既有sandbox可以由实现了相同exact generation owner-token协议的新owner重连；不能证明时必须走上述reconciliation路径，
   不能把`Preparing`回退为`Accepted`或在同一Sandbox Job内重跑用户代码；
 - package/runtime/cache 只按 verified digest 命中，cache corruption 隔离 node 并重新拉取；
 - Callback 丢失由平台 poll/safety scan 查询 Job terminal receipt；
@@ -582,12 +736,12 @@ global isolation class
 - Sandbox 全部不可用时 API、Scheduler、Model、Native Capability 和 MCP readiness 必须保持正常。
 
 admission按ceiling reserve四维quota；terminal必须在同一事务释放concurrent/memory reservation，并以可信usage结算CPU/output。
-失败或不确定且缺少完整usage时按已冻结ceiling保守结算，不能以0掩盖已消耗资源。`artifact_links`是本Job grant撤销的唯一
-durable authority。只读Sandbox Artifact Broker只返回绑定exact tenant、Sandbox Job、request digest、attempt、
-WorkerProcessGeneration、lease generation、Artifact/grant和bytes digest的bounded read receipt，不修改`artifact_links`。Sandbox owner/
-Controller authority必须在提交`Destroyed`/cleanup evidence前，以该receipt和current Job fence幂等地把本Job active grant推进为released；
-terminal事务再释放任何尚未released的剩余grant，并断言本Job恰有request冻结的全部released grant。数量、owner或receipt不匹配时整笔
-事务失败；pre-destroy release与terminal收口是同一Sandbox owner authority的两个idempotent command，不是Broker的第二写authority。
+失败或不确定且缺少完整usage时按已冻结ceiling保守结算，不能以0掩盖已消耗资源。15的`ArtifactGrant`逻辑aggregate（物理映射进共享
+ArtifactLink）是本Job grant撤销的唯一durable authority。只读Sandbox Artifact Broker只返回绑定exact tenant、Sandbox Job、request digest、attempt、
+WorkerProcessGeneration、lease generation、Artifact/grant和bytes digest的bounded read receipt，不修改Grant。Sandbox owner/
+Controller authority必须在提交`Destroyed`/cleanup evidence前，以该receipt和current Job fence幂等地把本Job grant从`Active`推进为`Revoked`；
+terminal事务再撤销任何尚未`Revoked`的剩余grant，并断言本Job恰有request冻结的全部`Revoked` grant。数量、owner或receipt不匹配时整笔
+事务失败；pre-destroy revoke与terminal收口是同一Sandbox owner authority的两个idempotent command，不是Broker的第二写authority。
 
 ## 21. Secret
 
@@ -621,33 +775,18 @@ result、cleanup 或 executor-node authority。
 
 ## 24. 所有权接口
 
-```rust
-trait SandboxGateway {
-    async fn submit(&self, request: SandboxExecutionRequest) -> SandboxSubmitReceipt;
-    async fn get(&self, request: GetSandboxJob) -> SandboxJobSnapshot;
-    async fn cancel(&self, request: CancelSandboxJob) -> SandboxCancelReceipt;
-}
+| port | 输入 | 输出/唯一职责 |
+|---|---|---|
+| `SandboxGateway.submit` | closed `SandboxAdmissionBindingV1` + Command idempotency | shared Command Receipt与唯一`JobId`；不创建Sandbox专用aggregate |
+| `SandboxGateway.get` | tenant-scoped `JobId` | 03 shared Job的safe Sandbox projection |
+| `SandboxGateway.cancel` | `JobId`、current expected Job version、Idempotency-Key | shared Command Receipt；只提交cancel intent/first-winner |
+| `SandboxExecutorBackend` phase ports | credential-free `SandboxExecutionCommandV1`与registered phase command snapshot | bounded typed Provider/cleanup evidence；不得写Job、Receipt或Artifact |
+| `SandboxGatewayAuthority.accept_sandbox_execution` | registered `VersionedSnapshot` command | shared Receipt与first-winner disposition |
+| `SandboxExecutionAuthority.commit_sandbox_phase` | registered phase `VersionedSnapshot` + current Job fence | shared `JobCommit` Receipt与bounded phase decision |
+| `SandboxExecutionAuthority.commit_sandbox_outcome` | registered terminal `VersionedSnapshot` + current Job fence | shared `JobCommit` Receipt与唯一terminal disposition |
 
-trait SandboxExecutorBackend {
-    async fn prepare(&self, job: LeasedSandboxJob) -> PreparedSandbox;
-    async fn start(&self, sandbox: PreparedSandbox) -> RunningSandbox;
-    async fn terminate(&self, command: TerminateSandbox) -> TerminationEvidence;
-    async fn destroy(&self, command: DestroySandbox) -> CleanupEvidence;
-    async fn abort(&self, command: AbortSandboxExecution) -> SandboxAbortEvidence;
-}
-
-trait SandboxGatewayAuthority {
-    async fn accept_sandbox_execution(&self, command: AcceptSandboxExecution)
-        -> CommandOutcome<SandboxPhaseDecision>;
-}
-
-trait SandboxExecutionAuthority {
-    async fn commit_sandbox_phase(&self, command: CommitSandboxPhase)
-        -> CommandOutcome<SandboxPhaseDecision>;
-    async fn commit_sandbox_outcome(&self, command: CommitSandboxOutcome)
-        -> CommandOutcome<SandboxPhaseDecision>;
-}
-```
+每个`VersionedSnapshot`的schema ID/path/maximum和对应`ClosedOperation`必须在03 machine registry注册后才能实现port；表中名称是所有权边界，
+不是允许adapter自造开放payload的trait占位符。
 
 WASI与microVM Artifact读取由独立Sandbox Artifact Broker实现15的受信物化合同。Sandbox Controller只把Executor/Provider的
 credential-free请求分别转交`ReadWasiArtifact`或`ReadMicroVmArtifact`，并返回已经过exact generation/length/digest复验的bounded bytes；
@@ -655,15 +794,15 @@ Controller不得自行解释密文locator，也不得持有Artifact provider cat
 Provider同样不得取得PostgreSQL/S3/KMS credential。Controller以exact Sandbox Controller URI SAN调用Broker，Model Worker不能调用这两个
 Sandbox方法；WASI与microVM请求不会互相转换。read authority的两条授权路径是闭合且互斥的：
 
-- `runtime_bundle`不携带grant，必须精确匹配当前active leased Sandbox Job冻结的published Package revision及
+- `runtime_bundle`必须携带该Job request中冻结的exact `JobRequest + WorkloadBound + ReadWhole` grant ID/generation/authorization binding digest，并精确匹配当前active leased Sandbox Job、published Package revision及
   `runtime_bundle_artifact`；
-- `input_value`必须携带该Job request中完全相等的`read_whole` grant，并匹配仍为active、未过期、generation/
-  payload digest/owner/source Artifact均一致的`artifact_links`行。
+- `input_value`必须携带该Job request中完全相等的`JobRequest + WorkloadBound + ReadWhole` grant ID/generation/authorization binding digest，并匹配仍为`Active`、未过期、
+  state/owner/source Artifact均一致的ArtifactGrant。
 
-两条路径都必须重验tenant、SandboxJob/Job同UUID投影、request digest、WorkerProcessGeneration、lease
+两条路径都必须重验tenant、exact Job ID/immutable owner、admission digest、WorkerProcessGeneration、lease
 generation、active physical phase、deadline、Ready Artifact、Verified Blob及ArtifactRef全部字段。ArtifactRef
-本身、已释放grant、Executor提交的deadline或当前Job payload任一单独事实都不足以授权读取。该路径不创建
-read状态表；body-free read audit使用已有Event/telemetry策略，grant的durable状态仍只属于`artifact_links`。
+本身、已撤销grant、Executor提交的deadline或当前Job payload任一单独事实都不足以授权读取。该路径不创建
+read状态表；body-free read audit使用已有Event/telemetry策略，grant的durable状态仍只属于15的ArtifactGrant逻辑aggregate。
 
 Sandbox Artifact Broker与Model Artifact Broker是两个audience-isolated进程和Deployment；它们不得共享Pod、ServiceAccount、
 数据库连接池、process-local permit或in-flight bulkhead。Sandbox Broker只注册上述WASI与microVM RPC，两条Sandbox方法可以共享
@@ -671,7 +810,7 @@ Sandbox audience自己的有界runtime、对象存储/KMS client和bulkhead；�
 不能接受Sandbox Controller身份。两者即使使用相同Artifact metadata schema或底层S3/KMS服务，也必须使用独立workload identity、
 restricted database credential和连接池，任何一侧饱和、泄露或rolling restart都不能占用另一侧的准入容量。
 
-Backend 对 IsolationClass exhaustive。Domain contract 不依赖 Kubernetes/Firecracker/gVisor SDK；adapter 层负责具体
+Backend 对 SandboxIsolationClass exhaustive。Domain contract 不依赖 Kubernetes/Firecracker/gVisor SDK；adapter 层负责具体
 实现。所有 outcome 为闭合枚举，未知 agent/VMM state fail closed。
 
 ## 25. 公共 API 与事件
@@ -869,13 +1008,16 @@ payload误送入有限执行解码器；Managed session仍须由其专用termina
 
 Managed session新增独立fenced lost commit：exact Provider cleanup evidence、最新物理Job fence、usage reservation和四个terminal quota
 ledger identity共同进入请求摘要；PostgreSQL同一事务把物理Job写为`Lost/ReconciliationRequired`并清除lease，保守结算未知CPU/output、
-确认Artifact grant已释放，随后才清除逻辑session/link、设置full reconcile并重排逻辑MCP Job，Receipt/Event/Outbox与双状态变化原子提交。
+确认Artifact grant已撤销，随后才清除逻辑session/link、设置full reconcile并重排逻辑MCP Job，Receipt/Event/Outbox与双状态变化原子提交。
 该authority已贯穿domain、PostgreSQL与internal gRPC且不增表/migration。Provider lifecycle现增加exact observation和typed cleanup RPC：
 observation绑定逻辑/物理identity、两端process generation、lease与sandbox identity，Linux Provider用child wait加PID/start identity判活；
 transport failure绝不等于`Exited`。cleanup closed outcome区分`Absent`与含完整`SandboxCleanupEvidence`的`Destroyed`，tombstone replay返回
 同一证据。microVM Executor现把Managed专用driver与有限执行driver、NATS control listener置于同一supervisor；两条lane共享
 `LocalWorkerPools`，Managed permit保留到cleanup与terminal commit得到durable disposition。长期循环按profile续租，guest退出、deadline、
 process drain或观察/heartbeat失败均先exact destroy，只有`Destroyed(evidence)`才可构造并提交lost。
+
+上述既有实现证据仍使用旧ArtifactLink `active -> released` helper，runtime bundle也尚未冻结15目标`ReadWhole` grant；它不能证明CR-165后的
+`ArtifactGrantCapabilityV1`/subject/delivery、`Active -> Revoked`或八个Artifact物理role隔离。对应domain/PostgreSQL/RPC/部署fixture clean-cut完成前，本规范保持Draft。
 
 作为absence worker的前置合同，`Starting`提交现把完整credential-free prepared binding与其canonical digest一并持久化；Job校验逐字段回绑
 request、旧Executor/Provider generation、lease和sandbox identity，replay也必须返回同一binding。此前仅保存不可展开摘要的状态不足以让
@@ -906,7 +1048,7 @@ Provider生产组合已经交付；真实KMS/Secret Manager、Linux KVM与proces
 
 process-generation isolation authority是独立于PostgreSQL lease、NATS和Controller进程的node/runtime attestor；数据库lease过期、NATS
 断连、Pod deletion request、Controller本地cache miss或对旧generation RPC超时都不是absence proof。其closed请求必须精确绑定
-`tenant_id`、`sandbox_job_id`、`request_digest`、旧`worker_process_generation_id`和已提交到Sandbox Job phase evidence中的
+`tenant_id`、`job_id`、`admission_digest`、旧`worker_process_generation_id`和已提交到shared Job phase evidence中的
 `executor_identity_digest`。成功回执固定包含同一组字段、`observed_at`、CandidateManifest安装的`attestor_identity_digest`、
 `process_absent | node_quarantined`二选一的处置和覆盖全部字段的canonical digest。`process_absent`表示attestor从对应runtime/cgroup
 authority确认旧execution process tree不存在；`node_quarantined`表示该exact node identity已由placement、network和storage authority
