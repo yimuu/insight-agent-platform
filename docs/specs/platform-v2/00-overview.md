@@ -189,6 +189,8 @@ RunValue、usage/quota、Event与Outbox；pre-header transport timeout与storage
 absence后迟到PUT。该结论只表示目标合同可实施；对应domain/schema/protobuf、Producer进程与权限、部署及
 real-process/故障/容量资格仍全部Open。当前Model output materializer仍为Inline-only，超过Inline能力时仍走开发期
 `model_output_artifact_required`防护；不得据此关闭Phase 4～6、任一Qualification Gate，或把Artifact-backed output声明为当前行为。
+实现已从04的closed Model-output ArtifactIo Policy Rust/JSON合同与pure checked retention timing helper开始；它尚未连接v5 limits、
+Candidate storage binding、Model Deployment或任何写路径，因此不改变上述当前行为边界。
 精确完成度和下一门禁只以 [`implementation-plan.md`](implementation-plan.md) 为准。Phase 4～6 尚未完成，Phase 7 还要求
 用户对 clean replacement 单独明确授权。
 

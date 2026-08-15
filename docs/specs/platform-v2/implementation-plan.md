@@ -790,7 +790,13 @@ ModelTurn/Job/Receipt/Event/Outbox并按dedupe disposition结算两个bundle。A
 bundle跟随Blob到最后alias物理删除，preexisting/race candidate按无对象/cleanup evidence Close。Inline/no-object关闭两bundle；已有candidate
 时只先关闭Artifact bundle，Blob bundle保持到GC。该设计保持23表和单一`0001`，不新增Model output表、第二Artifact lifecycle或terminal authority。
 
-下一实现切片按依赖顺序交付：04 typed Policy/时间公式；HardLimitProfile v5全部Model-output字段、WorkerManifest v2、
+CR-165首个实现依赖已经交付：04的closed `ModelOutputArtifactIoPolicyDocument`、独立checked-in JSON Schema与root contract digest、
+`PolicyResourceSpec` exact variant/rules digest validation，以及显式接收effective staging/Ready界限和Candidate PUT uncertainty的pure checked
+time closure。fixture覆盖unknown field、media/ID/digest、ceil+margin、staging窗口、Ready duration与terminal绝对时间；全workspace all-target
+compile保持通过。该证据只关闭typed Policy/时间公式基础，不表示Model Deployment、reservation、Producer或Artifact-backed current path已实现。
+
+下一实现切片按依赖顺序交付：先修复18中Component/Storage manifest wire、集合上限、capacity identity和4096 constant closure的剩余
+machine空洞，再原子实现HardLimitProfile v5全部Model-output字段、WorkerManifest v2、
 ComponentCapacityManifest、ArtifactStorageBindingManifest与Candidate exact closure；closed Rust/protobuf success+tagged failure合同和两bundle reservation；Producer
 core/RPC、two-phase admission、restricted PostgreSQL projection、S3/KMS/dedupe/checkpoint；Hybrid materializer与生产进程；owner-finalize、
 candidate/orphan cleanup、shared-Blob quota lifecycle及真实PostgreSQL并发/崩溃fixture；最后完成独立Helm/NetworkPolicy/credential互换、

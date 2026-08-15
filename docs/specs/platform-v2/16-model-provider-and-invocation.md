@@ -1195,9 +1195,10 @@ bytes、把容量permit保留到有界批次flush结束的non-blocking队列投�
 公开SSE消费与live-gap/backpressure资格、real-process Provider conformance、跨work-class饱和隔舱和Phase 6 fault fixture仍未交付，因此
 CR-132/CR-136和本规范状态保持进行中。
 
-本次新增的`ModelOutputArtifactReservation`、最坏Artifact quota预留、`StageModelOutput` client-stream机器合同、独立Model Artifact
+04的closed Model-output ArtifactIo Policy Rust/JSON合同与pure checked staging/Ready时间计算已经交付，但尚未接入Model Deployment或
+admission。`ModelOutputArtifactReservation`、最坏Artifact quota预留、`StageModelOutput` client-stream机器合同、独立Model Artifact
 Producer进程/ServiceAccount/restricted写role/S3-KMS identity、双重授权、Verified→Ready terminal transaction、Inline reservation释放、
-orphan GC与对应real-process/fault/capacity fixture均尚未实现。既有Inline output materializer、只读Model Artifact Broker、能够引用预先
+orphan GC与对应real-process/fault/capacity fixture仍尚未实现。既有Inline output materializer、只读Model Artifact Broker、能够引用预先
 Ready Artifact的repository shape或普通Artifact prepare/finalize测试都不能单独证明本合同。上述全部代码、schema、protobuf、数据库权限、
 Helm与资格证据完成前，`model_output_artifact_required`防护仍只是当前缺功能边界，Artifact-backed Model output、Phase 4/6与Gate均保持Open。
 

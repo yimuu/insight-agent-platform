@@ -818,6 +818,12 @@ idempotency_conflict
   切换为ready retention，并对Artifact/Inline/失败竞态只结算或释放一次；Blob bind前失败可零actual关闭，bind/PUT后的cancel/loser及
   reservation expiry持续占worst-case staging额度，直到exact generation deletion/absence evidence与释放同事务提交。
 
+当前实现证据已包含closed Rust `ModelOutputArtifactIoPolicyDocument`、生成并纳入根contract digest的独立JSON Schema、
+`PolicyResourceSpec`的exact `ArtifactIo` variant/rules digest门禁，以及只接受显式effective limit与Candidate storage uncertainty输入的pure
+checked timing helper。unit/checked-in schema fixture覆盖unknown field、错误media/ID kind、短write-quiescence grace、staging window、Ready
+duration区间和admission/terminal数据库时间分离。该切片不解析Candidate storage binding、不升级HardLimitProfile v5、不创建Model
+Deployment closure或reservation，也不启用Artifact-backed output；这些仍以implementation plan的后续依赖为准。
+
 ## 21. 明确推迟的工作
 
 - 企业外部 IAM/SCIM 集成；
