@@ -26,18 +26,19 @@ spec:
       automountServiceAccountToken: false
       hostPID: true
       terminationGracePeriodSeconds: 40
-      nodeSelector: {{ toYaml .Values.executor.nodeSelector | nindent 8 }}
-      tolerations: {{ toYaml .Values.executor.tolerations | nindent 8 }}
+      schedulerName: {{ .Values.admission.schedulerName }}
+      nodeSelector: {{ toYaml .Values.attestor.nodeSelector | nindent 8 }}
+      tolerations: {{ toYaml .Values.attestor.tolerations | nindent 8 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
-      securityContext: {runAsUser: 0, runAsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      securityContext: {runAsUser: 0, runAsGroup: 10001, seccompProfile: {type: RuntimeDefault}, appArmorProfile: {type: RuntimeDefault}}
       containers:
         - name: attestor
           image: {{ include "insight-platform-sandbox.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/platform-sandbox-attestor"]
-          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"], add: ["SYS_PTRACE"]}}
+          securityContext: {runAsUser: 0, runAsGroup: 10001, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"], add: ["SYS_PTRACE"]}}
           env:
             - {name: PLATFORM_SANDBOX_ATTESTOR_CONFIG, value: /etc/insight/config/attestor.json}
             - {name: PLATFORM_SANDBOX_ATTESTOR_CONFIG_DIGEST, value: {{ printf "sha256:%s" ($config | sha256sum) | quote }}}

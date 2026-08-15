@@ -29,6 +29,14 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
 {{- end }}
 
+{{- define "insight-platform-sandbox.microVmExecutorImage" -}}
+{{- printf "%s@%s" .Values.microVmExecutor.image.repository .Values.microVmExecutor.image.digest -}}
+{{- end }}
+
+{{- define "insight-platform-sandbox.microVmProviderImage" -}}
+{{- printf "%s@%s" .Values.microVmExecutor.provider.image.repository .Values.microVmExecutor.provider.image.digest -}}
+{{- end }}
+
 {{- define "insight-platform-sandbox.controllerEndpoint" -}}
 {{- printf "https://%s.%s.svc:%d" (include "insight-platform-sandbox.controllerName" .) .Values.namespaces.controller (int .Values.controller.port) -}}
 {{- end }}

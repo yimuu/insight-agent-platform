@@ -25,18 +25,19 @@ spec:
       serviceAccountName: {{ include "insight-platform-sandbox.executorName" . }}
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 40
+      schedulerName: {{ .Values.admission.schedulerName }}
       nodeSelector: {{ toYaml .Values.executor.nodeSelector | nindent 8 }}
       tolerations: {{ toYaml .Values.executor.tolerations | nindent 8 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
-      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}, appArmorProfile: {type: RuntimeDefault}}
       initContainers:
         - name: wait-for-node-attestor
           image: {{ include "insight-platform-sandbox.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["sh", "-ec", "until test -S /run/insight-sandbox-attestor/registration.sock; do sleep 1; done"]
-          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+          securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
           volumeMounts:
             - {name: socket, mountPath: /run/insight-sandbox-attestor, readOnly: true}
       containers:
@@ -44,7 +45,7 @@ spec:
           image: {{ include "insight-platform-sandbox.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/platform-sandbox-executor"]
-          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+          securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
           env:
             - {name: PLATFORM_SANDBOX_EXECUTOR_CONFIG, value: /etc/insight/config/executor.json}
             - {name: PLATFORM_SANDBOX_EXECUTOR_CONFIG_DIGEST, value: {{ printf "sha256:%s" ($config | sha256sum) | quote }}}

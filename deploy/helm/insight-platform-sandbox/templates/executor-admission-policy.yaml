@@ -1,3 +1,7 @@
+{{- $wasiConfig := include "insight-platform-sandbox.executorConfig" . -}}
+{{- $microVmExecutorConfig := include "insight-platform-sandbox.microVmExecutorConfig" . -}}
+{{- $microVmProviderConfig := include "insight-platform-sandbox.microVmProviderConfig" . -}}
+{{- $attestorConfig := include "insight-platform-sandbox.attestorConfig" . -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -9,70 +13,336 @@ spec:
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["pods"]
+        resources: ["pods", "pods/ephemeralcontainers"]
         scope: Namespaced
   validations:
     - expression: >-
         has(object.metadata.labels) &&
         object.metadata.labels['app.kubernetes.io/name'] == {{ .Chart.Name | quote }} &&
         object.metadata.labels['app.kubernetes.io/instance'] == {{ .Release.Name | quote }} &&
-        object.metadata.labels['app.kubernetes.io/component'] in ['attestor', 'executor-wasi', 'executor-microvm']
+        object.metadata.labels['app.kubernetes.io/component'] in ['attestor', 'executor-wasi', 'executor-microvm'] &&
+        object.metadata.labels.all(k, v,
+          k in ['app.kubernetes.io/name', 'app.kubernetes.io/instance', 'app.kubernetes.io/component', 'controller-revision-hash', 'pod-template-generation'] ||
+          (object.metadata.labels['app.kubernetes.io/component'] == 'executor-microvm' && k == 'insight.platform/workload-role')) &&
+        (object.metadata.labels['app.kubernetes.io/component'] != 'executor-microvm' ||
+          object.metadata.labels['insight.platform/workload-role'] == 'sandbox-provider.microvm')
       message: only the installed attestor, WASI Executor, and microVM Executor pod roles are allowed
+    - expression: >-
+        has(object.metadata.annotations) &&
+        ((object.metadata.labels['app.kubernetes.io/component'] == 'executor-wasi' &&
+          object.metadata.annotations['checksum/config'] == {{ $wasiConfig | sha256sum | quote }} &&
+          object.metadata.annotations.all(k, v, k in ['checksum/config', 'deprecated.daemonset.template.generation'])) ||
+         (object.metadata.labels['app.kubernetes.io/component'] == 'executor-microvm' &&
+          object.metadata.annotations['checksum/executor-config'] == {{ $microVmExecutorConfig | sha256sum | quote }} &&
+          object.metadata.annotations['checksum/provider-config'] == {{ $microVmProviderConfig | sha256sum | quote }} &&
+          object.metadata.annotations.all(k, v, k in ['checksum/executor-config', 'checksum/provider-config', 'deprecated.daemonset.template.generation'])) ||
+         (object.metadata.labels['app.kubernetes.io/component'] == 'attestor' &&
+          object.metadata.annotations['checksum/config'] == {{ $attestorConfig | sha256sum | quote }} &&
+          object.metadata.annotations.all(k, v, k in ['checksum/config', 'deprecated.daemonset.template.generation'])))
+      message: Sandbox execution pods allow only their exact config checksums and controller metadata annotations
+    - expression: >-
+        ((request.operation == 'CREATE' && request.userInfo.username == {{ .Values.admission.daemonSetControllerUsername | quote }}) ||
+         (request.operation == 'UPDATE' && object.metadata.ownerReferences == oldObject.metadata.ownerReferences)) &&
+        has(object.metadata.ownerReferences) && object.metadata.ownerReferences.size() == 1 &&
+        ((object.metadata.labels['app.kubernetes.io/component'] == 'executor-wasi' &&
+          object.metadata.ownerReferences.exists_one(r,
+            r.apiVersion == 'apps/v1' && r.kind == 'DaemonSet' &&
+            r.name == {{ include "insight-platform-sandbox.executorName" . | quote }} && r.uid != '' &&
+            has(r.controller) && r.controller && has(r.blockOwnerDeletion) && r.blockOwnerDeletion)) ||
+         (object.metadata.labels['app.kubernetes.io/component'] == 'executor-microvm' &&
+          object.metadata.ownerReferences.exists_one(r,
+            r.apiVersion == 'apps/v1' && r.kind == 'DaemonSet' &&
+            r.name == {{ include "insight-platform-sandbox.microVmExecutorName" . | quote }} && r.uid != '' &&
+            has(r.controller) && r.controller && has(r.blockOwnerDeletion) && r.blockOwnerDeletion)) ||
+         (object.metadata.labels['app.kubernetes.io/component'] == 'attestor' &&
+          object.metadata.ownerReferences.exists_one(r,
+            r.apiVersion == 'apps/v1' && r.kind == 'DaemonSet' &&
+            r.name == {{ include "insight-platform-sandbox.attestorName" . | quote }} && r.uid != '' &&
+            has(r.controller) && r.controller && has(r.blockOwnerDeletion) && r.blockOwnerDeletion)))
+      message: Sandbox execution pods require their exact DaemonSet controller identity and ownership
     - expression: >-
         object.spec.automountServiceAccountToken == false &&
         !object.spec.hostNetwork && !object.spec.hostIPC &&
-        ((object.metadata.labels['app.kubernetes.io/component'] in ['attestor', 'executor-wasi'] &&
-          object.spec.nodeSelector['insight.platform/sandbox-node'] == 'true') ||
+        object.spec.schedulerName == {{ .Values.admission.schedulerName | quote }} &&
+        ((!has(object.spec.nodeName) || object.spec.nodeName == '') ||
+         (request.operation == 'UPDATE' && has(oldObject.spec.nodeName) && object.spec.nodeName == oldObject.spec.nodeName)) &&
+        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName == '') &&
+        !has(object.spec.resources) &&
+        (!has(object.spec.resourceClaims) || object.spec.resourceClaims.size() == 0) &&
+        (!has(object.spec.shareProcessNamespace) || !object.spec.shareProcessNamespace) &&
+        (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
+        has(object.spec.securityContext.seccompProfile) &&
+        object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+        has(object.spec.securityContext.appArmorProfile) &&
+        object.spec.securityContext.appArmorProfile.type == 'RuntimeDefault' &&
+        (!has(object.spec.securityContext.sysctls) || object.spec.securityContext.sysctls.size() == 0) &&
+        (!has(object.spec.securityContext.supplementalGroups) || object.spec.securityContext.supplementalGroups.size() == 0) &&
+        !has(object.spec.securityContext.seLinuxOptions) && !has(object.spec.securityContext.windowsOptions) &&
+        (!has(object.spec.os) || object.spec.os.name == 'linux') &&
+        ((object.metadata.labels['app.kubernetes.io/component'] == 'attestor' &&
+          object.spec.nodeSelector == {{ .Values.attestor.nodeSelector | toJson }}) ||
+         (object.metadata.labels['app.kubernetes.io/component'] == 'executor-wasi' &&
+          object.spec.nodeSelector == {{ .Values.executor.nodeSelector | toJson }}) ||
          (object.metadata.labels['app.kubernetes.io/component'] == 'executor-microvm' &&
-          object.spec.nodeSelector['insight.platform/sandbox-microvm-node'] == 'true'))
+          object.spec.nodeSelector == {{ .Values.microVmExecutor.nodeSelector | toJson }}))
       message: Sandbox execution pods require their exact dedicated node and API-token isolation contract
     - expression: >-
         object.metadata.labels['app.kubernetes.io/component'] != 'executor-wasi' ||
         ((!has(object.spec.hostPID) || !object.spec.hostPID) &&
          object.spec.serviceAccountName == {{ include "insight-platform-sandbox.executorName" . | quote }} &&
+         object.spec.securityContext.runAsNonRoot &&
+         object.spec.securityContext.runAsUser == 10001 &&
+         object.spec.securityContext.runAsGroup == 10001 &&
+         object.spec.securityContext.fsGroup == 10001 &&
          object.spec.containers.size() == 1 &&
          object.spec.initContainers.size() == 1 &&
-         object.spec.volumes.filter(v, has(v.hostPath)).size() == 1 &&
+         object.spec.volumes.map(v, v.name) == ['config', 'tls', 'nats-tls', 'socket', 'tmp'] &&
+         object.spec.volumes.exists_one(v, v.name == 'config' && has(v.configMap) &&
+           v.configMap.name == {{ include "insight-platform-sandbox.executorName" . | quote }}) &&
+         object.spec.volumes.exists_one(v, v.name == 'tls' && has(v.secret) &&
+           v.secret.secretName == {{ .Values.tls.wasiExecutorSecret | quote }} && v.secret.defaultMode == 288) &&
+         object.spec.volumes.exists_one(v, v.name == 'nats-tls' && has(v.secret) &&
+           v.secret.secretName == {{ .Values.natsTls.existingSecret | quote }} && v.secret.defaultMode == 288) &&
          object.spec.volumes.exists_one(v, v.name == 'socket' && has(v.hostPath) &&
            v.hostPath.path == {{ .Values.attestor.hostPaths.socketDirectory | quote }} &&
            v.hostPath.type == 'Directory') &&
-         object.spec.containers.all(c, !has(c.securityContext.privileged) || !c.securityContext.privileged) &&
-         object.spec.containers.all(c, !has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0))
-      message: WASI Executor cannot receive host PID, extra host paths, privilege, or capabilities
+         object.spec.volumes.exists_one(v, v.name == 'tmp' && has(v.emptyDir)) &&
+         object.spec.initContainers.exists_one(c, c.name == 'wait-for-node-attestor' &&
+           c.image == {{ include "insight-platform-sandbox.image" . | quote }} &&
+           c.command == ['sh', '-ec', 'until test -S /run/insight-sandbox-attestor/registration.sock; do sleep 1; done'] &&
+           (!has(c.args) || c.args.size() == 0) &&
+           c.securityContext.runAsNonRoot && c.securityContext.runAsUser == 10001 && c.securityContext.runAsGroup == 10001 &&
+           c.securityContext.allowPrivilegeEscalation == false && c.securityContext.readOnlyRootFilesystem &&
+           (!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+           (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') &&
+           (!has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type == 'RuntimeDefault') &&
+           (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+           !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions) &&
+           c.securityContext.capabilities.drop == ['ALL'] &&
+           (!has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0) &&
+           (!has(c.resources.requests) || c.resources.requests.size() == 0) &&
+           (!has(c.resources.limits) || c.resources.limits.size() == 0) &&
+           (!has(c.resources.claims) || c.resources.claims.size() == 0) &&
+           c.volumeMounts.size() == 1 &&
+           c.volumeMounts.exists_one(v, v.name == 'socket' && v.mountPath == '/run/insight-sandbox-attestor' && v.readOnly) &&
+           c.volumeMounts.all(v, (!has(v.subPath) || v.subPath == '') && (!has(v.subPathExpr) || v.subPathExpr == '') && (!has(v.mountPropagation) || v.mountPropagation == 'None')) &&
+           (!has(c.volumeDevices) || c.volumeDevices.size() == 0) &&
+           (!has(c.env) || c.env.size() == 0) && (!has(c.envFrom) || c.envFrom.size() == 0) &&
+           (!has(c.ports) || c.ports.size() == 0) && !has(c.lifecycle) && !has(c.restartPolicy) &&
+           !has(c.startupProbe) && !has(c.readinessProbe) && !has(c.livenessProbe)) &&
+         object.spec.containers.exists_one(c, c.name == 'executor' &&
+           c.image == {{ include "insight-platform-sandbox.image" . | quote }} &&
+           c.command == ['/usr/local/bin/platform-sandbox-executor'] &&
+           (!has(c.args) || c.args.size() == 0) &&
+           c.securityContext.runAsNonRoot && c.securityContext.runAsUser == 10001 && c.securityContext.runAsGroup == 10001 &&
+           c.securityContext.allowPrivilegeEscalation == false && c.securityContext.readOnlyRootFilesystem &&
+           (!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+           (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') &&
+           (!has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type == 'RuntimeDefault') &&
+           (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+           !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions) &&
+           c.securityContext.capabilities.drop == ['ALL'] &&
+           (!has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0) &&
+           c.resources.requests.size() == 2 &&
+           c.resources.requests['cpu'] == quantity({{ .Values.executor.resources.requests.cpu | quote }}) &&
+           c.resources.requests['memory'] == quantity({{ .Values.executor.resources.requests.memory | quote }}) &&
+           c.resources.limits.size() == 2 &&
+           c.resources.limits['cpu'] == quantity({{ .Values.executor.resources.limits.cpu | quote }}) &&
+           c.resources.limits['memory'] == quantity({{ .Values.executor.resources.limits.memory | quote }}) &&
+           (!has(c.resources.claims) || c.resources.claims.size() == 0) &&
+           c.volumeMounts.map(v, v.name) == ['config', 'tls', 'nats-tls', 'socket', 'tmp'] &&
+           c.volumeMounts.exists_one(v, v.name == 'config' && v.mountPath == '/etc/insight/config' && v.readOnly) &&
+           c.volumeMounts.exists_one(v, v.name == 'tls' && v.mountPath == '/etc/insight/tls' && v.readOnly) &&
+           c.volumeMounts.exists_one(v, v.name == 'nats-tls' && v.mountPath == '/etc/insight/nats-tls' && v.readOnly) &&
+           c.volumeMounts.exists_one(v, v.name == 'socket' && v.mountPath == '/run/insight-sandbox-attestor' && v.readOnly) &&
+           c.volumeMounts.exists_one(v, v.name == 'tmp' && v.mountPath == '/tmp' && (!has(v.readOnly) || !v.readOnly)) &&
+           c.volumeMounts.all(v, (!has(v.subPath) || v.subPath == '') && (!has(v.subPathExpr) || v.subPathExpr == '') && (!has(v.mountPropagation) || v.mountPropagation == 'None')) &&
+           (!has(c.volumeDevices) || c.volumeDevices.size() == 0) &&
+           c.env.map(e, e.name) == ['PLATFORM_SANDBOX_EXECUTOR_CONFIG', 'PLATFORM_SANDBOX_EXECUTOR_CONFIG_DIGEST', 'PLATFORM_SANDBOX_GRPC_CA_PATH', 'PLATFORM_SANDBOX_GRPC_CERT_PATH', 'PLATFORM_SANDBOX_GRPC_KEY_PATH', 'PLATFORM_SANDBOX_ATTESTOR_CA_PATH', 'PLATFORM_SANDBOX_NATS_CA_PATH', 'PLATFORM_SANDBOX_NATS_CERT_PATH', 'PLATFORM_SANDBOX_NATS_KEY_PATH'] &&
+           c.env.map(e, e.value) == ['/etc/insight/config/executor.json', {{ printf "sha256:%s" ($wasiConfig | sha256sum) | quote }}, {{ printf "/etc/insight/tls/%s" .Values.tls.keys.controllerServerCa | quote }}, {{ printf "/etc/insight/tls/%s" .Values.tls.keys.executorClientCertificate | quote }}, {{ printf "/etc/insight/tls/%s" .Values.tls.keys.executorClientPrivateKey | quote }}, {{ printf "/etc/insight/tls/%s" .Values.tls.keys.attestorServerCa | quote }}, {{ printf "/etc/insight/nats-tls/%s" .Values.natsTls.rootCertificateKey | quote }}, {{ printf "/etc/insight/nats-tls/%s" .Values.natsTls.clientCertificateKey | quote }}, {{ printf "/etc/insight/nats-tls/%s" .Values.natsTls.clientPrivateKeyKey | quote }}] &&
+           (!has(c.envFrom) || c.envFrom.size() == 0) && (!has(c.ports) || c.ports.size() == 0) && !has(c.lifecycle) &&
+           c.startupProbe.exec.command == ['sh', '-ec', 'kill -0 1 && test -S /run/insight-sandbox-attestor/registration.sock'] &&
+           c.readinessProbe.exec.command == ['sh', '-ec', 'kill -0 1 && test -S /run/insight-sandbox-attestor/registration.sock'] &&
+           c.livenessProbe.exec.command == ['sh', '-ec', 'kill -0 1']))
+      message: WASI Executor must retain its exact image, command, volume, credential, probe, and security-context closure
     - expression: >-
         object.metadata.labels['app.kubernetes.io/component'] != 'executor-microvm' ||
         ((!has(object.spec.hostPID) || !object.spec.hostPID) &&
          object.spec.serviceAccountName == {{ include "insight-platform-sandbox.microVmExecutorName" . | quote }} &&
+         object.spec.securityContext.fsGroup == 10001 &&
          object.spec.containers.size() == 2 &&
-         object.spec.containers.exists_one(c, c.name == 'executor' && c.securityContext.runAsNonRoot &&
-           c.securityContext.runAsUser == 10001 &&
-           (!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
-           (!has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0) &&
-           !c.volumeMounts.exists(v, v.name in ['kvm', 'firecracker-jails', 'provider-state', 'host-cgroup', 'provider-tls'])) &&
-         object.spec.containers.exists_one(c, c.name == 'provider' && c.securityContext.runAsUser == 0 &&
-           c.securityContext.runAsGroup == 10001 && !c.securityContext.privileged &&
-           c.securityContext.capabilities.add == ['CHOWN', 'DAC_OVERRIDE', 'KILL', 'SETGID', 'SETUID', 'SYS_ADMIN', 'SYS_RESOURCE'] &&
-           !c.volumeMounts.exists(v, v.name in ['executor-tls', 'nats-tls', 'attestor-socket'])) &&
-         object.spec.volumes.filter(v, has(v.hostPath)).size() == 5 &&
+         object.spec.initContainers.size() == 1 &&
+         object.spec.volumes.map(v, v.name) == ['executor-config', 'provider-config', 'executor-tls', 'provider-tls', 'nats-tls', 'attestor-socket', 'provider-socket', 'kvm', 'runtime-assets', 'firecracker-jails', 'provider-state', 'host-cgroup', 'executor-tmp', 'provider-tmp'] &&
+         object.spec.volumes.exists_one(v, v.name == 'executor-config' && has(v.configMap) && v.configMap.name == {{ include "insight-platform-sandbox.microVmExecutorName" . | quote }}) &&
+         object.spec.volumes.exists_one(v, v.name == 'provider-config' && has(v.configMap) && v.configMap.name == {{ printf "%s-provider" (include "insight-platform-sandbox.microVmExecutorName" .) | quote }}) &&
+         object.spec.volumes.exists_one(v, v.name == 'executor-tls' && has(v.secret) && v.secret.secretName == {{ .Values.tls.microVmExecutorSecret | quote }} && v.secret.defaultMode == 288) &&
+         object.spec.volumes.exists_one(v, v.name == 'provider-tls' && has(v.secret) && v.secret.secretName == {{ .Values.tls.microVmProviderSecret | quote }} && v.secret.defaultMode == 288) &&
+         object.spec.volumes.exists_one(v, v.name == 'nats-tls' && has(v.secret) && v.secret.secretName == {{ .Values.natsTls.existingSecret | quote }} && v.secret.defaultMode == 288) &&
          object.spec.volumes.exists_one(v, v.name == 'attestor-socket' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.socketDirectory | quote }} && v.hostPath.type == 'Directory') &&
+         object.spec.volumes.exists_one(v, v.name == 'provider-socket' && has(v.emptyDir)) &&
          object.spec.volumes.exists_one(v, v.name == 'kvm' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.kvm | quote }} && v.hostPath.type == 'CharDevice') &&
+         object.spec.volumes.exists_one(v, v.name == 'runtime-assets' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.runtimeAssets | quote }} && v.hostPath.type == 'Directory') &&
          object.spec.volumes.exists_one(v, v.name == 'firecracker-jails' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.chrootBaseDirectory | quote }} && v.hostPath.type == 'DirectoryOrCreate') &&
          object.spec.volumes.exists_one(v, v.name == 'provider-state' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.stateDirectory | quote }} && v.hostPath.type == 'DirectoryOrCreate') &&
-         object.spec.volumes.exists_one(v, v.name == 'host-cgroup' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.cgroup | quote }} && v.hostPath.type == 'Directory'))
-      message: microVM Executor and Provider must retain the exact split KVM, state, cgroup, credential, and capability profile
+         object.spec.volumes.exists_one(v, v.name == 'host-cgroup' && has(v.hostPath) && v.hostPath.path == {{ .Values.microVmExecutor.provider.hostPaths.cgroup | quote }} && v.hostPath.type == 'Directory') &&
+         object.spec.volumes.exists_one(v, v.name == 'executor-tmp' && has(v.emptyDir)) &&
+         object.spec.volumes.exists_one(v, v.name == 'provider-tmp' && has(v.emptyDir)))
+      message: microVM Pod must retain the exact closed volume sources, credentials, and host authorities
+    - expression: >-
+        object.metadata.labels['app.kubernetes.io/component'] != 'executor-microvm' ||
+        object.spec.initContainers.exists_one(c, c.name == 'wait-for-node-attestor' &&
+          c.image == {{ include "insight-platform-sandbox.microVmExecutorImage" . | quote }} &&
+          c.command == ['sh', '-ec', 'until test -S /run/insight-sandbox-attestor/registration.sock; do sleep 1; done'] &&
+          (!has(c.args) || c.args.size() == 0) &&
+          c.securityContext.runAsNonRoot && c.securityContext.runAsUser == 10001 && c.securityContext.runAsGroup == 10001 &&
+          c.securityContext.allowPrivilegeEscalation == false && c.securityContext.readOnlyRootFilesystem &&
+          (!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+          (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') &&
+          (!has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type == 'RuntimeDefault') &&
+          (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+          !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions) &&
+          c.securityContext.capabilities.drop == ['ALL'] &&
+          (!has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0) &&
+          (!has(c.resources.requests) || c.resources.requests.size() == 0) &&
+          (!has(c.resources.limits) || c.resources.limits.size() == 0) &&
+          (!has(c.resources.claims) || c.resources.claims.size() == 0) &&
+          c.volumeMounts.size() == 1 &&
+          c.volumeMounts.exists_one(v, v.name == 'attestor-socket' && v.mountPath == '/run/insight-sandbox-attestor' && v.readOnly) &&
+          c.volumeMounts.all(v, (!has(v.subPath) || v.subPath == '') && (!has(v.subPathExpr) || v.subPathExpr == '') && (!has(v.mountPropagation) || v.mountPropagation == 'None')) &&
+          (!has(c.volumeDevices) || c.volumeDevices.size() == 0) &&
+          (!has(c.env) || c.env.size() == 0) && (!has(c.envFrom) || c.envFrom.size() == 0) &&
+          (!has(c.ports) || c.ports.size() == 0) && !has(c.lifecycle) && !has(c.restartPolicy) &&
+          !has(c.startupProbe) && !has(c.readinessProbe) && !has(c.livenessProbe))
+      message: microVM attestor wait must retain its exact unprivileged image, command, mount, and security context
+    - expression: >-
+        object.metadata.labels['app.kubernetes.io/component'] != 'executor-microvm' ||
+        object.spec.containers.exists_one(c, c.name == 'executor' &&
+          c.image == {{ include "insight-platform-sandbox.microVmExecutorImage" . | quote }} &&
+          c.command == ['sh', '-ec', 'until test -S /run/insight-sandbox-provider/provider.sock; do sleep 1; done; exec /usr/local/bin/platform-sandbox-executor'] &&
+          (!has(c.args) || c.args.size() == 0) &&
+          c.securityContext.runAsNonRoot && c.securityContext.runAsUser == 10001 && c.securityContext.runAsGroup == 10001 &&
+          c.securityContext.allowPrivilegeEscalation == false && c.securityContext.readOnlyRootFilesystem &&
+          (!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+          (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') &&
+          (!has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type == 'RuntimeDefault') &&
+          (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+          !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions) &&
+          c.securityContext.capabilities.drop == ['ALL'] &&
+          (!has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0) &&
+          c.resources.requests.size() == 2 &&
+          c.resources.requests['cpu'] == quantity({{ .Values.microVmExecutor.resources.requests.cpu | quote }}) &&
+          c.resources.requests['memory'] == quantity({{ .Values.microVmExecutor.resources.requests.memory | quote }}) &&
+          c.resources.limits.size() == 2 &&
+          c.resources.limits['cpu'] == quantity({{ .Values.microVmExecutor.resources.limits.cpu | quote }}) &&
+          c.resources.limits['memory'] == quantity({{ .Values.microVmExecutor.resources.limits.memory | quote }}) &&
+          (!has(c.resources.claims) || c.resources.claims.size() == 0) &&
+          c.volumeMounts.map(v, v.name) == ['executor-config', 'executor-tls', 'nats-tls', 'attestor-socket', 'provider-socket', 'executor-tmp'] &&
+          c.volumeMounts.exists_one(v, v.name == 'executor-config' && v.mountPath == '/etc/insight/executor-config' && v.readOnly) &&
+          c.volumeMounts.exists_one(v, v.name == 'executor-tls' && v.mountPath == '/etc/insight/executor-tls' && v.readOnly) &&
+          c.volumeMounts.exists_one(v, v.name == 'nats-tls' && v.mountPath == '/etc/insight/nats-tls' && v.readOnly) &&
+          c.volumeMounts.exists_one(v, v.name == 'attestor-socket' && v.mountPath == '/run/insight-sandbox-attestor' && v.readOnly) &&
+          c.volumeMounts.exists_one(v, v.name == 'provider-socket' && v.mountPath == '/run/insight-sandbox-provider' && (!has(v.readOnly) || !v.readOnly)) &&
+          c.volumeMounts.exists_one(v, v.name == 'executor-tmp' && v.mountPath == '/tmp' && (!has(v.readOnly) || !v.readOnly)) &&
+          c.volumeMounts.all(v, (!has(v.subPath) || v.subPath == '') && (!has(v.subPathExpr) || v.subPathExpr == '') && (!has(v.mountPropagation) || v.mountPropagation == 'None')) &&
+          (!has(c.volumeDevices) || c.volumeDevices.size() == 0) &&
+          c.env.map(e, e.name) == ['PLATFORM_SANDBOX_EXECUTOR_CONFIG', 'PLATFORM_SANDBOX_EXECUTOR_CONFIG_DIGEST', 'PLATFORM_SANDBOX_GRPC_CA_PATH', 'PLATFORM_SANDBOX_GRPC_CERT_PATH', 'PLATFORM_SANDBOX_GRPC_KEY_PATH', 'PLATFORM_SANDBOX_ATTESTOR_CA_PATH', 'PLATFORM_SANDBOX_PROVIDER_CA_PATH', 'PLATFORM_SANDBOX_NATS_CA_PATH', 'PLATFORM_SANDBOX_NATS_CERT_PATH', 'PLATFORM_SANDBOX_NATS_KEY_PATH'] &&
+          c.env.map(e, e.value) == ['/etc/insight/executor-config/executor.json', {{ printf "sha256:%s" ($microVmExecutorConfig | sha256sum) | quote }}, {{ printf "/etc/insight/executor-tls/%s" .Values.tls.keys.controllerServerCa | quote }}, {{ printf "/etc/insight/executor-tls/%s" .Values.tls.keys.executorClientCertificate | quote }}, {{ printf "/etc/insight/executor-tls/%s" .Values.tls.keys.executorClientPrivateKey | quote }}, {{ printf "/etc/insight/executor-tls/%s" .Values.tls.keys.attestorServerCa | quote }}, {{ printf "/etc/insight/executor-tls/%s" .Values.tls.keys.providerClientCa | quote }}, {{ printf "/etc/insight/nats-tls/%s" .Values.natsTls.rootCertificateKey | quote }}, {{ printf "/etc/insight/nats-tls/%s" .Values.natsTls.clientCertificateKey | quote }}, {{ printf "/etc/insight/nats-tls/%s" .Values.natsTls.clientPrivateKeyKey | quote }}] &&
+          (!has(c.envFrom) || c.envFrom.size() == 0) && (!has(c.ports) || c.ports.size() == 0) && !has(c.lifecycle) &&
+          c.startupProbe.exec.command == ['sh', '-ec', 'kill -0 1 && test -S /run/insight-sandbox-attestor/registration.sock && test -S /run/insight-sandbox-provider/provider.sock'] &&
+          c.readinessProbe.exec.command == ['sh', '-ec', 'kill -0 1 && test -S /run/insight-sandbox-provider/provider.sock'] &&
+          c.livenessProbe.exec.command == ['sh', '-ec', 'kill -0 1'])
+      message: microVM Executor must retain its exact image, command, credentials, probes, mounts, and unprivileged security context
+    - expression: >-
+        object.metadata.labels['app.kubernetes.io/component'] != 'executor-microvm' ||
+        object.spec.containers.exists_one(c, c.name == 'provider' &&
+          c.image == {{ include "insight-platform-sandbox.microVmProviderImage" . | quote }} &&
+          c.command == ['/usr/local/bin/platform-sandbox-microvm-provider'] &&
+          (!has(c.args) || c.args.size() == 0) &&
+          c.securityContext.runAsUser == 0 && c.securityContext.runAsGroup == 10001 &&
+          c.securityContext.allowPrivilegeEscalation == false && c.securityContext.readOnlyRootFilesystem &&
+          c.securityContext.privileged == false &&
+          (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') &&
+          (!has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type == 'RuntimeDefault') &&
+          (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+          !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions) &&
+          c.securityContext.capabilities.drop == ['ALL'] &&
+          c.securityContext.capabilities.add == ['CHOWN', 'DAC_OVERRIDE', 'KILL', 'SETGID', 'SETUID', 'SYS_ADMIN', 'SYS_RESOURCE'] &&
+          c.resources.requests.size() == 2 &&
+          c.resources.requests['cpu'] == quantity({{ .Values.microVmExecutor.provider.resources.requests.cpu | quote }}) &&
+          c.resources.requests['memory'] == quantity({{ .Values.microVmExecutor.provider.resources.requests.memory | quote }}) &&
+          c.resources.limits.size() == 2 &&
+          c.resources.limits['cpu'] == quantity({{ .Values.microVmExecutor.provider.resources.limits.cpu | quote }}) &&
+          c.resources.limits['memory'] == quantity({{ .Values.microVmExecutor.provider.resources.limits.memory | quote }}) &&
+          (!has(c.resources.claims) || c.resources.claims.size() == 0) &&
+          c.volumeMounts.map(v, v.name) == ['provider-config', 'provider-tls', 'provider-socket', 'kvm', 'runtime-assets', 'firecracker-jails', 'provider-state', 'host-cgroup', 'provider-tmp'] &&
+          c.volumeMounts.exists_one(v, v.name == 'provider-config' && v.mountPath == '/etc/insight/provider-config' && v.readOnly) &&
+          c.volumeMounts.exists_one(v, v.name == 'provider-tls' && v.mountPath == '/etc/insight/provider-tls' && v.readOnly) &&
+          c.volumeMounts.exists_one(v, v.name == 'provider-socket' && v.mountPath == '/run/insight-sandbox-provider' && (!has(v.readOnly) || !v.readOnly)) &&
+          c.volumeMounts.exists_one(v, v.name == 'kvm' && v.mountPath == '/dev/kvm' && (!has(v.readOnly) || !v.readOnly)) &&
+          c.volumeMounts.exists_one(v, v.name == 'runtime-assets' && v.mountPath == '/opt/insight/microvm-runtime-assets' && v.readOnly && has(v.recursiveReadOnly) && v.recursiveReadOnly == 'Enabled') &&
+          c.volumeMounts.exists_one(v, v.name == 'firecracker-jails' && v.mountPath == '/srv/insight-firecracker-jails' && (!has(v.readOnly) || !v.readOnly)) &&
+          c.volumeMounts.exists_one(v, v.name == 'provider-state' && v.mountPath == '/var/lib/insight-sandbox-provider' && (!has(v.readOnly) || !v.readOnly)) &&
+          c.volumeMounts.exists_one(v, v.name == 'host-cgroup' && v.mountPath == '/sys/fs/cgroup' && (!has(v.readOnly) || !v.readOnly)) &&
+          c.volumeMounts.exists_one(v, v.name == 'provider-tmp' && v.mountPath == '/tmp' && (!has(v.readOnly) || !v.readOnly)) &&
+          c.volumeMounts.all(v, (!has(v.subPath) || v.subPath == '') && (!has(v.subPathExpr) || v.subPathExpr == '') && (!has(v.mountPropagation) || v.mountPropagation == 'None')) &&
+          (!has(c.volumeDevices) || c.volumeDevices.size() == 0) &&
+          c.env.map(e, e.name) == ['PLATFORM_SANDBOX_MICROVM_PROVIDER_CONFIG', 'PLATFORM_SANDBOX_MICROVM_PROVIDER_CONFIG_DIGEST', 'PLATFORM_SANDBOX_PROVIDER_CLIENT_CA_PATH', 'PLATFORM_SANDBOX_PROVIDER_CERT_PATH', 'PLATFORM_SANDBOX_PROVIDER_KEY_PATH', 'PLATFORM_SANDBOX_PROVIDER_BROKER_CA_PATH', 'PLATFORM_SANDBOX_PROVIDER_BROKER_CERT_PATH', 'PLATFORM_SANDBOX_PROVIDER_BROKER_KEY_PATH', 'PLATFORM_SANDBOX_PROVIDER_EGRESS_CA_PATH', 'PLATFORM_SANDBOX_PROVIDER_EGRESS_CERT_PATH', 'PLATFORM_SANDBOX_PROVIDER_EGRESS_KEY_PATH'] &&
+          c.env.map(e, e.value) == ['/etc/insight/provider-config/provider.json', {{ printf "sha256:%s" ($microVmProviderConfig | sha256sum) | quote }}, {{ printf "/etc/insight/provider-tls/%s" .Values.tls.keys.providerClientCa | quote }}, {{ printf "/etc/insight/provider-tls/%s" .Values.tls.keys.providerServerCertificate | quote }}, {{ printf "/etc/insight/provider-tls/%s" .Values.tls.keys.providerServerPrivateKey | quote }}, {{ printf "/etc/insight/provider-tls/%s" .Values.tls.keys.providerControllerCa | quote }}, {{ printf "/etc/insight/provider-tls/%s" .Values.tls.keys.providerClientCertificate | quote }}, {{ printf "/etc/insight/provider-tls/%s" .Values.tls.keys.providerClientPrivateKey | quote }}, {{ printf "/etc/insight/provider-tls/%s" .Values.tls.keys.providerEgressCa | quote }}, {{ printf "/etc/insight/provider-tls/%s" .Values.tls.keys.providerClientCertificate | quote }}, {{ printf "/etc/insight/provider-tls/%s" .Values.tls.keys.providerClientPrivateKey | quote }}] &&
+          (!has(c.envFrom) || c.envFrom.size() == 0) && (!has(c.ports) || c.ports.size() == 0) && !has(c.lifecycle) &&
+          c.startupProbe.exec.command == ['sh', '-ec', 'kill -0 1 && test -S /run/insight-sandbox-provider/provider.sock'] &&
+          c.readinessProbe.exec.command == ['sh', '-ec', 'kill -0 1 && test -S /run/insight-sandbox-provider/provider.sock'] &&
+          c.livenessProbe.exec.command == ['sh', '-ec', 'kill -0 1'])
+      message: microVM Provider must retain its exact image, command, credentials, probes, mounts, and root capability closure
     - expression: >-
         object.metadata.labels['app.kubernetes.io/component'] != 'attestor' ||
         (object.spec.hostPID &&
          object.spec.serviceAccountName == {{ include "insight-platform-sandbox.attestorName" . | quote }} &&
+         object.spec.securityContext.runAsUser == 0 && object.spec.securityContext.runAsGroup == 10001 &&
          object.spec.containers.size() == 1 &&
-         object.spec.volumes.filter(v, has(v.hostPath)).size() == 4 &&
+         (!has(object.spec.initContainers) || object.spec.initContainers.size() == 0) &&
+         object.spec.volumes.map(v, v.name) == ['config', 'tls', 'host-proc', 'node-uid', 'registry', 'socket'] &&
+         object.spec.volumes.exists_one(v, v.name == 'config' && has(v.configMap) && v.configMap.name == {{ include "insight-platform-sandbox.attestorName" . | quote }}) &&
+         object.spec.volumes.exists_one(v, v.name == 'tls' && has(v.secret) && v.secret.secretName == {{ .Values.tls.attestorSecret | quote }} && v.secret.defaultMode == 288) &&
          object.spec.volumes.exists_one(v, v.name == 'host-proc' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.proc | quote }} && v.hostPath.type == 'Directory') &&
          object.spec.volumes.exists_one(v, v.name == 'node-uid' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.nodeUid | quote }} && v.hostPath.type == 'File') &&
          object.spec.volumes.exists_one(v, v.name == 'registry' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.registryDirectory | quote }} && v.hostPath.type == 'DirectoryOrCreate') &&
          object.spec.volumes.exists_one(v, v.name == 'socket' && has(v.hostPath) && v.hostPath.path == {{ .Values.attestor.hostPaths.socketDirectory | quote }} && v.hostPath.type == 'DirectoryOrCreate') &&
-         object.spec.containers.all(c, !has(c.securityContext.privileged) || !c.securityContext.privileged) &&
-         object.spec.containers.all(c, has(c.securityContext.capabilities.add) && c.securityContext.capabilities.add == ['SYS_PTRACE']))
-      message: attestor host authority must be the exact reviewed proc/node/registry/socket profile
+         object.spec.containers.exists_one(c, c.name == 'attestor' &&
+           c.image == {{ include "insight-platform-sandbox.image" . | quote }} &&
+           c.command == ['/usr/local/bin/platform-sandbox-attestor'] &&
+           (!has(c.args) || c.args.size() == 0) &&
+           c.securityContext.runAsUser == 0 && c.securityContext.runAsGroup == 10001 &&
+           c.securityContext.allowPrivilegeEscalation == false && c.securityContext.readOnlyRootFilesystem &&
+           (!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+           (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') &&
+           (!has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type == 'RuntimeDefault') &&
+           (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+           !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions) &&
+           c.securityContext.capabilities.drop == ['ALL'] && c.securityContext.capabilities.add == ['SYS_PTRACE'] &&
+           c.resources.requests.size() == 2 &&
+           c.resources.requests['cpu'] == quantity({{ .Values.attestor.resources.requests.cpu | quote }}) &&
+           c.resources.requests['memory'] == quantity({{ .Values.attestor.resources.requests.memory | quote }}) &&
+           c.resources.limits.size() == 2 &&
+           c.resources.limits['cpu'] == quantity({{ .Values.attestor.resources.limits.cpu | quote }}) &&
+           c.resources.limits['memory'] == quantity({{ .Values.attestor.resources.limits.memory | quote }}) &&
+           (!has(c.resources.claims) || c.resources.claims.size() == 0) &&
+           c.volumeMounts.map(v, v.name) == ['config', 'tls', 'host-proc', 'node-uid', 'registry', 'socket'] &&
+           c.volumeMounts.exists_one(v, v.name == 'config' && v.mountPath == '/etc/insight/config' && v.readOnly) &&
+           c.volumeMounts.exists_one(v, v.name == 'tls' && v.mountPath == '/etc/insight/tls' && v.readOnly) &&
+           c.volumeMounts.exists_one(v, v.name == 'host-proc' && v.mountPath == '/host/proc' && v.readOnly) &&
+           c.volumeMounts.exists_one(v, v.name == 'node-uid' && v.mountPath == '/host/node-uid' && v.readOnly) &&
+           c.volumeMounts.exists_one(v, v.name == 'registry' && v.mountPath == '/var/lib/insight-sandbox-attestor' && (!has(v.readOnly) || !v.readOnly)) &&
+           c.volumeMounts.exists_one(v, v.name == 'socket' && v.mountPath == '/run/insight-sandbox-attestor' && (!has(v.readOnly) || !v.readOnly)) &&
+           c.volumeMounts.all(v, (!has(v.subPath) || v.subPath == '') && (!has(v.subPathExpr) || v.subPathExpr == '') && (!has(v.mountPropagation) || v.mountPropagation == 'None')) &&
+           (!has(c.volumeDevices) || c.volumeDevices.size() == 0) &&
+           c.env.map(e, e.name) == ['PLATFORM_SANDBOX_ATTESTOR_CONFIG', 'PLATFORM_SANDBOX_ATTESTOR_CONFIG_DIGEST', 'NODE_IP', 'PLATFORM_SANDBOX_ATTESTOR_ADVERTISED_IP', 'PLATFORM_SANDBOX_ATTESTOR_EXECUTOR_CA_PATH', 'PLATFORM_SANDBOX_ATTESTOR_REGISTRATION_CERT_PATH', 'PLATFORM_SANDBOX_ATTESTOR_REGISTRATION_KEY_PATH', 'PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_CA_PATH', 'PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_CERT_PATH', 'PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_KEY_PATH'] &&
+           c.env.filter(e, e.name != 'NODE_IP').map(e, e.value) == ['/etc/insight/config/attestor.json', {{ printf "sha256:%s" ($attestorConfig | sha256sum) | quote }}, '$(NODE_IP)', {{ printf "/etc/insight/tls/%s" .Values.tls.keys.executorClientCa | quote }}, {{ printf "/etc/insight/tls/%s" .Values.tls.keys.attestorServerCertificate | quote }}, {{ printf "/etc/insight/tls/%s" .Values.tls.keys.attestorServerPrivateKey | quote }}, {{ printf "/etc/insight/tls/%s" .Values.tls.keys.controllerClientCa | quote }}, {{ printf "/etc/insight/tls/%s" .Values.tls.keys.attestorServerCertificate | quote }}, {{ printf "/etc/insight/tls/%s" .Values.tls.keys.attestorServerPrivateKey | quote }}] &&
+           c.env.exists_one(e, e.name == 'NODE_IP' && has(e.valueFrom.fieldRef) && e.valueFrom.fieldRef.apiVersion == 'v1' && e.valueFrom.fieldRef.fieldPath == 'status.hostIP') &&
+           c.env.filter(e, e.name != 'NODE_IP').all(e, !has(e.valueFrom)) &&
+           (!has(c.envFrom) || c.envFrom.size() == 0) && !has(c.lifecycle) &&
+           c.ports.size() == 1 && c.ports.exists_one(p, p.name == 'attest' && p.containerPort == {{ int .Values.attestor.controllerPort }} && p.hostPort == {{ int .Values.attestor.controllerPort }} && p.protocol == 'TCP') &&
+           c.startupProbe.tcpSocket.port == 'attest' && c.readinessProbe.tcpSocket.port == 'attest' && c.livenessProbe.tcpSocket.port == 'attest'))
+      message: attestor host authority must retain its exact image, command, credentials, host mounts, probes, port, and SYS_PTRACE-only security closure
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -84,4 +354,72 @@ spec:
   matchResources:
     namespaceSelector:
       matchLabels:
-        insight.platform/sandbox-executor-namespace: "true"
+        kubernetes.io/metadata.name: {{ .Values.namespaces.executor | quote }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-restricted-subresources
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CONNECT"]
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+        scope: Namespaced
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["pods/resize"]
+        scope: Namespaced
+  validations:
+    - expression: "false"
+      message: interactive exec, attach, port-forward, and in-place resize are forbidden in the Sandbox executor namespace
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-restricted-subresources
+spec:
+  policyName: {{ include "insight-platform-sandbox.name" . }}-restricted-subresources
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.namespaces.executor | quote }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-pod-binding
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods/binding"]
+        scope: Namespaced
+  validations:
+    - expression: >-
+        request.userInfo.username == {{ .Values.admission.schedulerUsername | quote }} &&
+        object.target.kind == 'Node' && object.target.name != '' &&
+        (!has(object.metadata.annotations) || object.metadata.annotations.size() == 0) &&
+        (!has(object.metadata.labels) || object.metadata.labels.all(k, v,
+          k in ['topology.kubernetes.io/region', 'topology.kubernetes.io/zone']))
+      message: Pod binding requires the exact authenticated scheduler and only trusted topology labels
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-pod-binding
+spec:
+  policyName: {{ include "insight-platform-sandbox.name" . }}-pod-binding
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.namespaces.executor | quote }}

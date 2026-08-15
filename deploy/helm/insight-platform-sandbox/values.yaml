@@ -8,6 +8,11 @@ namespaces:
   controller: platform-sandbox
   executor: platform-sandbox-exec
 
+admission:
+  schedulerName: default-scheduler
+  schedulerUsername: system:kube-scheduler
+  daemonSetControllerUsername: system:serviceaccount:kube-system:daemon-set-controller
+
 controller:
   replicas: 2
   port: 7443
@@ -38,7 +43,9 @@ executor:
   serviceAccount:
     annotations: {}
   nodeSelector:
-    insight.platform/sandbox-node: "true"
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+    insight.platform.node-restriction.kubernetes.io/sandbox-wasi: "true"
   tolerations: []
   workerManifest:
     manifest_version: 1
@@ -63,10 +70,16 @@ executor:
     limits: {cpu: "4", memory: 2Gi}
 
 microVmExecutor:
+  image:
+    repository: insight-platform-sandbox-microvm-executor
+    digest: sha256:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+    pullPolicy: IfNotPresent
   serviceAccount:
     annotations: {}
   nodeSelector:
-    insight.platform/sandbox-microvm-node: "true"
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+    insight.platform.node-restriction.kubernetes.io/sandbox-microvm: "true"
   tolerations:
     - {key: insight.platform/sandbox-microvm, operator: Equal, value: "true", effect: NoSchedule}
   workerManifest:
@@ -87,15 +100,19 @@ microVmExecutor:
   connectTimeoutMilliseconds: 5000
   requestTimeoutMilliseconds: 30000
   provider:
+    image:
+      repository: insight-platform-sandbox-microvm-provider
+      digest: sha256:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+      pullPolicy: IfNotPresent
     socketPath: /run/insight-sandbox-provider/provider.sock
     tlsServerName: sandbox-provider.insight.internal
     egressBrokerEndpoint: https://insight-platform-security-egress-egress.platform-egress.svc:8443
     egressBrokerTlsServerName: insight-platform-security-egress-egress.platform-egress.svc
     installation:
-      version: 1.12.1
-      firecracker_path: /opt/insight/firecracker/firecracker
+      version: 1.16.1
+      firecracker_path: /opt/insight/microvm-runtime-assets/firecracker/1.16.1/firecracker
       firecracker_digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
-      jailer_path: /opt/insight/firecracker/jailer
+      jailer_path: /opt/insight/microvm-runtime-assets/firecracker/1.16.1/jailer
       jailer_digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
       chroot_base_directory: /srv/insight-firecracker-jails
       parent_cgroup: insight-sandbox
@@ -104,8 +121,8 @@ microVmExecutor:
         runtime_digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
         guest_kernel_digest: sha256:4444444444444444444444444444444444444444444444444444444444444444
         guest_agent_digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
-        guest_kernel_path: /opt/insight/runtimes/managed-mcp/vmlinux
-        rootfs_path: /opt/insight/runtimes/managed-mcp/rootfs.ext4
+        guest_kernel_path: /opt/insight/microvm-runtime-assets/runtimes/managed-mcp/vmlinux
+        rootfs_path: /opt/insight/microvm-runtime-assets/runtimes/managed-mcp/rootfs.ext4
         rootfs_bytes: 536870912
     stateDirectory: /var/lib/insight-sandbox-provider
     ephemeralUidBase: 100000
@@ -125,6 +142,7 @@ microVmExecutor:
     shutdownGraceMilliseconds: 30000
     hostPaths:
       kvm: /dev/kvm
+      runtimeAssets: /opt/insight/microvm-runtime-assets
       chrootBaseDirectory: /var/lib/insight-firecracker-jails
       stateDirectory: /var/lib/insight-sandbox-provider
       cgroup: /sys/fs/cgroup
@@ -142,6 +160,12 @@ microVmExecutor:
     limits: {cpu: "4", memory: 2Gi}
 
 attestor:
+  nodeSelector:
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+    insight.platform.node-restriction.kubernetes.io/sandbox-attestor: "true"
+  tolerations:
+    - {key: insight.platform/sandbox-microvm, operator: Equal, value: "true", effect: NoSchedule}
   controllerPort: 7444
   maximumRegistrations: 10000
   absentRetentionSeconds: 3900

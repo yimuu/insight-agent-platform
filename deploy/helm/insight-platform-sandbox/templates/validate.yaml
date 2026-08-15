@@ -13,14 +13,77 @@
 {{- if lt (int .Values.attestor.absentRetentionSeconds) 3900 }}
 {{- fail "attestor.absentRetentionSeconds must cover the hard wall plus cleanup window" }}
 {{- end }}
-{{- if empty .Values.executor.nodeSelector }}
-{{- fail "executor.nodeSelector is required" }}
+{{- if or (ne .Values.admission.schedulerName "default-scheduler") (empty .Values.admission.schedulerUsername) (eq .Values.admission.schedulerUsername "system:anonymous") }}
+{{- fail "admission requires the default scheduler and one exact authenticated scheduler username" }}
+{{- end }}
+{{- if or (empty .Values.admission.daemonSetControllerUsername) (eq .Values.admission.daemonSetControllerUsername "system:anonymous") (eq .Values.admission.daemonSetControllerUsername .Values.admission.schedulerUsername) }}
+{{- fail "admission requires a distinct exact authenticated DaemonSet controller username" }}
+{{- end }}
+{{- if or (empty .Values.executor.nodeSelector) (empty .Values.attestor.nodeSelector) }}
+{{- fail "WASI Executor and attestor require exact node selectors" }}
 {{- end }}
 {{- if or (empty .Values.microVmExecutor.nodeSelector) (empty .Values.microVmExecutor.tolerations) }}
 {{- fail "microVmExecutor requires an exact nodeSelector and taint toleration" }}
 {{- end }}
-{{- if hasKey .Values.microVmExecutor.nodeSelector "insight.platform/sandbox-node" }}
-{{- fail "microVmExecutor must use a distinct microVM-only node selector" }}
+{{- $roleSecrets := list .Values.tls.controllerSecret .Values.tls.wasiExecutorSecret .Values.tls.microVmExecutorSecret .Values.tls.microVmProviderSecret .Values.tls.attestorSecret .Values.natsTls.existingSecret }}
+{{- if ne (len (uniq $roleSecrets)) (len $roleSecrets) }}
+{{- fail "Controller, Executor, Provider, attestor, and NATS roles require distinct Secret names" }}
+{{- end }}
+{{- if or (empty .Values.microVmExecutor.image.repository) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.microVmExecutor.image.digest)) }}
+{{- fail "microVmExecutor.image requires a repository and immutable lowercase sha256 digest" }}
+{{- end }}
+{{- if or (empty .Values.microVmExecutor.provider.image.repository) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.microVmExecutor.provider.image.digest)) }}
+{{- fail "microVmExecutor.provider.image requires a repository and immutable lowercase sha256 digest" }}
+{{- end }}
+{{- if or (eq .Values.microVmExecutor.image.repository .Values.microVmExecutor.provider.image.repository) (eq .Values.microVmExecutor.image.digest .Values.microVmExecutor.provider.image.digest) }}
+{{- fail "microVM Executor and Provider must use distinct image repositories and digests" }}
+{{- end }}
+{{- if or (eq .Values.image.repository .Values.microVmExecutor.image.repository) (eq .Values.image.repository .Values.microVmExecutor.provider.image.repository) (eq .Values.image.digest .Values.microVmExecutor.image.digest) (eq .Values.image.digest .Values.microVmExecutor.provider.image.digest) }}
+{{- fail "microVM Executor and Provider images must be distinct from the shared control-plane image" }}
+{{- end }}
+{{- $executionArch := get .Values.executor.nodeSelector "kubernetes.io/arch" }}
+{{- if or (ne (len .Values.executor.nodeSelector) 3) (ne (get .Values.executor.nodeSelector "insight.platform.node-restriction.kubernetes.io/sandbox-wasi") "true") (ne (get .Values.executor.nodeSelector "kubernetes.io/os") "linux") (not (has $executionArch (list "amd64" "arm64"))) }}
+{{- fail "WASI Executor requires an exact NodeRestriction-protected Linux node architecture" }}
+{{- end }}
+{{- if or (ne (len .Values.attestor.nodeSelector) 3) (ne (get .Values.attestor.nodeSelector "insight.platform.node-restriction.kubernetes.io/sandbox-attestor") "true") (ne (get .Values.attestor.nodeSelector "kubernetes.io/os") "linux") (ne (get .Values.attestor.nodeSelector "kubernetes.io/arch") $executionArch) }}
+{{- fail "attestor requires its exact NodeRestriction-protected execution-node selector" }}
+{{- end }}
+{{- if or (ne (len .Values.microVmExecutor.nodeSelector) 3) (ne (get .Values.microVmExecutor.nodeSelector "insight.platform.node-restriction.kubernetes.io/sandbox-microvm") "true") (ne (get .Values.microVmExecutor.nodeSelector "kubernetes.io/os") "linux") (ne (get .Values.microVmExecutor.nodeSelector "kubernetes.io/arch") $executionArch) }}
+{{- fail "microVmExecutor requires its exact NodeRestriction-protected Linux node architecture" }}
+{{- end }}
+{{- $microVmToleration := dict "key" "insight.platform/sandbox-microvm" "operator" "Equal" "value" "true" "effect" "NoSchedule" }}
+{{- if not (deepEqual .Values.microVmExecutor.tolerations (list $microVmToleration)) }}
+{{- fail "microVmExecutor requires the exact dedicated KVM-node taint toleration" }}
+{{- end }}
+{{- if not (deepEqual .Values.attestor.tolerations (list $microVmToleration)) }}
+{{- fail "attestor requires the exact KVM-node toleration so registration is present on both execution pools" }}
+{{- end }}
+{{- if not (empty .Values.executor.tolerations) }}
+{{- fail "WASI Executor must not tolerate the dedicated microVM node taint" }}
+{{- end }}
+{{- $providerHostPaths := dict "kvm" "/dev/kvm" "runtimeAssets" "/opt/insight/microvm-runtime-assets" "chrootBaseDirectory" "/var/lib/insight-firecracker-jails" "stateDirectory" "/var/lib/insight-sandbox-provider" "cgroup" "/sys/fs/cgroup" }}
+{{- if not (deepEqual .Values.microVmExecutor.provider.hostPaths $providerHostPaths) }}
+{{- fail "microVM Provider host paths must retain the exact disjoint device, read-only asset, jail, state, and cgroup authorities" }}
+{{- end }}
+{{- $attestorHostPaths := dict "proc" "/proc" "nodeUid" "/var/lib/insight/node-uid" "registryDirectory" "/var/lib/insight-sandbox-attestor" "socketDirectory" "/var/run/insight-sandbox-attestor" }}
+{{- if not (deepEqual .Values.attestor.hostPaths $attestorHostPaths) }}
+{{- fail "attestor host paths must retain the exact reviewed proc, node identity, registry, and socket authorities" }}
+{{- end }}
+{{- $firecrackerVersion := .Values.microVmExecutor.provider.installation.version | toString }}
+{{- if ne $firecrackerVersion "1.16.1" }}
+{{- fail "Firecracker version must equal the reviewed 1.16.1 security baseline" }}
+{{- end }}
+{{- $firecrackerVersionRoot := printf "/opt/insight/microvm-runtime-assets/firecracker/%s" $firecrackerVersion }}
+{{- if or (ne .Values.microVmExecutor.provider.installation.firecracker_path (printf "%s/firecracker" $firecrackerVersionRoot)) (ne .Values.microVmExecutor.provider.installation.jailer_path (printf "%s/jailer" $firecrackerVersionRoot)) }}
+{{- fail "Firecracker and jailer paths must exactly bind the declared security-baseline version" }}
+{{- end }}
+{{- if or (not (hasPrefix "/opt/insight/microvm-runtime-assets/" .Values.microVmExecutor.provider.installation.firecracker_path)) (not (hasPrefix "/opt/insight/microvm-runtime-assets/" .Values.microVmExecutor.provider.installation.jailer_path)) (regexMatch "(^|/)\\.\\.(/|$)" .Values.microVmExecutor.provider.installation.firecracker_path) (regexMatch "(^|/)\\.\\.(/|$)" .Values.microVmExecutor.provider.installation.jailer_path) }}
+{{- fail "Firecracker and jailer paths must be below the read-only runtime asset mount" }}
+{{- end }}
+{{- range .Values.microVmExecutor.provider.runtimes }}
+{{- if or (not (hasPrefix "/opt/insight/microvm-runtime-assets/" .guest_kernel_path)) (not (hasPrefix "/opt/insight/microvm-runtime-assets/" .rootfs_path)) (regexMatch "(^|/)\\.\\.(/|$)" .guest_kernel_path) (regexMatch "(^|/)\\.\\.(/|$)" .rootfs_path) }}
+{{- fail "microVM kernel and rootfs paths must be below the read-only runtime asset mount" }}
+{{- end }}
 {{- end }}
 {{- if ne .Values.microVmExecutor.provider.installation.chroot_base_directory "/srv/insight-firecracker-jails" }}
 {{- fail "microVM provider chroot_base_directory must match its exact container mount" }}

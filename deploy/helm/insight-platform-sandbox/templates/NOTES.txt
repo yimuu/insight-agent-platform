@@ -7,5 +7,23 @@ credentials, no RBAC Role/RoleBinding, and no attestor Service.
 The attestor is the only workload with hostPID. The WASI Executor remains non-root and mounts only
 the attestor socket. The microVM Executor is also non-root; only its node-local Provider container
 receives the exact KVM, cgroup, jail/state host paths and bounded Linux capabilities. Neither role
-receives a Kubernetes API token. Install the microVM DaemonSet only on the tainted KVM node pool
-after replacing every runtime asset digest and path with CandidateManifest-qualified values.
+receives a Kubernetes API token. This chart requires Kubernetes 1.33 or newer. Label execution
+nodes with the NodeRestriction-protected `insight.platform.node-restriction.kubernetes.io/`
+`sandbox-wasi`, `sandbox-microvm`, and `sandbox-attestor` keys, matching one exact Linux architecture.
+Taint only the KVM pool with `insight.platform/sandbox-microvm=true:NoSchedule`; the attestor is the
+only non-microVM role that tolerates that taint. Install the microVM DaemonSet only on this KVM pool
+after building and promoting the distinct `sandbox-microvm-executor-runtime` and
+`sandbox-microvm-provider-runtime` Docker targets. Before scheduling it, provision the exact
+Candidate-qualified Firecracker 1.16.1, jailer, per-architecture kernel and rootfs bytes as
+root-owned, non-group/world-writable files below `/opt/insight/microvm-runtime-assets` on every
+selected node. The Provider is the only container that mounts this directory, and it mounts it
+recursively read-only and verifies every configured length/digest before becoming ready. Use
+different Secret objects for every workload TLS identity and for NATS credentials. The admission
+policy rejects extra Pod annotations (including secondary-CNI requests), RuntimeClass/DRA/device
+or Pod-level resource requests, ephemeral containers, and all exec/attach/port-forward access in
+the exact executor namespace selected by its Kubernetes-maintained namespace-name label. Verify
+`admission.schedulerUsername` and `admission.daemonSetControllerUsername` against authenticated
+cluster audit identity before install: only that scheduler may bind Pods and only that DaemonSet
+controller may create Pods with the exact role owner reference. Binding metadata permits only the
+Kubernetes topology region/zone labels, existing owner references are immutable, and in-place Pod
+resize is denied.

@@ -28,24 +28,25 @@ spec:
       serviceAccountName: {{ include "insight-platform-sandbox.microVmExecutorName" . }}
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 40
+      schedulerName: {{ .Values.admission.schedulerName }}
       nodeSelector: {{ toYaml .Values.microVmExecutor.nodeSelector | nindent 8 }}
       tolerations: {{ toYaml .Values.microVmExecutor.tolerations | nindent 8 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
-      securityContext: {fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      securityContext: {fsGroup: 10001, seccompProfile: {type: RuntimeDefault}, appArmorProfile: {type: RuntimeDefault}}
       initContainers:
         - name: wait-for-node-attestor
-          image: {{ include "insight-platform-sandbox.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "insight-platform-sandbox.microVmExecutorImage" . | quote }}
+          imagePullPolicy: {{ .Values.microVmExecutor.image.pullPolicy }}
           command: ["sh", "-ec", "until test -S /run/insight-sandbox-attestor/registration.sock; do sleep 1; done"]
           securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
           volumeMounts:
             - {name: attestor-socket, mountPath: /run/insight-sandbox-attestor, readOnly: true}
       containers:
         - name: executor
-          image: {{ include "insight-platform-sandbox.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "insight-platform-sandbox.microVmExecutorImage" . | quote }}
+          imagePullPolicy: {{ .Values.microVmExecutor.image.pullPolicy }}
           command: ["sh", "-ec", "until test -S /run/insight-sandbox-provider/provider.sock; do sleep 1; done; exec /usr/local/bin/platform-sandbox-executor"]
           securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
           env:
@@ -71,8 +72,8 @@ spec:
             - {name: provider-socket, mountPath: /run/insight-sandbox-provider}
             - {name: executor-tmp, mountPath: /tmp}
         - name: provider
-          image: {{ include "insight-platform-sandbox.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "insight-platform-sandbox.microVmProviderImage" . | quote }}
+          imagePullPolicy: {{ .Values.microVmExecutor.provider.image.pullPolicy }}
           command: ["/usr/local/bin/platform-sandbox-microvm-provider"]
           securityContext:
             runAsUser: 0
@@ -104,6 +105,7 @@ spec:
             - {name: provider-tls, mountPath: /etc/insight/provider-tls, readOnly: true}
             - {name: provider-socket, mountPath: /run/insight-sandbox-provider}
             - {name: kvm, mountPath: /dev/kvm}
+            - {name: runtime-assets, mountPath: /opt/insight/microvm-runtime-assets, readOnly: true, recursiveReadOnly: Enabled}
             - {name: firecracker-jails, mountPath: /srv/insight-firecracker-jails}
             - {name: provider-state, mountPath: /var/lib/insight-sandbox-provider}
             - {name: host-cgroup, mountPath: /sys/fs/cgroup}
@@ -117,6 +119,7 @@ spec:
         - {name: attestor-socket, hostPath: {path: {{ .Values.attestor.hostPaths.socketDirectory }}, type: Directory}}
         - {name: provider-socket, emptyDir: {sizeLimit: 16Mi}}
         - {name: kvm, hostPath: {path: {{ .Values.microVmExecutor.provider.hostPaths.kvm }}, type: CharDevice}}
+        - {name: runtime-assets, hostPath: {path: {{ .Values.microVmExecutor.provider.hostPaths.runtimeAssets }}, type: Directory}}
         - {name: firecracker-jails, hostPath: {path: {{ .Values.microVmExecutor.provider.hostPaths.chrootBaseDirectory }}, type: DirectoryOrCreate}}
         - {name: provider-state, hostPath: {path: {{ .Values.microVmExecutor.provider.hostPaths.stateDirectory }}, type: DirectoryOrCreate}}
         - {name: host-cgroup, hostPath: {path: {{ .Values.microVmExecutor.provider.hostPaths.cgroup }}, type: Directory}}

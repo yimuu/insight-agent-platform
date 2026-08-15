@@ -1,6 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1.94-bullseye AS builder
-
-ARG TARGETPLATFORM
+FROM rust:1.94-bullseye@sha256:f4f82b80e5f2945fed4ba17af177c6d6be85d98cde38ff318fc7666ce4505617 AS builder
 WORKDIR /workspace
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
@@ -20,9 +18,10 @@ RUN cargo build --locked --release --bin insight-agent-platform \
     && cargo build --locked --release -p insight-platform-security-authority --bin platform-security-authority \
     && cargo build --locked --release -p insight-platform-sandbox-controller --bin platform-sandbox-controller \
     && cargo build --locked --release -p insight-platform-sandbox-attestor --bin platform-sandbox-attestor \
-    && cargo build --locked --release -p insight-platform-sandbox-executor --bin platform-sandbox-executor
+    && cargo build --locked --release -p insight-platform-sandbox-executor --bin platform-sandbox-executor \
+    && cargo build --locked --release -p insight-platform-sandbox-microvm --bin platform-sandbox-microvm-provider
 
-FROM debian:bullseye-slim AS runtime
+FROM debian:bullseye-slim@sha256:f313b4bd62667092a59b3a664d7d3ab8b5e65f41675f48e81455a15dc5abe792 AS runtime-base
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates \
@@ -31,6 +30,27 @@ RUN apt-get update \
     && useradd --uid 10001 --gid insight --create-home --home-dir /app insight
 
 WORKDIR /app
+
+FROM runtime-base AS sandbox-microvm-executor-runtime
+
+COPY --from=builder /workspace/target/release/platform-sandbox-executor /usr/local/bin/platform-sandbox-executor
+
+USER 10001:10001
+
+ENTRYPOINT ["/usr/local/bin/platform-sandbox-executor"]
+
+FROM runtime-base AS sandbox-microvm-provider-runtime
+
+COPY --from=builder /workspace/target/release/platform-sandbox-microvm-provider /usr/local/bin/platform-sandbox-microvm-provider
+
+# The Provider is the sole root process in the microVM Pod. Firecracker, jailer, kernel and
+# rootfs bytes are supplied by the root-owned, read-only node runtime-asset mount and are verified
+# against the closed Provider config before the Unix listener becomes ready.
+USER 0:10001
+
+ENTRYPOINT ["/usr/local/bin/platform-sandbox-microvm-provider"]
+
+FROM runtime-base AS runtime
 
 COPY --from=builder /workspace/target/release/insight-agent-platform /usr/local/bin/insight-agent-platform
 COPY --from=builder /workspace/target/release/platform-callback-api /usr/local/bin/platform-callback-api
