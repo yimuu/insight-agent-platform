@@ -63,12 +63,13 @@ required_egress_methods = {
     "rpc CancelMcpRemoteTask(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
     "rpc StreamMcpStreamableHttpSubscription(stream ClosedEgressEnvelope) returns (stream ClosedEgressEnvelope);",
     "rpc ResolveManagedMcpSandboxSecret(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
+    "rpc SealManagedMcpSandboxSessionState(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
 }
 for method in required_egress_methods:
     if method not in egress_proto:
         failures.append(f"Egress internal RPC is missing exact method: {method}")
 if egress_proto.count("  rpc ") != len(required_egress_methods):
-    failures.append("Egress internal RPC must expose exactly the twelve reviewed methods")
+    failures.append("Egress internal RPC must expose exactly the thirteen reviewed methods")
 for binary in ("platform-egress-broker", "platform-security-authority"):
     if f"/usr/local/bin/{binary}" not in dockerfile:
         failures.append(f"runtime image is missing {binary}")
