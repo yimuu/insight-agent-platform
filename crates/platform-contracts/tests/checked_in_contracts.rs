@@ -1,9 +1,11 @@
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile,
     machine::{check_contract_tree, repository_root_from_manifest},
-    parse_strict_json, CandidateManifest, JsonLimits, NewCandidateManifest, ResourceId,
-    ResourceKind, Sha256Digest, WorkClass, WorkerManifest, WORKER_MANIFEST_VERSION,
-    WORKER_PROTOCOL_VERSION,
+    parse_strict_json, CandidateManifest, DataClassification, JsonLimits,
+    ModelOutputArtifactIoPolicyDocument, NewCandidateManifest, ResourceId, ResourceKind,
+    Sha256Digest, WorkClass, WorkerManifest, MAX_SAFE_JSON_INTEGER,
+    MODEL_OUTPUT_ARTIFACT_IO_POLICY_VERSION, MODEL_OUTPUT_VERIFIED_MEDIA_TYPE,
+    WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use sha2::{Digest as _, Sha256};
 use std::fs;
@@ -119,6 +121,64 @@ fn candidate_manifest_schema_matches_the_closed_rust_contract() {
     invalid["git_commit"] = serde_json::json!("latest");
     assert!(!validator.is_valid(&invalid));
     assert!(serde_json::from_value::<CandidateManifest>(invalid).is_err());
+}
+
+#[test]
+fn model_output_artifact_io_schema_matches_the_closed_rust_contract() {
+    let root = repository_root_from_manifest();
+    let schema: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join(
+            "contracts/platform-v1/schemas/policies/model-output-artifact-io-policy.schema.json",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let validator = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .build(&schema)
+        .unwrap();
+    let document = ModelOutputArtifactIoPolicyDocument {
+        schema_version: MODEL_OUTPUT_ARTIFACT_IO_POLICY_VERSION,
+        staging_grace_seconds: 60,
+        verified_media_type: MODEL_OUTPUT_VERIFIED_MEDIA_TYPE.to_owned(),
+        classification_ceiling: DataClassification::Confidential,
+        maximum_materialized_bytes: 16_777_216,
+        storage_binding_digest: sha('1'),
+        encryption_domain_id: ResourceId::from_uuid_v7(
+            ResourceKind::EncryptionDomain,
+            Uuid::now_v7(),
+        )
+        .unwrap(),
+        content_validation_profile_digest: sha('2'),
+    };
+    let value = serde_json::to_value(&document).unwrap();
+    assert!(validator.is_valid(&value));
+    document.validate().unwrap();
+
+    let mut invalid = value.clone();
+    invalid["verified_media_type"] = serde_json::json!("application/octet-stream");
+    assert!(!validator.is_valid(&invalid));
+    assert!(
+        serde_json::from_value::<ModelOutputArtifactIoPolicyDocument>(invalid)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+
+    let mut unsafe_integer = value.clone();
+    unsafe_integer["staging_grace_seconds"] = serde_json::json!(MAX_SAFE_JSON_INTEGER + 1);
+    assert!(!validator.is_valid(&unsafe_integer));
+    assert!(
+        serde_json::from_value::<ModelOutputArtifactIoPolicyDocument>(unsafe_integer)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+
+    let mut unknown = value;
+    unknown["unknown"] = serde_json::json!(true);
+    assert!(!validator.is_valid(&unknown));
+    assert!(serde_json::from_value::<ModelOutputArtifactIoPolicyDocument>(unknown).is_err());
 }
 
 fn sha(character: char) -> Sha256Digest {

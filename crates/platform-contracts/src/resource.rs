@@ -13,11 +13,11 @@ use crate::{
     ContextPaginationContract, ContextRankingContract, ContextWindowContract, DataRegion, Effect,
     InstalledModelAdapter, McpAuthPolicyDocument, McpProtocolPolicyDocument, McpServerLimits,
     McpTransportBinding, McpTransportKind, ModelArtifactDeliveryContract, ModelCatalogEvidence,
-    ModelLimits, ModelModalities, ModelToolContract, ModelUsageContract, PolicyKind,
-    PrincipalSnapshot, ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
-    ResourceId, ResourceKind, SandboxAbiVersion, SandboxCleanupPolicy, SandboxEntrypointKind,
-    SandboxIsolationClass, SandboxRuntimeFamily, SecretPurpose, Sha256Digest,
-    StructuredOutputContract,
+    ModelLimits, ModelModalities, ModelOutputArtifactIoPolicyDocument, ModelToolContract,
+    ModelUsageContract, PolicyKind, PrincipalSnapshot, ProviderDataHandlingContract,
+    ProviderModelIdentity, ProviderRequestLimits, ResourceId, ResourceKind, SandboxAbiVersion,
+    SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass, SandboxRuntimeFamily,
+    SecretPurpose, Sha256Digest, StructuredOutputContract,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, error::Error, fmt, str::FromStr};
@@ -549,6 +549,7 @@ pub struct PolicyResourceSpec {
     pub sandbox_resource: Option<crate::SandboxResourcePolicyDocument>,
     pub sandbox_network: Option<crate::SandboxNetworkPolicyDocument>,
     pub sandbox_artifact_io: Option<crate::SandboxArtifactIoPolicyDocument>,
+    pub model_output_artifact_io: Option<ModelOutputArtifactIoPolicyDocument>,
     pub sandbox_secret_resolution: Option<crate::SandboxSecretResolutionPolicyDocument>,
 }
 
@@ -557,66 +558,40 @@ impl PolicyResourceSpec {
         self.authoring_package.validate()?;
         validate_exact_versions(&self.dependency_versions, MAX_RESOURCE_DEPENDENCIES)?;
         validate_policy_versions(&self.policy_versions)?;
-        match (
-            &self.policy_kind,
-            &self.scheduling,
-            &self.retention,
-            &self.mcp_protocol,
-            &self.mcp_auth,
-            &self.sandbox_isolation,
-            &self.sandbox_resource,
-            &self.sandbox_network,
-            &self.sandbox_artifact_io,
-            &self.sandbox_secret_resolution,
-        ) {
-            (
-                PolicyKind::Scheduling,
-                Some(document),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ) => {
+        let document_count = [
+            self.scheduling.is_some(),
+            self.retention.is_some(),
+            self.mcp_protocol.is_some(),
+            self.mcp_auth.is_some(),
+            self.sandbox_isolation.is_some(),
+            self.sandbox_resource.is_some(),
+            self.sandbox_network.is_some(),
+            self.sandbox_artifact_io.is_some(),
+            self.model_output_artifact_io.is_some(),
+            self.sandbox_secret_resolution.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+        match self.policy_kind {
+            PolicyKind::Scheduling if document_count == 1 && self.scheduling.is_some() => {
+                let document = self.scheduling.as_ref().expect("guarded above");
                 document.validate()?;
                 if document.canonical_digest()? != self.rules_digest {
                     return Err(ResourceContractError::InvalidPolicyDocument);
                 }
                 Ok(())
             }
-            (
-                PolicyKind::Retention,
-                None,
-                Some(document),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ) => {
+            PolicyKind::Retention if document_count == 1 && self.retention.is_some() => {
+                let document = self.retention.as_ref().expect("guarded above");
                 document.validate()?;
                 if document.canonical_digest()? != self.rules_digest {
                     return Err(ResourceContractError::InvalidPolicyDocument);
                 }
                 Ok(())
             }
-            (
-                PolicyKind::Protocol,
-                None,
-                None,
-                Some(document),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ) => {
+            PolicyKind::Protocol if document_count == 1 && self.mcp_protocol.is_some() => {
+                let document = self.mcp_protocol.as_ref().expect("guarded above");
                 document
                     .validate()
                     .map_err(|_| ResourceContractError::InvalidPolicyDocument)?;
@@ -629,18 +604,8 @@ impl PolicyResourceSpec {
                 }
                 Ok(())
             }
-            (
-                PolicyKind::McpAuth,
-                None,
-                None,
-                None,
-                Some(document),
-                None,
-                None,
-                None,
-                None,
-                None,
-            ) => {
+            PolicyKind::McpAuth if document_count == 1 && self.mcp_auth.is_some() => {
+                let document = self.mcp_auth.as_ref().expect("guarded above");
                 document
                     .validate()
                     .map_err(|_| ResourceContractError::InvalidPolicyDocument)?;
@@ -653,96 +618,63 @@ impl PolicyResourceSpec {
                 }
                 Ok(())
             }
-            (
-                PolicyKind::Isolation,
-                None,
-                None,
-                None,
-                None,
-                Some(document),
-                None,
-                None,
-                None,
-                None,
-            ) => validate_sandbox_policy(document, &self.rules_digest),
-            (
-                PolicyKind::Resource,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(document),
-                None,
-                None,
-                None,
-            ) => validate_sandbox_policy(document, &self.rules_digest),
-            (
-                PolicyKind::Network,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(document),
-                None,
-                None,
-            ) => validate_sandbox_policy(document, &self.rules_digest),
-            (
-                PolicyKind::ArtifactIo,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(document),
-                None,
-            ) => validate_sandbox_policy(document, &self.rules_digest),
-            (
-                PolicyKind::SecretResolution,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(document),
-            ) => validate_sandbox_policy(document, &self.rules_digest),
-            (
-                PolicyKind::Scheduling
-                | PolicyKind::Retention
-                | PolicyKind::McpAuth
-                | PolicyKind::Isolation
-                | PolicyKind::Resource
-                | PolicyKind::ArtifactIo
-                | PolicyKind::SecretResolution,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-            )
-            | (_, Some(_), _, _, _, _, _, _, _, _)
-            | (_, _, Some(_), _, _, _, _, _, _, _)
-            | (_, _, _, Some(_), _, _, _, _, _, _)
-            | (_, _, _, _, Some(_), _, _, _, _, _)
-            | (_, _, _, _, _, Some(_), _, _, _, _)
-            | (_, _, _, _, _, _, Some(_), _, _, _)
-            | (_, _, _, _, _, _, _, Some(_), _, _)
-            | (_, _, _, _, _, _, _, _, Some(_), _)
-            | (_, _, _, _, _, _, _, _, _, Some(_)) => {
-                Err(ResourceContractError::InvalidPolicyDocument)
+            PolicyKind::Isolation if document_count == 1 && self.sandbox_isolation.is_some() => {
+                validate_sandbox_policy(
+                    self.sandbox_isolation.as_ref().expect("guarded above"),
+                    &self.rules_digest,
+                )
             }
-            (_, None, None, None, None, None, None, None, None, None) => Ok(()),
+            PolicyKind::Resource if document_count == 1 && self.sandbox_resource.is_some() => {
+                validate_sandbox_policy(
+                    self.sandbox_resource.as_ref().expect("guarded above"),
+                    &self.rules_digest,
+                )
+            }
+            PolicyKind::Network if document_count == 1 && self.sandbox_network.is_some() => {
+                validate_sandbox_policy(
+                    self.sandbox_network.as_ref().expect("guarded above"),
+                    &self.rules_digest,
+                )
+            }
+            PolicyKind::ArtifactIo if document_count == 1 && self.sandbox_artifact_io.is_some() => {
+                validate_sandbox_policy(
+                    self.sandbox_artifact_io.as_ref().expect("guarded above"),
+                    &self.rules_digest,
+                )
+            }
+            PolicyKind::ArtifactIo
+                if document_count == 1 && self.model_output_artifact_io.is_some() =>
+            {
+                let document = self
+                    .model_output_artifact_io
+                    .as_ref()
+                    .expect("guarded above");
+                document.validate()?;
+                if document.canonical_digest()? != self.rules_digest {
+                    return Err(ResourceContractError::InvalidPolicyDocument);
+                }
+                Ok(())
+            }
+            PolicyKind::SecretResolution
+                if document_count == 1 && self.sandbox_secret_resolution.is_some() =>
+            {
+                validate_sandbox_policy(
+                    self.sandbox_secret_resolution
+                        .as_ref()
+                        .expect("guarded above"),
+                    &self.rules_digest,
+                )
+            }
+            PolicyKind::Protocol | PolicyKind::Network if document_count == 0 => Ok(()),
+            PolicyKind::Scheduling
+            | PolicyKind::Retention
+            | PolicyKind::McpAuth
+            | PolicyKind::Isolation
+            | PolicyKind::Resource
+            | PolicyKind::ArtifactIo
+            | PolicyKind::SecretResolution => Err(ResourceContractError::InvalidPolicyDocument),
+            _ if document_count == 0 => Ok(()),
+            _ => Err(ResourceContractError::InvalidPolicyDocument),
         }
     }
 }
@@ -2528,6 +2460,7 @@ mod tests {
             sandbox_resource: None,
             sandbox_network: None,
             sandbox_artifact_io: None,
+            model_output_artifact_io: None,
             sandbox_secret_resolution: None,
         };
         spec.validate().unwrap();
@@ -2543,6 +2476,75 @@ mod tests {
         unbounded.gc_grace_seconds = 0;
         assert_eq!(
             unbounded.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+    }
+
+    #[test]
+    fn model_output_artifact_io_policy_is_a_single_rules_digest_bound_variant() {
+        let document = ModelOutputArtifactIoPolicyDocument {
+            schema_version: crate::MODEL_OUTPUT_ARTIFACT_IO_POLICY_VERSION,
+            staging_grace_seconds: 60,
+            verified_media_type: crate::MODEL_OUTPUT_VERIFIED_MEDIA_TYPE.to_owned(),
+            classification_ceiling: DataClassification::Confidential,
+            maximum_materialized_bytes: 16_777_216,
+            storage_binding_digest: digest('d'),
+            encryption_domain_id: id("enc_0198f1c3-8f49-7c3e-b1f3-773c28367ba2"),
+            content_validation_profile_digest: digest('e'),
+        };
+        let mut spec = PolicyResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: ArtifactRef::new(
+                    id("art_0198f1c3-8f49-7c3e-b1f3-773c28367ba3"),
+                    digest('a'),
+                    16,
+                    "application/json",
+                    DataClassification::Internal,
+                    Some("model-output-artifact-io-policy.json".to_owned()),
+                )
+                .unwrap(),
+                manifest_digest: digest('b'),
+            },
+            contract_digest: digest('c'),
+            dependency_versions: vec![],
+            policy_versions: vec![],
+            policy_kind: PolicyKind::ArtifactIo,
+            rules_digest: document.canonical_digest().unwrap(),
+            scheduling: None,
+            retention: None,
+            mcp_protocol: None,
+            mcp_auth: None,
+            sandbox_isolation: None,
+            sandbox_resource: None,
+            sandbox_network: None,
+            sandbox_artifact_io: None,
+            model_output_artifact_io: Some(document),
+            sandbox_secret_resolution: None,
+        };
+        spec.validate().unwrap();
+
+        spec.rules_digest = digest('0');
+        assert_eq!(
+            spec.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+
+        spec.rules_digest = spec
+            .model_output_artifact_io
+            .as_ref()
+            .unwrap()
+            .canonical_digest()
+            .unwrap();
+        spec.retention = Some(ArtifactRetentionPolicy {
+            version: 1,
+            minimum_retention_seconds: 0,
+            gc_grace_seconds: 1,
+            tombstone_retention_seconds: 1,
+            retain_provenance_sources: false,
+            delete_requires_approval: false,
+        });
+        assert_eq!(
+            spec.validate(),
             Err(ResourceContractError::InvalidPolicyDocument)
         );
     }
@@ -2575,6 +2577,7 @@ mod tests {
             sandbox_resource: None,
             sandbox_network: None,
             sandbox_artifact_io: None,
+            model_output_artifact_io: None,
             sandbox_secret_resolution: None,
         };
         spec.validate().unwrap();

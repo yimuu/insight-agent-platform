@@ -180,6 +180,7 @@ fn policy_document(
         sandbox_resource: None,
         sandbox_network: None,
         sandbox_artifact_io: None,
+        model_output_artifact_io: None,
         sandbox_secret_resolution: None,
     })
 }

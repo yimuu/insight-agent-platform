@@ -37,6 +37,7 @@ CONTRACT_FILES = [
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/candidate-manifest.schema.json",
     "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
+    "contracts/platform-v1/schemas/policies/model-output-artifact-io-policy.schema.json",
     "contracts/platform-v1/schemas/policies/scheduling-policy.schema.json",
     "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
     "contracts/platform-v1/schemas/nominal/artifact-ref.schema.json",

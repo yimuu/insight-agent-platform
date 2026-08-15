@@ -226,6 +226,7 @@ fn sandbox_policy_resource(
         sandbox_resource: None,
         sandbox_network: None,
         sandbox_artifact_io: None,
+        model_output_artifact_io: None,
         sandbox_secret_resolution: None,
     };
     match kind {
@@ -712,6 +713,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
                     sandbox_resource: None,
                     sandbox_network: None,
                     sandbox_artifact_io: None,
+                    model_output_artifact_io: None,
                     sandbox_secret_resolution: None,
                 }),
             ),

@@ -511,6 +511,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
                 sandbox_resource: None,
                 sandbox_network: None,
                 sandbox_artifact_io: None,
+                model_output_artifact_io: None,
                 sandbox_secret_resolution: None,
             }),
             validation: ValidationSummary {
@@ -1198,6 +1199,7 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
                 sandbox_resource: None,
                 sandbox_network: None,
                 sandbox_artifact_io: None,
+                model_output_artifact_io: None,
                 sandbox_secret_resolution: None,
             }),
             validation: ValidationSummary {

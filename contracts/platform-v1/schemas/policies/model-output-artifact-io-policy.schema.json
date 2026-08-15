@@ -1,0 +1,59 @@
+{
+  "$id": "urn:insight:platform:v1:model-output-artifact-io-policy",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Closed Artifact I/O policy for canonical Artifact-backed Model responses. Candidate storage and effective HardLimit facts are validated separately at admission.",
+  "properties": {
+    "classification_ceiling": {
+      "enum": [
+        "public",
+        "internal",
+        "confidential",
+        "restricted"
+      ],
+      "type": "string"
+    },
+    "content_validation_profile_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "encryption_domain_id": {
+      "pattern": "^enc_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "maximum_materialized_bytes": {
+      "maximum": 1073741824,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "staging_grace_seconds": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "storage_binding_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "verified_media_type": {
+      "const": "application/json",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "staging_grace_seconds",
+    "verified_media_type",
+    "classification_ceiling",
+    "maximum_materialized_bytes",
+    "storage_binding_digest",
+    "encryption_domain_id",
+    "content_validation_profile_digest"
+  ],
+  "title": "ModelOutputArtifactIoPolicyDocument",
+  "type": "object"
+}
