@@ -342,7 +342,8 @@ session/reconnect/event-count均有硬限制；有event ID的重投保持稳定�
 session/Worker generation的Host ingress和PostgreSQL command清除opaque state并重排同一Job。合法sub-resource update只保留URI digest，始终重新读取
 exact published root。生产UUIDv7 ingress identity只分配Receipt/Event/Outbox identity，transport-loss幂等scope绑定exact session/Worker。
 Host 56项unit、Egress MCP 18项定向unit、三crate all-target/all-feature check与strict Clippy通过；PostgreSQL subscription fixture已扩展
-sub-resource、真实redelivery和异步transport termination，但本轮只完成编译，Docker daemon无响应，不能把该扩展声明为fresh PostgreSQL实际执行证据。
+sub-resource、真实redelivery和异步transport termination，并已在全新PostgreSQL 16数据库实际执行通过；该开发期fixture仍不是
+real-process conformance或Phase 6资格证据。
 
 Streamable HTTP operation的生产connector现已进入独立Egress：process-installed exact MCP Deployment catalog固定唯一HTTPS
 endpoint与Protocol/Network/TLS/Trust/Auth Policy，连接前校验全部DNS答案为公网地址并pin到该连接，强制no-proxy/no-redirect、late Pinned
@@ -626,10 +627,11 @@ Sandbox deployment合同门禁；两个显式ignored RustFS资格测试仍不计
 实际Managed microVM session Provider已进入独立Provider进程并完成guest Artifact/一次性Secret注入与同实例activation。Managed authority的
 非事件化heartbeat也已贯穿closed domain、PostgreSQL和独立gRPC：每次只用exact Job/version/lease/Worker/token续租，返回的新version成为
 下一次mutation fence，不延长request deadline/session expiry，也不创建Receipt/Event/Outbox。domain和RPC测试已执行，fresh PostgreSQL
-fixture已编译；本机Docker daemon无响应，故尚无本次路径的真实数据库运行证据。Sandbox domain establishment Worker现在会在
+fixture已在全新PostgreSQL 16数据库实际执行通过，覆盖heartbeat、session lost与expired-lease recovery；该证据仍不替代真实Linux
+KVM/process qualification。Sandbox domain establishment Worker现在会在
 Provider prepare/initialize/activate等待期间按profile heartbeat，将每次返回的新version串行带入下一phase；heartbeat失败时先等待
-Provider调用收敛，再对任何已创建实例执行exact destroy，避免取消中的RPC留下孤儿VM。长期liveness heartbeat与terminal supervisor仍未
-组合进Executor进程，terminal/session-loss recovery和真实资格也未交付，故上述开放项和Phase状态不变。
+Provider调用收敛，再对任何已创建实例执行exact destroy，避免取消中的RPC留下孤儿VM。长期liveness heartbeat、terminal supervisor与
+expired-lease recovery已在后续切片组合进Executor进程；真实Linux KVM/process资格仍未交付，因此Phase状态不变。
 同时修正共享Sandbox Job恢复扫描的队列隔离：有限Capability expired-lease scan现在在SQL候选阶段要求closed
 `workload_kind=capability_execution`，不会因同表中的Managed session payload解码失败而阻断整个分片；Managed expired lease仍由待交付的
 专用terminal/absence recovery负责。
@@ -637,8 +639,8 @@ Provider调用收敛，再对任何已创建实例执行exact destroy，避免�
 Managed session fenced lost authority随后贯穿domain、PostgreSQL与internal gRPC：最新物理Job fence、exact cleanup、usage reservation与
 四个terminal quota ledger identity共同绑定请求；单事务把旧物理Job推进为`Lost/ReconciliationRequired`并清除lease，保守结算未知
 CPU/output、确认Artifact grant已释放，随后清除逻辑opaque session/物理link、设置full reconcile、重排逻辑MCP Job并提交独立
-Receipt/Event/Outbox。domain 37项、MCP Host 61项、authority RPC 10项测试及目标strict Clippy已通过；扩展PostgreSQL fixture已编译，
-但`PLATFORM_TEST_DATABASE_URL`未设置且Docker daemon仍无响应，故不声明本次真实数据库运行证据。Provider lifecycle随后补齐closed
+Receipt/Event/Outbox。domain 37项、MCP Host 61项、authority RPC 10项测试及目标strict Clippy已通过；扩展PostgreSQL fixture已在全新
+PostgreSQL 16数据库实际执行通过。Provider lifecycle随后补齐closed
 liveness与cleanup RPC：observation exact绑定session/request、Executor/Provider generation、lease和sandbox identity；Linux实现同时观察
 child exit和PID/start identity，RPC失败不能被解释为`Exited`。cleanup outcome显式区分未创建实例的`Absent`和可供terminal authority使用的
 `Destroyed(evidence)`，持久tombstone支持byte-stable evidence重放。Sandbox domain 38项、microVM 5项和RPC 10项定向测试通过。长期
@@ -661,8 +663,8 @@ route与database-observation重验。microVM Executor新增专用recovery driver
 `Accepted -> Ready | TimedOut`，started候选严格执行`absence/quarantine -> same-node Provider observation -> CAS`，任何证明/Provider失败均保持
 durable状态不变。driver已组合进有限claim、Managed claim与NATS control所在的同一shutdown supervisor。Sandbox 40项、Executor package 6项、
 microVM backend配置独立冻结recovery shard/scan/jitter/backoff，Helm正向与错误shard负向门禁通过，避免复用100ms业务claim轮询频率。
-authority RPC 10项及相关strict Clippy实际通过；PostgreSQL fixture已扩展scan/requeue/replay且可编译，但本机
-`PLATFORM_TEST_DATABASE_URL`未配置、Docker daemon无响应，故不登记fresh PG执行证据。此功能切片已闭合，真实Linux KVM/process-kill/
+authority RPC 10项及相关strict Clippy实际通过；PostgreSQL fixture已在全新PostgreSQL 16数据库实际执行scan/requeue/replay通过。
+此功能切片已闭合，真实Linux KVM/process-kill/
 node-quarantine/escape/saturation Candidate资格仍属于Phase 4/6开放门禁。
 
 随后补齐了Firecracker生产拓扑前置项：新增独立`executor-microvm` DaemonSet与专用KVM node selector/taint toleration，非root Executor
@@ -679,6 +681,13 @@ policy/contract digest和UTC创建时间。builder从实际WorkerManifest与Hard
 limit drift及非canonical顺序；schema已进入`insight.platform/v1`根合同digest，并由Rust和独立Python checker共同验证。这里的
 `database_schema_version`是当前值为6的PostgreSQL schema contract version，不是migration数量。该开发期合同不等于实际Candidate，
 尚未绑定production-equivalent images/config/topology，也没有Gate A～G或ReleaseManifest，因此Phase 6保持Pending。
+
+CR-160关闭真实Phase 4 PostgreSQL验证暴露的shared Network Policy合同冲突：`PolicyKind::Network`同时服务MCP、Model、Capability与
+Sandbox，通用Revision允许用closed AuthoringPackage加`rules_digest`承诺领域正文，不能被Resource合同强制携带Sandbox typed body；
+只有被Sandbox Profile引用的exact Revision必须携带完整`SandboxNetworkPolicyDocument`，且Sandbox repository继续逐字段和digest
+重验。Contracts定向测试以及全新PostgreSQL 16的OAuth、subscription/Managed与Sandbox suites实际通过；同时把cleanup evidence时间
+fixture改为使用数据库时钟，避免宿主与数据库微小时钟偏差制造伪失败。该修订不放宽Sandbox egress、不增表或migration；跨节点clock-skew
+与真实网络隔离仍属于Phase 6资格。
 
 clean-cut baseline现由部署期独立provisioning流程对fresh PostgreSQL target一次性安装；Platform运行时crate已删除DDL apply入口，
 API/Scheduler/Worker只做read-only schema verification。旧`coordinator.rs`实现路径改为role-neutral orchestration模块，cutover gate

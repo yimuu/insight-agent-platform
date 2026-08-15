@@ -463,6 +463,10 @@ struct SandboxNetworkPolicyDocument {
 }
 ```
 
+`PolicyKind::Network`是平台共享策略类型；Sandbox Profile引用的exact Network Policy Revision必须携带上述完整typed body，并使其
+canonical digest与Revision的`rules_digest`一致。只有AuthoringPackage与通用摘要、但没有该typed body的Network Revision可以服务其他
+领域，不能通过Sandbox Profile repository的发布或执行校验。
+
 - 禁止 raw socket、listen/inbound、peer-to-peer、arbitrary DNS、UDP（除 brokered DNS）和 CONNECT tunnel；
 - hostname 在 proxy 解析并检查 private/link-local/metadata/Kubernetes/internal ranges；
 - redirect 每 hop 重新验证，默认禁止跨 origin；
@@ -806,8 +810,8 @@ Executor library的专用claim driver与普通Sandbox共享同一`LocalWorkerPoo
 workload区分有限Capability与长生命周期session，并对Managed Job/request/attempt/lease/Executor及Ready sandbox identity执行幂等回收。
 全新PostgreSQL 16 Managed fixture及既有Sandbox回归fixture均实际通过，不增加表或migration。mTLS authority、Executor pool和Sandbox
 domain定向测试分别9、3、33项通过。真实Managed microVM session Provider、guest Artifact/Secret注入和同实例activation现已进入独立
-Provider进程；Managed authority新增非事件化exact-fence heartbeat，domain/RPC测试通过，fresh PostgreSQL fixture已编译但因本机Docker
-daemon无响应未取得实际运行证据。Sandbox domain establishment Worker现会在Provider prepare/initialize/activate等待期间按profile
+Provider进程；Managed authority新增非事件化exact-fence heartbeat，domain/RPC测试通过，fixture已在全新PostgreSQL 16数据库实际覆盖
+heartbeat、session lost与expired-lease recovery。Sandbox domain establishment Worker现会在Provider prepare/initialize/activate等待期间按profile
 续租，并把最新version fence串行传给下一phase；heartbeat失败后先等待Provider调用收敛，再对任何已创建实例执行exact destroy，避免
 取消中的RPC留下孤儿microVM。长期liveness heartbeat、terminal supervisor及expired-lease recovery现均已组合进microVM Executor；真实
 Linux KVM互操作、process-kill、escape与饱和资格仍未完成，因此不关闭Phase 4。
@@ -840,8 +844,8 @@ TimedOut，started Job必须同时验证旧Executor process absence与随后发�
 database observation决定requeue或timeout，started候选严格执行absence/quarantine → same-node Provider observation → CAS，证明不可用时不写
 durable状态。该driver已进入microVM Executor supervisor，与有限/Managed claim及NATS control共享shutdown fence。当前Sandbox 40项、Executor
 6项及authority RPC 10项定向测试通过，strict Clippy通过；microVM backend独立冻结recovery shard/scan/jitter/backoff，Helm正向及错误
-shard负向门禁通过，不复用业务claim轮询频率。真实PostgreSQL fixture已编译但本机Docker daemon无响应，本切片不登记fresh
-数据库证据，也不替代Linux Candidate recovery资格。
+shard负向门禁通过，不复用业务claim轮询频率。fixture已在全新PostgreSQL 16数据库实际覆盖scan/requeue/replay；该证据不替代Linux
+Candidate recovery资格。
 
 Managed session的一次性Secret交付现已实现为两阶段、双平面协议。microVM Provider只以exact workload URI SAN调用Egress；Egress以自身
 workload identity调用Sandbox Controller执行reserve与commit，并在两者之间通过既有Security Authority、KMS和Secret Provider解析材料。

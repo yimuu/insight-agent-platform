@@ -3341,6 +3341,10 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         CommandOutcome::Replayed(_)
     ));
 
+    let lost_observed_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
     let mut lost = CommitManagedMcpSandboxSessionLost {
         audit: phase_audit(0x6e0, "managed-session-lost-key"),
         identity: winner.request.identity.clone(),
@@ -3361,7 +3365,7 @@ async fn managed_mcp_sandbox_session_admission_fixture(
             sandbox_identity_digest,
             grants_revoked: true,
             ephemeral_storage_destroyed: true,
-            observed_at: Utc::now(),
+            observed_at: lost_observed_at,
             evidence_digest: revoked.evidence_digest,
         },
         session_loss_evidence_digest: named_digest("managed-session-loss-evidence"),
@@ -3371,6 +3375,7 @@ async fn managed_mcp_sandbox_session_admission_fixture(
             .collect(),
     };
     lost.audit.request_digest = lost.canonical_request_digest().unwrap();
+    lost.validate_at(lost_observed_at).unwrap();
     let lost_decision = match repository
         .commit_managed_mcp_sandbox_session_lost(lost.clone())
         .await

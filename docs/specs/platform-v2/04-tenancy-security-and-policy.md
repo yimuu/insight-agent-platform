@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-08 |
+| 日期 | 2026-08-15 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) |
 | 直接下游 | 05、09、11、12、13、14、15、16、17、18 |
 
@@ -252,6 +252,11 @@ resource等非领域资源的`*_profile_revision_id`，都必须引用`prev`并�
 
 一个字段允许多个Policy Revision时，每个元素也必须是该role允许的kind，集合规范排序且不允许同kind冲突；合法的多层
 policy组合使用发布时编译的deterministic intersection/join receipt，不能依赖运行时“最后一个覆盖”。
+
+`Network`是MCP、Model、Capability与Sandbox共享的PolicyKind，而不是Sandbox私有资源。通用Network Policy Revision可以只以
+closed AuthoringPackage和`rules_digest`承诺其领域正文，Resource合同不得强制它携带Sandbox专用typed body。只有当Sandbox
+Profile引用某个Network Policy Revision时，该exact revision才必须同时携带完整`SandboxNetworkPolicyDocument`，且Sandbox
+repository必须重新验证typed body与`rules_digest`一致；仅有通用Network摘要的Revision不能用于Sandbox执行。
 
 ```text
 installation.manage/support

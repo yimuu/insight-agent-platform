@@ -682,7 +682,8 @@ AEAD加密、绑定tenant/Deployment/Auth/binding/session generation的prepared 
 event-count；有ID redelivery保持稳定去重，无ID data在断线后触发full reconcile。Host ingress生成UUIDv7 Receipt/Event/Outbox identity并把断线
 绑定exact auth/session/Worker generation交给PostgreSQL，后者原子清除opaque state、标记full reconcile并把同一Job重排Ready。MCP允许的
 sub-resource update只保留URI digest作为evidence，下游始终重新读取exact published root。Host 56项与Egress MCP 18项定向unit、相关check和
-strict Clippy通过；扩展后的PostgreSQL fixture已编译，但本轮Docker daemon无响应，尚未取得该新路径的fresh PostgreSQL实际执行证据。
+strict Clippy通过；扩展后的PostgreSQL fixture已在全新PostgreSQL 16数据库实际执行通过，覆盖sub-resource redelivery、异步transport
+termination、session-loss与expired-session rebuild。该证据仍不是real-process或Phase 6资格。
 
 同步及experimental Task-aware Streamable HTTP operation现在有生产Egress connector：只按process-installed exact Deployment catalog选择HTTPS endpoint，重验
 Protocol/Network/TLS/Trust/Auth Policy与Pinned token purpose，全部DNS答案必须为公网地址并固定到当前连接；reqwest强制HTTPS-only、无代理、
@@ -761,11 +762,11 @@ Security Authority、KMS和Secret Provider解析明文；解析后Controller再�
 generation和sandbox identity的完整credential-free prepared binding及canonical digest，防止交付或恢复时用较弱prepare evidence替换实际运行实例。
 真实microVM Managed session Provider、guest Artifact/一次性Secret注入和同实例activation现已进入独立Provider进程；Managed authority又新增
 非事件化、exact Job/version/lease/Worker/token fenced heartbeat，PostgreSQL只推进物理Job version与lease，不能延长request deadline或
-session expiry，也不创建Receipt/Event/Outbox。domain与gRPC测试已执行，fresh PostgreSQL fixture已编译；本机Docker daemon无响应，故本次不把
-该fixture声明为实际运行证据。Sandbox domain establishment Worker现会在每段Provider I/O期间按profile续租，并把每次返回的新Job version
-串行带入后续phase；heartbeat失败时不会中途丢弃Provider future，而是等待其收敛并对任何已创建实例执行exact destroy。该循环尚未与
-长期liveness观察、terminal supervisor及Executor进程组合，terminal/session-loss recovery以及
-真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation资格也未交付，因此该证据不关闭MCP或Phase 4，也不把本规范标记为
+session expiry，也不创建Receipt/Event/Outbox。Sandbox domain establishment Worker现会在每段Provider I/O期间按profile续租，并把每次返回的新Job version
+串行带入后续phase；heartbeat失败时不会中途丢弃Provider future，而是等待其收敛并对任何已创建实例执行exact destroy。长期
+liveness观察、terminal supervisor及expired-lease recovery已组合进Executor进程；domain与gRPC测试已执行，对应PostgreSQL fixture现已在全新PostgreSQL 16数据库
+实际覆盖heartbeat、session lost与expired-lease recovery。真实Linux KVM/jailer/guest-agent、process-kill/recovery与escape/saturation
+资格仍未交付，因此该证据不关闭MCP或Phase 4，也不把本规范标记为
 Implemented/Verified。此前workspace
 all-target/all-feature check、test、doc-test与strict Clippy及public API/contract/schema/cutover门禁证据不自动覆盖本次变更；本次完整门禁
 结果以实施计划的最新记录为准。
@@ -782,8 +783,8 @@ expired lease的PostgreSQL authority现已交付专用bounded/sharded/keyset sca
 回到Ready，deadline后以零实际使用量结算并同时终结逻辑/物理Job；`Preparing`及以后只有旧process-generation absence与同节点Provider
 observation组成的closed evidence才能写`Lost`、保守结算并重排逻辑MCP Job。Receipt的semantic key绑定旧lease generation而不绑定恢复
 Worker，使新generation可以对不确定响应进行exact replay；当前恢复Executor registration仍作为每次transport调用的独立授权输入。domain
-40项测试通过，PostgreSQL fixture已扩展Accepted scan/requeue/replay但本机没有可用数据库执行证据。authority internal RPC与Executor recovery
-driver仍未交付，因此不能仅凭本切片创建replacement或关闭Phase 4。
+40项测试通过，PostgreSQL fixture已在全新PostgreSQL 16数据库实际覆盖Accepted scan/requeue/replay。authority internal RPC与Executor
+recovery driver也已交付；真实Linux absence/Provider/process恢复资格完成前仍不能关闭Phase 4。
 
 ## 28. 明确推迟的工作
 

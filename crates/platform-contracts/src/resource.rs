@@ -718,7 +718,6 @@ impl PolicyResourceSpec {
                 | PolicyKind::McpAuth
                 | PolicyKind::Isolation
                 | PolicyKind::Resource
-                | PolicyKind::Network
                 | PolicyKind::ArtifactIo
                 | PolicyKind::SecretResolution,
                 _,
@@ -2538,6 +2537,65 @@ mod tests {
         unbounded.gc_grace_seconds = 0;
         assert_eq!(
             unbounded.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+    }
+
+    #[test]
+    fn shared_network_policy_allows_generic_or_sandbox_typed_documents() {
+        let mut spec = PolicyResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: ArtifactRef::new(
+                    id("art_0198f1c3-8f49-7c3e-b1f3-773c28367ba1"),
+                    digest('a'),
+                    16,
+                    "application/json",
+                    DataClassification::Internal,
+                    Some("network-policy.json".to_owned()),
+                )
+                .unwrap(),
+                manifest_digest: digest('b'),
+            },
+            contract_digest: digest('c'),
+            dependency_versions: vec![],
+            policy_versions: vec![],
+            policy_kind: PolicyKind::Network,
+            rules_digest: digest('d'),
+            scheduling: None,
+            retention: None,
+            mcp_protocol: None,
+            mcp_auth: None,
+            sandbox_isolation: None,
+            sandbox_resource: None,
+            sandbox_network: None,
+            sandbox_artifact_io: None,
+            sandbox_secret_resolution: None,
+        };
+        spec.validate().unwrap();
+
+        let sandbox_network = crate::SandboxNetworkPolicyDocument {
+            schema_version: 1,
+            destinations: vec![],
+            maximum_redirects: 0,
+            maximum_dns_answers: 8,
+            maximum_response_bytes: 65_536,
+            require_https: true,
+            require_tls12_or_newer: true,
+            deny_private_addresses: true,
+            deny_link_local_addresses: true,
+            deny_metadata_addresses: true,
+            deny_proxy_environment: true,
+            deny_connect_tunnel: true,
+            deny_listen: true,
+            deny_udp: true,
+        };
+        spec.rules_digest = sandbox_network.canonical_digest().unwrap();
+        spec.sandbox_network = Some(sandbox_network);
+        spec.validate().unwrap();
+
+        spec.rules_digest = digest('0');
+        assert_eq!(
+            spec.validate(),
             Err(ResourceContractError::InvalidPolicyDocument)
         );
     }
