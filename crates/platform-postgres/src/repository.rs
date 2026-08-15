@@ -83,6 +83,20 @@ use uuid::{Uuid, Variant, Version};
 pub const DEFAULT_PAYLOAD_LIMIT: usize = 1_048_576;
 pub const MAX_JOB_LEASE_MILLISECONDS: i64 = 120_000;
 
+/// Starts one coherent, non-mutating authority snapshot for externally brokered reads.
+///
+/// The second authorization after object I/O detects later state changes, so row locks would only
+/// widen contention and force the Artifact Broker's database role to own UPDATE privilege.
+pub(crate) async fn begin_read_only_repeatable(
+    pool: &PgPool,
+) -> Result<Transaction<'_, Postgres>, RepositoryError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
 pub const DEFAULT_SCHEDULER_LIMITS: SchedulerHardLimits = SchedulerHardLimits {
     maximum_deficit: 1_000_000,
     maximum_tenants: 64,

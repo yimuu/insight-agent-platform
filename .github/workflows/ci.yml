@@ -50,6 +50,8 @@ jobs:
         run: bash scripts/check-platform-mcp-cleanup-deployment.sh
       - name: Check Model Worker deployment boundary
         run: bash scripts/check-platform-model-worker-deployment.sh
+      - name: Check Artifact Broker deployment boundary
+        run: bash scripts/check-platform-artifact-broker-deployment.sh
       - name: Check callback API deployment boundary
         run: bash scripts/check-platform-callback-deployment.sh
       - name: Check root public API baseline
@@ -111,9 +113,17 @@ jobs:
         run: |
           psql "$PLATFORM_DATABASE_ADMIN_URL" --no-psqlrc --set ON_ERROR_STOP=1 --command 'CREATE ROLE platform_security_authority_qualification NOLOGIN'
           bash scripts/provision-platform-security-authority-role.sh
+      - name: Provision Artifact Broker least-privilege role
+        env:
+          PLATFORM_DATABASE_ADMIN_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+          PLATFORM_ARTIFACT_BROKER_ROLE: platform_artifact_broker_qualification
+        run: |
+          psql "$PLATFORM_DATABASE_ADMIN_URL" --no-psqlrc --set ON_ERROR_STOP=1 --command 'CREATE ROLE platform_artifact_broker_qualification NOLOGIN'
+          bash scripts/provision-platform-artifact-broker-role.sh
       - name: Test
         env:
           PLATFORM_SECURITY_AUTHORITY_TEST_ROLE: platform_security_authority_qualification
+          PLATFORM_ARTIFACT_BROKER_TEST_ROLE: platform_artifact_broker_qualification
         run: cargo test --locked --workspace --all-targets --all-features
       - name: Documentation tests
         run: cargo test --locked --workspace --doc --all-features

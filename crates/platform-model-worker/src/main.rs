@@ -2,8 +2,9 @@
 //!
 //! The process owns only Model-local permits and adapter orchestration. PostgreSQL remains the
 //! durable Job/ModelTurn authority, Provider traffic crosses the Model Worker mTLS Egress RPC,
-//! and this first production composition deliberately accepts only Inline RunValue material.
+//! and Artifact-backed requests cross a separate mTLS Artifact Broker RPC before Provider I/O.
 
+use insight_platform_artifact_rpc::{ArtifactInternalRpcLimits, ArtifactModelBrokerGrpcClient};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, InstalledModelAdapter,
     JsonLimits, ResourceId, ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
@@ -15,11 +16,11 @@ use insight_platform_model_adapters::{
     ANTHROPIC_MESSAGES_ADAPTER_NAME, OPENAI_RESPONSES_ADAPTER_NAME,
 };
 use insight_platform_model_worker::{
-    BufferedNatsModelLiveDeltaSink, InlineModelOutputMaterializer, InlineModelRequestMaterializer,
-    ModelCancellationDriver, ModelCancellationDriverConfig, ModelLiveDeltaNatsConfig,
-    ModelLiveDeltaNatsSettings, ModelWorkerDriver, ModelWorkerDriverConfig,
-    ModelWorkerDriverTiming, RegisteredModelJobExecutor, UuidModelWorkerIdentityFactory,
-    MODEL_WORKER_ROLE,
+    BrokeredModelRequestMaterializer, BufferedNatsModelLiveDeltaSink,
+    InlineModelOutputMaterializer, ModelCancellationDriver, ModelCancellationDriverConfig,
+    ModelLiveDeltaNatsConfig, ModelLiveDeltaNatsSettings, ModelWorkerDriver,
+    ModelWorkerDriverConfig, ModelWorkerDriverTiming, RegisteredModelJobExecutor,
+    UuidModelWorkerIdentityFactory, MODEL_WORKER_ROLE,
 };
 use insight_platform_models::ModelTurnLimits;
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
@@ -42,6 +43,9 @@ const DATABASE_URL_ENV: &str = "PLATFORM_MODEL_WORKER_DATABASE_URL";
 const EGRESS_CA_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_EGRESS_CA_PATH";
 const EGRESS_CERT_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH";
 const EGRESS_KEY_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_EGRESS_KEY_PATH";
+const ARTIFACT_CA_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_ARTIFACT_CA_PATH";
+const ARTIFACT_CERT_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_ARTIFACT_CERT_PATH";
+const ARTIFACT_KEY_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_ARTIFACT_KEY_PATH";
 const NATS_CA_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_NATS_CA_PATH";
 const NATS_CERT_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_NATS_CERT_PATH";
 const NATS_KEY_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_NATS_KEY_PATH";
@@ -63,11 +67,23 @@ struct ModelWorkerProcessConfig {
     egress_request_timeout_milliseconds: u64,
     maximum_rpc_metadata_bytes: usize,
     maximum_rpc_payload_bytes: usize,
+    artifact_broker: ModelArtifactBrokerProcessConfig,
     live_delta: ModelLiveDeltaProcessConfig,
     receipt_ttl_seconds: u64,
     claim_scan_milliseconds: u64,
     claim_failure_backoff_milliseconds: u64,
     drain_grace_milliseconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelArtifactBrokerProcessConfig {
+    endpoint: String,
+    tls_server_name: String,
+    connect_timeout_milliseconds: u64,
+    request_timeout_milliseconds: u64,
+    maximum_request_bytes: usize,
+    maximum_chunk_bytes: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,6 +140,8 @@ impl ModelWorkerProcessConfig {
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         let egress =
             Url::parse(&self.egress_endpoint).map_err(|_| ProcessError::InvalidConfiguration)?;
+        let artifact = Url::parse(&self.artifact_broker.endpoint)
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
             || self.worker_manifest.worker_role != MODEL_WORKER_ROLE
             || self.worker_manifest.work_class != WorkClass::Model
@@ -145,6 +163,19 @@ impl ModelWorkerProcessConfig {
             || self.egress_connect_timeout_milliseconds > 30_000
             || self.egress_request_timeout_milliseconds == 0
             || self.egress_request_timeout_milliseconds > 120_000
+            || artifact.scheme() != "https"
+            || artifact.host_str().is_none()
+            || artifact.port().is_none()
+            || artifact.username() != ""
+            || artifact.password().is_some()
+            || artifact.path() != "/"
+            || artifact.query().is_some()
+            || artifact.fragment().is_some()
+            || !valid_tls_server_name(&self.artifact_broker.tls_server_name)
+            || self.artifact_broker.connect_timeout_milliseconds == 0
+            || self.artifact_broker.connect_timeout_milliseconds > 30_000
+            || self.artifact_broker.request_timeout_milliseconds == 0
+            || self.artifact_broker.request_timeout_milliseconds > 120_000
             || self.receipt_ttl_seconds == 0
             || self.claim_scan_milliseconds == 0
             || self.claim_scan_milliseconds > 60_000
@@ -160,6 +191,7 @@ impl ModelWorkerProcessConfig {
             self.maximum_rpc_payload_bytes,
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?;
+        self.artifact_rpc_limits()?;
         let mut names = BTreeSet::new();
         for adapter in &self.installed_adapters {
             adapter
@@ -198,6 +230,14 @@ impl ModelWorkerProcessConfig {
         EgressInternalRpcLimits::new(
             self.maximum_rpc_metadata_bytes,
             self.maximum_rpc_payload_bytes,
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)
+    }
+
+    fn artifact_rpc_limits(&self) -> Result<ArtifactInternalRpcLimits, ProcessError> {
+        ArtifactInternalRpcLimits::new(
+            self.artifact_broker.maximum_request_bytes,
+            self.artifact_broker.maximum_chunk_bytes,
         )
         .map_err(|_| ProcessError::InvalidConfiguration)
     }
@@ -302,6 +342,11 @@ async fn run() -> Result<(), ProcessError> {
         config.rpc_limits()?,
     ));
     let connector: Arc<dyn ModelProviderWireConnector> = egress.clone();
+    let artifact_broker = Arc::new(ArtifactModelBrokerGrpcClient::new(
+        connect_artifact(&config).await?,
+        config.artifact_rpc_limits()?,
+        limits,
+    ));
     let mut registry = InstalledModelAdapterRegistry::default();
     for installed in &config.installed_adapters {
         let descriptor = InstalledModelAdapterDescriptor::from(installed);
@@ -344,7 +389,7 @@ async fn run() -> Result<(), ProcessError> {
         repository.as_ref().clone(),
     ));
     let executor = Arc::new(RegisteredModelJobExecutor::new(
-        InlineModelRequestMaterializer,
+        BrokeredModelRequestMaterializer::new(artifact_broker),
         worker,
         Arc::clone(&repository),
     ));
@@ -464,6 +509,40 @@ async fn connect_egress(
         .map_err(|_| ProcessError::EgressUnavailable)
 }
 
+async fn connect_artifact(
+    config: &ModelWorkerProcessConfig,
+) -> Result<tonic::transport::Channel, ProcessError> {
+    let tls = ClientTlsConfig::new()
+        .domain_name(config.artifact_broker.tls_server_name.clone())
+        .ca_certificate(Certificate::from_pem(read_bounded_file(
+            &required_absolute_path(ARTIFACT_CA_PATH_ENV)?,
+            MAX_TLS_FILE_BYTES,
+        )?))
+        .identity(Identity::from_pem(
+            read_bounded_file(
+                &required_absolute_path(ARTIFACT_CERT_PATH_ENV)?,
+                MAX_TLS_FILE_BYTES,
+            )?,
+            read_bounded_file(
+                &required_absolute_path(ARTIFACT_KEY_PATH_ENV)?,
+                MAX_TLS_FILE_BYTES,
+            )?,
+        ));
+    Endpoint::from_shared(config.artifact_broker.endpoint.clone())
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .connect_timeout(Duration::from_millis(
+            config.artifact_broker.connect_timeout_milliseconds,
+        ))
+        .timeout(Duration::from_millis(
+            config.artifact_broker.request_timeout_milliseconds,
+        ))
+        .tls_config(tls)
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .connect()
+        .await
+        .map_err(|_| ProcessError::ArtifactUnavailable)
+}
+
 async fn shutdown_signal() -> Result<(), ProcessError> {
     #[cfg(unix)]
     {
@@ -553,6 +632,7 @@ enum ProcessError {
     DatabaseUnavailable,
     SchemaMismatch,
     EgressUnavailable,
+    ArtifactUnavailable,
     SignalUnavailable,
     WorkerFailed,
     WorkerExitedUnexpectedly,
@@ -569,6 +649,7 @@ impl fmt::Display for ProcessError {
             Self::DatabaseUnavailable => formatter.write_str("database is unavailable"),
             Self::SchemaMismatch => formatter.write_str("database schema does not match candidate"),
             Self::EgressUnavailable => formatter.write_str("Egress Broker is unavailable"),
+            Self::ArtifactUnavailable => formatter.write_str("Artifact Broker is unavailable"),
             Self::SignalUnavailable => formatter.write_str("shutdown signal is unavailable"),
             Self::WorkerFailed => formatter.write_str("Model Worker driver failed"),
             Self::WorkerExitedUnexpectedly => {
@@ -625,6 +706,14 @@ mod tests {
             egress_request_timeout_milliseconds: 120_000,
             maximum_rpc_metadata_bytes: 1_048_576,
             maximum_rpc_payload_bytes: 64 * 1_048_576,
+            artifact_broker: ModelArtifactBrokerProcessConfig {
+                endpoint: "https://artifact-broker.platform-artifacts.svc:9443/".to_owned(),
+                tls_server_name: "artifact-broker.platform-artifacts.svc".to_owned(),
+                connect_timeout_milliseconds: 5_000,
+                request_timeout_milliseconds: 30_000,
+                maximum_request_bytes: 1_048_576,
+                maximum_chunk_bytes: 262_144,
+            },
             live_delta: ModelLiveDeltaProcessConfig {
                 servers: vec!["tls://nats.platform-runtime.svc:4222".to_owned()],
                 namespace: "candidate".to_owned(),
@@ -663,6 +752,12 @@ mod tests {
         assert_eq!(config.validate(), Err(ProcessError::InvalidConfiguration));
         let mut config = fixture_config();
         config.maximum_rpc_payload_bytes = usize::MAX;
+        assert_eq!(config.validate(), Err(ProcessError::InvalidConfiguration));
+        let mut config = fixture_config();
+        config.artifact_broker.endpoint = "http://artifact-broker:8080/".to_owned();
+        assert_eq!(config.validate(), Err(ProcessError::InvalidConfiguration));
+        let mut config = fixture_config();
+        config.artifact_broker.maximum_chunk_bytes = 0;
         assert_eq!(config.validate(), Err(ProcessError::InvalidConfiguration));
         let mut config = fixture_config();
         config.live_delta.servers = vec!["nats://nats:4222".to_owned()];

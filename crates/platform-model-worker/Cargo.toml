@@ -17,6 +17,7 @@ path = "src/main.rs"
 async-nats.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+insight-platform-artifact-rpc.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-egress-rpc.workspace = true
 insight-platform-jobs.workspace = true

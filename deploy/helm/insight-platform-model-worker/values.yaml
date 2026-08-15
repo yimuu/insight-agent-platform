@@ -20,6 +20,12 @@ egressTls:
     ca: ca.pem
     certificate: client.pem
     privateKey: client-key.pem
+artifactTls:
+  existingSecret: insight-platform-model-worker-artifact-client-tls
+  keys:
+    ca: ca.pem
+    certificate: client.pem
+    privateKey: client-key.pem
 natsTls:
   existingSecret: insight-platform-model-worker-nats-client-tls
   keys:
@@ -32,6 +38,9 @@ networkPolicy:
   egressNamespace: platform-egress
   egressPodSelector: {app.kubernetes.io/component: egress-broker}
   egressPort: 8443
+  artifactNamespace: platform-artifacts
+  artifactPodSelector: {app.kubernetes.io/component: artifact-broker}
+  artifactPort: 9443
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
   postgresCidrs: [10.10.0.0/24]

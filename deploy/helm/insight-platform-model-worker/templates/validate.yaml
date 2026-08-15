@@ -7,14 +7,20 @@
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) -}}
 {{- fail "config.digest must be an exact sha256 digest" -}}
 {{- end -}}
-{{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.egressTls.existingSecret) (empty .Values.natsTls.existingSecret) -}}
-{{- fail "config, database, Egress mTLS and NATS mTLS inputs must be existing projected objects" -}}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.egressTls.existingSecret) (empty .Values.artifactTls.existingSecret) (empty .Values.natsTls.existingSecret) -}}
+{{- fail "config, database, Egress/Artifact mTLS and NATS mTLS inputs must be existing projected objects" -}}
+{{- end -}}
+{{- if or (empty .Values.artifactTls.keys.ca) (empty .Values.artifactTls.keys.certificate) (empty .Values.artifactTls.keys.privateKey) -}}
+{{- fail "Artifact mTLS projected keys are required" -}}
 {{- end -}}
 {{- if or (empty .Values.natsTls.keys.ca) (empty .Values.natsTls.keys.certificate) (empty .Values.natsTls.keys.privateKey) -}}
 {{- fail "NATS mTLS projected keys are required" -}}
 {{- end -}}
-{{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.natsCidrs) (empty .Values.networkPolicy.egressNamespace) -}}
-{{- fail "PostgreSQL/NATS CIDRs and exact Egress namespace are required" -}}
+{{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.natsCidrs) (empty .Values.networkPolicy.egressNamespace) (empty .Values.networkPolicy.artifactNamespace) (empty .Values.networkPolicy.artifactPodSelector) -}}
+{{- fail "PostgreSQL/NATS CIDRs and exact Egress/Artifact destinations are required" -}}
+{{- end -}}
+{{- if or (lt (int .Values.networkPolicy.artifactPort) 1) (gt (int .Values.networkPolicy.artifactPort) 65535) -}}
+{{- fail "Artifact Broker port must be in 1..65535" -}}
 {{- end -}}
 {{- if or (lt (int .Values.networkPolicy.natsPort) 1) (gt (int .Values.networkPolicy.natsPort) 65535) -}}
 {{- fail "NATS port must be in 1..65535" -}}

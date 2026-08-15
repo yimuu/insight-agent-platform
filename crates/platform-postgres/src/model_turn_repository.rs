@@ -1,11 +1,11 @@
 use crate::{
     invocation_repository::load_enabled_exact_published_version,
     repository::{
-        append_command_event, append_scheduler_event, claim_command_receipt,
-        decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
-        load_deployment, load_job_for_update_by_text, load_resource, load_run_for_update,
-        require_tenant_permission, terminalize_command_receipt, JobRecord, PgRepository,
-        RepositoryError, RunRecord, TypedPayload,
+        append_command_event, append_scheduler_event, begin_read_only_repeatable,
+        claim_command_receipt, decode_deployment_closure, decode_versioned_payload, job_from_row,
+        job_projection, load_deployment, load_job_for_update_by_text, load_resource,
+        load_run_for_update, require_tenant_permission, terminalize_command_receipt, JobRecord,
+        PgRepository, RepositoryError, RunRecord, TypedPayload,
     },
     sandbox_repository::{
         load_authorized_artifact_object, ArtifactObjectReadProjection, ArtifactObjectReadPurpose,
@@ -229,9 +229,7 @@ impl ArtifactObjectReadAuthority<ModelArtifactReadRequest> for PgRepository {
         let artifact = request
             .artifact()
             .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
-        let mut transaction = self
-            .pool()
-            .begin()
+        let mut transaction = begin_read_only_repeatable(self.pool())
             .await
             .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
         let database_now = database_now(&mut transaction)
@@ -241,12 +239,12 @@ impl ArtifactObjectReadAuthority<ModelArtifactReadRequest> for PgRepository {
             &mut transaction,
             &request.tenant_id,
             &request.model_turn_id,
-            true,
+            false,
             self.model_turn_limits(),
         )
         .await
         .map_err(classify_model_artifact_read_error)?;
-        let job = load_model_job(&mut transaction, &request.tenant_id, &request.job_id, true)
+        let job = load_model_job(&mut transaction, &request.tenant_id, &request.job_id, false)
             .await
             .map_err(classify_model_artifact_read_error)?;
         let projection = job_projection(&job).map_err(classify_model_artifact_read_error)?;

@@ -10,6 +10,8 @@ members = [
     "crates/runtime",
     "crates/api",
     "crates/platform-artifact-broker",
+    "crates/platform-artifact-rpc",
+    "crates/platform-artifact-service",
     "crates/platform-artifacts",
     "crates/platform-api",
     "crates/platform-capability-adapters",
@@ -117,6 +119,8 @@ insight-durable = { path = "crates/durable" }
 insight-engine = { path = "crates/engine" }
 insight-mcp = { path = "crates/mcp" }
 insight-platform-artifact-broker = { path = "crates/platform-artifact-broker" }
+insight-platform-artifact-rpc = { path = "crates/platform-artifact-rpc" }
+insight-platform-artifact-service = { path = "crates/platform-artifact-service" }
 insight-platform-artifacts = { path = "crates/platform-artifacts" }
 insight-platform-api = { path = "crates/platform-api" }
 insight-platform-capability-adapters = { path = "crates/platform-capability-adapters" }

@@ -654,12 +654,15 @@ reference解封与digest、process-installed Provider catalog、独立permit/总
 独立`platform-model-worker`候选进程现把exact双adapter manifest、独立bounded PostgreSQL pool、schema verify、Model driver与Model Worker
 身份的mTLS Egress RPC组合起来；候选镜像和独立namespace/ServiceAccount/Deployment/PDB/HPA/default-deny NetworkPolicy已通过静态正负向门禁，
 Pod没有Service/Ingress、云Provider credential、Kubernetes API token或直接Provider客户端。Artifact-backed request的domain、PostgreSQL
-authority、共享Broker pipeline和Worker materializer内核已交付，但该进程当前仍明确只安装Inline request/output materializer；独立
-Artifact Broker RPC和生产进程组合尚未交付。Model取消路径现以reserved critical-control permit运行bounded PostgreSQL safety scan，只接受当前generation仍持有lease的
+authority、共享Broker pipeline和Worker materializer内核已交付；生产进程现在安装`ArtifactModelBrokerGrpcClient`与
+`BrokeredModelRequestMaterializer`，经独立Artifact Broker的exact Model Worker mTLS端点读取并逐片复验Artifact-backed request。Broker使用
+restricted read-only PostgreSQL role，真实PostgreSQL 16 fixture证明授权读取成功而业务更新和Secret读取被数据库拒绝；loopback mTLS fixture
+证明同CA错误workload role在进入authority前被拒绝。output materializer当前仍只支持Inline。Model取消路径现以reserved critical-control permit运行bounded PostgreSQL safety scan，只接受当前generation仍持有lease的
 Cancelling Turn/Job，调用Egress exact cancel后用旋转fence提交保守usage ceiling；重试失败不提交terminal，late completion由first-winner拒绝。
 通过完整Turn/Job/attempt/lease/Worker/request fence的text delta现在会进入credential-free canonical内部envelope，并由同时限制message数和
 bytes、把容量permit保留到有界批次flush结束的non-blocking队列投影到TLS/mTLS NATS tenant/run scoped subject；tool argument与Provider metadata不发布，NATS不可用、背压或单帧
-超限只丢live observation，不影响durable执行。真实Secret Manager provider、catalog provisioning、Artifact-backed request生产RPC/output IO、
+超限只丢live observation，不影响durable执行。真实Secret Manager provider、生产storage/KMS catalog provisioning、Artifact-backed output IO、
+Sandbox对独立Broker的迁移、
 公开SSE消费与live-gap/backpressure资格、real-process Provider conformance、跨work-class饱和隔舱和Phase 6 fault fixture仍未交付，因此
 CR-132/CR-136和本规范状态保持进行中。
 

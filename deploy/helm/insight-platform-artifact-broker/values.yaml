@@ -1,0 +1,51 @@
+image:
+  repository: insight-agent-platform
+  digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+namespace: platform-artifacts
+replicas: 2
+port: 9443
+
+config:
+  existingConfigMap: insight-platform-artifact-broker-candidate
+  fileKey: artifact-broker.json
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+database:
+  existingSecret: insight-platform-artifact-broker-database
+  urlKey: database-url
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-broker
+tls:
+  existingSecret: insight-platform-artifact-broker-server-tls
+  keys:
+    clientCa: client-ca.pem
+    serverCertificate: server.pem
+    serverPrivateKey: server-key.pem
+
+networkPolicy:
+  enabled: true
+  modelWorkerNamespaceSelector: {insight.platform/workload-namespace: model-worker}
+  modelWorkerPodSelector: {insight.platform/workload-role: model-worker}
+  dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
+  dnsPodSelector: {k8s-app: kube-dns}
+  postgresCidrs: [10.10.0.0/24]
+  storageProviderCidrs: [10.50.0.0/24]
+  kmsProviderCidrs: [10.60.0.0/24]
+  workloadIdentityCidrs: [10.40.0.0/24]
+
+resources:
+  requests: {cpu: 200m, memory: 256Mi}
+  limits: {cpu: "2", memory: 1Gi}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 16
+  targetCPUUtilizationPercentage: 70

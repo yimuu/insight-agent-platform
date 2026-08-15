@@ -765,7 +765,14 @@ fixture覆盖GC grace、exact approval、live link阻塞、same-Blob alias witne
 replay及Event/Receipt/Outbox原子闭合。CR-130要求的Artifact Job union、worker audit/current scan evidence、rescan与cleanup
 completion也已通过23项domain/worker fixture和fresh PostgreSQL 16 transaction fixture：rescan排队先进入Quarantined，只有exact
 WorkerProcessGeneration/Job fence可提交新证据，delete/blob cleanup必须匹配exact object generation、backend receipt与absence evidence。
-生产object-store/scanner/GC provider、公开 `/v1` 和对应qualification尚未交付，不能由当前开发期fixture或旧候选记录推断为当前行为。
+Model request读取现在还具有独立的Artifact Broker进程边界：versioned internal gRPC只暴露一个closed read方法，按
+`spiffe://insight.platform/workload/model-worker` URI SAN做exact mTLS role gate，并对canonical request digest、单调chunk sequence、
+每片/整体digest、总长度和唯一terminal frame逐项fail closed。Broker使用只读repeatable-read PostgreSQL authority，部署role只被授予
+七张共享权威表的`SELECT`；fresh PostgreSQL 16 fixture证明该role可以完成schema verify和exact Model Artifact授权，同时任意Job更新与
+Secret表读取均以`42501`拒绝。独立双副本Deployment/PDB/HPA、Restricted Pod与default-deny NetworkPolicy只允许Model Worker入站及
+DNS/PostgreSQL/S3/KMS/workload-identity所需出站。该切片没有新增表或migration。当前独立RPC只组合Model request读取；Sandbox Controller
+迁移、Artifact-backed output、真实object-store/KMS负向资格、scanner/GC provider、公开 `/v1` 和对应qualification尚未交付，不能由当前
+开发期fixture或旧候选记录推断为当前行为。
 
 ## 25. 可观测性与隐私
 

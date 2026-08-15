@@ -2343,6 +2343,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-artifact-rpc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "insight-platform-contracts",
+ "insight-platform-models",
+ "prost",
+ "protoc-bin-vendored",
+ "rcgen",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "uuid",
+ "x509-parser",
+]
+
+[[package]]
+name = "insight-platform-artifact-service"
+version = "0.1.0"
+dependencies = [
+ "insight-platform-artifact-broker",
+ "insight-platform-artifact-rpc",
+ "insight-platform-contracts",
+ "insight-platform-models",
+ "insight-platform-postgres",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "insight-platform-artifacts"
 version = "0.1.0"
 dependencies = [
@@ -2576,6 +2617,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "insight-platform-artifact-rpc",
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
  "insight-platform-jobs",

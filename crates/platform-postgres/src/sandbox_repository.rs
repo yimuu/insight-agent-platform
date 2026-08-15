@@ -1058,7 +1058,6 @@ pub(crate) async fn load_authorized_artifact_object(
         WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
           AND artifact.state = 'ready' AND artifact.terminal_at IS NULL
           AND blob.state = 'verified' AND blob.deleted_at IS NULL
-        FOR KEY SHARE OF artifact, blob
         "#,
     )
     .bind(request.tenant_id.to_string())

@@ -2090,6 +2090,63 @@ async fn model_turn_fixture() {
     .unwrap();
     assert_eq!(replay.authorization_digest, authorized.authorization_digest);
 
+    if let Ok(configured_role) = std::env::var("PLATFORM_ARTIFACT_BROKER_TEST_ROLE") {
+        assert_eq!(configured_role, "platform_artifact_broker_qualification");
+        let restricted_pool = PgPoolOptions::new()
+            .max_connections(2)
+            .after_connect(|connection, _metadata| {
+                Box::pin(async move {
+                    sqlx::query("SET ROLE platform_artifact_broker_qualification")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await
+            .unwrap();
+        verify_schema(&restricted_pool).await.unwrap();
+        let restricted_repository = PgRepository::new(restricted_pool.clone());
+        let restricted = <PgRepository as ArtifactObjectReadAuthority<_>>::authorize_object_read(
+            &restricted_repository,
+            &read_request,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            restricted.authorization_digest,
+            authorized.authorization_digest
+        );
+        let forbidden_update = sqlx::query(
+            "UPDATE insight_platform.jobs SET version = version WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(read_request.tenant_id.to_string())
+        .bind(read_request.job_id.to_string())
+        .execute(&restricted_pool)
+        .await
+        .unwrap_err();
+        assert_eq!(
+            forbidden_update
+                .as_database_error()
+                .and_then(|failure| failure.code().map(|code| code.into_owned()))
+                .as_deref(),
+            Some("42501")
+        );
+        let forbidden_read =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM insight_platform.secret_bindings")
+                .fetch_one(&restricted_pool)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            forbidden_read
+                .as_database_error()
+                .and_then(|failure| failure.code().map(|code| code.into_owned()))
+                .as_deref(),
+            Some("42501")
+        );
+        restricted_pool.close().await;
+    }
+
     let mut stale_read = read_request;
     stale_read.fence.expected_version += 1;
     assert!(matches!(

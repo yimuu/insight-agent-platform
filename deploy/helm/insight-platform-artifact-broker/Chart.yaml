@@ -1,0 +1,6 @@
+apiVersion: v2
+name: insight-platform-artifact-broker
+description: Independent mTLS Artifact Broker with restricted PostgreSQL and S3/KMS authority
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

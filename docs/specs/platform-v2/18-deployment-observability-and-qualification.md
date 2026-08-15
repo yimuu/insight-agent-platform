@@ -160,14 +160,16 @@ stale cancel。但该证据尚未经过真实Secret Manager provider、真实Pro
 故障注入、独立Pod/NetworkPolicy或同一CandidateManifest，因此不能登记为Gate B、C、D或E。
 
 Model Worker现在已有独立候选binary和静态Kubernetes拓扑：进程启动复验config/WorkerManifest/两个adapter descriptor，使用独立bounded
-PostgreSQL pool和Model Worker mTLS Egress客户端；chart提供双副本rolling Deployment、PDB、HPA、topology spread、Restricted Pod、
+PostgreSQL pool、Model Worker mTLS Egress客户端和独立Artifact Broker mTLS客户端；chart提供双副本rolling Deployment、PDB、HPA、topology spread、Restricted Pod、
 无入站的default-deny NetworkPolicy及只到DNS/Egress/PostgreSQL和配置allowlist NATS TLS端口的出口。CI同时拒绝mutable image、单副本、
 空PostgreSQL/NATS allowlist、缺失NATS TLS Secret key和非法
 HPA。durable cancel driver现使用reserved critical-control permit，把当前generation的bounded PostgreSQL safety scan、Egress exact cancel和
-旋转fence下的保守terminal结算组合起来；unit fixture证明业务permit饱和不阻止取消，数据库fixture覆盖取消/完成first-winner。但该组合仍是
-Inline-only，未绑定真实CandidateManifest。Model text delta内部publisher已有exact fence、canonical credential-free envelope、将容量permit
-保留到有界批次flush结束的双重有界non-blocking queue和TLS/mTLS NATS组合；它不发布tool argument/Provider metadata，NATS故障不阻断durable执行。但Artifact-backed IO、公开SSE
-消费、真实NATS/Provider/process-kill/cross-workclass saturation资格证据仍缺失，因此只属于Contract/Functional输入，不能登记Gate B～E通过。
+旋转fence下的保守terminal结算组合起来；unit fixture证明业务permit饱和不阻止取消，数据库fixture覆盖取消/完成first-winner。Artifact-backed
+request已经由生产进程通过独立Artifact Broker RPC物化；Broker的双副本Deployment/PDB/HPA、Restricted Pod、default-deny、exact Model
+Worker入站、只读PostgreSQL role以及S3/KMS/workload-identity受限出站均有静态正负向门禁，真实PostgreSQL 16和loopback mTLS fixture分别证明
+最小数据库权限与错误role拒绝。但该组合未绑定真实CandidateManifest，Artifact output仍为Inline。Model text delta内部publisher已有exact fence、canonical credential-free envelope、将容量permit
+保留到有界批次flush结束的双重有界non-blocking queue和TLS/mTLS NATS组合；它不发布tool argument/Provider metadata，NATS故障不阻断durable执行。但Artifact-backed
+output、真实S3/KMS、公开SSE消费、真实NATS/Provider/process-kill/cross-workclass saturation资格证据仍缺失，因此只属于Contract/Functional输入，不能登记Gate B～E通过。
 
 Capability Worker的开发期Functional证据现把fresh PostgreSQL 16 claim、exact Native adapter dispatch/cancel和fenced terminal/
 cancellation commit连成同一可复现fixture，并覆盖durable control后的Job version fence旋转、完整物理身份重验、write reconciliation、
@@ -215,6 +217,7 @@ Q1生产最小topology：
 | Outbox Dispatcher | 2 | active-active claim | PostgreSQL、NATS | 否 |
 | Recovery/Deadline Worker | 2 | active-active shard lease | PostgreSQL | 否 |
 | Model Worker | 2 per required adapter/region | queue worker | PostgreSQL、Provider、Secret | 否，生产绑定存在时 |
+| Artifact Broker | 2 per storage region/boundary | stateless internal gRPC | PostgreSQL restricted read role、S3、KMS | 否，存在Artifact-backed绑定时 |
 | Egress Broker | 2 per external region/boundary | stateless internal gRPC | Security Authority RPC、private DNS、KMS/Secret Manager、exact remote endpoints | 否，生产外部绑定存在时 |
 | Security Authority | 2 | stateless internal gRPC | PostgreSQL restricted role、Policy | 否 |
 | Capability Worker | 2 per required manifest | queue worker | PostgreSQL、remote backend | 否，生产绑定存在时 |

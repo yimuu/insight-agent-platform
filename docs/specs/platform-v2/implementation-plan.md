@@ -379,14 +379,16 @@ digest精确选择进程内adapter，Provider SDK/wire类型保持在port之后�
 deployment级delta/timeout、stream sequence/terminal、本地response validation、cancel和panic containment均fail closed。Model worker把
 规范化结果经materializer转换为RunValue/Artifact形状，并只通过fenced PostgreSQL authority提交；claim现在返回精确fence、usage
 reservation、quota ledger IDs以及与冻结RunValue和ArtifactLink逐字段复核的exact request input。Inline正文按canonical digest复核后交付，
-Artifact-backed正文仍只交付link identity并留在Artifact Broker边界；terminal command在Provider I/O前拒绝复用reservation ledger ID。
+Artifact-backed正文由独立Artifact Broker RPC和生产Worker materializer按closed authority读取；terminal command在Provider I/O前拒绝复用reservation ledger ID。
 dispatch后未知结果按冻结上限保守结算且attempt耗尽不重放。OpenAI Responses与Anthropic Messages
 production wire adapter现通过credential-free Connector边界实现固定endpoint/protocol request与bounded SSE normalization；共同fixture覆盖
 text stream、usage、tool intent、本地structured/tool schema、请求digest及未知字段fail-closed。brokered connector现在还把credential-free
 request交给独立Egress broker port，并对raw SSE执行incremental总量/line/event限制、strict JSON重复key拒绝、closed content-type/status/
-`[DONE]`处理；fixture增至20项并通过strict Clippy。独立Model Worker binary/Deployment/HPA已按上述Inline-only边界组合并通过静态
+`[DONE]`处理；fixture增至20项并通过strict Clippy。独立Model Worker binary/Deployment/HPA已通过静态
 部署门禁；durable cancel safety scan、reserved control permit、exact Egress cancel与fenced conservative terminal commit也已组合并有unit/数据库
-fixture。catalog provisioning、Artifact-backed IO、real-process Provider conformance与饱和/故障资格仍未完整
+fixture。Artifact-backed request现由生产进程组合`BrokeredModelRequestMaterializer`与独立versioned Artifact Broker gRPC读取；exact
+Model Worker URI SAN、bounded canonical chunk、双重授权和restricted PostgreSQL read role均有正负向fixture。生产storage/KMS catalog
+provisioning、Artifact-backed output、real-process Provider conformance与饱和/故障资格仍未完整
 交付。Model text delta的内部publisher已经通过exact fence、canonical credential-free envelope、持有容量permit到批次flush结束的双重有界
 non-blocking队列和TLS/mTLS NATS
 组合；tool argument与Provider metadata保持私有，NATS故障不影响durable terminal。公开SSE消费及live-gap/backpressure资格仍未交付。
@@ -504,8 +506,10 @@ per-Job read grant，覆盖admission及Controller schema-validator，但正文�
 Model claim现在构造closed Artifact read request，精确绑定Turn、当前Job version/fence/lease/Worker generation、request digest、deadline、
 RunValue及active ModelTurn-owned ArtifactLink；PostgreSQL authority与通用Broker在object I/O前后授权，Worker materializer再检查strict
 canonical JSON与逻辑digest。fresh PostgreSQL 16 fixture证明有效读取可重放且陈旧Job fence被拒绝；共享Broker与Worker unit还覆盖
-非canonical正文拒绝。generic Capability producer、独立Artifact Broker RPC、Model生产进程组合与Artifact-backed output仍未完成，
-因此CR-148与Phase 4保持进行中。
+非canonical正文拒绝。独立Artifact Broker RPC和Model生产进程组合现在已交付：Model Worker使用exact URI SAN mTLS客户端，Broker只接受
+唯一closed Model read方法并校验bounded canonical chunk，restricted PostgreSQL role只有完成授权所需七张表的`SELECT`；fresh PostgreSQL 16
+fixture证明读取成功而Job更新和Secret读取返回`42501`。generic Capability producer、Sandbox Controller迁移、Artifact-backed output与真实
+S3/KMS qualification仍未完成，因此CR-148与Phase 4保持进行中。
 
 CR-149已关闭内部Sandbox workload identity混淆缺口。registration、verify与absence端点统一从已通过client CA验证的leaf certificate
 提取恰好一个`spiffe://insight.platform/workload/<closed-workload-role>` URI SAN，并按方法匹配Executor或Controller exact role；CN、DNS
@@ -698,8 +702,11 @@ CR-161关闭Model Artifact-backed request在claim与object read之间缺少exact
 当前Job version/fence/lease/Worker generation、request digest、deadline、exact RunValue与active ModelTurn ArtifactLink；PostgreSQL在同一
 snapshot校验逻辑值、grant和Ready Artifact/Verified Blob后生成非持久物理投影，共享Artifact Broker在I/O后以同一请求再次授权，Worker再按
 Model hard limits复核strict canonical JSON与逻辑content digest。fresh PostgreSQL 16 fixture证明有效授权可稳定重放且陈旧Job fence被拒绝，
-Broker/Worker unit覆盖同一exact-object pipeline与非canonical正文拒绝。该切片不增表、migration或locator泄漏；独立versioned Broker RPC、
-生产Model Worker组合及Artifact-backed output仍属Phase 4开放项。
+Broker/Worker unit覆盖同一exact-object pipeline与非canonical正文拒绝。该切片不增表、migration或locator泄漏；独立versioned Broker RPC和
+生产Model Worker组合现已交付：internal proto只有一个Model read方法，exact Model Worker URI SAN在进入authority前门禁，流式响应逐项验证
+request/content/chunk digest、sequence、长度和唯一terminal；独立服务使用restricted read-only repeatable-read PostgreSQL role。真实
+PostgreSQL 16 fixture证明该role完成同一授权路径并拒绝业务更新与Secret读取，独立Helm拓扑及网络正负向门禁通过。Artifact-backed output、
+Sandbox Controller迁移、真实S3/KMS负向资格仍属Phase 4开放项。
 
 clean-cut baseline现由部署期独立provisioning流程对fresh PostgreSQL target一次性安装；Platform运行时crate已删除DDL apply入口，
 API/Scheduler/Worker只做read-only schema verification。旧`coordinator.rs`实现路径改为role-neutral orchestration模块，cutover gate

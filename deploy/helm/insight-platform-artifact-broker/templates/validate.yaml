@@ -1,0 +1,38 @@
+{{- if lt (int .Values.replicas) 2 }}
+{{- fail "Artifact Broker requires at least two replicas" }}
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+{{- fail "Artifact Broker NetworkPolicy must remain enabled" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must be an exact lowercase sha256 digest" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) }}
+{{- fail "config.digest must be an exact lowercase sha256 digest" }}
+{{- end }}
+{{- if or (lt (int .Values.port) 1) (gt (int .Values.port) 65535) }}
+{{- fail "Artifact Broker port must be valid" }}
+{{- end }}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.tls.existingSecret) }}
+{{- fail "immutable config, restricted database and server mTLS inputs are required" }}
+{{- end }}
+{{- if empty .Values.serviceAccount.annotations }}
+{{- fail "Artifact Broker workload-identity annotation is required" }}
+{{- end }}
+{{- if or (empty .Values.networkPolicy.modelWorkerNamespaceSelector) (empty .Values.networkPolicy.modelWorkerPodSelector) }}
+{{- fail "exact Model Worker caller selectors are required" }}
+{{- end }}
+{{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.storageProviderCidrs) (empty .Values.networkPolicy.kmsProviderCidrs) (empty .Values.networkPolicy.workloadIdentityCidrs) }}
+{{- fail "PostgreSQL, storage, KMS and workload-identity CIDRs are required" }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+{{- if lt (int .Values.autoscaling.minReplicas) 2 }}
+{{- fail "Artifact Broker HPA requires at least two replicas" }}
+{{- end }}
+{{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) }}
+{{- fail "Artifact Broker HPA maximum must be at least its minimum" }}
+{{- end }}
+{{- if or (lt (int .Values.autoscaling.targetCPUUtilizationPercentage) 1) (gt (int .Values.autoscaling.targetCPUUtilizationPercentage) 100) }}
+{{- fail "Artifact Broker HPA CPU target must be in 1..100" }}
+{{- end }}
+{{- end }}

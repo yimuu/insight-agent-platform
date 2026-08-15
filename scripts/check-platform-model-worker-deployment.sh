@@ -15,6 +15,7 @@ failures = []
 
 for dependency in (
     "async-nats.workspace = true",
+    "insight-platform-artifact-rpc.workspace = true",
     "insight-platform-egress-rpc.workspace = true",
     "insight-platform-model-adapters.workspace = true",
     "insight-platform-postgres.workspace = true",
@@ -38,10 +39,11 @@ for forbidden in ("reqwest", "aws_sdk", "SecretManager", "KmsClient"):
         failures.append(f"Model Worker owns a forbidden Provider/Secret client: {forbidden}")
 for required in (
     "BufferedNatsModelLiveDeltaSink",
-    "InlineModelRequestMaterializer",
+    "BrokeredModelRequestMaterializer",
     "InlineModelOutputMaterializer",
     "verify_schema",
     "EgressBrokerGrpcClient",
+    "ArtifactModelBrokerGrpcClient",
 ):
     if required not in source:
         failures.append(f"Model Worker production composition is missing {required}")
@@ -76,7 +78,9 @@ required_rendered = (
     'allowPrivilegeEscalation: false',
     'PLATFORM_MODEL_WORKER_DATABASE_URL',
     'PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH',
+    'PLATFORM_MODEL_WORKER_ARTIFACT_CERT_PATH',
     'PLATFORM_MODEL_WORKER_NATS_CERT_PATH',
+    'name: artifact-tls',
     'name: nats-tls',
 )
 for needle in required_rendered:
@@ -105,6 +109,8 @@ negative_values = (
     ("--set-json", "networkPolicy.natsCidrs=[]", "PostgreSQL/NATS CIDRs"),
     ("--set", "networkPolicy.natsPort=0", "NATS port"),
     ("--set", "natsTls.keys.privateKey=", "NATS mTLS projected keys"),
+    ("--set", "artifactTls.keys.privateKey=", "Artifact mTLS projected keys"),
+    ("--set", "networkPolicy.artifactPort=0", "Artifact Broker port"),
     ("--set", "autoscaling.minReplicas=1", "at least two replicas"),
     ("--set", "autoscaling.maxReplicas=1", "maximum must be at least"),
 )

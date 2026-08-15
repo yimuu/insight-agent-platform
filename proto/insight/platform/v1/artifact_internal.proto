@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package insight.platform.v1;
+
+// Internal-only, credential-free Model input boundary for the independently deployed Artifact
+// Broker. The request is one strict canonical Rust contract. Verified object bytes are chunked so
+// gRPC message size never becomes the object-size authority.
+service ArtifactModelBrokerService {
+  rpc ReadModelRequest(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
+}
+
+message ClosedArtifactReadRequest {
+  uint32 schema_version = 1;
+  string operation = 2;
+  bytes canonical_request_json = 3;
+  string request_digest = 4;
+}
+
+message ArtifactReadChunk {
+  uint32 schema_version = 1;
+  string operation = 2;
+  string request_digest = 3;
+  uint64 sequence = 4;
+  bytes payload = 5;
+  string payload_digest = 6;
+  string content_digest = 7;
+  uint64 total_length = 8;
+  bool terminal = 9;
+}
