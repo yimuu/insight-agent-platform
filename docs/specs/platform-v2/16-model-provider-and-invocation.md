@@ -649,8 +649,11 @@ Egress broker负责late Secret resolution、DNS/network/TLS/redirect policy并�
 public-IP SSRF deny、HTTPS-only、no-proxy/no-redirect、Pinned/Follow Secret evidence校验、固定OpenAI/Anthropic auth header、请求/响应字节
 限制和exact in-flight cancellation。CR-143进一步交付共享Secret resolution组合内核，串联current revoke/generation门、KMS/AEAD
 reference解封与digest、process-installed Provider catalog、独立permit/总超时和actual version evidence，但具体KMS/Secret Manager Provider仍未交付。
-真实Secret Manager provider、catalog provisioning、Artifact-backed request/output IO、Model Worker生产binary与部署、
-real-process Provider conformance、独立Pod/NetworkPolicy、跨work-class饱和隔舱和Phase 6 fault fixture仍未交付，因此CR-132/CR-136和本规范状态保持进行中。
+独立`platform-model-worker`候选进程现把exact双adapter manifest、独立bounded PostgreSQL pool、schema verify、Model driver与Model Worker
+身份的mTLS Egress RPC组合起来；候选镜像和独立namespace/ServiceAccount/Deployment/PDB/HPA/default-deny NetworkPolicy已通过静态正负向门禁，
+Pod没有Service/Ingress、云Provider credential、Kubernetes API token或直接Provider客户端。该进程当前明确只安装Inline request/output
+materializer。真实Secret Manager provider、catalog provisioning、Artifact-backed request/output IO、live-delta/cancel控制组合、
+real-process Provider conformance、跨work-class饱和隔舱和Phase 6 fault fixture仍未交付，因此CR-132/CR-136和本规范状态保持进行中。
 
 Provider wire request还必须冻结`JobId`、`attempt_no`、`lease_generation`和`WorkerProcessGenerationId`，并与
 ModelTurn、tenant、Provider Deployment和request digest共同形成一次物理请求identity。Egress broker只允许exact identity注册一个

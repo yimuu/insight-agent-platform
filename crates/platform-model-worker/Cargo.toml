@@ -9,17 +9,26 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "platform-model-worker"
+path = "src/main.rs"
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-egress-rpc.workspace = true
 insight-platform-jobs.workspace = true
 insight-platform-model-adapters.workspace = true
 insight-platform-models.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-worker.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tonic.workspace = true
+url.workspace = true
 uuid.workspace = true

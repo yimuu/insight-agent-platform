@@ -117,6 +117,14 @@ Inline承载时，在Provider dispatch前提交`model_output_artifact_required`�
 Artifact Broker port；20项adapter与5项driver unit、三crate strict Clippy、44-package workspace check及crate-boundary/cutover门禁通过。
 因此该组合关闭执行驱动缺口，但不关闭CR-132、CR-148或Phase 4。
 
+Model Worker的独立候选进程与Kubernetes隔舱也已交付：`platform-model-worker`启动时复验canonical config digest、exact
+`model-worker`/Model WorkerManifest及OpenAI Responses、Anthropic Messages两个process-installed adapter descriptor，使用独立bounded
+PostgreSQL pool做schema verify/claim/heartbeat/commit，只以Model Worker URI SAN的mTLS客户端访问Egress Broker。候选镜像已包含该binary；
+独立namespace/ServiceAccount/Deployment/PDB/HPA/default-deny NetworkPolicy只开放DNS、exact Egress pod和PostgreSQL，禁止Service/Ingress、
+云Provider credential、Kubernetes API token及直接Provider客户端。静态部署门禁含错误副本、mutable image、空PostgreSQL CIDR及非法HPA的负向渲染。
+当前进程明确只组合Inline request/output materializer；Artifact-backed input/output、live-delta投影、durable cancel路由和real-process
+Provider/kill/saturation资格未闭合，因此这只是production-shaped候选组合，不是Phase 4或Candidate资格结论。
+
 durable control winner现由`ControlledCapabilityExecution`与原claim共同构造cancel job：只旋转Job optimistic version，tenant、Invocation、Job、
 physical attempt、lease generation/token、WorkerProcessGeneration和Deployment/Input必须保持exact，旧generation在adapter I/O前fail closed。
 Native adapter使用process-installed cancel port，HTTP/gRPC使用Egress exact live-request cancel；transport确认永不伪造no-effect proof，write Effect
@@ -363,8 +371,9 @@ dispatch后未知结果按冻结上限保守结算且attempt耗尽不重放。Op
 production wire adapter现通过credential-free Connector边界实现固定endpoint/protocol request与bounded SSE normalization；共同fixture覆盖
 text stream、usage、tool intent、本地structured/tool schema、请求digest及未知字段fail-closed。brokered connector现在还把credential-free
 request交给独立Egress broker port，并对raw SSE执行incremental总量/line/event限制、strict JSON重复key拒绝、closed content-type/status/
-`[DONE]`处理；fixture增至20项并通过strict Clippy。生产Secret/Egress broker、catalog discovery、Artifact-backed IO、real-process
-Provider conformance与饱和/故障资格仍未完整交付；其中生产HTTPS Egress首片已转入CR-136跟踪，因此CR-132和Phase 4保持进行中。
+`[DONE]`处理；fixture增至20项并通过strict Clippy。独立Model Worker binary/Deployment/HPA已按上述Inline-only边界组合并通过静态
+部署门禁；catalog provisioning、Artifact-backed IO、live-delta/cancel控制组合、real-process Provider conformance与饱和/故障资格仍未完整
+交付。生产HTTPS Egress首片已转入CR-136跟踪，因此CR-132和Phase 4保持进行中。
 
 CR-133（进行中）建立Sandbox执行权威首片：`insight-platform-sandbox`冻结exact Capability Deployment、Runtime、Package、Profile、
 isolation backend、Artifact/Secret/callback grant和closed resource envelope；plain OCI/runc不能注册为Sandbox backend。Gateway admission

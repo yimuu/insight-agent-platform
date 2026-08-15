@@ -48,6 +48,8 @@ jobs:
         run: bash scripts/check-platform-security-deployment.sh
       - name: Check MCP OAuth cleanup deployment boundary
         run: bash scripts/check-platform-mcp-cleanup-deployment.sh
+      - name: Check Model Worker deployment boundary
+        run: bash scripts/check-platform-model-worker-deployment.sh
       - name: Check callback API deployment boundary
         run: bash scripts/check-platform-callback-deployment.sh
       - name: Check root public API baseline

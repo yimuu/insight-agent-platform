@@ -159,6 +159,12 @@ exact-attempt-bound task/session，按原session执行`tasks/get`/`tasks/result`
 stale cancel。但该证据尚未经过真实Secret Manager provider、真实Provider/MCP/Capability进程、
 故障注入、独立Pod/NetworkPolicy或同一CandidateManifest，因此不能登记为Gate B、C、D或E。
 
+Model Worker现在已有独立候选binary和静态Kubernetes拓扑：进程启动复验config/WorkerManifest/两个adapter descriptor，使用独立bounded
+PostgreSQL pool和Model Worker mTLS Egress客户端；chart提供双副本rolling Deployment、PDB、HPA、topology spread、Restricted Pod、
+无入站的default-deny NetworkPolicy及只到DNS/Egress/PostgreSQL的出口。CI同时拒绝mutable image、单副本、空PostgreSQL allowlist和非法
+HPA。该组合仍是Inline-only，未绑定真实CandidateManifest，也没有Artifact-backed IO、durable cancel/live delta、真实Provider/process-kill/
+cross-workclass saturation证据，因此只属于Contract/Functional输入，不能登记Gate B～E通过。
+
 Capability Worker的开发期Functional证据现把fresh PostgreSQL 16 claim、exact Native adapter dispatch/cancel和fenced terminal/
 cancellation commit连成同一可复现fixture，并覆盖durable control后的Job version fence旋转、完整物理身份重验、write reconciliation、
 RunValue、Receipt、Event、Outbox、quota settle/replay、reserve/settle ledger identity隔离及cancel/completed first-winner。deadline后cancel
