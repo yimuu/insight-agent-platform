@@ -10,14 +10,14 @@ use insight_platform_contracts::{
 };
 use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
 use insight_platform_model_adapters::{
-    AnthropicMessagesAdapter, DropModelLiveDeltas, InstalledModelAdapterDescriptor,
-    InstalledModelAdapterRegistry, ModelAdapterHost, ModelAdapterWorker,
-    ModelProviderWireConnector, OpenAiResponsesAdapter, ANTHROPIC_MESSAGES_ADAPTER_NAME,
-    OPENAI_RESPONSES_ADAPTER_NAME,
+    AnthropicMessagesAdapter, InstalledModelAdapterDescriptor, InstalledModelAdapterRegistry,
+    ModelAdapterHost, ModelAdapterWorker, ModelProviderWireConnector, OpenAiResponsesAdapter,
+    ANTHROPIC_MESSAGES_ADAPTER_NAME, OPENAI_RESPONSES_ADAPTER_NAME,
 };
 use insight_platform_model_worker::{
-    InlineModelOutputMaterializer, InlineModelRequestMaterializer, ModelCancellationDriver,
-    ModelCancellationDriverConfig, ModelWorkerDriver, ModelWorkerDriverConfig,
+    BufferedNatsModelLiveDeltaSink, InlineModelOutputMaterializer, InlineModelRequestMaterializer,
+    ModelCancellationDriver, ModelCancellationDriverConfig, ModelLiveDeltaNatsConfig,
+    ModelLiveDeltaNatsSettings, ModelWorkerDriver, ModelWorkerDriverConfig,
     ModelWorkerDriverTiming, RegisteredModelJobExecutor, UuidModelWorkerIdentityFactory,
     MODEL_WORKER_ROLE,
 };
@@ -30,6 +30,7 @@ use std::{
     collections::BTreeSet, error::Error, fmt, io::Read as _, path::PathBuf, sync::Arc,
     time::Duration,
 };
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 use url::Url;
@@ -41,6 +42,9 @@ const DATABASE_URL_ENV: &str = "PLATFORM_MODEL_WORKER_DATABASE_URL";
 const EGRESS_CA_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_EGRESS_CA_PATH";
 const EGRESS_CERT_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH";
 const EGRESS_KEY_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_EGRESS_KEY_PATH";
+const NATS_CA_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_NATS_CA_PATH";
+const NATS_CERT_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_NATS_CERT_PATH";
+const NATS_KEY_PATH_ENV: &str = "PLATFORM_MODEL_WORKER_NATS_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
 const MAX_INSTALLED_MODEL_ADAPTERS: usize = 8;
@@ -59,10 +63,24 @@ struct ModelWorkerProcessConfig {
     egress_request_timeout_milliseconds: u64,
     maximum_rpc_metadata_bytes: usize,
     maximum_rpc_payload_bytes: usize,
+    live_delta: ModelLiveDeltaProcessConfig,
     receipt_ttl_seconds: u64,
     claim_scan_milliseconds: u64,
     claim_failure_backoff_milliseconds: u64,
     drain_grace_milliseconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelLiveDeltaProcessConfig {
+    servers: Vec<String>,
+    namespace: String,
+    connect_timeout_milliseconds: u64,
+    publish_timeout_milliseconds: u64,
+    reconnect_backoff_milliseconds: u64,
+    drain_timeout_milliseconds: u64,
+    maximum_pending_messages: usize,
+    maximum_pending_bytes: usize,
 }
 
 impl ModelWorkerProcessConfig {
@@ -165,6 +183,14 @@ impl ModelWorkerProcessConfig {
         self.driver_config()
             .map(|_| ())
             .and_then(|_| self.cancellation_driver_config().map(|_| ()))
+            .and_then(|_| {
+                self.live_delta_config(
+                    PathBuf::from("/validation/ca.pem"),
+                    PathBuf::from("/validation/client.pem"),
+                    PathBuf::from("/validation/client-key.pem"),
+                )
+                .map(|_| ())
+            })
             .map_err(|_| ProcessError::InvalidConfiguration)
     }
 
@@ -197,6 +223,37 @@ impl ModelWorkerProcessConfig {
             Duration::from_secs(self.receipt_ttl_seconds),
             Duration::from_millis(self.claim_scan_milliseconds),
             Duration::from_millis(self.claim_failure_backoff_milliseconds),
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)
+    }
+
+    fn live_delta_config(
+        &self,
+        root_certificate: PathBuf,
+        client_certificate: PathBuf,
+        client_private_key: PathBuf,
+    ) -> Result<ModelLiveDeltaNatsConfig, ProcessError> {
+        ModelLiveDeltaNatsConfig::from_profile(
+            &checked_in_hard_limit_profile(),
+            ModelLiveDeltaNatsSettings {
+                servers: self.live_delta.servers.clone(),
+                namespace: self.live_delta.namespace.clone(),
+                root_certificate,
+                client_certificate,
+                client_private_key,
+                connect_timeout: Duration::from_millis(
+                    self.live_delta.connect_timeout_milliseconds,
+                ),
+                publish_timeout: Duration::from_millis(
+                    self.live_delta.publish_timeout_milliseconds,
+                ),
+                reconnect_backoff: Duration::from_millis(
+                    self.live_delta.reconnect_backoff_milliseconds,
+                ),
+                drain_timeout: Duration::from_millis(self.live_delta.drain_timeout_milliseconds),
+                maximum_pending_messages: self.live_delta.maximum_pending_messages,
+                maximum_pending_bytes: self.live_delta.maximum_pending_bytes,
+            },
         )
         .map_err(|_| ProcessError::InvalidConfiguration)
     }
@@ -265,9 +322,20 @@ async fn run() -> Result<(), ProcessError> {
         }
     }
     let identities = Arc::new(UuidModelWorkerIdentityFactory);
+    let nats_ca_path = required_absolute_path(NATS_CA_PATH_ENV)?;
+    let nats_certificate_path = required_absolute_path(NATS_CERT_PATH_ENV)?;
+    let nats_private_key_path = required_absolute_path(NATS_KEY_PATH_ENV)?;
+    validate_bounded_file(&nats_ca_path, MAX_TLS_FILE_BYTES)?;
+    validate_bounded_file(&nats_certificate_path, MAX_TLS_FILE_BYTES)?;
+    validate_bounded_file(&nats_private_key_path, MAX_TLS_FILE_BYTES)?;
+    let (live_delta_sink, live_delta_driver) = BufferedNatsModelLiveDeltaSink::new(
+        config.live_delta_config(nats_ca_path, nats_certificate_path, nats_private_key_path)?,
+        limits,
+    )
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
     let host = Arc::new(ModelAdapterHost::new(
         registry,
-        Arc::new(DropModelLiveDeltas),
+        Arc::new(live_delta_sink),
         limits,
     ));
     let worker = Arc::new(ModelAdapterWorker::new(
@@ -303,44 +371,63 @@ async fn run() -> Result<(), ProcessError> {
         process_generation_id, manifest_digest
     );
     let cancellation = CancellationToken::new();
-    let mut driver_task = tokio::spawn(driver.run(cancellation.child_token()));
-    let mut cancellation_task = tokio::spawn(cancellation_driver.run(cancellation.child_token()));
+    let mut components = JoinSet::new();
+    let driver_cancellation = cancellation.child_token();
+    components.spawn(async move {
+        driver
+            .run(driver_cancellation)
+            .await
+            .map(|_| ())
+            .map_err(|_| ProcessError::WorkerFailed)
+    });
+    let control_cancellation = cancellation.child_token();
+    components.spawn(async move {
+        cancellation_driver
+            .run(control_cancellation)
+            .await
+            .map(|_| ())
+            .map_err(|_| ProcessError::WorkerFailed)
+    });
+    let live_cancellation = cancellation.child_token();
+    components.spawn(async move {
+        live_delta_driver
+            .run(live_cancellation)
+            .await
+            .map(|_| ())
+            .map_err(|_| ProcessError::WorkerFailed)
+    });
     tokio::select! {
         signal = shutdown_signal() => {
             cancellation.cancel();
-            let (driver_result, cancellation_result) = tokio::join!(driver_task, cancellation_task);
+            let component_result = drain_components(&mut components).await;
             signal?;
-            driver_result
-                .map_err(|_| ProcessError::WorkerFailed)?
-                .map_err(|_| ProcessError::WorkerFailed)?;
-            cancellation_result
-                .map_err(|_| ProcessError::WorkerFailed)?
-                .map_err(|_| ProcessError::WorkerFailed)?;
+            component_result?;
             Ok(())
         }
-        result = &mut driver_task => {
+        result = components.join_next() => {
             cancellation.cancel();
-            let cancellation_result = cancellation_task.await;
-            result
-                .map_err(|_| ProcessError::WorkerFailed)?
-                .map_err(|_| ProcessError::WorkerFailed)?;
-            cancellation_result
-                .map_err(|_| ProcessError::WorkerFailed)?
-                .map_err(|_| ProcessError::WorkerFailed)?;
-            Err(ProcessError::WorkerExitedUnexpectedly)
-        }
-        result = &mut cancellation_task => {
-            cancellation.cancel();
-            let driver_result = driver_task.await;
-            result
-                .map_err(|_| ProcessError::WorkerFailed)?
-                .map_err(|_| ProcessError::WorkerFailed)?;
-            driver_result
-                .map_err(|_| ProcessError::WorkerFailed)?
-                .map_err(|_| ProcessError::WorkerFailed)?;
+            observe_component(result)?;
+            drain_components(&mut components).await?;
             Err(ProcessError::WorkerExitedUnexpectedly)
         }
     }
+}
+
+fn observe_component(
+    result: Option<Result<Result<(), ProcessError>, tokio::task::JoinError>>,
+) -> Result<(), ProcessError> {
+    result
+        .ok_or(ProcessError::WorkerFailed)?
+        .map_err(|_| ProcessError::WorkerFailed)?
+}
+
+async fn drain_components(
+    components: &mut JoinSet<Result<(), ProcessError>>,
+) -> Result<(), ProcessError> {
+    while let Some(result) = components.join_next().await {
+        result.map_err(|_| ProcessError::WorkerFailed)??;
+    }
+    Ok(())
 }
 
 async fn connect_egress(
@@ -445,6 +532,19 @@ fn read_bounded_file(path: &PathBuf, maximum: usize) -> Result<Vec<u8>, ProcessE
     Ok(bytes)
 }
 
+fn validate_bounded_file(path: &PathBuf, maximum: usize) -> Result<(), ProcessError> {
+    let metadata = std::fs::File::open(path)
+        .and_then(|file| file.metadata())
+        .map_err(|_| ProcessError::FileUnavailable)?;
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > u64::try_from(maximum).unwrap_or(u64::MAX)
+    {
+        return Err(ProcessError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessError {
     MissingConfiguration(&'static str),
@@ -525,6 +625,16 @@ mod tests {
             egress_request_timeout_milliseconds: 120_000,
             maximum_rpc_metadata_bytes: 1_048_576,
             maximum_rpc_payload_bytes: 64 * 1_048_576,
+            live_delta: ModelLiveDeltaProcessConfig {
+                servers: vec!["tls://nats.platform-runtime.svc:4222".to_owned()],
+                namespace: "candidate".to_owned(),
+                connect_timeout_milliseconds: 5_000,
+                publish_timeout_milliseconds: 100,
+                reconnect_backoff_milliseconds: 1_000,
+                drain_timeout_milliseconds: 5_000,
+                maximum_pending_messages: 4_096,
+                maximum_pending_bytes: 64 * 1_048_576,
+            },
             receipt_ttl_seconds: 3_600,
             claim_scan_milliseconds: 250,
             claim_failure_backoff_milliseconds: 100,
@@ -553,6 +663,12 @@ mod tests {
         assert_eq!(config.validate(), Err(ProcessError::InvalidConfiguration));
         let mut config = fixture_config();
         config.maximum_rpc_payload_bytes = usize::MAX;
+        assert_eq!(config.validate(), Err(ProcessError::InvalidConfiguration));
+        let mut config = fixture_config();
+        config.live_delta.servers = vec!["nats://nats:4222".to_owned()];
+        assert_eq!(config.validate(), Err(ProcessError::InvalidConfiguration));
+        let mut config = fixture_config();
+        config.live_delta.maximum_pending_bytes = 1;
         assert_eq!(config.validate(), Err(ProcessError::InvalidConfiguration));
         let mut config = fixture_config();
         config.drain_grace_milliseconds = 120_001;

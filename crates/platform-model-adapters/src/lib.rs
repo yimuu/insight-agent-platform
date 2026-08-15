@@ -65,6 +65,7 @@ impl From<&insight_platform_contracts::InstalledModelAdapter> for InstalledModel
 pub struct ModelAdapterExecutionRequest {
     pub schema_version: u32,
     pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
     pub model_turn_id: ResourceId,
     pub job_id: ResourceId,
     pub worker_process_generation_id: ResourceId,
@@ -112,6 +113,7 @@ impl ModelAdapterExecutionRequest {
             .map_err(|_| ModelAdapterHostError::InvalidExecutionContract)?;
         if self.schema_version != 1
             || self.tenant_id.kind() != ResourceKind::Tenant
+            || self.run_id.kind() != ResourceKind::Run
             || self.model_turn_id.kind() != ResourceKind::ModelTurn
             || self.job_id.kind() != ResourceKind::Job
             || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
@@ -363,7 +365,7 @@ impl ModelAdapterCancelRequest {
 
 #[async_trait]
 pub trait ModelLiveDeltaSink: Send + Sync {
-    async fn publish(&self, frame: &NormalizedModelFrame);
+    async fn publish(&self, execution: &ModelAdapterExecutionRequest, frame: &NormalizedModelFrame);
 }
 
 #[derive(Default)]
@@ -371,7 +373,12 @@ pub struct DropModelLiveDeltas;
 
 #[async_trait]
 impl ModelLiveDeltaSink for DropModelLiveDeltas {
-    async fn publish(&self, _frame: &NormalizedModelFrame) {}
+    async fn publish(
+        &self,
+        _execution: &ModelAdapterExecutionRequest,
+        _frame: &NormalizedModelFrame,
+    ) {
+    }
 }
 
 #[derive(Default, Clone)]
@@ -576,7 +583,9 @@ impl ModelAdapterHost {
                 .accept(frame)
                 .map_err(|_| ModelAdapterHostError::InvalidNormalizedStream)?
             {
-                ModelStreamAcceptance::Live { .. } => self.live_sink.publish(&live_frame).await,
+                ModelStreamAcceptance::Live { .. } => {
+                    self.live_sink.publish(request, &live_frame).await
+                }
                 ModelStreamAcceptance::Terminal { response, evidence } => {
                     response
                         .validate_for(

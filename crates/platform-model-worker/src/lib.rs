@@ -13,14 +13,15 @@ use insight_platform_contracts::{
 use insight_platform_jobs::JobFence;
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
-    ModelAdapterFailureClass, ModelAdapterWorker, ModelExecutionAuthority, ModelOutputMaterializer,
-    ModelProviderWireConnector, ModelProviderWireProtocol, ANTHROPIC_MESSAGES_ADAPTER_NAME,
-    OPENAI_RESPONSES_ADAPTER_NAME,
+    ModelAdapterFailureClass, ModelAdapterWorker, ModelExecutionAuthority, ModelLiveDeltaSink,
+    ModelOutputMaterializer, ModelProviderWireConnector, ModelProviderWireProtocol,
+    ANTHROPIC_MESSAGES_ADAPTER_NAME, OPENAI_RESPONSES_ADAPTER_NAME,
 };
 use insight_platform_models::{
     CanonicalModelRequest, ClaimModelJobs, CommitModelCancellationOutcome, ModelAttemptMeasurement,
-    ModelClaimSlot, ModelExecutionInput, ModelExecutionInputMaterial, ModelTurnLimits,
-    ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, MODEL_QUOTA_LINES,
+    ModelClaimSlot, ModelExecutionInput, ModelExecutionInputMaterial, ModelLiveTextDelta,
+    ModelTurnLimits, ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, NormalizedModelDelta,
+    NormalizedModelFrame, MODEL_QUOTA_LINES,
 };
 use insight_platform_postgres::{
     model_turn_repository::{ClaimedModelExecution, ControlledModelExecution},
@@ -30,15 +31,503 @@ use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
 };
 use sha2::{Digest as _, Sha256};
-use std::{collections::BTreeSet, error::Error, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    error::Error,
+    fmt,
+    fmt::Write as _,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{
+    sync::{mpsc, OwnedSemaphorePermit, Semaphore},
     task::{JoinError, JoinSet},
     time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
+use url::Url;
 use uuid::Uuid;
 
 pub const MODEL_WORKER_ROLE: &str = "model-worker";
+pub const MODEL_LIVE_NATS_SUBJECT_PREFIX: &str = "insight.platform.v1.run.live";
+const MAX_LIVE_DELTA_PUBLISH_BATCH_MESSAGES: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelLiveDeltaNatsSettings {
+    pub servers: Vec<String>,
+    pub namespace: String,
+    pub root_certificate: PathBuf,
+    pub client_certificate: PathBuf,
+    pub client_private_key: PathBuf,
+    pub connect_timeout: Duration,
+    pub publish_timeout: Duration,
+    pub reconnect_backoff: Duration,
+    pub drain_timeout: Duration,
+    pub maximum_pending_messages: usize,
+    pub maximum_pending_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelLiveDeltaNatsConfig {
+    settings: ModelLiveDeltaNatsSettings,
+    pub maximum_payload_bytes: usize,
+}
+
+impl ModelLiveDeltaNatsConfig {
+    pub fn from_profile(
+        profile: &HardLimitProfile,
+        settings: ModelLiveDeltaNatsSettings,
+    ) -> Result<Self, ModelLiveDeltaError> {
+        profile
+            .validate()
+            .map_err(|_| ModelLiveDeltaError::InvalidConfig)?;
+        let maximum_payload_bytes =
+            usize::try_from(profile.control_data.nats_payload_bytes.q1_default)
+                .map_err(|_| ModelLiveDeltaError::InvalidConfig)?;
+        let maximum_buffer_events =
+            usize::try_from(profile.control_data.telemetry_buffer_events.q1_default)
+                .map_err(|_| ModelLiveDeltaError::InvalidConfig)?;
+        if settings.maximum_pending_messages > maximum_buffer_events {
+            return Err(ModelLiveDeltaError::InvalidConfig);
+        }
+        let config = Self {
+            settings,
+            maximum_payload_bytes,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), ModelLiveDeltaError> {
+        let settings = &self.settings;
+        if settings.servers.is_empty()
+            || settings.servers.len() > 16
+            || settings.servers.iter().collect::<BTreeSet<_>>().len() != settings.servers.len()
+            || settings
+                .servers
+                .iter()
+                .any(|server| !valid_nats_server(server))
+            || !valid_nats_namespace(&settings.namespace)
+            || !settings.root_certificate.is_absolute()
+            || !settings.client_certificate.is_absolute()
+            || !settings.client_private_key.is_absolute()
+            || settings.connect_timeout.is_zero()
+            || settings.connect_timeout > Duration::from_secs(30)
+            || settings.publish_timeout.is_zero()
+            || settings.publish_timeout > Duration::from_secs(5)
+            || settings.reconnect_backoff.is_zero()
+            || settings.reconnect_backoff > Duration::from_secs(30)
+            || settings.drain_timeout.is_zero()
+            || settings.drain_timeout > Duration::from_secs(30)
+            || settings.maximum_pending_messages == 0
+            || settings.maximum_pending_bytes < self.maximum_payload_bytes
+            || settings.maximum_pending_bytes > 1_073_741_824
+            || self.maximum_payload_bytes < 256
+            || self.maximum_payload_bytes > 1_048_576
+            || settings.maximum_pending_bytes > Semaphore::MAX_PERMITS
+            || settings.maximum_pending_bytes > u32::MAX as usize
+        {
+            return Err(ModelLiveDeltaError::InvalidConfig);
+        }
+        Ok(())
+    }
+}
+
+fn valid_nats_server(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "tls"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some()
+        && url.port().is_some()
+        && matches!(url.path(), "" | "/")
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn valid_nats_namespace(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+pub fn model_live_delta_subject(
+    namespace: &str,
+    tenant_id: &ResourceId,
+    run_id: &ResourceId,
+) -> Result<String, ModelLiveDeltaError> {
+    if !valid_nats_namespace(namespace)
+        || tenant_id.kind() != ResourceKind::Tenant
+        || run_id.kind() != ResourceKind::Run
+    {
+        return Err(ModelLiveDeltaError::InvalidEnvelope);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"insight.platform/v1/run-live-subject\0");
+    hasher.update(tenant_id.to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(run_id.to_string().as_bytes());
+    let mut key = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    Ok(format!(
+        "{MODEL_LIVE_NATS_SUBJECT_PREFIX}.{namespace}.{key}"
+    ))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelLiveDeltaReport {
+    pub enqueued: u64,
+    pub published: u64,
+    pub dropped_non_public: u64,
+    pub dropped_invalid: u64,
+    pub dropped_oversized: u64,
+    pub dropped_backpressure: u64,
+    pub transport_failures: u64,
+}
+
+#[derive(Default)]
+struct ModelLiveDeltaCounters {
+    enqueued: AtomicU64,
+    published: AtomicU64,
+    dropped_non_public: AtomicU64,
+    dropped_invalid: AtomicU64,
+    dropped_oversized: AtomicU64,
+    dropped_backpressure: AtomicU64,
+    transport_failures: AtomicU64,
+}
+
+impl ModelLiveDeltaCounters {
+    fn snapshot(&self) -> ModelLiveDeltaReport {
+        ModelLiveDeltaReport {
+            enqueued: self.enqueued.load(Ordering::Relaxed),
+            published: self.published.load(Ordering::Relaxed),
+            dropped_non_public: self.dropped_non_public.load(Ordering::Relaxed),
+            dropped_invalid: self.dropped_invalid.load(Ordering::Relaxed),
+            dropped_oversized: self.dropped_oversized.load(Ordering::Relaxed),
+            dropped_backpressure: self.dropped_backpressure.load(Ordering::Relaxed),
+            transport_failures: self.transport_failures.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct QueuedModelLiveDelta {
+    subject: String,
+    payload: Vec<u8>,
+    message_permit: OwnedSemaphorePermit,
+    byte_permit: OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
+pub struct BufferedNatsModelLiveDeltaSink {
+    sender: mpsc::Sender<QueuedModelLiveDelta>,
+    message_capacity: Arc<Semaphore>,
+    byte_capacity: Arc<Semaphore>,
+    namespace: String,
+    limits: ModelTurnLimits,
+    maximum_payload_bytes: usize,
+    counters: Arc<ModelLiveDeltaCounters>,
+}
+
+pub struct NatsModelLiveDeltaDriver {
+    receiver: mpsc::Receiver<QueuedModelLiveDelta>,
+    config: ModelLiveDeltaNatsConfig,
+    counters: Arc<ModelLiveDeltaCounters>,
+}
+
+impl BufferedNatsModelLiveDeltaSink {
+    pub fn new(
+        config: ModelLiveDeltaNatsConfig,
+        limits: ModelTurnLimits,
+    ) -> Result<(Self, NatsModelLiveDeltaDriver), ModelLiveDeltaError> {
+        config.validate()?;
+        let (sender, receiver) = mpsc::channel(config.settings.maximum_pending_messages);
+        let counters = Arc::new(ModelLiveDeltaCounters::default());
+        let sink = Self {
+            sender,
+            message_capacity: Arc::new(Semaphore::new(config.settings.maximum_pending_messages)),
+            byte_capacity: Arc::new(Semaphore::new(config.settings.maximum_pending_bytes)),
+            namespace: config.settings.namespace.clone(),
+            limits,
+            maximum_payload_bytes: config.maximum_payload_bytes,
+            counters: Arc::clone(&counters),
+        };
+        let driver = NatsModelLiveDeltaDriver {
+            receiver,
+            config,
+            counters,
+        };
+        Ok((sink, driver))
+    }
+
+    pub fn report(&self) -> ModelLiveDeltaReport {
+        self.counters.snapshot()
+    }
+
+    fn enqueue(&self, event: ModelLiveTextDelta) {
+        if event.validate(self.limits).is_err() {
+            self.counters
+                .dropped_invalid
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let payload = match serde_jcs::to_vec(&event) {
+            Ok(payload) if payload.len() <= self.maximum_payload_bytes => payload,
+            Ok(_) => {
+                self.counters
+                    .dropped_oversized
+                    .fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            Err(_) => {
+                self.counters
+                    .dropped_invalid
+                    .fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        };
+        let subject =
+            match model_live_delta_subject(&self.namespace, &event.tenant_id, &event.run_id) {
+                Ok(subject) => subject,
+                Err(_) => {
+                    self.counters
+                        .dropped_invalid
+                        .fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            };
+        let Ok(byte_count) = u32::try_from(payload.len()) else {
+            self.counters
+                .dropped_oversized
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let Ok(message_permit) = Arc::clone(&self.message_capacity).try_acquire_owned() else {
+            self.counters
+                .dropped_backpressure
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let Ok(byte_permit) = Arc::clone(&self.byte_capacity).try_acquire_many_owned(byte_count)
+        else {
+            self.counters
+                .dropped_backpressure
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        if self
+            .sender
+            .try_send(QueuedModelLiveDelta {
+                subject,
+                payload,
+                message_permit,
+                byte_permit,
+            })
+            .is_err()
+        {
+            self.counters
+                .dropped_backpressure
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.counters.enqueued.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[async_trait]
+impl ModelLiveDeltaSink for BufferedNatsModelLiveDeltaSink {
+    async fn publish(
+        &self,
+        execution: &insight_platform_model_adapters::ModelAdapterExecutionRequest,
+        frame: &NormalizedModelFrame,
+    ) {
+        let NormalizedModelDelta::Text(text) = &frame.delta else {
+            self.counters
+                .dropped_non_public
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        if frame.model_turn_id != execution.model_turn_id
+            || frame.attempt_no != execution.attempt_no
+            || frame.lease_generation != execution.lease_generation
+        {
+            self.counters
+                .dropped_invalid
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.enqueue(ModelLiveTextDelta {
+            schema_version: 1,
+            tenant_id: execution.tenant_id.clone(),
+            run_id: execution.run_id.clone(),
+            model_turn_id: execution.model_turn_id.clone(),
+            job_id: execution.job_id.clone(),
+            worker_process_generation_id: execution.worker_process_generation_id.clone(),
+            attempt_no: execution.attempt_no,
+            lease_generation: execution.lease_generation,
+            transport_sequence: frame.transport_sequence,
+            request_digest: execution.request_digest.clone(),
+            classification: execution.request.classification,
+            text: text.clone(),
+        });
+    }
+}
+
+impl NatsModelLiveDeltaDriver {
+    pub async fn run(
+        mut self,
+        cancellation: CancellationToken,
+    ) -> Result<ModelLiveDeltaReport, ModelLiveDeltaError> {
+        loop {
+            let connection_config = self.config.clone();
+            let connect = Self::connect(&connection_config);
+            tokio::pin!(connect);
+            let client = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok(self.counters.snapshot()),
+                result = &mut connect => match result {
+                    Ok(client) => client,
+                    Err(()) => {
+                        self.counters.transport_failures.fetch_add(1, Ordering::Relaxed);
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return Ok(self.counters.snapshot()),
+                            _ = tokio::time::sleep(self.config.settings.reconnect_backoff) => continue,
+                        }
+                    }
+                }
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        let _ = tokio::time::timeout(self.config.settings.drain_timeout, client.drain()).await;
+                        return Ok(self.counters.snapshot());
+                    }
+                    item = self.receiver.recv() => {
+                        let Some(item) = item else {
+                            return Err(ModelLiveDeltaError::QueueClosed);
+                        };
+                        let mut batch = Vec::with_capacity(
+                            MAX_LIVE_DELTA_PUBLISH_BATCH_MESSAGES.min(
+                                self.config.settings.maximum_pending_messages,
+                            ),
+                        );
+                        batch.push(item);
+                        while batch.len() < batch.capacity() {
+                            match self.receiver.try_recv() {
+                                Ok(item) => batch.push(item),
+                                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => break,
+                            }
+                        }
+                        let published = batch.len();
+                        if Self::publish_batch(
+                            &client,
+                            batch,
+                            self.config.settings.publish_timeout,
+                        )
+                        .await
+                        .is_ok()
+                        {
+                            self.counters
+                                .published
+                                .fetch_add(published as u64, Ordering::Relaxed);
+                        } else {
+                            self.counters.transport_failures.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn publish_batch(
+        client: &async_nats::Client,
+        batch: Vec<QueuedModelLiveDelta>,
+        publish_timeout: Duration,
+    ) -> Result<(), ()> {
+        let publish = async {
+            let mut permits = Vec::with_capacity(batch.len());
+            for item in batch {
+                client
+                    .publish(item.subject, item.payload.into())
+                    .await
+                    .map_err(|_| ())?;
+                permits.push((item.message_permit, item.byte_permit));
+            }
+            client.flush().await.map_err(|_| ())?;
+            drop(permits);
+            Ok(())
+        };
+        tokio::time::timeout(publish_timeout, publish)
+            .await
+            .map_err(|_| ())?
+    }
+
+    async fn connect(config: &ModelLiveDeltaNatsConfig) -> Result<async_nats::Client, ()> {
+        let servers = config
+            .settings
+            .servers
+            .iter()
+            .map(|server| server.parse::<async_nats::ServerAddr>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| ())?;
+        let options = async_nats::ConnectOptions::new()
+            .name("insight-platform-model-worker-live-v1")
+            .connection_timeout(config.settings.connect_timeout)
+            .max_reconnects(None)
+            .client_capacity(config.settings.maximum_pending_messages)
+            .require_tls(true)
+            .add_root_certificates(config.settings.root_certificate.clone())
+            .add_client_certificate(
+                config.settings.client_certificate.clone(),
+                config.settings.client_private_key.clone(),
+            );
+        let client =
+            tokio::time::timeout(config.settings.connect_timeout, options.connect(servers))
+                .await
+                .map_err(|_| ())?
+                .map_err(|_| ())?;
+        if client.max_payload() < config.maximum_payload_bytes {
+            return Err(());
+        }
+        Ok(client)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelLiveDeltaError {
+    InvalidConfig,
+    InvalidEnvelope,
+    QueueClosed,
+}
+
+impl fmt::Display for ModelLiveDeltaError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidConfig => "Model live delta NATS configuration is invalid",
+            Self::InvalidEnvelope => "Model live delta envelope is invalid",
+            Self::QueueClosed => "Model live delta publisher queue closed unexpectedly",
+        })
+    }
+}
+
+impl Error for ModelLiveDeltaError {}
 
 pub trait ModelWorkerIdentityFactory: Send + Sync {
     fn new_resource_id(&self, kind: ResourceKind) -> Result<ResourceId, ModelWorkerIdentityError>;
@@ -1460,6 +1949,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt as _;
     use insight_platform_contracts::{
         checked_in_hard_limit_profile, ExactDeploymentRef, WorkerManifest, WORKER_MANIFEST_VERSION,
         WORKER_PROTOCOL_VERSION,
@@ -1650,6 +2140,46 @@ mod tests {
                     stream_bytes: 0,
                 },
             },
+        }
+    }
+
+    fn live_delta_config(
+        maximum_pending_messages: usize,
+        maximum_pending_bytes: usize,
+    ) -> ModelLiveDeltaNatsConfig {
+        ModelLiveDeltaNatsConfig::from_profile(
+            &checked_in_hard_limit_profile(),
+            ModelLiveDeltaNatsSettings {
+                servers: vec!["tls://nats.platform-runtime.svc:4222".to_owned()],
+                namespace: "candidate".to_owned(),
+                root_certificate: PathBuf::from("/tmp/nats-ca.pem"),
+                client_certificate: PathBuf::from("/tmp/nats-client.pem"),
+                client_private_key: PathBuf::from("/tmp/nats-client-key.pem"),
+                connect_timeout: Duration::from_secs(1),
+                publish_timeout: Duration::from_millis(100),
+                reconnect_backoff: Duration::from_millis(100),
+                drain_timeout: Duration::from_secs(1),
+                maximum_pending_messages,
+                maximum_pending_bytes,
+            },
+        )
+        .unwrap()
+    }
+
+    fn live_delta(text: String) -> ModelLiveTextDelta {
+        ModelLiveTextDelta {
+            schema_version: 1,
+            tenant_id: resource(ResourceKind::Tenant),
+            run_id: resource(ResourceKind::Run),
+            model_turn_id: resource(ResourceKind::ModelTurn),
+            job_id: resource(ResourceKind::Job),
+            worker_process_generation_id: resource(ResourceKind::WorkerProcessGeneration),
+            attempt_no: 1,
+            lease_generation: 1,
+            transport_sequence: 1,
+            request_digest: digest('7'),
+            classification: insight_platform_contracts::DataClassification::Internal,
+            text,
         }
     }
 
@@ -1929,6 +2459,107 @@ mod tests {
         assert_eq!(report.discovered, 1);
         assert_eq!(report.deferred, 1);
         assert!(authority.commands.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn live_delta_pipeline_is_canonical_tenant_scoped_and_end_to_end_bounded() {
+        let limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let (sink, mut driver) =
+            BufferedNatsModelLiveDeltaSink::new(live_delta_config(1, 1_048_576), limits).unwrap();
+        let first = live_delta("first".to_owned());
+        let expected_subject =
+            model_live_delta_subject("candidate", &first.tenant_id, &first.run_id).unwrap();
+        sink.enqueue(first.clone());
+        sink.enqueue(live_delta("second".to_owned()));
+
+        let queued = driver.receiver.try_recv().unwrap();
+        sink.enqueue(live_delta("still-held-after-dequeue".to_owned()));
+        assert_eq!(queued.subject, expected_subject);
+        assert_eq!(
+            serde_json::from_slice::<ModelLiveTextDelta>(&queued.payload).unwrap(),
+            first
+        );
+        assert_eq!(serde_jcs::to_vec(&first).unwrap(), queued.payload);
+        assert_eq!(
+            sink.report(),
+            ModelLiveDeltaReport {
+                enqueued: 1,
+                dropped_backpressure: 2,
+                ..Default::default()
+            }
+        );
+        drop(queued);
+        sink.enqueue(live_delta("capacity-released".to_owned()));
+        assert!(driver.receiver.try_recv().is_ok());
+        assert_eq!(sink.report().enqueued, 2);
+    }
+
+    #[test]
+    fn live_delta_envelope_over_nats_limit_is_dropped() {
+        let limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let (sink, mut driver) =
+            BufferedNatsModelLiveDeltaSink::new(live_delta_config(1, 1_048_576), limits).unwrap();
+        sink.enqueue(live_delta(
+            "x".repeat(limits.maximum_delta_bytes().saturating_sub(2)),
+        ));
+        assert!(driver.receiver.try_recv().is_err());
+        assert_eq!(sink.report().dropped_oversized, 1);
+    }
+
+    #[tokio::test]
+    async fn real_tls_nats_publishes_live_delta_when_configured() {
+        let (Ok(server), Ok(ca), Ok(certificate), Ok(private_key)) = (
+            std::env::var("PLATFORM_TEST_NATS_URL"),
+            std::env::var("PLATFORM_TEST_NATS_CA_PATH"),
+            std::env::var("PLATFORM_TEST_NATS_CERT_PATH"),
+            std::env::var("PLATFORM_TEST_NATS_KEY_PATH"),
+        ) else {
+            return;
+        };
+        let limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let config = ModelLiveDeltaNatsConfig::from_profile(
+            &checked_in_hard_limit_profile(),
+            ModelLiveDeltaNatsSettings {
+                servers: vec![server],
+                namespace: "model_worker_fixture".to_owned(),
+                root_certificate: PathBuf::from(ca),
+                client_certificate: PathBuf::from(certificate),
+                client_private_key: PathBuf::from(private_key),
+                connect_timeout: Duration::from_secs(5),
+                publish_timeout: Duration::from_secs(1),
+                reconnect_backoff: Duration::from_millis(100),
+                drain_timeout: Duration::from_secs(1),
+                maximum_pending_messages: 16,
+                maximum_pending_bytes: 1_048_576,
+            },
+        )
+        .unwrap();
+        let subscriber_client = NatsModelLiveDeltaDriver::connect(&config).await.unwrap();
+        let event = live_delta("real NATS delta".to_owned());
+        let subject =
+            model_live_delta_subject("model_worker_fixture", &event.tenant_id, &event.run_id)
+                .unwrap();
+        let mut subscriber = subscriber_client.subscribe(subject).await.unwrap();
+        subscriber_client.flush().await.unwrap();
+        let (sink, driver) = BufferedNatsModelLiveDeltaSink::new(config, limits).unwrap();
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(driver.run(cancellation.child_token()));
+        sink.enqueue(event.clone());
+
+        let message = tokio::time::timeout(Duration::from_secs(5), subscriber.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ModelLiveTextDelta>(&message.payload).unwrap(),
+            event
+        );
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

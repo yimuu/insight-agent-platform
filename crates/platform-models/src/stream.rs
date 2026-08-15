@@ -1,5 +1,5 @@
 use crate::{is_code, CanonicalModelResponse, ModelTurnError, ModelTurnLimits};
-use insight_platform_contracts::{ResourceId, ResourceKind, Sha256Digest};
+use insight_platform_contracts::{DataClassification, ResourceId, ResourceKind, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,6 +28,53 @@ pub struct NormalizedModelFrame {
     pub lease_generation: u64,
     pub transport_sequence: u64,
     pub delta: NormalizedModelDelta,
+}
+
+/// Credential-free, lossy observation emitted by a Model Worker after stream-fence validation.
+///
+/// Only text deltas are eligible for the internal live projection path. This envelope is not the
+/// public SSE contract. Incremental tool arguments and Provider metadata remain private until the
+/// terminal response has passed complete local validation and the durable ModelTurn transaction
+/// wins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelLiveTextDelta {
+    pub schema_version: u32,
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub model_turn_id: ResourceId,
+    pub job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub attempt_no: u32,
+    pub lease_generation: u64,
+    pub transport_sequence: u64,
+    pub request_digest: Sha256Digest,
+    pub classification: DataClassification,
+    pub text: String,
+}
+
+impl ModelLiveTextDelta {
+    pub fn validate(&self, limits: ModelTurnLimits) -> Result<(), ModelTurnError> {
+        if self.schema_version != 1
+            || self.tenant_id.kind() != ResourceKind::Tenant
+            || self.run_id.kind() != ResourceKind::Run
+            || self.model_turn_id.kind() != ResourceKind::ModelTurn
+            || self.job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.attempt_no == 0
+            || self.lease_generation == 0
+            || self.transport_sequence == 0
+            || self.text.is_empty()
+            || self.text.contains('\0')
+            || serde_json::to_vec(&self.text)
+                .map_err(|_| ModelTurnError::Canonicalization)?
+                .len()
+                > limits.maximum_delta_bytes()
+        {
+            return Err(ModelTurnError::InvalidStream);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

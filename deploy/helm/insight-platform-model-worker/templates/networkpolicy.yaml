@@ -33,4 +33,9 @@ spec:
         - ipBlock: {cidr: {{ . }} }
         {{- end }}
       ports: [{protocol: TCP, port: 5432}]
+    - to:
+        {{- range .Values.networkPolicy.natsCidrs }}
+        - ipBlock: {cidr: {{ . }} }
+        {{- end }}
+      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.natsPort }}}]
 {{- end }}

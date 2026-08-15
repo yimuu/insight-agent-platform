@@ -20,6 +20,12 @@ egressTls:
     ca: ca.pem
     certificate: client.pem
     privateKey: client-key.pem
+natsTls:
+  existingSecret: insight-platform-model-worker-nats-client-tls
+  keys:
+    ca: ca.pem
+    certificate: client.pem
+    privateKey: client-key.pem
 
 networkPolicy:
   enabled: true
@@ -29,6 +35,8 @@ networkPolicy:
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
   postgresCidrs: [10.10.0.0/24]
+  natsCidrs: [10.20.0.0/24]
+  natsPort: 4222
 
 resources:
   requests: {cpu: 250m, memory: 256Mi}

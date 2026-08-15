@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-09 |
+| 日期 | 2026-08-15 |
 | 依赖 | [`00-overview.md`](00-overview.md)～[`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) |
 | 直接下游 | 实现计划、迁移记录、资格报告与 `docs/current` |
 
@@ -161,11 +161,13 @@ stale cancel。但该证据尚未经过真实Secret Manager provider、真实Pro
 
 Model Worker现在已有独立候选binary和静态Kubernetes拓扑：进程启动复验config/WorkerManifest/两个adapter descriptor，使用独立bounded
 PostgreSQL pool和Model Worker mTLS Egress客户端；chart提供双副本rolling Deployment、PDB、HPA、topology spread、Restricted Pod、
-无入站的default-deny NetworkPolicy及只到DNS/Egress/PostgreSQL的出口。CI同时拒绝mutable image、单副本、空PostgreSQL allowlist和非法
+无入站的default-deny NetworkPolicy及只到DNS/Egress/PostgreSQL和配置allowlist NATS TLS端口的出口。CI同时拒绝mutable image、单副本、
+空PostgreSQL/NATS allowlist、缺失NATS TLS Secret key和非法
 HPA。durable cancel driver现使用reserved critical-control permit，把当前generation的bounded PostgreSQL safety scan、Egress exact cancel和
 旋转fence下的保守terminal结算组合起来；unit fixture证明业务permit饱和不阻止取消，数据库fixture覆盖取消/完成first-winner。但该组合仍是
-Inline-only，未绑定真实CandidateManifest，也没有Artifact-backed IO、live delta、真实Provider/process-kill/
-cross-workclass saturation证据，因此只属于Contract/Functional输入，不能登记Gate B～E通过。
+Inline-only，未绑定真实CandidateManifest。Model text delta内部publisher已有exact fence、canonical credential-free envelope、将容量permit
+保留到有界批次flush结束的双重有界non-blocking queue和TLS/mTLS NATS组合；它不发布tool argument/Provider metadata，NATS故障不阻断durable执行。但Artifact-backed IO、公开SSE
+消费、真实NATS/Provider/process-kill/cross-workclass saturation资格证据仍缺失，因此只属于Contract/Functional输入，不能登记Gate B～E通过。
 
 Capability Worker的开发期Functional证据现把fresh PostgreSQL 16 claim、exact Native adapter dispatch/cancel和fenced terminal/
 cancellation commit连成同一可复现fixture，并覆盖durable control后的Job version fence旋转、完整物理身份重验、write reconciliation、

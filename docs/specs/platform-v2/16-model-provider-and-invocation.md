@@ -654,8 +654,11 @@ reference解封与digest、process-installed Provider catalog、独立permit/总
 Pod没有Service/Ingress、云Provider credential、Kubernetes API token或直接Provider客户端。该进程当前明确只安装Inline request/output
 materializer。Model取消路径现以reserved critical-control permit运行bounded PostgreSQL safety scan，只接受当前generation仍持有lease的
 Cancelling Turn/Job，调用Egress exact cancel后用旋转fence提交保守usage ceiling；重试失败不提交terminal，late completion由first-winner拒绝。
-真实Secret Manager provider、catalog provisioning、Artifact-backed request/output IO、live-delta、
-real-process Provider conformance、跨work-class饱和隔舱和Phase 6 fault fixture仍未交付，因此CR-132/CR-136和本规范状态保持进行中。
+通过完整Turn/Job/attempt/lease/Worker/request fence的text delta现在会进入credential-free canonical内部envelope，并由同时限制message数和
+bytes、把容量permit保留到有界批次flush结束的non-blocking队列投影到TLS/mTLS NATS tenant/run scoped subject；tool argument与Provider metadata不发布，NATS不可用、背压或单帧
+超限只丢live observation，不影响durable执行。真实Secret Manager provider、catalog provisioning、Artifact-backed request/output IO、
+公开SSE消费与live-gap/backpressure资格、real-process Provider conformance、跨work-class饱和隔舱和Phase 6 fault fixture仍未交付，因此
+CR-132/CR-136和本规范状态保持进行中。
 
 Provider wire request还必须冻结`JobId`、`attempt_no`、`lease_generation`和`WorkerProcessGenerationId`，并与
 ModelTurn、tenant、Provider Deployment和request digest共同形成一次物理请求identity。Egress broker只允许exact identity注册一个

@@ -114,20 +114,26 @@ reservation ledger identity逐项回绑。request materializer、Provider adapte
 HardLimitProfile heartbeat续租，heartbeat只旋转Job optimistic version，已规范化结果随后用新fence提交而不会仅因续租重放付费请求。
 进程drain超时要求终止整代Worker，使未完成lease由恢复扫描接管。Inline request/output实现已有明确上限；当冻结的Provider响应上限无法由
 Inline承载时，在Provider dispatch前提交`model_output_artifact_required`拒绝，不产生调用或保守计费。Artifact-backed生产实现仍必须注入
-Artifact Broker port；20项adapter、7项driver与2项process-config unit、三crate strict Clippy、44-package workspace check及crate-boundary/cutover门禁通过。
+Artifact Broker port。Model stream中通过完整fence校验的text delta现在被编码为credential-free canonical内部envelope，并经
+双重message/byte有界、non-blocking队列投影到TLS/mTLS NATS tenant/run scoped subject；容量permit保留到有界批次flush结束，不能被NATS
+客户端内部缓冲绕过。tool argument与Provider metadata不会进入该通道，
+NATS断连、背压或单帧超限只丢弃live observation，不阻断PostgreSQL中的ModelTurn/Job执行。20项adapter、10项worker与2项
+process-config unit通过；环境提供真实TLS NATS fixture时还会验证跨进程发布。
 因此该组合关闭执行驱动缺口，但不关闭CR-132、CR-148或Phase 4。
 
 Model Worker的独立候选进程与Kubernetes隔舱也已交付：`platform-model-worker`启动时复验canonical config digest、exact
 `model-worker`/Model WorkerManifest及OpenAI Responses、Anthropic Messages两个process-installed adapter descriptor，使用独立bounded
 PostgreSQL pool做schema verify/claim/heartbeat/commit，只以Model Worker URI SAN的mTLS客户端访问Egress Broker。候选镜像已包含该binary；
-独立namespace/ServiceAccount/Deployment/PDB/HPA/default-deny NetworkPolicy只开放DNS、exact Egress pod和PostgreSQL，禁止Service/Ingress、
+独立namespace/ServiceAccount/Deployment/PDB/HPA/default-deny NetworkPolicy只开放DNS、exact Egress pod、PostgreSQL和配置allowlist中的NATS
+TLS端口，禁止Service/Ingress、
 云Provider credential、Kubernetes API token及直接Provider客户端。静态部署门禁含错误副本、mutable image、空PostgreSQL CIDR及非法HPA的负向渲染。
 Model durable control也已进入同一候选进程：bounded PostgreSQL safety scan只发现当前WorkerProcessGeneration仍持有lease的
 `Cancelling` ModelTurn/Job，使用保留的critical-control permit调用Egress exact-generation cancel，再以旋转后的Job fence提交
 `CommitModelCancellationOutcome`。Egress重试失败不提交terminal；`Unsupported`或畸形结果fail closed；已dispatch但无法取得可信usage时按
 admission token/cost ceiling生成Reconciled保守结算，late completion仍由first-winner fence拒绝。该路径复用ModelTurn/Job/Quota/
-Receipt/Event/Outbox，不增加表或migration。当前进程仍明确只组合Inline request/output materializer；Artifact-backed input/output、live-delta投影和real-process
-Provider/kill/saturation资格未闭合，因此这只是production-shaped候选组合，不是Phase 4或Candidate资格结论。
+Receipt/Event/Outbox，不增加表或migration。当前进程还把exact text delta投影到上述非权威NATS内部通道；公开SSE消费、断线后的durable
+terminal校准与live-gap/backpressure资格仍属于Phase 5/6。进程仍明确只组合Inline request/output materializer；Artifact-backed input/output及
+real-process Provider/kill/saturation资格未闭合，因此这只是production-shaped候选组合，不是Phase 4或Candidate资格结论。
 
 durable control winner现由`ControlledCapabilityExecution`与原claim共同构造cancel job：只旋转Job optimistic version，tenant、Invocation、Job、
 physical attempt、lease generation/token、WorkerProcessGeneration和Deployment/Input必须保持exact，旧generation在adapter I/O前fail closed。
@@ -377,8 +383,11 @@ text stream、usage、tool intent、本地structured/tool schema、请求digest�
 request交给独立Egress broker port，并对raw SSE执行incremental总量/line/event限制、strict JSON重复key拒绝、closed content-type/status/
 `[DONE]`处理；fixture增至20项并通过strict Clippy。独立Model Worker binary/Deployment/HPA已按上述Inline-only边界组合并通过静态
 部署门禁；durable cancel safety scan、reserved control permit、exact Egress cancel与fenced conservative terminal commit也已组合并有unit/数据库
-fixture。catalog provisioning、Artifact-backed IO、live-delta、real-process Provider conformance与饱和/故障资格仍未完整
-交付。生产HTTPS Egress首片已转入CR-136跟踪，因此CR-132和Phase 4保持进行中。
+fixture。catalog provisioning、Artifact-backed IO、real-process Provider conformance与饱和/故障资格仍未完整
+交付。Model text delta的内部publisher已经通过exact fence、canonical credential-free envelope、持有容量permit到批次flush结束的双重有界
+non-blocking队列和TLS/mTLS NATS
+组合；tool argument与Provider metadata保持私有，NATS故障不影响durable terminal。公开SSE消费及live-gap/backpressure资格仍未交付。
+生产HTTPS Egress首片已转入CR-136跟踪，因此CR-132和Phase 4保持进行中。
 
 CR-133（进行中）建立Sandbox执行权威首片：`insight-platform-sandbox`冻结exact Capability Deployment、Runtime、Package、Profile、
 isolation backend、Artifact/Secret/callback grant和closed resource envelope；plain OCI/runc不能注册为Sandbox backend。Gateway admission

@@ -99,6 +99,7 @@ impl ClaimedModelExecution {
         let execution = ModelAdapterExecutionRequest {
             schema_version: 1,
             tenant_id: self.turn.tenant_id.clone(),
+            run_id: self.turn.run_id.clone(),
             model_turn_id: self.turn.model_turn_id.clone(),
             job_id: projection.job_id,
             worker_process_generation_id: self.fence.worker_process_generation_id.clone(),

@@ -14,6 +14,7 @@ chart = root / "deploy/helm/insight-platform-model-worker"
 failures = []
 
 for dependency in (
+    "async-nats.workspace = true",
     "insight-platform-egress-rpc.workspace = true",
     "insight-platform-model-adapters.workspace = true",
     "insight-platform-postgres.workspace = true",
@@ -36,6 +37,7 @@ for forbidden in ("reqwest", "aws_sdk", "SecretManager", "KmsClient"):
     if forbidden in source:
         failures.append(f"Model Worker owns a forbidden Provider/Secret client: {forbidden}")
 for required in (
+    "BufferedNatsModelLiveDeltaSink",
     "InlineModelRequestMaterializer",
     "InlineModelOutputMaterializer",
     "verify_schema",
@@ -74,6 +76,8 @@ required_rendered = (
     'allowPrivilegeEscalation: false',
     'PLATFORM_MODEL_WORKER_DATABASE_URL',
     'PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH',
+    'PLATFORM_MODEL_WORKER_NATS_CERT_PATH',
+    'name: nats-tls',
 )
 for needle in required_rendered:
     if needle not in rendered:
@@ -97,7 +101,10 @@ if rendered.count('\nkind: Deployment\n') != 1 or rendered.count('\nkind: Networ
 negative_values = (
     ("--set", "replicas=1", "at least two replicas"),
     ("--set", "image.digest=latest", "exact sha256"),
-    ("--set-json", "networkPolicy.postgresCidrs=[]", "PostgreSQL CIDRs"),
+    ("--set-json", "networkPolicy.postgresCidrs=[]", "PostgreSQL/NATS CIDRs"),
+    ("--set-json", "networkPolicy.natsCidrs=[]", "PostgreSQL/NATS CIDRs"),
+    ("--set", "networkPolicy.natsPort=0", "NATS port"),
+    ("--set", "natsTls.keys.privateKey=", "NATS mTLS projected keys"),
     ("--set", "autoscaling.minReplicas=1", "at least two replicas"),
     ("--set", "autoscaling.maxReplicas=1", "maximum must be at least"),
 )

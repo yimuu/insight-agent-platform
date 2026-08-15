@@ -65,6 +65,9 @@ spec:
             - {name: PLATFORM_MODEL_WORKER_EGRESS_CA_PATH, value: /etc/insight/egress-tls/ca.pem}
             - {name: PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH, value: /etc/insight/egress-tls/client.pem}
             - {name: PLATFORM_MODEL_WORKER_EGRESS_KEY_PATH, value: /etc/insight/egress-tls/client-key.pem}
+            - {name: PLATFORM_MODEL_WORKER_NATS_CA_PATH, value: /etc/insight/nats-tls/ca.pem}
+            - {name: PLATFORM_MODEL_WORKER_NATS_CERT_PATH, value: /etc/insight/nats-tls/client.pem}
+            - {name: PLATFORM_MODEL_WORKER_NATS_KEY_PATH, value: /etc/insight/nats-tls/client-key.pem}
           startupProbe:
             exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}
             periodSeconds: 2
@@ -88,6 +91,7 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
             - {name: egress-tls, mountPath: /etc/insight/egress-tls, readOnly: true}
+            - {name: nats-tls, mountPath: /etc/insight/nats-tls, readOnly: true}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - name: config
@@ -101,6 +105,13 @@ spec:
               - {key: {{ .Values.egressTls.keys.ca }}, path: ca.pem}
               - {key: {{ .Values.egressTls.keys.certificate }}, path: client.pem}
               - {key: {{ .Values.egressTls.keys.privateKey }}, path: client-key.pem}
+        - name: nats-tls
+          secret:
+            secretName: {{ .Values.natsTls.existingSecret }}
+            items:
+              - {key: {{ .Values.natsTls.keys.ca }}, path: ca.pem}
+              - {key: {{ .Values.natsTls.keys.certificate }}, path: client.pem}
+              - {key: {{ .Values.natsTls.keys.privateKey }}, path: client-key.pem}
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
 {{- if .Values.podDisruptionBudget.enabled }}
 ---

@@ -306,6 +306,7 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
         request: ModelAdapterExecutionRequest {
             schema_version: 1,
             tenant_id,
+            run_id: id(ResourceKind::Run, 19),
             model_turn_id,
             job_id: id(ResourceKind::Job, 22),
             worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 23),
@@ -437,7 +438,12 @@ struct CapturingSink {
 
 #[async_trait]
 impl ModelLiveDeltaSink for CapturingSink {
-    async fn publish(&self, frame: &NormalizedModelFrame) {
+    async fn publish(
+        &self,
+        execution: &ModelAdapterExecutionRequest,
+        frame: &NormalizedModelFrame,
+    ) {
+        assert_eq!(execution.model_turn_id, frame.model_turn_id);
         self.frames.lock().unwrap().push(frame.clone());
     }
 }

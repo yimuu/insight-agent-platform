@@ -788,3 +788,36 @@ fn cancel_wins_against_late_completion_and_stream_is_fenced() {
         ModelTurnError::StreamAlreadyTerminal
     );
 }
+
+#[test]
+fn live_text_delta_is_closed_and_fence_bound() {
+    let fixture = fixture();
+    let delta = ModelLiveTextDelta {
+        schema_version: 1,
+        tenant_id: fixture.command.audit.tenant_id.clone(),
+        run_id: fixture.command.run_id.clone(),
+        model_turn_id: fixture.command.model_turn_id.clone(),
+        job_id: id(ResourceKind::Job, 0x601),
+        worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x602),
+        attempt_no: 1,
+        lease_generation: 1,
+        transport_sequence: 1,
+        request_digest: crate::types::digest(&fixture.request).unwrap(),
+        classification: fixture.request.classification,
+        text: "bounded live text".to_owned(),
+    };
+    delta.validate(fixture.limits).unwrap();
+
+    let mut wrong_run = delta.clone();
+    wrong_run.run_id = id(ResourceKind::Job, 0x603);
+    assert_eq!(
+        wrong_run.validate(fixture.limits),
+        Err(ModelTurnError::InvalidStream)
+    );
+    let mut private_delta = delta;
+    private_delta.text = "contains\0nul".to_owned();
+    assert_eq!(
+        private_delta.validate(fixture.limits),
+        Err(ModelTurnError::InvalidStream)
+    );
+}
