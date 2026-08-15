@@ -38,11 +38,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   "schema_version" 1
   "listen_address" (printf "0.0.0.0:%d" (int .Values.controller.port))
   "database_max_connections" (int .Values.controller.database.maxConnections)
-  "artifact_provider_catalog" .Values.controller.artifactProviderCatalog
   "artifact_broker" (dict
-    "maximum_in_flight" (int .Values.controller.artifactBroker.maximum_in_flight)
-    "maximum_read_bytes" (int .Values.controller.artifactBroker.maximum_read_bytes)
-    "operation_timeout_milliseconds" (int .Values.controller.artifactBroker.operation_timeout_milliseconds))
+    "endpoint" .Values.controller.artifactBroker.endpoint
+    "tls_server_name" .Values.controller.artifactBroker.tlsServerName
+    "maximum_request_bytes" (int .Values.controller.artifactBroker.maximumRequestBytes)
+    "maximum_chunk_bytes" (int .Values.controller.artifactBroker.maximumChunkBytes)
+    "maximum_in_flight_responses" (int .Values.controller.artifactBroker.maximumInFlightResponses))
   "process_isolation_attestor" (dict
     "tls_server_name" .Values.controller.attestor.tlsServerName
     "attestor_identity_digest" .Values.controller.attestor.identityDigest

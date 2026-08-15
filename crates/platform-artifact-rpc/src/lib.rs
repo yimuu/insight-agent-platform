@@ -1,19 +1,39 @@
 //! Versioned internal gRPC boundary for the independently deployed Artifact Broker.
 //!
-//! Model Workers submit one exact, credential-free read authority request. The Broker returns
-//! bytes only after PostgreSQL authorization, exact-version object verification and a second
-//! authorization. The wire is bounded, canonical and chunked; it never carries an object locator,
-//! storage credential or generic operation name supplied by the caller.
+//! Model Workers and the Sandbox Controller submit exact, credential-free read authority
+//! requests. The Broker returns bytes only after PostgreSQL authorization, exact-version object
+//! verification and a second authorization. The wire is bounded, canonical and chunked; it never
+//! carries an object locator, storage credential or generic operation name supplied by the caller.
 
 use async_trait::async_trait;
-use futures::{stream, Stream};
-use insight_platform_contracts::{parse_strict_json, JsonLimits, Sha256Digest};
+use futures::Stream;
+use insight_platform_contracts::{
+    parse_strict_json, ArtifactRef, JsonLimits, ResourceKind, Sha256Digest,
+};
 use insight_platform_models::{
     ModelArtifactBroker, ModelArtifactBrokerError, ModelArtifactReadRequest, ModelTurnLimits,
 };
+use insight_platform_sandbox::{
+    MicroVmArtifactBroker, WasiArtifactBroker, WasiArtifactReadPurpose,
+};
+pub use insight_platform_sandbox::{
+    MicroVmArtifactBrokerError, MicroVmArtifactReadRequest, WasiArtifactBrokerError,
+    WasiArtifactReadRequest,
+};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::{error::Error, fmt, pin::Pin, sync::Arc};
+use std::{
+    error::Error,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        Arc, Mutex,
+    },
+    task::{Context, Poll},
+    time::{Duration as StdDuration, SystemTime},
+};
 use tonic::{Request, Response, Status};
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
@@ -23,16 +43,24 @@ pub mod proto {
 
 use proto::{
     artifact_model_broker_service_client::ArtifactModelBrokerServiceClient,
-    artifact_model_broker_service_server::ArtifactModelBrokerService, ArtifactReadChunk,
+    artifact_model_broker_service_server::ArtifactModelBrokerService,
+    artifact_sandbox_broker_service_client::ArtifactSandboxBrokerServiceClient,
+    artifact_sandbox_broker_service_server::ArtifactSandboxBrokerService, ArtifactReadChunk,
     ClosedArtifactReadRequest,
 };
 
 pub const ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_WORKER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/model-worker";
+pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/sandbox-controller";
 pub const MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD: usize = 1_048_576;
 pub const MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD: usize = 262_144;
 const MODEL_REQUEST_READ_OPERATION: &str = "artifact.model_request.read/v1";
 const MODEL_REQUEST_CHUNK_OPERATION: &str = "artifact.model_request.chunk/v1";
+const WASI_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.wasi.read/v1";
+const WASI_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.wasi.chunk/v1";
+const MICRO_VM_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.microvm.read/v1";
+const MICRO_VM_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.microvm.chunk/v1";
 const RPC_MESSAGE_OVERHEAD_BYTES: usize = 8_192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +128,23 @@ impl tonic::service::Interceptor for ModelWorkerWorkloadIdentity {
     }
 }
 
+/// Authorizes only the Sandbox Controller at the Sandbox materialization boundary.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SandboxControllerWorkloadIdentity;
+
+impl tonic::service::Interceptor for SandboxControllerWorkloadIdentity {
+    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        let certificates = request
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        let leaf = certificates
+            .first()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        require_exact_workload_uri(leaf.as_ref(), SANDBOX_CONTROLLER_WORKLOAD_IDENTITY)?;
+        Ok(request)
+    }
+}
+
 fn require_exact_workload_uri(certificate: &[u8], expected: &str) -> Result<(), Status> {
     let (remainder, certificate) = parse_x509_certificate(certificate)
         .map_err(|_| Status::unauthenticated("client certificate is invalid"))?;
@@ -163,80 +208,372 @@ impl ModelArtifactBroker for ArtifactModelBrokerGrpcClient {
             .artifact()
             .cloned()
             .ok_or(ModelArtifactBrokerError::Denied)?;
+        let maximum_bytes = request.maximum_bytes;
         let envelope = encode_request(MODEL_REQUEST_READ_OPERATION, &request, self.rpc_limits)
             .map_err(|_| ModelArtifactBrokerError::Integrity)?;
         let request_digest = envelope.request_digest.clone();
+        let deadline = SystemTime::from(request.deadline);
+        let rpc_request = request_with_domain_deadline(envelope, deadline)
+            .map_err(map_model_client_read_error)?;
         let mut client = self.client.clone();
-        let mut response = client
-            .read_model_request(envelope)
-            .await
-            .map_err(map_client_status)?
-            .into_inner();
+        let mut response =
+            await_rpc_before_deadline(deadline, client.read_model_request(rpc_request))
+                .await
+                .map_err(map_model_client_read_error)?
+                .into_inner();
         let expected_length = usize::try_from(artifact.byte_length())
             .map_err(|_| ModelArtifactBrokerError::TooLarge)?;
-        if expected_length != request.maximum_bytes {
+        if expected_length != maximum_bytes {
             return Err(ModelArtifactBrokerError::Integrity);
         }
-        let mut bytes = Vec::with_capacity(expected_length);
-        let mut expected_sequence = 0_u64;
-        let mut observed_terminal = false;
-        while let Some(chunk) = response.message().await.map_err(map_client_status)? {
-            if observed_terminal {
-                return Err(ModelArtifactBrokerError::Integrity);
-            }
-            validate_chunk(
-                &chunk,
-                &request_digest,
-                expected_sequence,
-                &artifact,
-                self.rpc_limits,
-            )?;
-            let next_length = bytes
-                .len()
-                .checked_add(chunk.payload.len())
-                .ok_or(ModelArtifactBrokerError::TooLarge)?;
-            if next_length > expected_length {
-                return Err(ModelArtifactBrokerError::TooLarge);
-            }
-            bytes.extend_from_slice(&chunk.payload);
-            expected_sequence = expected_sequence
-                .checked_add(1)
-                .ok_or(ModelArtifactBrokerError::Integrity)?;
-            observed_terminal = chunk.terminal;
+        collect_artifact_stream(
+            &mut response,
+            &request_digest,
+            MODEL_REQUEST_CHUNK_OPERATION,
+            &artifact,
+            maximum_bytes,
+            self.rpc_limits,
+            deadline,
+        )
+        .await
+        .map_err(map_model_client_read_error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactClientReadError {
+    Unavailable,
+    Denied,
+    NotFound,
+    TooLarge,
+    Integrity,
+}
+
+async fn collect_artifact_stream(
+    response: &mut tonic::Streaming<ArtifactReadChunk>,
+    request_digest: &str,
+    chunk_operation: &str,
+    artifact: &ArtifactRef,
+    maximum_bytes: usize,
+    limits: ArtifactInternalRpcLimits,
+    deadline: SystemTime,
+) -> Result<Vec<u8>, ArtifactClientReadError> {
+    let expected_length =
+        usize::try_from(artifact.byte_length()).map_err(|_| ArtifactClientReadError::TooLarge)?;
+    if expected_length > maximum_bytes {
+        return Err(ArtifactClientReadError::TooLarge);
+    }
+    let mut bytes = ZeroizingBytes::with_capacity(expected_length);
+    let mut expected_sequence = 0_u64;
+    let mut observed_terminal = false;
+    while let Some(chunk) = await_rpc_before_deadline(deadline, response.message()).await? {
+        if observed_terminal {
+            return Err(ArtifactClientReadError::Integrity);
         }
-        if !observed_terminal
-            || bytes.len() != expected_length
-            || digest_bytes(&bytes) != *artifact.content_digest()
+        validate_chunk(
+            &chunk,
+            request_digest,
+            chunk_operation,
+            expected_sequence,
+            artifact,
+            limits,
+        )?;
+        let next_length = bytes
+            .len()
+            .checked_add(chunk.payload.len())
+            .ok_or(ArtifactClientReadError::TooLarge)?;
+        if next_length > expected_length || next_length > maximum_bytes {
+            return Err(ArtifactClientReadError::TooLarge);
+        }
+        if (chunk.terminal && next_length != expected_length)
+            || (!chunk.terminal && next_length >= expected_length)
         {
-            bytes.fill(0);
-            return Err(ModelArtifactBrokerError::Integrity);
+            return Err(ArtifactClientReadError::Integrity);
         }
-        Ok(bytes)
+        bytes.extend_from_slice(&chunk.payload);
+        expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or(ArtifactClientReadError::Integrity)?;
+        observed_terminal = chunk.terminal;
+    }
+    if !observed_terminal
+        || bytes.len() != expected_length
+        || digest_bytes(bytes.as_slice()) != *artifact.content_digest()
+    {
+        return Err(ArtifactClientReadError::Integrity);
+    }
+    Ok(bytes.into_inner())
+}
+
+struct ZeroizingBytes {
+    value: Vec<u8>,
+}
+
+impl ZeroizingBytes {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            value: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.value.len()
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.value
+    }
+
+    fn extend_from_slice(&mut self, value: &[u8]) {
+        self.value.extend_from_slice(value);
+    }
+
+    fn into_inner(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.value)
+    }
+}
+
+impl Drop for ZeroizingBytes {
+    fn drop(&mut self) {
+        self.value.fill(0);
     }
 }
 
 fn validate_chunk(
     chunk: &ArtifactReadChunk,
     request_digest: &str,
+    chunk_operation: &str,
     expected_sequence: u64,
-    artifact: &insight_platform_contracts::ArtifactRef,
+    artifact: &ArtifactRef,
     limits: ArtifactInternalRpcLimits,
-) -> Result<(), ModelArtifactBrokerError> {
+) -> Result<(), ArtifactClientReadError> {
     let expected_length = artifact.byte_length();
+    let empty_terminal = chunk.terminal && expected_length == 0 && expected_sequence == 0;
     if chunk.schema_version != ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION
-        || chunk.operation != MODEL_REQUEST_CHUNK_OPERATION
+        || chunk.operation != chunk_operation
         || chunk.request_digest != request_digest
         || chunk.sequence != expected_sequence
-        || chunk.payload.is_empty()
+        || (chunk.payload.is_empty() && !empty_terminal)
         || chunk.payload.len() > limits.maximum_chunk_bytes()
         || (!chunk.terminal && chunk.payload.len() != limits.maximum_chunk_bytes())
         || chunk.total_length != expected_length
         || chunk.content_digest != artifact.content_digest().to_string()
         || chunk.payload_digest != digest_bytes(&chunk.payload).to_string()
     {
-        return Err(ModelArtifactBrokerError::Integrity);
+        return Err(ArtifactClientReadError::Integrity);
     }
     Ok(())
+}
+
+/// Credential-free client used only by the Sandbox Controller. The closed WASI and microVM
+/// methods deliberately share transport plumbing but remain distinct domain operations.
+#[derive(Clone)]
+pub struct ArtifactSandboxBrokerGrpcClient {
+    client: ArtifactSandboxBrokerServiceClient<tonic::transport::Channel>,
+    rpc_limits: ArtifactInternalRpcLimits,
+}
+
+impl ArtifactSandboxBrokerGrpcClient {
+    pub fn new(channel: tonic::transport::Channel, rpc_limits: ArtifactInternalRpcLimits) -> Self {
+        let maximum = rpc_limits.maximum_message_bytes();
+        Self {
+            client: ArtifactSandboxBrokerServiceClient::new(channel)
+                .max_encoding_message_size(maximum)
+                .max_decoding_message_size(maximum),
+            rpc_limits,
+        }
+    }
+}
+
+#[async_trait]
+impl WasiArtifactBroker for ArtifactSandboxBrokerGrpcClient {
+    async fn read_exact(
+        &self,
+        request: WasiArtifactReadRequest,
+    ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
+        validate_wasi_read_request(&request)?;
+        let artifact = request.artifact.clone();
+        let maximum_bytes = request.maximum_bytes;
+        let envelope = encode_request(WASI_ARTIFACT_READ_OPERATION, &request, self.rpc_limits)
+            .map_err(|_| WasiArtifactBrokerError::Integrity)?;
+        let request_digest = envelope.request_digest.clone();
+        let deadline = SystemTime::from(request.deadline);
+        let request =
+            request_with_domain_deadline(envelope, deadline).map_err(map_wasi_client_read_error)?;
+        let mut client = self.client.clone();
+        let mut response = await_rpc_before_deadline(deadline, client.read_wasi_artifact(request))
+            .await
+            .map_err(map_wasi_client_read_error)?
+            .into_inner();
+        collect_artifact_stream(
+            &mut response,
+            &request_digest,
+            WASI_ARTIFACT_CHUNK_OPERATION,
+            &artifact,
+            maximum_bytes,
+            self.rpc_limits,
+            deadline,
+        )
+        .await
+        .map_err(map_wasi_client_read_error)
+    }
+}
+
+#[async_trait]
+impl MicroVmArtifactBroker for ArtifactSandboxBrokerGrpcClient {
+    async fn read_exact(
+        &self,
+        request: MicroVmArtifactReadRequest,
+    ) -> Result<Vec<u8>, MicroVmArtifactBrokerError> {
+        request.validate()?;
+        let artifact = request.artifact.clone();
+        let maximum_bytes = request.maximum_bytes;
+        let envelope = encode_request(MICRO_VM_ARTIFACT_READ_OPERATION, &request, self.rpc_limits)
+            .map_err(|_| MicroVmArtifactBrokerError::Integrity)?;
+        let request_digest = envelope.request_digest.clone();
+        let deadline = SystemTime::from(request.deadline);
+        let request = request_with_domain_deadline(envelope, deadline)
+            .map_err(map_micro_vm_client_read_error)?;
+        let mut client = self.client.clone();
+        let mut response =
+            await_rpc_before_deadline(deadline, client.read_micro_vm_artifact(request))
+                .await
+                .map_err(map_micro_vm_client_read_error)?
+                .into_inner();
+        collect_artifact_stream(
+            &mut response,
+            &request_digest,
+            MICRO_VM_ARTIFACT_CHUNK_OPERATION,
+            &artifact,
+            maximum_bytes,
+            self.rpc_limits,
+            deadline,
+        )
+        .await
+        .map_err(map_micro_vm_client_read_error)
+    }
+}
+
+fn validate_wasi_read_request(
+    request: &WasiArtifactReadRequest,
+) -> Result<(), WasiArtifactBrokerError> {
+    let grant_shape_valid = match request.purpose {
+        WasiArtifactReadPurpose::RuntimeBundle => request.read_grant.is_none(),
+        WasiArtifactReadPurpose::InputValue => request.read_grant.is_some(),
+    };
+    if request.tenant_id.kind() != ResourceKind::Tenant
+        || request.sandbox_job_id.kind() != ResourceKind::SandboxJob
+        || request.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+        || request.lease_generation == 0
+        || request.maximum_bytes == 0
+        || request.artifact.validate().is_err()
+        || u64::try_from(request.maximum_bytes)
+            .ok()
+            .is_none_or(|maximum| maximum < request.artifact.byte_length())
+        || !grant_shape_valid
+    {
+        return Err(WasiArtifactBrokerError::Denied);
+    }
+    Ok(())
+}
+
+fn remaining_until(deadline: SystemTime) -> Option<StdDuration> {
+    deadline
+        .duration_since(SystemTime::now())
+        .ok()
+        .filter(|remaining| !remaining.is_zero())
+}
+
+fn request_with_domain_deadline<T>(
+    message: T,
+    deadline: SystemTime,
+) -> Result<Request<T>, ArtifactClientReadError> {
+    let remaining = remaining_until(deadline).ok_or(ArtifactClientReadError::Unavailable)?;
+    let mut request = Request::new(message);
+    request.set_timeout(remaining);
+    Ok(request)
+}
+
+async fn await_rpc_before_deadline<T, F>(
+    deadline: SystemTime,
+    future: F,
+) -> Result<T, ArtifactClientReadError>
+where
+    F: Future<Output = Result<T, Status>>,
+{
+    let remaining = remaining_until(deadline).ok_or(ArtifactClientReadError::Unavailable)?;
+    tokio::time::timeout(remaining, future)
+        .await
+        .map_err(|_| ArtifactClientReadError::Unavailable)?
+        .map_err(classify_client_status)
+}
+
+fn server_deadline_budget(deadline: SystemTime) -> Result<StdDuration, Status> {
+    remaining_until(deadline)
+        .ok_or_else(|| Status::deadline_exceeded("Artifact read deadline elapsed"))
+}
+
+/// Exact bytes plus the opaque audience-capacity lease that authorized their materialization.
+/// The server moves both into one response stream so a slow or abandoned response continues to
+/// consume the same permit until the stream completes or is dropped.
+pub struct LeasedArtifactBytes {
+    bytes: Vec<u8>,
+    lease: Option<Box<dyn Send + 'static>>,
+}
+
+impl LeasedArtifactBytes {
+    pub fn new<L>(bytes: Vec<u8>, lease: L) -> Self
+    where
+        L: Send + 'static,
+    {
+        Self {
+            bytes,
+            lease: Some(Box::new(lease)),
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn into_parts(mut self) -> (Vec<u8>, Box<dyn Send + 'static>) {
+        let bytes = std::mem::take(&mut self.bytes);
+        let lease = self
+            .lease
+            .take()
+            .expect("Artifact response lease is present until the stream takes ownership");
+        (bytes, lease)
+    }
+}
+
+impl Drop for LeasedArtifactBytes {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
+    }
+}
+
+#[async_trait]
+pub trait ModelArtifactResponseBroker: Send + Sync {
+    async fn read_for_response(
+        &self,
+        request: ModelArtifactReadRequest,
+    ) -> Result<LeasedArtifactBytes, ModelArtifactBrokerError>;
+}
+
+#[async_trait]
+pub trait WasiArtifactResponseBroker: Send + Sync {
+    async fn read_wasi_for_response(
+        &self,
+        request: WasiArtifactReadRequest,
+    ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError>;
+}
+
+#[async_trait]
+pub trait MicroVmArtifactResponseBroker: Send + Sync {
+    async fn read_micro_vm_for_response(
+        &self,
+        request: MicroVmArtifactReadRequest,
+    ) -> Result<LeasedArtifactBytes, MicroVmArtifactBrokerError>;
 }
 
 pub struct ArtifactModelBrokerGrpcService<B> {
@@ -262,7 +599,7 @@ impl<B> ArtifactModelBrokerGrpcService<B> {
 #[tonic::async_trait]
 impl<B> ArtifactModelBrokerService for ArtifactModelBrokerGrpcService<B>
 where
-    B: ModelArtifactBroker + 'static,
+    B: ModelArtifactResponseBroker + 'static,
 {
     type ReadModelRequestStream =
         Pin<Box<dyn Stream<Item = Result<ArtifactReadChunk, Status>> + Send + 'static>>;
@@ -282,26 +619,143 @@ where
             .artifact()
             .cloned()
             .ok_or_else(|| Status::invalid_argument("invalid Artifact read request"))?;
-        let bytes = self
-            .broker
-            .read_exact(read)
-            .await
-            .map_err(map_server_error)?;
-        if u64::try_from(bytes.len()).ok() != Some(artifact.byte_length())
-            || digest_bytes(&bytes) != *artifact.content_digest()
-        {
-            return Err(Status::data_loss("Artifact Broker returned invalid bytes"));
-        }
-        let chunks = encode_chunks(
-            &bytes,
+        let deadline = SystemTime::from(read.deadline);
+        let read = tokio::time::timeout(
+            server_deadline_budget(deadline)?,
+            self.broker.read_for_response(read),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("Artifact read deadline elapsed"))?
+        .map_err(map_server_error)?;
+        artifact_read_stream(
+            read,
             &request_digest,
+            MODEL_REQUEST_CHUNK_OPERATION,
             &artifact,
             self.rpc_limits.maximum_chunk_bytes(),
-        )?;
-        Ok(Response::new(Box::pin(stream::iter(
-            chunks.into_iter().map(Ok),
-        ))))
+            deadline,
+        )
     }
+}
+
+/// Server adapter for the two exact Sandbox materialization authorities. Endpoint-role
+/// authorization is installed by the process around the generated service and therefore runs
+/// before either method decodes a request or invokes the domain broker.
+pub struct ArtifactSandboxBrokerGrpcService<B> {
+    broker: Arc<B>,
+    rpc_limits: ArtifactInternalRpcLimits,
+}
+
+impl<B> ArtifactSandboxBrokerGrpcService<B> {
+    pub fn new(broker: Arc<B>, rpc_limits: ArtifactInternalRpcLimits) -> Self {
+        Self { broker, rpc_limits }
+    }
+
+    async fn read_wasi(
+        &self,
+        envelope: ClosedArtifactReadRequest,
+    ) -> Result<Response<ArtifactReadStream>, Status>
+    where
+        B: WasiArtifactResponseBroker + 'static,
+    {
+        let request_digest = envelope.request_digest.clone();
+        let read: WasiArtifactReadRequest =
+            decode_request(envelope, WASI_ARTIFACT_READ_OPERATION, self.rpc_limits)
+                .map_err(Status::from)?;
+        validate_wasi_read_request(&read).map_err(map_wasi_server_error)?;
+        let artifact = read.artifact.clone();
+        let maximum_bytes = read.maximum_bytes;
+        let deadline = SystemTime::from(read.deadline);
+        let response_read = tokio::time::timeout(
+            server_deadline_budget(deadline)?,
+            self.broker.read_wasi_for_response(read),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("Artifact read deadline elapsed"))?
+        .map_err(map_wasi_server_error)?;
+        require_broker_bytes(response_read.as_bytes(), &artifact, maximum_bytes)?;
+        artifact_read_stream(
+            response_read,
+            &request_digest,
+            WASI_ARTIFACT_CHUNK_OPERATION,
+            &artifact,
+            self.rpc_limits.maximum_chunk_bytes(),
+            deadline,
+        )
+    }
+
+    async fn read_micro_vm(
+        &self,
+        envelope: ClosedArtifactReadRequest,
+    ) -> Result<Response<ArtifactReadStream>, Status>
+    where
+        B: MicroVmArtifactResponseBroker + 'static,
+    {
+        let request_digest = envelope.request_digest.clone();
+        let read: MicroVmArtifactReadRequest =
+            decode_request(envelope, MICRO_VM_ARTIFACT_READ_OPERATION, self.rpc_limits)
+                .map_err(Status::from)?;
+        read.validate().map_err(map_micro_vm_server_error)?;
+        let artifact = read.artifact.clone();
+        let maximum_bytes = read.maximum_bytes;
+        let deadline = SystemTime::from(read.deadline);
+        let response_read = tokio::time::timeout(
+            server_deadline_budget(deadline)?,
+            self.broker.read_micro_vm_for_response(read),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("Artifact read deadline elapsed"))?
+        .map_err(map_micro_vm_server_error)?;
+        require_broker_bytes(response_read.as_bytes(), &artifact, maximum_bytes)?;
+        artifact_read_stream(
+            response_read,
+            &request_digest,
+            MICRO_VM_ARTIFACT_CHUNK_OPERATION,
+            &artifact,
+            self.rpc_limits.maximum_chunk_bytes(),
+            deadline,
+        )
+    }
+}
+
+type ArtifactReadStream =
+    Pin<Box<dyn Stream<Item = Result<ArtifactReadChunk, Status>> + Send + 'static>>;
+
+#[tonic::async_trait]
+impl<B> ArtifactSandboxBrokerService for ArtifactSandboxBrokerGrpcService<B>
+where
+    B: WasiArtifactResponseBroker + MicroVmArtifactResponseBroker + 'static,
+{
+    type ReadWasiArtifactStream = ArtifactReadStream;
+    type ReadMicroVmArtifactStream = ArtifactReadStream;
+
+    async fn read_wasi_artifact(
+        &self,
+        request: Request<ClosedArtifactReadRequest>,
+    ) -> Result<Response<Self::ReadWasiArtifactStream>, Status> {
+        self.read_wasi(request.into_inner()).await
+    }
+
+    async fn read_micro_vm_artifact(
+        &self,
+        request: Request<ClosedArtifactReadRequest>,
+    ) -> Result<Response<Self::ReadMicroVmArtifactStream>, Status> {
+        self.read_micro_vm(request.into_inner()).await
+    }
+}
+
+fn require_broker_bytes(
+    bytes: &[u8],
+    artifact: &ArtifactRef,
+    maximum_bytes: usize,
+) -> Result<(), Status> {
+    if bytes.len() > maximum_bytes
+        || u64::try_from(bytes.len()).ok() != Some(artifact.byte_length())
+        || digest_bytes(bytes) != *artifact.content_digest()
+    {
+        return Err(Status::data_loss("Artifact Broker returned invalid bytes"));
+    }
+    Ok(())
 }
 
 fn encode_request<T: Serialize>(
@@ -357,32 +811,152 @@ fn decode_request<T: DeserializeOwned>(
     serde_json::from_value(value).map_err(|_| ArtifactRpcError::InvalidEnvelope)
 }
 
-fn encode_chunks(
-    bytes: &[u8],
+fn artifact_read_stream(
+    read: LeasedArtifactBytes,
     request_digest: &str,
-    artifact: &insight_platform_contracts::ArtifactRef,
+    chunk_operation: &'static str,
+    artifact: &ArtifactRef,
     maximum_chunk_bytes: usize,
-) -> Result<Vec<ArtifactReadChunk>, Status> {
-    if bytes.is_empty() || maximum_chunk_bytes == 0 {
+    deadline: SystemTime,
+) -> Result<Response<ArtifactReadStream>, Status> {
+    if maximum_chunk_bytes == 0 {
         return Err(Status::data_loss("Artifact Broker returned invalid bytes"));
     }
-    let chunk_count = bytes.len().div_ceil(maximum_chunk_bytes);
-    let mut chunks = Vec::with_capacity(chunk_count);
-    for (index, payload) in bytes.chunks(maximum_chunk_bytes).enumerate() {
-        chunks.push(ArtifactReadChunk {
-            schema_version: ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION,
-            operation: MODEL_REQUEST_CHUNK_OPERATION.to_owned(),
-            request_digest: request_digest.to_owned(),
-            sequence: u64::try_from(index)
-                .map_err(|_| Status::resource_exhausted("too many Artifact chunks"))?,
-            payload: payload.to_vec(),
-            payload_digest: digest_bytes(payload).to_string(),
-            content_digest: artifact.content_digest().to_string(),
-            total_length: artifact.byte_length(),
-            terminal: index + 1 == chunk_count,
-        });
+    let maximum_bytes = usize::try_from(artifact.byte_length())
+        .map_err(|_| Status::resource_exhausted("Artifact exceeds the read limit"))?;
+    require_broker_bytes(read.as_bytes(), artifact, maximum_bytes)?;
+    let deadline_budget = server_deadline_budget(deadline)?;
+    let (bytes, lease) = read.into_parts();
+    let response = Arc::new(Mutex::new(LeasedArtifactResponse {
+        bytes,
+        lease: Some(lease),
+    }));
+    let deadline_expired = Arc::new(AtomicBool::new(false));
+    let deadline_response = Arc::clone(&response);
+    let deadline_flag = Arc::clone(&deadline_expired);
+    let deadline_task = tokio::spawn(async move {
+        tokio::time::sleep(deadline_budget).await;
+        let mut response = deadline_response
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        response.release();
+        deadline_flag.store(true, AtomicOrdering::Release);
+    });
+    Ok(Response::new(Box::pin(ArtifactChunkStream {
+        response,
+        offset: 0,
+        sequence: 0,
+        terminal_emitted: false,
+        request_digest: request_digest.to_owned(),
+        chunk_operation,
+        content_digest: artifact.content_digest().to_string(),
+        total_length: artifact.byte_length(),
+        maximum_chunk_bytes,
+        deadline_expired,
+        deadline_task: Some(deadline_task),
+    })))
+}
+
+struct LeasedArtifactResponse {
+    bytes: Vec<u8>,
+    lease: Option<Box<dyn Send + 'static>>,
+}
+
+impl LeasedArtifactResponse {
+    fn release(&mut self) {
+        let mut bytes = std::mem::take(&mut self.bytes);
+        bytes.fill(0);
+        drop(bytes);
+        self.lease.take();
     }
-    Ok(chunks)
+}
+
+struct ArtifactChunkStream {
+    response: Arc<Mutex<LeasedArtifactResponse>>,
+    offset: usize,
+    sequence: u64,
+    terminal_emitted: bool,
+    request_digest: String,
+    chunk_operation: &'static str,
+    content_digest: String,
+    total_length: u64,
+    maximum_chunk_bytes: usize,
+    deadline_expired: Arc<AtomicBool>,
+    deadline_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ArtifactChunkStream {
+    fn release_response(&mut self) {
+        if let Some(deadline_task) = self.deadline_task.take() {
+            deadline_task.abort();
+        }
+        self.response
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .release();
+    }
+}
+
+impl Stream for ArtifactChunkStream {
+    type Item = Result<ArtifactReadChunk, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.terminal_emitted {
+            self.release_response();
+            return Poll::Ready(None);
+        }
+
+        let response = Arc::clone(&self.response);
+        let mut response = response
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.deadline_expired.load(AtomicOrdering::Acquire) {
+            drop(response);
+            self.terminal_emitted = true;
+            self.release_response();
+            return Poll::Ready(Some(Err(Status::deadline_exceeded(
+                "Artifact read deadline elapsed",
+            ))));
+        }
+
+        let start = self.offset;
+        let end = start
+            .saturating_add(self.maximum_chunk_bytes)
+            .min(response.bytes.len());
+        let payload = response.bytes[start..end].to_vec();
+        response.bytes[start..end].fill(0);
+        let terminal = end == response.bytes.len();
+        drop(response);
+        let chunk = ArtifactReadChunk {
+            schema_version: ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION,
+            operation: self.chunk_operation.to_owned(),
+            request_digest: self.request_digest.clone(),
+            sequence: self.sequence,
+            payload_digest: digest_bytes(&payload).to_string(),
+            payload,
+            content_digest: self.content_digest.clone(),
+            total_length: self.total_length,
+            terminal,
+        };
+        self.offset = end;
+        self.sequence = match self.sequence.checked_add(1) {
+            Some(sequence) => sequence,
+            None => {
+                self.terminal_emitted = true;
+                return Poll::Ready(Some(Err(Status::resource_exhausted(
+                    "too many Artifact chunks",
+                ))));
+            }
+        };
+        self.terminal_emitted = terminal;
+        Poll::Ready(Some(Ok(chunk)))
+    }
+}
+
+impl Drop for ArtifactChunkStream {
+    fn drop(&mut self) {
+        self.release_response();
+    }
 }
 
 fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
@@ -411,17 +985,77 @@ fn map_server_error(error: ModelArtifactBrokerError) -> Status {
     }
 }
 
-fn map_client_status(status: Status) -> ModelArtifactBrokerError {
+fn map_wasi_server_error(error: WasiArtifactBrokerError) -> Status {
+    match error {
+        WasiArtifactBrokerError::Unavailable => Status::unavailable("Artifact Broker unavailable"),
+        WasiArtifactBrokerError::Denied => Status::permission_denied("Artifact read denied"),
+        WasiArtifactBrokerError::NotFound => Status::not_found("Artifact not found"),
+        WasiArtifactBrokerError::TooLarge => {
+            Status::resource_exhausted("Artifact exceeds the read limit")
+        }
+        WasiArtifactBrokerError::Integrity => {
+            Status::data_loss("Artifact integrity verification failed")
+        }
+    }
+}
+
+fn map_micro_vm_server_error(error: MicroVmArtifactBrokerError) -> Status {
+    match error {
+        MicroVmArtifactBrokerError::Unavailable => {
+            Status::unavailable("Artifact Broker unavailable")
+        }
+        MicroVmArtifactBrokerError::Denied => Status::permission_denied("Artifact read denied"),
+        MicroVmArtifactBrokerError::NotFound => Status::not_found("Artifact not found"),
+        MicroVmArtifactBrokerError::TooLarge => {
+            Status::resource_exhausted("Artifact exceeds the read limit")
+        }
+        MicroVmArtifactBrokerError::Integrity => {
+            Status::data_loss("Artifact integrity verification failed")
+        }
+    }
+}
+
+fn classify_client_status(status: Status) -> ArtifactClientReadError {
     match status.code() {
         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
-            ModelArtifactBrokerError::Unavailable
+            ArtifactClientReadError::Unavailable
         }
         tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
-            ModelArtifactBrokerError::Denied
+            ArtifactClientReadError::Denied
         }
-        tonic::Code::NotFound => ModelArtifactBrokerError::NotFound,
-        tonic::Code::ResourceExhausted => ModelArtifactBrokerError::TooLarge,
-        _ => ModelArtifactBrokerError::Integrity,
+        tonic::Code::NotFound => ArtifactClientReadError::NotFound,
+        tonic::Code::ResourceExhausted => ArtifactClientReadError::TooLarge,
+        _ => ArtifactClientReadError::Integrity,
+    }
+}
+
+fn map_model_client_read_error(error: ArtifactClientReadError) -> ModelArtifactBrokerError {
+    match error {
+        ArtifactClientReadError::Unavailable => ModelArtifactBrokerError::Unavailable,
+        ArtifactClientReadError::Denied => ModelArtifactBrokerError::Denied,
+        ArtifactClientReadError::NotFound => ModelArtifactBrokerError::NotFound,
+        ArtifactClientReadError::TooLarge => ModelArtifactBrokerError::TooLarge,
+        ArtifactClientReadError::Integrity => ModelArtifactBrokerError::Integrity,
+    }
+}
+
+fn map_wasi_client_read_error(error: ArtifactClientReadError) -> WasiArtifactBrokerError {
+    match error {
+        ArtifactClientReadError::Unavailable => WasiArtifactBrokerError::Unavailable,
+        ArtifactClientReadError::Denied => WasiArtifactBrokerError::Denied,
+        ArtifactClientReadError::NotFound => WasiArtifactBrokerError::NotFound,
+        ArtifactClientReadError::TooLarge => WasiArtifactBrokerError::TooLarge,
+        ArtifactClientReadError::Integrity => WasiArtifactBrokerError::Integrity,
+    }
+}
+
+fn map_micro_vm_client_read_error(error: ArtifactClientReadError) -> MicroVmArtifactBrokerError {
+    match error {
+        ArtifactClientReadError::Unavailable => MicroVmArtifactBrokerError::Unavailable,
+        ArtifactClientReadError::Denied => MicroVmArtifactBrokerError::Denied,
+        ArtifactClientReadError::NotFound => MicroVmArtifactBrokerError::NotFound,
+        ArtifactClientReadError::TooLarge => MicroVmArtifactBrokerError::TooLarge,
+        ArtifactClientReadError::Integrity => MicroVmArtifactBrokerError::Integrity,
     }
 }
 
@@ -452,16 +1086,18 @@ impl From<ArtifactRpcError> for Status {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+    use futures::StreamExt as _;
     use insight_platform_contracts::{
         checked_in_hard_limit_profile, ArtifactRef, DataClassification, ResourceId, ResourceKind,
     };
     use insight_platform_models::{ExactInvocationValueRef, InvocationValueStorage, JobFence};
+    use insight_platform_sandbox::{MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind};
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose, SanType,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::oneshot;
+    use tokio::sync::{oneshot, Semaphore};
     use tonic::transport::{
         server::TcpIncoming, Certificate, ClientTlsConfig, Endpoint, Identity, Server,
         ServerTlsConfig,
@@ -477,16 +1113,20 @@ mod tests {
             .unwrap()
     }
 
-    fn request(bytes: &[u8]) -> ModelArtifactReadRequest {
-        let artifact = ArtifactRef::new(
+    fn artifact(bytes: &[u8], display_name: &str) -> ArtifactRef {
+        ArtifactRef::new(
             id(ResourceKind::Artifact),
             digest_bytes(bytes),
             u64::try_from(bytes.len()).unwrap(),
-            "application/json",
+            "application/octet-stream",
             DataClassification::Internal,
-            Some("model-request.json".to_owned()),
+            Some(display_name.to_owned()),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn request(bytes: &[u8]) -> ModelArtifactReadRequest {
+        let artifact = artifact(bytes, "model-request.json");
         ModelArtifactReadRequest {
             schema_version: 1,
             tenant_id: id(ResourceKind::Tenant),
@@ -516,19 +1156,125 @@ mod tests {
         }
     }
 
+    fn wasi_request(bytes: &[u8]) -> WasiArtifactReadRequest {
+        WasiArtifactReadRequest {
+            tenant_id: id(ResourceKind::Tenant),
+            sandbox_job_id: id(ResourceKind::SandboxJob),
+            request_digest: digest('d'),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+            lease_generation: 2,
+            artifact: artifact(bytes, "runtime.wasm"),
+            purpose: WasiArtifactReadPurpose::RuntimeBundle,
+            read_grant: None,
+            maximum_bytes: bytes.len(),
+            deadline: Utc::now() + Duration::minutes(1),
+        }
+    }
+
+    fn micro_vm_request(bytes: &[u8]) -> MicroVmArtifactReadRequest {
+        MicroVmArtifactReadRequest {
+            workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
+            tenant_id: id(ResourceKind::Tenant),
+            sandbox_job_id: id(ResourceKind::SandboxJob),
+            request_digest: digest('e'),
+            executor_worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+            provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+            sandbox_identity_digest: digest('f'),
+            lease_generation: 3,
+            artifact: artifact(bytes, "runtime.ext4"),
+            purpose: MicroVmArtifactReadPurpose::RuntimeBundle,
+            read_grant: None,
+            maximum_bytes: bytes.len(),
+            deadline: Utc::now() + Duration::minutes(1),
+        }
+    }
+
     struct RecordingBroker {
         bytes: Vec<u8>,
         calls: AtomicUsize,
     }
 
     #[async_trait]
-    impl ModelArtifactBroker for RecordingBroker {
-        async fn read_exact(
+    impl ModelArtifactResponseBroker for RecordingBroker {
+        async fn read_for_response(
             &self,
             _request: ModelArtifactReadRequest,
-        ) -> Result<Vec<u8>, ModelArtifactBrokerError> {
+        ) -> Result<LeasedArtifactBytes, ModelArtifactBrokerError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
-            Ok(self.bytes.clone())
+            Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
+        }
+    }
+
+    struct RecordingSandboxBroker {
+        bytes: Vec<u8>,
+        wasi_calls: AtomicUsize,
+        micro_vm_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WasiArtifactResponseBroker for RecordingSandboxBroker {
+        async fn read_wasi_for_response(
+            &self,
+            _request: WasiArtifactReadRequest,
+        ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError> {
+            self.wasi_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
+        }
+    }
+
+    #[async_trait]
+    impl MicroVmArtifactResponseBroker for RecordingSandboxBroker {
+        async fn read_micro_vm_for_response(
+            &self,
+            _request: MicroVmArtifactReadRequest,
+        ) -> Result<LeasedArtifactBytes, MicroVmArtifactBrokerError> {
+            self.micro_vm_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
+        }
+    }
+
+    struct AudienceCapacityBroker {
+        bytes: Vec<u8>,
+        model: Arc<Semaphore>,
+        sandbox: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl ModelArtifactResponseBroker for AudienceCapacityBroker {
+        async fn read_for_response(
+            &self,
+            _request: ModelArtifactReadRequest,
+        ) -> Result<LeasedArtifactBytes, ModelArtifactBrokerError> {
+            let permit = Arc::clone(&self.model)
+                .try_acquire_owned()
+                .map_err(|_| ModelArtifactBrokerError::Unavailable)?;
+            Ok(LeasedArtifactBytes::new(self.bytes.clone(), permit))
+        }
+    }
+
+    #[async_trait]
+    impl WasiArtifactResponseBroker for AudienceCapacityBroker {
+        async fn read_wasi_for_response(
+            &self,
+            _request: WasiArtifactReadRequest,
+        ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError> {
+            let permit = Arc::clone(&self.sandbox)
+                .try_acquire_owned()
+                .map_err(|_| WasiArtifactBrokerError::Unavailable)?;
+            Ok(LeasedArtifactBytes::new(self.bytes.clone(), permit))
+        }
+    }
+
+    #[async_trait]
+    impl MicroVmArtifactResponseBroker for AudienceCapacityBroker {
+        async fn read_micro_vm_for_response(
+            &self,
+            _request: MicroVmArtifactReadRequest,
+        ) -> Result<LeasedArtifactBytes, MicroVmArtifactBrokerError> {
+            let permit = Arc::clone(&self.sandbox)
+                .try_acquire_owned()
+                .map_err(|_| MicroVmArtifactBrokerError::Unavailable)?;
+            Ok(LeasedArtifactBytes::new(self.bytes.clone(), permit))
         }
     }
 
@@ -538,6 +1284,8 @@ mod tests {
         server_key_pem: String,
         model_certificate_pem: String,
         model_key_pem: String,
+        sandbox_controller_certificate_pem: String,
+        sandbox_controller_key_pem: String,
         wrong_certificate_pem: String,
         wrong_key_pem: String,
     }
@@ -570,6 +1318,12 @@ mod tests {
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
+        let (sandbox_controller_certificate_pem, sandbox_controller_key_pem) = issue(
+            vec![SanType::URI(
+                SANDBOX_CONTROLLER_WORKLOAD_IDENTITY.try_into().unwrap(),
+            )],
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
         let (wrong_certificate_pem, wrong_key_pem) = issue(
             vec![SanType::URI(
                 "spiffe://insight.platform/workload/capability-worker"
@@ -584,6 +1338,8 @@ mod tests {
             server_key_pem,
             model_certificate_pem,
             model_key_pem,
+            sandbox_controller_certificate_pem,
+            sandbox_controller_key_pem,
             wrong_certificate_pem,
             wrong_key_pem,
         }
@@ -620,10 +1376,36 @@ mod tests {
 
         let mut whitespace = envelope.clone();
         whitespace.canonical_request_json.push(b' ');
+        whitespace.request_digest = digest_bytes(&whitespace.canonical_request_json).to_string();
         assert!(decode_request::<ModelArtifactReadRequest>(
             whitespace,
             MODEL_REQUEST_READ_OPERATION,
             limits
+        )
+        .is_err());
+
+        let wasi = wasi_request(b"wasi-runtime");
+        let wasi_envelope = encode_request(WASI_ARTIFACT_READ_OPERATION, &wasi, limits).unwrap();
+        let decoded: WasiArtifactReadRequest =
+            decode_request(wasi_envelope.clone(), WASI_ARTIFACT_READ_OPERATION, limits).unwrap();
+        assert_eq!(decoded, wasi);
+        let mut digest_tamper = wasi_envelope;
+        digest_tamper.request_digest = digest('9').to_string();
+        assert!(decode_request::<WasiArtifactReadRequest>(
+            digest_tamper,
+            WASI_ARTIFACT_READ_OPERATION,
+            limits,
+        )
+        .is_err());
+
+        let micro_vm = micro_vm_request(b"microvm-runtime");
+        let mut operation_tamper =
+            encode_request(MICRO_VM_ARTIFACT_READ_OPERATION, &micro_vm, limits).unwrap();
+        operation_tamper.operation = WASI_ARTIFACT_READ_OPERATION.to_owned();
+        assert!(decode_request::<MicroVmArtifactReadRequest>(
+            operation_tamper,
+            MICRO_VM_ARTIFACT_READ_OPERATION,
+            limits,
         )
         .is_err());
 
@@ -635,6 +1417,186 @@ mod tests {
             limits
         )
         .is_err());
+    }
+
+    #[test]
+    fn grpc_timeout_is_positive_and_does_not_exceed_the_domain_deadline() {
+        fn decode_grpc_timeout(value: &str) -> StdDuration {
+            let (number, unit) = value.split_at(value.len() - 1);
+            let number = number.parse::<u64>().unwrap();
+            match unit {
+                "H" => StdDuration::from_secs(number * 60 * 60),
+                "M" => StdDuration::from_secs(number * 60),
+                "S" => StdDuration::from_secs(number),
+                "m" => StdDuration::from_millis(number),
+                "u" => StdDuration::from_micros(number),
+                "n" => StdDuration::from_nanos(number),
+                _ => panic!("unexpected gRPC timeout unit"),
+            }
+        }
+
+        let domain_budget = StdDuration::from_secs(5);
+        let request =
+            request_with_domain_deadline((), SystemTime::now().checked_add(domain_budget).unwrap())
+                .unwrap();
+        let encoded = request
+            .metadata()
+            .get("grpc-timeout")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let timeout = decode_grpc_timeout(encoded);
+        assert!(!timeout.is_zero());
+        assert!(timeout <= domain_budget);
+        assert!(matches!(
+            request_with_domain_deadline((), SystemTime::now()),
+            Err(ArtifactClientReadError::Unavailable)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_absolute_deadline_cancels_a_stalled_rpc_body_future() {
+        let deadline = SystemTime::now()
+            .checked_add(StdDuration::from_secs(30))
+            .unwrap();
+        let stalled = tokio::spawn(async move {
+            await_rpc_before_deadline(deadline, futures::future::pending::<Result<(), Status>>())
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(StdDuration::from_secs(31)).await;
+        assert_eq!(
+            stalled.await.unwrap(),
+            Err(ArtifactClientReadError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_streams_hold_independent_model_and_sandbox_audience_capacity() {
+        let bytes = br#"{"messages":[]}"#.to_vec();
+        let broker = Arc::new(AudienceCapacityBroker {
+            bytes: bytes.clone(),
+            model: Arc::new(Semaphore::new(1)),
+            sandbox: Arc::new(Semaphore::new(1)),
+        });
+        let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
+        let model_limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let model_service =
+            ArtifactModelBrokerGrpcService::new(Arc::clone(&broker), rpc_limits, model_limits);
+        let sandbox_service =
+            ArtifactSandboxBrokerGrpcService::new(Arc::clone(&broker), rpc_limits);
+
+        let model_envelope = || {
+            Request::new(
+                encode_request(MODEL_REQUEST_READ_OPERATION, &request(&bytes), rpc_limits).unwrap(),
+            )
+        };
+        let wasi_envelope = || {
+            Request::new(
+                encode_request(
+                    WASI_ARTIFACT_READ_OPERATION,
+                    &wasi_request(&bytes),
+                    rpc_limits,
+                )
+                .unwrap(),
+            )
+        };
+        let micro_vm_envelope = || {
+            Request::new(
+                encode_request(
+                    MICRO_VM_ARTIFACT_READ_OPERATION,
+                    &micro_vm_request(&bytes),
+                    rpc_limits,
+                )
+                .unwrap(),
+            )
+        };
+
+        let model_stream = model_service
+            .read_model_request(model_envelope())
+            .await
+            .unwrap()
+            .into_inner();
+        let rejected_model = model_service
+            .read_model_request(model_envelope())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(rejected_model.code(), tonic::Code::Unavailable);
+
+        let mut sandbox_stream = sandbox_service
+            .read_wasi_artifact(wasi_envelope())
+            .await
+            .unwrap()
+            .into_inner();
+        let rejected_micro_vm = sandbox_service
+            .read_micro_vm_artifact(micro_vm_envelope())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(rejected_micro_vm.code(), tonic::Code::Unavailable);
+
+        while let Some(chunk) = sandbox_stream.next().await {
+            chunk.unwrap();
+        }
+        assert_eq!(broker.sandbox.available_permits(), 1);
+        let released_sandbox = sandbox_service
+            .read_micro_vm_artifact(micro_vm_envelope())
+            .await
+            .unwrap();
+        drop(released_sandbox);
+
+        drop(model_stream);
+        let released_model = model_service
+            .read_model_request(model_envelope())
+            .await
+            .unwrap();
+        drop(released_model);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_stream_releases_lease_at_domain_deadline_without_poll_or_drop() {
+        let bytes = br#"{"messages":[]}"#.to_vec();
+        let model_capacity = Arc::new(Semaphore::new(1));
+        let broker = Arc::new(AudienceCapacityBroker {
+            bytes: bytes.clone(),
+            model: Arc::clone(&model_capacity),
+            sandbox: Arc::new(Semaphore::new(1)),
+        });
+        let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
+        let model_limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let service =
+            ArtifactModelBrokerGrpcService::new(Arc::clone(&broker), rpc_limits, model_limits);
+
+        let mut stalled_request = request(&bytes);
+        stalled_request.deadline = Utc::now() + Duration::seconds(30);
+        let mut stalled_stream = service
+            .read_model_request(Request::new(
+                encode_request(MODEL_REQUEST_READ_OPERATION, &stalled_request, rpc_limits).unwrap(),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(model_capacity.available_permits(), 0);
+
+        // Let the independently spawned deadline task register its timer, then advance time while
+        // retaining the stream without polling it. HTTP/2 backpressure has the same ownership
+        // shape: the stream and its buffered body remain live, but the capacity lease must not.
+        tokio::task::yield_now().await;
+        tokio::time::advance(StdDuration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(model_capacity.available_permits(), 1);
+
+        let released_capacity = service
+            .read_model_request(Request::new(
+                encode_request(MODEL_REQUEST_READ_OPERATION, &request(&bytes), rpc_limits).unwrap(),
+            ))
+            .await
+            .unwrap();
+        drop(released_capacity);
+
+        let expired = stalled_stream.next().await.unwrap().unwrap_err();
+        assert_eq!(expired.code(), tonic::Code::DeadlineExceeded);
     }
 
     #[tokio::test]
@@ -706,6 +1668,115 @@ mod tests {
             .unwrap_err();
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
         assert_eq!(broker.calls.load(Ordering::Acquire), 1);
+
+        drop(client);
+        drop(wrong_client);
+        shutdown_sender.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sandbox_mtls_streams_wasi_and_micro_vm_and_rejects_wrong_role_before_authority() {
+        let fixture = mtls_fixture();
+        let bytes = b"sandbox-runtime-material".to_vec();
+        let broker = Arc::new(RecordingSandboxBroker {
+            bytes: bytes.clone(),
+            wasi_calls: AtomicUsize::new(0),
+            micro_vm_calls: AtomicUsize::new(0),
+        });
+        let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = incoming.local_addr().unwrap();
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+        let service =
+            proto::artifact_sandbox_broker_service_server::ArtifactSandboxBrokerServiceServer::new(
+                ArtifactSandboxBrokerGrpcService::new(Arc::clone(&broker), rpc_limits),
+            )
+            .max_encoding_message_size(rpc_limits.maximum_message_bytes())
+            .max_decoding_message_size(rpc_limits.maximum_message_bytes());
+        let service = tonic::service::interceptor::InterceptedService::new(
+            service,
+            SandboxControllerWorkloadIdentity,
+        );
+        let tls = ServerTlsConfig::new()
+            .identity(Identity::from_pem(
+                &fixture.server_certificate_pem,
+                &fixture.server_key_pem,
+            ))
+            .client_ca_root(Certificate::from_pem(&fixture.ca_pem));
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(tls)
+                .unwrap()
+                .add_service(service)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_receiver.await;
+                })
+                .await
+                .unwrap();
+        });
+        let endpoint = format!("https://localhost:{}", address.port());
+
+        let accepted_channel = channel(
+            &endpoint,
+            &fixture,
+            &fixture.sandbox_controller_certificate_pem,
+            &fixture.sandbox_controller_key_pem,
+        )
+        .await;
+        let client = ArtifactSandboxBrokerGrpcClient::new(accepted_channel, rpc_limits);
+        assert_eq!(
+            WasiArtifactBroker::read_exact(&client, wasi_request(&bytes))
+                .await
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            MicroVmArtifactBroker::read_exact(&client, micro_vm_request(&bytes))
+                .await
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(broker.wasi_calls.load(Ordering::Acquire), 1);
+        assert_eq!(broker.micro_vm_calls.load(Ordering::Acquire), 1);
+
+        let wrong_channel = channel(
+            &endpoint,
+            &fixture,
+            &fixture.model_certificate_pem,
+            &fixture.model_key_pem,
+        )
+        .await;
+        let mut wrong_client = ArtifactSandboxBrokerServiceClient::new(wrong_channel);
+        let rejected_wasi = wrong_client
+            .read_wasi_artifact(
+                encode_request(
+                    WASI_ARTIFACT_READ_OPERATION,
+                    &wasi_request(&bytes),
+                    rpc_limits,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(rejected_wasi.code(), tonic::Code::PermissionDenied);
+        let rejected_micro_vm = wrong_client
+            .read_micro_vm_artifact(
+                encode_request(
+                    MICRO_VM_ARTIFACT_READ_OPERATION,
+                    &micro_vm_request(&bytes),
+                    rpc_limits,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(rejected_micro_vm.code(), tonic::Code::PermissionDenied);
+        assert_eq!(broker.wasi_calls.load(Ordering::Acquire), 1);
+        assert_eq!(broker.micro_vm_calls.load(Ordering::Acquire), 1);
 
         drop(client);
         drop(wrong_client);

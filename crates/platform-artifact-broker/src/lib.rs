@@ -20,7 +20,7 @@ use insight_platform_sandbox::{
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
-use tokio::{sync::Semaphore, time::timeout};
+use tokio::{sync::OwnedSemaphorePermit, sync::Semaphore, time::timeout};
 
 mod aws;
 
@@ -265,6 +265,50 @@ pub struct BrokeredModelArtifactBroker {
     core: ArtifactBrokerCore,
 }
 
+/// An exact Artifact read whose audience permit remains owned until the caller finishes with the
+/// returned bytes. RPC adapters must move this lease into the response stream.
+pub struct BrokeredArtifactRead {
+    bytes: Vec<u8>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+/// Opaque ownership of one audience capacity slot.
+pub struct ArtifactBrokerReadPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+impl BrokeredArtifactRead {
+    fn new(bytes: Vec<u8>, permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            bytes,
+            permit: Some(permit),
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+
+    pub fn into_response_parts(mut self) -> (Vec<u8>, ArtifactBrokerReadPermit) {
+        let bytes = std::mem::take(&mut self.bytes);
+        let permit = self
+            .permit
+            .take()
+            .expect("Artifact read permit is present until the lease is consumed");
+        (bytes, ArtifactBrokerReadPermit { _permit: permit })
+    }
+}
+
+impl Drop for BrokeredArtifactRead {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
+    }
+}
+
 struct ArtifactBrokerCore {
     unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
     stores: InstalledArtifactObjectStoreCatalog,
@@ -357,6 +401,39 @@ impl BrokeredModelArtifactBroker {
             authority,
             core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
         })
+    }
+
+    pub async fn read_for_response(
+        &self,
+        request: ModelArtifactReadRequest,
+    ) -> Result<BrokeredArtifactRead, ModelArtifactBrokerError> {
+        self.core
+            .read(self.authority.as_ref(), &request)
+            .await
+            .map_err(map_model_broker_error)
+    }
+}
+
+impl BrokeredSandboxArtifactBroker {
+    pub async fn read_wasi_for_response(
+        &self,
+        request: WasiArtifactReadRequest,
+    ) -> Result<BrokeredArtifactRead, WasiArtifactBrokerError> {
+        self.core
+            .read(self.wasi_authority.as_ref(), &request)
+            .await
+            .map_err(map_wasi_broker_error)
+    }
+
+    pub async fn read_micro_vm_for_response(
+        &self,
+        request: MicroVmArtifactReadRequest,
+    ) -> Result<BrokeredArtifactRead, MicroVmArtifactBrokerError> {
+        request.validate()?;
+        self.core
+            .read(self.micro_vm_authority.as_ref(), &request)
+            .await
+            .map_err(map_micro_vm_broker_error)
     }
 }
 
@@ -452,7 +529,7 @@ impl ArtifactBrokerCore {
         &self,
         authority: &dyn ArtifactObjectReadAuthority<R>,
         request: &R,
-    ) -> Result<Vec<u8>, ArtifactBrokerReadError>
+    ) -> Result<BrokeredArtifactRead, ArtifactBrokerReadError>
     where
         R: ArtifactReadRequest + Sync,
     {
@@ -467,11 +544,10 @@ impl ArtifactBrokerCore {
             .to_std()
             .map_err(|_| ArtifactBrokerReadError::Denied)?;
         let budget = self.limits.operation_timeout.min(deadline_budget);
-        let result = timeout(budget, self.read_inner(authority, request))
+        let bytes = timeout(budget, self.read_inner(authority, request))
             .await
-            .map_err(|_| ArtifactBrokerReadError::Unavailable)?;
-        drop(permit);
-        result
+            .map_err(|_| ArtifactBrokerReadError::Unavailable)??;
+        Ok(BrokeredArtifactRead::new(bytes, permit))
     }
 }
 
@@ -481,10 +557,9 @@ impl WasiArtifactBroker for BrokeredSandboxArtifactBroker {
         &self,
         request: WasiArtifactReadRequest,
     ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
-        self.core
-            .read(self.wasi_authority.as_ref(), &request)
+        self.read_wasi_for_response(request)
             .await
-            .map_err(map_wasi_broker_error)
+            .map(BrokeredArtifactRead::into_bytes)
     }
 }
 
@@ -494,11 +569,9 @@ impl MicroVmArtifactBroker for BrokeredSandboxArtifactBroker {
         &self,
         request: MicroVmArtifactReadRequest,
     ) -> Result<Vec<u8>, MicroVmArtifactBrokerError> {
-        request.validate()?;
-        self.core
-            .read(self.micro_vm_authority.as_ref(), &request)
+        self.read_micro_vm_for_response(request)
             .await
-            .map_err(map_micro_vm_broker_error)
+            .map(BrokeredArtifactRead::into_bytes)
     }
 }
 
@@ -508,10 +581,9 @@ impl ModelArtifactBroker for BrokeredModelArtifactBroker {
         &self,
         request: ModelArtifactReadRequest,
     ) -> Result<Vec<u8>, ModelArtifactBrokerError> {
-        self.core
-            .read(self.authority.as_ref(), &request)
+        self.read_for_response(request)
             .await
-            .map_err(map_model_broker_error)
+            .map(BrokeredArtifactRead::into_bytes)
     }
 }
 

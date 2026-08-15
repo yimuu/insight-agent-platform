@@ -17,7 +17,7 @@
   ],
   "properties": {
     "profile_id": { "const": "q1-50" },
-    "profile_version": { "type": "integer", "minimum": 1 },
+    "profile_version": { "const": 4 },
     "api": { "$ref": "#/$defs/api" },
     "registry_plan": { "$ref": "#/$defs/registry_plan" },
     "run_scheduler": { "$ref": "#/$defs/run_scheduler" },
@@ -146,11 +146,22 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "input_bytes", "output_bytes", "progress_events", "queue_depth", "cpu_millicores",
+        "input_bytes", "runtime_bundle_bytes", "output_bytes", "progress_events", "queue_depth", "cpu_millicores",
         "memory_mebibytes", "pids", "files", "io_bytes", "wall_seconds", "cleanup_seconds"
       ],
       "properties": {
         "input_bytes": { "$ref": "#/$defs/limit" },
+        "runtime_bundle_bytes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["unit", "hard_max", "q1_default", "overflow_outcome"],
+          "properties": {
+            "unit": { "const": "bytes" },
+            "hard_max": { "const": 67108864 },
+            "q1_default": { "const": 33554432 },
+            "overflow_outcome": { "const": "content_rejected" }
+          }
+        },
         "output_bytes": { "$ref": "#/$defs/limit" },
         "progress_events": { "$ref": "#/$defs/limit" },
         "queue_depth": { "$ref": "#/$defs/limit" },

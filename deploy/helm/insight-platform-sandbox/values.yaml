@@ -15,37 +15,13 @@ controller:
     existingSecret: insight-platform-sandbox-database
     urlKey: database-url
     maxConnections: 10
-  serviceAccount:
-    annotations: {}
-  workloadIdentity:
-    roleArn: arn:aws:iam::111122223333:role/insight-platform-sandbox-controller
-    audience: sts.amazonaws.com
-    tokenExpirationSeconds: 3600
-  artifactProviderCatalog:
-    schema_version: 1
-    s3_storage_bindings:
-      - schema_version: 1
-        storage_binding_digest: sha256:b5d4ea2254a7770284738b6ca76a8e7833899ebbe796d61a113f57bd5609b630
-        endpoint: https://s3.example.invalid
-        region: us-east-1
-        bucket: insight-platform
-        force_path_style: false
-        kms_binding_digest: sha256:ee8b022acf9fbbb8134127266a11a93cbca559aea8ff563d9cb95965e40719d8
-        connect_timeout_milliseconds: 5000
-        operation_timeout_milliseconds: 30000
-        maximum_object_bytes: 67108864
-    kms_key_bindings:
-      - schema_version: 1
-        kms_binding_digest: sha256:ee8b022acf9fbbb8134127266a11a93cbca559aea8ff563d9cb95965e40719d8
-        endpoint: https://kms.us-east-1.amazonaws.com
-        region: us-east-1
-        key_id: arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012
-        connect_timeout_milliseconds: 5000
-        operation_timeout_milliseconds: 30000
+  serviceAccount: {}
   artifactBroker:
-    maximum_in_flight: 32
-    maximum_read_bytes: 67108864
-    operation_timeout_milliseconds: 30000
+    endpoint: https://insight-platform-artifact-broker-sandbox.platform-artifacts.svc:9443
+    tlsServerName: insight-platform-artifact-broker-sandbox.platform-artifacts.svc
+    maximumRequestBytes: 1048576
+    maximumChunkBytes: 262144
+    maximumInFlightResponses: 1
   attestor:
     tlsServerName: sandbox-attestor.insight.internal
     identityDigest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -196,6 +172,9 @@ tls:
     attestorCa: attestor-ca.pem
     controllerClientCertificate: controller-client.pem
     controllerClientPrivateKey: controller-client-key.pem
+    artifactBrokerServerCa: artifact-broker-server-ca.pem
+    artifactBrokerClientCertificate: artifact-broker-client.pem
+    artifactBrokerClientPrivateKey: artifact-broker-client-key.pem
     executorClientCertificate: executor-client.pem
     executorClientPrivateKey: executor-client-key.pem
     attestorServerCertificate: attestor-server.pem
@@ -224,8 +203,9 @@ networkPolicy:
   # endpoint CIDRs recorded in the CandidateManifest.
   postgresCidrs: [10.10.0.0/24]
   natsCidrs: [10.20.0.0/24]
-  artifactProviderCidrs: [10.30.0.0/24]
-  workloadIdentityCidrs: [10.40.0.0/24]
+  artifactBrokerNamespaceSelector: {insight.platform/artifact-namespace: "true"}
+  artifactBrokerPodSelector: {insight.platform/workload-role: artifact-broker-sandbox}
+  artifactBrokerPort: 9443
   egressBrokerNamespaceSelector: {insight.platform/egress-namespace: "true"}
   egressBrokerPodSelector: {insight.platform/workload-role: egress-broker}
   egressBrokerPort: 8443

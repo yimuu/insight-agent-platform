@@ -64,6 +64,8 @@ pub enum SandboxIsolationBackendKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedSandbox {
+    /// Present only for a microVM prepared by one exact provider process generation.
+    pub provider_process_generation_id: Option<ResourceId>,
     pub sandbox_identity_digest: Sha256Digest,
     pub request_digest: Sha256Digest,
     pub attempt_no: u32,
@@ -72,13 +74,24 @@ pub struct PreparedSandbox {
 }
 
 impl PreparedSandbox {
-    fn validate_for(
+    pub(crate) fn validate_for(
         &self,
         request: &SandboxExecutionRequest,
     ) -> Result<(), SandboxBackendHostError> {
         if self.request_digest != request.request_digest
             || self.attempt_no != request.attempt_no
             || self.lease_generation != request.lease_generation
+            || match request.isolation_class {
+                SandboxIsolationClass::MicroVm => self
+                    .provider_process_generation_id
+                    .as_ref()
+                    .is_none_or(|generation| {
+                        generation.kind() != ResourceKind::WorkerProcessGeneration
+                    }),
+                SandboxIsolationClass::Wasm | SandboxIsolationClass::SandboxedContainer => {
+                    self.provider_process_generation_id.is_some()
+                }
+            }
         {
             return Err(SandboxBackendHostError::InvalidBackendEvidence);
         }
@@ -548,6 +561,7 @@ pub enum SandboxLifecycleObservation {
         target: SandboxJobState,
         executor_identity_digest: Sha256Digest,
         phase_evidence_digest: Sha256Digest,
+        prepared: Option<PreparedSandbox>,
     },
     Terminal {
         outcome: SandboxExecutionOutcome,
@@ -760,6 +774,7 @@ impl SandboxExecutorHost {
                 target: SandboxJobState::Preparing,
                 executor_identity_digest: executor_identity_digest.clone(),
                 phase_evidence_digest: phase_evidence_digest("preparing", &request, &resolved),
+                prepared: None,
             })
             .await
             .map_err(SandboxObservedExecutionError::Observer)?;
@@ -822,6 +837,7 @@ impl SandboxExecutorHost {
                 target: SandboxJobState::Starting,
                 executor_identity_digest: executor_identity_digest.clone(),
                 phase_evidence_digest: prepared.prepare_evidence_digest.clone(),
+                prepared: Some(prepared.clone()),
             })
             .await
         {
@@ -884,6 +900,7 @@ impl SandboxExecutorHost {
                 target: SandboxJobState::Running,
                 executor_identity_digest: executor_identity_digest.clone(),
                 phase_evidence_digest: running.start_evidence_digest.clone(),
+                prepared: None,
             })
             .await
         {
@@ -900,6 +917,7 @@ impl SandboxExecutorHost {
                 target: SandboxJobState::Collecting,
                 executor_identity_digest: executor_identity_digest.clone(),
                 phase_evidence_digest: phase_evidence_digest("collecting", &request, &resolved),
+                prepared: None,
             })
             .await
         {
@@ -1061,6 +1079,7 @@ impl SandboxExecutorHost {
                 request,
                 &backend.descriptor(),
             ),
+            prepared: None,
         };
         let (cancelling, abort) = tokio::join!(
             observer.observe(cancelling_observation),

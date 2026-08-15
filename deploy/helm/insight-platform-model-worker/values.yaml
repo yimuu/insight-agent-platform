@@ -39,7 +39,7 @@ networkPolicy:
   egressPodSelector: {app.kubernetes.io/component: egress-broker}
   egressPort: 8443
   artifactNamespace: platform-artifacts
-  artifactPodSelector: {app.kubernetes.io/component: artifact-broker}
+  artifactPodSelector: {insight.platform/workload-role: artifact-broker-model}
   artifactPort: 9443
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}

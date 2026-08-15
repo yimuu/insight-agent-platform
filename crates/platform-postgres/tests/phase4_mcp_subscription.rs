@@ -3101,11 +3101,85 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         .unwrap();
     assert_eq!(authorized.artifact, artifact_read.artifact);
     assert_eq!(authorized.tenant_id, artifact_read.tenant_id);
+
+    let started_version = started.physical_job.version;
+    let started = repository
+        .heartbeat_managed_mcp_sandbox_session(HeartbeatSandboxExecution {
+            tenant_id: winner.request.identity.tenant_id.clone(),
+            sandbox_job_id: winner.request.identity.sandbox_job_id.clone(),
+            job_id: winner.request.identity.physical_job_id.clone(),
+            fence: DomainJobFence {
+                expected_version: started.physical_job.version,
+                worker_process_generation_id: sandbox_worker.clone(),
+                lease_generation: started.physical_job.lease_generation,
+                token_digest: started
+                    .physical_job
+                    .lease
+                    .as_ref()
+                    .unwrap()
+                    .token_digest
+                    .clone(),
+            },
+            lease_milliseconds: 60_000,
+        })
+        .await
+        .unwrap();
+    assert_eq!(started.physical_job.version, started_version + 1);
+    let heartbeat_authorized = repository
+        .authorize_object_read(&artifact_read)
+        .await
+        .unwrap();
+    assert_eq!(
+        heartbeat_authorized.authorization_digest,
+        authorized.authorization_digest
+    );
+
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(winner.request.identity.tenant_id.to_string())
+    .bind(winner.request.identity.physical_job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        repository.authorize_object_read(&artifact_read).await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = $3, lease_expires_at = $4 WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(winner.request.identity.tenant_id.to_string())
+    .bind(winner.request.identity.physical_job_id.to_string())
+    .bind(started.physical_job.lease.as_ref().unwrap().heartbeat_at)
+    .bind(started.physical_job.lease.as_ref().unwrap().expires_at)
+    .execute(pool)
+    .await
+    .unwrap();
+
     let mut stale_artifact_read = artifact_read.clone();
     stale_artifact_read.executor_worker_process_generation_id =
         id(ResourceKind::WorkerProcessGeneration, 0x6b9);
     assert!(matches!(
         repository.authorize_object_read(&stale_artifact_read).await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
+    let mut wrong_provider_artifact_read = artifact_read.clone();
+    wrong_provider_artifact_read.provider_process_generation_id =
+        id(ResourceKind::WorkerProcessGeneration, 0x6ba);
+    assert!(matches!(
+        repository
+            .authorize_object_read(&wrong_provider_artifact_read)
+            .await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
+    let mut wrong_sandbox_identity_artifact_read = artifact_read.clone();
+    wrong_sandbox_identity_artifact_read.sandbox_identity_digest =
+        named_digest("managed-session-wrong-sandbox-identity");
+    assert!(matches!(
+        repository
+            .authorize_object_read(&wrong_sandbox_identity_artifact_read)
+            .await,
         Err(ArtifactObjectReadAuthorityError::Denied)
     ));
     let mut wrong_workload_artifact_read = artifact_read.clone();

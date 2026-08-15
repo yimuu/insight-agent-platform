@@ -376,7 +376,10 @@ mod tests {
         }
     }
 
-    fn candidate(workers: &[WorkerManifest]) -> CandidateManifest {
+    fn build_candidate(
+        workers: &[WorkerManifest],
+        hard_limit_profile: &HardLimitProfile,
+    ) -> Result<CandidateManifest, CandidateManifestError> {
         CandidateManifest::build(NewCandidateManifest {
             candidate_id: id(ResourceKind::ReleaseCandidate),
             git_commit: format!("sha1:{}", "a".repeat(40)).parse().unwrap(),
@@ -388,12 +391,15 @@ mod tests {
             ]),
             worker_manifests: workers,
             deployment_config_digest: sha('e'),
-            hard_limit_profile: &checked_in_hard_limit_profile(),
+            hard_limit_profile,
             policy_baseline_digest: sha('f'),
             qualification_profile: id(ResourceKind::QualificationProfile),
             created_at: "2026-08-14T12:00:00.000000Z".parse().unwrap(),
         })
-        .unwrap()
+    }
+
+    fn candidate(workers: &[WorkerManifest]) -> CandidateManifest {
+        build_candidate(workers, &checked_in_hard_limit_profile()).unwrap()
     }
 
     #[test]
@@ -461,6 +467,31 @@ mod tests {
         assert_eq!(
             noncanonical.validate().unwrap_err().field,
             "worker_manifests"
+        );
+    }
+
+    #[test]
+    fn candidate_rejects_old_or_drifted_hard_limit_contracts() {
+        let workers = [worker(
+            "orchestration.primary",
+            WorkClass::Orchestration,
+            '1',
+        )];
+        let mut old = checked_in_hard_limit_profile();
+        old.profile_version = crate::HARD_LIMIT_PROFILE_VERSION - 1;
+        assert_eq!(
+            build_candidate(&workers, &old).unwrap_err().field,
+            "hard_limit_profile_digest"
+        );
+
+        let mut drifted = checked_in_hard_limit_profile();
+        drifted
+            .capability_sandbox
+            .runtime_bundle_bytes
+            .overflow_outcome = crate::OverflowOutcome::QuotaExceeded;
+        assert_eq!(
+            build_candidate(&workers, &drifted).unwrap_err().field,
+            "hard_limit_profile_digest"
         );
     }
 

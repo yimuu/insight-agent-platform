@@ -1,7 +1,8 @@
 use crate::ManagedMcpSandboxProtocolAdapter;
 use async_trait::async_trait;
 use insight_platform_contracts::{
-    canonical_digest, Retryability, SandboxIsolationClass, SandboxJobState, Sha256Digest,
+    canonical_digest, ResourceId, Retryability, SandboxIsolationClass, SandboxJobState,
+    Sha256Digest,
 };
 use insight_platform_mcp_host::McpOperationOutcome;
 use insight_platform_sandbox::{
@@ -19,6 +20,7 @@ use std::{error::Error, fmt, sync::Arc};
 /// Evidence returned by the host-side VMM adapter after constructing a fresh, single-use jail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedMicroVm {
+    pub provider_process_generation_id: ResourceId,
     pub sandbox_identity_digest: Sha256Digest,
     pub prepare_evidence_digest: Sha256Digest,
 }
@@ -275,6 +277,7 @@ where
             .await
             .map_err(|failure| self.failure(SandboxBackendFailureStage::Preparing, failure))?;
         Ok(PreparedSandbox {
+            provider_process_generation_id: Some(prepared.provider_process_generation_id),
             sandbox_identity_digest: prepared.sandbox_identity_digest,
             request_digest: request.request_digest,
             attempt_no: request.attempt_no,
@@ -293,6 +296,13 @@ where
         if prepared.request_digest != request.request_digest
             || prepared.attempt_no != request.attempt_no
             || prepared.lease_generation != request.lease_generation
+            || prepared
+                .provider_process_generation_id
+                .as_ref()
+                .is_none_or(|generation| {
+                    generation.kind()
+                        != insight_platform_contracts::ResourceKind::WorkerProcessGeneration
+                })
         {
             return Err(self.failure(
                 SandboxBackendFailureStage::Starting,
@@ -305,6 +315,10 @@ where
                 &fence,
                 &request,
                 &PreparedMicroVm {
+                    provider_process_generation_id: prepared
+                        .provider_process_generation_id
+                        .clone()
+                        .expect("validated microVM prepared binding has a Provider generation"),
                     sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
                     prepare_evidence_digest: prepared.prepare_evidence_digest.clone(),
                 },

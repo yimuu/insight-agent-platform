@@ -437,7 +437,7 @@ retention/hold/suspension、grant generation 和 current policy。Object store r
 ### 13.1 受信物化与对象定位机器合同
 
 `artifact_blobs`中的`object_reference_ciphertext`是physical object locator的唯一durable
-authority。它只能由Artifact Broker读取；Sandbox Controller、Executor、Model/MCP/Capability
+authority。它只能由对应audience的Artifact Broker读取；Sandbox Controller、Executor、Model/MCP/Capability
 worker和公共API均不得取得明文locator、bucket credential或KMS plaintext。受信read authority在同一
 PostgreSQL snapshot中重验caller冻结的tenant/owner/Job/lease/Worker generation/request、exact grant或
 published package引用、Ready Artifact与Verified Blob后，返回以下非持久、不可Clone且Debug恒定脱敏的投影：
@@ -475,7 +475,20 @@ struct AuthorizedArtifactObjectRead {
 任何字段漂移均fail closed。plaintext和ciphertext buffer在drop时清零，且不得进入错误、日志、trace、
 metric label、Event、Receipt或Outbox。
 
-Artifact Broker从CandidateManifest安装的closed storage-binding catalog按exact digest选择client；catalog
+Artifact Broker是共享协议/实现族，不是共享运行时。生产物理边界固定为两个audience-isolated服务：
+
+- Model Artifact Broker是独立进程、Deployment、ServiceAccount、restricted PostgreSQL credential/pool和permit，只注册
+  `ArtifactModelBrokerService.ReadModelRequest`，只接受exact Model Worker URI SAN；
+- Sandbox Artifact Broker是另一组独立进程、Deployment、ServiceAccount、restricted PostgreSQL credential/pool和permit，只注册
+  `ArtifactSandboxBrokerService.ReadWasiArtifact`与`ReadMicroVmArtifact`，只接受exact Sandbox Controller URI SAN；WASI与
+  microVM允许共享Sandbox audience内的runtime、对象存储/KMS client和in-flight bulkhead。
+
+两者不得共享Pod、ServiceAccount、数据库连接池或process-local semaphore，任一audience的队列、正文、连接或对象存储请求饱和不得
+消耗另一audience的本地准入容量；不得通过同一listener动态选择audience，也不存在三方法通用服务或generic object read。实现可以复用
+无状态library与相同machine schema，但每个进程只能安装自己的RPC surface、mTLS allowlist、storage-binding catalog、workload identity和
+bounded resources。
+
+每个Artifact Broker从CandidateManifest安装的closed storage-binding catalog按exact digest选择client；catalog
 只含endpoint/region/bucket/path-style、timeout和hard byte limit，不含静态access key。生产S3/KMS client
 只能使用该Pod的短期workload identity/default credential chain和private endpoint。读取必须对exact
 `object_generation`执行HEAD及GET，禁止无version fallback；在流式聚合前核对长度上限，聚合后再次核对
@@ -485,7 +498,7 @@ failure，provider timeout/unavailable保持可重试但不得返回部分bytes�
 Model逻辑输入的受信读取请求还必须冻结tenant、ModelTurn、当前Job ID/version、lease generation/token digest、
 WorkerProcessGeneration、request digest、deadline、exact `model_request` RunValue、ModelTurn owner的active
 ArtifactLink以及ArtifactRef/maximum bytes。PostgreSQL read authority在同一snapshot中逐项重验后才能返回上述
-非持久投影；Broker完成object I/O后必须用同一closed请求再次授权。Model Worker取得bytes后仍须按Model请求的
+非持久投影；Model Artifact Broker完成object I/O后必须用同一closed请求再次授权。Model Worker取得bytes后仍须按Model请求的
 closed JSON限制重新解析，要求输入已是canonical JCS并重算逻辑值content digest；任何link替换、lease/fence漂移、
 非canonical正文或digest漂移都必须在Provider dispatch前fail closed。
 
@@ -531,10 +544,14 @@ MCP embedded resource/resource link 经过 size/media/URI/auth policy后 ingest 
 
 ### 15.4 Sandbox
 
-Sandbox input/output 使用 14 的 per-Job grant。Guest 只能读声明 input、写 staging output；不能指定 Artifact ID、
+Sandbox input/output 使用 14 的 per-Job grant，并只经Sandbox Artifact Broker物化。Guest 只能读声明 input、写 staging output；不能指定 Artifact ID、
 object key、classification 或 Ready 状态。`artifact_links`是撤销的唯一durable fact：Broker在Sandbox销毁证据形成前按exact
 Job/attempt/Worker generation/lease幂等推进`active -> released`，Job terminal事务释放遗漏项并核对request冻结的完整grant集合。
 重复撤销不得形成第二状态或阻止terminal；未 finalize output 进入 staging GC。
+
+Sandbox runtime bundle虽是普通Ready Artifact，其发布边界由18的HardLimitProfile version 4额外收紧：byte length必须非零且不超过
+`capability_sandbox.runtime_bundle_bytes.hard_max=67108864`，Q1 effective limit为33554432，溢出稳定为`content_rejected`。
+Artifact Ready不替代SandboxPackage发布校验，Broker读取上限也不能把非法Package延迟到Job执行时才发现。
 
 ## 16. Value 与 Inline Threshold
 
@@ -553,7 +570,7 @@ Inline threshold 由protocol/data classification在不超过18唯一
 ValueRef 的通用转换不会自动解析文件或执行内容。只有下游规范显式定义的trusted materializer
 可以在exact grant下读取Artifact-backed逻辑值；它必须重新核对tenant/digest/length/media/classification，并在
 使用前执行该消费者的exact schema validation。materializer不得直接接收object locator或storage credential；
-所有物理读取必须经13.1的Artifact Broker authority，且读取成功不替代消费者对canonical正文和逻辑digest的复验。
+所有物理读取必须经13.1中与调用方audience匹配的Artifact Broker authority，且读取成功不替代消费者对canonical正文和逻辑digest的复验。
 
 ## 17. Retention、Legal Hold 与删除
 
@@ -650,7 +667,8 @@ egress/download bytes
 - scan backlog 超过安全门槛时拒绝/延迟新高风险 upload，不把未扫描内容当 Ready；
 - large transfer 使用 streaming backpressure，不在内存缓冲全文件；
 - control/quarantine/revoke/delete 使用保留 capacity；
-- Artifact/S3 饱和不能耗尽 API/Scheduler/Model/MCP/Sandbox control DB pool。
+- Artifact/S3 饱和不能耗尽 API/Scheduler/Model/MCP/Sandbox control DB pool；Sandbox Artifact Broker的permit/DB pool耗尽也不能
+  占用Model Artifact Broker的permit/DB pool，反向同理。
 
 ## 21. 安全、租户与加密
 
@@ -765,13 +783,13 @@ fixture覆盖GC grace、exact approval、live link阻塞、same-Blob alias witne
 replay及Event/Receipt/Outbox原子闭合。CR-130要求的Artifact Job union、worker audit/current scan evidence、rescan与cleanup
 completion也已通过23项domain/worker fixture和fresh PostgreSQL 16 transaction fixture：rescan排队先进入Quarantined，只有exact
 WorkerProcessGeneration/Job fence可提交新证据，delete/blob cleanup必须匹配exact object generation、backend receipt与absence evidence。
-Model request读取现在还具有独立的Artifact Broker进程边界：versioned internal gRPC只暴露一个closed read方法，按
-`spiffe://insight.platform/workload/model-worker` URI SAN做exact mTLS role gate，并对canonical request digest、单调chunk sequence、
-每片/整体digest、总长度和唯一terminal frame逐项fail closed。Broker使用只读repeatable-read PostgreSQL authority，部署role只被授予
-七张共享权威表的`SELECT`；fresh PostgreSQL 16 fixture证明该role可以完成schema verify和exact Model Artifact授权，同时任意Job更新与
-Secret表读取均以`42501`拒绝。独立双副本Deployment/PDB/HPA、Restricted Pod与default-deny NetworkPolicy只允许Model Worker入站及
-DNS/PostgreSQL/S3/KMS/workload-identity所需出站。该切片没有新增表或migration。当前独立RPC只组合Model request读取；Sandbox Controller
-迁移、Artifact-backed output、真实object-store/KMS负向资格、scanner/GC provider、公开 `/v1` 和对应qualification尚未交付，不能由当前
+既有开发期实现已分别证明Model、WASI与microVM closed read authority、exact Model/Sandbox URI SAN、bounded stream、只读repeatable-read authority以及Job/Secret
+数据库越权拒绝；但此前把Model与Sandbox组合进同一process-wide runtime/in-flight bulkhead的部署证据已被本次architecture revision取代，
+不能证明新目标。当前实施批把它拆为Model与Sandbox两个Broker进程/Deployment/ServiceAccount/DB pool/permit；Model进程只注册一个Model
+read RPC，Sandbox进程只注册WASI与microVM两个RPC。双向mTLS/NetworkPolicy、不同DB credential/config/TLS identity、独立饱和和rolling
+restart门禁全部通过前，这一新拓扑仍只是target/implementation slice，不登记Gate或Phase完成。Sandbox Controller仍不得持有
+object-store/KMS credential或对应直出网络。该切片没有新增表或migration。Artifact-backed output、真实
+object-store/KMS负向资格、scanner/GC provider、公开 `/v1` 和对应qualification尚未交付，不能由当前
 开发期fixture或旧候选记录推断为当前行为。
 
 ## 25. 可观测性与隐私
@@ -794,7 +812,8 @@ share/export、quarantine release、hold、delete 和 break-glass。
 ## 26. 配置与部署
 
 - PostgreSQL 是 metadata/reference/grant/lifecycle 权威；S3-compatible store 是 blob 权威；
-- Artifact Gateway、Upload Finalizer、Scanner、Transformer、Download Gateway、GC/Reconciler 独立 Deployment/permit；
+- Model Artifact Broker与Sandbox Artifact Broker分别使用独立Deployment、ServiceAccount、restricted DB pool、storage identity和permit；
+  Artifact Gateway、Upload Finalizer、Scanner、Transformer、Download Gateway、GC/Reconciler也各自使用独立Deployment/permit；
 - scanner/transformer 使用 14 Sandbox node pool，不在 Gateway/API 解析复杂文件；
 - bucket 默认 private、versioning/object-lock/replication 按环境 policy，禁止静态 public website；
 - Artifact service 使用最小 bucket/KMS identity，不与 Sandbox/Model/MCP 共享 credential；
@@ -812,6 +831,7 @@ share/export、quarantine release、hold、delete 和 break-glass。
 - cross-tenant ID/digest/object key/grant/cache/dedupe timing isolation；
 - finalize/quarantine、read/revoke、reference/GC、legal hold/delete、restore/delete竞态；
 - Sandbox/MCP/Context/Model grant audience/port/purpose swap；
+- Model/Sandbox Broker endpoint、URI SAN、ServiceAccount、DB credential和config互换，以及单audience饱和/重启；
 - derived Artifact classification/provenance/citation 和 source deletion；
 - quota reservation leak、staging TTL、abandoned multipart、logical vs physical quota；
 - S3 version/object missing/corrupt、KMS revoke/rotation、backup restore reconciliation；
@@ -832,6 +852,7 @@ share/export、quarantine release、hold、delete 和 break-glass。
 - Quarantine/revoke 可以阻止已有 Artifact 新读取且不破坏审计 Reference；
 - Reference/retention/hold/grant 任一存在时 GC 无法删除；
 - Sandbox 输出只能写 staging，不能自置 Ready/classification/object key；
+- Model与Sandbox Artifact Broker不能共享进程、Pod、ServiceAccount、DB pool或permit，任一audience饱和不阻断另一方；
 - derived content 产生新 Artifact/Provenance，不覆盖 source；
 - object missing/corrupt 被检测、隔离并有恢复/incident runbook；
 - 大文件 streaming 不形成无界内存/DB/event，饱和不拖垮控制面。

@@ -4,6 +4,9 @@
 {{- if lt (int .Values.controller.replicas) 2 }}
 {{- fail "controller.replicas must be at least 2" }}
 {{- end }}
+{{- if not (empty .Values.controller.serviceAccount) }}
+{{- fail "Controller ServiceAccount customization is forbidden" }}
+{{- end }}
 {{- if or (lt (int .Values.attestor.controllerPort) 1) (gt (int .Values.attestor.controllerPort) 65535) }}
 {{- fail "attestor.controllerPort must be a valid fixed host port" }}
 {{- end }}
@@ -49,11 +52,14 @@
 {{- if empty .Values.networkPolicy.natsCidrs }}
 {{- fail "networkPolicy.natsCidrs is required" }}
 {{- end }}
-{{- if empty .Values.networkPolicy.artifactProviderCidrs }}
-{{- fail "networkPolicy.artifactProviderCidrs is required" }}
+{{- if or (empty .Values.networkPolicy.artifactBrokerNamespaceSelector) (empty .Values.networkPolicy.artifactBrokerPodSelector) }}
+{{- fail "Artifact Broker NetworkPolicy selectors are required" }}
 {{- end }}
-{{- if empty .Values.networkPolicy.workloadIdentityCidrs }}
-{{- fail "networkPolicy.workloadIdentityCidrs is required" }}
+{{- if or (not (deepEqual .Values.networkPolicy.artifactBrokerNamespaceSelector (dict "insight.platform/artifact-namespace" "true"))) (not (deepEqual .Values.networkPolicy.artifactBrokerPodSelector (dict "insight.platform/workload-role" "artifact-broker-sandbox"))) }}
+{{- fail "Controller must target only the isolated Sandbox Artifact Broker workload role" }}
+{{- end }}
+{{- if or (lt (int .Values.networkPolicy.artifactBrokerPort) 1) (gt (int .Values.networkPolicy.artifactBrokerPort) 65535) }}
+{{- fail "networkPolicy.artifactBrokerPort must be a valid fixed port" }}
 {{- end }}
 {{- if or (empty .Values.networkPolicy.egressBrokerNamespaceSelector) (empty .Values.networkPolicy.egressBrokerPodSelector) }}
 {{- fail "Egress Broker NetworkPolicy selectors are required" }}
@@ -61,8 +67,21 @@
 {{- if or (lt (int .Values.networkPolicy.egressBrokerPort) 1) (gt (int .Values.networkPolicy.egressBrokerPort) 65535) }}
 {{- fail "networkPolicy.egressBrokerPort must be a valid fixed port" }}
 {{- end }}
-{{- if or (empty .Values.controller.workloadIdentity.roleArn) (empty .Values.controller.workloadIdentity.audience) }}
-{{- fail "controller.workloadIdentity roleArn and audience are required" }}
+{{- if or (empty .Values.controller.artifactBroker.endpoint) (empty .Values.controller.artifactBroker.tlsServerName) }}
+{{- fail "Controller requires an exact Artifact Broker mTLS endpoint" }}
+{{- end }}
+{{- $expectedArtifactBrokerEndpoint := printf "https://%s:%d" .Values.controller.artifactBroker.tlsServerName (int .Values.networkPolicy.artifactBrokerPort) }}
+{{- if ne .Values.controller.artifactBroker.endpoint $expectedArtifactBrokerEndpoint }}
+{{- fail "Controller Artifact Broker endpoint must exactly match TLS identity and NetworkPolicy port" }}
+{{- end }}
+{{- if or (lt (int .Values.controller.artifactBroker.maximumRequestBytes) 1) (gt (int .Values.controller.artifactBroker.maximumRequestBytes) 1048576) (lt (int .Values.controller.artifactBroker.maximumChunkBytes) 1) (gt (int .Values.controller.artifactBroker.maximumChunkBytes) 262144) }}
+{{- fail "Controller Artifact Broker RPC bounds exceed the closed hard caps" }}
+{{- end }}
+{{- if or (lt (int .Values.controller.artifactBroker.maximumInFlightResponses) 1) (gt (int .Values.controller.artifactBroker.maximumInFlightResponses) 4) }}
+{{- fail "Controller Artifact response capacity must be between 1 and 4" }}
+{{- end }}
+{{- if or (empty .Values.tls.keys.artifactBrokerServerCa) (empty .Values.tls.keys.artifactBrokerClientCertificate) (empty .Values.tls.keys.artifactBrokerClientPrivateKey) }}
+{{- fail "Controller Artifact Broker mTLS Secret keys are required" }}
 {{- end }}
 {{- if not .Values.networkPolicy.enabled }}
 {{- fail "networkPolicy.enabled must remain true" }}

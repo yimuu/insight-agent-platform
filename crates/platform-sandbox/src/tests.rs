@@ -3122,9 +3122,26 @@ fn submission_and_physical_state_share_one_fenced_job_authority() {
         &preparing.job,
         &preparing.payload,
         &fence_for(&preparing.job, 'b'),
-        insight_platform_contracts::SandboxJobState::Starting,
-        sha('e'),
-        now + ChronoDuration::milliseconds(2),
+        AdvanceSandboxPhase {
+            target: insight_platform_contracts::SandboxJobState::Starting,
+            phase_evidence_digest: sha('e'),
+            prepared: Some(PreparedSandbox {
+                provider_process_generation_id: None,
+                sandbox_identity_digest: sha('c'),
+                request_digest: preparing
+                    .payload
+                    .request
+                    .as_ref()
+                    .clone()
+                    .bind_lease_generation(preparing.job.lease_generation)
+                    .unwrap()
+                    .request_digest,
+                attempt_no: preparing.payload.request.attempt_no,
+                lease_generation: preparing.job.lease_generation,
+                prepare_evidence_digest: sha('e'),
+            }),
+            database_now: now + ChronoDuration::milliseconds(2),
+        },
         limits(),
     )
     .unwrap();
@@ -3133,9 +3150,12 @@ fn submission_and_physical_state_share_one_fenced_job_authority() {
             &starting.job,
             &starting.payload,
             &fence_for(&preparing.job, 'b'),
-            insight_platform_contracts::SandboxJobState::Running,
-            sha('f'),
-            now + ChronoDuration::milliseconds(3),
+            AdvanceSandboxPhase {
+                target: insight_platform_contracts::SandboxJobState::Running,
+                phase_evidence_digest: sha('f'),
+                prepared: None,
+                database_now: now + ChronoDuration::milliseconds(3),
+            },
             limits(),
         ),
         Err(SandboxContractError::StaleFence)
@@ -3144,9 +3164,12 @@ fn submission_and_physical_state_share_one_fenced_job_authority() {
         &starting.job,
         &starting.payload,
         &fence_for(&starting.job, 'b'),
-        insight_platform_contracts::SandboxJobState::Running,
-        sha('1'),
-        now + ChronoDuration::milliseconds(3),
+        AdvanceSandboxPhase {
+            target: insight_platform_contracts::SandboxJobState::Running,
+            phase_evidence_digest: sha('1'),
+            prepared: None,
+            database_now: now + ChronoDuration::milliseconds(3),
+        },
         limits(),
     )
     .unwrap();
@@ -3154,9 +3177,12 @@ fn submission_and_physical_state_share_one_fenced_job_authority() {
         &running.job,
         &running.payload,
         &fence_for(&running.job, 'b'),
-        insight_platform_contracts::SandboxJobState::Collecting,
-        sha('2'),
-        now + ChronoDuration::milliseconds(4),
+        AdvanceSandboxPhase {
+            target: insight_platform_contracts::SandboxJobState::Collecting,
+            phase_evidence_digest: sha('2'),
+            prepared: None,
+            database_now: now + ChronoDuration::milliseconds(4),
+        },
         limits(),
     )
     .unwrap();
@@ -3234,6 +3260,7 @@ impl SandboxExecutorBackend for StaticWasiBackend {
     ) -> Result<PreparedSandbox, SandboxBackendFailure> {
         self.record("prepare");
         Ok(PreparedSandbox {
+            provider_process_generation_id: None,
             sandbox_identity_digest: sha('a'),
             request_digest: request.request_digest,
             attempt_no: request.attempt_no,
@@ -3728,9 +3755,12 @@ impl SandboxExecutionAuthority for InMemorySandboxAuthority {
                 &current.0,
                 &current.1,
                 &command.fence,
-                command.target,
-                command.phase_evidence_digest,
-                Utc::now(),
+                AdvanceSandboxPhase {
+                    target: command.target,
+                    phase_evidence_digest: command.phase_evidence_digest,
+                    prepared: command.prepared,
+                    database_now: Utc::now(),
+                },
                 limits(),
             )?
         };

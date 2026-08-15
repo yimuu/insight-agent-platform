@@ -5,47 +5,78 @@ image:
 imagePullSecrets: []
 
 namespace: platform-artifacts
-replicas: 2
-port: 9443
 
-config:
-  existingConfigMap: insight-platform-artifact-broker-candidate
-  fileKey: artifact-broker.json
-  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-database:
-  existingSecret: insight-platform-artifact-broker-database
-  urlKey: database-url
-serviceAccount:
-  annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-broker
-tls:
-  existingSecret: insight-platform-artifact-broker-server-tls
-  keys:
-    clientCa: client-ca.pem
-    serverCertificate: server.pem
-    serverPrivateKey: server-key.pem
+brokers:
+  model:
+    replicas: 2
+    port: 9443
+    config:
+      existingConfigMap: insight-platform-artifact-broker-model-candidate
+      fileKey: artifact-broker.json
+      digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    database:
+      existingSecret: insight-platform-artifact-broker-model-database
+      urlKey: database-url
+    serviceAccount:
+      annotations:
+        eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-broker-model
+    tls:
+      existingSecret: insight-platform-artifact-broker-model-server-tls
+      keys:
+        clientCa: client-ca.pem
+        serverCertificate: server.pem
+        serverPrivateKey: server-key.pem
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: "1", memory: 512Mi}
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 16
+      targetCPUUtilizationPercentage: 70
+  sandbox:
+    replicas: 2
+    port: 9443
+    config:
+      existingConfigMap: insight-platform-artifact-broker-sandbox-candidate
+      fileKey: artifact-broker.json
+      digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    database:
+      existingSecret: insight-platform-artifact-broker-sandbox-database
+      urlKey: database-url
+    serviceAccount:
+      annotations:
+        eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-broker-sandbox
+    tls:
+      existingSecret: insight-platform-artifact-broker-sandbox-server-tls
+      keys:
+        clientCa: client-ca.pem
+        serverCertificate: server.pem
+        serverPrivateKey: server-key.pem
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {cpu: "2", memory: 1Gi}
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 32
+      targetCPUUtilizationPercentage: 70
 
 networkPolicy:
   enabled: true
   modelWorkerNamespaceSelector: {insight.platform/workload-namespace: model-worker}
   modelWorkerPodSelector: {insight.platform/workload-role: model-worker}
+  sandboxControllerNamespaceSelector: {insight.platform/sandbox-controller-namespace: "true"}
+  sandboxControllerPodSelector: {insight.platform/workload-role: sandbox-controller}
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
   postgresCidrs: [10.10.0.0/24]
   storageProviderCidrs: [10.50.0.0/24]
   kmsProviderCidrs: [10.60.0.0/24]
   workloadIdentityCidrs: [10.40.0.0/24]
-
-resources:
-  requests: {cpu: 200m, memory: 256Mi}
-  limits: {cpu: "2", memory: 1Gi}
-
-podDisruptionBudget:
-  enabled: true
-  minAvailable: 1
-
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 16
-  targetCPUUtilizationPercentage: 70

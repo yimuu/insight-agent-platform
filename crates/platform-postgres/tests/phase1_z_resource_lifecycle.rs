@@ -1,11 +1,12 @@
 use chrono::{Duration, Utc};
 use insight_platform_contracts::{
     ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
-    ArtifactRetentionPolicy, AuthoringPackage, DataClassification, DeploymentClosure,
-    EntityLifecycle, ExactDeploymentRef, ExactVersionRef, Permission, PermissionSet, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublishedVersionPayload, ResourceDocument, ResourceDraftPayload, ResourceId,
-    RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
+    ArtifactRetentionPolicy, AuthoringPackage, CodeTrustClass, DataClassification,
+    DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExactVersionRef, Permission,
+    PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind,
+    PrincipalSnapshot, PublishedVersionPayload, ResourceDocument, ResourceDraftPayload, ResourceId,
+    ResourceKind, RunBindingsSnapshot, SandboxEntrypointKind, SandboxPackageResourceSpec,
+    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
 };
 use insight_platform_postgres::{
     repository::{
@@ -19,7 +20,7 @@ use insight_platform_registry::{
     RequestResourceValidation, SetResourceGate, TransitionResourceLifecycle,
 };
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 
 const TENANT_ID: &str = "ten_0198f1c3-8f49-7c3e-b1f3-773c28367c00";
 const TENANT_B_ID: &str = "ten_0198f1c3-8f49-7c3e-b1f3-773c28367c01";
@@ -94,6 +95,372 @@ macro_rules! registry_command {
     }};
 }
 
+fn sandbox_id(kind: ResourceKind, suffix: u16) -> ResourceId {
+    format!(
+        "{}_0198f1d1-8f49-7c3e-b1f3-773c2836{suffix:04x}",
+        kind.descriptor().prefix
+    )
+    .parse()
+    .unwrap()
+}
+
+async fn prove_sandbox_package_runtime_bundle_publication(
+    pool: &PgPool,
+    repository: &PgRepository,
+    authoring_artifact: &ArtifactRef,
+) {
+    let runtime_resource_id = sandbox_id(ResourceKind::SandboxRuntime, 1);
+    let runtime_revision = ExactVersionRef::new(
+        sandbox_id(ResourceKind::SandboxRuntimeRevision, 2),
+        digest('1'),
+    )
+    .unwrap();
+    let package_resource_id = sandbox_id(ResourceKind::SandboxPackage, 3);
+    let package_revision_id = sandbox_id(ResourceKind::SandboxPackageRevision, 4);
+    let bundle_blob_id = sandbox_id(ResourceKind::InternalBlob, 5);
+    let bundle_artifact = ArtifactRef::new(
+        sandbox_id(ResourceKind::Artifact, 6),
+        digest('2'),
+        32,
+        "application/wasm",
+        DataClassification::Internal,
+        Some("published-module.wasm".to_owned()),
+    )
+    .unwrap();
+    let runtime_payload = TypedPayload::new(1, &json!({"fixture": "sandbox-runtime"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.resources (
+            tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+            payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, 'sandbox_runtime', 'active', 'enabled', $3, $4, $5)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(runtime_resource_id.to_string())
+    .bind(runtime_payload.schema_version)
+    .bind(&runtime_payload.value)
+    .bind(&runtime_payload.digest)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.resource_versions (
+            tenant_id, resource_version_id, resource_id, resource_version_kind,
+            revision_no, content_digest, payload_schema_version, payload,
+            payload_digest, created_by
+        ) VALUES ($1, $2, $3, 'sandbox_runtime_revision', 1, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(runtime_revision.revision_id.to_string())
+    .bind(runtime_resource_id.to_string())
+    .bind(runtime_revision.semantic_digest.to_string())
+    .bind(runtime_payload.schema_version)
+    .bind(&runtime_payload.value)
+    .bind(&runtime_payload.digest)
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let package_document = ResourceDocument::SandboxPackage(SandboxPackageResourceSpec {
+        authoring_package: AuthoringPackage {
+            artifact: authoring_artifact.clone(),
+            manifest_digest: digest('3'),
+        },
+        contract_digest: digest('4'),
+        dependency_versions: vec![],
+        policy_versions: vec![],
+        source_artifact: authoring_artifact.clone(),
+        source_digest: authoring_artifact.content_digest().clone(),
+        runtime_revision,
+        entrypoint_kind: SandboxEntrypointKind::WasmExport,
+        entrypoint: "run".to_owned(),
+        dependency_lock_digest: digest('5'),
+        runtime_bundle_artifact: bundle_artifact.clone(),
+        build_evidence: authoring_artifact.clone(),
+        trust_class: CodeTrustClass::BuiltIn,
+        package_digest: digest('6'),
+    });
+    let draft = ResourceDraftPayload {
+        display_name: "Sandbox package publication fixture".to_owned(),
+        document: package_document.clone(),
+        validation: None,
+    };
+    assert!(matches!(
+        registry_command!(
+            repository,
+            create_resource_draft,
+            CreateResourceDraft {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "8a10", '1', '2'),
+                resource_id: package_resource_id.clone(),
+                draft: draft.clone(),
+            }
+        )
+        .unwrap(),
+        CommandOutcome::Applied(_)
+    ));
+    let draft_digest = draft.document_digest().unwrap();
+    let validator_digest = digest('7');
+    let now = Utc::now();
+    registry_command!(
+        repository,
+        request_resource_validation,
+        RequestResourceValidation {
+            audit: audit(TENANT_ID, PRINCIPAL_ID, "8a20", '3', '4'),
+            resource_id: package_resource_id.clone(),
+            expected_resource_version: 1,
+            expected_draft_digest: draft_digest.clone(),
+            operation_id: sandbox_id(ResourceKind::ManagementOperation, 7),
+            job_id: sandbox_id(ResourceKind::Job, 8),
+            validator_digest: validator_digest.clone(),
+            validation_profile_digest: digest('8'),
+            attempt_limit: 1,
+            scheduled_at: now,
+            deadline: now + Duration::minutes(5),
+        }
+    )
+    .unwrap();
+    let validation = ValidationSummary {
+        validator_digest,
+        validated_draft_digest: draft_digest.clone(),
+        dependency_closure_digest: digest('9'),
+        security_evidence_digest: digest('a'),
+        warnings: vec![],
+    };
+    registry_command!(
+        repository,
+        record_resource_validation,
+        RecordResourceValidation {
+            audit: audit(TENANT_ID, PRINCIPAL_ID, "8a30", '5', '6'),
+            resource_id: package_resource_id.clone(),
+            expected_resource_version: 1,
+            expected_draft_digest: draft_digest.clone(),
+            validation: validation.clone(),
+        }
+    )
+    .unwrap();
+
+    macro_rules! publish {
+        ($suffix:literal, $idempotency:literal, $request:literal, $document:expr) => {{
+            registry_command!(
+                repository,
+                publish_resource_versions,
+                PublishResourceVersions {
+                    audit: audit(TENANT_ID, PRINCIPAL_ID, $suffix, $idempotency, $request,),
+                    resource_id: package_resource_id.clone(),
+                    expected_resource_version: 2,
+                    expected_draft_digest: draft_digest.clone(),
+                    versions: vec![NewPublishedVersion {
+                        resource_version_id: package_revision_id.clone(),
+                        revision_no: 1,
+                        content_digest: digest('b'),
+                        artifact_id: None,
+                        payload: PublishedVersionPayload {
+                            document: $document,
+                            validation: validation.clone(),
+                        },
+                    }],
+                }
+            )
+        }};
+    }
+
+    assert!(matches!(
+        publish!("8a40", '7', '8', package_document.clone()),
+        Err(RepositoryError::NotFound(
+            "ready Sandbox runtime bundle artifact"
+        ))
+    ));
+
+    let artifact_metadata = TypedPayload::new(1, &json!({"fixture": "runtime-bundle"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest, security_domain_digest,
+            object_reference_ciphertext, key_id, encryption_domain_id, state
+        ) VALUES ($1, $2, 'fixture', $3, $4, $5, 'fixture-key', $6, 'pending')
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(bundle_blob_id.to_string())
+    .bind(digest('c').to_string())
+    .bind(digest('d').to_string())
+    .bind(vec![4_u8, 5, 6])
+    .bind(sandbox_id(ResourceKind::EncryptionDomain, 9).to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, metadata_schema_version, metadata,
+            metadata_digest, retention_policy_revision_id, retain_until, created_by
+        ) VALUES ($1, $2, $3, 'package', 'internal', $4, $5,
+                  'application/wasm', 'application/wasm', 'ready', $6, $7, $8,
+                  $9, $10, $11)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(bundle_artifact.artifact_id().to_string())
+    .bind(bundle_blob_id.to_string())
+    .bind(i64::try_from(bundle_artifact.byte_length()).unwrap())
+    .bind(bundle_artifact.content_digest().to_string())
+    .bind(artifact_metadata.schema_version)
+    .bind(&artifact_metadata.value)
+    .bind(&artifact_metadata.digest)
+    .bind(RETENTION_REVISION_ID)
+    .bind(now + Duration::days(30))
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        publish!("8a50", '9', 'a', package_document.clone()),
+        Err(RepositoryError::NotFound(
+            "ready Sandbox runtime bundle artifact"
+        ))
+    ));
+
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.artifact_blobs
+        SET object_generation = 'fixture-generation', content_digest = $3,
+            size_bytes = $4, state = 'verified', verified_at = clock_timestamp(),
+            updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND blob_id = $2
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(bundle_blob_id.to_string())
+    .bind(bundle_artifact.content_digest().to_string())
+    .bind(i64::try_from(bundle_artifact.byte_length()).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.artifacts SET state = 'pending', updated_at = clock_timestamp() WHERE tenant_id = $1 AND artifact_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(bundle_artifact.artifact_id().to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        publish!("8a60", 'b', 'c', package_document.clone()),
+        Err(RepositoryError::NotFound(
+            "ready Sandbox runtime bundle artifact"
+        ))
+    ));
+
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.artifacts
+        SET state = 'ready', updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND artifact_id = $2
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(bundle_artifact.artifact_id().to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.artifact_blobs SET content_digest = $3, updated_at = clock_timestamp() WHERE tenant_id = $1 AND blob_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(bundle_blob_id.to_string())
+    .bind(digest('e').to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        publish!("8a70", 'd', 'e', package_document.clone()),
+        Err(RepositoryError::NotFound(
+            "ready Sandbox runtime bundle artifact"
+        ))
+    ));
+
+    sqlx::query(
+        "UPDATE insight_platform.artifact_blobs SET content_digest = $3, size_bytes = $4, updated_at = clock_timestamp() WHERE tenant_id = $1 AND blob_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(bundle_blob_id.to_string())
+    .bind(bundle_artifact.content_digest().to_string())
+    .bind(i64::try_from(bundle_artifact.byte_length() + 1).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        publish!("8a80", 'f', '0', package_document.clone()),
+        Err(RepositoryError::NotFound(
+            "ready Sandbox runtime bundle artifact"
+        ))
+    ));
+
+    sqlx::query(
+        "UPDATE insight_platform.artifact_blobs SET size_bytes = $3, updated_at = clock_timestamp() WHERE tenant_id = $1 AND blob_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(bundle_blob_id.to_string())
+    .bind(i64::try_from(bundle_artifact.byte_length()).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    let alternate_bundle_artifact = ArtifactRef::new(
+        sandbox_id(ResourceKind::Artifact, 10),
+        bundle_artifact.content_digest().clone(),
+        bundle_artifact.byte_length(),
+        bundle_artifact.media_type(),
+        bundle_artifact.classification(),
+        None,
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, metadata_schema_version, metadata,
+            metadata_digest, retention_policy_revision_id, retain_until, created_by
+        ) VALUES ($1, $2, $3, 'package', 'internal', $4, $5,
+                  'application/wasm', 'application/wasm', 'ready', $6, $7, $8,
+                  $9, $10, $11)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(alternate_bundle_artifact.artifact_id().to_string())
+    .bind(bundle_blob_id.to_string())
+    .bind(i64::try_from(alternate_bundle_artifact.byte_length()).unwrap())
+    .bind(alternate_bundle_artifact.content_digest().to_string())
+    .bind(artifact_metadata.schema_version)
+    .bind(&artifact_metadata.value)
+    .bind(&artifact_metadata.digest)
+    .bind(RETENTION_REVISION_ID)
+    .bind(now + Duration::days(30))
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    let mut drifted_published_document = package_document.clone();
+    let ResourceDocument::SandboxPackage(spec) = &mut drifted_published_document else {
+        unreachable!();
+    };
+    spec.runtime_bundle_artifact = alternate_bundle_artifact;
+    assert!(matches!(
+        publish!("8a90", '0', '1', drifted_published_document),
+        Err(RepositoryError::InvalidInput(message))
+            if message == "published document does not match the validated draft"
+    ));
+
+    let published = publish!("8aa0", '2', '3', package_document).unwrap();
+    assert!(matches!(published, CommandOutcome::Applied(_)));
+}
+
 #[tokio::test]
 async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
@@ -147,6 +514,8 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
                     Permission::AgentPublish,
                     Permission::AgentDeploy,
                     Permission::AgentActivate,
+                    Permission::SandboxWrite,
+                    Permission::SandboxPublish,
                 ])
                 .unwrap(),
             },
@@ -319,6 +688,8 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     .await
     .unwrap();
     bootstrap.commit().await.unwrap();
+
+    prove_sandbox_package_runtime_bundle_publication(&pool, &repository, &authoring_artifact).await;
 
     let document = ResourceDocument::Policy(PolicyResourceSpec {
         authoring_package: AuthoringPackage {

@@ -523,7 +523,8 @@ impl MicroVmHostFactory for LinuxFirecrackerHostFactory {
         let record = instance.record.lock().await;
         Ok(PreparedMicroVmHost {
             instance: instance.clone(),
-            evidence: record.prepared_evidence(),
+            evidence: record
+                .prepared_evidence(&instance.shared.config.provider_process_generation_id),
         })
     }
 
@@ -544,7 +545,8 @@ impl MicroVmHostFactory for LinuxFirecrackerHostFactory {
         }
         Ok(Some(PreparedMicroVmHost {
             instance: instance.clone(),
-            evidence: record.prepared_evidence(),
+            evidence: record
+                .prepared_evidence(&instance.shared.config.provider_process_generation_id),
         }))
     }
 }
@@ -1502,8 +1504,9 @@ impl FirecrackerHostRecord {
         Ok(())
     }
 
-    fn prepared_evidence(&self) -> PreparedMicroVm {
+    fn prepared_evidence(&self, provider_process_generation_id: &ResourceId) -> PreparedMicroVm {
         PreparedMicroVm {
+            provider_process_generation_id: provider_process_generation_id.clone(),
             sandbox_identity_digest: self.sandbox_identity_digest.clone(),
             prepare_evidence_digest: self.prepare_evidence_digest.clone(),
         }

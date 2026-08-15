@@ -165,6 +165,22 @@ fn fixture(
     drift_after_first: bool,
     metadata_generation: &str,
 ) -> Fixture {
+    fixture_with_limits(
+        bytes,
+        plaintext,
+        drift_after_first,
+        metadata_generation,
+        ArtifactBrokerLimits::default(),
+    )
+}
+
+fn fixture_with_limits(
+    bytes: &[u8],
+    plaintext: Vec<u8>,
+    drift_after_first: bool,
+    metadata_generation: &str,
+    limits: ArtifactBrokerLimits,
+) -> Fixture {
     let tenant_id = id(ResourceKind::Tenant);
     let content_digest = sha256(bytes);
     let artifact = ArtifactRef::new(
@@ -202,7 +218,7 @@ fn fixture(
             plaintext: Mutex::new(plaintext),
         }),
         InstalledArtifactObjectStoreCatalog::new(vec![store.clone()]).unwrap(),
-        ArtifactBrokerLimits::default(),
+        limits,
     )
     .unwrap();
     Fixture {
@@ -244,6 +260,46 @@ async fn exact_object_is_returned_only_after_second_authorization() {
         WasiArtifactBroker::read_exact(&fixture.broker, fixture.request)
             .await
             .unwrap(),
+        bytes
+    );
+}
+
+#[tokio::test]
+async fn audience_permit_is_held_until_the_response_lease_is_dropped() {
+    let bytes = b"wasm-module";
+    let fixture = fixture_with_limits(
+        bytes,
+        locator(&digest('b'), "version-1"),
+        false,
+        "version-1",
+        ArtifactBrokerLimits {
+            maximum_in_flight: 1,
+            ..ArtifactBrokerLimits::default()
+        },
+    );
+    let held = fixture
+        .broker
+        .read_wasi_for_response(fixture.request.clone())
+        .await
+        .unwrap();
+    assert_eq!(held.as_bytes(), bytes);
+    assert_eq!(
+        fixture
+            .broker
+            .read_wasi_for_response(fixture.request.clone())
+            .await
+            .err(),
+        Some(WasiArtifactBrokerError::Unavailable)
+    );
+
+    drop(held);
+    assert_eq!(
+        fixture
+            .broker
+            .read_wasi_for_response(fixture.request)
+            .await
+            .unwrap()
+            .as_bytes(),
         bytes
     );
 }

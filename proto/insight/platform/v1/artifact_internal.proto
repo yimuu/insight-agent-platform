@@ -9,6 +9,14 @@ service ArtifactModelBrokerService {
   rpc ReadModelRequest(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
 }
 
+// Internal-only Sandbox materialization boundary. The Sandbox Controller is the sole caller and
+// selects one of two closed domain requests; this service deliberately has no generic object-read
+// method and never accepts an object locator or storage credential.
+service ArtifactSandboxBrokerService {
+  rpc ReadWasiArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
+  rpc ReadMicroVmArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
+}
+
 message ClosedArtifactReadRequest {
   uint32 schema_version = 1;
   string operation = 2;

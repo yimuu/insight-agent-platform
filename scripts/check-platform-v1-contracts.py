@@ -147,7 +147,7 @@ def check_fixtures(errors):
 
 def check_limits(errors):
     profile = load(CONTRACT_ROOT / "limits" / "q1-50.json")
-    if profile.get("profile_id") != "q1-50" or profile.get("profile_version", 0) < 1:
+    if profile.get("profile_id") != "q1-50" or profile.get("profile_version") != 4:
         errors.append("Q1 limit profile identity/version is invalid")
     expected_families = {
         "api",
@@ -184,7 +184,35 @@ def check_limits(errors):
         or heartbeat.get("q1_default", 0) * 3 >= lease.get("q1_default", 0)
     ):
         errors.append("Q1 heartbeat must be strictly below one third of its lease")
+    runtime_bundle = profile.get("capability_sandbox", {}).get("runtime_bundle_bytes", {})
+    if runtime_bundle != {
+        "unit": "bytes",
+        "hard_max": 67_108_864,
+        "q1_default": 33_554_432,
+        "overflow_outcome": "content_rejected",
+    }:
+        errors.append("Q1 Sandbox runtime bundle limit differs from the closed v4 contract")
     schema = load(CONTRACT_ROOT / "limits" / "hard-limit-profile.schema.json")
+    if schema.get("properties", {}).get("profile_version") != {"const": 4}:
+        errors.append("HardLimitProfile schema must accept only profile version 4")
+    runtime_bundle_schema = (
+        schema.get("$defs", {})
+        .get("capability_sandbox", {})
+        .get("properties", {})
+        .get("runtime_bundle_bytes", {})
+    )
+    if runtime_bundle_schema != {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["unit", "hard_max", "q1_default", "overflow_outcome"],
+        "properties": {
+            "unit": {"const": "bytes"},
+            "hard_max": {"const": 67_108_864},
+            "q1_default": {"const": 33_554_432},
+            "overflow_outcome": {"const": "content_rejected"},
+        },
+    }:
+        errors.append("HardLimitProfile schema does not freeze the Sandbox runtime bundle tuple")
     limit_schema = schema.get("$defs", {}).get("limit", {})
     allowed_units = set(limit_schema.get("properties", {}).get("unit", {}).get("enum", []))
     allowed_outcomes = set(

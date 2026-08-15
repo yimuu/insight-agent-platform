@@ -18,6 +18,11 @@ transport、外部 Secret Manager 作为 Secret value 权威。Control（其中R
 Sandbox、Artifact 与 Recovery 使用独立 Deployment、service account、DB/connection pool、queue、permit 和
 autoscaling policy。
 
+Artifact受信物化进一步按调用audience物理切分：Model Artifact Broker与Sandbox Artifact Broker必须是不同进程、
+Deployment、ServiceAccount、restricted PostgreSQL credential/pool和process-local permit。Model Broker只暴露Model RPC；Sandbox
+Broker只暴露WASI与microVM RPC，后两者可以共享Sandbox audience自己的bulkhead。两个Broker不得共Pod、共pool或通过单listener动态
+选择audience；一侧饱和、重启或泄露不能消耗另一侧准入容量。
+
 普通 workload 遵守 Kubernetes Restricted security baseline。Sandbox controller 与 KVM Executor 位于独立 namespace/
 node pool；只有最小 Executor Agent 能访问 `/dev/kvm`，user code 只在14定义的WASM/gVisor/microVM边界执行。
 PodDisruptionBudget、topology spread和rolling strategy共同保护自愿中断，但durable PostgreSQL state仍是实例丢失后的
@@ -160,14 +165,18 @@ stale cancel。但该证据尚未经过真实Secret Manager provider、真实Pro
 故障注入、独立Pod/NetworkPolicy或同一CandidateManifest，因此不能登记为Gate B、C、D或E。
 
 Model Worker现在已有独立候选binary和静态Kubernetes拓扑：进程启动复验config/WorkerManifest/两个adapter descriptor，使用独立bounded
-PostgreSQL pool、Model Worker mTLS Egress客户端和独立Artifact Broker mTLS客户端；chart提供双副本rolling Deployment、PDB、HPA、topology spread、Restricted Pod、
+PostgreSQL pool、Model Worker mTLS Egress客户端和独立Model Artifact Broker mTLS客户端；chart提供双副本rolling Deployment、PDB、HPA、topology spread、Restricted Pod、
 无入站的default-deny NetworkPolicy及只到DNS/Egress/PostgreSQL和配置allowlist NATS TLS端口的出口。CI同时拒绝mutable image、单副本、
 空PostgreSQL/NATS allowlist、缺失NATS TLS Secret key和非法
 HPA。durable cancel driver现使用reserved critical-control permit，把当前generation的bounded PostgreSQL safety scan、Egress exact cancel和
 旋转fence下的保守terminal结算组合起来；unit fixture证明业务permit饱和不阻止取消，数据库fixture覆盖取消/完成first-winner。Artifact-backed
-request已经由生产进程通过独立Artifact Broker RPC物化；Broker的双副本Deployment/PDB/HPA、Restricted Pod、default-deny、exact Model
-Worker入站、只读PostgreSQL role以及S3/KMS/workload-identity受限出站均有静态正负向门禁，真实PostgreSQL 16和loopback mTLS fixture分别证明
-最小数据库权限与错误role拒绝。但该组合未绑定真实CandidateManifest，Artifact output仍为Inline。Model text delta内部publisher已有exact fence、canonical credential-free envelope、将容量permit
+request已经由生产进程通过对应audience的Artifact Broker RPC物化；既有双副本、Restricted Pod、只读PostgreSQL与loopback mTLS证据证明最小authority和
+错误workload role拒绝，但旧单Broker拓扑已被本次architecture revision取代，不能作为新目标证据。
+当前实施批将Model与Sandbox Broker拆成不同进程/Deployment/ServiceAccount/DB credential/pool/permit，并分别收窄为Model-only与
+WASI+microVM-only RPC surface；Sandbox Controller仍移除provider catalog、AWS workload token、S3/KMS client与对应直出网络。双向
+Helm/mTLS/DB credential互换、独立饱和和rolling restart门禁未全部形成Candidate evidence前，该切分只是target/implementation slice，
+不登记Gate或Phase完成。该组合未绑定真实CandidateManifest，
+Artifact output仍为Inline。Model text delta内部publisher已有exact fence、canonical credential-free envelope、将容量permit
 保留到有界批次flush结束的双重有界non-blocking queue和TLS/mTLS NATS组合；它不发布tool argument/Provider metadata，NATS故障不阻断durable执行。但Artifact-backed
 output、真实S3/KMS、公开SSE消费、真实NATS/Provider/process-kill/cross-workclass saturation资格证据仍缺失，因此只属于Contract/Functional输入，不能登记Gate B～E通过。
 
@@ -186,8 +195,8 @@ RunValue、Receipt、Event、Outbox、quota settle/replay、reserve/settle ledge
 platform-control       Management API, Registry validators
 platform-runtime       Runtime API, SSE, Scheduler, Recovery, regular Workers
 platform-integrations  Model Workers, MCP Hosts, remote adapters
-platform-artifacts     Artifact Gateway, scanner controller, GC
-platform-sandbox       Sandbox Gateway/Controller/Brokers
+platform-artifacts     Model/Sandbox Artifact Brokers, Artifact Gateway, scanner controller, GC
+platform-sandbox       Sandbox Gateway/Controller, Secret/Egress proxies
 platform-sandbox-exec  gVisor/microVM/WASM Executors on dedicated nodes
 platform-observability OTel Collectors and telemetry agents
 ```
@@ -217,7 +226,8 @@ Q1生产最小topology：
 | Outbox Dispatcher | 2 | active-active claim | PostgreSQL、NATS | 否 |
 | Recovery/Deadline Worker | 2 | active-active shard lease | PostgreSQL | 否 |
 | Model Worker | 2 per required adapter/region | queue worker | PostgreSQL、Provider、Secret | 否，生产绑定存在时 |
-| Artifact Broker | 2 per storage region/boundary | stateless internal gRPC | PostgreSQL restricted read role、S3、KMS | 否，存在Artifact-backed绑定时 |
+| Model Artifact Broker | 2 per storage region/boundary | stateless Model-only internal gRPC | exact Model Worker mTLS、Model专用restricted PostgreSQL pool、S3、KMS | 否，存在Artifact-backed Model绑定时 |
+| Sandbox Artifact Broker | 2 per storage region/boundary | stateless WASI+microVM internal gRPC | exact Sandbox Controller mTLS、Sandbox专用restricted PostgreSQL pool、S3、KMS | 否，存在Sandbox Package/Artifact绑定时 |
 | Egress Broker | 2 per external region/boundary | stateless internal gRPC | Security Authority RPC、private DNS、KMS/Secret Manager、exact remote endpoints | 否，生产外部绑定存在时 |
 | Security Authority | 2 | stateless internal gRPC | PostgreSQL restricted role、Policy | 否 |
 | Capability Worker | 2 per required manifest | queue worker | PostgreSQL、remote backend | 否，生产绑定存在时 |
@@ -267,7 +277,10 @@ Platform services -> PostgreSQL/NATS/Artifact/Secret endpoints
 Workers -> credential-free closed request -> Egress Broker
 Egress Broker -> Security Authority RPC -> PostgreSQL restricted Secret authority
 Egress Broker -> KMS/Secret Manager/private DNS/exact Provider/MCP/remote capability
-Sandbox guest -> Artifact/Secret broker and approved egress proxy only
+Model Worker -> exact mTLS -> Model Artifact Broker
+Sandbox Controller -> exact mTLS -> Sandbox Artifact Broker
+each Artifact Broker -> its own restricted PostgreSQL pool / private S3 / KMS identity
+Sandbox Provider -> private guest materialization channel
 OTel SDK -> local/central Collector
 ```
 
@@ -278,6 +291,9 @@ OTel SDK -> local/central Collector
   SecretBinding受信读取和prepared winner登记两个closed method，不能访问公网、private DNS resolver、KMS、Secret Manager或远端backend。
   resolution调用不改变数据库；prepared registration只能复用04冻结的Receipt/Event/Outbox原子事务，不能成为通用业务mutation API；
 - Provider/MCP/remote/Sandbox egress按Revision/tenant policy经过proxy、DNS/TLS/allowlist；
+- Sandbox Controller不得直连S3、KMS或workload-identity endpoint；只有Sandbox Artifact Broker持有相应物理读取identity；
+- Model与Sandbox Artifact Broker使用不同Service、ServiceAccount、数据库credential/pool、mTLS server identity、NetworkPolicy和
+  in-flight permit；Model Broker拒绝Sandbox Controller，Sandbox Broker拒绝Model Worker；
 - PostgreSQL/NATS/S3/Secret Manager只接受workload identity/private endpoint；
 - cloud metadata、Kubernetes API、node/kubelet、container runtime和cluster DNS敏感域默认阻断；
 - Executor只能通过同节点Unix socket调用attestor的generation登记端点；该listener同时要求mTLS exact Executor role，并从内核
@@ -298,7 +314,8 @@ OTel SDK -> local/central Collector
 - authority query、claim、CAS、Run snapshot和mutation receipt只读writer，不从可能陈旧replica做授权/状态决定；
 - read replica只允许离线analytics/qualification且不回写业务；
 - 使用fresh `platform` database/schema ownership；旧实现不与新schema dual-write；
-- connection pool按role硬隔离，所有pool最大值总和 + migration/admin reserve必须低于DB max connections；
+- connection pool按role硬隔离，Model与Sandbox Artifact Broker即使具有相同只读表集合也必须使用不同credential和pool；所有pool最大值总和 +
+  migration/admin reserve必须低于DB max connections；
 - Q1至少保留20% connections给critical control、failover、migration check和incident；
 - statement/lock/idle transaction timeout、batch、claim和transaction duration按role固定；
 - PgBouncer/代理如使用必须验证transaction/session语义，不破坏advisory lock、prepared statement或RLS假设；
@@ -423,7 +440,13 @@ profile的machine contract目标路径为`contracts/platform-v1/limits/hard-limi
 旧 migration 34～35、Deferred poll/callback 专用 evidence 及其 adapter checkpoint 已撤销，不属于当前 baseline、
 部署状态或 Gate 证据；详细记录只保留在 Git 历史。
 
-当前 HardLimitProfile machine contract 以 checked-in schema 和 CandidateManifest 精确引用的实例为唯一输入。
+HardLimitProfile machine contract仍以checked-in schema和CandidateManifest精确引用的实例为唯一输入。当前revision固定
+`profile_version=4`并新增必填
+`capability_sandbox.runtime_bundle_bytes={unit:"bytes",hard_max:67108864,q1_default:33554432,
+overflow_outcome:"content_rejected"}`。SandboxPackage发布必须从Ready `runtime_bundle_artifact`取得可信byte length，并拒绝长度为零或
+大于67108864；Q1 effective limit为33554432且只能被deployment/tenant进一步收紧。WASI ABI的16 MiB module限制仍是backend-specific
+更严格上限。缺失该字段、旧profile version、错误单位/outcome或越界Package都必须在Candidate/发布阶段fail closed，不能形成永远无法执行的Job。
+schema/Q1实例、Rust exact validator、Package publication fixture和Candidate closure门禁已经通过；这只构成该合同切片的实现证据，不单独构成Phase或Gate完成证据。
 Deferred execution、callback ingress、timer/wake Worker 与 Q1 资格必须在对应 Phase 3～6 重新生成证据，不得沿用旧候选记录。
 
 ### 14.2 Capacity contract
@@ -434,7 +457,7 @@ Deferred execution、callback ingress、timer/wake Worker 与 Q1 资格必须在
 | Registry/Plan | Draft/package/schema bytes、definitions/nodes/edges、branch/map/loop/model round、dependency closure |
 | Run/Scheduler | active/waiting Run、descendants、ready rows、inline Value bytes、ValueRef count、claim batch、attempts、lease/heartbeat、deferred poll base/max、wake contracts |
 | Model/Context/MCP | request/response/delta、tokens、tool calls、candidates/items/pages、sessions/tasks/subscriptions |
-| Capability/Sandbox | input/output/progress、queue、CPU/memory/pids/files/IO/network、wall time、cleanup deadline |
+| Capability/Sandbox | input/runtime bundle/output/progress、queue、CPU/memory/pids/files/IO/network、wall time、cleanup deadline |
 | Artifact | single/total bytes、parts、references/grants、scan expansion/page/object、staging/retention batch |
 | Durable Quota | Agent/work-class/Capability/Sandbox并发、CPU/memory/output、Model token/cost/request、Context usage、Artifact占用、HumanTask |
 | Control/Data | DB connections/transactions、outbox/callback/recovery batch、NATS payload、telemetry buffer/cardinality |
@@ -456,7 +479,7 @@ HPA/cluster autoscaler信号：
 | Context | query ready age、candidate throughput、index latency |
 | MCP | operation ready age、sessions、remote tasks、connections |
 | Sandbox | weighted queued resource units、slots、startup latency |
-| Artifact | upload/scan/download/GC backlog、bytes/IO |
+| Artifact | Model Broker与Sandbox Broker各自的in-flight/bytes/DB pool、upload/scan/download/GC backlog、bytes/IO |
 
 - autoscaling不能超过DB connection、Provider quota、node/KVM、NATS/S3和tenant hard capacity；
 - scale-up前保留control/cancel/cleanup slots；
@@ -477,7 +500,7 @@ HPA/cluster autoscaler信号：
 - old worker adapter/runtime digest在历史binding仍有ready/in-flight work时保留兼容pool；
 - canary按role和workclass逐步放量，不把所有Scheduler/Recovery同时替换；
 - release失败先停promotion，应用rollback只使用schema-compatibleimage；
-- Provider/MCP/Sandbox/Artifact单pool rollout不触发无关服务rollout；
+- Provider/MCP/Sandbox/Artifact单pool rollout不触发无关服务rollout；Model与Sandbox Artifact Broker必须可以独立rollout，不通过共享Pod联动；
 - deployment controller/API不通过active head自动改变RunBindings。
 
 ## 17. `/v1` Clean Replacement
@@ -667,6 +690,7 @@ Q1基线manifest：
 200 concurrent SSE clients with reconnect churn
 mixed durable waits, Model, Capability, Context, Subagent and Artifact work
 10 concurrent Sandbox jobs, then 100% Sandbox slot saturation for 30 minutes
+100% Sandbox Artifact Broker permit/DB-pool saturation while Model Artifact reads remain admissible
 20 concurrent Artifact transfers, typical 10 MiB, boundary fixture 100 MiB
 two or more Scheduler/Runtime instances claiming concurrently
 ```
@@ -731,6 +755,7 @@ kill -9 Management API / Runtime API / SSE Gateway
 kill Scheduler / Outbox / Recovery owner during claim/commit
 kill Model / Capability / Context / MCP Worker before and after external dispatch
 kill Sandbox Controller / Executor / microVM during start/run/result/cleanup
+kill or saturate only one Artifact Broker audience while the other continues exact authorized reads
 PostgreSQL primary failover and connection reset
 NATS total outage, duplicate and reordered hints/events
 S3 timeout, partial upload, missing object, digest/KMS failure
@@ -790,7 +815,7 @@ Gate A Contract
 - Gate B：全部real-process E2E/adapter/conformance通过；
 - Gate C：security matrix/red-team无open blocker；
 - Gate D：fault matrix全部收敛且invariant通过；
-- Gate E：Q1容量、fairness、bulkhead和SLO达标；
+- Gate E：Q1容量、fairness、bulkhead和SLO达标，包括Model/Sandbox Artifact Broker双向独立饱和；
 - Gate F：连续24小时soak达标；
 - Gate G：从正式backup恢复并达到RPO/RTO；
 - 任何Gate失败使后续证据无效或需要从受影响Gate重跑；

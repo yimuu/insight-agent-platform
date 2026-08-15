@@ -423,6 +423,7 @@ impl SandboxExecutorBackend for WasmtimeSandboxExecutorBackend {
             })? = Some(ScrubbedBytes(input));
             execution.phase.store(PHASE_PREPARED, Ordering::Release);
             Ok(PreparedSandbox {
+                provider_process_generation_id: None,
                 sandbox_identity_digest: sandbox_identity_digest.clone(),
                 request_digest: request.request_digest.clone(),
                 attempt_no: request.attempt_no,

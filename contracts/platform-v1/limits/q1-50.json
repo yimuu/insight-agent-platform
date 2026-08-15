@@ -1,6 +1,6 @@
 {
   "profile_id": "q1-50",
-  "profile_version": 3,
+  "profile_version": 4,
   "api": {
     "header_bytes": {"unit":"bytes","hard_max":65536,"q1_default":32768,"overflow_outcome":"invalid_request"},
     "url_bytes": {"unit":"bytes","hard_max":8192,"q1_default":4096,"overflow_outcome":"invalid_request"},
@@ -58,6 +58,7 @@
   },
   "capability_sandbox": {
     "input_bytes": {"unit":"bytes","hard_max":67108864,"q1_default":16777216,"overflow_outcome":"promote_to_artifact"},
+    "runtime_bundle_bytes": {"unit":"bytes","hard_max":67108864,"q1_default":33554432,"overflow_outcome":"content_rejected"},
     "output_bytes": {"unit":"bytes","hard_max":268435456,"q1_default":67108864,"overflow_outcome":"promote_to_artifact"},
     "progress_events": {"unit":"count","hard_max":10000,"q1_default":1000,"overflow_outcome":"drop_live_then_close"},
     "queue_depth": {"unit":"count","hard_max":10000,"q1_default":1000,"overflow_outcome":"durable_queue"},

@@ -57,8 +57,9 @@ spec:
             - {name: PLATFORM_SANDBOX_ATTESTOR_CA_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.attestorServerCa }}}
             - {name: PLATFORM_SANDBOX_ATTESTOR_CERT_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerClientCertificate }}}
             - {name: PLATFORM_SANDBOX_ATTESTOR_KEY_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerClientPrivateKey }}}
-            - {name: AWS_ROLE_ARN, value: {{ .Values.controller.workloadIdentity.roleArn | quote }}}
-            - {name: AWS_WEB_IDENTITY_TOKEN_FILE, value: /var/run/secrets/insight-workload-identity/token}
+            - {name: PLATFORM_SANDBOX_ARTIFACT_CA_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.artifactBrokerServerCa }}}
+            - {name: PLATFORM_SANDBOX_ARTIFACT_CERT_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.artifactBrokerClientCertificate }}}
+            - {name: PLATFORM_SANDBOX_ARTIFACT_KEY_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.artifactBrokerClientPrivateKey }}}
           ports: [{name: grpc, containerPort: {{ int .Values.controller.port }}}]
           startupProbe: {tcpSocket: {port: grpc}, failureThreshold: 30, periodSeconds: 2}
           readinessProbe: {tcpSocket: {port: grpc}, periodSeconds: 5, timeoutSeconds: 2}
@@ -67,18 +68,9 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
             - {name: tls, mountPath: /etc/insight/controller-tls, readOnly: true}
-            - {name: workload-identity, mountPath: /var/run/secrets/insight-workload-identity, readOnly: true}
       volumes:
         - {name: config, configMap: {name: {{ include "insight-platform-sandbox.controllerName" . }}}}
         - {name: tls, secret: {secretName: {{ .Values.tls.controllerSecret }}, defaultMode: 0440}}
-        - name: workload-identity
-          projected:
-            defaultMode: 0440
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  audience: {{ .Values.controller.workloadIdentity.audience | quote }}
-                  expirationSeconds: {{ int .Values.controller.workloadIdentity.tokenExpirationSeconds }}
 ---
 apiVersion: v1
 kind: Service

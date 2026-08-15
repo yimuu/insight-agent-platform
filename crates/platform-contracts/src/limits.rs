@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
 
+pub const HARD_LIMIT_PROFILE_VERSION: u32 = 4;
+pub const Q1_SANDBOX_RUNTIME_BUNDLE_BYTES: u64 = 33_554_432;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardLimitProfile {
@@ -146,6 +149,7 @@ limit_family! {
 limit_family! {
     CapabilitySandboxLimits {
         input_bytes,
+        runtime_bundle_bytes,
         output_bytes,
         progress_events,
         queue_depth,
@@ -238,10 +242,23 @@ impl HardLimitProfile {
                 message: "the initial profile ID must be q1-50",
             });
         }
-        if self.profile_version == 0 {
+        if self.profile_version != HARD_LIMIT_PROFILE_VERSION {
             return Err(LimitProfileError {
                 field: "profile_version".to_owned(),
-                message: "profile version must be positive",
+                message: "profile version does not match the current closed contract",
+            });
+        }
+        if self.capability_sandbox.runtime_bundle_bytes
+            != (Limit {
+                unit: LimitUnit::Bytes,
+                hard_max: crate::MAX_SANDBOX_RUNTIME_BUNDLE_BYTES,
+                q1_default: Q1_SANDBOX_RUNTIME_BUNDLE_BYTES,
+                overflow_outcome: OverflowOutcome::ContentRejected,
+            })
+        {
+            return Err(LimitProfileError {
+                field: "capability_sandbox.runtime_bundle_bytes".to_owned(),
+                message: "runtime bundle limit does not match the current closed contract",
             });
         }
 
@@ -371,7 +388,48 @@ mod tests {
         let bytes = q1_profile_bytes();
         let profile: HardLimitProfile = serde_json::from_slice(&bytes).unwrap();
         profile.validate().unwrap();
+        assert_eq!(
+            profile.capability_sandbox.runtime_bundle_bytes.hard_max,
+            crate::MAX_SANDBOX_RUNTIME_BUNDLE_BYTES
+        );
         assert_eq!(profile, checked_in_hard_limit_profile());
+    }
+
+    #[test]
+    fn runtime_bundle_limit_and_profile_version_are_exact() {
+        let bytes = q1_profile_bytes();
+        let profile: HardLimitProfile = serde_json::from_slice(&bytes).unwrap();
+
+        let mut old_version = profile.clone();
+        old_version.profile_version = HARD_LIMIT_PROFILE_VERSION - 1;
+        assert_eq!(old_version.validate().unwrap_err().field, "profile_version");
+
+        let mutations = [
+            Limit {
+                unit: LimitUnit::Count,
+                ..profile.capability_sandbox.runtime_bundle_bytes.clone()
+            },
+            Limit {
+                hard_max: crate::MAX_SANDBOX_RUNTIME_BUNDLE_BYTES - 1,
+                ..profile.capability_sandbox.runtime_bundle_bytes.clone()
+            },
+            Limit {
+                q1_default: Q1_SANDBOX_RUNTIME_BUNDLE_BYTES - 1,
+                ..profile.capability_sandbox.runtime_bundle_bytes.clone()
+            },
+            Limit {
+                overflow_outcome: OverflowOutcome::QuotaExceeded,
+                ..profile.capability_sandbox.runtime_bundle_bytes.clone()
+            },
+        ];
+        for mutation in mutations {
+            let mut changed = profile.clone();
+            changed.capability_sandbox.runtime_bundle_bytes = mutation;
+            assert_eq!(
+                changed.validate().unwrap_err().field,
+                "capability_sandbox.runtime_bundle_bytes"
+            );
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@ service SandboxManagedMcpSessionAuthorityService {
 }
 
 service SandboxExecutorBrokerService {
-  rpc ReadExactArtifact(ClosedSandboxEnvelope) returns (SandboxBytesEnvelope);
+  rpc ReadExactArtifact(ClosedSandboxEnvelope) returns (stream SandboxArtifactChunkEnvelope);
   rpc ValidateWasiValue(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
   rpc RevokeWasiGrants(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
   rpc ProveSandboxProcessGenerationAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
@@ -96,12 +96,6 @@ message ClosedSandboxEnvelope {
   uint32 schema_version = 1;
   bytes canonical_json = 2;
   string payload_digest = 3;
-}
-
-message SandboxBytesEnvelope {
-  uint32 schema_version = 1;
-  bytes value = 2;
-  string content_digest = 3;
 }
 
 message SandboxArtifactChunkEnvelope {

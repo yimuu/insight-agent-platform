@@ -10,10 +10,10 @@ use crate::{
     },
     mcp_repository::{load_managed_mcp_sandbox_session_job, resolve_mcp_execution_contract},
     repository::{
-        append_command_event, append_scheduler_event, claim_command_receipt,
-        decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
-        load_deployment, load_job_for_update_by_text, load_resource, payload_from_row,
-        require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page,
+        append_command_event, append_scheduler_event, begin_read_only_repeatable,
+        claim_command_receipt, decode_deployment_closure, decode_versioned_payload, job_from_row,
+        job_projection, load_deployment, load_job_for_update_by_text, load_resource,
+        payload_from_row, require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page,
         terminalize_command_receipt, validate_safety_scan_request, JobRecord, PgRepository,
         RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
         MAX_JOB_LEASE_MILLISECONDS,
@@ -319,15 +319,13 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
         }
         let job_id = ResourceId::from_uuid_v7(ResourceKind::Job, request.sandbox_job_id.uuid())
             .map_err(|_| ArtifactObjectReadAuthorityError::Denied)?;
-        let mut transaction = self
-            .pool()
-            .begin()
+        let mut transaction = begin_read_only_repeatable(self.pool())
             .await
             .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
         let database_now = database_now(&mut transaction)
             .await
             .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
-        let current = load_sandbox_job(
+        let current = load_sandbox_job_read_only(
             &mut transaction,
             &request.tenant_id,
             &job_id,
@@ -352,6 +350,7 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
         if leased_request.request_digest != request.request_digest
             || lease.worker_process_generation_id != request.worker_process_generation_id
             || lease.lease_generation != request.lease_generation
+            || lease.expires_at <= database_now
             || request.deadline != leased_request.deadline
             || request.deadline <= database_now
             || request.maximum_bytes == 0
@@ -377,6 +376,8 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
             owner_id: &request.sandbox_job_id,
             request_digest: &request.request_digest,
             worker_process_generation_id: &request.worker_process_generation_id,
+            provider_process_generation_id: None,
+            sandbox_identity_digest: None,
             lease_generation: request.lease_generation,
             artifact: &request.artifact,
             purpose_domain: match request.purpose {
@@ -387,7 +388,6 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
                 WasiArtifactReadPurpose::RuntimeBundle => ArtifactObjectReadPurpose::Package,
                 WasiArtifactReadPurpose::InputValue => ArtifactObjectReadPurpose::SandboxInput,
             },
-            job_version: current.job.version,
         };
         let authorized = load_authorized_artifact_object(&mut transaction, projection)
             .await
@@ -427,11 +427,106 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
                 maximum_bytes: request.maximum_bytes,
                 deadline: request.deadline,
             };
-            return <Self as ArtifactObjectReadAuthority<WasiArtifactReadRequest>>::authorize_object_read(
-                self,
-                &wasi_request,
+            let job_id = ResourceId::from_uuid_v7(ResourceKind::Job, request.sandbox_job_id.uuid())
+                .map_err(|_| ArtifactObjectReadAuthorityError::Denied)?;
+            let mut transaction = begin_read_only_repeatable(self.pool())
+                .await
+                .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+            let database_now = database_now(&mut transaction)
+                .await
+                .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+            let current = load_sandbox_job_read_only(
+                &mut transaction,
+                &request.tenant_id,
+                &job_id,
+                self.sandbox_limits(),
             )
-            .await;
+            .await
+            .map_err(classify_artifact_read_repository_error)?;
+            require_sandbox_command_owner(&current, &request.sandbox_job_id, &request.tenant_id)
+                .map_err(classify_artifact_read_repository_error)?;
+            let lease = current
+                .job
+                .lease
+                .as_ref()
+                .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
+            let leased_request = current
+                .payload
+                .request
+                .as_ref()
+                .clone()
+                .bind_lease_generation(current.job.lease_generation)
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+            let prepared = current
+                .payload
+                .prepared
+                .as_ref()
+                .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
+            if leased_request.isolation_class
+                != insight_platform_contracts::SandboxIsolationClass::MicroVm
+                || leased_request.request_digest != request.request_digest
+                || lease.worker_process_generation_id
+                    != request.executor_worker_process_generation_id
+                || lease.lease_generation != request.lease_generation
+                || lease.expires_at <= database_now
+                || prepared.provider_process_generation_id.as_ref()
+                    != Some(&request.provider_process_generation_id)
+                || prepared.sandbox_identity_digest != request.sandbox_identity_digest
+                || request.deadline != leased_request.deadline
+                || request.deadline <= database_now
+                || u64::try_from(request.maximum_bytes)
+                    .map_or(true, |maximum| maximum < request.artifact.byte_length())
+                || !matches!(
+                    current.payload.physical_state,
+                    SandboxJobState::Starting
+                        | SandboxJobState::Running
+                        | SandboxJobState::Collecting
+                        | SandboxJobState::Cancelling
+                )
+            {
+                return Err(ArtifactObjectReadAuthorityError::Denied);
+            }
+            authorize_wasi_artifact_purpose(
+                &mut transaction,
+                &wasi_request,
+                &leased_request,
+                database_now,
+            )
+            .await
+            .map_err(classify_artifact_read_repository_error)?;
+            let authorized = load_authorized_artifact_object(
+                &mut transaction,
+                ArtifactObjectReadProjection {
+                    tenant_id: &request.tenant_id,
+                    owner_kind: "sandbox_job",
+                    owner_id: &request.sandbox_job_id,
+                    request_digest: &request.request_digest,
+                    worker_process_generation_id: &request.executor_worker_process_generation_id,
+                    provider_process_generation_id: Some(&request.provider_process_generation_id),
+                    sandbox_identity_digest: Some(&request.sandbox_identity_digest),
+                    lease_generation: request.lease_generation,
+                    artifact: &request.artifact,
+                    purpose_domain: match request.purpose {
+                        MicroVmArtifactReadPurpose::RuntimeBundle => "runtime_bundle",
+                        MicroVmArtifactReadPurpose::InputValue => "input_value",
+                    },
+                    purpose_class: match request.purpose {
+                        MicroVmArtifactReadPurpose::RuntimeBundle => {
+                            ArtifactObjectReadPurpose::Package
+                        }
+                        MicroVmArtifactReadPurpose::InputValue => {
+                            ArtifactObjectReadPurpose::SandboxInput
+                        }
+                    },
+                },
+            )
+            .await
+            .map_err(classify_artifact_read_repository_error)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+            return Ok(authorized);
         }
         if request.purpose != MicroVmArtifactReadPurpose::RuntimeBundle {
             return Err(ArtifactObjectReadAuthorityError::Denied);
@@ -442,9 +537,7 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
             .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
         let job_id = ResourceId::from_uuid_v7(ResourceKind::Job, request.sandbox_job_id.uuid())
             .map_err(|_| ArtifactObjectReadAuthorityError::Denied)?;
-        let mut transaction = self
-            .pool()
-            .begin()
+        let mut transaction = begin_read_only_repeatable(self.pool())
             .await
             .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
         let database_now = database_now(&mut transaction)
@@ -455,7 +548,7 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
             &request.tenant_id,
             &job_id,
             self.sandbox_limits(),
-            true,
+            false,
         )
         .await
         .map_err(classify_artifact_read_repository_error)?;
@@ -463,11 +556,18 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
             .lease
             .as_ref()
             .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
+        let prepared = payload
+            .prepared_binding
+            .as_ref()
+            .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
         if payload.physical_state != SandboxJobState::Starting
             || payload.request.identity.sandbox_job_id != request.sandbox_job_id
             || payload.request.request_digest != request.request_digest
             || lease.worker_process_generation_id != request.executor_worker_process_generation_id
             || lease.lease_generation != request.lease_generation
+            || lease.expires_at <= database_now
+            || prepared.provider_process_generation_id != request.provider_process_generation_id
+            || prepared.sandbox_identity_digest != request.sandbox_identity_digest
             || payload.request.deadline != request.deadline
             || request.deadline <= database_now
             || request.artifact != payload.request.package.runtime_bundle_artifact
@@ -497,11 +597,12 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
                 owner_id: &request.sandbox_job_id,
                 request_digest: &request.request_digest,
                 worker_process_generation_id: &request.executor_worker_process_generation_id,
+                provider_process_generation_id: Some(&request.provider_process_generation_id),
+                sandbox_identity_digest: Some(&request.sandbox_identity_digest),
                 lease_generation: request.lease_generation,
                 artifact: &request.artifact,
                 purpose_domain: "managed_mcp_session_runtime_bundle",
                 purpose_class: ArtifactObjectReadPurpose::Package,
-                job_version: job.version,
             },
         )
         .await
@@ -989,7 +1090,6 @@ async fn require_active_sandbox_artifact_grant(
         WHERE tenant_id = $1 AND artifact_link_id = $2
           AND link_kind = 'grant' AND owner_kind = 'sandbox_job'
           AND owner_id = $3
-        FOR UPDATE
         "#,
     )
     .bind(tenant_id.to_string())
@@ -1032,11 +1132,12 @@ pub(crate) struct ArtifactObjectReadProjection<'a> {
     pub owner_id: &'a ResourceId,
     pub request_digest: &'a Sha256Digest,
     pub worker_process_generation_id: &'a ResourceId,
+    pub provider_process_generation_id: Option<&'a ResourceId>,
+    pub sandbox_identity_digest: Option<&'a Sha256Digest>,
     pub lease_generation: u64,
     pub artifact: &'a insight_platform_contracts::ArtifactRef,
     pub purpose_domain: &'static str,
     pub purpose_class: ArtifactObjectReadPurpose,
-    pub job_version: u64,
 }
 
 pub(crate) async fn load_authorized_artifact_object(
@@ -1132,15 +1233,20 @@ pub(crate) async fn load_authorized_artifact_object(
     let blob_version: i64 = row.try_get("blob_version")?;
     let object_reference_ciphertext: Vec<u8> = row.try_get("object_reference_ciphertext")?;
     let object_reference_ciphertext_digest = prefixed_sha256(&object_reference_ciphertext);
-    let authorization_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+    if request.provider_process_generation_id.is_some() != request.sandbox_identity_digest.is_some()
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Artifact read physical binding is incomplete".to_owned(),
+        ));
+    }
+    let mut authorization = serde_json::json!({
         "artifact": request.artifact,
         "backend": backend,
         "blob_id": blob_id,
         "blob_version": blob_version,
         "encryption_domain_id": encryption_domain_id,
-        "job_version": request.job_version,
+        "authority_generation": request.lease_generation,
         "key_id": key_id,
-        "lease_generation": request.lease_generation,
         "object_generation": object_generation,
         "object_reference_ciphertext_digest": object_reference_ciphertext_digest,
         "owner_id": request.owner_id,
@@ -1151,10 +1257,29 @@ pub(crate) async fn load_authorized_artifact_object(
         "storage_binding_digest": storage_binding_digest,
         "tenant_id": request.tenant_id,
         "worker_process_generation_id": request.worker_process_generation_id,
-    }))
-    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
-    .parse::<Sha256Digest>()
-    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    });
+    if let (Some(provider), Some(identity)) = (
+        request.provider_process_generation_id,
+        request.sandbox_identity_digest,
+    ) {
+        let object = authorization
+            .as_object_mut()
+            .ok_or_else(|| RepositoryError::CorruptRow("Artifact authorization".to_owned()))?;
+        object.insert(
+            "provider_process_generation_id".to_owned(),
+            serde_json::to_value(provider)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        );
+        object.insert(
+            "sandbox_identity_digest".to_owned(),
+            serde_json::to_value(identity)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        );
+    }
+    let authorization_digest: Sha256Digest = canonical_digest(&authorization)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+        .parse::<Sha256Digest>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     let authorized = AuthorizedArtifactObjectRead {
         tenant_id: request.tenant_id.clone(),
         blob_id,
@@ -3025,9 +3150,12 @@ impl SandboxExecutionAuthority for PgRepository {
                 &current.job,
                 &current.payload,
                 &command.fence,
-                command.target,
-                command.phase_evidence_digest.clone(),
-                database_now,
+                insight_platform_sandbox::AdvanceSandboxPhase {
+                    target: command.target,
+                    phase_evidence_digest: command.phase_evidence_digest.clone(),
+                    prepared: command.prepared.clone(),
+                    database_now,
+                },
                 self.sandbox_limits(),
             )?
         };
@@ -4630,6 +4758,36 @@ async fn load_sandbox_job(
     let record =
         load_job_for_update_by_text(transaction, &tenant_id.to_string(), &job_id.to_string())
             .await?;
+    let job = job_projection(&record)?;
+    let payload = decode_sandbox_capability_payload(&record.payload)?;
+    payload
+        .validate_for(&job, limits)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    Ok(LockedSandboxJob {
+        record,
+        job,
+        payload,
+    })
+}
+
+async fn load_sandbox_job_read_only(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    job_id: &ResourceId,
+    limits: SandboxCommandLimits,
+) -> Result<LockedSandboxJob, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT * FROM insight_platform.jobs
+        WHERE tenant_id = $1 AND job_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("Sandbox Job"))?;
+    let record = job_from_row(row)?;
     let job = job_projection(&record)?;
     let payload = decode_sandbox_capability_payload(&record.payload)?;
     payload

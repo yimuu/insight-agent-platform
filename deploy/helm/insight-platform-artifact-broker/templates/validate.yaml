@@ -1,38 +1,69 @@
-{{- if lt (int .Values.replicas) 2 }}
-{{- fail "Artifact Broker requires at least two replicas" }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must be an exact lowercase sha256 digest" }}
 {{- end }}
 {{- if not .Values.networkPolicy.enabled }}
 {{- fail "Artifact Broker NetworkPolicy must remain enabled" }}
 {{- end }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
-{{- fail "image.digest must be an exact lowercase sha256 digest" }}
+{{- if ne (join "," (keys .Values.brokers | sortAlpha)) "model,sandbox" }}
+{{- fail "brokers must contain exactly the isolated model and sandbox audiences" }}
 {{- end }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) }}
-{{- fail "config.digest must be an exact lowercase sha256 digest" }}
+{{- range $audience, $broker := .Values.brokers }}
+{{- if lt (int $broker.replicas) 2 }}
+{{- fail (printf "%s Artifact Broker requires at least two replicas" $audience) }}
 {{- end }}
-{{- if or (lt (int .Values.port) 1) (gt (int .Values.port) 65535) }}
-{{- fail "Artifact Broker port must be valid" }}
+{{- if or (lt (int $broker.port) 1) (gt (int $broker.port) 65535) }}
+{{- fail (printf "%s Artifact Broker port must be valid" $audience) }}
 {{- end }}
-{{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.tls.existingSecret) }}
-{{- fail "immutable config, restricted database and server mTLS inputs are required" }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $broker.config.digest) }}
+{{- fail (printf "%s config.digest must be an exact lowercase sha256 digest" $audience) }}
 {{- end }}
-{{- if empty .Values.serviceAccount.annotations }}
-{{- fail "Artifact Broker workload-identity annotation is required" }}
+{{- if or (empty $broker.config.existingConfigMap) (empty $broker.config.fileKey) }}
+{{- fail (printf "%s immutable config input is required" $audience) }}
+{{- end }}
+{{- if or (empty $broker.database.existingSecret) (empty $broker.database.urlKey) }}
+{{- fail (printf "%s restricted database input is required" $audience) }}
+{{- end }}
+{{- if empty $broker.serviceAccount.annotations }}
+{{- fail (printf "%s Artifact Broker workload-identity annotation is required" $audience) }}
+{{- end }}
+{{- if or (empty $broker.tls.existingSecret) (empty $broker.tls.keys.clientCa) (empty $broker.tls.keys.serverCertificate) (empty $broker.tls.keys.serverPrivateKey) }}
+{{- fail (printf "%s server mTLS inputs are required" $audience) }}
+{{- end }}
+{{- if $broker.autoscaling.enabled }}
+{{- if lt (int $broker.autoscaling.minReplicas) 2 }}
+{{- fail (printf "%s Artifact Broker HPA requires at least two replicas" $audience) }}
+{{- end }}
+{{- if lt (int $broker.autoscaling.maxReplicas) (int $broker.autoscaling.minReplicas) }}
+{{- fail (printf "%s Artifact Broker HPA maximum must be at least its minimum" $audience) }}
+{{- end }}
+{{- if or (lt (int $broker.autoscaling.targetCPUUtilizationPercentage) 1) (gt (int $broker.autoscaling.targetCPUUtilizationPercentage) 100) }}
+{{- fail (printf "%s Artifact Broker HPA CPU target must be in 1..100" $audience) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $model := index .Values.brokers "model" }}
+{{- $sandbox := index .Values.brokers "sandbox" }}
+{{- if eq $model.config.existingConfigMap $sandbox.config.existingConfigMap }}
+{{- fail "Model and Sandbox Artifact Brokers require isolated config maps" }}
+{{- end }}
+{{- if eq $model.database.existingSecret $sandbox.database.existingSecret }}
+{{- fail "Model and Sandbox Artifact Brokers require isolated database pools and credentials" }}
+{{- end }}
+{{- if eq $model.tls.existingSecret $sandbox.tls.existingSecret }}
+{{- fail "Model and Sandbox Artifact Brokers require isolated server identities" }}
+{{- end }}
+{{- if deepEqual $model.serviceAccount.annotations $sandbox.serviceAccount.annotations }}
+{{- fail "Model and Sandbox Artifact Brokers require isolated workload identities" }}
 {{- end }}
 {{- if or (empty .Values.networkPolicy.modelWorkerNamespaceSelector) (empty .Values.networkPolicy.modelWorkerPodSelector) }}
 {{- fail "exact Model Worker caller selectors are required" }}
 {{- end }}
+{{- if or (empty .Values.networkPolicy.sandboxControllerNamespaceSelector) (empty .Values.networkPolicy.sandboxControllerPodSelector) }}
+{{- fail "exact Sandbox Controller caller selectors are required" }}
+{{- end }}
+{{- if or (empty .Values.networkPolicy.dnsNamespaceSelector) (empty .Values.networkPolicy.dnsPodSelector) }}
+{{- fail "exact DNS selectors are required" }}
+{{- end }}
 {{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.storageProviderCidrs) (empty .Values.networkPolicy.kmsProviderCidrs) (empty .Values.networkPolicy.workloadIdentityCidrs) }}
 {{- fail "PostgreSQL, storage, KMS and workload-identity CIDRs are required" }}
-{{- end }}
-{{- if .Values.autoscaling.enabled }}
-{{- if lt (int .Values.autoscaling.minReplicas) 2 }}
-{{- fail "Artifact Broker HPA requires at least two replicas" }}
-{{- end }}
-{{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) }}
-{{- fail "Artifact Broker HPA maximum must be at least its minimum" }}
-{{- end }}
-{{- if or (lt (int .Values.autoscaling.targetCPUUtilizationPercentage) 1) (gt (int .Values.autoscaling.targetCPUUtilizationPercentage) 100) }}
-{{- fail "Artifact Broker HPA CPU target must be in 1..100" }}
-{{- end }}
 {{- end }}

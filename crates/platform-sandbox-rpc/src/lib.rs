@@ -9,8 +9,10 @@ mod control;
 pub use control::*;
 
 use async_trait::async_trait;
+#[cfg(test)]
+use insight_platform_contracts::ArtifactGrantOperation;
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, CommandOutcome, HardLimitProfile, JsonLimits,
+    canonical_digest, parse_strict_json, ArtifactRef, CommandOutcome, HardLimitProfile, JsonLimits,
     Retryability, Sha256Digest,
 };
 use insight_platform_jobs::JobFence;
@@ -42,7 +44,7 @@ use insight_platform_sandbox::{
     SandboxProcessGenerationIsolation, SandboxProcessGenerationIsolationError,
     SandboxTerminationEvidence, ScanExpiredManagedMcpSandboxSessionLeases, TerminateSandbox,
     VerifyWasiExecutorProcessGeneration, WasiArtifactBroker, WasiArtifactBrokerError,
-    WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
+    WasiArtifactReadPurpose, WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
     WasiExecutorProcessIdentityEvidence, WasiExecutorProcessRegistrar,
     WasiExecutorProcessRegistrationError, WasiExecutorProcessRegistrationVerifier,
     WasiExecutorRegistrationPeer, WasiGrantRevocationError, WasiGrantRevocationEvidence,
@@ -51,11 +53,18 @@ use insight_platform_sandbox::{
 #[cfg(test)]
 use insight_platform_sandbox::{
     ManagedMcpSandboxSessionRecoveryExecutor, ManagedMcpSandboxSessionRecoveryShard,
-    MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind,
+    MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind, ScopedArtifactGrant,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::{error::Error, fmt, sync::Arc};
+use std::{
+    error::Error,
+    fmt,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::transport::server::{TlsConnectInfo, UdsConnectInfo};
 use tonic::{Request, Response, Status};
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
@@ -85,7 +94,7 @@ use proto::{
     sandbox_process_isolation_attestor_service_server::SandboxProcessIsolationAttestorService,
     sandbox_secret_delivery_authority_service_client::SandboxSecretDeliveryAuthorityServiceClient,
     sandbox_secret_delivery_authority_service_server::SandboxSecretDeliveryAuthorityService,
-    ClosedSandboxEnvelope, SandboxArtifactChunkEnvelope, SandboxBytesEnvelope,
+    ClosedSandboxEnvelope, SandboxArtifactChunkEnvelope,
 };
 
 pub const SANDBOX_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
@@ -99,7 +108,9 @@ pub const MICROVM_PROVIDER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-provider.microvm";
 pub const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/egress-broker";
-const MICROVM_ARTIFACT_CHUNK_BYTES: usize = 1024 * 1024;
+const SANDBOX_ARTIFACT_CHUNK_BYTES: usize = 1024 * 1024;
+const SANDBOX_ARTIFACT_MESSAGE_OVERHEAD_BYTES: usize = 1024;
+const MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD: usize = 4;
 
 /// Authorizes the mTLS-authenticated peer before any Sandbox request body is decoded.
 ///
@@ -1009,63 +1020,30 @@ impl MicroVmArtifactBroker for SandboxMicroVmBrokerGrpcClient {
     ) -> Result<Vec<u8>, MicroVmArtifactBrokerError> {
         request.validate()?;
         let maximum_bytes = request.maximum_bytes;
-        let expected_bytes = usize::try_from(request.artifact.byte_length())
-            .map_err(|_| MicroVmArtifactBrokerError::TooLarge)?;
-        let expected_digest = request.artifact.content_digest().clone();
+        let artifact = request.artifact.clone();
+        let deadline = request.deadline;
         let envelope =
             encode(&request, self.limits).map_err(|_| MicroVmArtifactBrokerError::Integrity)?;
+        let (rpc_request, deadline_at) = artifact_request_with_deadline(envelope, deadline)
+            .map_err(map_micro_vm_artifact_client_read_error)?;
         let mut client = self.client.clone();
-        let mut stream = client
-            .read_exact_micro_vm_artifact(Request::new(envelope))
-            .await
-            .map_err(micro_vm_artifact_client_error)?
-            .into_inner();
-        let mut value = Vec::with_capacity(expected_bytes.min(maximum_bytes));
-        let mut expected_sequence = 0_u64;
-        while let Some(chunk) = stream
-            .message()
-            .await
-            .map_err(micro_vm_artifact_client_error)?
-        {
-            if chunk.schema_version != SANDBOX_INTERNAL_RPC_SCHEMA_VERSION
-                || chunk.sequence != expected_sequence
-                || chunk.value.is_empty()
-                || chunk.value.len() > MICROVM_ARTIFACT_CHUNK_BYTES
-                || chunk.value.len() > self.limits.maximum_message_bytes()
-                || chunk.total_bytes != request.artifact.byte_length()
-            {
-                return Err(MicroVmArtifactBrokerError::Integrity);
-            }
-            let content_digest: Sha256Digest = chunk
-                .content_digest
-                .parse()
-                .map_err(|_| MicroVmArtifactBrokerError::Integrity)?;
-            let chunk_digest: Sha256Digest = chunk
-                .chunk_digest
-                .parse()
-                .map_err(|_| MicroVmArtifactBrokerError::Integrity)?;
-            if content_digest != expected_digest
-                || bytes_digest(&chunk.value).map_err(|_| MicroVmArtifactBrokerError::Integrity)?
-                    != chunk_digest
-                || value
-                    .len()
-                    .checked_add(chunk.value.len())
-                    .is_none_or(|length| length > expected_bytes || length > maximum_bytes)
-            {
-                return Err(MicroVmArtifactBrokerError::Integrity);
-            }
-            value.extend_from_slice(&chunk.value);
-            expected_sequence = expected_sequence
-                .checked_add(1)
-                .ok_or(MicroVmArtifactBrokerError::Integrity)?;
-        }
-        if value.len() != expected_bytes
-            || bytes_digest(&value).map_err(|_| MicroVmArtifactBrokerError::Integrity)?
-                != expected_digest
-        {
-            return Err(MicroVmArtifactBrokerError::Integrity);
-        }
-        Ok(value)
+        let mut stream = tokio::time::timeout_at(
+            deadline_at,
+            client.read_exact_micro_vm_artifact(rpc_request),
+        )
+        .await
+        .map_err(|_| MicroVmArtifactBrokerError::Unavailable)?
+        .map_err(micro_vm_artifact_client_error)?
+        .into_inner();
+        collect_sandbox_artifact_stream(
+            &mut stream,
+            &artifact,
+            maximum_bytes,
+            self.limits,
+            deadline_at,
+        )
+        .await
+        .map_err(map_micro_vm_artifact_client_read_error)
     }
 }
 
@@ -1076,26 +1054,168 @@ impl WasiArtifactBroker for SandboxBrokerGrpcClient {
         request: WasiArtifactReadRequest,
     ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
         let maximum_bytes = request.maximum_bytes;
+        let artifact = request.artifact.clone();
+        let deadline = request.deadline;
         let envelope =
             encode(&request, self.limits).map_err(|_| WasiArtifactBrokerError::Integrity)?;
+        let (rpc_request, deadline_at) = artifact_request_with_deadline(envelope, deadline)
+            .map_err(map_wasi_artifact_client_read_error)?;
         let mut client = self.client.clone();
-        let response = client
-            .read_exact_artifact(Request::new(envelope))
+        let mut stream =
+            tokio::time::timeout_at(deadline_at, client.read_exact_artifact(rpc_request))
+                .await
+                .map_err(|_| WasiArtifactBrokerError::Unavailable)?
+                .map_err(wasi_artifact_client_error)?
+                .into_inner();
+        collect_sandbox_artifact_stream(
+            &mut stream,
+            &artifact,
+            maximum_bytes,
+            self.limits,
+            deadline_at,
+        )
+        .await
+        .map_err(map_wasi_artifact_client_read_error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxArtifactClientReadError {
+    Unavailable,
+    TooLarge,
+    Integrity,
+}
+
+struct CollectedSandboxArtifact(Vec<u8>);
+
+impl CollectedSandboxArtifact {
+    fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for CollectedSandboxArtifact {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+fn artifact_deadline_budget(
+    deadline: chrono::DateTime<chrono::Utc>,
+) -> Result<std::time::Duration, SandboxArtifactClientReadError> {
+    deadline
+        .signed_duration_since(chrono::Utc::now())
+        .to_std()
+        .ok()
+        .filter(|budget| !budget.is_zero())
+        .ok_or(SandboxArtifactClientReadError::Unavailable)
+}
+
+fn artifact_request_with_deadline<T>(
+    message: T,
+    deadline: chrono::DateTime<chrono::Utc>,
+) -> Result<(Request<T>, tokio::time::Instant), SandboxArtifactClientReadError> {
+    let budget = artifact_deadline_budget(deadline)?;
+    let mut request = Request::new(message);
+    request.set_timeout(budget);
+    Ok((request, tokio::time::Instant::now() + budget))
+}
+
+async fn collect_sandbox_artifact_stream(
+    stream: &mut tonic::Streaming<SandboxArtifactChunkEnvelope>,
+    artifact: &ArtifactRef,
+    maximum_bytes: usize,
+    limits: SandboxInternalRpcLimits,
+    deadline_at: tokio::time::Instant,
+) -> Result<Vec<u8>, SandboxArtifactClientReadError> {
+    let expected_bytes = usize::try_from(artifact.byte_length())
+        .map_err(|_| SandboxArtifactClientReadError::TooLarge)?;
+    if expected_bytes > maximum_bytes {
+        return Err(SandboxArtifactClientReadError::TooLarge);
+    }
+    let chunk_bytes = sandbox_artifact_chunk_bytes(limits)?;
+    let mut value = CollectedSandboxArtifact::with_capacity(expected_bytes);
+    let mut expected_sequence = 0_u64;
+    loop {
+        let chunk = tokio::time::timeout_at(deadline_at, stream.message())
             .await
-            .map_err(|status| match status.code() {
-                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
-                    WasiArtifactBrokerError::Unavailable
-                }
-                tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
-                    WasiArtifactBrokerError::Denied
-                }
-                tonic::Code::NotFound => WasiArtifactBrokerError::NotFound,
-                tonic::Code::ResourceExhausted => WasiArtifactBrokerError::TooLarge,
-                _ => WasiArtifactBrokerError::Integrity,
-            })?
-            .into_inner();
-        decode_bytes(response, maximum_bytes, self.limits)
-            .map_err(|_| WasiArtifactBrokerError::Integrity)
+            .map_err(|_| SandboxArtifactClientReadError::Unavailable)?
+            .map_err(classify_sandbox_artifact_status)?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let content_digest: Sha256Digest = chunk
+            .content_digest
+            .parse()
+            .map_err(|_| SandboxArtifactClientReadError::Integrity)?;
+        let chunk_digest: Sha256Digest = chunk
+            .chunk_digest
+            .parse()
+            .map_err(|_| SandboxArtifactClientReadError::Integrity)?;
+        let next_length = value
+            .0
+            .len()
+            .checked_add(chunk.value.len())
+            .ok_or(SandboxArtifactClientReadError::TooLarge)?;
+        if chunk.schema_version != SANDBOX_INTERNAL_RPC_SCHEMA_VERSION
+            || chunk.sequence != expected_sequence
+            || chunk.value.is_empty()
+            || chunk.value.len() > chunk_bytes
+            || chunk.total_bytes != artifact.byte_length()
+            || content_digest != *artifact.content_digest()
+            || bytes_digest(&chunk.value).map_err(|_| SandboxArtifactClientReadError::Integrity)?
+                != chunk_digest
+            || next_length > expected_bytes
+            || next_length > maximum_bytes
+            || (next_length < expected_bytes && chunk.value.len() != chunk_bytes)
+        {
+            return Err(SandboxArtifactClientReadError::Integrity);
+        }
+        value.0.extend_from_slice(&chunk.value);
+        expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or(SandboxArtifactClientReadError::Integrity)?;
+    }
+    if value.0.len() != expected_bytes
+        || bytes_digest(&value.0).map_err(|_| SandboxArtifactClientReadError::Integrity)?
+            != *artifact.content_digest()
+    {
+        return Err(SandboxArtifactClientReadError::Integrity);
+    }
+    Ok(value.into_bytes())
+}
+
+fn classify_sandbox_artifact_status(status: Status) -> SandboxArtifactClientReadError {
+    match status.code() {
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+            SandboxArtifactClientReadError::Unavailable
+        }
+        tonic::Code::ResourceExhausted => SandboxArtifactClientReadError::TooLarge,
+        _ => SandboxArtifactClientReadError::Integrity,
+    }
+}
+
+fn map_wasi_artifact_client_read_error(
+    error: SandboxArtifactClientReadError,
+) -> WasiArtifactBrokerError {
+    match error {
+        SandboxArtifactClientReadError::Unavailable => WasiArtifactBrokerError::Unavailable,
+        SandboxArtifactClientReadError::TooLarge => WasiArtifactBrokerError::TooLarge,
+        SandboxArtifactClientReadError::Integrity => WasiArtifactBrokerError::Integrity,
+    }
+}
+
+fn map_micro_vm_artifact_client_read_error(
+    error: SandboxArtifactClientReadError,
+) -> MicroVmArtifactBrokerError {
+    match error {
+        SandboxArtifactClientReadError::Unavailable => MicroVmArtifactBrokerError::Unavailable,
+        SandboxArtifactClientReadError::TooLarge => MicroVmArtifactBrokerError::TooLarge,
+        SandboxArtifactClientReadError::Integrity => MicroVmArtifactBrokerError::Integrity,
     }
 }
 
@@ -1724,20 +1844,60 @@ pub struct SandboxBrokerGrpcService<B, V, G, P> {
     grant_revoker: Arc<G>,
     process_isolation: Arc<P>,
     limits: SandboxInternalRpcLimits,
+    artifact_response_capacity: SandboxArtifactResponseCapacity,
 }
 
 pub struct SandboxMicroVmBrokerGrpcService<B, G> {
     artifacts: Arc<B>,
     grant_revoker: Arc<G>,
     limits: SandboxInternalRpcLimits,
+    artifact_response_capacity: SandboxArtifactResponseCapacity,
+}
+
+/// One process-local bulkhead shared by every Controller Artifact response lane.
+///
+/// A permit is acquired before the Controller calls the upstream Sandbox Artifact Broker and is
+/// moved into the outward response stream. This bounds both the upstream aggregation and the
+/// downstream response body for WASI and microVM callers together.
+#[derive(Clone)]
+pub struct SandboxArtifactResponseCapacity {
+    permits: Arc<Semaphore>,
+}
+
+impl SandboxArtifactResponseCapacity {
+    pub fn new(maximum_in_flight: usize) -> Result<Self, SandboxRpcError> {
+        if !(1..=MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD).contains(&maximum_in_flight) {
+            return Err(SandboxRpcError::InvalidConfiguration);
+        }
+        Ok(Self {
+            permits: Arc::new(Semaphore::new(maximum_in_flight)),
+        })
+    }
+
+    fn try_acquire(&self) -> Result<OwnedSemaphorePermit, Status> {
+        Arc::clone(&self.permits).try_acquire_owned().map_err(|_| {
+            Status::resource_exhausted("Sandbox Artifact response capacity is saturated")
+        })
+    }
+
+    #[cfg(test)]
+    fn available_permits(&self) -> usize {
+        self.permits.available_permits()
+    }
 }
 
 impl<B, G> SandboxMicroVmBrokerGrpcService<B, G> {
-    pub fn new(artifacts: Arc<B>, grant_revoker: Arc<G>, limits: SandboxInternalRpcLimits) -> Self {
+    pub fn new(
+        artifacts: Arc<B>,
+        grant_revoker: Arc<G>,
+        limits: SandboxInternalRpcLimits,
+        artifact_response_capacity: SandboxArtifactResponseCapacity,
+    ) -> Self {
         Self {
             artifacts,
             grant_revoker,
             limits,
+            artifact_response_capacity,
         }
     }
 }
@@ -1748,7 +1908,7 @@ where
     B: MicroVmArtifactBroker + 'static,
     G: MicroVmGrantRevoker + 'static,
 {
-    type ReadExactMicroVmArtifactStream = std::pin::Pin<
+    type ReadExactMicroVmArtifactStream = Pin<
         Box<
             dyn futures::Stream<Item = Result<SandboxArtifactChunkEnvelope, Status>>
                 + Send
@@ -1764,12 +1924,14 @@ where
         request
             .validate()
             .map_err(|_| Status::invalid_argument("invalid microVM Artifact read fence"))?;
+        let permit = self.artifact_response_capacity.try_acquire()?;
         let artifact = request.artifact.clone();
         let maximum_bytes = request.maximum_bytes;
-        let value = self
-            .artifacts
-            .read_exact(request)
+        let deadline = request.deadline;
+        let read_budget = sandbox_artifact_server_deadline_budget(deadline)?;
+        let value = tokio::time::timeout(read_budget, self.artifacts.read_exact(request))
             .await
+            .map_err(|_| Status::deadline_exceeded("microVM Artifact read deadline elapsed"))?
             .map_err(micro_vm_artifact_status)?;
         if value.len() > maximum_bytes
             || u64::try_from(value.len()).ok() != Some(artifact.byte_length())
@@ -1779,33 +1941,19 @@ where
                 "microVM Artifact integrity failed",
             ));
         }
-        let chunk_bytes = MICROVM_ARTIFACT_CHUNK_BYTES
-            .min(self.limits.maximum_message_bytes().saturating_sub(1024));
-        if chunk_bytes == 0 {
-            return Err(Status::resource_exhausted(
-                "Sandbox RPC message bound is too small",
-            ));
-        }
+        let chunk_bytes = sandbox_artifact_chunk_bytes(self.limits)
+            .map_err(|_| Status::resource_exhausted("Sandbox RPC message bound is too small"))?;
         let total_bytes = artifact.byte_length();
         let content_digest = artifact.content_digest().to_string();
-        let chunks = value
-            .chunks(chunk_bytes)
-            .enumerate()
-            .map(|(sequence, value)| {
-                let sequence = u64::try_from(sequence)
-                    .map_err(|_| Status::resource_exhausted("too many Artifact chunks"))?;
-                let chunk_digest = bytes_digest(value)?;
-                Ok(SandboxArtifactChunkEnvelope {
-                    schema_version: SANDBOX_INTERNAL_RPC_SCHEMA_VERSION,
-                    sequence,
-                    value: value.to_vec(),
-                    chunk_digest: chunk_digest.to_string(),
-                    total_bytes,
-                    content_digest: content_digest.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
-        Ok(Response::new(Box::pin(futures::stream::iter(chunks))))
+        let stream_budget = sandbox_artifact_server_deadline_budget(deadline)?;
+        Ok(Response::new(Box::pin(SandboxArtifactChunkStream::new(
+            value,
+            permit,
+            chunk_bytes,
+            total_bytes,
+            content_digest,
+            stream_budget,
+        ))))
     }
 
     async fn revoke_micro_vm_grants(
@@ -1829,6 +1977,210 @@ where
                     }
                 })?;
         Ok(Response::new(encode(&evidence, self.limits)?))
+    }
+}
+
+fn sandbox_artifact_server_deadline_budget(
+    deadline: chrono::DateTime<chrono::Utc>,
+) -> Result<std::time::Duration, Status> {
+    deadline
+        .signed_duration_since(chrono::Utc::now())
+        .to_std()
+        .ok()
+        .filter(|budget| !budget.is_zero())
+        .ok_or_else(|| Status::deadline_exceeded("Sandbox Artifact read deadline elapsed"))
+}
+
+fn sandbox_artifact_chunk_bytes(
+    limits: SandboxInternalRpcLimits,
+) -> Result<usize, SandboxArtifactClientReadError> {
+    let chunk_bytes = SANDBOX_ARTIFACT_CHUNK_BYTES.min(
+        limits
+            .maximum_message_bytes()
+            .saturating_sub(SANDBOX_ARTIFACT_MESSAGE_OVERHEAD_BYTES),
+    );
+    if chunk_bytes == 0 {
+        return Err(SandboxArtifactClientReadError::TooLarge);
+    }
+    Ok(chunk_bytes)
+}
+
+struct SandboxArtifactResponseState {
+    value: Vec<u8>,
+    permit: Option<OwnedSemaphorePermit>,
+    deadline_expired: bool,
+}
+
+impl SandboxArtifactResponseState {
+    fn release(&mut self) {
+        let mut value = std::mem::take(&mut self.value);
+        value.fill(0);
+        drop(value);
+        self.permit.take();
+    }
+
+    fn expire(&mut self) {
+        self.deadline_expired = true;
+        self.release();
+    }
+}
+
+struct SandboxArtifactChunkStream {
+    response: Arc<Mutex<SandboxArtifactResponseState>>,
+    offset: usize,
+    sequence: u64,
+    chunk_bytes: usize,
+    total_bytes: u64,
+    content_digest: String,
+    deadline_at: tokio::time::Instant,
+    deadline_waker: Arc<futures::task::AtomicWaker>,
+    deadline_task: Option<tokio::task::JoinHandle<()>>,
+    completed: bool,
+}
+
+impl SandboxArtifactChunkStream {
+    fn new(
+        value: Vec<u8>,
+        permit: OwnedSemaphorePermit,
+        chunk_bytes: usize,
+        total_bytes: u64,
+        content_digest: String,
+        deadline_budget: std::time::Duration,
+    ) -> Self {
+        let response = Arc::new(Mutex::new(SandboxArtifactResponseState {
+            value,
+            permit: Some(permit),
+            deadline_expired: false,
+        }));
+        let deadline_at = tokio::time::Instant::now() + deadline_budget;
+        let deadline_waker = Arc::new(futures::task::AtomicWaker::new());
+        let deadline_response = Arc::clone(&response);
+        let task_waker = Arc::clone(&deadline_waker);
+        let deadline_task = tokio::spawn(async move {
+            tokio::time::sleep_until(deadline_at).await;
+            let mut response = deadline_response
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            response.expire();
+            drop(response);
+            task_waker.wake();
+        });
+        Self {
+            response,
+            offset: 0,
+            sequence: 0,
+            chunk_bytes,
+            total_bytes,
+            content_digest,
+            deadline_at,
+            deadline_waker,
+            deadline_task: Some(deadline_task),
+            completed: false,
+        }
+    }
+
+    fn release(&mut self) {
+        let mut response = self
+            .response
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        response.release();
+        drop(response);
+        if let Some(task) = self.deadline_task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl futures::Stream for SandboxArtifactChunkStream {
+    type Item = Result<SandboxArtifactChunkEnvelope, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.completed {
+            return Poll::Ready(None);
+        }
+        self.deadline_waker.register(context.waker());
+        let (value, reached_end, deadline_expired) = {
+            let response = self
+                .response
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if response.deadline_expired || tokio::time::Instant::now() >= self.deadline_at {
+                (Vec::new(), false, true)
+            } else if self.offset >= response.value.len() {
+                (Vec::new(), true, false)
+            } else {
+                let end = self
+                    .offset
+                    .saturating_add(self.chunk_bytes)
+                    .min(response.value.len());
+                (response.value[self.offset..end].to_vec(), false, false)
+            }
+        };
+        if deadline_expired {
+            self.release();
+            self.completed = true;
+            return Poll::Ready(Some(Err(Status::deadline_exceeded(
+                "Sandbox Artifact read deadline elapsed",
+            ))));
+        }
+        if reached_end {
+            self.release();
+            self.completed = true;
+            return Poll::Ready(None);
+        }
+
+        let chunk_digest = match bytes_digest(&value) {
+            Ok(digest) => digest,
+            Err(error) => {
+                self.release();
+                self.completed = true;
+                return Poll::Ready(Some(Err(Status::from(error))));
+            }
+        };
+
+        let deadline_expired = {
+            let response = self
+                .response
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            response.deadline_expired || tokio::time::Instant::now() >= self.deadline_at
+        };
+        if deadline_expired {
+            let mut value = value;
+            value.fill(0);
+            self.release();
+            self.completed = true;
+            return Poll::Ready(Some(Err(Status::deadline_exceeded(
+                "Sandbox Artifact read deadline elapsed",
+            ))));
+        }
+
+        let sequence = self.sequence;
+        let Some(next_sequence) = sequence.checked_add(1) else {
+            self.release();
+            self.completed = true;
+            return Poll::Ready(Some(Err(Status::resource_exhausted(
+                "too many Artifact chunks",
+            ))));
+        };
+        self.offset = self.offset.saturating_add(value.len());
+        self.sequence = next_sequence;
+        let chunk = SandboxArtifactChunkEnvelope {
+            schema_version: SANDBOX_INTERNAL_RPC_SCHEMA_VERSION,
+            sequence,
+            value,
+            chunk_digest: chunk_digest.to_string(),
+            total_bytes: self.total_bytes,
+            content_digest: self.content_digest.clone(),
+        };
+        Poll::Ready(Some(Ok(chunk)))
+    }
+}
+
+impl Drop for SandboxArtifactChunkStream {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -2440,6 +2792,7 @@ impl<B, V, G, P> SandboxBrokerGrpcService<B, V, G, P> {
         grant_revoker: Arc<G>,
         process_isolation: Arc<P>,
         limits: SandboxInternalRpcLimits,
+        artifact_response_capacity: SandboxArtifactResponseCapacity,
     ) -> Self {
         Self {
             artifacts,
@@ -2447,6 +2800,7 @@ impl<B, V, G, P> SandboxBrokerGrpcService<B, V, G, P> {
             grant_revoker,
             process_isolation,
             limits,
+            artifact_response_capacity,
         }
     }
 }
@@ -2459,26 +2813,61 @@ where
     G: WasiGrantRevoker + 'static,
     P: SandboxProcessGenerationIsolation + 'static,
 {
+    type ReadExactArtifactStream =
+        Pin<Box<dyn futures::Stream<Item = Result<SandboxArtifactChunkEnvelope, Status>> + Send>>;
+
     async fn read_exact_artifact(
         &self,
         request: Request<ClosedSandboxEnvelope>,
-    ) -> Result<Response<SandboxBytesEnvelope>, Status> {
+    ) -> Result<Response<Self::ReadExactArtifactStream>, Status> {
         let request: WasiArtifactReadRequest = decode(request.into_inner(), self.limits)?;
+        let grant_shape_valid = match request.purpose {
+            WasiArtifactReadPurpose::RuntimeBundle => request.read_grant.is_none(),
+            WasiArtifactReadPurpose::InputValue => request.read_grant.is_some(),
+        };
         if request.worker_process_generation_id.kind()
             != insight_platform_contracts::ResourceKind::WorkerProcessGeneration
+            || request.tenant_id.kind() != insight_platform_contracts::ResourceKind::Tenant
+            || request.sandbox_job_id.kind() != insight_platform_contracts::ResourceKind::SandboxJob
             || request.lease_generation == 0
             || request.maximum_bytes == 0
             || request.maximum_bytes > self.limits.maximum_message_bytes
+            || request.artifact.validate().is_err()
+            || u64::try_from(request.maximum_bytes)
+                .ok()
+                .is_none_or(|maximum| maximum < request.artifact.byte_length())
+            || !grant_shape_valid
         {
             return Err(Status::invalid_argument("invalid Artifact read bound"));
         }
+        let permit = self.artifact_response_capacity.try_acquire()?;
         let maximum = request.maximum_bytes;
-        let value = self
-            .artifacts
-            .read_exact(request)
+        let artifact = request.artifact.clone();
+        let deadline = request.deadline;
+        let read_budget = sandbox_artifact_server_deadline_budget(deadline)?;
+        let value = tokio::time::timeout(read_budget, self.artifacts.read_exact(request))
             .await
+            .map_err(|_| Status::deadline_exceeded("WASI Artifact read deadline elapsed"))?
             .map_err(artifact_status)?;
-        Ok(Response::new(encode_bytes(value, maximum, self.limits)?))
+        if value.len() > maximum
+            || u64::try_from(value.len()).ok() != Some(artifact.byte_length())
+            || bytes_digest(&value)? != *artifact.content_digest()
+        {
+            return Err(Status::failed_precondition(
+                "WASI Artifact integrity failed",
+            ));
+        }
+        let chunk_bytes = sandbox_artifact_chunk_bytes(self.limits)
+            .map_err(|_| Status::resource_exhausted("Sandbox RPC message bound is too small"))?;
+        let stream_budget = sandbox_artifact_server_deadline_budget(deadline)?;
+        Ok(Response::new(Box::pin(SandboxArtifactChunkStream::new(
+            value,
+            permit,
+            chunk_bytes,
+            artifact.byte_length(),
+            artifact.content_digest().to_string(),
+            stream_budget,
+        ))))
     }
 
     async fn validate_wasi_value(
@@ -2933,45 +3322,6 @@ fn decode<T: DeserializeOwned>(
     serde_json::from_value(parsed).map_err(|_| SandboxRpcError::InvalidEnvelope)
 }
 
-fn encode_bytes(
-    value: Vec<u8>,
-    maximum: usize,
-    limits: SandboxInternalRpcLimits,
-) -> Result<SandboxBytesEnvelope, SandboxRpcError> {
-    if value.is_empty() || value.len() > maximum || value.len() > limits.maximum_message_bytes {
-        return Err(SandboxRpcError::InvalidEnvelope);
-    }
-    let content_digest = bytes_digest(&value)?;
-    Ok(SandboxBytesEnvelope {
-        schema_version: SANDBOX_INTERNAL_RPC_SCHEMA_VERSION,
-        value,
-        content_digest: content_digest.to_string(),
-    })
-}
-
-fn decode_bytes(
-    envelope: SandboxBytesEnvelope,
-    maximum: usize,
-    limits: SandboxInternalRpcLimits,
-) -> Result<Vec<u8>, SandboxRpcError> {
-    if envelope.schema_version != SANDBOX_INTERNAL_RPC_SCHEMA_VERSION
-        || envelope.value.is_empty()
-        || envelope.value.len() > maximum
-        || envelope.value.len() > limits.maximum_message_bytes
-    {
-        return Err(SandboxRpcError::InvalidEnvelope);
-    }
-    let expected: Sha256Digest = envelope
-        .content_digest
-        .parse()
-        .map_err(|_| SandboxRpcError::InvalidEnvelope)?;
-    let actual = bytes_digest(&envelope.value)?;
-    if actual != expected {
-        return Err(SandboxRpcError::InvalidEnvelope);
-    }
-    Ok(envelope.value)
-}
-
 fn bytes_digest(value: &[u8]) -> Result<Sha256Digest, SandboxRpcError> {
     let digest = Sha256::digest(value);
     let mut encoded = String::with_capacity(71);
@@ -3027,6 +3377,20 @@ fn micro_vm_artifact_client_error(status: Status) -> MicroVmArtifactBrokerError 
         tonic::Code::NotFound => MicroVmArtifactBrokerError::NotFound,
         tonic::Code::ResourceExhausted => MicroVmArtifactBrokerError::TooLarge,
         _ => MicroVmArtifactBrokerError::Integrity,
+    }
+}
+
+fn wasi_artifact_client_error(status: Status) -> WasiArtifactBrokerError {
+    match status.code() {
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+            WasiArtifactBrokerError::Unavailable
+        }
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
+            WasiArtifactBrokerError::Denied
+        }
+        tonic::Code::NotFound => WasiArtifactBrokerError::NotFound,
+        tonic::Code::ResourceExhausted => WasiArtifactBrokerError::TooLarge,
+        _ => WasiArtifactBrokerError::Integrity,
     }
 }
 
@@ -3187,9 +3551,11 @@ impl Error for SandboxRpcError {}
 mod tests {
     use super::*;
     use chrono::Utc;
+    use futures::StreamExt;
     use hyper_util::rt::TokioIo;
     use insight_platform_contracts::{
         checked_in_hard_limit_profile, ArtifactRef, DataClassification, ResourceId, ResourceKind,
+        MAX_SANDBOX_RUNTIME_BUNDLE_BYTES,
     };
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
@@ -3197,7 +3563,7 @@ mod tests {
     };
     use std::{
         path::PathBuf,
-        sync::atomic::{AtomicU32, AtomicUsize, Ordering},
+        sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
         sync::Mutex,
     };
     use tokio::net::{UnixListener, UnixStream};
@@ -3528,6 +3894,203 @@ mod tests {
             self.calls.fetch_add(1, Ordering::AcqRel);
             self.requests.lock().unwrap().push(request);
             Ok(self.value.clone())
+        }
+    }
+
+    #[async_trait]
+    impl WasiArtifactBroker for RecordingArtifactBroker {
+        async fn read_exact(
+            &self,
+            _request: WasiArtifactReadRequest,
+        ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(self.value.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingWasiBrokerDependencies;
+
+    #[async_trait]
+    impl WasiValueValidator for RecordingWasiBrokerDependencies {
+        async fn validate(
+            &self,
+            _request: WasiValueValidationRequest,
+        ) -> Result<Sha256Digest, WasiValueValidationError> {
+            Err(WasiValueValidationError::Invalid)
+        }
+    }
+
+    #[async_trait]
+    impl WasiGrantRevoker for RecordingWasiBrokerDependencies {
+        async fn revoke_exact(
+            &self,
+            _request: RevokeWasiSandboxGrants,
+        ) -> Result<WasiGrantRevocationEvidence, WasiGrantRevocationError> {
+            Err(WasiGrantRevocationError::Rejected)
+        }
+    }
+
+    struct StallingWasiArtifactService {
+        observed_timeout: Arc<AtomicBool>,
+    }
+
+    #[tonic::async_trait]
+    impl SandboxExecutorBrokerService for StallingWasiArtifactService {
+        type ReadExactArtifactStream = Pin<
+            Box<
+                dyn futures::Stream<Item = Result<SandboxArtifactChunkEnvelope, Status>>
+                    + Send
+                    + 'static,
+            >,
+        >;
+
+        async fn read_exact_artifact(
+            &self,
+            request: Request<ClosedSandboxEnvelope>,
+        ) -> Result<Response<Self::ReadExactArtifactStream>, Status> {
+            if request.metadata().get("grpc-timeout").is_none() {
+                return Err(Status::invalid_argument("missing gRPC timeout"));
+            }
+            self.observed_timeout.store(true, Ordering::Release);
+            Ok(Response::new(Box::pin(futures::stream::pending())))
+        }
+
+        async fn validate_wasi_value(
+            &self,
+            _request: Request<ClosedSandboxEnvelope>,
+        ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn revoke_wasi_grants(
+            &self,
+            _request: Request<ClosedSandboxEnvelope>,
+        ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn prove_sandbox_process_generation_absent(
+            &self,
+            _request: Request<ClosedSandboxEnvelope>,
+        ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+    }
+
+    struct FailOnceArtifactBroker {
+        calls: AtomicUsize,
+        value: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl MicroVmArtifactBroker for FailOnceArtifactBroker {
+        async fn read_exact(
+            &self,
+            _request: MicroVmArtifactReadRequest,
+        ) -> Result<Vec<u8>, MicroVmArtifactBrokerError> {
+            if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                Err(MicroVmArtifactBrokerError::Unavailable)
+            } else {
+                Ok(self.value.clone())
+            }
+        }
+    }
+
+    fn micro_vm_artifact_request(
+        value: &[u8],
+        deadline: chrono::DateTime<Utc>,
+    ) -> MicroVmArtifactReadRequest {
+        let artifact = ArtifactRef::new(
+            ResourceId::from_uuid_v7(ResourceKind::Artifact, uuid::Uuid::now_v7()).unwrap(),
+            bytes_digest(value).unwrap(),
+            u64::try_from(value.len()).unwrap(),
+            "application/vnd.insight.sandbox-bundle",
+            DataClassification::Internal,
+            None,
+        )
+        .unwrap();
+        MicroVmArtifactReadRequest {
+            workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
+            tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
+                .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(
+                ResourceKind::SandboxJob,
+                uuid::Uuid::now_v7(),
+            )
+            .unwrap(),
+            request_digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
+            executor_worker_process_generation_id: ResourceId::from_uuid_v7(
+                ResourceKind::WorkerProcessGeneration,
+                uuid::Uuid::now_v7(),
+            )
+            .unwrap(),
+            provider_process_generation_id: ResourceId::from_uuid_v7(
+                ResourceKind::WorkerProcessGeneration,
+                uuid::Uuid::now_v7(),
+            )
+            .unwrap(),
+            sandbox_identity_digest: format!("sha256:{}", "b".repeat(64)).parse().unwrap(),
+            lease_generation: 1,
+            artifact,
+            purpose: MicroVmArtifactReadPurpose::RuntimeBundle,
+            read_grant: None,
+            maximum_bytes: value.len(),
+            deadline,
+        }
+    }
+
+    fn wasi_artifact_request(
+        value: &[u8],
+        deadline: chrono::DateTime<Utc>,
+    ) -> WasiArtifactReadRequest {
+        let tenant_id =
+            ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7()).unwrap();
+        let sandbox_job_id =
+            ResourceId::from_uuid_v7(ResourceKind::SandboxJob, uuid::Uuid::now_v7()).unwrap();
+        let artifact = ArtifactRef::new(
+            ResourceId::from_uuid_v7(ResourceKind::Artifact, uuid::Uuid::now_v7()).unwrap(),
+            bytes_digest(value).unwrap(),
+            u64::try_from(value.len()).unwrap(),
+            "application/octet-stream",
+            DataClassification::Internal,
+            None,
+        )
+        .unwrap();
+        let maximum_bytes = value.len().max(1);
+        let read_grant = ScopedArtifactGrant {
+            schema_version: 1,
+            grant_id: ResourceId::from_uuid_v7(ResourceKind::ArtifactGrant, uuid::Uuid::now_v7())
+                .unwrap(),
+            tenant_id: tenant_id.clone(),
+            sandbox_job_id: sandbox_job_id.clone(),
+            operation: ArtifactGrantOperation::ReadWhole,
+            port: "input".to_owned(),
+            artifact: Some(artifact.clone()),
+            staging_artifact_id: None,
+            byte_range: None,
+            maximum_bytes: u64::try_from(maximum_bytes).unwrap(),
+            generation: 1,
+            expires_at: deadline,
+            grant_digest: format!("sha256:{}", "0".repeat(64)).parse().unwrap(),
+        }
+        .seal()
+        .unwrap();
+        WasiArtifactReadRequest {
+            tenant_id,
+            sandbox_job_id,
+            request_digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
+            worker_process_generation_id: ResourceId::from_uuid_v7(
+                ResourceKind::WorkerProcessGeneration,
+                uuid::Uuid::now_v7(),
+            )
+            .unwrap(),
+            lease_generation: 1,
+            artifact,
+            purpose: WasiArtifactReadPurpose::InputValue,
+            read_grant: Some(read_grant),
+            maximum_bytes,
+            deadline,
         }
     }
 
@@ -4388,13 +4951,345 @@ mod tests {
         server.await.unwrap();
     }
 
+    fn recording_process_isolation() -> Arc<RecordingProcessIsolation> {
+        Arc::new(RecordingProcessIsolation {
+            calls: AtomicUsize::new(0),
+            registrations: AtomicUsize::new(0),
+            registered_host_process_id: AtomicU32::new(0),
+            attestor_identity_digest: format!("sha256:{}", "e".repeat(64)).parse().unwrap(),
+        })
+    }
+
+    #[test]
+    fn artifact_rpc_request_carries_a_positive_domain_bounded_timeout() {
+        let domain_budget = std::time::Duration::from_secs(5);
+        let deadline = Utc::now() + chrono::Duration::from_std(domain_budget).unwrap();
+        let (request, deadline_at) = artifact_request_with_deadline((), deadline).unwrap();
+        assert!(request.metadata().contains_key("grpc-timeout"));
+        assert!(deadline_at > tokio::time::Instant::now());
+        assert!(deadline_at <= tokio::time::Instant::now() + domain_budget);
+        assert!(matches!(
+            artifact_request_with_deadline((), Utc::now()),
+            Err(SandboxArtifactClientReadError::Unavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn wasi_client_enforces_the_absolute_deadline_after_response_headers() {
+        let limits =
+            SandboxInternalRpcLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let observed_timeout = Arc::new(AtomicBool::new(false));
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = incoming.local_addr().unwrap();
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+        let service =
+            proto::sandbox_executor_broker_service_server::SandboxExecutorBrokerServiceServer::new(
+                StallingWasiArtifactService {
+                    observed_timeout: Arc::clone(&observed_timeout),
+                },
+            )
+            .max_encoding_message_size(limits.maximum_message_bytes())
+            .max_decoding_message_size(limits.maximum_message_bytes());
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_receiver.await;
+                })
+                .await
+                .unwrap();
+        });
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let client = SandboxBrokerGrpcClient::new(channel, limits);
+        let request =
+            wasi_artifact_request(b"deadline", Utc::now() + chrono::Duration::milliseconds(50));
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            WasiArtifactBroker::read_exact(&client, request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Err(WasiArtifactBrokerError::Unavailable));
+        assert!(observed_timeout.load(Ordering::Acquire));
+
+        shutdown_sender.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wasi_and_micro_vm_share_capacity_until_stream_completion() {
+        let limits =
+            SandboxInternalRpcLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let artifact_bytes = vec![0x4d; SANDBOX_ARTIFACT_CHUNK_BYTES + 17];
+        let artifacts = Arc::new(RecordingArtifactBroker {
+            calls: AtomicUsize::new(0),
+            value: artifact_bytes.clone(),
+            requests: Mutex::new(Vec::new()),
+        });
+        let capacity = SandboxArtifactResponseCapacity::new(1).unwrap();
+        let dependencies = Arc::new(RecordingWasiBrokerDependencies);
+        let wasi_service = SandboxBrokerGrpcService::new(
+            Arc::clone(&artifacts),
+            Arc::clone(&dependencies),
+            dependencies,
+            recording_process_isolation(),
+            limits,
+            capacity.clone(),
+        );
+        let micro_vm_service = SandboxMicroVmBrokerGrpcService::new(
+            Arc::clone(&artifacts),
+            Arc::new(RecordingMicroVmGrantRevoker::default()),
+            limits,
+            capacity.clone(),
+        );
+        let deadline = Utc::now() + chrono::Duration::minutes(2);
+        let wasi_request = wasi_artifact_request(&artifact_bytes, deadline);
+        let micro_vm_request = micro_vm_artifact_request(&artifact_bytes, deadline);
+
+        let mut wasi_stream = wasi_service
+            .read_exact_artifact(Request::new(encode(&wasi_request, limits).unwrap()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(capacity.available_permits(), 0);
+        let saturated = micro_vm_service
+            .read_exact_micro_vm_artifact(Request::new(encode(&micro_vm_request, limits).unwrap()))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(saturated.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(artifacts.calls.load(Ordering::Acquire), 1);
+
+        let first = wasi_stream.next().await.unwrap().unwrap();
+        assert_eq!(first.sequence, 0);
+        let last = wasi_stream.next().await.unwrap().unwrap();
+        assert_eq!(last.sequence, 1);
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(wasi_stream.next().await.is_none());
+        assert_eq!(capacity.available_permits(), 1);
+
+        let released = micro_vm_service
+            .read_exact_micro_vm_artifact(Request::new(encode(&micro_vm_request, limits).unwrap()))
+            .await
+            .unwrap();
+        drop(released);
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn wasi_stream_supports_an_exact_zero_byte_input() {
+        let limits =
+            SandboxInternalRpcLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let artifacts = Arc::new(RecordingArtifactBroker {
+            calls: AtomicUsize::new(0),
+            value: Vec::new(),
+            requests: Mutex::new(Vec::new()),
+        });
+        let capacity = SandboxArtifactResponseCapacity::new(1).unwrap();
+        let dependencies = Arc::new(RecordingWasiBrokerDependencies);
+        let service = SandboxBrokerGrpcService::new(
+            artifacts,
+            Arc::clone(&dependencies),
+            dependencies,
+            recording_process_isolation(),
+            limits,
+            capacity.clone(),
+        );
+        let request = wasi_artifact_request(&[], Utc::now() + chrono::Duration::seconds(30));
+
+        let mut stream = service
+            .read_exact_artifact(Request::new(encode(&request, limits).unwrap()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(stream.next().await.is_none());
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn slow_maximum_artifact_response_holds_capacity_without_full_chunk_precopy() {
+        let limits =
+            SandboxInternalRpcLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let artifact_bytes = vec![0x5a; usize::try_from(MAX_SANDBOX_RUNTIME_BUNDLE_BYTES).unwrap()];
+        let request =
+            micro_vm_artifact_request(&artifact_bytes, Utc::now() + chrono::Duration::minutes(2));
+        let artifacts = Arc::new(RecordingArtifactBroker {
+            calls: AtomicUsize::new(0),
+            value: artifact_bytes,
+            requests: Mutex::new(Vec::new()),
+        });
+        assert!(matches!(
+            SandboxArtifactResponseCapacity::new(MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD + 1),
+            Err(SandboxRpcError::InvalidConfiguration)
+        ));
+        let capacity = SandboxArtifactResponseCapacity::new(1).unwrap();
+        let service = SandboxMicroVmBrokerGrpcService::new(
+            Arc::clone(&artifacts),
+            Arc::new(RecordingMicroVmGrantRevoker::default()),
+            limits,
+            capacity.clone(),
+        );
+
+        let mut first = service
+            .read_exact_micro_vm_artifact(Request::new(encode(&request, limits).unwrap()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(artifacts.calls.load(Ordering::Acquire), 1);
+        assert_eq!(capacity.available_permits(), 0);
+
+        let saturated = service
+            .read_exact_micro_vm_artifact(Request::new(encode(&request, limits).unwrap()))
+            .await;
+        assert!(matches!(
+            saturated,
+            Err(status) if status.code() == tonic::Code::ResourceExhausted
+        ));
+        assert_eq!(artifacts.calls.load(Ordering::Acquire), 1);
+
+        let first_chunk = first.next().await.unwrap().unwrap();
+        assert_eq!(first_chunk.sequence, 0);
+        assert_eq!(first_chunk.value.len(), SANDBOX_ARTIFACT_CHUNK_BYTES);
+        let still_saturated = service
+            .read_exact_micro_vm_artifact(Request::new(encode(&request, limits).unwrap()))
+            .await;
+        assert!(matches!(
+            still_saturated,
+            Err(status) if status.code() == tonic::Code::ResourceExhausted
+        ));
+        assert_eq!(artifacts.calls.load(Ordering::Acquire), 1);
+
+        drop(first);
+        assert_eq!(capacity.available_permits(), 1);
+
+        let mut completed = service
+            .read_exact_micro_vm_artifact(Request::new(encode(&request, limits).unwrap()))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut expected_sequence = 0_u64;
+        let mut observed_bytes = 0_u64;
+        loop {
+            let chunk = completed.next().await.unwrap().unwrap();
+            assert_eq!(chunk.sequence, expected_sequence);
+            assert_eq!(chunk.total_bytes, MAX_SANDBOX_RUNTIME_BUNDLE_BYTES);
+            observed_bytes += u64::try_from(chunk.value.len()).unwrap();
+            expected_sequence += 1;
+            if observed_bytes == MAX_SANDBOX_RUNTIME_BUNDLE_BYTES {
+                break;
+            }
+        }
+        assert_eq!(observed_bytes, MAX_SANDBOX_RUNTIME_BUNDLE_BYTES);
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(completed.next().await.is_none());
+        assert_eq!(capacity.available_permits(), 1);
+        assert_eq!(artifacts.calls.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn abandoned_artifact_response_releases_capacity_at_absolute_deadline() {
+        let limits =
+            SandboxInternalRpcLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let artifact_bytes = vec![0x6b; SANDBOX_ARTIFACT_CHUNK_BYTES + 17];
+        let expiring_request = micro_vm_artifact_request(
+            &artifact_bytes,
+            Utc::now() + chrono::Duration::milliseconds(50),
+        );
+        let fresh_request = MicroVmArtifactReadRequest {
+            deadline: Utc::now() + chrono::Duration::seconds(30),
+            ..expiring_request.clone()
+        };
+        let artifacts = Arc::new(RecordingArtifactBroker {
+            calls: AtomicUsize::new(0),
+            value: artifact_bytes,
+            requests: Mutex::new(Vec::new()),
+        });
+        let capacity = SandboxArtifactResponseCapacity::new(1).unwrap();
+        let service = SandboxMicroVmBrokerGrpcService::new(
+            Arc::clone(&artifacts),
+            Arc::new(RecordingMicroVmGrantRevoker::default()),
+            limits,
+            capacity.clone(),
+        );
+
+        let mut abandoned = service
+            .read_exact_micro_vm_artifact(Request::new(encode(&expiring_request, limits).unwrap()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(capacity.available_permits(), 0);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while capacity.available_permits() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let replacement = service
+            .read_exact_micro_vm_artifact(Request::new(encode(&fresh_request, limits).unwrap()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(artifacts.calls.load(Ordering::Acquire), 2);
+        let expired = abandoned.next().await.unwrap().unwrap_err();
+        assert_eq!(expired.code(), tonic::Code::DeadlineExceeded);
+        assert!(abandoned.next().await.is_none());
+        drop(replacement);
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn upstream_artifact_failure_does_not_leak_response_capacity() {
+        let limits =
+            SandboxInternalRpcLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let artifact_bytes = vec![0x7c; 4_097];
+        let request =
+            micro_vm_artifact_request(&artifact_bytes, Utc::now() + chrono::Duration::seconds(30));
+        let artifacts = Arc::new(FailOnceArtifactBroker {
+            calls: AtomicUsize::new(0),
+            value: artifact_bytes,
+        });
+        let capacity = SandboxArtifactResponseCapacity::new(1).unwrap();
+        let service = SandboxMicroVmBrokerGrpcService::new(
+            Arc::clone(&artifacts),
+            Arc::new(RecordingMicroVmGrantRevoker::default()),
+            limits,
+            capacity.clone(),
+        );
+
+        let failed = service
+            .read_exact_micro_vm_artifact(Request::new(encode(&request, limits).unwrap()))
+            .await;
+        assert!(matches!(
+            failed,
+            Err(status) if status.code() == tonic::Code::Unavailable
+        ));
+        assert_eq!(capacity.available_permits(), 1);
+
+        let recovered = service
+            .read_exact_micro_vm_artifact(Request::new(encode(&request, limits).unwrap()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(artifacts.calls.load(Ordering::Acquire), 2);
+        drop(recovered);
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
     #[tokio::test]
     async fn microvm_broker_rpc_accepts_only_provider_and_preserves_exact_cleanup_fence() {
         let fixture = mtls_fixture();
         let limits =
             SandboxInternalRpcLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
         let revoker = Arc::new(RecordingMicroVmGrantRevoker::default());
-        let artifact_bytes = vec![0x5a; MICROVM_ARTIFACT_CHUNK_BYTES + 173];
+        let artifact_bytes = vec![0x5a; SANDBOX_ARTIFACT_CHUNK_BYTES + 173];
         let artifact = ArtifactRef::new(
             ResourceId::from_uuid_v7(ResourceKind::Artifact, uuid::Uuid::now_v7()).unwrap(),
             bytes_digest(&artifact_bytes).unwrap(),
@@ -4418,6 +5313,7 @@ mod tests {
                     Arc::clone(&artifacts),
                     Arc::clone(&revoker),
                     limits,
+                    SandboxArtifactResponseCapacity::new(1).unwrap(),
                 ),
             )
             .max_encoding_message_size(limits.maximum_message_bytes())

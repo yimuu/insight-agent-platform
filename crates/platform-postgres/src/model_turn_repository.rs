@@ -332,11 +332,12 @@ impl ArtifactObjectReadAuthority<ModelArtifactReadRequest> for PgRepository {
                 owner_id: &request.model_turn_id,
                 request_digest: &request.request_digest,
                 worker_process_generation_id: &request.fence.worker_process_generation_id,
+                provider_process_generation_id: None,
+                sandbox_identity_digest: None,
                 lease_generation: request.fence.lease_generation,
                 artifact,
                 purpose_domain: "model_request_value",
                 purpose_class: ArtifactObjectReadPurpose::ModelInput,
-                job_version: projection.version,
             },
         )
         .await

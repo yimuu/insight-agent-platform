@@ -117,7 +117,7 @@ Orchestration 的 claim loop 与 safety loop 是同一 Worker role 内的两个�
 后者只使用独立保留的critical-control permit/pool。safety loop依次驱动expired Job lease、due retry、cancel/timeout/deadline
 convergence和expired Task；四类扫描各自持有可丢失的进程内high-water cursor。满页推进cursor，短页清空cursor并从该shard起点
 回绕；进程重启也从起点重扫。每个page的候选数和mutation identity slot数严格等于`recovery_batch`请求，分片数量受
-`recovery_shards.hard_max`约束，Q1默认使用profile version 3的batch 1000、16 shards，最大256 shards。每次mutation仍在
+`recovery_shards.hard_max`约束，Q1默认使用profile version 4的batch 1000、16 shards，最大256 shards。每次mutation仍在
 caller-owned PostgreSQL事务复核current fact/fence并first-win；cursor、timer和wake hint都不是持久化authority。
 
 ## 6. Claim
@@ -251,7 +251,7 @@ policy version；整个 typed scheduler-state payload 由自身 canonical digest
 - lease duration 按 WorkClass 配置并有平台 hard max；
 - heartbeat 间隔小于 lease 的三分之一并带 jitter；调用方时间只能作为事件时间，start/heartbeat/Worker terminal还必须由
   PostgreSQL `clock_timestamp()`证明当前lease未到期，不能通过回填旧时间续租或提交结果；
-- versioned HardLimitProfile 必须对 hard maximum 和 Q1 default 同时验证上述严格比例；`q1-50` profile version 3 使用
+- versioned HardLimitProfile 必须对 hard maximum 和 Q1 default 同时验证上述严格比例；`q1-50` profile version 4 使用
   `lease=30000ms`、`heartbeat=8000ms`，实际带 jitter 的调度仍不得达到或越过 lease 的三分之一；
 - heartbeat 只更新当前 Job lease generation，不延长 Run deadline；
 - external backend 长任务必须能以 deferred task 释放 Worker，而不是无限 heartbeat；

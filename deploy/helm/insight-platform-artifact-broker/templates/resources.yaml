@@ -1,3 +1,4 @@
+{{- $root := . -}}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -6,53 +7,54 @@ metadata:
     insight.platform/artifact-namespace: "true"
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
+{{ range $audience, $broker := .Values.brokers }}
+{{ $context := dict "audience" $audience }}
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "insight-platform-artifact-broker.name" . }}
-  namespace: {{ .Values.namespace }}
+  name: {{ include "insight-platform-artifact-broker.name" $context }}
+  namespace: {{ $root.Values.namespace }}
   annotations:
-    {{- toYaml .Values.serviceAccount.annotations | nindent 4 }}
+    {{- toYaml $broker.serviceAccount.annotations | nindent 4 }}
 automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "insight-platform-artifact-broker.name" . }}
-  namespace: {{ .Values.namespace }}
+  name: {{ include "insight-platform-artifact-broker.name" $context }}
+  namespace: {{ $root.Values.namespace }}
 spec:
   type: ClusterIP
   selector:
-    {{- include "insight-platform-artifact-broker.labels" . | nindent 4 }}
+    {{- include "insight-platform-artifact-broker.labels" $context | nindent 4 }}
   ports:
-    - {name: grpc-mtls, protocol: TCP, port: {{ int .Values.port }}, targetPort: grpc-mtls}
+    - {name: grpc-mtls, protocol: TCP, port: {{ int $broker.port }}, targetPort: grpc-mtls}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "insight-platform-artifact-broker.name" . }}
-  namespace: {{ .Values.namespace }}
+  name: {{ include "insight-platform-artifact-broker.name" $context }}
+  namespace: {{ $root.Values.namespace }}
   labels:
-    {{- include "insight-platform-artifact-broker.labels" . | nindent 4 }}
+    {{- include "insight-platform-artifact-broker.labels" $context | nindent 4 }}
 spec:
-  replicas: {{ int .Values.replicas }}
+  replicas: {{ int $broker.replicas }}
   strategy:
     type: RollingUpdate
     rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
   selector:
     matchLabels:
-      {{- include "insight-platform-artifact-broker.labels" . | nindent 6 }}
+      {{- include "insight-platform-artifact-broker.labels" $context | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "insight-platform-artifact-broker.labels" . | nindent 8 }}
-        insight.platform/workload-role: artifact-broker
+        {{- include "insight-platform-artifact-broker.labels" $context | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "insight-platform-artifact-broker.name" . }}
+      serviceAccountName: {{ include "insight-platform-artifact-broker.name" $context }}
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 120
-      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      imagePullSecrets: {{ toYaml $root.Values.imagePullSecrets | nindent 8 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -65,25 +67,26 @@ spec:
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
-              {{- include "insight-platform-artifact-broker.labels" . | nindent 14 }}
+              {{- include "insight-platform-artifact-broker.labels" $context | nindent 14 }}
       containers:
         - name: artifact-broker
-          image: {{ include "insight-platform-artifact-broker.image" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "insight-platform-artifact-broker.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
           command: ["/usr/local/bin/platform-artifact-broker"]
-          ports: [{name: grpc-mtls, containerPort: {{ int .Values.port }}, protocol: TCP}]
+          ports: [{name: grpc-mtls, containerPort: {{ int $broker.port }}, protocol: TCP}]
           env:
+            - {name: PLATFORM_ARTIFACT_BROKER_AUDIENCE, value: {{ $audience | quote }}}
             - {name: PLATFORM_ARTIFACT_BROKER_CONFIG, value: /etc/insight/config/artifact-broker.json}
-            - {name: PLATFORM_ARTIFACT_BROKER_CONFIG_DIGEST, value: {{ .Values.config.digest | quote }}}
+            - {name: PLATFORM_ARTIFACT_BROKER_CONFIG_DIGEST, value: {{ $broker.config.digest | quote }}}
             - name: PLATFORM_ARTIFACT_BROKER_DATABASE_URL
-              valueFrom: {secretKeyRef: {name: {{ .Values.database.existingSecret }}, key: {{ .Values.database.urlKey }}}}
+              valueFrom: {secretKeyRef: {name: {{ $broker.database.existingSecret }}, key: {{ $broker.database.urlKey }}}}
             - {name: PLATFORM_ARTIFACT_BROKER_CLIENT_CA_PATH, value: /etc/insight/tls/client-ca.pem}
             - {name: PLATFORM_ARTIFACT_BROKER_CERT_PATH, value: /etc/insight/tls/server.pem}
             - {name: PLATFORM_ARTIFACT_BROKER_KEY_PATH, value: /etc/insight/tls/server-key.pem}
           startupProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
           readinessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
           livenessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
-          resources: {{ toYaml .Values.resources | nindent 12 }}
+          resources: {{ toYaml $broker.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -95,43 +98,43 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ .Values.config.existingConfigMap }}
-            items: [{key: {{ .Values.config.fileKey }}, path: artifact-broker.json}]
+            name: {{ $broker.config.existingConfigMap }}
+            items: [{key: {{ $broker.config.fileKey }}, path: artifact-broker.json}]
         - name: tls
           secret:
-            secretName: {{ .Values.tls.existingSecret }}
+            secretName: {{ $broker.tls.existingSecret }}
             items:
-              - {key: {{ .Values.tls.keys.clientCa }}, path: client-ca.pem}
-              - {key: {{ .Values.tls.keys.serverCertificate }}, path: server.pem}
-              - {key: {{ .Values.tls.keys.serverPrivateKey }}, path: server-key.pem}
+              - {key: {{ $broker.tls.keys.clientCa }}, path: client-ca.pem}
+              - {key: {{ $broker.tls.keys.serverCertificate }}, path: server.pem}
+              - {key: {{ $broker.tls.keys.serverPrivateKey }}, path: server-key.pem}
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
-{{- if .Values.podDisruptionBudget.enabled }}
+{{- if $broker.podDisruptionBudget.enabled }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "insight-platform-artifact-broker.name" . }}
-  namespace: {{ .Values.namespace }}
+  name: {{ include "insight-platform-artifact-broker.name" $context }}
+  namespace: {{ $root.Values.namespace }}
 spec:
-  minAvailable: {{ int .Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ int $broker.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels:
-      {{- include "insight-platform-artifact-broker.labels" . | nindent 6 }}
+      {{- include "insight-platform-artifact-broker.labels" $context | nindent 6 }}
 {{- end }}
-{{- if .Values.autoscaling.enabled }}
+{{- if $broker.autoscaling.enabled }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "insight-platform-artifact-broker.name" . }}
-  namespace: {{ .Values.namespace }}
+  name: {{ include "insight-platform-artifact-broker.name" $context }}
+  namespace: {{ $root.Values.namespace }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "insight-platform-artifact-broker.name" . }}
-  minReplicas: {{ int .Values.autoscaling.minReplicas }}
-  maxReplicas: {{ int .Values.autoscaling.maxReplicas }}
+    name: {{ include "insight-platform-artifact-broker.name" $context }}
+  minReplicas: {{ int $broker.autoscaling.minReplicas }}
+  maxReplicas: {{ int $broker.autoscaling.maxReplicas }}
   behavior:
     scaleDown: {stabilizationWindowSeconds: 300}
     scaleUp: {stabilizationWindowSeconds: 30}
@@ -141,5 +144,6 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ int .Values.autoscaling.targetCPUUtilizationPercentage }}
-{{- end }}
+          averageUtilization: {{ int $broker.autoscaling.targetCPUUtilizationPercentage }}
+{{ end }}
+{{ end }}

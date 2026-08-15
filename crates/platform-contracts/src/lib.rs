@@ -36,7 +36,7 @@ pub use json::{
 };
 pub use limits::{
     checked_in_hard_limit_profile, HardLimitProfile, Limit, LimitProfileError, LimitUnit,
-    OverflowOutcome,
+    OverflowOutcome, HARD_LIMIT_PROFILE_VERSION, Q1_SANDBOX_RUNTIME_BUNDLE_BYTES,
 };
 pub use machine::{is_execution_work_owner_pair, EXECUTION_WORK_OWNER_PAIRS};
 pub use mcp::*;

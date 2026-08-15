@@ -70,7 +70,7 @@ Sandbox Gateway / Controller
   -> durable SandboxJob + bounded queue
 Dedicated Executor Node Pool
   -> WASI instance | gVisor sandbox | microVM
-Egress Proxy + Artifact Broker + Secret Broker
+Egress Proxy + Sandbox Artifact Broker + Secret Broker
 ```
 
 | 组件 | 信任 | 所有权 |
@@ -81,7 +81,8 @@ Egress Proxy + Artifact Broker + Secret Broker
 | Guest Agent | 不信任边界内最小 TCB | 接收 request、启动 entrypoint、上传结果 |
 | User code/dependency | 不受信任 | 只在 sandbox 内执行 |
 | Egress Proxy | 可信 | DNS/target/method/byte/rate enforcement |
-| Artifact/Secret Broker | 可信 | 一次性 scoped grant，不暴露平台 credential |
+| Sandbox Artifact Broker | 可信 | exact Artifact物化，不暴露storage credential；与Model audience物理隔离 |
+| Secret Broker | 可信 | 一次性 scoped Secret grant，不暴露平台 credential |
 
 Executor node 不运行 API、Scheduler、Model、MCP Host 或数据库。Sandbox namespace/VM 不获得 Kubernetes service
 account、node credential、container runtime socket、cloud metadata 或平台内部 DNS 通用访问。
@@ -139,7 +140,7 @@ struct SandboxPackageRevision {
     runtime_revision_id: RevisionId,
     entrypoint: Entrypoint,
     dependency_lock_digest: Digest,
-    runtime_bundle_artifact_id: ArtifactId,
+    runtime_bundle_artifact: ArtifactRef,
     build_evidence_id: EvidenceId,
     trust_class: CodeTrustClass,
     package_digest: Digest,
@@ -161,6 +162,9 @@ immutable bundle，不访问 package registry。
 - Shell entrypoint 必须是 package 内固定 relative path，人工 ReviewedPublished；
 - `sh -c`、`eval`、字符串拼命令、动态 loader path 和任意 interpreter flag 禁止；
 - 参数通过 closed JSON、argv array 或 ABI memory 传递；
+- `runtime_bundle_artifact`必须引用非空Ready Artifact；发布时其`byte_length`必须为`1..=67108864`，并受
+  `HardLimitProfile` version 4的`capability_sandbox.runtime_bundle_bytes.hard_max`再次约束。超限稳定返回
+  `content_rejected`，不能发布后留给Executor或Broker以资源不足失败；
 - ModelGenerated code 使用临时 CodeArtifact + 专用 DynamicCode profile，不发布为可复用 Package；
 - Skill package 永不自动变成 SandboxPackage。
 
@@ -405,7 +409,8 @@ Agent 读取；额外文件只有在声明 Artifact output port 下收集。禁�
 首个`wasm_wasi` backend固定为Wasmtime `42.0.0`上的受限core WebAssembly ABI；“WASI”表示该runtime family的发布与
 隔离层级，不表示v1默认开放WASI Preview 1/2系统调用。v1 module必须满足：
 
-- binary Artifact长度不超过16 MiB，Executor从Artifact Broker取得后重新验证exact length和SHA-256；
+- binary Artifact长度不超过16 MiB，Executor从Sandbox Artifact Broker取得后重新验证exact length和SHA-256；该WASI
+  module上限比通用Sandbox runtime bundle的64 MiB平台hard max更严格，不能由Q1 profile放宽；
 - module不允许任何import，因而不能访问filesystem、socket、clock、random、environment、stdio或host callback；
 - 只能导出一份32-bit、非shared且有显式maximum的`memory`，不能导出table；minimum和maximum均不得超过Job的
   `wasm_memory_pages`，且`wasm_memory_pages * 64KiB <= memory_mebibytes * 1MiB`；
@@ -643,10 +648,11 @@ trait SandboxExecutionAuthority {
 }
 ```
 
-WASI Artifact读取由独立Artifact Broker实现15的受信物化合同。Sandbox Controller只把Executor的
-credential-free请求转交该Broker并返回已经过exact generation/length/digest复验的bounded bytes；它不得
-自行解释密文locator，也不得把PostgreSQL/S3/KMS client或credential链接进Executor进程。read authority的
-两条授权路径是闭合且互斥的：
+WASI与microVM Artifact读取由独立Sandbox Artifact Broker实现15的受信物化合同。Sandbox Controller只把Executor/Provider的
+credential-free请求分别转交`ReadWasiArtifact`或`ReadMicroVmArtifact`，并返回已经过exact generation/length/digest复验的bounded bytes；
+Controller不得自行解释密文locator，也不得持有Artifact provider catalog、AWS workload token、S3/KMS client或对应直出网络。Executor与
+Provider同样不得取得PostgreSQL/S3/KMS credential。Controller以exact Sandbox Controller URI SAN调用Broker，Model Worker不能调用这两个
+Sandbox方法；WASI与microVM请求不会互相转换。read authority的两条授权路径是闭合且互斥的：
 
 - `runtime_bundle`不携带grant，必须精确匹配当前active leased Sandbox Job冻结的published Package revision及
   `runtime_bundle_artifact`；
@@ -657,6 +663,12 @@ credential-free请求转交该Broker并返回已经过exact generation/length/di
 generation、active physical phase、deadline、Ready Artifact、Verified Blob及ArtifactRef全部字段。ArtifactRef
 本身、已释放grant、Executor提交的deadline或当前Job payload任一单独事实都不足以授权读取。该路径不创建
 read状态表；body-free read audit使用已有Event/telemetry策略，grant的durable状态仍只属于`artifact_links`。
+
+Sandbox Artifact Broker与Model Artifact Broker是两个audience-isolated进程和Deployment；它们不得共享Pod、ServiceAccount、
+数据库连接池、process-local permit或in-flight bulkhead。Sandbox Broker只注册上述WASI与microVM RPC，两条Sandbox方法可以共享
+Sandbox audience自己的有界runtime、对象存储/KMS client和bulkhead；它不得注册Model RPC。相反，Model Broker只注册Model RPC，
+不能接受Sandbox Controller身份。两者即使使用相同Artifact metadata schema或底层S3/KMS服务，也必须使用独立workload identity、
+restricted database credential和连接池，任何一侧饱和、泄露或rolling restart都不能占用另一侧的准入容量。
 
 Backend 对 IsolationClass exhaustive。Domain contract 不依赖 Kubernetes/Firecracker/gVisor SDK；adapter 层负责具体
 实现。所有 outcome 为闭合枚举，未知 agent/VMM state fail closed。
@@ -707,6 +719,8 @@ profile、phase、bytes 和 failure class，不记录 code/input/output/Secret�
 - gVisor 使用固定 RuntimeClass，admission policy 阻止降级为 runc；
 - WASM Executor 可以无 KVM，但仍在 Sandbox node pool；
 - NetworkPolicy 默认 deny，只有 controller、Artifact/Secret Broker、Egress Proxy 必需路径；
+- Sandbox Artifact Broker使用自己的Deployment、ServiceAccount、restricted DB pool和permit；Controller只经exact mTLS连接该Broker，
+  不得直连S3、KMS或workload-identity endpoint，也不得回退到Model Artifact Broker；
 - Controller内部gRPC强制client CA验证，并在统一RPC前置门exact匹配Executor workload URI SAN；证书轮换沿用同一URI
   identity，不能使用证书指纹、CN或客户端metadata作为角色授权；
 - API/Scheduler namespace 不具备调用 Executor low-level API 或访问 KVM 的身份；
@@ -727,6 +741,8 @@ profile、phase、bytes 和 failure class，不记录 code/input/output/Secret�
 - cancel/timeout/completed race 与完整 process tree termination；
 - warm snapshot entropy、single-use clone、tenant residue和 cleanup failure；
 - WASM import/fuel/memory、gVisor runtime enforcement、microVM VMM/jailer policy；
+- Package发布拒绝零字节或超过67108864字节的runtime bundle，Q1在33554432字节触发`content_rejected`；
+- Model身份调用Sandbox RPC、Sandbox身份调用Model RPC、共享ServiceAccount/DB Secret/permit配置均fail closed；
 - Sandbox saturation 时 API/Scheduler/Model/Native/MCP latency 与 admission 不受其连接/permit 影响。
 
 安全测试需要独立 red-team escape suite、节点基线扫描和定期故障注入，不只依赖单元测试。
@@ -753,8 +769,10 @@ expired-lease safety scan返回exact request、旧Job version/generation、旧Wo
 同一恢复可由不同recovery process以新mutation ID重放。`Preparing -> Lost`已加入closed state contract，因为该phase提交后backend prepare
 可能正在进行，不能回退到Accepted。
 58个contract fixture、22个Sandbox domain/worker fixture、3个NATS control wire/config fixture、strict Clippy及真实PostgreSQL 16
-Sandbox transaction/resolver/scan/recovery测试均已实际通过。生产WASI与Firecracker adapter及其独立进程/Helm拓扑已经交付；gVisor adapter、
-authenticated NATS real-process/control ACL fixture、生产backend reconnect/abort/quarantine实现、完整Artifact/Secret/Egress broker组合以及
+Sandbox transaction/resolver/scan/recovery测试均已实际通过。生产WASI与Firecracker adapter及既有Broker读取路径已经交付；新目标要求
+Sandbox Artifact Broker与Model Artifact Broker进一步使用不同进程/Deployment/ServiceAccount/DB pool/permit，该双audience拓扑只有完成本批
+静态、mTLS、真实PostgreSQL与饱和门禁后才能作为已交付证据。gVisor adapter、
+authenticated NATS real-process/control ACL fixture、生产backend reconnect/abort/quarantine实现、真实S3/KMS/Secret Manager组合以及
 escape/process-kill/saturation conformance仍是Phase 4退出门禁，不能由mock backend、Helm渲染或编译结果替代。
 
 运行时`SandboxRecoveryDriver`使用Sandbox WorkerManifest的独立critical-control permit循环执行分片scan；每个已进入backend的候选先经
@@ -763,17 +781,18 @@ exact backend contract执行destroy或node quarantine并生成sealed evidence，
 fixture，不表示任一生产WASI/gVisor/microVM backend已实现该操作。
 
 CR-146已交付独立`insight-platform-sandbox-wasi` Executor adapter；Wasmtime/Cranelift只存在于该crate，API、Scheduler、
-Orchestration和generic Worker依赖图不包含JIT/runtime。adapter通过Artifact Broker读取并重验module、以bounded local semaphore
+Orchestration和generic Worker依赖图不包含JIT/runtime。adapter通过Sandbox Artifact Broker读取并重验module、以bounded local semaphore
 限制并发、执行13.1的closed ABI、调用exact output-schema validator与grant revoker，并实现prepare/start/collect/terminate/destroy/
 abort/expired-lease recovery。engine关闭全部proposal后仅开启本合同实际需要的`FLOATS | MUTABLE_GLOBAL`特征位；不得把Wasmtime的
 parser-only `GC_TYPES`默认位或任何post-WASM1 proposal误当成本ABI的一部分。重启后的recovery若没有进程内execution，只能在独立
 process-generation isolation authority证明旧WorkerProcessGeneration已终止后提交Destroyed，当前generation缺失本地状态必须fail closed。
 10项真实Wasmtime conformance覆盖engine feature contract、canonical JSON成功、任意import与post-WASM1指令拒绝、fuel耗尽、I/O超限、
 memory-page与Job memory envelope耦合、运行中epoch interrupt等待guest退出、process-generation absence proof以及single-use cleanup/grant
-revoke。该开发期证据仍未包含生产Artifact/
-Secret broker实现、独立Executor进程/Pod、gVisor/microVM、Linux escape suite或CandidateManifest，不能声明Phase 4/6通过。
+revoke。独立Executor与Sandbox Artifact Broker的双audience隔离改造属于当前实施批；门禁通过前，既有单Broker拓扑证据不能证明该目标。
+该开发期证据仍未包含gVisor、真实Linux KVM/process-kill、
+escape/saturation suite或CandidateManifest，不能声明Phase 4/6通过。
 
-production Firecracker Provider现已接入Controller Artifact Broker：每个请求按exact tenant、Sandbox Job/request、Executor与Provider
+production Firecracker Provider现已接入Controller closed Artifact proxy；Controller再委托独立Sandbox Artifact Broker。每个请求按exact tenant、Sandbox Job/request、Executor与Provider
 process generation、sandbox identity、lease、deadline读取runtime bundle及可选Artifact-backed输入，Provider再次核对完整ArtifactRef长度和
 SHA-256；主逻辑输入必须持有exact `read_whole` grant。通过guest Ready fence后，Provider以不超过1 MiB的canonical、digest-bound chunk在
 private vsock依序交付一次性runtime/input materialization，最后才发送同一request fence的execute command；materialization与execute envelope
@@ -804,9 +823,15 @@ sandbox identity，任一post-prepare合同、authority或provider失败都必�
 销毁且不activation。cleanup port现可在prepare响应丢失时按exact request/fence、无prepared evidence执行销毁。独立Managed session
 authority internal gRPC已在Controller组合，先由node attestor校验登记，再只允许exact microVM Executor URI SAN执行claim/phase/Ready；
 Executor library的专用claim driver与普通Sandbox共享同一`LocalWorkerPools`，先保留本地容量再claim，并在长生命周期command future结束前
-保持permit。microVM Artifact RPC现逐字转发closed请求，不再转换成会丢失Provider/sandbox/workload identity的WASI请求；统一
-`BrokeredSandboxArtifactBroker`为WASI与microVM共享object store、KMS unseal、两阶段authorization和单一in-flight bulkhead，但分别调用
-各自typed PostgreSQL authority。Managed session只可在`Starting`用exact active package grant读取runtime bundle；grant revoker按closed
+保持permit。Controller的microVM Artifact proxy现逐字转发closed请求，不再转换成会丢失Provider/sandbox/workload identity的WASI请求；
+WASI与microVM proxy均以exact Sandbox Controller URI SAN调用Sandbox Artifact Broker的对应closed RPC。只有WASI与microVM可在该
+Sandbox audience进程内共享有界runtime、object store/KMS client、两阶段authorization和in-flight bulkhead；Model RPC、Model DB pool与
+Model permit不得进入该进程。Sandbox Broker使用自己的restricted read-only repeatable-read role/pool；fresh PostgreSQL 16 fixture证明
+既有authority可完成真实Sandbox读取，并
+拒绝Job更新与Secret表读取。loopback mTLS及Helm正负向门禁还证明错误workload role在authority前拒绝，Controller没有provider catalog、
+AWS token、S3/KMS环境或直出网络；双audience ServiceAccount/DB pool/permit的Helm负向门禁已重新取得。Controller内WASI与microVM proxy共享
+同一个在上游read前取得的bounded response permit，默认1、hard max 4；逐chunk stream持有原始buffer与permit到completion/drop/absolute
+deadline，零字节、跨lane saturation、慢消费者与deadline主动回收fixture通过。真实集群credential互换、rolling restart与S3/KMS负向资格仍Open。Managed session只可在`Starting`用exact active package grant读取runtime bundle；grant revoker按closed
 workload区分有限Capability与长生命周期session，并对Managed Job/request/attempt/lease/Executor及Ready sandbox identity执行幂等回收。
 全新PostgreSQL 16 Managed fixture及既有Sandbox回归fixture均实际通过，不增加表或migration。mTLS authority、Executor pool和Sandbox
 domain定向测试分别9、3、33项通过。真实Managed microVM session Provider、guest Artifact/Secret注入和同实例activation现已进入独立
@@ -895,6 +920,7 @@ route不可达时保持reconciliation，不能尝试另一节点或把unreachabl
 - Pure lost Job 可安全新 Attempt，有 Effect lost Job 进入 reconciliation；
 - package dependency 在执行时不访问 registry/network；
 - Artifact/Secret grant 只对单 Job/port/purpose/deadline 有效；
+- Model与Sandbox Artifact Broker不共享进程、Deployment、ServiceAccount、DB pool或permit；Sandbox Broker饱和时Model Artifact读取仍可准入；
 - resource/network/file/output 所有硬限制可由可复现 fixture 触发；
 - warm clone 不携带前一 Job 数据，cleanup 失败自动隔离 node；
 - escape、Secret、network 和 output canary 不进入宿主或其他 tenant；

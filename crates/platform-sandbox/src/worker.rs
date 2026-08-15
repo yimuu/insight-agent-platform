@@ -1,6 +1,6 @@
 use crate::{
-    AcceptSandboxExecution, NodeAttestorRoute, SandboxCleanupEvidence, SandboxCommandLimits,
-    SandboxContractError, SandboxControlError, SandboxExecutionControlRouter,
+    AcceptSandboxExecution, NodeAttestorRoute, PreparedSandbox, SandboxCleanupEvidence,
+    SandboxCommandLimits, SandboxContractError, SandboxControlError, SandboxExecutionControlRouter,
     SandboxExecutionOutcome, SandboxExecutionRequest, SandboxExecutionStopToken,
     SandboxExecutorHost, SandboxLeaseRecoveryAction, SandboxLifecycleObservation,
     SandboxLifecycleObserver, SandboxObservedExecutionError, SandboxPhaseDecision,
@@ -161,6 +161,7 @@ pub struct CommitSandboxPhase {
     pub executor_identity_digest: Sha256Digest,
     pub attestor_route: NodeAttestorRoute,
     pub phase_evidence_digest: Sha256Digest,
+    pub prepared: Option<PreparedSandbox>,
 }
 
 impl CommitSandboxPhase {
@@ -178,6 +179,7 @@ impl CommitSandboxPhase {
             "executor_identity_digest": self.executor_identity_digest,
             "attestor_route": self.attestor_route,
             "phase_evidence_digest": self.phase_evidence_digest,
+            "prepared": self.prepared,
         }))
         .map_err(|_| SandboxWorkerContractError::Canonicalization)?
         .parse()
@@ -199,6 +201,7 @@ impl CommitSandboxPhase {
                     | SandboxJobState::Collecting
                     | SandboxJobState::Cancelling
             )
+            || (self.target == SandboxJobState::Starting) != self.prepared.is_some()
             || self.audit.request_digest != self.canonical_request_digest()?
         {
             return Err(SandboxWorkerContractError::InvalidPhaseCommit);
@@ -973,6 +976,7 @@ where
                 target,
                 executor_identity_digest,
                 phase_evidence_digest,
+                prepared,
             } => {
                 if !state.physical_state.can_transition_to(target)
                     || !matches!(
@@ -1004,6 +1008,7 @@ where
                     executor_identity_digest,
                     attestor_route: state.attestor_route.clone(),
                     phase_evidence_digest,
+                    prepared,
                 };
                 command.audit.request_digest = command
                     .canonical_request_digest()

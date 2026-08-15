@@ -20,6 +20,51 @@ if helm template sandbox "$chart" \
   echo "sandbox deployment: invalid Managed recovery shard was accepted" >&2
   exit 1
 fi
+if helm template sandbox "$chart" \
+  --set networkPolicy.artifactBrokerPodSelector= >/dev/null 2>&1; then
+  echo "sandbox deployment: empty Artifact Broker selector was accepted" >&2
+  exit 1
+fi
+if helm template sandbox "$chart" \
+  --set networkPolicy.artifactBrokerPodSelector.insight\\.platform/workload-role=artifact-broker-model >/dev/null 2>&1; then
+  echo "sandbox deployment: Model Artifact Broker selector was accepted" >&2
+  exit 1
+fi
+if helm template sandbox "$chart" \
+  --set networkPolicy.artifactBrokerPort=0 >/dev/null 2>&1; then
+  echo "sandbox deployment: invalid Artifact Broker port was accepted" >&2
+  exit 1
+fi
+if helm template sandbox "$chart" \
+  --set controller.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn=arn:aws:iam::111122223333:role/forbidden >/dev/null 2>&1; then
+  echo "sandbox deployment: Controller workload-identity annotation was accepted" >&2
+  exit 1
+fi
+if helm template sandbox "$chart" \
+  --set controller.artifactBroker.endpoint=https://insight-platform-artifact-broker-sandbox.platform-artifacts.svc:9555 >/dev/null 2>&1; then
+  echo "sandbox deployment: Artifact Broker endpoint/NetworkPolicy port drift was accepted" >&2
+  exit 1
+fi
+if helm template sandbox "$chart" \
+  --set controller.artifactBroker.maximumRequestBytes=1048577 >/dev/null 2>&1; then
+  echo "sandbox deployment: oversized Artifact Broker request bound was accepted" >&2
+  exit 1
+fi
+if helm template sandbox "$chart" \
+  --set controller.artifactBroker.maximumChunkBytes=262145 >/dev/null 2>&1; then
+  echo "sandbox deployment: oversized Artifact Broker chunk bound was accepted" >&2
+  exit 1
+fi
+if helm template sandbox "$chart" \
+  --set controller.artifactBroker.maximumInFlightResponses=5 >/dev/null 2>&1; then
+  echo "sandbox deployment: excessive in-flight Artifact response capacity was accepted" >&2
+  exit 1
+fi
+if helm template sandbox "$chart" \
+  --set tls.keys.artifactBrokerClientPrivateKey= >/dev/null 2>&1; then
+  echo "sandbox deployment: empty Artifact Broker client private-key name was accepted" >&2
+  exit 1
+fi
 
 ruby -rjson -ryaml -e '
 docs = YAML.load_stream(File.read(ARGV.fetch(0))).compact
@@ -48,6 +93,13 @@ if controller && executor && microvm && attestor
 
   host_paths = ->(doc) { doc.dig("spec", "template", "spec", "volumes").to_a.select { |volume| volume.key?("hostPath") } }
   failures << "Controller must have no hostPath" unless host_paths.call(controller).empty?
+  controller_env = controller.dig("spec", "template", "spec", "containers", 0, "env").to_a.to_h { |entry| [entry["name"], entry["value"]] }
+  required_artifact_env = %w[PLATFORM_SANDBOX_ARTIFACT_CA_PATH PLATFORM_SANDBOX_ARTIFACT_CERT_PATH PLATFORM_SANDBOX_ARTIFACT_KEY_PATH]
+  failures << "Controller is missing Artifact Broker mTLS client configuration" unless required_artifact_env.all? { |name| controller_env[name]&.start_with?("/etc/insight/controller-tls/") }
+  failures << "Controller must not receive AWS/object-store credentials" if controller_env.keys.any? { |name| name.start_with?("AWS_") || name.include?("KMS") || name.include?("S3") }
+  failures << "Controller must not mount workload-identity tokens" if controller.dig("spec", "template", "spec", "volumes").to_a.any? { |volume| volume["name"] == "workload-identity" || volume.key?("projected") }
+  controller_service_account = docs.find { |doc| doc["kind"] == "ServiceAccount" && doc.dig("metadata", "name") == controller.dig("spec", "template", "spec", "serviceAccountName") }
+  failures << "Controller ServiceAccount must have no annotations" unless controller_service_account && controller_service_account.dig("metadata", "annotations").to_h.empty?
   executor_paths = host_paths.call(executor)
   failures << "Executor may mount only the node-local attestor socket" unless executor_paths.length == 1 && executor_paths.first["name"] == "socket"
   microvm_paths = host_paths.call(microvm)
@@ -84,6 +136,12 @@ if controller && executor && microvm && attestor
   executor_config = executor_config_map && JSON.parse(executor_config_map.fetch("data").fetch("executor.json"))
   recovery = executor_config&.dig("backend", "managed_recovery")
   failures << "microVM Executor config is missing bounded Managed recovery controls" unless recovery && recovery["shard_index"] == 0 && recovery["shard_count"] == 1 && recovery["scan_milliseconds"] > recovery["scan_jitter_milliseconds"] && recovery["failure_backoff_milliseconds"].between?(1, recovery["scan_milliseconds"])
+  controller_config_map = docs.find { |doc| doc["kind"] == "ConfigMap" && doc.dig("metadata", "name")&.end_with?("-controller") }
+  controller_config = controller_config_map && JSON.parse(controller_config_map.fetch("data").fetch("controller.json"))
+  broker = controller_config&.dig("artifact_broker")
+  expected_broker_endpoint = broker && "https://#{broker["tls_server_name"]}:9443"
+  failures << "Controller config must route Artifact reads to one bounded mTLS Broker" unless broker && broker["endpoint"] == expected_broker_endpoint && broker["maximum_request_bytes"].to_i.between?(1, 1_048_576) && broker["maximum_chunk_bytes"].to_i.between?(1, 262_144)
+  failures << "Controller config must not contain an embedded Artifact provider catalog" if controller_config&.key?("artifact_provider_catalog")
 
   images = workloads.flat_map { |doc| doc.dig("spec", "template", "spec", "containers").to_a + doc.dig("spec", "template", "spec", "initContainers").to_a }.map { |container| container["image"] }
   failures << "all Sandbox workload images must use immutable sha256 digests" unless images.all? { |image| image&.match?(/@sha256:[0-9a-f]{64}\z/) }

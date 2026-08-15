@@ -1,13 +1,11 @@
 //! Dedicated trusted Sandbox Controller composition.
 //!
-//! This process owns PostgreSQL authority and the Artifact S3/KMS broker. It never loads an
-//! untrusted runtime. The Executor connects over mandatory mTLS and the Controller delegates old
-//! process-generation absence proof to an independently deployed attestor.
+//! This process owns PostgreSQL mutation authority but no object-store or KMS credential. It never
+//! loads an untrusted runtime. Executors connect over mandatory mTLS; exact Artifact bytes come
+//! from the independently deployed Artifact Broker, and old process-generation absence proof comes
+//! from the independently deployed attestor.
 
-use insight_platform_artifact_broker::{
-    ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
-    BrokeredSandboxArtifactBroker,
-};
+use insight_platform_artifact_rpc::{ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcClient};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
 };
@@ -28,7 +26,7 @@ use insight_platform_sandbox_rpc::{
         sandbox_secret_delivery_authority_service_server::SandboxSecretDeliveryAuthorityServiceServer,
     },
     EgressBrokerWorkloadIdentity, MicroVmExecutorWorkloadIdentity, MicroVmProviderWorkloadIdentity,
-    SandboxAuthorityGrpcService, SandboxBrokerGrpcService,
+    SandboxArtifactResponseCapacity, SandboxAuthorityGrpcService, SandboxBrokerGrpcService,
     SandboxExecutorAuthorityWorkloadIdentity, SandboxInternalRpcLimits,
     SandboxManagedMcpSessionAuthorityGrpcService, SandboxMicroVmBrokerGrpcService,
     SandboxProcessIsolationAttestorGrpcClient, SandboxSecretDeliveryAuthorityGrpcService,
@@ -53,8 +51,12 @@ const SERVER_KEY_PATH_ENV: &str = "PLATFORM_SANDBOX_GRPC_KEY_PATH";
 const ATTESTOR_CA_PATH_ENV: &str = "PLATFORM_SANDBOX_ATTESTOR_CA_PATH";
 const ATTESTOR_CERT_PATH_ENV: &str = "PLATFORM_SANDBOX_ATTESTOR_CERT_PATH";
 const ATTESTOR_KEY_PATH_ENV: &str = "PLATFORM_SANDBOX_ATTESTOR_KEY_PATH";
+const ARTIFACT_CA_PATH_ENV: &str = "PLATFORM_SANDBOX_ARTIFACT_CA_PATH";
+const ARTIFACT_CERT_PATH_ENV: &str = "PLATFORM_SANDBOX_ARTIFACT_CERT_PATH";
+const ARTIFACT_KEY_PATH_ENV: &str = "PLATFORM_SANDBOX_ARTIFACT_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const MAX_TLS_FILE_BYTES: usize = 1024 * 1024;
+const MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD: usize = 4;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,7 +64,6 @@ struct ControllerProcessConfig {
     schema_version: u32,
     listen_address: String,
     database_max_connections: u32,
-    artifact_provider_catalog: AwsArtifactProviderCatalogConfig,
     artifact_broker: ArtifactBrokerProcessConfig,
     process_isolation_attestor: AttestorProcessConfig,
     connect_timeout_milliseconds: u64,
@@ -73,9 +74,11 @@ struct ControllerProcessConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactBrokerProcessConfig {
-    maximum_in_flight: usize,
-    maximum_read_bytes: usize,
-    operation_timeout_milliseconds: u64,
+    endpoint: String,
+    tls_server_name: String,
+    maximum_request_bytes: usize,
+    maximum_chunk_bytes: usize,
+    maximum_in_flight_responses: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -120,18 +123,18 @@ impl ControllerProcessConfig {
     }
 
     fn validate(&self) -> Result<(), ProcessError> {
-        self.artifact_provider_catalog
-            .validate()
-            .map_err(|_| ProcessError::InvalidConfiguration)?;
         let _listen: SocketAddr = self
             .listen_address
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
             || !(2..=64).contains(&self.database_max_connections)
-            || self.artifact_broker.maximum_in_flight == 0
-            || self.artifact_broker.maximum_read_bytes == 0
-            || self.artifact_broker.operation_timeout_milliseconds == 0
+            || !closed_https_endpoint(
+                &self.artifact_broker.endpoint,
+                &self.artifact_broker.tls_server_name,
+            )
+            || !(1..=MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD)
+                .contains(&self.artifact_broker.maximum_in_flight_responses)
             || !stable_dns_name(&self.process_isolation_attestor.tls_server_name)
             || self.process_isolation_attestor.maximum_cached_routes == 0
             || self.process_isolation_attestor.maximum_cached_routes > 10_000
@@ -161,15 +164,12 @@ impl ControllerProcessConfig {
         {
             return Err(ProcessError::InvalidConfiguration);
         }
-        ArtifactBrokerLimits {
-            maximum_in_flight: self.artifact_broker.maximum_in_flight,
-            maximum_read_bytes: self.artifact_broker.maximum_read_bytes,
-            operation_timeout: Duration::from_millis(
-                self.artifact_broker.operation_timeout_milliseconds,
-            ),
-        }
-        .validate()
+        ArtifactInternalRpcLimits::new(
+            self.artifact_broker.maximum_request_bytes,
+            self.artifact_broker.maximum_chunk_bytes,
+        )
         .map_err(|_| ProcessError::InvalidConfiguration)
+        .map(|_| ())
     }
 }
 
@@ -197,30 +197,7 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::SchemaMismatch)?;
     let repository = Arc::new(PgRepository::new(pool));
 
-    let providers = AwsArtifactProviderCatalog::install(config.artifact_provider_catalog.clone())
-        .await
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
-    providers
-        .check_readiness()
-        .await
-        .map_err(|_| ProcessError::ArtifactProviderUnavailable)?;
-    let (unsealer, stores) = providers.into_components();
-    let artifacts = Arc::new(
-        BrokeredSandboxArtifactBroker::new(
-            repository.clone(),
-            repository.clone(),
-            unsealer,
-            stores,
-            ArtifactBrokerLimits {
-                maximum_in_flight: config.artifact_broker.maximum_in_flight,
-                maximum_read_bytes: config.artifact_broker.maximum_read_bytes,
-                operation_timeout: Duration::from_millis(
-                    config.artifact_broker.operation_timeout_milliseconds,
-                ),
-            },
-        )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
-    );
+    let artifacts = Arc::new(connect_artifact_broker(&config).await?);
 
     let process_isolation = Arc::new(RoutedProcessAttestor::new(&config, limits)?);
 
@@ -230,12 +207,16 @@ async fn run() -> Result<(), ProcessError> {
     )
     .max_encoding_message_size(maximum)
     .max_decoding_message_size(maximum);
+    let artifact_response_capacity =
+        SandboxArtifactResponseCapacity::new(config.artifact_broker.maximum_in_flight_responses)
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
     let broker_service = SandboxExecutorBrokerServiceServer::new(SandboxBrokerGrpcService::new(
         artifacts.clone(),
         repository.clone(),
         repository.clone(),
         process_isolation.clone(),
         limits,
+        artifact_response_capacity.clone(),
     ))
     .max_encoding_message_size(maximum)
     .max_decoding_message_size(maximum);
@@ -248,11 +229,15 @@ async fn run() -> Result<(), ProcessError> {
     )
     .max_encoding_message_size(maximum)
     .max_decoding_message_size(maximum);
-    let micro_vm_broker_service = SandboxMicroVmBrokerServiceServer::new(
-        SandboxMicroVmBrokerGrpcService::new(artifacts, repository.clone(), limits),
-    )
-    .max_encoding_message_size(maximum)
-    .max_decoding_message_size(maximum);
+    let micro_vm_broker_service =
+        SandboxMicroVmBrokerServiceServer::new(SandboxMicroVmBrokerGrpcService::new(
+            artifacts,
+            repository.clone(),
+            limits,
+            artifact_response_capacity,
+        ))
+        .max_encoding_message_size(maximum)
+        .max_decoding_message_size(maximum);
     let secret_delivery_authority_service = SandboxSecretDeliveryAuthorityServiceServer::new(
         SandboxSecretDeliveryAuthorityGrpcService::new(repository.clone(), limits),
     )
@@ -326,6 +311,43 @@ async fn run() -> Result<(), ProcessError> {
             .map_err(|_| ProcessError::RpcUnavailable)
         }
     }
+}
+
+async fn connect_artifact_broker(
+    config: &ControllerProcessConfig,
+) -> Result<ArtifactSandboxBrokerGrpcClient, ProcessError> {
+    let ca = read_bounded(
+        &required_absolute_path(ARTIFACT_CA_PATH_ENV)?,
+        MAX_TLS_FILE_BYTES,
+    )?;
+    let certificate = read_bounded(
+        &required_absolute_path(ARTIFACT_CERT_PATH_ENV)?,
+        MAX_TLS_FILE_BYTES,
+    )?;
+    let key = read_bounded(
+        &required_absolute_path(ARTIFACT_KEY_PATH_ENV)?,
+        MAX_TLS_FILE_BYTES,
+    )?;
+    let tls = ClientTlsConfig::new()
+        .domain_name(&config.artifact_broker.tls_server_name)
+        .ca_certificate(Certificate::from_pem(ca))
+        .identity(Identity::from_pem(certificate, key))
+        .timeout(Duration::from_millis(config.connect_timeout_milliseconds));
+    let channel = Endpoint::from_shared(config.artifact_broker.endpoint.clone())
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .tls_config(tls)
+        .map_err(|_| ProcessError::InvalidTls)?
+        .connect_timeout(Duration::from_millis(config.connect_timeout_milliseconds))
+        .timeout(Duration::from_millis(config.request_timeout_milliseconds))
+        .connect()
+        .await
+        .map_err(|_| ProcessError::ArtifactBrokerUnavailable)?;
+    let limits = ArtifactInternalRpcLimits::new(
+        config.artifact_broker.maximum_request_bytes,
+        config.artifact_broker.maximum_chunk_bytes,
+    )
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
+    Ok(ArtifactSandboxBrokerGrpcClient::new(channel, limits))
 }
 
 struct RoutedProcessAttestor {
@@ -506,6 +528,21 @@ fn stable_dns_name(value: &str) -> bool {
         })
 }
 
+fn closed_https_endpoint(value: &str, tls_server_name: &str) -> bool {
+    let Ok(endpoint) = url::Url::parse(value) else {
+        return false;
+    };
+    endpoint.scheme() == "https"
+        && stable_dns_name(tls_server_name)
+        && endpoint.host_str() == Some(tls_server_name)
+        && endpoint.port().is_some()
+        && endpoint.username().is_empty()
+        && endpoint.password().is_none()
+        && endpoint.query().is_none()
+        && endpoint.fragment().is_none()
+        && matches!(endpoint.path(), "" | "/")
+}
+
 fn private_network(network: &IpNet) -> bool {
     ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
         .into_iter()
@@ -522,7 +559,7 @@ enum ProcessError {
     InvalidConfiguration,
     DatabaseUnavailable,
     SchemaMismatch,
-    ArtifactProviderUnavailable,
+    ArtifactBrokerUnavailable,
     InvalidTls,
     RpcUnavailable,
     ShutdownDeadlineExceeded,
@@ -534,7 +571,7 @@ impl fmt::Display for ProcessError {
             Self::InvalidConfiguration => "invalid Controller configuration",
             Self::DatabaseUnavailable => "PostgreSQL authority is unavailable",
             Self::SchemaMismatch => "PostgreSQL authority schema is incompatible",
-            Self::ArtifactProviderUnavailable => "Artifact S3/KMS provider is unavailable",
+            Self::ArtifactBrokerUnavailable => "Artifact Broker is unavailable",
             Self::InvalidTls => "Controller TLS configuration is invalid",
             Self::RpcUnavailable => "Controller RPC server failed",
             Self::ShutdownDeadlineExceeded => "Controller graceful shutdown deadline exceeded",
@@ -547,6 +584,32 @@ impl Error for ProcessError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_config() -> ControllerProcessConfig {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "listen_address": "0.0.0.0:7443",
+            "database_max_connections": 8,
+            "artifact_broker": {
+                "endpoint": "https://artifact-broker.platform-artifacts.svc:9443",
+                "tls_server_name": "artifact-broker.platform-artifacts.svc",
+                "maximum_request_bytes": 1048576,
+                "maximum_chunk_bytes": 262144,
+                "maximum_in_flight_responses": 1
+            },
+            "process_isolation_attestor": {
+                "tls_server_name": "sandbox-attestor.insight.internal",
+                "attestor_identity_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "maximum_cached_routes": 1024,
+                "controller_port": 7444,
+                "allowed_node_cidrs": ["10.0.0.0/8"]
+            },
+            "connect_timeout_milliseconds": 5000,
+            "request_timeout_milliseconds": 30000,
+            "shutdown_grace_milliseconds": 30000
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn attestor_routes_and_dns_names_are_closed() {
@@ -582,5 +645,31 @@ mod tests {
                 "accepted {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn controller_requires_bounded_exact_artifact_broker_transport() {
+        let valid = valid_config();
+        valid.validate().unwrap();
+
+        let mut cleartext = valid.clone();
+        cleartext.artifact_broker.endpoint =
+            "http://artifact-broker.platform-artifacts.svc:9443".to_owned();
+        assert!(cleartext.validate().is_err());
+
+        let mut identity_drift = valid.clone();
+        identity_drift.artifact_broker.tls_server_name =
+            "other-broker.platform-artifacts.svc".to_owned();
+        assert!(identity_drift.validate().is_err());
+
+        let mut unbounded = valid;
+        unbounded.artifact_broker.maximum_chunk_bytes = 0;
+        assert!(unbounded.validate().is_err());
+
+        let mut excessive_response_capacity = valid_config();
+        excessive_response_capacity
+            .artifact_broker
+            .maximum_in_flight_responses = MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD + 1;
+        assert!(excessive_response_capacity.validate().is_err());
     }
 }

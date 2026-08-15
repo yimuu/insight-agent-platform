@@ -26,6 +26,7 @@ pub const MAX_RESOURCE_DEPENDENCIES: usize = 512;
 pub const MAX_RESOURCE_POLICIES: usize = 64;
 pub const MAX_FROZEN_SLOTS: usize = 512;
 pub const MAX_CODE_BYTES: usize = 128;
+pub const MAX_SANDBOX_RUNTIME_BUNDLE_BYTES: u64 = 67_108_864;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1038,6 +1039,11 @@ impl ResourceDocument {
                 spec.runtime_bundle_artifact
                     .validate()
                     .map_err(|_| ResourceContractError::InvalidArtifact)?;
+                if spec.runtime_bundle_artifact.byte_length() == 0
+                    || spec.runtime_bundle_artifact.byte_length() > MAX_SANDBOX_RUNTIME_BUNDLE_BYTES
+                {
+                    return Err(ResourceContractError::InvalidSandboxContract);
+                }
                 spec.build_evidence
                     .validate()
                     .map_err(|_| ResourceContractError::InvalidArtifact)?;
@@ -2597,6 +2603,63 @@ mod tests {
         assert_eq!(
             spec.validate(),
             Err(ResourceContractError::InvalidPolicyDocument)
+        );
+    }
+
+    #[test]
+    fn sandbox_package_runtime_bundle_is_bounded_at_publication() {
+        let artifact = |suffix: &str, character: char, byte_length| {
+            ArtifactRef::new(
+                id(&format!("art_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
+                digest(character),
+                byte_length,
+                "application/octet-stream",
+                DataClassification::Internal,
+                None,
+            )
+            .unwrap()
+        };
+        let runtime_revision = ExactVersionRef::new(
+            id("srrev_0198f1c3-8f49-7c3e-b1f3-773c28367baa"),
+            digest('1'),
+        )
+        .unwrap();
+        let spec = SandboxPackageResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: artifact("7bab", '2', 16),
+                manifest_digest: digest('3'),
+            },
+            contract_digest: digest('4'),
+            dependency_versions: vec![runtime_revision.clone()],
+            policy_versions: vec![],
+            source_artifact: artifact("7bac", '5', 16),
+            source_digest: digest('5'),
+            runtime_revision,
+            entrypoint_kind: SandboxEntrypointKind::WasmExport,
+            entrypoint: "run".to_owned(),
+            dependency_lock_digest: digest('6'),
+            runtime_bundle_artifact: artifact("7bad", '7', MAX_SANDBOX_RUNTIME_BUNDLE_BYTES),
+            build_evidence: artifact("7bae", '8', 16),
+            trust_class: CodeTrustClass::BuiltIn,
+            package_digest: digest('9'),
+        };
+        ResourceDocument::SandboxPackage(spec.clone())
+            .validate()
+            .unwrap();
+
+        let mut empty = spec.clone();
+        empty.runtime_bundle_artifact = artifact("7baf", 'a', 0);
+        assert_eq!(
+            ResourceDocument::SandboxPackage(empty).validate(),
+            Err(ResourceContractError::InvalidSandboxContract)
+        );
+
+        let mut oversized = spec;
+        oversized.runtime_bundle_artifact =
+            artifact("7bb0", 'b', MAX_SANDBOX_RUNTIME_BUNDLE_BYTES + 1);
+        assert_eq!(
+            ResourceDocument::SandboxPackage(oversized).validate(),
+            Err(ResourceContractError::InvalidSandboxContract)
         );
     }
 

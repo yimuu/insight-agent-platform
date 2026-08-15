@@ -73,6 +73,7 @@ required_rendered = (
     'kind: PodDisruptionBudget',
     'command: ["/usr/local/bin/platform-model-worker"]',
     'insight.platform/workload-role: model-worker',
+    'insight.platform/workload-role: artifact-broker-model',
     'automountServiceAccountToken: false',
     'readOnlyRootFilesystem: true',
     'allowPrivilegeEscalation: false',
@@ -111,6 +112,7 @@ negative_values = (
     ("--set", "natsTls.keys.privateKey=", "NATS mTLS projected keys"),
     ("--set", "artifactTls.keys.privateKey=", "Artifact mTLS projected keys"),
     ("--set", "networkPolicy.artifactPort=0", "Artifact Broker port"),
+    ("--set", "networkPolicy.artifactPodSelector.insight\\.platform/workload-role=artifact-broker-sandbox", "only the Model Artifact Broker"),
     ("--set", "autoscaling.minReplicas=1", "at least two replicas"),
     ("--set", "autoscaling.maxReplicas=1", "maximum must be at least"),
 )

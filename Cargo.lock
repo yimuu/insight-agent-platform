@@ -2351,6 +2351,7 @@ dependencies = [
  "futures",
  "insight-platform-contracts",
  "insight-platform-models",
+ "insight-platform-sandbox",
  "prost",
  "protoc-bin-vendored",
  "rcgen",
@@ -2371,6 +2372,7 @@ dependencies = [
 name = "insight-platform-artifact-service"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "insight-platform-artifact-broker",
  "insight-platform-artifact-rpc",
  "insight-platform-contracts",
@@ -2768,7 +2770,7 @@ dependencies = [
 name = "insight-platform-sandbox-controller"
 version = "0.1.0"
 dependencies = [
- "insight-platform-artifact-broker",
+ "insight-platform-artifact-rpc",
  "insight-platform-contracts",
  "insight-platform-postgres",
  "insight-platform-sandbox",
@@ -2779,6 +2781,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tonic",
+ "url",
 ]
 
 [[package]]

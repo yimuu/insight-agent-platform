@@ -19,6 +19,9 @@
 {{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.natsCidrs) (empty .Values.networkPolicy.egressNamespace) (empty .Values.networkPolicy.artifactNamespace) (empty .Values.networkPolicy.artifactPodSelector) -}}
 {{- fail "PostgreSQL/NATS CIDRs and exact Egress/Artifact destinations are required" -}}
 {{- end -}}
+{{- if not (deepEqual .Values.networkPolicy.artifactPodSelector (dict "insight.platform/workload-role" "artifact-broker-model")) -}}
+{{- fail "Model Worker must target only the Model Artifact Broker workload role" -}}
+{{- end -}}
 {{- if or (lt (int .Values.networkPolicy.artifactPort) 1) (gt (int .Values.networkPolicy.artifactPort) 65535) -}}
 {{- fail "Artifact Broker port must be in 1..65535" -}}
 {{- end -}}

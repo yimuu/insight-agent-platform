@@ -524,7 +524,8 @@ global Model work
 - 每Provider Deployment/endpoint有connection pool、rate-limit state、circuit和bounded queue；
 - `429/Retry-After`保存durable retry_at并释放Worker/connection；
 - 等待 budget/rate-limit/deadline 不持有 execution permit；
-- large Artifact upload与Model request使用不同IO permit；
+- large Artifact upload与Model request使用不同IO permit；Model Artifact Broker还必须使用自己的进程、DB pool与permit，不能借用
+  Sandbox Artifact Broker的容量；
 - tenant公平调度，单tenant/Provider backlog不阻塞其他Provider；
 - Model饱和不占用API/Scheduler/Sandbox/MCP/Context permit；
 - critical cancel/usage reconciliation使用保留capacity；
@@ -592,6 +593,8 @@ Deployment/activate/suspend、credential grant、high-risk data transfer和break
 ## 27. 配置与部署
 
 - Model Worker是独立Deployment、service account、DB/HTTP pool、queue和HPA；
+- Model Artifact Broker是只暴露Model read RPC的独立Deployment、ServiceAccount、restricted DB pool和permit；它不得注册WASI/
+  microVM RPC，也不得与Sandbox Artifact Broker共享Pod、连接池或process-local bulkhead；
 - Provider adapter随signed Worker image安装，startup报告manifest/digest；
 - 不同data region/high-sensitivity Provider可使用独立Worker pool；
 - Provider endpoint/auth不来自环境自由字符串，只来自immutable Provider Deployment；model identity只来自immutable
@@ -616,6 +619,7 @@ Deployment/activate/suspend、credential grant、high-risk data transfer和break
 - high-classification Artifact无法发送到不合规Provider/region；
 - Secret、prompt、response、hidden reasoning、file/cache handle不进入public event/metric/default log；
 - Model饱和或单Provider `429`不影响API/Scheduler/Sandbox/MCP/Context准入；
+- Sandbox Artifact Broker队列、DB pool或permit饱和时，Model Artifact Broker仍能接受已授权request materialization；
 - credential revoke/provider suspension在限定窗口阻止新Attempt并有审计。
 
 ### 28.1 当前实施证据边界（非规范性）
@@ -654,15 +658,15 @@ reference解封与digest、process-installed Provider catalog、独立permit/总
 独立`platform-model-worker`候选进程现把exact双adapter manifest、独立bounded PostgreSQL pool、schema verify、Model driver与Model Worker
 身份的mTLS Egress RPC组合起来；候选镜像和独立namespace/ServiceAccount/Deployment/PDB/HPA/default-deny NetworkPolicy已通过静态正负向门禁，
 Pod没有Service/Ingress、云Provider credential、Kubernetes API token或直接Provider客户端。Artifact-backed request的domain、PostgreSQL
-authority、共享Broker pipeline和Worker materializer内核已交付；生产进程现在安装`ArtifactModelBrokerGrpcClient`与
-`BrokeredModelRequestMaterializer`，经独立Artifact Broker的exact Model Worker mTLS端点读取并逐片复验Artifact-backed request。Broker使用
-restricted read-only PostgreSQL role，真实PostgreSQL 16 fixture证明授权读取成功而业务更新和Secret读取被数据库拒绝；loopback mTLS fixture
-证明同CA错误workload role在进入authority前被拒绝。output materializer当前仍只支持Inline。Model取消路径现以reserved critical-control permit运行bounded PostgreSQL safety scan，只接受当前generation仍持有lease的
+authority、Model Broker pipeline和Worker materializer内核已交付；生产进程现在安装`ArtifactModelBrokerGrpcClient`与
+`BrokeredModelRequestMaterializer`，经Model Artifact Broker的exact Model Worker mTLS端点读取并逐片复验Artifact-backed request。Model
+Broker的目标边界只注册Model RPC，并使用独立于Sandbox audience的进程、Deployment、ServiceAccount、restricted PostgreSQL pool和permit；
+既有只读数据库与错误workload role fixture仍证明authority最小权限，但旧单Broker拓扑证据不能证明新的跨audience
+隔舱。双Broker部署、身份互换和独立饱和门禁完成前不把该拓扑登记为Phase 4/6完成。output materializer当前仍只支持Inline。Model取消路径现以reserved critical-control permit运行bounded PostgreSQL safety scan，只接受当前generation仍持有lease的
 Cancelling Turn/Job，调用Egress exact cancel后用旋转fence提交保守usage ceiling；重试失败不提交terminal，late completion由first-winner拒绝。
 通过完整Turn/Job/attempt/lease/Worker/request fence的text delta现在会进入credential-free canonical内部envelope，并由同时限制message数和
 bytes、把容量permit保留到有界批次flush结束的non-blocking队列投影到TLS/mTLS NATS tenant/run scoped subject；tool argument与Provider metadata不发布，NATS不可用、背压或单帧
 超限只丢live observation，不影响durable执行。真实Secret Manager provider、生产storage/KMS catalog provisioning、Artifact-backed output IO、
-Sandbox对独立Broker的迁移、
 公开SSE消费与live-gap/backpressure资格、real-process Provider conformance、跨work-class饱和隔舱和Phase 6 fault fixture仍未交付，因此
 CR-132/CR-136和本规范状态保持进行中。
 

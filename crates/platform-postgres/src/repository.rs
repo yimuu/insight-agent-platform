@@ -4,13 +4,13 @@ use insight_platform_context::{
     ContextJobPayload, ContextQueryError as DomainContextQueryError, ContextQueryLimits,
 };
 use insight_platform_contracts::{
-    checked_in_hard_limit_profile, is_execution_work_owner_pair, ActiveTarget, AdministrativeGate,
-    ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome, DataClassification,
-    DeploymentClosure, EntityLifecycle, ExactDatasetGenerationRef, ExactDeploymentRef,
-    ExactSecretBindingRef, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
-    FrozenSlotTarget, HardLimitProfile, InstallationPrincipalBinding, JobState, JsonLimits,
-    NodeExecutionState, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
-    PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    canonical_digest, checked_in_hard_limit_profile, is_execution_work_owner_pair, ActiveTarget,
+    AdministrativeGate, ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome,
+    DataClassification, DeploymentClosure, EntityLifecycle, ExactDatasetGenerationRef,
+    ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure, FailureClass, FailureCode,
+    FailureSource, FrozenSlotTarget, HardLimitProfile, InstallationPrincipalBinding, JobState,
+    JsonLimits, NodeExecutionState, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode,
+    PolicyKind, PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
     PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
     ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState, SchedulerPriority,
     ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
@@ -1219,6 +1219,12 @@ impl PgRegistryTransaction {
             draft.document.authoring_package(),
         )
         .await?;
+        require_ready_sandbox_runtime_bundle(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &draft.document,
+        )
+        .await?;
         let document_refs = draft.document.exact_version_refs();
         validate_exact_version_refs_exist(
             &mut transaction,
@@ -1233,11 +1239,26 @@ impl PgRegistryTransaction {
                 .payload
                 .validate_for(kind, &version.resource_version_id)
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            let published_document = serde_json::to_value(&version.payload.document)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            let published_document_digest = canonical_digest(&published_document)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            if published_document_digest != command.expected_draft_digest.as_str() {
+                return Err(RepositoryError::InvalidInput(
+                    "published document does not match the validated draft".to_owned(),
+                ));
+            }
             if version.payload.validation != *validation {
                 return Err(RepositoryError::InvalidInput(
                     "published validation does not match the validated draft".to_owned(),
                 ));
             }
+            require_ready_sandbox_runtime_bundle(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &version.payload.document,
+            )
+            .await?;
             let payload = TypedPayload::new(1, &version.payload)?;
             let artifact_id = version.artifact_id.as_ref().map(ToString::to_string);
             let row = sqlx::query(
@@ -19566,20 +19587,50 @@ async fn require_ready_authoring_artifact(
     tenant_id: &ResourceId,
     package: &AuthoringPackage,
 ) -> Result<(), RepositoryError> {
-    let artifact = &package.artifact;
-    let matched: bool = sqlx::query_scalar(
+    require_ready_artifact_ref(
+        transaction,
+        tenant_id,
+        &package.artifact,
+        "ready authoring artifact",
+    )
+    .await
+}
+
+async fn require_ready_sandbox_runtime_bundle(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    document: &ResourceDocument,
+) -> Result<(), RepositoryError> {
+    let ResourceDocument::SandboxPackage(package) = document else {
+        return Ok(());
+    };
+    require_ready_artifact_ref(
+        transaction,
+        tenant_id,
+        &package.runtime_bundle_artifact,
+        "ready Sandbox runtime bundle artifact",
+    )
+    .await
+}
+
+async fn require_ready_artifact_ref(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    artifact: &ArtifactRef,
+    not_found_label: &'static str,
+) -> Result<(), RepositoryError> {
+    let matched: Option<i32> = sqlx::query_scalar(
         r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM insight_platform.artifacts AS artifact
-            JOIN insight_platform.artifact_blobs AS blob
-              ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
-            WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
-              AND artifact.state = 'ready' AND artifact.terminal_at IS NULL
-              AND blob.state = 'verified' AND blob.deleted_at IS NULL
-              AND blob.content_digest = $3 AND blob.size_bytes = $4
-              AND artifact.verified_media_type = $5 AND artifact.classification = $6
-        )
+        SELECT 1
+        FROM insight_platform.artifacts AS artifact
+        JOIN insight_platform.artifact_blobs AS blob
+          ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+        WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
+          AND artifact.state = 'ready' AND artifact.terminal_at IS NULL
+          AND blob.state = 'verified' AND blob.deleted_at IS NULL
+          AND blob.content_digest = $3 AND blob.size_bytes = $4
+          AND artifact.verified_media_type = $5 AND artifact.classification = $6
+        FOR SHARE OF artifact, blob
         "#,
     )
     .bind(tenant_id.to_string())
@@ -19590,10 +19641,10 @@ async fn require_ready_authoring_artifact(
     })?)
     .bind(artifact.media_type())
     .bind(artifact.classification().as_str())
-    .fetch_one(&mut **transaction)
+    .fetch_optional(&mut **transaction)
     .await?;
-    if !matched {
-        return Err(RepositoryError::NotFound("ready authoring artifact"));
+    if matched.is_none() {
+        return Err(RepositoryError::NotFound(not_found_label));
     }
     Ok(())
 }

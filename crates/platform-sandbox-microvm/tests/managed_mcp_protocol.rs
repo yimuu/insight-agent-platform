@@ -1069,6 +1069,7 @@ impl MicroVmHostFactory for CountingHostFactory {
         Ok(PreparedMicroVmHost {
             instance: self.instance.clone(),
             evidence: PreparedMicroVm {
+                provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 61),
                 sandbox_identity_digest: self.instance.identity.clone(),
                 prepare_evidence_digest: sha('a'),
             },
@@ -1090,6 +1091,7 @@ impl MicroVmHostFactory for CountingHostFactory {
         Ok(Some(PreparedMicroVmHost {
             instance: self.instance.clone(),
             evidence: PreparedMicroVm {
+                provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 61),
                 sandbox_identity_digest: self.instance.identity.clone(),
                 prepare_evidence_digest: sha('a'),
             },
@@ -1313,6 +1315,7 @@ impl MicroVmLifecyclePort for FixtureLifecycle {
         _request: &SandboxExecutionRequest,
     ) -> Result<PreparedMicroVm, MicroVmProviderFailure> {
         Ok(PreparedMicroVm {
+            provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 61),
             sandbox_identity_digest: sha('1'),
             prepare_evidence_digest: sha('2'),
         })

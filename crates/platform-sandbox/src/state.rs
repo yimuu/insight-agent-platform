@@ -1,5 +1,5 @@
 use crate::{
-    digest_without_field, stable_code, SandboxCommandLimits, SandboxContractError,
+    digest_without_field, stable_code, PreparedSandbox, SandboxCommandLimits, SandboxContractError,
     SandboxExecutionRequest, SandboxStopReason, MAX_SANDBOX_ARTIFACT_GRANTS,
     MAX_SANDBOX_SAFE_CODE_BYTES, MAX_SANDBOX_SAFE_MESSAGE_BYTES,
 };
@@ -538,6 +538,8 @@ pub struct SandboxExecutionJobPayload {
     pub executor_identity_digest: Option<Sha256Digest>,
     pub attestor_route: Option<crate::NodeAttestorRoute>,
     pub phase_evidence_digest: Option<Sha256Digest>,
+    /// Exact physical binding established by a successful prepare and committed before start.
+    pub prepared: Option<PreparedSandbox>,
     pub outcome: Option<SandboxExecutionOutcome>,
     pub cleanup: Option<SandboxCleanupEvidence>,
     pub payload_digest: Sha256Digest,
@@ -570,6 +572,36 @@ impl SandboxExecutionJobPayload {
             || self.submission_digest != self.request.request_digest
             || digest_without_field(self, "payload_digest")? != self.payload_digest
         {
+            return Err(SandboxContractError::InvalidJob);
+        }
+        if let Some(prepared) = &self.prepared {
+            let leased_request = self
+                .request
+                .as_ref()
+                .clone()
+                .bind_lease_generation(job.lease_generation)?;
+            prepared
+                .validate_for(&leased_request)
+                .map_err(|_| SandboxContractError::InvalidJob)?;
+            if self.cleanup.as_ref().is_some_and(|cleanup| {
+                cleanup.sandbox_identity_digest != prepared.sandbox_identity_digest
+            }) {
+                return Err(SandboxContractError::InvalidJob);
+            }
+        }
+        let prepared_state_matches = match self.physical_state {
+            SandboxJobState::Accepted | SandboxJobState::Preparing => self.prepared.is_none(),
+            SandboxJobState::Starting
+            | SandboxJobState::Running
+            | SandboxJobState::Collecting
+            | SandboxJobState::Succeeded => self.prepared.is_some(),
+            SandboxJobState::Cancelling
+            | SandboxJobState::Failed
+            | SandboxJobState::Cancelled
+            | SandboxJobState::TimedOut
+            | SandboxJobState::Lost => true,
+        };
+        if !prepared_state_matches {
             return Err(SandboxContractError::InvalidJob);
         }
         let state_matches = match self.physical_state {
@@ -799,6 +831,7 @@ pub fn decide_accept(
         executor_identity_digest: None,
         attestor_route: None,
         phase_evidence_digest: None,
+        prepared: None,
         outcome: None,
         cleanup: None,
         payload_digest: command.request.request_digest.clone(),
@@ -862,15 +895,27 @@ pub fn decide_begin_execution(
     Ok(SandboxPhaseDecision { job, payload })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdvanceSandboxPhase {
+    pub target: SandboxJobState,
+    pub phase_evidence_digest: Sha256Digest,
+    pub prepared: Option<PreparedSandbox>,
+    pub database_now: DateTime<Utc>,
+}
+
 pub fn decide_advance_phase(
     current_job: &JobProjection,
     current_payload: &SandboxExecutionJobPayload,
     fence: &JobFence,
-    target: SandboxJobState,
-    phase_evidence_digest: Sha256Digest,
-    database_now: DateTime<Utc>,
+    transition: AdvanceSandboxPhase,
     limits: SandboxCommandLimits,
 ) -> Result<SandboxPhaseDecision, SandboxContractError> {
+    let AdvanceSandboxPhase {
+        target,
+        phase_evidence_digest,
+        prepared,
+        database_now,
+    } = transition;
     current_payload.validate_for(current_job, limits)?;
     if !matches!(
         target,
@@ -879,6 +924,7 @@ pub fn decide_advance_phase(
             | SandboxJobState::Collecting
             | SandboxJobState::Cancelling
     ) || !current_payload.physical_state.can_transition_to(target)
+        || (target == SandboxJobState::Starting) != prepared.is_some()
     {
         return Err(SandboxContractError::InvalidTransition);
     }
@@ -891,6 +937,9 @@ pub fn decide_advance_phase(
         .checked_add(1)
         .ok_or(SandboxContractError::InvalidTransition)?;
     payload.phase_evidence_digest = Some(phase_evidence_digest);
+    if target == SandboxJobState::Starting {
+        payload.prepared = prepared;
+    }
     payload = payload.seal()?;
     payload.validate_for(&job, limits)?;
     Ok(SandboxPhaseDecision { job, payload })
