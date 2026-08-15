@@ -795,6 +795,10 @@ CR-165首个实现依赖已经交付：04的closed `ModelOutputArtifactIoPolicyD
 time closure。fixture覆盖unknown field、media/ID/digest、ceil+margin、staging窗口、Ready duration与terminal绝对时间；全workspace all-target
 compile保持通过。该证据只关闭typed Policy/时间公式基础，不表示Model Deployment、reservation、Producer或Artifact-backed current path已实现。
 
+实现前machine审计已将16、18与CR-165临时回退为Architecture Revision：Candidate尚无显式Inline-only/Artifact-capable mode，两个新digest
+集合没有上限与空集语义，capacity enum/region/backend没有closed wire，opaque deployment digest不能证明局部pool/semaphore不别名，
+4096-byte protobuf overhead也尚未进入root machine contract。完成上游16→下游18修订及全量cross-review前，不得继续v5/v2代码接线。
+
 下一实现切片按依赖顺序交付：先修复18中Component/Storage manifest wire、集合上限、capacity identity和4096 constant closure的剩余
 machine空洞，再原子实现HardLimitProfile v5全部Model-output字段、WorkerManifest v2、
 ComponentCapacityManifest、ArtifactStorageBindingManifest与Candidate exact closure；closed Rust/protobuf success+tagged failure合同和两bundle reservation；Producer

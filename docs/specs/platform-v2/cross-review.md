@@ -1,11 +1,16 @@
 # Platform v2 00～18 Cross-review
 
+> **Architecture Revision override（2026-08-15）**：CR-165在实现前machine审计中重新打开。Candidate缺少显式
+> Inline-only/Artifact-capable mode、两个新digest集合的边界/空集语义、可比较的typed pool/semaphore identity closure，以及进入root
+> contract digest的4096-byte protobuf overhead载体；Component/Storage manifest wire也未闭合。下方CR-165旧行的
+> “Resolved contract”结论暂时失效，16与18已回退为Draft / Architecture Revision；完成上游到下游修订和全量cross-review后才可恢复。
+
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Cross-review Closed |
+| 状态 | Draft / Cross-review Reopened |
 | 日期 | 2026-08-15 |
 | 范围 | 00～18 的状态、ID、schema、错误、聚合、事件、权限、容量与 fixture |
-| 结论 | 业务合同一致；旧 migration 1～35、177 表 catalog 与专用表族结论全部撤销 |
+| 结论 | Persistence结论仍有效；CR-165 machine closure重新打开，修复完成前不得生成对应实现 |
 
 ## 1. 审查结论
 

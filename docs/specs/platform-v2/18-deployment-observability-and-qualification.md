@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
+| 状态 | Draft / Architecture Revision |
 | 日期 | 2026-08-15 |
 | 依赖 | [`00-overview.md`](00-overview.md)～[`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) |
 | 直接下游 | 实现计划、迁移记录、资格报告与 `docs/current` |

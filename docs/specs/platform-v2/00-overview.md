@@ -56,9 +56,9 @@ Platform v2 采用以下不可逆的架构决定：
 | 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / In Progress | MCP Transport、OAuth、投影、Task 和 Subscription |
 | 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / In Progress | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / In Progress | S3、内容寻址、上传、生命周期和内容安全 |
-| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / In Progress | Provider、Model Profile、ModelTurn、流式响应和预算 |
+| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Draft / Architecture Revision | Provider、Model Profile、ModelTurn、流式响应和预算 |
 | 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / In Progress | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / In Progress | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Draft / Architecture Revision | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned 文件不得被实现或其他规范作为已确定合同引用。一个文件只有进入 Draft 并给出完整状态机、
 不变量和验收条款后，才能成为实施输入。
@@ -166,7 +166,9 @@ Draft
 
 ## 8. 本批次结论与下一步
 
-00～18 的 persistence architecture cross-review 已关闭，目标合同推进为 Accepted / Implementation In Progress。旧的专用
+00～18 的 persistence architecture cross-review 已关闭；其余目标合同保持 Accepted / Implementation In Progress。CR-165 在实现前审计中
+发现 Candidate enablement、capacity isolation identity和RPC常量缺少机器闭包，因此16与18已按规范流程临时回退为
+Draft / Architecture Revision，修复并完成全量cross-review前不得作为实现输入。旧的专用
 表族、migration 1～35、177 表 catalog、checksum 和资格结论全部退出活动基线。物理模型由
 [`ADR-0001`](../../adr/0001-platform-v2-postgres-baseline.md)冻结为 23 张表，并已经形成单一 `0001`、共享 repository 与
 真实 PostgreSQL 16 foundation fixture。
@@ -183,10 +185,11 @@ Git 历史，不再复制到活动规范。它们不能证明当前 schema、API
 functional exit 已关闭；Phase 3 的 Artifact transaction/worker、generic Invocation、Capability execution、ModelTurn、Context 与
 Text2SQL domain/repository 已在 fresh PostgreSQL 16 上作为同一全量 fixture suite 实际执行。Text2SQL admission 还在同一事务锁定
 committed SqlCatalog Observation 与 exact `database.query.readonly` Capability Interface/Deployment/ReadOnly Effect，不建立专用表。
-CR-165 已将 Model Artifact-backed output 的目标合同完成 cross-review并冻结为Accepted：写路径使用独立Model Artifact Producer，
+CR-165 的Model Artifact-backed output架构方向仍是独立Model Artifact Producer，
 与只读Model Artifact Broker分离，且只有Model terminal PostgreSQL事务能够把Verified Artifact原子推进为Ready并提交Output Link、
 RunValue、usage/quota、Event与Outbox；pre-header transport timeout与storage write-quiescence barrier分别阻断slowloris容量占用和
-absence后迟到PUT。该结论只表示目标合同可实施；对应domain/schema/protobuf、Producer进程与权限、部署及
+absence后迟到PUT。但Candidate显式enablement、digest集合边界、pool/semaphore alias closure与4096-byte RPC overhead尚未形成完整机器合同，
+故该项当前处于Architecture Revision。对应domain/schema/protobuf、Producer进程与权限、部署及
 real-process/故障/容量资格仍全部Open。当前Model output materializer仍为Inline-only，超过Inline能力时仍走开发期
 `model_output_artifact_required`防护；不得据此关闭Phase 4～6、任一Qualification Gate，或把Artifact-backed output声明为当前行为。
 实现已从04的closed Model-output ArtifactIo Policy Rust/JSON合同与pure checked retention timing helper开始；它尚未连接v5 limits、
