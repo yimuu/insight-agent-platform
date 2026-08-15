@@ -66,6 +66,10 @@ pub struct ClaimedModelExecution {
 }
 
 impl ClaimedModelExecution {
+    pub fn job_projection(&self) -> Result<JobProjection, RepositoryError> {
+        job_projection(&self.job)
+    }
+
     /// Builds the credential-free, exact Provider request after the canonical request bytes have
     /// been materialized from their inline value or Ready Artifact and digest-checked.
     pub fn adapter_execution(

@@ -108,6 +108,15 @@ Worker通过process-installed dispatcher执行Native/HTTP/gRPC/MCP adapter，并
 Receipt/Event/Outbox/quota事务；NonIdempotentWrite的dispatch后失败强制进入Uncertain而非重试，attempt耗尽的retryable failure转为
 terminal failure。claim reserve ledger identity与terminal settle ledger identity是两组不同ID，组合层在I/O前拒绝复用。
 
+Model Worker的独立执行组合现由`insight-platform-model-worker`承载：只在`model-worker`/`WorkClass::Model`精确manifest下，先预留
+process-local business permit再发有界PostgreSQL claim，并把返回的Job、WorkerManifest、lease token/generation、request digest和四条
+reservation ledger identity逐项回绑。request materializer、Provider adapter host与output materializer都在permit内执行；Provider I/O期间按
+HardLimitProfile heartbeat续租，heartbeat只旋转Job optimistic version，已规范化结果随后用新fence提交而不会仅因续租重放付费请求。
+进程drain超时要求终止整代Worker，使未完成lease由恢复扫描接管。Inline request/output实现已有明确上限；当冻结的Provider响应上限无法由
+Inline承载时，在Provider dispatch前提交`model_output_artifact_required`拒绝，不产生调用或保守计费。Artifact-backed生产实现仍必须注入
+Artifact Broker port；20项adapter与5项driver unit、三crate strict Clippy、44-package workspace check及crate-boundary/cutover门禁通过。
+因此该组合关闭执行驱动缺口，但不关闭CR-132、CR-148或Phase 4。
+
 durable control winner现由`ControlledCapabilityExecution`与原claim共同构造cancel job：只旋转Job optimistic version，tenant、Invocation、Job、
 physical attempt、lease generation/token、WorkerProcessGeneration和Deployment/Input必须保持exact，旧generation在adapter I/O前fail closed。
 Native adapter使用process-installed cancel port，HTTP/gRPC使用Egress exact live-request cancel；transport确认永不伪造no-effect proof，write Effect
@@ -354,7 +363,7 @@ dispatch后未知结果按冻结上限保守结算且attempt耗尽不重放。Op
 production wire adapter现通过credential-free Connector边界实现固定endpoint/protocol request与bounded SSE normalization；共同fixture覆盖
 text stream、usage、tool intent、本地structured/tool schema、请求digest及未知字段fail-closed。brokered connector现在还把credential-free
 request交给独立Egress broker port，并对raw SSE执行incremental总量/line/event限制、strict JSON重复key拒绝、closed content-type/status/
-`[DONE]`处理；fixture增至18项并通过strict Clippy。生产Secret/Egress broker、catalog discovery、Artifact-backed IO、real-process
+`[DONE]`处理；fixture增至20项并通过strict Clippy。生产Secret/Egress broker、catalog discovery、Artifact-backed IO、real-process
 Provider conformance与饱和/故障资格仍未完整交付；其中生产HTTPS Egress首片已转入CR-136跟踪，因此CR-132和Phase 4保持进行中。
 
 CR-133（进行中）建立Sandbox执行权威首片：`insight-platform-sandbox`冻结exact Capability Deployment、Runtime、Package、Profile、

@@ -59,6 +59,13 @@ impl ExecuteModelAdapterJob {
 /// receives no Provider SDK value and cannot advance durable state.
 #[async_trait]
 pub trait ModelOutputMaterializer: Send + Sync {
+    /// Fails before Provider dispatch when this materializer cannot represent every response
+    /// allowed by the exact frozen execution contract.
+    fn validate_execution(
+        &self,
+        execution: &ModelAdapterExecutionRequest,
+    ) -> Result<(), ModelAdapterFailure>;
+
     async fn materialize(
         &self,
         execution: &ModelAdapterExecutionRequest,
@@ -83,6 +90,31 @@ pub struct ModelAdapterWorker<M, A> {
     authority: A,
 }
 
+pub struct PreparedModelAdapterCommit {
+    command: CommitModelOutcome,
+}
+
+impl PreparedModelAdapterCommit {
+    pub fn refresh_fence(
+        &mut self,
+        fence: JobFence,
+    ) -> Result<(), ModelAdapterWorkerContractError> {
+        if fence.worker_process_generation_id != self.command.fence.worker_process_generation_id
+            || fence.lease_generation != self.command.fence.lease_generation
+            || fence.token_digest != self.command.fence.token_digest
+            || fence.expected_version < self.command.fence.expected_version
+        {
+            return Err(ModelAdapterWorkerContractError::InvalidCommand);
+        }
+        self.command.fence = fence;
+        Ok(())
+    }
+
+    pub fn fence(&self) -> &JobFence {
+        &self.command.fence
+    }
+}
+
 impl<M, A> ModelAdapterWorker<M, A>
 where
     M: ModelOutputMaterializer,
@@ -100,15 +132,37 @@ where
         &self,
         command: ExecuteModelAdapterJob,
     ) -> Result<CommandOutcome<A::Record>, ModelAdapterWorkerError<A::Error>> {
+        let prepared = self
+            .prepare(command)
+            .await
+            .map_err(ModelAdapterWorkerError::Contract)?;
+        self.commit(prepared).await
+    }
+
+    /// Executes Provider I/O and local materialization without mutating durable authority.
+    ///
+    /// A production supervisor may heartbeat the exact lease while this future is pending, then
+    /// rotate only the optimistic Job version through [`PreparedModelAdapterCommit::refresh_fence`]
+    /// before committing the already-normalized outcome. This avoids replaying paid Provider I/O
+    /// merely because a heartbeat advanced the Job row version.
+    pub async fn prepare(
+        &self,
+        command: ExecuteModelAdapterJob,
+    ) -> Result<PreparedModelAdapterCommit, ModelAdapterWorkerContractError> {
         let now = Utc::now();
         command
             .validate_at(now)
-            .map_err(ModelAdapterWorkerError::Contract)?;
-        let adapter_outcome = match self.host.execute(command.execution.clone()).await {
-            Ok(outcome) => outcome,
-            Err(failure) => {
-                ModelAdapterExecutionOutcome::Failed(host_failure(failure, &command.execution, now))
-            }
+            .map_err(|_| ModelAdapterWorkerContractError::InvalidCommand)?;
+        let adapter_outcome = match self.materializer.validate_execution(&command.execution) {
+            Err(failure) => ModelAdapterExecutionOutcome::Failed(failure),
+            Ok(()) => match self.host.execute(command.execution.clone()).await {
+                Ok(outcome) => outcome,
+                Err(failure) => ModelAdapterExecutionOutcome::Failed(host_failure(
+                    failure,
+                    &command.execution,
+                    now,
+                )),
+            },
         };
         let outcome = match adapter_outcome {
             ModelAdapterExecutionOutcome::Succeeded(success) => {
@@ -125,17 +179,17 @@ where
                         failure.request_sent = true;
                         failure.retry_at = None;
                         failure_outcome(&command.execution, failure, Utc::now())
-                            .map_err(ModelAdapterWorkerError::Contract)?
+                            .map_err(|_| ModelAdapterWorkerContractError::InvalidCommand)?
                     }
                 }
             }
             ModelAdapterExecutionOutcome::Failed(failure) => {
                 failure_outcome(&command.execution, failure, Utc::now())
-                    .map_err(ModelAdapterWorkerError::Contract)?
+                    .map_err(|_| ModelAdapterWorkerContractError::InvalidCommand)?
             }
         };
-        self.authority
-            .commit_model_outcome(CommitModelOutcome {
+        Ok(PreparedModelAdapterCommit {
+            command: CommitModelOutcome {
                 audit: command.audit,
                 model_turn_id: command.execution.model_turn_id.clone(),
                 job_id: command.execution.job_id.clone(),
@@ -145,7 +199,16 @@ where
                 quota_entry_ids: command.quota_entry_ids,
                 request: *command.execution.request,
                 outcome,
-            })
+            },
+        })
+    }
+
+    pub async fn commit(
+        &self,
+        prepared: PreparedModelAdapterCommit,
+    ) -> Result<CommandOutcome<A::Record>, ModelAdapterWorkerError<A::Error>> {
+        self.authority
+            .commit_model_outcome(prepared.command)
             .await
             .map_err(ModelAdapterWorkerError::Authority)
     }

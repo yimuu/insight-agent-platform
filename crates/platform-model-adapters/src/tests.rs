@@ -19,7 +19,10 @@ use insight_platform_models::{
     SafeTraceContext,
 };
 use serde_json::Value;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     format!(
@@ -343,6 +346,33 @@ struct FailingAdapter {
     failure: ModelAdapterFailure,
 }
 
+struct DispatchCountingAdapter {
+    descriptor: InstalledModelAdapterDescriptor,
+    dispatch_count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ModelProviderAdapter for DispatchCountingAdapter {
+    fn descriptor(&self) -> InstalledModelAdapterDescriptor {
+        self.descriptor.clone()
+    }
+
+    async fn invoke(
+        &self,
+        _request: ModelAdapterExecutionRequest,
+    ) -> Result<NormalizedModelStream, ModelAdapterFailure> {
+        self.dispatch_count.fetch_add(1, Ordering::SeqCst);
+        panic!("preflight-rejected execution reached the Provider")
+    }
+
+    async fn cancel(
+        &self,
+        _request: ModelAdapterCancelRequest,
+    ) -> Result<ModelAdapterCancelOutcome, ModelAdapterFailure> {
+        Ok(ModelAdapterCancelOutcome::Unsupported)
+    }
+}
+
 #[async_trait]
 impl ModelProviderAdapter for FailingAdapter {
     fn descriptor(&self) -> InstalledModelAdapterDescriptor {
@@ -548,6 +578,13 @@ struct InlineMaterializer;
 
 #[async_trait]
 impl ModelOutputMaterializer for InlineMaterializer {
+    fn validate_execution(
+        &self,
+        _execution: &ModelAdapterExecutionRequest,
+    ) -> Result<(), ModelAdapterFailure> {
+        Ok(())
+    }
+
     async fn materialize(
         &self,
         execution: &ModelAdapterExecutionRequest,
@@ -573,8 +610,36 @@ impl ModelOutputMaterializer for InlineMaterializer {
     }
 }
 
+struct RejectingMaterializer;
+
+#[async_trait]
+impl ModelOutputMaterializer for RejectingMaterializer {
+    fn validate_execution(
+        &self,
+        _execution: &ModelAdapterExecutionRequest,
+    ) -> Result<(), ModelAdapterFailure> {
+        Err(ModelAdapterFailure {
+            class: ModelAdapterFailureClass::RejectedBeforeDispatch,
+            safe_code: "model_output_artifact_required".to_owned(),
+            safe_message: "Output requires Artifact materialization".to_owned(),
+            evidence_digest: sha('8'),
+            request_sent: false,
+            retry_at: None,
+        })
+    }
+
+    async fn materialize(
+        &self,
+        _execution: &ModelAdapterExecutionRequest,
+        _success: ModelAdapterSuccess,
+    ) -> Result<ModelOutputValue, ModelAdapterFailure> {
+        panic!("preflight-rejected execution reached output materialization")
+    }
+}
+
 struct CapturingAuthority {
     outcome: Mutex<Option<ModelDispatchOutcome>>,
+    fence: Mutex<Option<JobFence>>,
 }
 
 #[async_trait]
@@ -586,6 +651,7 @@ impl ModelExecutionAuthority for Arc<CapturingAuthority> {
         &self,
         command: insight_platform_models::CommitModelOutcome,
     ) -> Result<CommandOutcome<Self::Record>, Self::Error> {
+        *self.fence.lock().unwrap() = Some(command.fence.clone());
         *self.outcome.lock().unwrap() = Some(command.outcome);
         Ok(CommandOutcome::Applied("committed".to_owned()))
     }
@@ -632,6 +698,7 @@ async fn worker_materializes_and_commits_one_fenced_terminal_outcome() {
         .unwrap();
     let authority = Arc::new(CapturingAuthority {
         outcome: Mutex::new(None),
+        fence: Mutex::new(None),
     });
     let worker = ModelAdapterWorker::new(
         Arc::new(ModelAdapterHost::new(
@@ -651,6 +718,94 @@ async fn worker_materializes_and_commits_one_fenced_terminal_outcome() {
         authority.outcome.lock().unwrap().as_ref(),
         Some(ModelDispatchOutcome::Succeeded(_))
     ));
+}
+
+#[tokio::test]
+async fn output_capacity_rejection_is_committed_without_provider_dispatch() {
+    let fixture = fixture("fixture.responses/v1", '9', 'a');
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let mut registry = InstalledModelAdapterRegistry::default();
+    registry
+        .install(Arc::new(DispatchCountingAdapter {
+            descriptor: fixture.descriptor,
+            dispatch_count: dispatch_count.clone(),
+        }))
+        .unwrap();
+    let authority = Arc::new(CapturingAuthority {
+        outcome: Mutex::new(None),
+        fence: Mutex::new(None),
+    });
+    let worker = ModelAdapterWorker::new(
+        Arc::new(ModelAdapterHost::new(
+            registry,
+            Arc::new(DropModelLiveDeltas),
+            limits(),
+        )),
+        RejectingMaterializer,
+        authority.clone(),
+    );
+
+    worker
+        .execute(worker_command(fixture.request))
+        .await
+        .unwrap();
+
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
+    let outcome = authority.outcome.lock().unwrap();
+    let ModelDispatchOutcome::PermanentFailure {
+        failure,
+        measurement,
+    } = outcome.as_ref().unwrap()
+    else {
+        panic!("preflight rejection was not committed as a permanent failure")
+    };
+    assert_eq!(failure.safe_code, "model_output_artifact_required");
+    assert!(!measurement.observation.request_sent);
+    assert!(measurement.usage.is_none());
+}
+
+#[tokio::test]
+async fn prepared_outcome_accepts_only_same_lease_heartbeat_fence() {
+    let fixture = fixture("fixture.responses/v1", '9', 'a');
+    let mut registry = InstalledModelAdapterRegistry::default();
+    registry
+        .install(Arc::new(StaticAdapter {
+            descriptor: fixture.descriptor,
+            response: fixture.response,
+        }))
+        .unwrap();
+    let authority = Arc::new(CapturingAuthority {
+        outcome: Mutex::new(None),
+        fence: Mutex::new(None),
+    });
+    let worker = ModelAdapterWorker::new(
+        Arc::new(ModelAdapterHost::new(
+            registry,
+            Arc::new(DropModelLiveDeltas),
+            limits(),
+        )),
+        InlineMaterializer,
+        authority.clone(),
+    );
+    let command = worker_command(fixture.request);
+    let mut prepared = worker.prepare(command.clone()).await.unwrap();
+    assert!(authority.outcome.lock().unwrap().is_none());
+
+    let mut wrong_generation = command.fence.clone();
+    wrong_generation.worker_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 99);
+    assert_eq!(
+        prepared.refresh_fence(wrong_generation),
+        Err(ModelAdapterWorkerContractError::InvalidCommand)
+    );
+
+    let mut heartbeat_fence = command.fence;
+    heartbeat_fence.expected_version += 1;
+    prepared.refresh_fence(heartbeat_fence.clone()).unwrap();
+    worker.commit(prepared).await.unwrap();
+    assert_eq!(
+        authority.fence.lock().unwrap().as_ref(),
+        Some(&heartbeat_fence)
+    );
 }
 
 #[tokio::test]
@@ -677,6 +832,7 @@ async fn dispatched_failure_is_conservatively_accounted_and_attempt_bounded() {
             .unwrap();
         let authority = Arc::new(CapturingAuthority {
             outcome: Mutex::new(None),
+            fence: Mutex::new(None),
         });
         let worker = ModelAdapterWorker::new(
             Arc::new(ModelAdapterHost::new(

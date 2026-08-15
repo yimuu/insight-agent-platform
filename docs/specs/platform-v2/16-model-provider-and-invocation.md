@@ -633,20 +633,24 @@ exact process-local resolution，消费closed normalized stream并强制Provider
 response local validation、cancel与panic containment。worker materializer和PostgreSQL authority之间只有fenced
 `CommitModelOutcome`；claim显式返回fence、usage reservation、quota ledger identity与exact request input，后者逐字段回绑冻结
 RunValue；Inline正文复核canonical digest，Artifact-backed只暴露已验证的ArtifactLink identity。terminal command还在Provider I/O前
-拒绝复用reservation ledger identity。未知dispatch按冻结token/cost ceiling保守结算。
+拒绝复用reservation ledger identity。独立`insight-platform-model-worker`现在先预留本地Model permit再claim，逐项回绑WorkerManifest、
+Job/lease/request/quota identity，并在materialize与Provider stream期间按统一HardLimitProfile heartbeat；heartbeat只推进Job version，
+已经规范化的响应刷新到新fence后再提交，不因续租重放Provider调用。未知dispatch按冻结token/cost ceiling保守结算。
 OpenAI Responses与Anthropic Messages现各有独立production wire adapter：它们从同一canonical request映射固定endpoint/protocol body，
 通过credential-free `ModelProviderWireConnector`消费bounded SSE event，隐藏reasoning，且把text、tool arguments、structured output、usage与
 terminal归一为同一closed stream。共同fixture覆盖message/stream/tool/schema/usage、请求digest与未知Provider field fail-closed；原有host/
 worker之外又增加incremental SSE与brokered connector：raw body按总字节上限分帧，SSE field/event type歧义、重复JSON key、非法content-type、
-未知HTTP status和`[DONE]`后字节均fail closed；429/选定5xx映射为dispatch后可重试。18项fixture与strict Clippy通过。connector只接收exact
+未知HTTP status和`[DONE]`后字节均fail closed；429/选定5xx映射为dispatch后可重试。Inline output materializer还会根据冻结的Provider
+最大响应字节和closed envelope开销，在Provider dispatch前拒绝必须使用Artifact的请求；fixture证明未调用Provider、未生成usage。
+20项fixture与strict Clippy通过。connector只接收exact
 `ExactSecretBindingRef`、endpoint identity digest和冻结network/TLS/trust/data policy，不接收Secret value、任意URL或调用方header；role-scoped
 Egress broker负责late Secret resolution、DNS/network/TLS/redirect policy并只返回sanitized status/content-type/raw bounded stream。生产broker
 首片已经由独立`insight-platform-egress` crate实现process-installed exact endpoint catalog、全量DNS answer验证与per-request连接pinning、
 public-IP SSRF deny、HTTPS-only、no-proxy/no-redirect、Pinned/Follow Secret evidence校验、固定OpenAI/Anthropic auth header、请求/响应字节
 限制和exact in-flight cancellation。CR-143进一步交付共享Secret resolution组合内核，串联current revoke/generation门、KMS/AEAD
 reference解封与digest、process-installed Provider catalog、独立permit/总超时和actual version evidence，但具体KMS/Secret Manager Provider仍未交付。
-真实Secret Manager provider、catalog provisioning、Artifact-backed request/output IO、
-real-process Provider conformance、独立Pod/NetworkPolicy、饱和隔舱和Phase 6 fault fixture仍未交付，因此CR-132/CR-136和本规范状态保持进行中。
+真实Secret Manager provider、catalog provisioning、Artifact-backed request/output IO、Model Worker生产binary与部署、
+real-process Provider conformance、独立Pod/NetworkPolicy、跨work-class饱和隔舱和Phase 6 fault fixture仍未交付，因此CR-132/CR-136和本规范状态保持进行中。
 
 Provider wire request还必须冻结`JobId`、`attempt_no`、`lease_generation`和`WorkerProcessGenerationId`，并与
 ModelTurn、tenant、Provider Deployment和request digest共同形成一次物理请求identity。Egress broker只允许exact identity注册一个

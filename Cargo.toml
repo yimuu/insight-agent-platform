@@ -22,6 +22,7 @@ members = [
     "crates/platform-invocations",
     "crates/platform-jobs",
     "crates/platform-model-adapters",
+    "crates/platform-model-worker",
     "crates/platform-models",
     "crates/platform-mcp-host",
     "crates/platform-mcp-cleanup-worker",
@@ -128,6 +129,7 @@ insight-platform-egress-rpc = { path = "crates/platform-egress-rpc" }
 insight-platform-invocations = { path = "crates/platform-invocations" }
 insight-platform-jobs = { path = "crates/platform-jobs" }
 insight-platform-model-adapters = { path = "crates/platform-model-adapters" }
+insight-platform-model-worker = { path = "crates/platform-model-worker" }
 insight-platform-models = { path = "crates/platform-models" }
 insight-platform-mcp-host = { path = "crates/platform-mcp-host" }
 insight-platform-mcp-cleanup-worker = { path = "crates/platform-mcp-cleanup-worker" }
