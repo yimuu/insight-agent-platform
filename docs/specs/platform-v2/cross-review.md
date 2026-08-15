@@ -5,7 +5,7 @@
 | 状态 | Draft / Cross-review Reopened |
 | 日期 | 2026-08-15 |
 | 范围 | 00～18 的状态、ID、schema、错误、聚合、事件、权限、容量与 fixture |
-| 结论 | Persistence结论仍有效；CR-165已扩展至02、07、15、16、18的authority修订，终审关闭前不得生成对应实现 |
+| 结论 | CR-165影响00、02～10、12、14～18与ADR；目标schema及全部受影响规范在终审关闭前不得生成对应实现 |
 
 ## 1. 审查结论
 
@@ -43,18 +43,23 @@ qualification 数字若仍出现在文档的“已否决历史”小节，只能
 | file/blob/reference/grant/hold | 15 | Artifact、ArtifactBlob、ArtifactLink、shared primitives |
 | Model provider/profile/turn | 16 | Resource/Version/Deployment、Invocation/Job/Quota |
 | Management/Runtime API/SSE | 17 | domain aggregates、Receipt、Event、Outbox；API 不拥有状态 |
-| deployment/qualification | 18 | release Artifact/Event；不改变业务 authority |
+| deployment/release/qualification | 18 | immutable Candidate/Release/Qualification/Approval supply-chain documents、InstallationReleaseState、Event/Receipt/Outbox |
 
 一个概念只能有一个 current-state owner。下游只能保存 exact ID、immutable snapshot 或 derived safe projection；不得
 复制 lifecycle、lease、terminal outcome、quota balance、idempotency result 或 public sequence authority。
 
 ## 3. ID 与版本
 
-- 所有 ID 是 tenant-scoped opaque UUIDv7，prefix 只用于 parser/type safety，不作为数据库多态完整性证明；
+- 业务ID默认是tenant-scoped opaque UUIDv7；唯一`InstallationId`是installation-scoped且使用`ins` prefix，不允许fake tenant；prefix只用于
+  parser/type safety，不作为数据库多态完整性证明；
 - Resource、ResourceVersion、Deployment、Run、Node、Invocation、Job、Task、Event、Receipt、Artifact 均有稳定 nominal ID；
 - ResourceVersion immutable；Resource 的 current draft/lifecycle/active target 使用 version CAS；
 - Deployment immutable；环境、Secret、Policy、backend binding 改变必须创建新 Deployment；
-- RunBindingsSnapshot 在 admission 事务冻结，不读取后续 active head；
+- shared Task按kind直接使用public nominal ID：Approval只能是`ApprovalTaskId(apr_)`，其余公开interaction只能是
+  `InteractionId(int_)`；Invocation等owner不得接受自由`TaskId`或internal `tsk_` alias；
+- 所有region字段只使用02 `CanonicalRegion`及其common schema；旧`DataRegion` validator在clean-cut目标删除；
+- root RunBindingsSnapshot v2在admission事务冻结exact Installation Release/Candidate ID/digest、generation/state digest及全部Model candidate
+  validation；child逐字段继承parent installation binding并针对historical Candidate重验，不读取后续active head；
 - Job attempt ordinal 与 lease epoch 对 logical owner 单调递增；stale epoch 永远不能提交结果；
 - public Run sequence 由 Run 行 CAS 分配，EventId 负责 exact replay，二者不混用；
 - ETag 是 version 的 API 编码，不建立额外 ETag authority。
@@ -71,6 +76,7 @@ qualification 数字若仍出现在文档的“已否决历史”小节，只能
 | Task | Task | generation/version first-winner |
 | Artifact | Artifact | version + blob/link closure |
 | Receipt | Receipt | tenant/scope/key unique + canonical request digest |
+| Installation Release | InstallationReleaseState | expected generation/state digest + bounded preflight scan + final CAS |
 
 transition Event 只在 current-state 更新成功后同事务追加。Event 缺失由 outbox/reconcile 修复；Event 存在不能反向证明
 某个 current state。拒绝、stale、duplicate、late callback 和 reconciliation disposition 使用 Receipt/Event，不建专用表。
@@ -108,6 +114,9 @@ transition Event 只在 current-state 更新成功后同事务追加。Event 缺
 - cursor 在读取时根据当前 principal 生成，不持久化 per-user/per-connection cursor；
 - callback body 在认证、大小限制和类型校验后才进入 bounded Receipt/Artifact；重复 callback 返回相同 Receipt；
 - safety scan 可从 Job/Outbox 当前事实恢复，不能依赖消息恰好一次。
+- Receipt/Event/Outbox使用`AuthorityScope::Tenant | Installation`；只有exact configured InstallationId的promote/rollback Command及其Release
+  Event/Outbox可以没有tenant。04首个operator bootstrap是无Principal/Receipt的唯一部署期例外，只写installation-scoped bootstrap audit；
+  Callback/JobCommit永远tenant-only，禁止fake tenant、NULL uniqueness或NULL composite FK绕过。
 
 ## 8. 权限、租户与 Secret
 
@@ -118,6 +127,10 @@ transition Event 只在 current-state 更新成功后同事务追加。Event 缺
 - Approval/HumanInput 使用 Task，permission/effect/expected schema/decision principal snapshot 必须在 first-winner 事务闭合；
 - dynamic code 只进入 Sandbox execution plane，不能在 API/Scheduler/Worker host 直接 spawn；
 - Artifact、callback、MCP session、remote handle 和 cursor 都同时绑定 tenant 与 owner generation。
+- Installation Release GET只允许support/manage；promote/rollback只允许`InstallationOperator + installation.manage`，tenant token、
+  ServiceIdentity和普通Operator不能借用该scope；
+- Tenant aggregate是encryption-domain current binding owner；Producer各checkpoint及Model owner terminal在同一lock rank重验Active
+  generation/binding digest，rebind/revoke不能被冻结snapshot绕过。
 
 ## 9. Artifact 与大值
 
@@ -157,6 +170,14 @@ F-E2E      publish/deploy/admit/execute/wait/cancel/result/recover
 F-Q1       bulkhead、fairness、capacity、chaos、soak、DR
 ```
 
+CR-165新增行为fixture必须覆盖Installation state provisioning、operator bootstrap audit、promote/rollback、Uninitialized、active Model 4096上限与N+1、256项分页/
+EOF/count、final CAS、activation与root Run并发、child historical Candidate、无fake tenant的Receipt/Event/Outbox；还必须覆盖统一region、
+same-source startup projection、storage timing、Tenant encryption revoke/rebind，以及Worker semantic evidence与Producer tagged content evidence不可互换。
+Invocation/Task fixture还必须证明`apr_`/`int_`不可互换、`tsk_`/错误kind/跨tenant owner fail closed，`AwaitingApproval`/`AwaitingInput`
+只引用对应Pending Task，backend不能提交或建议Interaction ID，同一normalized InputRequired/JobCommit Receipt重放返回同一`int_`且不创建第二Task；
+Task resolution、Invocation transition、Receipt/Event/Outbox在respond/decline/approve/reject/cancel/expiry竞态中只有一个winner。
+物理名称、精确表数和schema version不在该业务fixture重复定义，只要求ADR-0001的fresh-schema gate独立通过。
+
 所有 SQL integration fixture 必须在真实 PostgreSQL 16 执行。静态 SQL parse、mock repository、catalog snapshot 或单元测试
 不能替代 transaction/lease/concurrency 行为。旧 migration 1～35 的测试结果已撤销，新 baseline 必须重新资格化。
 
@@ -164,50 +185,58 @@ F-Q1       bulkhead、fairness、capacity、chaos、soak、DR
 
 | 文档 | 结果 | 处理 |
 |---|---|---|
-| 00 | Reviewed | 撤销旧实施结论，重新定义顺序 |
-| 01 | Reviewed | 平面/领域边界保持，persistence 依赖收敛 |
-| 02 | Reviewed | 重写为共享 Resource/Version/Deployment |
-| 03 | Reviewed | 重写为 Aggregate/Job/Task/Receipt/Event/Outbox |
-| 04 | Reviewed | 专用 policy/principal/quota 表族改为共享映射 |
-| 05 | Reviewed | Agent 专用 lifecycle 表族改为 Resource 映射 |
-| 06 | Reviewed | Attempt/Continuation 改为 Job/WakeContract/Task |
-| 07 | Reviewed | claim/fairness 改为 Job/Quota/SchedulerState |
-| 08 | Reviewed | ChildRunLink 改为 RunNode typed relation |
-| 09 | Reviewed | Capability registry 改为 Resource 映射 |
-| 10 | Reviewed | Invocation 重写为单 aggregate + shared primitives |
-| 11 | Reviewed | Skill registry/activation 改为 Resource/Run snapshot |
-| 12 | Reviewed | Context query/observation 改为 Invocation/RunValue/Artifact |
-| 13 | Reviewed | MCP runtime 改为 shared Invocation/Job/Task/Receipt |
-| 14 | Reviewed | Sandbox registry/execution 改为 Resource/Job |
-| 15 | Reviewed | Artifact 收敛为 Artifact/Blob/Link + shared primitives |
-| 16 | Reviewed | Model registry/turn 改为 Resource/Invocation/Job |
-| 17 | Reviewed | API operation/stream/audit 改为 shared primitives |
-| 18 | Reviewed | 撤销旧 schema qualification，保留部署/验证合同 |
+| 00 | Draft | CR-165重新打开全量cross-review并更新目标/current证据边界 |
+| 01 | Accepted / Implementation In Progress | 平面/领域边界保持，persistence 依赖收敛；未受CR-165修改 |
+| 02 | Draft | 新增InstallationId/CanonicalRegion与RunBindings v2 |
+| 03 | Draft | 新增installation scope、锁序及Receipt/Event/Outbox约束 |
+| 04 | Draft | 新增tenant encryption-domain binding与Model ArtifactIo重验 |
+| 05 | Draft | root Run compile/admission冻结installation binding与全部Model candidates |
+| 06 | Draft | root/child Run的current/inherited installation binding语义 |
+| 07 | Draft | WorkerManifest v2 region与same-source startup projection |
+| 08 | Draft | Child Run逐字段继承parent historical installation binding |
+| 09 | Draft | 全域region统一为02 CanonicalRegion |
+| 10 | Draft | Invocation Approval/Input引用收紧为`ApprovalTaskId`/`InteractionId`并闭合Task state/owner fixture |
+| 11 | Accepted / Implementation In Progress | Skill registry/activation 改为 Resource/Run snapshot；未受CR-165修改 |
+| 12 | Draft | Context placement统一为02 CanonicalRegion |
+| 13 | Accepted / Implementation In Progress | MCP runtime 改为 shared Invocation/Job/Task/Receipt；未受CR-165修改 |
+| 14 | Draft | Sandbox ArtifactGrant统一为15的closed capability与`Active | Revoked` state，并只经隔离Broker物化 |
+| 15 | Draft | 新增resolved storage binding及checked timing closure |
+| 16 | Draft | 新增完整installation compatibility port、reservation与Producer projection |
+| 17 | Draft | 新增Installation Release API及全Model candidate Run admission |
+| 18 | Draft | 新增Candidate/runtime manifests、InstallationReleaseState及有界切换算法 |
 
-## 13. Accepted 门禁结果
+## 13. 历史门禁结果与当前重开状态
 
-三项门禁已经满足：ADR-0001 冻结 23 张表；新 `0001` 替换旧 migration/catalog/schema contract；Rust repository 与
-真实 PostgreSQL 16 fixture 已证明 migration replay、精确表集、lease fence、Receipt/Event/Outbox 和 quota concurrency。
-因此 00～18 推进为 Accepted / Implementation In Progress。Accepted 表示可以实施，不表示所有 API/Worker/部署已完成。
+首轮门禁曾以23张总表/schema v6通过：新`0001`替换旧migration/catalog/schema contract，Rust repository与真实PostgreSQL 16 fixture
+证明了migration replay、精确表集、lease fence、Receipt/Event/Outbox和quota concurrency。这些仍是当前实现证据，但CR-165发现缺少
+installation current Release/Candidate authority，因而不能继续作为完整目标合同的Accepted结论。目标ADR现为24张总表/schema v7；相关
+规范、migration/verifier和fresh PostgreSQL fixture完成全量cross-review前保持Draft，既不能生成新实现，也不能把目标状态声明为当前行为。
 
 任何为新增 ResourceKind、WorkClass、TaskKind、EventKind 或 ReceiptKind 而复制一组表的变更，直接视为 cross-review 回归。
 
 ### CR-165 machine closure复核增量
 
-实现前machine审计的当前修订按02→{07,15}→16→18依赖DAG闭合：02拥有共享ComponentRole，07拥有Worker shape，15拥有storage
-binding与64项hard max，16拥有installation capability port及共享compatibility generation，18只组合Candidate/qualification。Model Deployment
-output使用closed tagged union并在创建/激活/Run admission时通过同一port验证，Release切换与activation由同一Aggregate fence串行化；
-Candidate；Candidate `inline_only | artifact_capable`只由Producer installation closure派生且不读取动态domain catalog；四个manifest digest集合的
-required、空集、上下界、顺序和唯一性已冻结，通用Artifact storage catalog独立保持1～64项；Component/Storage
-manifest使用closed wire；checked-in startup-profile registry、validated projection、typed ComponentStartupManifest和唯一capacity factory把每个本地pool/semaphore绑定
-role-scoped logical identity，进入Candidate并执行全局alias拒绝；4096-byte protobuf
-overhead由closed protocol document/schema进入根contract digest；HardLimitProfile v5、WorkerManifest v2及其checked关系和Gate A负向fixture
-均已逐字段起草，正在执行最终冲突审查。
+实现前machine审计沿00 §3既有DAG推进，再按18 deployment/release→17 API→18 qualification的章节顺序闭合：02拥有
+`InstallationId`、`CanonicalRegion`、`ComponentRole`和RunBindings v2；03拥有installation scope、锁序及
+Receipt/Event/Outbox边界；04拥有tenant encryption-domain current binding；07拥有Worker shape；15拥有storage binding与checked timing；
+10只以`ApprovalTaskId(apr_)`/`InteractionId(int_)`引用03 shared Task authority并闭合Invocation/Task state coupling；16拥有pure installation
+compatibility port、完整reservation和Producer authorization projection；18拥有Candidate/Release manifest、
+`ComponentRuntimeManifest`、same-source startup projection、唯一capacity factory、content-addressed qualification/approval resolver和
+`InstallationReleaseStateV1`；17只投影公开API，不拥有状态。
 
-本次增量cross-review新增02 `ComponentRole` nominal但不新增持久ID；未改变业务状态机、错误、数据库表、事件或权限，compatibility fence复用
-既有installation-scoped Aggregate，保持23表/单一`0001` persistence authority，也不需要migration。
-CR-159的旧Candidate实现证据只证明此前Inline合同，不能证明新增mode、manifest集合或capacity identity closure；CR-162的Broker物理隔离与
-饱和fixture继续有效，但不能替代新增Candidate局部alias closure的实现和资格证据。schema、容量与fixture合同已经闭合，实现仍按计划开放。
+Model Deployment output使用closed tagged union，并在创建、每次激活和root Run admission时通过同一port验证；admission验证全部Model
+candidates，child Run继承parent exact binding。Release切换对最多4096个active Model Deployment做锁外repeatable-read keyset preflight，
+然后以Receipt-first短事务按generation/state digest完成最终CAS；terminal replay先于resolver/If-Match，public ETag漂移返回412，只有ETag未变的
+transient race才可有界重试后503。所有改变Model bindable active set或Tenant encryption-domain binding的mutation使用同一installation fence。Candidate
+`inline_only | artifact_capable`只由installation Producer closure派生，不读取动态domain catalog。required digest集合、closed runtime/storage
+wire、closed content-validation profile/evidence validity、统一region、role-scoped pool/semaphore identity、全Candidate alias拒绝及4096-byte
+protobuf overhead均进入根合同。04拥有可复用current encryption fence；15 Ready read与16 Producer/terminal都消费它。16另以closed
+`ModelResponseSemanticEvidenceV1`让Worker/owner可重复计算语义摘要，Producer只绑定digest并独立生成content evidence。
+
+该修订明确改变ID、Run binding、状态机、错误、数据库、事件、权限、容量和fixture：ADR把唯一逻辑
+`InstallationReleaseState`映射为一个新增physical singleton，总表数从当前23/业务22升为目标24/业务23，schema contract从当前v6升为目标v7。由于clean-cut尚未发布，
+接受后直接修改单一`0001`，不创建兼容migration或并行API。CR-159旧Candidate证据只证明此前Inline合同；CR-162 Broker物理隔离与饱和
+fixture继续有效，但不能替代新增Candidate/runtime/installation closure的实现和资格证据。当前合同仍在最终冲突审查，不能标记Accepted。
 
 ### 当前实施复核增量
 
@@ -232,7 +261,7 @@ critical-control permit完成bounded scan、旧process absence/quarantine、same
 |---|---|
 | CR-086 shared Job initial-state spelling differed between 03 (`Queued`) and 07/implementation-plan/baseline (`Ready`) | Resolved：03统一为`Ready`；它表示已通过typed owner admission、可被对应WorkClass claim的Job，不引入queue authority或兼容别名。 |
 | CR-105 04同时要求Principal generation history强FK与消费聚合内嵌snapshot，形成两个历史authority | Resolved：采用内嵌closed `PrincipalSnapshot`；repository在授权事务从current Principal/binding派生，快照没有独立ID、current row、history表或生命周期。 |
-| CR-106 06已将Attempt/Continuation收敛为Job generation/WakeContract，但machine contract仍暴露独立ExecutionAttempt/Continuation identity | Resolved：Attempt只保留为`AttemptObservationState`历史观测；Continuation kind/state改为Job payload内的`WakeContractKind/State`，删除两种独立ResourceKind。 |
+| CR-106 06已将Attempt/Continuation收敛为Job generation/WakeContract，但machine contract仍暴露独立ExecutionAttempt/Continuation identity | Resolved：Attempt只保留为`AttemptObservationState`历史观测；Continuation改为03唯一Job payload内的`WakeContractPayload/WakeState`，06只引用且不复制nominal，删除两种独立ResourceKind。 |
 | CR-107 06同时要求claim递增`attempt_count`与max attempts只统计Started Attempt，导致start前lease loss错误消耗预算 | Resolved：claim只递增`lease_generation`；原子start成功时才递增`attempt_count`并写Started evidence。start前expired lease可安全返回Ready且不消耗attempt budget。 |
 | CR-108 claim把Node提前推进Running，与CR-107要求start前lease loss无损返回Ready冲突 | Resolved：claim保留Node Ready并递增projection version；start receipt原子提交Job Running/attempt count与Node Ready→Running。leased generation丢失只恢复Job并释放active/quota。 |
 | CR-109 `q1-50`原默认heartbeat 10000ms与lease 30000ms恰好等于三分之一，违反07的严格小于关系 | Resolved：HardLimitProfile version 2将Q1 heartbeat收紧为8000ms；Rust与machine checker同时验证hard/Q1两组值满足`heartbeat * 3 < lease`，为jitter和数据库时钟延迟保留明确余量。 |
@@ -240,7 +269,7 @@ critical-control permit完成bounded scan、旧process absence/quarantine、same
 | CR-111 safety scan复用`run_scheduler.claim_batch`且HardLimitProfile未冻结shard数量，无法形成独立恢复容量合同 | Resolved：HardLimitProfile version 3新增`control_data.recovery_shards`，恢复扫描的batch与shard分别只由`recovery_batch`和`recovery_shards`约束；Q1默认16 shards，repository admission使用256的hard maximum而不是误用默认值。cursor是可丢失的短期观察；重启从分片起点重扫，mutation仍以数据库current fact/CAS first-win，不新增持久化authority或表。 |
 | CR-112 WorkCoordinator在drain grace内只被动等待handler，未向active generation发handoff信号；claim后也没有生产start/heartbeat wrapper | Resolved：每个active generation绑定进程内shutdown token；`LeaseFencedOrchestrationExecutor`以同一Job fence原子start、按versioned profile heartbeat并传递最新Job version，Draining先触发durable handoff，grace超时才abort本地future并等待lease recovery。handoff复用Job/Receipt/Event/Outbox/Quota聚合，不增加状态或表。 |
 | CR-113 18已宣布旧177表/migration资格记录撤销，却仍把migration 1～28候选fixture描述为当前证据输入 | Resolved：删除旧候选细节；当前证据边界只承认23表/单一`0001`及Phase 1/2开发期Contract/Functional fixture，且在绑定CandidateManifest和production-equivalent Q1拓扑前不得计入Gate D/E或Release。 |
-| CR-114 00、15、17、18仍复制已撤销migration 24～35的“当前实施检查点”，与23表/单一`0001`活动基线及Phase状态冲突 | Resolved：活动规范只保留简短撤销声明和当前证据边界；旧表清单、checksum、repository checkpoint及资格数字只留在Git历史。overview同时明确Architecture Revision是reset过程状态，完成全量cross-review后已重新Accepted。 |
+| CR-114 00、15、17、18仍复制已撤销migration 24～35的“当前实施检查点”，与23表/单一`0001`活动基线及Phase状态冲突 | Resolved history：活动规范只保留简短撤销声明和当前证据边界；旧表清单、checksum、repository checkpoint及资格数字只留在Git历史。首轮cross-review后受影响规范曾恢复Accepted；CR-165随后重新打开Architecture Revision，当前状态以§12 Draft矩阵为准。 |
 | CR-115 18的共享fixture清单仍列出旧Entity/Gate/Continuation等独立状态族，与cross-review冻结的共享聚合suite不一致 | Resolved：F-STATE统一为Resource/Run/Node/Invocation/Job/Task/Artifact，F-EVENT统一为Event/Receipt/Outbox/public sequence；容量合同使用Job内WakeContract术语，不恢复旧identity或状态authority。 |
 | CR-116 Phase 2缺少真实多进程/多tenant的PostgreSQL fairness-head争用证据，单进程pool隔舱fixture也不能证明跨WorkClass probe边界 | Resolved：新增50 Runs/5 tenants/4 OS processes的fresh PostgreSQL fixture，以shared advisory barrier同时放行；验证single lease、多个worker获胜、每tenant恰好10次durable WDRR claim、active/quota闭合，并在orchestration business pool饱和时验证独立Sandbox-role 20-sample p95和critical-control reserve。该证据只关闭Phase 2 functional exit，不计入Phase 6 Gate E。 |
 | CR-117 Artifact规范允许prepare时expected digest/media未知且verified content只在验证后出现，但baseline强制两表都写digest/size并要求Artifact media，迫使sentinel或重复authority | Resolved：不增表；Artifact保存prepare admission、verified media、retention、creator与Blob reference，Blob唯一保存verified digest/size及object generation/storage/encryption binding。Staging字段可空，Verified结构由SQL guard，Ready ArtifactRef由tenant-scoped join构造；该结构修正最初将schema contract升为version 4。 |
@@ -267,7 +296,7 @@ critical-control permit完成bounded scan、旧process absence/quarantine、same
 | CR-138 02与Phase 1要求异步Resource validation Job，但07的closed WorkClass没有Registry/Validation类别，repository因而把非Artifact payload写成`WorkClass::Artifact`，在同一fresh数据库中会被Artifact worker claim并fail closed | Resolved contract：新增`RegistryValidation` WorkClass并只允许`ManagementOperation` owner；payload冻结exact Resource kind/ID、operation、draft、validator和validation-profile digest。它使用独立WorkerManifest、queue/pool/permit，不借用Artifact、Interaction或Orchestration容量；仍复用shared Job/Receipt/Event/Outbox，不增加表或migration。 |
 | CR-139 12要求Text2SQL只能经`database.query.readonly`执行，但generic Invocation admission只冻结opaque Interface/Deployment而未冻结规范09已有的`qualified_name`，也未在一个事务中把SQL plan绑定到本Run已提交的SqlCatalog Observation；仅验证plan JSON会允许选择错误Capability或引用漂移catalog | Resolved：Capability Interface closed ResourceVersion与frozen admission snapshot增加规范性`CapabilityName`，仅用于证明选择结果、不参与运行时路由。Text2SQL plan与admission共同绑定RunValue digest、exact Capability Interface/Deployment/ReadOnly Effect、同Run ContextQuery、committed Observation/digest/projection、Context Deployment、database identity与dialect；generic Invocation repository在同一caller-owned transaction锁定并验证全部事实。domain和fresh PostgreSQL 16 fixture覆盖成功/replay、错误名称/Effect、foreign Run/citation与Observation drift全事务rollback；不增加表、migration或第二Text2SQL authority。 |
 | CR-140 Capability adapter与PostgreSQL authority之间原缺少可信Worker组合，claim只返回裸Job记录且把reserve quota ledger ID暴露为通用`quota_entry_ids`，调用方容易把它们再次用于terminal settle并触发主键冲突；adapter failure也可能把无幂等保护的dispatch后write误标为retryable | Resolved：`ClaimedCapabilityExecution`现携带显式JobFence与`quota_reservation_entry_ids`，重验Running Invocation/Job/attempt/lease/Worker/Deployment/Input后才构造credential-free request；terminal `adapter_job`要求调用方提供另一组settlement IDs并在I/O前拒绝与reserve ID重叠。`CapabilityAdapterWorker`只经typed authority提交fenced outcome；NonIdempotentWrite dispatch后retryable强制转Uncertain，attempt耗尽转terminal。durable control后的`ControlledCapabilityExecution`与原claim重新验证tenant、Invocation/Job、attempt、lease/token、Worker generation及Deployment/Input，只旋转Job version fence；Native/HTTP/gRPC取消同一物理执行，transport observation不伪造no-effect proof，write进入ReconciliationRequired。deadline后只在frozen backend timeout派生且受平台hard limit封顶的cleanup window提交。12项adapter/worker、8项Invocation、29项Egress unit及fresh PostgreSQL 16端到端fixture覆盖claim→Native dispatch/取消→PgRepository commit、RunValue/Receipt/Event/Outbox/quota settle/replay、确定性write reconciliation和cancel/completed first-winner；不增表、migration或第二authority。 |
-| CR-141 10的generic dispatch把Sandbox映射为`CapabilityRemote`并先绑定Capability Job，而14又要求Gateway创建`work_class=sandbox`共享Job；若两者同时实现，会让一次物理执行拥有两个Job、两套attempt/lease/fence与不明确的terminal owner | Resolved contract：Sandbox backend不进入generic Capability claim。Gateway admission以一个事务锁定Ready Invocation及expected version，验证exact frozen input/output、Deployment/Runtime/Package/Profile/grant/quota，直接创建唯一`work_class=sandbox`共享Job，并把Invocation推进为Deferred且绑定该Job。`SandboxJobId`、`JobId`与预留output RunValue使用同一UUID typed projection，不拥有独立row/lifecycle。Executor只terminalize该Job；独立Capability owner controller读取同一terminal evidence后归并Invocation，不重写Job或创建第二Job。safe retry使用显式`RetryScheduled -> Deferred`原子admission，新建下一条Sandbox Job、保留旧terminal Job并严格递增全局attempt。07/10/14及实施计划已同步；保持23表、单一`0001`与一个physical-attempt authority。 |
+| CR-141 10的generic dispatch把Sandbox映射为`CapabilityRemote`并先绑定Capability Job，而14又要求Gateway创建`work_class=sandbox`共享Job；若两者同时实现，会让一次物理执行拥有两个Job、两套attempt/lease/fence与不明确的terminal owner | Resolved contract：Sandbox backend不进入generic Capability claim。Gateway admission以一个事务锁定Ready Invocation及expected version，验证exact frozen input/output、Deployment/Runtime/Package/Profile/grant/quota，直接创建唯一`work_class=sandbox`共享Job，并把Invocation推进为Deferred且绑定该Job。该物理执行只使用共享`JobId`；不存在`SandboxJobId`、同UUID typed alias或第二条生命周期，预留output使用独立`RunValueId`并通过owner binding关联。Executor只terminalize该Job；独立Capability owner controller读取同一terminal evidence后归并Invocation，不重写Job或创建第二Job。safe retry使用显式`RetryScheduled -> Deferred`原子admission，新建下一条Sandbox Job、保留旧terminal Job并严格递增全局attempt。07/10/14及实施计划已同步；保持23表、单一`0001`与一个physical-attempt authority。 |
 | CR-142 CR-141只定义“owner controller读取terminal evidence”，未定义丢失wake后的发现、精确Event/Job/Invocation绑定及retry时间权威；若controller直接接受Event或本地绝对`retry_at`，丢失/重复hint和副本配置漂移会阻止收敛或产生不同业务结果 | Resolved：terminal Event仅为coalesced wake hint；Capability owner controller使用HardLimitProfile约束的sharded keyset PostgreSQL safety scan，候选必须同时匹配当前Deferred/Cancelling Invocation、`current_job_id`、terminal Sandbox Job current version与精确terminal Event aggregate version/payload digest。merge重新锁定事实，以source Event为Receipt dedupe owner并只修改Invocation/RunValue/ArtifactLink/Event/Outbox，不修改Job、不建pending表。相对retry backoff在Capability admission snapshot冻结并复制到Sandbox request，controller不提交绝对时间或本地业务策略；repository使用transaction database clock派生`retry_at`并与deadline求交。NATS重复/丢失/乱序、并发controller和response loss均由scan、optimistic CAS与Receipt收敛；保持23表和单一`0001`。 |
 | CR-143 `platform-egress`已有late-resolution port，但缺少把current revoke/generation authority、encrypted opaque reference、KMS解封、CandidateManifest Provider选择与Pinned/Follow实际版本证据连成一条生产组合边界；直接在各Model/MCP/Capability adapter实现会复制安全门并扩大Secret可见范围 | Resolved contract / implementation slice：新增无持久化的`insight-platform-secret-broker` ownership crate。PostgreSQL只向受信port返回现有`secret_bindings`行的typed encrypted resolution projection；Broker依次重验tenant/current Active/provider/purpose/frozen policy/generation、解封并比对reference digest、从有界process-installed Provider catalog选择client、在独立permit/总超时内解析，再重验Pinned exact version或保留Follow实际generation/version evidence。reference与material non-clone、Debug redacted、drop清零；revoke、generation/policy/catalog/reference/provider evidence漂移均fail closed。5项Broker unit、47项Egress unit、Security unit、targeted check/strict Clippy、23表/单一migration、public contract与30-crate DAG门禁通过；PostgreSQL fixture已接入trusted read/revoke/cross-tenant检查，但本批次无`PLATFORM_TEST_DATABASE_URL`，不登记新的fresh PG运行证据。具体KMS/Secret Manager Provider、OAuth prepare/store/exact-delete、Sandbox one-time delivery、独立Pod/NetworkPolicy与Phase 6资格仍Open。 |
 | CR-144 MCP OAuth的prepared token端口最初没有冻结exact Secret Provider，也没有规定“外部token已写入、数据库登记响应丢失”后如何在不重用one-time authorization code的前提下收敛；若直接重试兑换会产生多份credential或把外部Provider变成不可恢复的隐式authority | Resolved contract / implementation slice：exact `McpAuth` Revision分别冻结PKCE与token `SecretProviderId`并纳入preparation digest。token preparation还冻结Task generation/version、AuthorizationBinding、Deployment、state、authorization-code domain digest、purpose、scope、audience、issuer与deadline。Egress在DNS/Secret/token endpoint前先`load-prepared`；无winner才兑换、验证并由exact Provider `prepare-or-load`。外部prepared winner经KMS sealing后，由受信ServiceIdentity使用preparation digest幂等登记到现有`secret_bindings`，同事务终结Receipt并写Event/Outbox；事件不含ciphertext/key/reference/token。响应丢失时load同一winner修复登记，任何metadata/provider/version/evidence漂移fail closed。9项Broker、10项OAuth定向Egress、14项Host OAuth测试和PostgreSQL no-run fixture通过；本机Docker daemon无响应，故不登记fresh PG执行证据。无新表或migration；具体KMS/Secret Manager adapter、生产token verifier/route/outbox delivery及Phase 4/6资格仍Open。 |
@@ -276,7 +305,7 @@ critical-control permit完成bounded scan、旧process absence/quarantine、same
 | CR-146 Sandbox `wasm_export`只有“固定ABI handle”描述，没有冻结内存签名、import集合、结果编码、resource/fuel/cancel语义；直接接Wasmtime会让Executor自行发明协议，并可能把发出epoch interrupt误报为process已终止 | Resolved contract / implementation slice：WASI ABI v1固定Wasmtime 42.0.0、关闭全部proposal后只启用合同需要的`FLOATS | MUTABLE_GLOBAL`、零imports、恰好一个bounded 32-bit memory、零table和恰好`memory`/`insight_alloc(i32)->i32`/`run(i32,i32)->i64`三个exports；输入输出为closed strict canonical JSON，i64高32位为output pointer、低32位为length。独立`insight-platform-sandbox-wasi` crate是唯一链接JIT/runtime的角色，module经Sandbox Artifact Broker exact digest/length复验，Store实施fuel/memory/instance/table limit，output经exact schema validator，I/O超限形成显式resource failure，terminate/abort/recovery等待guest call实际退出后才撤销grant并生成cleanup evidence；重启后内存缺失还必须取得旧WorkerProcessGeneration absence proof，当前generation缺失状态fail closed。10项真实Wasmtime fixture覆盖上述合同；独立Executor已有开发期实现，但双audience Broker隔离门禁、gVisor、真实Linux KVM/process-kill/escape/saturation与Phase 6资格仍Open。 |
 | CR-148 06/10/15的Artifact-backed RunValue是逻辑值的存储形状，14 WASI ABI会将真实字节物化为JSON；但09“Artifact使用nominal ArtifactRef”可被误读为用ArtifactRef metadata验证内容schema，而admission又看不到object storage正文 | Resolved contract / implementation slice：Interface显式Artifact字段才使用nominal ArtifactRef；整个逻辑JSON值因threshold而Artifact-backed时schema始终描述物化正文。trusted producer只能在核对exact digest/length并验证正文后提交immutable RunValue schema digest；admission锁定该承诺，可见Inline时本地验证，执行adapter物化Artifact后在自己的trust boundary重验。WASI input/output已共用Controller value-validator并绑定exact Worker generation、lease、request、phase、schema与classification；Model claim逐字段回绑冻结RunValue，Inline复核canonical digest，Artifact-backed request通过CR-161的closed authority、独立Broker RPC、生产Worker组合及Worker canonical/digest复验。Sandbox Controller也已通过两个closed RPC把WASI/microVM读取委托给独立Broker；fresh PostgreSQL fixture证明WASI Inline、Model/Sandbox Artifact授权和restricted Broker role的正负向路径。generic Capability producer、Artifact-backed output与真实S3/KMS qualification尚未闭合，CR-148保持Open。不增表或第二状态authority。 |
 | CR-149 04/14/18只要求内部调用使用mTLS workload identity，却未冻结证书身份形状或endpoint role匹配；仅配置client CA会让同一CA签发的其他平台角色调用Sandbox authority，而依赖CN、证书指纹或自报header又会破坏轮换或允许身份混淆 | Resolved：内部workload identity统一使用`spiffe://insight.platform/workload/<closed-workload-role>` URI SAN；受保护端点只从已通过client CA验证的leaf certificate读取恰好一个URI SAN并与closed role allowlist exact match，CN、DNS SAN、header和payload Worker ID不参与传输授权。Sandbox WASI Executor、Controller与Attestor的registration/verify/absence端点已按方法实施exact role gate；传输身份通过后仍独立重验WorkerProcessGeneration、lease与Job fence。真实loopback mTLS fixture已证明正确角色成功、同CA错误角色与错误CA在进入authority前拒绝；独立Pod/NetworkPolicy静态合同也已通过。不增加数据库状态；Phase 6生产证书轮换资格不属于本cross-review关闭条件。 |
-| CR-150 WASI backend在形成cleanup evidence前调用Grant Revoker，而Sandbox terminal/recovery原先又要求自己恰好把全部active grant更新为released；若Broker先成功，terminal会因更新数为0错误失败，形成两个竞争的撤销权威 | Resolved：`artifact_links`仍是唯一durable authority；Broker以exact Job/request/attempt/Worker generation/lease校验后幂等执行`active -> released`并返回不含时钟的稳定evidence，terminal/recovery释放剩余active项并断言released集合与request快照完全相等。两条路径共享同一事务helper；fresh PostgreSQL 16 fixture创建Ready Artifact、Invocation reference和真实per-Job grant，证明两次revoke只推进一次link version且随后terminal/outcome merge成功。不增表、migration或第二撤销状态。 |
+| CR-150 WASI backend在形成cleanup evidence前调用Grant Revoker，而Sandbox terminal/recovery原先又要求自己恰好更新全部grant；若两者不是同一幂等authority，terminal会把重复撤销误判为失败 | Reopened by CR-165：目标由15唯一`ArtifactGrant`逻辑aggregate（物理映射进共享ArtifactLink）执行`Active -> Revoked`，Broker只返回read receipt，Sandbox owner/Controller以exact Job/request/attempt/Worker generation/lease幂等revoke，terminal只撤销剩余Active项并断言全集Revoked。既有fresh PostgreSQL 16 fixture证明旧`active -> released` link helper的并发收敛，但尚未证明新closed capability/state、runtime bundle grant或Broker/Maintenance隔离，因此14/15保持Draft；仍不增表、migration或第二撤销状态。 |
 | CR-151 `object_reference_ciphertext`已有持久化字段，但此前没有冻结受信read projection、KMS context、明文locator shape或exact-version对象读取；若Controller直接拼S3 key或复用旧静态access-key storage，会让密文失去边界并把生产credential扩散到Sandbox角色 | Resolved contract / implementation slice：15冻结不可Clone/恒定脱敏的authorized projection、tenant/Blob/storage/encryption/key KMS context、strict canonical locator JSON、CandidateManifest exact storage-binding catalog、workload-identity S3/KMS client及HEAD+GET exact version/length/digest复验；Sandbox Artifact Broker组合PostgreSQL read authority与AWS S3/KMS provider。Sandbox Controller只经versioned closed mTLS RPC读取runtime bundle/input，已移除provider catalog、AWS workload token、S3/KMS client与直出网络；WASI与microVM请求保持不同typed authority，Broker在对象I/O前后重新授权。14冻结runtime bundle与input grant两条互斥授权路径及完整Job/lease/Worker/phase检查；`artifact_blobs`和`artifact_links`继续分别作为locator与grant唯一durable authority，不增表、migration或第二read state。fresh PostgreSQL 16 restricted-role路径已完成真实Broker authority读取并拒绝Job更新、Secret读取、错误Worker/purpose/grant和terminal后读取；双audience进程/Deployment/ServiceAccount/DB pool/permit隔离须按CR-162重新取得门禁证据。real object-store/KMS negative qualification完成前保持Open。 |
 | CR-152 WASI recovery要求旧WorkerProcessGeneration absence proof，但原port只回传旧generation、时间和opaque digest，未回绑tenant/Job/request/Executor instance，也未区分process absence与node quarantine；若由DB lease、NATS超时或Pod deletion推断，会在节点分区时伪造cleanup | Resolved contract / implementation slice：closed请求与回执已exact绑定tenant、Sandbox Job、request digest、旧WorkerProcessGeneration、已提交executor identity、attestor identity、观察时间及`process_absent | node_quarantined`处置；Controller仅经独立attestor mTLS client取得证据，DB lease、Kubernetes状态与RPC/NATS失败都不能合成证明。生产node attestor使用只读procfs/runtime observation与node-local bounded registry，复用既有Job/Event evidence，不新增表、migration或第二generation authority。Linux真实进程fixture已入库但本机macOS不能执行；Candidate Linux node上的process-kill/node-quarantine资格完成前保持Open。 |
 | CR-153 CR-152仍未定义`executor_identity_digest`的可信来源，现有Executor把WorkerManifest digest当进程实例身份；同一镜像/manifest的所有副本因此共享摘要，attestor无法区分旧generation、Pod/node/cgroup或PID复用，字段回绑也不能证明具体进程树消失 | Resolved contract / implementation slice：Executor在claim前经node-local registration RPC提交非实例字段，attestor再从peer credentials与只读procfs/runtime authority直接观察WorkerProcessGeneration、Pod UID、node UID、runtime sandbox/cgroup locator和process-start identity，签发sealed executor identity；首次Preparing及后续phase只提交该摘要。absence反查同一登记并以start identity防止PID/cgroup复用，node quarantine绑定同一node UID；现有fixture覆盖同一进程绑定两个generation、PID reuse与attestor重启。登记仅是node-local bounded证明索引，不拥有Job/lease/current state，不增业务表；Linux Candidate real-process negative qualification前保持Open。 |
@@ -291,4 +320,25 @@ critical-control permit完成bounded scan、旧process absence/quarantine、same
 | CR-162 将Artifact Broker从Model Worker和Sandbox Controller拆出后，若Model与Sandbox仍共用同一Broker进程、Pod、ServiceAccount、数据库池或in-flight bulkhead，Sandbox大bundle/饱和可耗尽Model request materialization，任一audience泄露也会扩大到另一套RPC authority | Resolved contract / implementation slice：物理拆为Model Artifact Broker与Sandbox Artifact Broker两个audience-isolated服务。Model进程只注册`ArtifactModelBrokerService.ReadModelRequest`并只接受exact Model Worker URI SAN；Sandbox进程只注册`ArtifactSandboxBrokerService.ReadWasiArtifact`与`ReadMicroVmArtifact`并只接受exact Sandbox Controller URI SAN。两者使用不同Deployment、Service、ServiceAccount、restricted PostgreSQL credential/pool、mTLS server identity、storage workload identity、NetworkPolicy和process-local permit；启动配置只能选择一个closed audience。Controller不再拥有S3/KMS Provider或workload identity，经Sandbox Broker mTLS读取；WASI与microVM outward proxy改为同一process-local bounded response capacity，默认1、hard max 4，在上游读取前取得permit并持有到stream completion/drop/absolute deadline，逐chunk生成而不预复制完整响应。双audience Helm/static negative、错误URI SAN loopback mTLS、跨lane saturation、慢消费者与deadline回收fixture均通过。真实集群credential互换、rolling restart以及真实S3/KMS负向资格仍保持Open，因此不关闭Phase 4或Gate；复用Artifact/Blob/Link权威，不新增表、migration或第二read state。 |
 | CR-163 SandboxPackage发布未把runtime bundle长度绑定到HardLimitProfile，可能发布零字节或超过Broker可物化上限的不可执行Package；若只在Executor读取时拒绝，会产生永久失败Job并允许不同部署自行选择上限 | Resolved contract / implementation slice：HardLimitProfile version 4新增必填`capability_sandbox.runtime_bundle_bytes`，固定`unit=bytes`、`hard_max=67108864`、Q1 `q1_default=33554432`、`overflow_outcome=content_rejected`；schema、checked-in Q1实例、Rust exact-profile validator与Candidate digest门禁均已更新。SandboxPackage合同拒绝零字节与hard max以上bundle；发布事务以`FOR SHARE`锁定同tenant Ready Artifact和Verified未删除Blob并精确匹配Artifact ID、digest、size、media、classification，同时要求每个Published ResourceDocument canonical digest等于已验证draft，防止换成另一个合法Ready bundle。fresh PostgreSQL fixture覆盖缺失、Blob未Verified、Artifact未Ready、digest/size漂移、合法Ready Artifact swap与成功路径。WASI ABI的16 MiB module上限保持更严格；Phase 4/Gate仍由真实对象存储、执行与资格开放项保持Open，不增表或migration。 |
 | CR-164 microVM Helm已调用独立Provider并冻结Firecracker/kernel/rootfs路径，但候选Dockerfile没有构建/复制Provider，Pod没有runtime asset image或mount；旧静态门禁只检查YAML形状，会接受必然启动失败的候选。初版修复又暴露Admission可借额外volume/subPath覆盖root Provider、Secret/hostPath可别名、build-host binary可进入target image、mutable base及已知受影响Firecracker version仍可成为默认；普通只读bind不会递归保护asset root下的descendant submount，device plugin/DRA/runtime handler与Pod-level resources可绕过resource/volume闭包，secondary-CNI annotation可绕过default-deny网络，既有namespace RBAC可用exec进入root Provider，删除自定义namespace label会使原Binding失配，pods/binding/resize及复制或孤立合法Pod又分别绕过node/resource/DaemonSet生命周期边界 | Resolved contract / implementation slice：Dockerfile新增两个独立microVM target，builder/runtime base以multi-arch digest冻结并按target platform执行；每个target只复制自己的平台可执行文件，默认shared image不含Provider。Helm要求三种不同immutable image；执行pool固定Linux、单一`amd64 | arm64`及NodeRestriction保护的exact selector，KVM pool另有exact taint/toleration，attestor以独立selector覆盖两个pool。全部workload/NATS Secret名称互异，Provider五个hostPath锁定为互不重叠的exact device/asset/jail/state/cgroup authority。runtime asset root预先存在且在Kubernetes 1.33+递归只读挂入；部署声明只接受Firecracker `1.16.1`并把Firecracker/jailer path segment绑定同一版本，kernel/rootfs留在同一root，Provider ready前复验leaf owner/mode/length/digest。ValidatingAdmissionPolicy覆盖Pod与ephemeral-container子资源，以Kubernetes维护的exact namespace-name label绑定并逐角色关闭metadata、volume source/mount/image/command/env/probe/resource/security context，拒绝subPath、lifecycle、runtimeClass、Pod-level/DRA/extended-resource device、secondary CNI、nodeName和debugger注入；子资源策略恒拒绝Executor namespace的exec/attach/port-forward/resize，binding只接受经audit确认的exact scheduler/Node/empty annotation/region-zone label，Pod CREATE只接受经audit确认的exact DaemonSet controller与唯一role ownerReference且UPDATE保持owner不变。Dockerfile instruction closure、Pod security-projection mutation、Helm负向case及Kubernetes 1.35.6 server-side CEL编译通过。该切片关闭静态启动与已知准入绕过；真实Admission Deny与cluster audit identity fixture、per-arch asset bytes、ancestor/TOCTOU、node provisioning、签名/SBOM/provenance、capability充分性、Linux KVM/jailer/guest-agent和Candidate资格仍Open，不关闭Phase 4/6或Gate。 |
-| CR-165 Model response超过Inline阈值时必须自动形成Artifact-backed RunValue，但现有Model Artifact Broker被CR-161/162冻结为单一read RPC与只读数据库角色，Model Worker又禁止持有object-store/KMS credential；若直接扩写read Broker会扩大权限并让大输出上传消耗request materialization容量。当前Model terminal还只接受已经Ready的ArtifactRef，无法保证Verified→Ready、Output Link、RunValue与Model first-winner同事务；shared Blob dedupe又要求physical quota跟随Blob而非任一可先删除的Artifact | Resolved contract / implementation pending：新增独立Model Artifact Producer，只接受exact output mTLS的closed client-stream RPC，使用独立进程/SA/write-limited DB pool/S3-KMS identity/two-phase admission并拒绝read client与application queue；transport monotonic timeout从accepted backlog覆盖TLS/permit/Header，valid Header后切换Attempt deadline。start在Provider dispatch前冻结typed ArtifactIo、Ready duration、HardLimit/Worker/Component capacity、closed storage-binding PUT uncertainty、`attempt_deadline + staging_grace` write-quiescence barrier、expected-version lower bound与immutable Job generation/token，预留Artifact/candidate Blob/cleanup Job/Receipt/Link/RunValue及Artifact-owned count/logical、candidate-Blob-owned upload/staging/physical两个quota bundle。Producer以共享Job guard推进Staging→Uploaded→Verifying→Verified，按closed terminal/transient failure矩阵写stage Receipt；同安全域dedupe闭合PreexistingHit/CandidateWinner/RacingCandidateLoser、resolved/candidate Blob、新增physical bytes与exact cleanup。Model owner terminal按全局锁序原子执行Verified→Ready、用terminal DB time派生absolute retention、Output Link/RunValue、Model/双bundle settlement及Receipt/Event/Outbox；Artifact删除只Refund count/logical，new Blob physical跟随最后alias，candidate cleanup在barrier后重验exact deletion/absence才Close。04 typed ArtifactIo Policy Rust/JSON与pure checked timing helper已实现，但尚未接Deployment/admission；HardLimitProfile v5、WorkerManifest v2、ComponentCapacityManifest/ArtifactStorageBindingManifest、ComponentStartupManifest/profile registry/projection/factory、installation compatibility generation与Candidate closure、Producer/RPC/repository/deployment/真实S3-KMS/并发崩溃饱和fixture仍未实现，当前仍为profile v4、WorkerManifest v1和Inline output。合同复用23表/单一`0001`，compatibility generation复用shared Aggregate，不新增第二Artifact/Model authority，不关闭CR-148、Phase 4或任何Gate。 |
+| CR-165 Model response超过Inline阈值时必须自动形成Artifact-backed RunValue，但read Broker是只读边界，Model Worker又不能持有object-store/KMS credential；后续machine审计还发现缺少Installation Release current authority、全Model candidate admission、same-source runtime capacity、storage timing、tenant encryption revoke fence、Producer-owned content evidence，以及普通workload/scan/GC没有不泄露locator的物化路径 | Reopened / contract revision under review：目标保留独立Model Artifact Producer及Model owner唯一terminal first-winner；新增02 InstallationId/CanonicalRegion/RunBindings v2、03 installation scope/锁序、04 encryption binding、07 Worker v2、10 `ApprovalTaskId`/`InteractionId`与Task state closure、14/15 closed ArtifactGrant、三个read Broker、ordinary-output Workload Producer、Maintenance Authority及拆分的public Upload/Download Gateway，15还冻结五个exact stage method、per-attempt identity/failure persistence/唯一scan Job与stream terminal-use合同；16提供pure compatibility/result/reservation，17固定`/v1` release/API及六个internal service，18固定八role ComponentRuntime/Candidate/InstallationReleaseState及bounded scan。Worker semantic evidence与Producer content evidence分离，Producer checkpoint和owner terminal均重验current encryption binding。Model-output本身不建专表；唯一新增installation singleton使总体目标变为24张总表/23张业务表/schema v7，并在未发布clean-cut中直接重写单一`0001`。当前仍为23/v6、profile v4、WorkerManifest v1和Inline output；10的当前实现仍由generic `ResourceId`加runtime kind检查承载Task引用，Sandbox fixture也仍证明旧grant state而非目标closed state/service隔离，新增Workload Producer wire/runtime/部署同样没有当前证据；全量cross-review、migration/verifier、Producer/runtime/deployment及真实PostgreSQL/S3/KMS/并发崩溃饱和fixture完成前不得标记Resolved/Accepted，也不关闭CR-148、Phase 4或任何Gate。 |
+
+CR-165本轮Draft增量还规定：Release preflight先提交可接管Processing Receipt，terminal replay后立即按Receipt→InstallationReleaseState捕获
+If-Match/transition guard，再在锁外resolver/scan；guard失败稳定409、public ETag漂移稳定412，只有ETag未变的transient race可503，active Processing
+observation是唯一pre-If-Match in-progress例外。Qualification/Approval改为installation supply-chain resolver中的content-addressed signed documents，
+GateResult固定七项A→G/Passed/证据及时序闭包，不复用tenant Artifact或未定义ApprovalReceipt。04 current encryption fence同时进入15 Ready read与16
+Producer/owner terminal；public download只经可逐请求重验的Gateway代理，不签发绕过revoke/evidence expiry的object-store URL。04 encryption-domain
+变更通过17 typed approval-request/apply API复用shared Task/Receipt且不伪造Run/Invocation；clean-cut目标把`enc` exposure改为public并删除无owner的
+internal `tsk`，Receipt ID/state/lease/result、Approval `apr` public ID/state/closed owner已闭合。
+10的Invocation只允许`ApprovalTaskId(apr_)`与`InteractionId(int_)` typed引用，不复制Task state；InputRequired的`int_`只由owner
+JobCommit first-winner事务分配，backend不能提交或建议ID。其现有generic `ResourceId`/backend-carried ID实现证据不能替代目标nominal field、
+machine schema、owner-side replay和逐状态跨aggregate fixture。
+16 semantic evidence有closed可复算preimage，且其response contract digest与15 Producer profile在Candidate、compatibility、Producer及owner terminal
+逐值相等；15 content profile descriptor冻结validator/rules/evidence validity并由HardLimitProfile v5第十一项封顶。ordinary-output path还冻结
+`ArtifactWorkloadProducerService`五个method、JobAttempt/WorkloadBound digest、per-attempt重试identity、ArtifactVerify/scan Job唯一创建权、
+failure persistence及独立runtime/capacity/deployment closure。上述增量仍属Reopened合同，只有其
+跨规范fixture终审通过后才可把CR-165改为Resolved。
+
+本次Draft push后的剩余终审门禁是显式开放项：14的Sandbox submit/cancel/phase/outcome仍须为每个port补齐03
+`ReceiptOperationContractV1`的exact operation、dedupe owner、request/result schema path、静态上限与commitment mode；17本轮新增的八项
+tenant/approval/installation Receipt entry及Operation target/result/progress projection还须生成checked-in schema/registry fixture并纳入root digest；
+全部target schema、PostgreSQL concurrency和service identity负向fixture通过前，本轮只代表合同收口进展，不代表Reviewed、Accepted或当前行为。
