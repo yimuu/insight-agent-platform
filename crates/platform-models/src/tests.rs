@@ -708,31 +708,24 @@ fn cancel_wins_against_late_completion_and_stream_is_fenced() {
         lease_generation: fence.lease_generation,
         token_digest: fence.token_digest.clone(),
     };
+    let conservative = ModelAttemptMeasurement::conservative_dispatched(
+        &controlled.turn.payload.admission,
+        fixture.limits,
+    )
+    .unwrap();
+    assert!(conservative.observation.request_sent);
+    assert!(conservative.observation.possible_duplicate_charge);
+    assert_eq!(
+        conservative.usage.as_ref().unwrap().accounting_quality,
+        AccountingQuality::Reconciled
+    );
     let cancelled = decide_model_cancellation_outcome(
         &controlled.turn,
         cancelling_job,
         controlled.job_payload.as_ref().unwrap(),
         Some(&cancellation_fence),
         &reservation,
-        &ModelAttemptMeasurement {
-            usage: Some(ModelUsage {
-                input_tokens: Some(20),
-                output_tokens: Some(0),
-                cached_input_tokens: None,
-                reasoning_tokens: None,
-                provider_reported_cost: Some(DecimalMoney::new("USD", 20, 6).unwrap()),
-                accounting_quality: AccountingQuality::ProviderReported,
-            }),
-            observation: ModelObservation {
-                request_sent: true,
-                provider_response_digest: Some(sha('6')),
-                actual_model_identity: Some("fixture-model-2026-08".to_owned()),
-                model_fingerprint: None,
-                possible_duplicate_charge: false,
-                stream_delta_count: 0,
-                stream_bytes: 0,
-            },
-        },
+        &conservative,
         fixture.now + Duration::seconds(1),
         fixture.limits,
     )

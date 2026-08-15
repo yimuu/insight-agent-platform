@@ -164,6 +164,12 @@ pub struct ControlledModelExecution {
     pub job: Option<JobRecord>,
 }
 
+impl ControlledModelExecution {
+    pub fn job_projection(&self) -> Result<Option<JobProjection>, RepositoryError> {
+        self.job.as_ref().map(job_projection).transpose()
+    }
+}
+
 pub struct PgModelTurnTransaction {
     transaction: Transaction<'static, Postgres>,
     limits: ModelTurnLimits,
@@ -1348,6 +1354,102 @@ async fn load_model_job(
 }
 
 impl PgRepository {
+    /// Returns the current cancellation winners leased by one exact Model Worker generation.
+    ///
+    /// Discovery is bounded and read-only. Egress cancellation and the fenced terminal commit
+    /// remain separate operations, so this scan cannot become a second ModelTurn authority.
+    pub async fn scan_cancelling_model_executions(
+        &self,
+        worker_process_generation_id: &ResourceId,
+        limit: u16,
+    ) -> Result<Vec<ControlledModelExecution>, RepositoryError> {
+        if worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || limit == 0
+            || limit > self.recovery_batch_limit()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Model cancellation scan is outside the platform bound".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool().begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT *
+            FROM insight_platform.jobs
+            WHERE work_class = 'model' AND owner_kind = 'model_turn'
+              AND state = 'cancelling' AND terminal_at IS NULL
+              AND worker_id = $1 AND lease_token_digest IS NOT NULL
+              AND lease_expires_at > clock_timestamp()
+              AND deadline > clock_timestamp()
+            ORDER BY updated_at, tenant_id, job_id
+            LIMIT $2
+            "#,
+        )
+        .bind(worker_process_generation_id.to_string())
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut executions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let job = job_from_row(row)?;
+            let tenant_id = parse_required_id(
+                Some(&job.tenant_id),
+                ResourceKind::Tenant,
+                "Model cancellation tenant",
+            )?;
+            let model_turn_id = parse_required_id(
+                Some(&job.owner_id),
+                ResourceKind::ModelTurn,
+                "Model cancellation owner",
+            )?;
+            let invocation_id = parse_required_id(
+                job.invocation_id.as_deref(),
+                ResourceKind::ModelTurn,
+                "Model cancellation Invocation",
+            )?;
+            if invocation_id != model_turn_id {
+                return Err(RepositoryError::CorruptRow(
+                    "Model cancellation Job owner and Invocation differ".to_owned(),
+                ));
+            }
+            let turn = load_model_turn(
+                &mut transaction,
+                &tenant_id,
+                &model_turn_id,
+                false,
+                self.model_turn_limits(),
+            )
+            .await?;
+            let projection = job_projection(&job)?;
+            let payload: ModelJobPayload = decode_versioned_payload(&job.payload, "Model Job")?;
+            payload
+                .validate_for(&turn, &projection, self.model_turn_limits())
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            if turn.state != ModelTurnState::Cancelling
+                || turn.payload.current_job_id.as_ref() != Some(&projection.job_id)
+                || projection.state != JobState::Cancelling
+                || projection.lease.as_ref().is_none_or(|lease| {
+                    lease.worker_process_generation_id != *worker_process_generation_id
+                })
+                || payload
+                    .active_usage_reservation_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    != job.quota_reservation_id
+            {
+                return Err(RepositoryError::CorruptRow(
+                    "Model cancellation projection is inconsistent".to_owned(),
+                ));
+            }
+            executions.push(ControlledModelExecution {
+                turn,
+                job: Some(job),
+            });
+        }
+        transaction.commit().await?;
+        Ok(executions)
+    }
+
     pub async fn claim_model_jobs(
         &self,
         command: ClaimModelJobs,

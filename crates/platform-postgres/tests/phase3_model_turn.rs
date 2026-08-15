@@ -9,7 +9,7 @@ use insight_platform_contracts::{
     CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonValue, CommandAudit,
     CommandOutcome, ContextWindowContract, DataClassification, DataRegion, DecimalMoney,
     DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactSecretBindingRef,
-    ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, InstalledModelAdapter,
+    ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, InstalledModelAdapter, JobState,
     ModelArtifactDeliveryContract, ModelCatalogEvidence, ModelDeploymentClosure,
     ModelIdentityStability, ModelLimits, ModelModalities, ModelProfileResourceSpec,
     ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelToolContract, ModelTurnState,
@@ -1903,6 +1903,16 @@ async fn model_turn_fixture() {
         }
         (Err(_), Ok(CommandOutcome::Applied(controlled))) => {
             assert_eq!(controlled.turn.state, ModelTurnState::Cancelling);
+            let discovered = repository
+                .scan_cancelling_model_executions(&cancellation_claim.worker_id, 16)
+                .await
+                .unwrap();
+            assert_eq!(discovered.len(), 1);
+            assert_eq!(discovered[0].turn.model_turn_id, cancellation.model_turn_id);
+            assert_eq!(
+                discovered[0].job_projection().unwrap().unwrap().state,
+                JobState::Cancelling
+            );
             let cancelling_job = controlled.job.as_ref().unwrap();
             let cancellation_fence = JobFence {
                 expected_version: u64::try_from(cancelling_job.version).unwrap(),

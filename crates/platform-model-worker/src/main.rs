@@ -16,9 +16,10 @@ use insight_platform_model_adapters::{
     OPENAI_RESPONSES_ADAPTER_NAME,
 };
 use insight_platform_model_worker::{
-    InlineModelOutputMaterializer, InlineModelRequestMaterializer, ModelWorkerDriver,
-    ModelWorkerDriverConfig, ModelWorkerDriverTiming, RegisteredModelJobExecutor,
-    UuidModelWorkerIdentityFactory, MODEL_WORKER_ROLE,
+    InlineModelOutputMaterializer, InlineModelRequestMaterializer, ModelCancellationDriver,
+    ModelCancellationDriverConfig, ModelWorkerDriver, ModelWorkerDriverConfig,
+    ModelWorkerDriverTiming, RegisteredModelJobExecutor, UuidModelWorkerIdentityFactory,
+    MODEL_WORKER_ROLE,
 };
 use insight_platform_models::ModelTurnLimits;
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
@@ -163,6 +164,7 @@ impl ModelWorkerProcessConfig {
         }
         self.driver_config()
             .map(|_| ())
+            .and_then(|_| self.cancellation_driver_config().map(|_| ()))
             .map_err(|_| ProcessError::InvalidConfiguration)
     }
 
@@ -185,6 +187,16 @@ impl ModelWorkerProcessConfig {
                 ),
                 drain_grace: Duration::from_millis(self.drain_grace_milliseconds),
             },
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)
+    }
+
+    fn cancellation_driver_config(&self) -> Result<ModelCancellationDriverConfig, ProcessError> {
+        ModelCancellationDriverConfig::from_profile(
+            &checked_in_hard_limit_profile(),
+            Duration::from_secs(self.receipt_ttl_seconds),
+            Duration::from_millis(self.claim_scan_milliseconds),
+            Duration::from_millis(self.claim_failure_backoff_milliseconds),
         )
         .map_err(|_| ProcessError::InvalidConfiguration)
     }
@@ -228,10 +240,11 @@ async fn run() -> Result<(), ProcessError> {
         .worker_manifest
         .canonical_digest()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let connector: Arc<dyn ModelProviderWireConnector> = Arc::new(EgressBrokerGrpcClient::new(
+    let egress = Arc::new(EgressBrokerGrpcClient::new(
         connect_egress(&config).await?,
         config.rpc_limits()?,
     ));
+    let connector: Arc<dyn ModelProviderWireConnector> = egress.clone();
     let mut registry = InstalledModelAdapterRegistry::default();
     for installed in &config.installed_adapters {
         let descriptor = InstalledModelAdapterDescriptor::from(installed);
@@ -270,9 +283,18 @@ async fn run() -> Result<(), ProcessError> {
     let driver = ModelWorkerDriver::new(
         Arc::clone(&repository),
         executor,
+        Arc::clone(&identities),
+        pools.clone(),
+        config.driver_config()?,
+    )
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let cancellation_driver = ModelCancellationDriver::new(
+        Arc::clone(&repository),
+        Arc::clone(&repository),
+        egress,
         identities,
         pools,
-        config.driver_config()?,
+        config.cancellation_driver_config()?,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
 
@@ -281,20 +303,39 @@ async fn run() -> Result<(), ProcessError> {
         process_generation_id, manifest_digest
     );
     let cancellation = CancellationToken::new();
-    let driver_cancellation = cancellation.child_token();
-    let mut driver_task = tokio::spawn(driver.run(driver_cancellation));
+    let mut driver_task = tokio::spawn(driver.run(cancellation.child_token()));
+    let mut cancellation_task = tokio::spawn(cancellation_driver.run(cancellation.child_token()));
     tokio::select! {
         signal = shutdown_signal() => {
             cancellation.cancel();
+            let (driver_result, cancellation_result) = tokio::join!(driver_task, cancellation_task);
             signal?;
-            driver_task.await
+            driver_result
+                .map_err(|_| ProcessError::WorkerFailed)?
+                .map_err(|_| ProcessError::WorkerFailed)?;
+            cancellation_result
                 .map_err(|_| ProcessError::WorkerFailed)?
                 .map_err(|_| ProcessError::WorkerFailed)?;
             Ok(())
         }
         result = &mut driver_task => {
             cancellation.cancel();
+            let cancellation_result = cancellation_task.await;
             result
+                .map_err(|_| ProcessError::WorkerFailed)?
+                .map_err(|_| ProcessError::WorkerFailed)?;
+            cancellation_result
+                .map_err(|_| ProcessError::WorkerFailed)?
+                .map_err(|_| ProcessError::WorkerFailed)?;
+            Err(ProcessError::WorkerExitedUnexpectedly)
+        }
+        result = &mut cancellation_task => {
+            cancellation.cancel();
+            let driver_result = driver_task.await;
+            result
+                .map_err(|_| ProcessError::WorkerFailed)?
+                .map_err(|_| ProcessError::WorkerFailed)?;
+            driver_result
                 .map_err(|_| ProcessError::WorkerFailed)?
                 .map_err(|_| ProcessError::WorkerFailed)?;
             Err(ProcessError::WorkerExitedUnexpectedly)

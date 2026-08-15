@@ -5,12 +5,12 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    CommandAudit, CommandOutcome, DeploymentClosure, ExactDeploymentRef, ExactVersionRef, Failure,
-    FailureClass, FailureCode, FailureSource, FrozenSlotTarget, ModelDeploymentClosure,
-    ModelProfileResourceSpec, ModelProviderDeploymentClosure, ModelProviderResourceSpec,
-    ModelTurnState, NodeExecutionState, Permission, PlanNodeKind, PlatformFailureCode,
-    PrincipalSnapshot, ResourceDocument, ResourceId, ResourceKind, Retryability,
-    RunBindingsSnapshot, RunState, Sha256Digest, WorkClass,
+    CommandAudit, CommandOutcome, DecimalMoney, DeploymentClosure, ExactDeploymentRef,
+    ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource, FrozenSlotTarget,
+    ModelDeploymentClosure, ModelProfileResourceSpec, ModelProviderDeploymentClosure,
+    ModelProviderResourceSpec, ModelTurnState, NodeExecutionState, Permission, PlanNodeKind,
+    PlatformFailureCode, PrincipalSnapshot, ResourceDocument, ResourceId, ResourceKind,
+    Retryability, RunBindingsSnapshot, RunState, Sha256Digest, WorkClass,
 };
 use insight_platform_invocations::{ExactInvocationValueRef, InvocationSelectionEvidence};
 use insight_platform_jobs::{
@@ -934,6 +934,64 @@ pub struct ModelAttemptMeasurement {
 }
 
 impl ModelAttemptMeasurement {
+    /// Produces the conservative terminal accounting used after a dispatched request can no
+    /// longer return trustworthy Provider usage (for example, a durable cancellation winner).
+    /// The exact admission ceiling is charged so a missing Provider response cannot undersettle.
+    pub fn conservative_dispatched(
+        admission: &ModelTurnAdmissionSnapshot,
+        limits: ModelTurnLimits,
+    ) -> Result<Self, ModelTurnError> {
+        admission.validate(limits)?;
+        let profile = &admission.profile;
+        let provider_reported_cost = if profile.usage.reports_cost {
+            let currency = profile
+                .usage
+                .cost_currency
+                .as_ref()
+                .ok_or(ModelTurnError::InvalidUsage)?;
+            Some(
+                DecimalMoney::new(
+                    currency.clone(),
+                    i64::try_from(admission.quota_ceiling.cost_microunits)
+                        .map_err(|_| ModelTurnError::InvalidUsage)?,
+                    6,
+                )
+                .map_err(|_| ModelTurnError::InvalidUsage)?,
+            )
+        } else {
+            None
+        };
+        let measurement = Self {
+            usage: Some(ModelUsage {
+                input_tokens: Some(admission.quota_ceiling.tokens),
+                output_tokens: Some(0),
+                cached_input_tokens: profile.usage.reports_cached_input_tokens.then_some(0),
+                reasoning_tokens: profile.usage.reports_reasoning_tokens.then_some(0),
+                provider_reported_cost,
+                accounting_quality: AccountingQuality::Reconciled,
+            }),
+            observation: ModelObservation {
+                request_sent: true,
+                provider_response_digest: None,
+                actual_model_identity: None,
+                model_fingerprint: None,
+                possible_duplicate_charge: true,
+                stream_delta_count: 0,
+                stream_bytes: 0,
+            },
+        };
+        let (usage, _) = measurement.validate_for(admission, limits)?;
+        if usage.requests != admission.quota_ceiling.requests
+            || usage.tokens != admission.quota_ceiling.tokens
+            || (profile.usage.reports_cost
+                && usage.cost_microunits != admission.quota_ceiling.cost_microunits)
+            || (!profile.usage.reports_cost && usage.cost_microunits != 0)
+        {
+            return Err(ModelTurnError::InvalidUsage);
+        }
+        Ok(measurement)
+    }
+
     fn validate_for(
         &self,
         admission: &ModelTurnAdmissionSnapshot,

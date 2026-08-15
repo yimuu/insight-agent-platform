@@ -7,20 +7,24 @@
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
-    canonical_digest, HardLimitProfile, ResourceId, ResourceIdError, ResourceKind, Sha256Digest,
-    WorkClass,
+    canonical_digest, HardLimitProfile, JobState, ModelTurnState, ResourceId, ResourceIdError,
+    ResourceKind, Sha256Digest, WorkClass,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_model_adapters::{
-    ModelAdapterFailure, ModelAdapterFailureClass, ModelAdapterWorker, ModelExecutionAuthority,
-    ModelOutputMaterializer,
+    ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
+    ModelAdapterFailureClass, ModelAdapterWorker, ModelExecutionAuthority, ModelOutputMaterializer,
+    ModelProviderWireConnector, ModelProviderWireProtocol, ANTHROPIC_MESSAGES_ADAPTER_NAME,
+    OPENAI_RESPONSES_ADAPTER_NAME,
 };
 use insight_platform_models::{
-    CanonicalModelRequest, ClaimModelJobs, ModelClaimSlot, ModelExecutionInput,
-    ModelExecutionInputMaterial, ModelTurnLimits, ModelWorkerAudit, MODEL_QUOTA_LINES,
+    CanonicalModelRequest, ClaimModelJobs, CommitModelCancellationOutcome, ModelAttemptMeasurement,
+    ModelClaimSlot, ModelExecutionInput, ModelExecutionInputMaterial, ModelTurnLimits,
+    ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, MODEL_QUOTA_LINES,
 };
 use insight_platform_postgres::{
-    model_turn_repository::ClaimedModelExecution, repository::PgRepository,
+    model_turn_repository::{ClaimedModelExecution, ControlledModelExecution},
+    repository::{PgRepository, RepositoryError},
 };
 use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
@@ -262,6 +266,526 @@ impl ModelHeartbeatAuthority for PgRepository {
         })
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCancellationSourceFailure {
+    Unavailable,
+    Invariant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCancellationCommitFailure {
+    Unavailable,
+    FirstWinnerLost,
+    Invariant,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelCancellationCandidate {
+    pub tenant_id: ResourceId,
+    pub model_turn_id: ResourceId,
+    pub job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub worker_manifest_digest: Sha256Digest,
+    pub expected_turn_version: u64,
+    pub fence: JobFence,
+    pub usage_reservation_id: ResourceId,
+    pub protocol: ModelProviderWireProtocol,
+    pub provider_deployment: insight_platform_contracts::ExactDeploymentRef,
+    pub attempt_no: u32,
+    pub deadline: chrono::DateTime<Utc>,
+    pub request_digest: Sha256Digest,
+    pub measurement: ModelAttemptMeasurement,
+}
+
+impl ModelCancellationCandidate {
+    fn from_controlled(
+        controlled: ControlledModelExecution,
+        limits: ModelTurnLimits,
+    ) -> Result<Self, ModelCancellationSourceFailure> {
+        controlled
+            .turn
+            .validate(limits)
+            .map_err(|_| ModelCancellationSourceFailure::Invariant)?;
+        let projection = controlled
+            .job_projection()
+            .map_err(|_| ModelCancellationSourceFailure::Invariant)?
+            .ok_or(ModelCancellationSourceFailure::Invariant)?;
+        let job = controlled
+            .job
+            .as_ref()
+            .ok_or(ModelCancellationSourceFailure::Invariant)?;
+        let lease = projection
+            .lease
+            .as_ref()
+            .ok_or(ModelCancellationSourceFailure::Invariant)?;
+        let usage_reservation_id: ResourceId = job
+            .quota_reservation_id
+            .as_deref()
+            .ok_or(ModelCancellationSourceFailure::Invariant)?
+            .parse()
+            .map_err(|_| ModelCancellationSourceFailure::Invariant)?;
+        let installed = &controlled.turn.payload.admission.provider.installed_adapter;
+        let protocol = match installed.qualified_name.as_str() {
+            OPENAI_RESPONSES_ADAPTER_NAME => ModelProviderWireProtocol::OpenAiResponses,
+            ANTHROPIC_MESSAGES_ADAPTER_NAME => ModelProviderWireProtocol::AnthropicMessages,
+            _ => return Err(ModelCancellationSourceFailure::Invariant),
+        };
+        if controlled.turn.state != ModelTurnState::Cancelling
+            || projection.state != JobState::Cancelling
+            || controlled.turn.payload.current_job_id.as_ref() != Some(&projection.job_id)
+            || controlled.turn.tenant_id != projection.tenant_id
+            || controlled.turn.model_turn_id != projection.owner.owner_id
+            || projection.work_class != WorkClass::Model
+            || usage_reservation_id.kind() != ResourceKind::UsageReservation
+        {
+            return Err(ModelCancellationSourceFailure::Invariant);
+        }
+        let request_digest = controlled.turn.payload.admission.request_digest.clone();
+        let measurement = ModelAttemptMeasurement::conservative_dispatched(
+            &controlled.turn.payload.admission,
+            limits,
+        )
+        .map_err(|_| ModelCancellationSourceFailure::Invariant)?;
+        let candidate = Self {
+            tenant_id: projection.tenant_id,
+            model_turn_id: controlled.turn.model_turn_id,
+            job_id: projection.job_id,
+            worker_process_generation_id: lease.worker_process_generation_id.clone(),
+            worker_manifest_digest: installed.worker_manifest_digest.clone(),
+            expected_turn_version: controlled.turn.version,
+            fence: JobFence {
+                expected_version: projection.version,
+                worker_process_generation_id: lease.worker_process_generation_id.clone(),
+                lease_generation: lease.lease_generation,
+                token_digest: lease.token_digest.clone(),
+            },
+            usage_reservation_id,
+            protocol,
+            provider_deployment: controlled
+                .turn
+                .payload
+                .admission
+                .provider_deployment
+                .clone(),
+            attempt_no: projection.attempt_count,
+            deadline: controlled.turn.deadline,
+            request_digest,
+            measurement,
+        };
+        Ok(candidate)
+    }
+
+    pub fn cancel_request(&self) -> ModelAdapterCancelRequest {
+        ModelAdapterCancelRequest {
+            tenant_id: self.tenant_id.clone(),
+            model_turn_id: self.model_turn_id.clone(),
+            job_id: self.job_id.clone(),
+            worker_process_generation_id: self.worker_process_generation_id.clone(),
+            provider_deployment: self.provider_deployment.clone(),
+            attempt_no: self.attempt_no,
+            lease_generation: self.fence.lease_generation,
+            deadline: self.deadline,
+        }
+    }
+}
+
+#[async_trait]
+pub trait ModelCancellationSource: Send + Sync + 'static {
+    async fn scan_model_cancellations(
+        &self,
+        worker_process_generation_id: &ResourceId,
+        limit: u16,
+        limits: ModelTurnLimits,
+    ) -> Result<Vec<ModelCancellationCandidate>, ModelCancellationSourceFailure>;
+}
+
+#[async_trait]
+impl ModelCancellationSource for PgRepository {
+    async fn scan_model_cancellations(
+        &self,
+        worker_process_generation_id: &ResourceId,
+        limit: u16,
+        limits: ModelTurnLimits,
+    ) -> Result<Vec<ModelCancellationCandidate>, ModelCancellationSourceFailure> {
+        let controlled = self
+            .scan_cancelling_model_executions(worker_process_generation_id, limit)
+            .await
+            .map_err(map_cancellation_source_repository_error)?;
+        let now = Utc::now();
+        let mut candidates = Vec::with_capacity(controlled.len());
+        for controlled in controlled {
+            if controlled.turn.deadline <= now {
+                continue;
+            }
+            let candidate = ModelCancellationCandidate::from_controlled(controlled, limits)?;
+            candidate
+                .cancel_request()
+                .validate_shape_at(now)
+                .map_err(|_| ModelCancellationSourceFailure::Invariant)?;
+            candidates.push(candidate);
+        }
+        Ok(candidates)
+    }
+}
+
+fn map_cancellation_source_repository_error(
+    failure: RepositoryError,
+) -> ModelCancellationSourceFailure {
+    match failure {
+        RepositoryError::Database(_) => ModelCancellationSourceFailure::Unavailable,
+        _ => ModelCancellationSourceFailure::Invariant,
+    }
+}
+
+#[async_trait]
+pub trait ModelCancellationAuthority: Send + Sync + 'static {
+    async fn commit_model_cancellation(
+        &self,
+        command: CommitModelCancellationOutcome,
+    ) -> Result<(), ModelCancellationCommitFailure>;
+}
+
+#[async_trait]
+impl ModelCancellationAuthority for PgRepository {
+    async fn commit_model_cancellation(
+        &self,
+        command: CommitModelCancellationOutcome,
+    ) -> Result<(), ModelCancellationCommitFailure> {
+        let mut transaction = self
+            .begin_model_turn()
+            .await
+            .map_err(map_cancellation_commit_repository_error)?;
+        transaction
+            .commit_model_cancellation_outcome(command)
+            .await
+            .map_err(map_cancellation_commit_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_cancellation_commit_repository_error)
+    }
+}
+
+fn map_cancellation_commit_repository_error(
+    failure: RepositoryError,
+) -> ModelCancellationCommitFailure {
+    match failure {
+        RepositoryError::Database(_) => ModelCancellationCommitFailure::Unavailable,
+        RepositoryError::Conflict(_)
+        | RepositoryError::StaleFence
+        | RepositoryError::LeaseExpired
+        | RepositoryError::NotFound(_) => ModelCancellationCommitFailure::FirstWinnerLost,
+        _ => ModelCancellationCommitFailure::Invariant,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelCancellationDriverConfig {
+    scan_limit: u16,
+    receipt_ttl: Duration,
+    scan_interval: Duration,
+    failure_backoff: Duration,
+    limits: ModelTurnLimits,
+}
+
+impl ModelCancellationDriverConfig {
+    pub fn from_profile(
+        profile: &HardLimitProfile,
+        receipt_ttl: Duration,
+        scan_interval: Duration,
+        failure_backoff: Duration,
+    ) -> Result<Self, ModelCancellationDriverError> {
+        profile
+            .validate()
+            .map_err(|_| ModelCancellationDriverError::InvalidConfig)?;
+        let scan_limit = u16::try_from(profile.control_data.recovery_batch.q1_default)
+            .map_err(|_| ModelCancellationDriverError::InvalidConfig)?;
+        if receipt_ttl <= Duration::from_millis(profile.run_scheduler.lease_milliseconds.q1_default)
+        {
+            return Err(ModelCancellationDriverError::InvalidConfig);
+        }
+        let config = Self {
+            scan_limit,
+            receipt_ttl,
+            scan_interval,
+            failure_backoff,
+            limits: ModelTurnLimits::from_profile(profile)
+                .map_err(|_| ModelCancellationDriverError::InvalidConfig)?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(self) -> Result<(), ModelCancellationDriverError> {
+        if self.scan_limit == 0
+            || self.receipt_ttl.is_zero()
+            || ChronoDuration::from_std(self.receipt_ttl).is_err()
+            || self.scan_interval.is_zero()
+            || self.failure_backoff.is_zero()
+            || self.failure_backoff > self.scan_interval
+        {
+            return Err(ModelCancellationDriverError::InvalidConfig);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelCancellationCycleReport {
+    pub discovered: u64,
+    pub cancelled: u64,
+    pub first_winner_lost: u64,
+    pub deferred: u64,
+}
+
+pub struct ModelCancellationDriver<S, A, P, I> {
+    source: Arc<S>,
+    authority: Arc<A>,
+    port: Arc<P>,
+    identities: Arc<I>,
+    pools: LocalWorkerPools,
+    config: ModelCancellationDriverConfig,
+}
+
+impl<S, A, P, I> ModelCancellationDriver<S, A, P, I>
+where
+    S: ModelCancellationSource,
+    A: ModelCancellationAuthority,
+    P: ModelProviderWireConnector + 'static,
+    I: ModelWorkerIdentityFactory + 'static,
+{
+    pub fn new(
+        source: Arc<S>,
+        authority: Arc<A>,
+        port: Arc<P>,
+        identities: Arc<I>,
+        pools: LocalWorkerPools,
+        config: ModelCancellationDriverConfig,
+    ) -> Result<Self, ModelCancellationDriverError> {
+        config.validate()?;
+        let pool = pools.snapshot();
+        if pool.worker_role != MODEL_WORKER_ROLE || pool.work_class != WorkClass::Model {
+            return Err(ModelCancellationDriverError::WrongWorkerManifest);
+        }
+        Ok(Self {
+            source,
+            authority,
+            port,
+            identities,
+            pools,
+            config,
+        })
+    }
+
+    pub async fn drive_once(
+        &self,
+    ) -> Result<ModelCancellationCycleReport, ModelCancellationDriverError> {
+        let Some(_permit) = self
+            .pools
+            .try_acquire_critical_control()
+            .map_err(ModelCancellationDriverError::LocalPool)?
+        else {
+            return Ok(ModelCancellationCycleReport::default());
+        };
+        let pool = self.pools.snapshot();
+        let candidates = self
+            .source
+            .scan_model_cancellations(
+                &pool.worker_process_generation_id,
+                self.config.scan_limit,
+                self.config.limits,
+            )
+            .await
+            .map_err(ModelCancellationDriverError::Source)?;
+        let mut report = ModelCancellationCycleReport {
+            discovered: candidates.len() as u64,
+            ..Default::default()
+        };
+        let mut jobs = BTreeSet::new();
+        for candidate in candidates {
+            if candidate.worker_process_generation_id != pool.worker_process_generation_id
+                || candidate.worker_manifest_digest != pool.worker_manifest_digest
+                || candidate.fence.worker_process_generation_id != pool.worker_process_generation_id
+                || !jobs.insert(candidate.job_id.clone())
+            {
+                return Err(ModelCancellationDriverError::CorruptCandidate);
+            }
+            let now = Utc::now();
+            if candidate.deadline <= now {
+                report.first_winner_lost = report.first_winner_lost.saturating_add(1);
+                continue;
+            }
+            match self
+                .port
+                .cancel(candidate.protocol, candidate.cancel_request())
+                .await
+            {
+                Ok(
+                    ModelAdapterCancelOutcome::Accepted
+                    | ModelAdapterCancelOutcome::AlreadyTerminal,
+                ) => {}
+                Ok(ModelAdapterCancelOutcome::Unsupported) => {
+                    return Err(ModelCancellationDriverError::InvalidEgressOutcome);
+                }
+                Err(failure) => {
+                    failure
+                        .validate_wire_shape(candidate.deadline, Utc::now())
+                        .map_err(|_| ModelCancellationDriverError::InvalidEgressOutcome)?;
+                    if matches!(
+                        failure.class,
+                        ModelAdapterFailureClass::RetryableBeforeDispatch
+                            | ModelAdapterFailureClass::RetryableAfterDispatch
+                    ) {
+                        report.deferred = report.deferred.saturating_add(1);
+                        continue;
+                    }
+                    return Err(ModelCancellationDriverError::InvalidEgressOutcome);
+                }
+            }
+            let command = self.commit_command(candidate)?;
+            match self.authority.commit_model_cancellation(command).await {
+                Ok(()) => report.cancelled = report.cancelled.saturating_add(1),
+                Err(ModelCancellationCommitFailure::FirstWinnerLost) => {
+                    report.first_winner_lost = report.first_winner_lost.saturating_add(1)
+                }
+                Err(failure) => return Err(ModelCancellationDriverError::Commit(failure)),
+            }
+        }
+        Ok(report)
+    }
+
+    fn commit_command(
+        &self,
+        candidate: ModelCancellationCandidate,
+    ) -> Result<CommitModelCancellationOutcome, ModelCancellationDriverError> {
+        let now = Utc::now();
+        let receipt_expires_at = now
+            .checked_add_signed(
+                ChronoDuration::from_std(self.config.receipt_ttl)
+                    .map_err(|_| ModelCancellationDriverError::InvalidConfig)?,
+            )
+            .ok_or(ModelCancellationDriverError::InvalidGeneratedCommand)?;
+        let audit = ModelWorkerAudit {
+            tenant_id: candidate.tenant_id.clone(),
+            worker_process_generation_id: candidate.worker_process_generation_id.clone(),
+            receipt_id: self.new_id(ResourceKind::Receipt)?,
+            event_id: self.new_id(ResourceKind::Event)?,
+            outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: self.new_digest()?,
+            request_digest: candidate.request_digest,
+            receipt_expires_at,
+        };
+        let command = CommitModelCancellationOutcome {
+            audit,
+            model_turn_id: candidate.model_turn_id,
+            job_id: candidate.job_id,
+            expected_turn_version: candidate.expected_turn_version,
+            fence: Some(candidate.fence),
+            usage_reservation_id: candidate.usage_reservation_id,
+            quota_entry_ids: self.quota_entry_ids()?,
+            measurement: candidate.measurement,
+        };
+        command
+            .validate_at(now)
+            .map_err(|_| ModelCancellationDriverError::InvalidGeneratedCommand)?;
+        Ok(command)
+    }
+
+    fn quota_entry_ids(&self) -> Result<Vec<ResourceId>, ModelCancellationDriverError> {
+        let mut ids = (0..MODEL_QUOTA_LINES)
+            .map(|_| self.new_id(ResourceKind::QuotaLedgerEntry))
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.sort();
+        if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ModelCancellationDriverError::InvalidGeneratedCommand);
+        }
+        Ok(ids)
+    }
+
+    fn new_id(&self, kind: ResourceKind) -> Result<ResourceId, ModelCancellationDriverError> {
+        self.identities
+            .new_resource_id(kind)
+            .map_err(ModelCancellationDriverError::Identity)
+    }
+
+    fn new_digest(&self) -> Result<Sha256Digest, ModelCancellationDriverError> {
+        self.identities
+            .new_opaque_digest()
+            .map_err(ModelCancellationDriverError::Identity)
+    }
+
+    pub async fn run(
+        self,
+        cancellation: CancellationToken,
+    ) -> Result<ModelCancellationCycleReport, ModelCancellationDriverError> {
+        let mut report = ModelCancellationCycleReport::default();
+        let mut scan = tokio::time::interval_at(Instant::now(), self.config.scan_interval);
+        scan.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok(report),
+                _ = scan.tick() => {}
+            }
+            match self.drive_once().await {
+                Ok(cycle) => {
+                    report.discovered = report.discovered.saturating_add(cycle.discovered);
+                    report.cancelled = report.cancelled.saturating_add(cycle.cancelled);
+                    report.first_winner_lost = report
+                        .first_winner_lost
+                        .saturating_add(cycle.first_winner_lost);
+                    report.deferred = report.deferred.saturating_add(cycle.deferred);
+                }
+                Err(ModelCancellationDriverError::Source(
+                    ModelCancellationSourceFailure::Unavailable,
+                ))
+                | Err(ModelCancellationDriverError::Commit(
+                    ModelCancellationCommitFailure::Unavailable,
+                )) => {
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Ok(report),
+                        _ = tokio::time::sleep(self.config.failure_backoff) => {}
+                    }
+                }
+                Err(failure) => return Err(failure),
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ModelCancellationDriverError {
+    InvalidConfig,
+    WrongWorkerManifest,
+    CorruptCandidate,
+    InvalidGeneratedCommand,
+    InvalidEgressOutcome,
+    Identity(ModelWorkerIdentityError),
+    LocalPool(LocalWorkerPoolError),
+    Source(ModelCancellationSourceFailure),
+    Commit(ModelCancellationCommitFailure),
+}
+
+impl fmt::Display for ModelCancellationDriverError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidConfig => "Model cancellation driver configuration is invalid",
+            Self::WrongWorkerManifest => "Model cancellation driver manifest is invalid",
+            Self::CorruptCandidate => "Model cancellation scan returned a corrupt candidate",
+            Self::InvalidGeneratedCommand => {
+                "Model cancellation driver generated an invalid command"
+            }
+            Self::InvalidEgressOutcome => "Model cancellation Egress outcome is invalid",
+            Self::Identity(_) => "Model cancellation identity generation failed",
+            Self::LocalPool(_) => "Model cancellation local control pool failed",
+            Self::Source(_) => "Model cancellation scan failed",
+            Self::Commit(_) => "Model cancellation commit failed",
+        })
+    }
+}
+
+impl Error for ModelCancellationDriverError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelWorkerDriverTiming {
@@ -937,9 +1461,11 @@ where
 mod tests {
     use super::*;
     use insight_platform_contracts::{
-        checked_in_hard_limit_profile, WorkerManifest, WORKER_MANIFEST_VERSION,
+        checked_in_hard_limit_profile, ExactDeploymentRef, WorkerManifest, WORKER_MANIFEST_VERSION,
         WORKER_PROTOCOL_VERSION,
     };
+    use insight_platform_model_adapters::{ModelProviderWireRequest, ModelProviderWireStream};
+    use insight_platform_models::{AccountingQuality, ModelObservation, ModelUsage};
     use std::sync::Mutex;
 
     #[derive(Debug, Clone)]
@@ -1060,6 +1586,140 @@ mod tests {
         .unwrap()
     }
 
+    fn cancellation_config() -> ModelCancellationDriverConfig {
+        ModelCancellationDriverConfig::from_profile(
+            &checked_in_hard_limit_profile(),
+            Duration::from_secs(300),
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        )
+        .unwrap()
+    }
+
+    fn resource(kind: ResourceKind) -> ResourceId {
+        ResourceId::from_uuid_v7(kind, Uuid::now_v7()).unwrap()
+    }
+
+    fn digest(character: char) -> Sha256Digest {
+        format!("sha256:{}", character.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    fn cancellation_candidate(pools: &LocalWorkerPools) -> ModelCancellationCandidate {
+        let snapshot = pools.snapshot();
+        ModelCancellationCandidate {
+            tenant_id: resource(ResourceKind::Tenant),
+            model_turn_id: resource(ResourceKind::ModelTurn),
+            job_id: resource(ResourceKind::Job),
+            worker_process_generation_id: snapshot.worker_process_generation_id.clone(),
+            worker_manifest_digest: snapshot.worker_manifest_digest,
+            expected_turn_version: 3,
+            fence: JobFence {
+                expected_version: 4,
+                worker_process_generation_id: snapshot.worker_process_generation_id,
+                lease_generation: 1,
+                token_digest: digest('d'),
+            },
+            usage_reservation_id: resource(ResourceKind::UsageReservation),
+            protocol: ModelProviderWireProtocol::OpenAiResponses,
+            provider_deployment: ExactDeploymentRef::new(
+                resource(ResourceKind::ModelProviderDeployment),
+                digest('e'),
+            )
+            .unwrap(),
+            attempt_no: 1,
+            deadline: Utc::now() + ChronoDuration::minutes(1),
+            request_digest: digest('f'),
+            measurement: ModelAttemptMeasurement {
+                usage: Some(ModelUsage {
+                    input_tokens: Some(20),
+                    output_tokens: Some(0),
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
+                    provider_reported_cost: None,
+                    accounting_quality: AccountingQuality::Reconciled,
+                }),
+                observation: ModelObservation {
+                    request_sent: true,
+                    provider_response_digest: None,
+                    actual_model_identity: None,
+                    model_fingerprint: None,
+                    possible_duplicate_charge: true,
+                    stream_delta_count: 0,
+                    stream_bytes: 0,
+                },
+            },
+        }
+    }
+
+    struct CancellationSource {
+        expected_generation: ResourceId,
+        candidates: Mutex<Option<Vec<ModelCancellationCandidate>>>,
+    }
+
+    #[async_trait]
+    impl ModelCancellationSource for CancellationSource {
+        async fn scan_model_cancellations(
+            &self,
+            worker_process_generation_id: &ResourceId,
+            limit: u16,
+            _limits: ModelTurnLimits,
+        ) -> Result<Vec<ModelCancellationCandidate>, ModelCancellationSourceFailure> {
+            assert_eq!(worker_process_generation_id, &self.expected_generation);
+            assert!(limit > 0);
+            Ok(self.candidates.lock().unwrap().take().unwrap_or_default())
+        }
+    }
+
+    #[derive(Clone)]
+    enum CancelResponse {
+        Outcome(ModelAdapterCancelOutcome),
+        Failure(ModelAdapterFailure),
+    }
+
+    struct CancellationPort {
+        response: CancelResponse,
+        requests: Mutex<Vec<(ModelProviderWireProtocol, ModelAdapterCancelRequest)>>,
+    }
+
+    #[async_trait]
+    impl ModelProviderWireConnector for CancellationPort {
+        async fn open(
+            &self,
+            _request: ModelProviderWireRequest,
+        ) -> Result<ModelProviderWireStream, ModelAdapterFailure> {
+            panic!("cancellation driver must not open a Provider stream")
+        }
+
+        async fn cancel(
+            &self,
+            protocol: ModelProviderWireProtocol,
+            request: ModelAdapterCancelRequest,
+        ) -> Result<ModelAdapterCancelOutcome, ModelAdapterFailure> {
+            self.requests.lock().unwrap().push((protocol, request));
+            match &self.response {
+                CancelResponse::Outcome(outcome) => Ok(*outcome),
+                CancelResponse::Failure(failure) => Err(failure.clone()),
+            }
+        }
+    }
+
+    struct CancellationAuthority {
+        commands: Mutex<Vec<CommitModelCancellationOutcome>>,
+    }
+
+    #[async_trait]
+    impl ModelCancellationAuthority for CancellationAuthority {
+        async fn commit_model_cancellation(
+            &self,
+            command: CommitModelCancellationOutcome,
+        ) -> Result<(), ModelCancellationCommitFailure> {
+            self.commands.lock().unwrap().push(command);
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn reserves_local_model_capacity_before_bounded_claim() {
         let authority = Arc::new(EmptyAuthority::default());
@@ -1170,6 +1830,105 @@ mod tests {
             Err(ModelWorkerDriverError::CorruptClaim)
         ));
         assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_uses_reserved_control_capacity_when_business_is_saturated() {
+        let process_generation = resource(ResourceKind::WorkerProcessGeneration);
+        let pools = LocalWorkerPools::new(model_manifest(1), process_generation.clone()).unwrap();
+        let business = pools
+            .reserve_claim_capacity(
+                WorkClass::Model,
+                1,
+                ClaimBatchHardLimit::from_profile(&checked_in_hard_limit_profile()).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        let candidate = cancellation_candidate(&pools);
+        let expected_request = candidate.cancel_request();
+        let source = Arc::new(CancellationSource {
+            expected_generation: process_generation,
+            candidates: Mutex::new(Some(vec![candidate])),
+        });
+        let authority = Arc::new(CancellationAuthority {
+            commands: Mutex::new(Vec::new()),
+        });
+        let port = Arc::new(CancellationPort {
+            response: CancelResponse::Outcome(ModelAdapterCancelOutcome::Accepted),
+            requests: Mutex::new(Vec::new()),
+        });
+        let driver = ModelCancellationDriver::new(
+            source,
+            Arc::clone(&authority),
+            Arc::clone(&port),
+            Arc::new(UuidModelWorkerIdentityFactory),
+            pools,
+            cancellation_config(),
+        )
+        .unwrap();
+
+        let report = driver.drive_once().await.unwrap();
+        assert_eq!(report.discovered, 1);
+        assert_eq!(report.cancelled, 1);
+        assert_eq!(
+            port.requests.lock().unwrap().as_slice(),
+            &[(ModelProviderWireProtocol::OpenAiResponses, expected_request,)]
+        );
+        let commands = authority.commands.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].measurement.observation.request_sent);
+        assert!(
+            commands[0]
+                .measurement
+                .observation
+                .possible_duplicate_charge
+        );
+        assert_eq!(commands[0].quota_entry_ids.len(), MODEL_QUOTA_LINES);
+        assert!(commands[0]
+            .quota_entry_ids
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+        drop(business);
+    }
+
+    #[tokio::test]
+    async fn retryable_cancel_failure_defers_without_terminal_commit() {
+        let process_generation = resource(ResourceKind::WorkerProcessGeneration);
+        let pools = LocalWorkerPools::new(model_manifest(1), process_generation.clone()).unwrap();
+        let candidate = cancellation_candidate(&pools);
+        let deadline = candidate.deadline;
+        let source = Arc::new(CancellationSource {
+            expected_generation: process_generation,
+            candidates: Mutex::new(Some(vec![candidate])),
+        });
+        let authority = Arc::new(CancellationAuthority {
+            commands: Mutex::new(Vec::new()),
+        });
+        let port = Arc::new(CancellationPort {
+            response: CancelResponse::Failure(ModelAdapterFailure {
+                class: ModelAdapterFailureClass::RetryableAfterDispatch,
+                safe_code: "model_cancel_temporarily_unavailable".to_owned(),
+                safe_message: "Model cancellation is temporarily unavailable".to_owned(),
+                evidence_digest: digest('9'),
+                request_sent: true,
+                retry_at: Some(deadline - ChronoDuration::seconds(1)),
+            }),
+            requests: Mutex::new(Vec::new()),
+        });
+        let driver = ModelCancellationDriver::new(
+            source,
+            Arc::clone(&authority),
+            port,
+            Arc::new(UuidModelWorkerIdentityFactory),
+            pools,
+            cancellation_config(),
+        )
+        .unwrap();
+
+        let report = driver.drive_once().await.unwrap();
+        assert_eq!(report.discovered, 1);
+        assert_eq!(report.deferred, 1);
+        assert!(authority.commands.lock().unwrap().is_empty());
     }
 
     #[test]
