@@ -1,10 +1,10 @@
 use crate::*;
 use chrono::{Duration, Utc};
 use insight_platform_contracts::{
-    AgentDeploymentClosure, ArtifactRef, AuthoringPackage, ClosedJsonValue, CommandAudit,
-    ContextWindowContract, DataClassification, DataRegion, DecimalMoney, ExactDeploymentRef,
-    ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
-    InstalledModelAdapter, ModelArtifactDeliveryContract, ModelCatalogEvidence,
+    canonical_digest, AgentDeploymentClosure, ArtifactRef, AuthoringPackage, ClosedJsonValue,
+    CommandAudit, ContextWindowContract, DataClassification, DataRegion, DecimalMoney,
+    ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding,
+    FrozenSlotTarget, InstalledModelAdapter, ModelArtifactDeliveryContract, ModelCatalogEvidence,
     ModelDeploymentClosure, ModelIdentityStability, ModelLimits, ModelModalities,
     ModelProfileResourceSpec, ModelProviderDeploymentClosure, ModelProviderResourceSpec,
     ModelToolContract, ModelUsageContract, Permission, PermissionSet, PrincipalKind,
@@ -534,6 +534,61 @@ fn claimed_model_input_binds_exact_inline_bytes() {
         value: json!({"messages": []}),
     };
     assert_eq!(input.validate(), Err(ModelTurnError::InvalidRequestValue));
+}
+
+#[test]
+fn model_artifact_read_request_closes_value_link_and_job_fence() {
+    let fixture = fixture();
+    let value = serde_json::to_value(&fixture.request).unwrap();
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let content_digest: Sha256Digest = canonical_digest(&value).unwrap().parse().unwrap();
+    let artifact = ArtifactRef::new(
+        id(ResourceKind::Artifact, 0x501),
+        content_digest.clone(),
+        u64::try_from(bytes.len()).unwrap(),
+        "application/json",
+        fixture.request.classification,
+        Some("model-request.json".to_owned()),
+    )
+    .unwrap();
+    let mut request_value = fixture.command.request.clone();
+    request_value.content_digest = content_digest;
+    request_value.value = ValueRef::Artifact {
+        artifact: artifact.clone(),
+    };
+    request_value.artifact_link_id = Some(id(ResourceKind::ArtifactLink, 0x502));
+    let exact = request_value
+        .exact_for(
+            &fixture.command.run_id,
+            &fixture.command.node_execution_id,
+            fixture.limits,
+        )
+        .unwrap();
+    let mut request = ModelArtifactReadRequest {
+        schema_version: 1,
+        tenant_id: fixture.command.audit.tenant_id.clone(),
+        model_turn_id: fixture.command.model_turn_id.clone(),
+        job_id: id(ResourceKind::Job, 0x503),
+        exact,
+        artifact_link_id: request_value.artifact_link_id.unwrap(),
+        fence: JobFence {
+            expected_version: 2,
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x504),
+            lease_generation: 1,
+            token_digest: sha('f'),
+        },
+        request_digest: sha('e'),
+        maximum_bytes: bytes.len(),
+        deadline: fixture.request.deadline,
+    };
+    request.validate(fixture.limits).unwrap();
+    assert_eq!(request.artifact(), Some(&artifact));
+
+    request.maximum_bytes += 1;
+    assert_eq!(
+        request.validate(fixture.limits),
+        Err(ModelTurnError::InvalidRequestValue)
+    );
 }
 
 #[test]

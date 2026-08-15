@@ -1,4 +1,5 @@
 use crate::{ModelTurnError, ModelTurnLimits};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, ArtifactRef, ClosedJsonValue, ClosedSchemaDocument, DataClassification,
@@ -7,6 +8,7 @@ use insight_platform_contracts::{
     ResourceKind, Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::{ExactInvocationValueRef, InvocationValueStorage};
+use insight_platform_jobs::JobFence;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -893,6 +895,75 @@ impl ModelExecutionInput {
         }
         Ok(())
     }
+}
+
+/// Credential-free authorization request for materializing one Artifact-backed logical Model
+/// request. The physical object locator and storage credentials are deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelArtifactReadRequest {
+    pub schema_version: u32,
+    pub tenant_id: ResourceId,
+    pub model_turn_id: ResourceId,
+    pub job_id: ResourceId,
+    pub exact: ExactInvocationValueRef,
+    pub artifact_link_id: ResourceId,
+    pub fence: JobFence,
+    pub request_digest: Sha256Digest,
+    pub maximum_bytes: usize,
+    pub deadline: DateTime<Utc>,
+}
+
+impl ModelArtifactReadRequest {
+    pub fn validate(&self, limits: ModelTurnLimits) -> Result<(), ModelTurnError> {
+        self.exact
+            .validate()
+            .map_err(|_| ModelTurnError::InvalidRequestValue)?;
+        let InvocationValueStorage::Artifact { artifact } = &self.exact.storage else {
+            return Err(ModelTurnError::InvalidRequestValue);
+        };
+        if self.schema_version != 1
+            || self.tenant_id.kind() != ResourceKind::Tenant
+            || self.model_turn_id.kind() != ResourceKind::ModelTurn
+            || self.job_id.kind() != ResourceKind::Job
+            || self.artifact_link_id.kind() != ResourceKind::ArtifactLink
+            || self.fence.expected_version == 0
+            || self.fence.worker_process_generation_id.kind()
+                != ResourceKind::WorkerProcessGeneration
+            || self.fence.lease_generation == 0
+            || self.exact.value_kind != "model_request"
+            || self.maximum_bytes == 0
+            || self.maximum_bytes > limits.maximum_request_bytes()
+            || u64::try_from(self.maximum_bytes).ok() != Some(artifact.byte_length())
+        {
+            return Err(ModelTurnError::InvalidRequestValue);
+        }
+        Ok(())
+    }
+
+    pub fn artifact(&self) -> Option<&ArtifactRef> {
+        match &self.exact.storage {
+            InvocationValueStorage::Artifact { artifact } => Some(artifact),
+            InvocationValueStorage::Inline => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelArtifactBrokerError {
+    Unavailable,
+    Denied,
+    NotFound,
+    TooLarge,
+    Integrity,
+}
+
+#[async_trait]
+pub trait ModelArtifactBroker: Send + Sync {
+    async fn read_exact(
+        &self,
+        request: ModelArtifactReadRequest,
+    ) -> Result<Vec<u8>, ModelArtifactBrokerError>;
 }
 
 impl ModelRequestValue {

@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-09 |
+| 日期 | 2026-08-15 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md)、[`12-context-and-retrieval.md`](12-context-and-retrieval.md) |
 | 直接下游 | 14、16、17、18 |
 
@@ -482,6 +482,13 @@ Artifact Broker从CandidateManifest安装的closed storage-binding catalog按exa
 ArtifactRef/Blob的exact length与SHA-256。object missing/version drift/oversize/digest mismatch归为integrity
 failure，provider timeout/unavailable保持可重试但不得返回部分bytes。
 
+Model逻辑输入的受信读取请求还必须冻结tenant、ModelTurn、当前Job ID/version、lease generation/token digest、
+WorkerProcessGeneration、request digest、deadline、exact `model_request` RunValue、ModelTurn owner的active
+ArtifactLink以及ArtifactRef/maximum bytes。PostgreSQL read authority在同一snapshot中逐项重验后才能返回上述
+非持久投影；Broker完成object I/O后必须用同一closed请求再次授权。Model Worker取得bytes后仍须按Model请求的
+closed JSON限制重新解析，要求输入已是canonical JCS并重算逻辑值content digest；任何link替换、lease/fence漂移、
+非canonical正文或digest漂移都必须在Provider dispatch前fail closed。
+
 ## 14. Derived Artifact 与 Provenance
 
 转换、预览、OCR、文本提取、转码、压缩、render、chunk 和 export 都创建新 Artifact：
@@ -545,7 +552,8 @@ Inline threshold 由protocol/data classification在不超过18唯一
 不能把正文拆成大量数据库 rows/events 绕过限制。小 JSON 即使 inline 也有 depth/string/array/total byte limit。
 ValueRef 的通用转换不会自动解析文件或执行内容。只有下游规范显式定义的trusted materializer
 可以在exact grant下读取Artifact-backed逻辑值；它必须重新核对tenant/digest/length/media/classification，并在
-使用前执行该消费者的exact schema validation。
+使用前执行该消费者的exact schema validation。materializer不得直接接收object locator或storage credential；
+所有物理读取必须经13.1的Artifact Broker authority，且读取成功不替代消费者对canonical正文和逻辑digest的复验。
 
 ## 17. Retention、Legal Hold 与删除
 

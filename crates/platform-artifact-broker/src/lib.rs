@@ -10,6 +10,9 @@ use insight_platform_artifacts::{
     ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, AuthorizedArtifactObjectRead,
 };
 use insight_platform_contracts::{parse_strict_json, JsonLimits, Sha256Digest};
+use insight_platform_models::{
+    ModelArtifactBroker, ModelArtifactBrokerError, ModelArtifactReadRequest,
+};
 use insight_platform_sandbox::{
     MicroVmArtifactBroker, MicroVmArtifactBrokerError, MicroVmArtifactReadRequest,
     WasiArtifactBroker, WasiArtifactBrokerError, WasiArtifactReadRequest,
@@ -254,19 +257,28 @@ impl InstalledArtifactObjectStoreCatalog {
 pub struct BrokeredSandboxArtifactBroker {
     wasi_authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
     micro_vm_authority: Arc<dyn ArtifactObjectReadAuthority<MicroVmArtifactReadRequest>>,
+    core: ArtifactBrokerCore,
+}
+
+pub struct BrokeredModelArtifactBroker {
+    authority: Arc<dyn ArtifactObjectReadAuthority<ModelArtifactReadRequest>>,
+    core: ArtifactBrokerCore,
+}
+
+struct ArtifactBrokerCore {
     unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
     stores: InstalledArtifactObjectStoreCatalog,
     limits: ArtifactBrokerLimits,
     in_flight: Arc<Semaphore>,
 }
 
-trait SandboxArtifactReadRequest {
+trait ArtifactReadRequest {
     fn deadline(&self) -> chrono::DateTime<Utc>;
     fn maximum_bytes(&self) -> usize;
-    fn artifact(&self) -> &insight_platform_contracts::ArtifactRef;
+    fn artifact(&self) -> Option<&insight_platform_contracts::ArtifactRef>;
 }
 
-impl SandboxArtifactReadRequest for WasiArtifactReadRequest {
+impl ArtifactReadRequest for WasiArtifactReadRequest {
     fn deadline(&self) -> chrono::DateTime<Utc> {
         self.deadline
     }
@@ -275,12 +287,12 @@ impl SandboxArtifactReadRequest for WasiArtifactReadRequest {
         self.maximum_bytes
     }
 
-    fn artifact(&self) -> &insight_platform_contracts::ArtifactRef {
-        &self.artifact
+    fn artifact(&self) -> Option<&insight_platform_contracts::ArtifactRef> {
+        Some(&self.artifact)
     }
 }
 
-impl SandboxArtifactReadRequest for MicroVmArtifactReadRequest {
+impl ArtifactReadRequest for MicroVmArtifactReadRequest {
     fn deadline(&self) -> chrono::DateTime<Utc> {
         self.deadline
     }
@@ -289,8 +301,22 @@ impl SandboxArtifactReadRequest for MicroVmArtifactReadRequest {
         self.maximum_bytes
     }
 
-    fn artifact(&self) -> &insight_platform_contracts::ArtifactRef {
-        &self.artifact
+    fn artifact(&self) -> Option<&insight_platform_contracts::ArtifactRef> {
+        Some(&self.artifact)
+    }
+}
+
+impl ArtifactReadRequest for ModelArtifactReadRequest {
+    fn deadline(&self) -> chrono::DateTime<Utc> {
+        self.deadline
+    }
+
+    fn maximum_bytes(&self) -> usize {
+        self.maximum_bytes
+    }
+
+    fn artifact(&self) -> Option<&insight_platform_contracts::ArtifactRef> {
+        self.artifact()
     }
 }
 
@@ -315,6 +341,33 @@ impl BrokeredSandboxArtifactBroker {
         Ok(Self {
             wasi_authority,
             micro_vm_authority,
+            core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
+        })
+    }
+}
+
+impl BrokeredModelArtifactBroker {
+    pub fn new(
+        authority: Arc<dyn ArtifactObjectReadAuthority<ModelArtifactReadRequest>>,
+        unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
+        stores: InstalledArtifactObjectStoreCatalog,
+        limits: ArtifactBrokerLimits,
+    ) -> Result<Self, ArtifactBrokerConfigurationError> {
+        Ok(Self {
+            authority,
+            core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
+        })
+    }
+}
+
+impl ArtifactBrokerCore {
+    fn new(
+        unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
+        stores: InstalledArtifactObjectStoreCatalog,
+        limits: ArtifactBrokerLimits,
+    ) -> Result<Self, ArtifactBrokerConfigurationError> {
+        limits.validate()?;
+        Ok(Self {
             unsealer,
             stores,
             limits,
@@ -328,14 +381,14 @@ impl BrokeredSandboxArtifactBroker {
         request: &R,
     ) -> Result<Vec<u8>, ArtifactBrokerReadError>
     where
-        R: SandboxArtifactReadRequest + Sync,
+        R: ArtifactReadRequest + Sync,
     {
         let maximum_bytes = request.maximum_bytes();
+        let artifact = request.artifact().ok_or(ArtifactBrokerReadError::Denied)?;
         if request.deadline() <= Utc::now()
             || maximum_bytes == 0
             || maximum_bytes > self.limits.maximum_read_bytes
-            || u64::try_from(maximum_bytes)
-                .map_or(true, |maximum| maximum < request.artifact().byte_length())
+            || u64::try_from(maximum_bytes).map_or(true, |maximum| maximum < artifact.byte_length())
         {
             return Err(ArtifactBrokerReadError::Denied);
         }
@@ -346,7 +399,7 @@ impl BrokeredSandboxArtifactBroker {
         authorized
             .validate()
             .map_err(|_| ArtifactBrokerReadError::Integrity)?;
-        if &authorized.artifact != request.artifact() {
+        if &authorized.artifact != artifact {
             return Err(ArtifactBrokerReadError::Integrity);
         }
         let store = self
@@ -401,7 +454,7 @@ impl BrokeredSandboxArtifactBroker {
         request: &R,
     ) -> Result<Vec<u8>, ArtifactBrokerReadError>
     where
-        R: SandboxArtifactReadRequest + Sync,
+        R: ArtifactReadRequest + Sync,
     {
         let permit = self
             .in_flight
@@ -428,7 +481,8 @@ impl WasiArtifactBroker for BrokeredSandboxArtifactBroker {
         &self,
         request: WasiArtifactReadRequest,
     ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
-        self.read(self.wasi_authority.as_ref(), &request)
+        self.core
+            .read(self.wasi_authority.as_ref(), &request)
             .await
             .map_err(map_wasi_broker_error)
     }
@@ -441,9 +495,23 @@ impl MicroVmArtifactBroker for BrokeredSandboxArtifactBroker {
         request: MicroVmArtifactReadRequest,
     ) -> Result<Vec<u8>, MicroVmArtifactBrokerError> {
         request.validate()?;
-        self.read(self.micro_vm_authority.as_ref(), &request)
+        self.core
+            .read(self.micro_vm_authority.as_ref(), &request)
             .await
             .map_err(map_micro_vm_broker_error)
+    }
+}
+
+#[async_trait]
+impl ModelArtifactBroker for BrokeredModelArtifactBroker {
+    async fn read_exact(
+        &self,
+        request: ModelArtifactReadRequest,
+    ) -> Result<Vec<u8>, ModelArtifactBrokerError> {
+        self.core
+            .read(self.authority.as_ref(), &request)
+            .await
+            .map_err(map_model_broker_error)
     }
 }
 
@@ -554,6 +622,16 @@ fn map_micro_vm_broker_error(error: ArtifactBrokerReadError) -> MicroVmArtifactB
         ArtifactBrokerReadError::NotFound => MicroVmArtifactBrokerError::NotFound,
         ArtifactBrokerReadError::TooLarge => MicroVmArtifactBrokerError::TooLarge,
         ArtifactBrokerReadError::Integrity => MicroVmArtifactBrokerError::Integrity,
+    }
+}
+
+fn map_model_broker_error(error: ArtifactBrokerReadError) -> ModelArtifactBrokerError {
+    match error {
+        ArtifactBrokerReadError::Unavailable => ModelArtifactBrokerError::Unavailable,
+        ArtifactBrokerReadError::Denied => ModelArtifactBrokerError::Denied,
+        ArtifactBrokerReadError::NotFound => ModelArtifactBrokerError::NotFound,
+        ArtifactBrokerReadError::TooLarge => ModelArtifactBrokerError::TooLarge,
+        ArtifactBrokerReadError::Integrity => ModelArtifactBrokerError::Integrity,
     }
 }
 

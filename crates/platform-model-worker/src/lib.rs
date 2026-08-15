@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
-    canonical_digest, HardLimitProfile, JobState, ModelTurnState, ResourceId, ResourceIdError,
-    ResourceKind, Sha256Digest, WorkClass,
+    canonical_digest, parse_strict_json, HardLimitProfile, JobState, ModelTurnState, ResourceId,
+    ResourceIdError, ResourceKind, Sha256Digest, WorkClass,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_model_adapters::{
@@ -18,9 +18,10 @@ use insight_platform_model_adapters::{
     ANTHROPIC_MESSAGES_ADAPTER_NAME, OPENAI_RESPONSES_ADAPTER_NAME,
 };
 use insight_platform_models::{
-    CanonicalModelRequest, ClaimModelJobs, CommitModelCancellationOutcome, ModelAttemptMeasurement,
-    ModelClaimSlot, ModelExecutionInput, ModelExecutionInputMaterial, ModelLiveTextDelta,
-    ModelTurnLimits, ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, NormalizedModelDelta,
+    CanonicalModelRequest, ClaimModelJobs, CommitModelCancellationOutcome, ModelArtifactBroker,
+    ModelArtifactBrokerError, ModelArtifactReadRequest, ModelAttemptMeasurement, ModelClaimSlot,
+    ModelExecutionInput, ModelExecutionInputMaterial, ModelLiveTextDelta, ModelTurnLimits,
+    ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, NormalizedModelDelta,
     NormalizedModelFrame, MODEL_QUOTA_LINES,
 };
 use insight_platform_postgres::{
@@ -1372,6 +1373,8 @@ pub trait ModelRequestMaterializer: Send + Sync {
     async fn materialize(
         &self,
         input: &ModelExecutionInput,
+        artifact_read: Option<&ModelArtifactReadRequest>,
+        limits: ModelTurnLimits,
     ) -> Result<CanonicalModelRequest, ModelRequestMaterializationError>;
 }
 
@@ -1383,15 +1386,70 @@ impl ModelRequestMaterializer for InlineModelRequestMaterializer {
     async fn materialize(
         &self,
         input: &ModelExecutionInput,
+        artifact_read: Option<&ModelArtifactReadRequest>,
+        limits: ModelTurnLimits,
     ) -> Result<CanonicalModelRequest, ModelRequestMaterializationError> {
         input
             .validate()
             .map_err(|_| ModelRequestMaterializationError::InvalidMaterial)?;
+        if artifact_read.is_some() {
+            return Err(ModelRequestMaterializationError::InvalidMaterial);
+        }
         let ModelExecutionInputMaterial::Inline { value } = &input.material else {
             return Err(ModelRequestMaterializationError::ArtifactBrokerRequired);
         };
-        serde_json::from_value(value.clone())
-            .map_err(|_| ModelRequestMaterializationError::InvalidMaterial)
+        let bytes = serde_jcs::to_vec(value)
+            .map_err(|_| ModelRequestMaterializationError::InvalidMaterial)?;
+        decode_canonical_model_request(&bytes, input, limits)
+    }
+}
+
+pub struct BrokeredModelRequestMaterializer<B> {
+    broker: Arc<B>,
+}
+
+impl<B> BrokeredModelRequestMaterializer<B> {
+    pub fn new(broker: Arc<B>) -> Self {
+        Self { broker }
+    }
+}
+
+#[async_trait]
+impl<B> ModelRequestMaterializer for BrokeredModelRequestMaterializer<B>
+where
+    B: ModelArtifactBroker,
+{
+    async fn materialize(
+        &self,
+        input: &ModelExecutionInput,
+        artifact_read: Option<&ModelArtifactReadRequest>,
+        limits: ModelTurnLimits,
+    ) -> Result<CanonicalModelRequest, ModelRequestMaterializationError> {
+        input
+            .validate()
+            .map_err(|_| ModelRequestMaterializationError::InvalidMaterial)?;
+        match (&input.material, artifact_read) {
+            (ModelExecutionInputMaterial::Inline { value }, None) => {
+                let bytes = serde_jcs::to_vec(value)
+                    .map_err(|_| ModelRequestMaterializationError::InvalidMaterial)?;
+                decode_canonical_model_request(&bytes, input, limits)
+            }
+            (ModelExecutionInputMaterial::LinkedArtifact { artifact_link_id }, Some(request))
+                if request.exact == input.exact
+                    && &request.artifact_link_id == artifact_link_id =>
+            {
+                request
+                    .validate(limits)
+                    .map_err(|_| ModelRequestMaterializationError::InvalidMaterial)?;
+                let bytes = self
+                    .broker
+                    .read_exact(request.clone())
+                    .await
+                    .map_err(map_model_artifact_broker_error)?;
+                decode_canonical_model_request(&bytes, input, limits)
+            }
+            _ => Err(ModelRequestMaterializationError::InvalidMaterial),
+        }
     }
 }
 
@@ -1400,6 +1458,45 @@ pub enum ModelRequestMaterializationError {
     InvalidMaterial,
     ArtifactBrokerRequired,
     BrokerUnavailable,
+}
+
+fn decode_canonical_model_request(
+    bytes: &[u8],
+    input: &ModelExecutionInput,
+    limits: ModelTurnLimits,
+) -> Result<CanonicalModelRequest, ModelRequestMaterializationError> {
+    if bytes.len() > limits.maximum_request_bytes() {
+        return Err(ModelRequestMaterializationError::InvalidMaterial);
+    }
+    let value = parse_strict_json(bytes, limits.request_json_limits())
+        .map_err(|_| ModelRequestMaterializationError::InvalidMaterial)?;
+    let canonical =
+        serde_jcs::to_vec(&value).map_err(|_| ModelRequestMaterializationError::InvalidMaterial)?;
+    if canonical != bytes {
+        return Err(ModelRequestMaterializationError::InvalidMaterial);
+    }
+    let digest: Sha256Digest = canonical_digest(&value)
+        .map_err(|_| ModelRequestMaterializationError::InvalidMaterial)?
+        .parse()
+        .map_err(|_| ModelRequestMaterializationError::InvalidMaterial)?;
+    if digest != input.exact.content_digest {
+        return Err(ModelRequestMaterializationError::InvalidMaterial);
+    }
+    serde_json::from_value(value).map_err(|_| ModelRequestMaterializationError::InvalidMaterial)
+}
+
+fn map_model_artifact_broker_error(
+    error: ModelArtifactBrokerError,
+) -> ModelRequestMaterializationError {
+    match error {
+        ModelArtifactBrokerError::Unavailable => {
+            ModelRequestMaterializationError::BrokerUnavailable
+        }
+        ModelArtifactBrokerError::Denied
+        | ModelArtifactBrokerError::NotFound
+        | ModelArtifactBrokerError::TooLarge
+        | ModelArtifactBrokerError::Integrity => ModelRequestMaterializationError::InvalidMaterial,
+    }
 }
 
 pub struct RegisteredModelJobExecutor<R, O, A, H> {
@@ -1449,9 +1546,17 @@ where
         let heartbeat_interval = command.heartbeat_interval;
         let lease_milliseconds = command.lease_milliseconds;
         let prepare = async {
+            let artifact_read = command
+                .claim
+                .artifact_read_request(command.limits)
+                .map_err(|_| ())?;
             let request = self
                 .request_materializer
-                .materialize(&command.claim.request_input)
+                .materialize(
+                    &command.claim.request_input,
+                    artifact_read.as_ref(),
+                    command.limits,
+                )
                 .await
                 .map_err(|_| ())?;
             let adapter_job = command
@@ -1951,11 +2056,16 @@ mod tests {
     use super::*;
     use futures::StreamExt as _;
     use insight_platform_contracts::{
-        checked_in_hard_limit_profile, ExactDeploymentRef, WorkerManifest, WORKER_MANIFEST_VERSION,
-        WORKER_PROTOCOL_VERSION,
+        canonical_digest, checked_in_hard_limit_profile, ClosedJsonValue, DataClassification,
+        ExactDeploymentRef, ExactVersionRef, ResourceKind, ValueRef, WorkerManifest,
+        WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
     };
     use insight_platform_model_adapters::{ModelProviderWireRequest, ModelProviderWireStream};
-    use insight_platform_models::{AccountingQuality, ModelObservation, ModelUsage};
+    use insight_platform_models::{
+        AccountingQuality, CanonicalMessage, CanonicalMessagePart, CanonicalMessageRole,
+        ModelContentSource, ModelObservation, ModelRequestValue, ModelResponseContract, ModelUsage,
+        SafeTraceContext,
+    };
     use std::sync::Mutex;
 
     #[derive(Debug, Clone)]
@@ -1986,6 +2096,20 @@ mod tests {
     }
 
     struct UnusedExecutor;
+
+    struct FixtureModelArtifactBroker {
+        bytes: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl ModelArtifactBroker for FixtureModelArtifactBroker {
+        async fn read_exact(
+            &self,
+            _request: ModelArtifactReadRequest,
+        ) -> Result<Vec<u8>, ModelArtifactBrokerError> {
+            Ok(self.bytes.clone())
+        }
+    }
 
     #[async_trait]
     impl ModelJobCommandExecutor<FakeClaim> for UnusedExecutor {
@@ -2248,6 +2372,134 @@ mod tests {
             self.commands.lock().unwrap().push(command);
             Ok(())
         }
+    }
+
+    fn artifact_backed_model_request_fixture() -> (
+        CanonicalModelRequest,
+        ModelExecutionInput,
+        ModelArtifactReadRequest,
+        Vec<u8>,
+    ) {
+        let deadline = Utc::now() + ChronoDuration::minutes(5);
+        let request = CanonicalModelRequest {
+            schema_version: 1,
+            model_turn_id: resource(ResourceKind::ModelTurn),
+            messages: vec![CanonicalMessage {
+                role: CanonicalMessageRole::User,
+                parts: vec![CanonicalMessagePart::Text("bounded request".to_owned())],
+                classification: DataClassification::Internal,
+                source: ModelContentSource {
+                    source_kind: "run_input".to_owned(),
+                    source_digest: digest('1'),
+                    trusted_instruction: false,
+                },
+            }],
+            tools: vec![],
+            response_contract: ModelResponseContract {
+                output_schema_digest: digest('2'),
+                structured_schema: None,
+                allow_tool_intents: false,
+                allow_message_with_tool_intents: false,
+            },
+            artifact_inputs: vec![],
+            generation_parameters: ClosedJsonValue::build(digest('3'), serde_json::json!({}))
+                .unwrap(),
+            max_output_tokens: 32,
+            input_token_estimate: 8,
+            estimator_contract_digest: digest('4'),
+            source_map_digest: digest('5'),
+            truncation_policy: ExactVersionRef::new(
+                resource(ResourceKind::PolicyRevision),
+                digest('6'),
+            )
+            .unwrap(),
+            classification: DataClassification::Internal,
+            deadline,
+            trace_context: SafeTraceContext {
+                trace_id_digest: digest('7'),
+                parent_span_id_digest: digest('8'),
+            },
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        let bytes = serde_jcs::to_vec(&value).unwrap();
+        let content_digest: Sha256Digest = canonical_digest(&value).unwrap().parse().unwrap();
+        let artifact = insight_platform_contracts::ArtifactRef::new(
+            resource(ResourceKind::Artifact),
+            content_digest.clone(),
+            u64::try_from(bytes.len()).unwrap(),
+            "application/json",
+            DataClassification::Internal,
+            Some("model-request.json".to_owned()),
+        )
+        .unwrap();
+        let run_id = resource(ResourceKind::Run);
+        let node_id = resource(ResourceKind::NodeExecution);
+        let artifact_link_id = resource(ResourceKind::ArtifactLink);
+        let request_value = ModelRequestValue {
+            value_id: resource(ResourceKind::RunValue),
+            classification: DataClassification::Internal,
+            schema_digest: digest('9'),
+            content_digest: content_digest.clone(),
+            value: ValueRef::Artifact {
+                artifact: artifact.clone(),
+            },
+            artifact_link_id: Some(artifact_link_id.clone()),
+            request: request.clone(),
+        };
+        let limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let exact = request_value.exact_for(&run_id, &node_id, limits).unwrap();
+        let input = ModelExecutionInput {
+            exact: exact.clone(),
+            material: ModelExecutionInputMaterial::LinkedArtifact {
+                artifact_link_id: artifact_link_id.clone(),
+            },
+        };
+        let read = ModelArtifactReadRequest {
+            schema_version: 1,
+            tenant_id: resource(ResourceKind::Tenant),
+            model_turn_id: request.model_turn_id.clone(),
+            job_id: resource(ResourceKind::Job),
+            exact,
+            artifact_link_id,
+            fence: JobFence {
+                expected_version: 2,
+                worker_process_generation_id: resource(ResourceKind::WorkerProcessGeneration),
+                lease_generation: 1,
+                token_digest: digest('a'),
+            },
+            request_digest: digest('b'),
+            maximum_bytes: bytes.len(),
+            deadline,
+        };
+        (request, input, read, bytes)
+    }
+
+    #[tokio::test]
+    async fn brokered_request_materializer_rechecks_canonical_bytes_and_digest() {
+        let (expected, input, read, bytes) = artifact_backed_model_request_fixture();
+        let limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let materializer =
+            BrokeredModelRequestMaterializer::new(Arc::new(FixtureModelArtifactBroker {
+                bytes: bytes.clone(),
+            }));
+        assert_eq!(
+            materializer
+                .materialize(&input, Some(&read), limits)
+                .await
+                .unwrap(),
+            expected
+        );
+
+        let mut noncanonical = bytes;
+        noncanonical.push(b'\n');
+        let materializer =
+            BrokeredModelRequestMaterializer::new(Arc::new(FixtureModelArtifactBroker {
+                bytes: noncanonical,
+            }));
+        assert_eq!(
+            materializer.materialize(&input, Some(&read), limits).await,
+            Err(ModelRequestMaterializationError::InvalidMaterial)
+        );
     }
 
     #[tokio::test]

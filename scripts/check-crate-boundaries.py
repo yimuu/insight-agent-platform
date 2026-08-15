@@ -64,7 +64,7 @@ ALLOWED_INTERNAL = {
     "runtime": {"engine", "durable", "dsl", "resources", "mcp"},
     "api": {"engine", "dsl", "durable", "resources", "runtime", "mcp"},
     "artifacts_domain": {"contracts", "jobs_domain"},
-    "artifact_broker": {"artifacts_domain", "contracts", "sandbox_domain"},
+    "artifact_broker": {"artifacts_domain", "contracts", "models_domain", "sandbox_domain"},
     "platform_api": {"mcp_host"},
     "capability_adapters": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "platform_postgres"},

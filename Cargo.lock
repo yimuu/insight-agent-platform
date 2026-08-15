@@ -2331,6 +2331,7 @@ dependencies = [
  "chrono",
  "insight-platform-artifacts",
  "insight-platform-contracts",
+ "insight-platform-models",
  "insight-platform-sandbox",
  "serde",
  "serde_jcs",
@@ -2598,6 +2599,7 @@ dependencies = [
 name = "insight-platform-models"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "insight-platform-contracts",
  "insight-platform-invocations",

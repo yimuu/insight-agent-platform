@@ -14,6 +14,8 @@ mod types;
 mod tests;
 
 pub use insight_platform_contracts::ClosedSchemaDocument;
+pub use insight_platform_invocations::{ExactInvocationValueRef, InvocationValueStorage};
+pub use insight_platform_jobs::JobFence;
 pub use state::*;
 pub use stream::*;
 pub use types::*;
@@ -116,6 +118,16 @@ impl ModelTurnLimits {
 
     pub const fn inline_value_limits(self) -> JsonLimits {
         self.inline_value_limits
+    }
+
+    pub const fn request_json_limits(self) -> JsonLimits {
+        JsonLimits {
+            max_bytes: self.maximum_request_bytes,
+            max_depth: self.inline_value_limits.max_depth,
+            max_items_per_array: self.inline_value_limits.max_items_per_array,
+            max_properties_per_object: self.inline_value_limits.max_properties_per_object,
+            max_string_bytes: self.maximum_request_bytes,
+        }
     }
 }
 

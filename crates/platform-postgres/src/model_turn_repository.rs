@@ -7,9 +7,15 @@ use crate::{
         require_tenant_permission, terminalize_command_receipt, JobRecord, PgRepository,
         RepositoryError, RunRecord, TypedPayload,
     },
+    sandbox_repository::{
+        load_authorized_artifact_object, ArtifactObjectReadProjection, ArtifactObjectReadPurpose,
+    },
 };
 use chrono::{DateTime, Utc};
-use insight_platform_artifacts::ArtifactReferenceSnapshot;
+use insight_platform_artifacts::{
+    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, ArtifactReferenceSnapshot,
+    AuthorizedArtifactObjectRead,
+};
 use insight_platform_contracts::{
     canonical_digest, ArtifactPurpose, ArtifactRef, ArtifactReferenceKind, CommandOutcome,
     DeploymentClosure, EntityLifecycle, FrozenSlotTarget, JobState, ModelTurnState,
@@ -23,11 +29,11 @@ use insight_platform_models::{
     decide_model_cancellation_outcome, decide_model_control, decide_model_outcome,
     decide_model_turn_admission, decide_prepare_model_dispatch, decide_start_model_dispatch,
     CanonicalMessagePart, ClaimModelJobs, CommitModelCancellationOutcome, CommitModelOutcome,
-    ControlModelTurn, CreateModelTurn, ModelAdmissionFacts, ModelControlKind, ModelDispatchOutcome,
-    ModelExecutionInput, ModelExecutionInputMaterial, ModelJobPayload, ModelOutputValue,
-    ModelQuotaCeiling, ModelQuotaSettlement, ModelRequestValue, ModelTurnLimits, ModelTurnPayload,
-    ModelTurnRecord, ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, PrepareModelDispatch,
-    PreparedModelDispatch, MODEL_QUOTA_LINES,
+    ControlModelTurn, CreateModelTurn, ModelAdmissionFacts, ModelArtifactReadRequest,
+    ModelControlKind, ModelDispatchOutcome, ModelExecutionInput, ModelExecutionInputMaterial,
+    ModelJobPayload, ModelOutputValue, ModelQuotaCeiling, ModelQuotaSettlement, ModelRequestValue,
+    ModelTurnLimits, ModelTurnPayload, ModelTurnRecord, ModelTurnStore, ModelTurnTransaction,
+    ModelWorkerAudit, PrepareModelDispatch, PreparedModelDispatch, MODEL_QUOTA_LINES,
 };
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,6 +74,58 @@ pub struct ClaimedModelExecution {
 impl ClaimedModelExecution {
     pub fn job_projection(&self) -> Result<JobProjection, RepositoryError> {
         job_projection(&self.job)
+    }
+
+    pub fn artifact_read_request(
+        &self,
+        limits: ModelTurnLimits,
+    ) -> Result<Option<ModelArtifactReadRequest>, RepositoryError> {
+        self.request_input
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let projection = self.job_projection()?;
+        let lease = projection
+            .lease
+            .as_ref()
+            .ok_or(RepositoryError::LeaseExpired)?;
+        if projection.state != JobState::Running
+            || projection.version != self.fence.expected_version
+            || projection.lease_generation != self.fence.lease_generation
+            || lease.worker_process_generation_id != self.fence.worker_process_generation_id
+            || lease.token_digest != self.fence.token_digest
+            || self.turn.payload.current_job_id.as_ref() != Some(&projection.job_id)
+        {
+            return Err(RepositoryError::StaleFence);
+        }
+        let ModelExecutionInputMaterial::LinkedArtifact { artifact_link_id } =
+            &self.request_input.material
+        else {
+            return Ok(None);
+        };
+        let InvocationValueStorage::Artifact { artifact } = &self.request_input.exact.storage
+        else {
+            return Err(RepositoryError::CorruptRow(
+                "Artifact-backed Model request has Inline storage".to_owned(),
+            ));
+        };
+        let request = ModelArtifactReadRequest {
+            schema_version: 1,
+            tenant_id: self.turn.tenant_id.clone(),
+            model_turn_id: self.turn.model_turn_id.clone(),
+            job_id: projection.job_id,
+            exact: self.request_input.exact.clone(),
+            artifact_link_id: artifact_link_id.clone(),
+            fence: self.fence.clone(),
+            request_digest: self.turn.payload.admission.request_digest.clone(),
+            maximum_bytes: usize::try_from(artifact.byte_length()).map_err(|_| {
+                RepositoryError::CorruptRow("Model request Artifact is too large".to_owned())
+            })?,
+            deadline: self.turn.deadline,
+        };
+        request
+            .validate(limits)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        Ok(Some(request))
     }
 
     /// Builds the credential-free, exact Provider request after the canonical request bytes have
@@ -156,6 +214,149 @@ impl ClaimedModelExecution {
             .validate_at(Utc::now())
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         Ok(command)
+    }
+}
+
+#[async_trait::async_trait]
+impl ArtifactObjectReadAuthority<ModelArtifactReadRequest> for PgRepository {
+    async fn authorize_object_read(
+        &self,
+        request: &ModelArtifactReadRequest,
+    ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
+        request
+            .validate(self.model_turn_limits())
+            .map_err(|_| ArtifactObjectReadAuthorityError::Denied)?;
+        let artifact = request
+            .artifact()
+            .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        let database_now = database_now(&mut transaction)
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        let turn = load_model_turn(
+            &mut transaction,
+            &request.tenant_id,
+            &request.model_turn_id,
+            true,
+            self.model_turn_limits(),
+        )
+        .await
+        .map_err(classify_model_artifact_read_error)?;
+        let job = load_model_job(&mut transaction, &request.tenant_id, &request.job_id, true)
+            .await
+            .map_err(classify_model_artifact_read_error)?;
+        let projection = job_projection(&job).map_err(classify_model_artifact_read_error)?;
+        let payload: ModelJobPayload = decode_versioned_payload(&job.payload, "Model Job")
+            .map_err(classify_model_artifact_read_error)?;
+        payload
+            .validate_for(&turn, &projection, self.model_turn_limits())
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let lease = projection
+            .lease
+            .as_ref()
+            .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
+        if turn.state != ModelTurnState::InFlight
+            || turn.payload.current_job_id.as_ref() != Some(&request.job_id)
+            || turn.payload.admission.request != request.exact
+            || turn.payload.admission.request_artifact_link_id.as_ref()
+                != Some(&request.artifact_link_id)
+            || turn.payload.admission.request_digest != request.request_digest
+            || turn.deadline != request.deadline
+            || request.deadline <= database_now
+            || projection.state != JobState::Running
+            || projection.version != request.fence.expected_version
+            || projection.lease_generation != request.fence.lease_generation
+            || lease.worker_process_generation_id != request.fence.worker_process_generation_id
+            || lease.token_digest != request.fence.token_digest
+            || lease.expires_at <= database_now
+        {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        let value_and_link_match: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM insight_platform.run_values AS value
+                JOIN insight_platform.artifact_links AS link
+                  ON link.tenant_id = value.tenant_id
+                 AND link.artifact_link_id = $8
+                 AND link.link_kind = 'reference'
+                 AND link.owner_kind = 'model_turn'
+                 AND link.owner_id = $9
+                 AND link.target_artifact_id = value.artifact_id
+                 AND link.state = 'active'
+                 AND link.released_at IS NULL
+                 AND (link.expires_at IS NULL OR link.expires_at > $10)
+                WHERE value.tenant_id = $1 AND value.value_id = $2
+                  AND value.run_id = $3 AND value.node_id = $4
+                  AND value.value_kind = 'model_request'
+                  AND value.classification = $5
+                  AND value.schema_digest = $6
+                  AND value.content_digest = $7
+                  AND value.inline_value IS NULL
+                  AND value.artifact_id = $11
+            )
+            "#,
+        )
+        .bind(request.tenant_id.to_string())
+        .bind(request.exact.value_id.to_string())
+        .bind(request.exact.run_id.to_string())
+        .bind(
+            request
+                .exact
+                .producing_node_id
+                .as_ref()
+                .ok_or(ArtifactObjectReadAuthorityError::InvalidEvidence)?
+                .to_string(),
+        )
+        .bind(request.exact.classification.as_str())
+        .bind(request.exact.schema_digest.to_string())
+        .bind(request.exact.content_digest.to_string())
+        .bind(request.artifact_link_id.to_string())
+        .bind(request.model_turn_id.to_string())
+        .bind(database_now)
+        .bind(artifact.artifact_id().to_string())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        if !value_and_link_match {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        let authorized = load_authorized_artifact_object(
+            &mut transaction,
+            ArtifactObjectReadProjection {
+                tenant_id: &request.tenant_id,
+                owner_kind: "model_turn",
+                owner_id: &request.model_turn_id,
+                request_digest: &request.request_digest,
+                worker_process_generation_id: &request.fence.worker_process_generation_id,
+                lease_generation: request.fence.lease_generation,
+                artifact,
+                purpose_domain: "model_request_value",
+                purpose_class: ArtifactObjectReadPurpose::ModelInput,
+                job_version: projection.version,
+            },
+        )
+        .await
+        .map_err(classify_model_artifact_read_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        Ok(authorized)
+    }
+}
+
+fn classify_model_artifact_read_error(error: RepositoryError) -> ArtifactObjectReadAuthorityError {
+    match error {
+        RepositoryError::Database(_) => ArtifactObjectReadAuthorityError::Unavailable,
+        RepositoryError::NotFound(_) => ArtifactObjectReadAuthorityError::NotFound,
+        RepositoryError::PermissionDenied => ArtifactObjectReadAuthorityError::Denied,
+        _ => ArtifactObjectReadAuthorityError::InvalidEvidence,
     }
 }
 

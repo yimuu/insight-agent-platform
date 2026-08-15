@@ -113,12 +113,13 @@ process-local business permit再发有界PostgreSQL claim，并把返回的Job�
 reservation ledger identity逐项回绑。request materializer、Provider adapter host与output materializer都在permit内执行；Provider I/O期间按
 HardLimitProfile heartbeat续租，heartbeat只旋转Job optimistic version，已规范化结果随后用新fence提交而不会仅因续租重放付费请求。
 进程drain超时要求终止整代Worker，使未完成lease由恢复扫描接管。Inline request/output实现已有明确上限；当冻结的Provider响应上限无法由
-Inline承载时，在Provider dispatch前提交`model_output_artifact_required`拒绝，不产生调用或保守计费。Artifact-backed生产实现仍必须注入
-Artifact Broker port。Model stream中通过完整fence校验的text delta现在被编码为credential-free canonical内部envelope，并经
+Inline承载时，在Provider dispatch前提交`model_output_artifact_required`拒绝，不产生调用或保守计费。Artifact-backed request现已有
+closed read request、PostgreSQL authority、共享Broker pipeline与Worker materializer内核；生产进程仍须经独立versioned RPC注入Artifact
+Broker port，Artifact-backed output仍未交付。Model stream中通过完整fence校验的text delta现在被编码为credential-free canonical内部envelope，并经
 双重message/byte有界、non-blocking队列投影到TLS/mTLS NATS tenant/run scoped subject；容量permit保留到有界批次flush结束，不能被NATS
 客户端内部缓冲绕过。tool argument与Provider metadata不会进入该通道，
-NATS断连、背压或单帧超限只丢弃live observation，不阻断PostgreSQL中的ModelTurn/Job执行。20项adapter、10项worker与2项
-process-config unit通过；环境提供真实TLS NATS fixture时还会验证跨进程发布。
+NATS断连、背压或单帧超限只丢弃live observation，不阻断PostgreSQL中的ModelTurn/Job执行。20项adapter、11项worker、7项Artifact Broker与
+2项process-config unit通过；环境提供真实TLS NATS fixture时还会验证跨进程发布。
 因此该组合关闭执行驱动缺口，但不关闭CR-132、CR-148或Phase 4。
 
 Model Worker的独立候选进程与Kubernetes隔舱也已交付：`platform-model-worker`启动时复验canonical config digest、exact
@@ -132,8 +133,9 @@ Model durable control也已进入同一候选进程：bounded PostgreSQL safety 
 `CommitModelCancellationOutcome`。Egress重试失败不提交terminal；`Unsupported`或畸形结果fail closed；已dispatch但无法取得可信usage时按
 admission token/cost ceiling生成Reconciled保守结算，late completion仍由first-winner fence拒绝。该路径复用ModelTurn/Job/Quota/
 Receipt/Event/Outbox，不增加表或migration。当前进程还把exact text delta投影到上述非权威NATS内部通道；公开SSE消费、断线后的durable
-terminal校准与live-gap/backpressure资格仍属于Phase 5/6。进程仍明确只组合Inline request/output materializer；Artifact-backed input/output及
-real-process Provider/kill/saturation资格未闭合，因此这只是production-shaped候选组合，不是Phase 4或Candidate资格结论。
+terminal校准与live-gap/backpressure资格仍属于Phase 5/6。进程仍明确只组合Inline request/output materializer；Artifact-backed request
+authority/materializer内核虽已交付，独立Broker RPC、生产进程注入、Artifact-backed output及real-process Provider/kill/saturation资格仍未
+闭合，因此这只是production-shaped候选组合，不是Phase 4或Candidate资格结论。
 
 durable control winner现由`ControlledCapabilityExecution`与原claim共同构造cancel job：只旋转Job optimistic version，tenant、Invocation、Job、
 physical attempt、lease generation/token、WorkerProcessGeneration和Deployment/Input必须保持exact，旧generation在adapter I/O前fail closed。
@@ -495,12 +497,15 @@ schema digest。68项Contracts、10项真实Wasmtime、受影响Capability/Model
 通过；数据库fixture同时证明错误placement摘要、陈旧Worker generation和字段类型错误的输入/输出均fail closed。该切片保持23表、单一
 `0001` migration，checked-in Platform v1合同无漂移。
 
-CR-148已交付Artifact-backed逻辑值语义的第一片：显式Artifact字段使用nominal ArtifactRef，而因存储阈值转为Artifact-backed的整个
+CR-148已交付Artifact-backed逻辑值语义和Model request读取的下一片：显式Artifact字段使用nominal ArtifactRef，而因存储阈值转为Artifact-backed的整个
 逻辑JSON仍按物化正文schema验证；admission不会把ArtifactRef metadata误当正文。WASI input/output现共用Controller value-validator，
 Inline路径已取得上述真实PostgreSQL正负向证据。Sandbox PostgreSQL fixture现也使用Ready Artifact-backed RunValue、Invocation reference与
 per-Job read grant，覆盖admission及Controller schema-validator，但正文仍由fixture backend模拟，尚不能替代真实Artifact Broker读取。
-Artifact-backed输入的真实broker fixture、generic Capability/Model producer materializer
-以及生产组合仍未完成，因此CR-148与Phase 4保持进行中。
+Model claim现在构造closed Artifact read request，精确绑定Turn、当前Job version/fence/lease/Worker generation、request digest、deadline、
+RunValue及active ModelTurn-owned ArtifactLink；PostgreSQL authority与通用Broker在object I/O前后授权，Worker materializer再检查strict
+canonical JSON与逻辑digest。fresh PostgreSQL 16 fixture证明有效读取可重放且陈旧Job fence被拒绝；共享Broker与Worker unit还覆盖
+非canonical正文拒绝。generic Capability producer、独立Artifact Broker RPC、Model生产进程组合与Artifact-backed output仍未完成，
+因此CR-148与Phase 4保持进行中。
 
 CR-149已关闭内部Sandbox workload identity混淆缺口。registration、verify与absence端点统一从已通过client CA验证的leaf certificate
 提取恰好一个`spiffe://insight.platform/workload/<closed-workload-role>` URI SAN，并按方法匹配Executor或Controller exact role；CN、DNS
@@ -688,6 +693,13 @@ Sandbox，通用Revision允许用closed AuthoringPackage加`rules_digest`承诺�
 重验。Contracts定向测试以及全新PostgreSQL 16的OAuth、subscription/Managed与Sandbox suites实际通过；同时把cleanup evidence时间
 fixture改为使用数据库时钟，避免宿主与数据库微小时钟偏差制造伪失败。该修订不放宽Sandbox egress、不增表或migration；跨节点clock-skew
 与真实网络隔离仍属于Phase 6资格。
+
+CR-161关闭Model Artifact-backed request在claim与object read之间缺少exact authority的问题：closed read request冻结tenant、ModelTurn、
+当前Job version/fence/lease/Worker generation、request digest、deadline、exact RunValue与active ModelTurn ArtifactLink；PostgreSQL在同一
+snapshot校验逻辑值、grant和Ready Artifact/Verified Blob后生成非持久物理投影，共享Artifact Broker在I/O后以同一请求再次授权，Worker再按
+Model hard limits复核strict canonical JSON与逻辑content digest。fresh PostgreSQL 16 fixture证明有效授权可稳定重放且陈旧Job fence被拒绝，
+Broker/Worker unit覆盖同一exact-object pipeline与非canonical正文拒绝。该切片不增表、migration或locator泄漏；独立versioned Broker RPC、
+生产Model Worker组合及Artifact-backed output仍属Phase 4开放项。
 
 clean-cut baseline现由部署期独立provisioning流程对fresh PostgreSQL target一次性安装；Platform运行时crate已删除DDL apply入口，
 API/Scheduler/Worker只做read-only schema verification。旧`coordinator.rs`实现路径改为role-neutral orchestration模块，cutover gate

@@ -371,9 +371,10 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
         authorize_wasi_artifact_purpose(&mut transaction, request, &leased_request, database_now)
             .await
             .map_err(classify_artifact_read_repository_error)?;
-        let projection = SandboxArtifactObjectReadProjection {
+        let projection = ArtifactObjectReadProjection {
             tenant_id: &request.tenant_id,
-            sandbox_job_id: &request.sandbox_job_id,
+            owner_kind: "sandbox_job",
+            owner_id: &request.sandbox_job_id,
             request_digest: &request.request_digest,
             worker_process_generation_id: &request.worker_process_generation_id,
             lease_generation: request.lease_generation,
@@ -383,8 +384,8 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
                 WasiArtifactReadPurpose::InputValue => "input_value",
             },
             purpose_class: match request.purpose {
-                WasiArtifactReadPurpose::RuntimeBundle => SandboxArtifactReadClass::Package,
-                WasiArtifactReadPurpose::InputValue => SandboxArtifactReadClass::Input,
+                WasiArtifactReadPurpose::RuntimeBundle => ArtifactObjectReadPurpose::Package,
+                WasiArtifactReadPurpose::InputValue => ArtifactObjectReadPurpose::SandboxInput,
             },
             job_version: current.job.version,
         };
@@ -490,15 +491,16 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
         .map_err(classify_artifact_read_repository_error)?;
         let authorized = load_authorized_artifact_object(
             &mut transaction,
-            SandboxArtifactObjectReadProjection {
+            ArtifactObjectReadProjection {
                 tenant_id: &request.tenant_id,
-                sandbox_job_id: &request.sandbox_job_id,
+                owner_kind: "sandbox_job",
+                owner_id: &request.sandbox_job_id,
                 request_digest: &request.request_digest,
                 worker_process_generation_id: &request.executor_worker_process_generation_id,
                 lease_generation: request.lease_generation,
                 artifact: &request.artifact,
                 purpose_domain: "managed_mcp_session_runtime_bundle",
-                purpose_class: SandboxArtifactReadClass::Package,
+                purpose_class: ArtifactObjectReadPurpose::Package,
                 job_version: job.version,
             },
         )
@@ -1018,26 +1020,28 @@ async fn require_active_sandbox_artifact_grant(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SandboxArtifactReadClass {
+pub(crate) enum ArtifactObjectReadPurpose {
     Package,
-    Input,
+    SandboxInput,
+    ModelInput,
 }
 
-struct SandboxArtifactObjectReadProjection<'a> {
-    tenant_id: &'a ResourceId,
-    sandbox_job_id: &'a ResourceId,
-    request_digest: &'a Sha256Digest,
-    worker_process_generation_id: &'a ResourceId,
-    lease_generation: u64,
-    artifact: &'a insight_platform_contracts::ArtifactRef,
-    purpose_domain: &'static str,
-    purpose_class: SandboxArtifactReadClass,
-    job_version: u64,
+pub(crate) struct ArtifactObjectReadProjection<'a> {
+    pub tenant_id: &'a ResourceId,
+    pub owner_kind: &'static str,
+    pub owner_id: &'a ResourceId,
+    pub request_digest: &'a Sha256Digest,
+    pub worker_process_generation_id: &'a ResourceId,
+    pub lease_generation: u64,
+    pub artifact: &'a insight_platform_contracts::ArtifactRef,
+    pub purpose_domain: &'static str,
+    pub purpose_class: ArtifactObjectReadPurpose,
+    pub job_version: u64,
 }
 
-async fn load_authorized_artifact_object(
+pub(crate) async fn load_authorized_artifact_object(
     transaction: &mut Transaction<'_, Postgres>,
-    request: SandboxArtifactObjectReadProjection<'_>,
+    request: ArtifactObjectReadProjection<'_>,
 ) -> Result<AuthorizedArtifactObjectRead, RepositoryError> {
     let row = sqlx::query(
         r#"
@@ -1073,8 +1077,8 @@ async fn load_authorized_artifact_object(
         .get("display_name")
         .and_then(|value| value.as_str());
     let expected_purpose = match request.purpose_class {
-        SandboxArtifactReadClass::Package => ArtifactPurpose::Package,
-        SandboxArtifactReadClass::Input => {
+        ArtifactObjectReadPurpose::Package => ArtifactPurpose::Package,
+        ArtifactObjectReadPurpose::SandboxInput => {
             let purpose = row
                 .try_get::<String, _>("purpose")?
                 .parse::<ArtifactPurpose>()
@@ -1087,6 +1091,7 @@ async fn load_authorized_artifact_object(
             }
             purpose
         }
+        ArtifactObjectReadPurpose::ModelInput => ArtifactPurpose::RunInput,
     };
     if row.try_get::<String, _>("purpose")? != expected_purpose.as_str()
         || row.try_get::<String, _>("classification")? != request.artifact.classification().as_str()
@@ -1139,9 +1144,10 @@ async fn load_authorized_artifact_object(
         "lease_generation": request.lease_generation,
         "object_generation": object_generation,
         "object_reference_ciphertext_digest": object_reference_ciphertext_digest,
+        "owner_id": request.owner_id,
+        "owner_kind": request.owner_kind,
         "purpose": request.purpose_domain,
         "request_digest": request.request_digest,
-        "sandbox_job_id": request.sandbox_job_id,
         "schema_version": 1,
         "storage_binding_digest": storage_binding_digest,
         "tenant_id": request.tenant_id,
