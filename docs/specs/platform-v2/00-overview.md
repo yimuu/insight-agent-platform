@@ -47,7 +47,7 @@ Platform v2 采用以下不可逆的架构决定：
 | 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / In Progress | 多租户、授权、Secret、Effect、Quota、Approval |
 | 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / In Progress | Agent Interface、Typed Plan、Model Loop |
 | 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / In Progress | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / In Progress | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Draft / Architecture Revision | Scheduler、Worker、Lease、背压和隔舱并发 |
 | 08 | [`08-subagent.md`](08-subagent.md) | Accepted / In Progress | Child Run、父子通信、取消传播和循环限制 |
 | 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / In Progress | Capability Interface、Implementation、Registry |
 | 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / In Progress | 调用协议、幂等、同步快路径、异步恢复 |
@@ -167,7 +167,7 @@ Draft
 ## 8. 本批次结论与下一步
 
 00～18 的 persistence architecture cross-review 已关闭；其余目标合同保持 Accepted / Implementation In Progress。CR-165 在实现前审计中
-发现 Candidate enablement、capacity isolation identity和RPC常量缺少机器闭包，因此16与18已按规范流程临时回退为
+发现全局HardLimitProfile版本、Candidate enablement、capacity isolation identity和RPC常量缺少机器闭包，因此07、16与18已按规范流程临时回退为
 Draft / Architecture Revision，修复并完成全量cross-review前不得作为实现输入。旧的专用
 表族、migration 1～35、177 表 catalog、checksum 和资格结论全部退出活动基线。物理模型由
 [`ADR-0001`](../../adr/0001-platform-v2-postgres-baseline.md)冻结为 23 张表，并已经形成单一 `0001`、共享 repository 与

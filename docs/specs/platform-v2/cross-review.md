@@ -3,7 +3,8 @@
 > **Architecture Revision override（2026-08-15）**：CR-165在实现前machine审计中重新打开。Candidate缺少显式
 > Inline-only/Artifact-capable mode、两个新digest集合的边界/空集语义、可比较的typed pool/semaphore identity closure，以及进入root
 > contract digest的4096-byte protobuf overhead载体；Component/Storage manifest wire也未闭合。下方CR-165旧行的
-> “Resolved contract”结论暂时失效，16与18已回退为Draft / Architecture Revision；完成上游到下游修订和全量cross-review后才可恢复。
+> “Resolved contract”结论暂时失效；全局profile将由v4升级为v5，故07、16与18已回退为Draft / Architecture Revision；完成上游到下游
+> 修订和全量cross-review后才可恢复。
 
 | 属性 | 值 |
 |---|---|
