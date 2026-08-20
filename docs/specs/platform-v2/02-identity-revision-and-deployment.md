@@ -111,24 +111,23 @@ struct Deployment {
     tenant_id: TenantId,
     resource_id: ResourceId,
     version_id: ResourceVersionId,
-    state: DeploymentState,
     environment: EnvironmentName,
-    region: CanonicalRegion,
-    backend: TypedBackendBinding,
-    secret_bindings: Vec<SecretBindingRef>,
-    policy_bindings: Vec<ResourceVersionId>,
-    dependency_closure: Vec<ExactDependency>,
-    runtime_digest: Digest,
+    closure: DeploymentClosure,
     closure_digest: Digest,
-    projection_version: u64,
+    created_by: PrincipalId,
+    created_at: Timestamp,
 }
 ```
 
-Deployment不复制Version definition，只冻结环境相关backend、credential reference、region、runtime/protocol和exact dependency closure。
-合法state为`Draft -> Validating -> Ready -> Active | Suspended -> Retired`，具体合法边由domain owner定义。
+Deployment是一经创建就不可变的exact runnable closure：它不复制Version definition，只冻结环境相关backend、
+credential reference、region（若该typed closure需要）、runtime/protocol和exact dependency。Deployment不拥有可变state、
+projection version或另一个current head；可绑定性由它引用的immutable closure与Secret/policy安全门禁共同决定。
 
-同一tenant/resource/environment/region只有一个active Deployment。activate事务锁定Resource、old/new Deployment和expected
-versions，更新active binding、Event/Outbox和Receipt。它不扫描或改写已存Run。
+Resource是未来Run绑定的唯一current authority：`active_deployment_id`指向当前exact Deployment，`AdministrativeGate`
+决定该绑定是否接受新admission。同一tenant/resource只有一个active binding。activate事务锁定Resource与目标
+Deployment，校验expected Resource version和exact closure digest，原子设置active binding及`Enabled` gate，并写Event/Outbox/Receipt。
+suspend只在path Deployment仍是Resource active binding时，以Resource CAS将gate设为`Suspended`；它不改写Deployment。
+再次activate同一或其他exact Deployment可原子恢复`Enabled`。上述命令都不扫描或改写已存Run。
 
 ## 7. 引用闭包与发布
 

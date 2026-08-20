@@ -86,9 +86,11 @@ POST   /v1/{kind}/{resource_id}/deployments/{deployment_id}:activate
 POST   /v1/{kind}/{resource_id}/deployments/{deployment_id}:suspend
 ```
 
-create/draft-update/validate/publish/deploy/activate语义由02拥有。Resource拥有唯一current editable Draft；Draft update使用
+create/draft-update/validate/publish/deploy/activate/suspend语义由02拥有。Resource拥有唯一current editable Draft；Draft update使用
 `If-Match`并推进generation、使旧validation失效。publish以Resource ETag + draft generation + digest为fence并创建immutable Version；
-Published Version和Deployment immutable。activate只影响未来Run；已存Run使用冻结binding。validate/discovery/build返回Job
+Published Version和Deployment immutable。activate/suspend都必须携带Resource `If-Match`：activate用path Deployment设置
+Resource active binding并使gate为`Enabled`，suspend仅在path Deployment仍为active binding时将Resource gate设为`Suspended`。
+它们只影响未来Run；已存Run使用冻结binding，Deployment row不被修改。validate/discovery/build返回Job
 Operation，不建业务Operation aggregate。首版不暴露mutable Draft Version identity，也不提供尚未发布Version的GET route。
 
 首版不提供Installation release/promote/rollback、Candidate、GateResult、ReleaseManifest、dynamic storage/KMS binding、
