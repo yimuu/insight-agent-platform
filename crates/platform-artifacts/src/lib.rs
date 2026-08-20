@@ -510,9 +510,8 @@ pub fn decide_complete_upload(
     if artifact.state != ArtifactState::Staging
         || blob.state != insight_platform_contracts::BlobIntegrityState::Staging
         || grant.state != ArtifactLinkState::Active
-        || operation.state != JobState::Leased
+        || operation.state != JobState::Waiting
         || !artifact.state.can_transition_to(ArtifactState::Uploaded)
-        || !operation.state.can_transition_to(JobState::Running)
     {
         return Err(ArtifactCommandError::InvalidTransition);
     }
@@ -540,7 +539,7 @@ pub fn decide_complete_upload(
         blob_version: next_version(blob.version)?,
         grant_state: ArtifactLinkState::Consumed,
         grant_version: next_version(grant.version)?,
-        operation_state: JobState::Running,
+        operation_state: JobState::Waiting,
         operation_version: next_version(operation.version)?,
     })
 }
@@ -1030,7 +1029,7 @@ impl MarkArtifactDeletion {
             .map_err(|_| ArtifactCommandError::InvalidAudit)?;
         if self.deletion_operation_id.kind() != ResourceKind::Job
             || self.deletion_job_id.kind() != ResourceKind::Job
-            || self.deletion_job_id == self.deletion_operation_id
+            || self.deletion_job_id != self.deletion_operation_id
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.expected_artifact_version == 0
@@ -1213,13 +1212,14 @@ impl CompleteArtifactDeletion {
             .map_err(|_| ArtifactCommandError::InvalidAudit)?;
         if self.deletion_operation_id.kind() != ResourceKind::Job
             || self.deletion_job_id.kind() != ResourceKind::Job
-            || self.deletion_job_id == self.deletion_operation_id
+            || self.deletion_job_id != self.deletion_operation_id
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.expected_artifact_version == 0
             || self.expected_blob_version == 0
             || self.expected_operation_version == 0
             || self.fence.expected_version == 0
+            || self.expected_operation_version != self.fence.expected_version
             || self.fence.lease_generation == 0
             || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
         {
@@ -1461,7 +1461,7 @@ pub fn decide_finalize_artifact(
     if artifact.state != ArtifactState::Verified
         || blob.state != BlobIntegrityState::Verified
         || grant.state != ArtifactLinkState::Consumed
-        || operation.state != JobState::Running
+        || operation.state != JobState::Waiting
         || !artifact.state.can_transition_to(ArtifactState::Ready)
         || !operation.state.can_transition_to(JobState::Succeeded)
     {
@@ -2040,7 +2040,7 @@ mod tests {
             operation: ArtifactOperationRecord {
                 tenant_id: command.audit.tenant_id.clone(),
                 operation_id: command.operation_id.clone(),
-                state: JobState::Leased,
+                state: JobState::Waiting,
                 version: 1,
                 snapshot: command.operation_snapshot(),
                 deadline: command.operation_deadline,
@@ -2145,7 +2145,7 @@ mod tests {
         assert_eq!(decision.blob_version, 2);
         assert_eq!(decision.grant_state, ArtifactLinkState::Consumed);
         assert_eq!(decision.grant_version, 2);
-        assert_eq!(decision.operation_state, JobState::Running);
+        assert_eq!(decision.operation_state, JobState::Waiting);
         assert_eq!(decision.operation_version, 2);
 
         let mut forged = completion.clone();
@@ -2202,7 +2202,7 @@ mod tests {
         bundle.blob.version = 2;
         bundle.grant.state = ArtifactLinkState::Consumed;
         bundle.grant.version = 2;
-        bundle.operation.state = JobState::Running;
+        bundle.operation.state = JobState::Waiting;
         bundle.operation.version = 2;
 
         bundle.artifact.state = ArtifactState::Verified;

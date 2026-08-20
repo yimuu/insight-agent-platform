@@ -278,7 +278,7 @@ fn schedule_initial_scan_command(
             '6',
             'a',
         ),
-        scan_job_id: id(ResourceKind::Job, base + 3),
+        scan_job_id: prepared.operation_id.clone(),
         operation_id: prepared.operation_id.clone(),
         artifact_id: prepared.artifact_id.clone(),
         blob_id: prepared.blob_id.clone(),
@@ -374,7 +374,7 @@ fn commit_scan_command(
         blob_id: prepared.blob_id.clone(),
         expected_artifact_version: scheduled.artifact.version,
         expected_blob_version: scheduled.scan.expected_blob_version,
-        expected_operation_version: scheduled.operation.version,
+        expected_operation_version: u64::try_from(fence.expected_job_version).unwrap(),
         evidence,
         duplicate_blob_cleanup_job_id: id(ResourceKind::Job, base + 3),
     }
@@ -461,6 +461,7 @@ async fn execute_schedule_rescan(
 fn finalize_command(
     prepared: &PrepareArtifact,
     quota_account_id: ResourceId,
+    expected_operation_version: u64,
     base: u16,
 ) -> FinalizeArtifact {
     FinalizeArtifact {
@@ -484,7 +485,7 @@ fn finalize_command(
         quota_settle_entry_id: id(ResourceKind::QuotaLedgerEntry, base + 4),
         expected_artifact_version: 4,
         expected_blob_version: 3,
-        expected_operation_version: 3,
+        expected_operation_version,
         expected_grant_version: 2,
         expected_quota_account_version: 2,
         grant_generation: 1,
@@ -1287,7 +1288,7 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(completed.blob.version, 2);
     assert_eq!(completed.grant.state, ArtifactLinkState::Consumed);
     assert_eq!(completed.grant.version, 2);
-    assert_eq!(completed.operation.state, JobState::Running);
+    assert_eq!(completed.operation.state, JobState::Waiting);
     assert_eq!(completed.operation.version, 2);
     let replayed_completion = execute_complete(&repository, completed_command.clone())
         .await
@@ -1340,7 +1341,7 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(started.artifact.state, ArtifactState::Verifying);
     assert_eq!(started.artifact.version, 3);
     assert_eq!(started.blob.version, 2);
-    assert_eq!(started.operation.version, 2);
+    assert_eq!(started.operation.version, 3);
     assert_eq!(started.scan_job_state.as_str(), "ready");
     assert_eq!(
         execute_schedule_initial_scan(&repository, schedule_scan)
@@ -1386,7 +1387,7 @@ async fn artifact_upload_lifecycle_fixture() {
     );
     assert_eq!(
         recovered_scan.records[0].operation_version,
-        Some(started.operation.version)
+        Some(u64::try_from(recovered_scan.records[0].job.version).unwrap())
     );
     let stale_completion = commit_scan_command(
         &prepared_command,
@@ -1446,9 +1447,8 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(verified.blob.version, 3);
     assert_eq!(verified.blob.content_digest, Some(digest('8')));
     assert_eq!(verified.blob.size_bytes, Some(1_024));
-    assert_eq!(verified.operation.state, JobState::Running);
-    assert_eq!(verified.operation.version, 3);
-    assert_eq!(verified.scan_job_state.as_str(), "succeeded");
+    assert_eq!(verified.operation.state, JobState::Waiting);
+    assert_eq!(verified.scan_job_state, JobState::Waiting);
     assert_eq!(
         verified
             .artifact
@@ -1463,7 +1463,7 @@ async fn artifact_upload_lifecycle_fixture() {
             .execute_scan(scan_execution(&started, &complete_scan), Utc::now())
             .await
             .unwrap(),
-        CommandOutcome::Replayed(verified)
+        CommandOutcome::Replayed(verified.clone())
     );
     let verification_counts: (i64, i64, i64) = sqlx::query_as(
         r#"
@@ -1480,7 +1480,12 @@ async fn artifact_upload_lifecycle_fixture() {
     .unwrap();
     assert_eq!(verification_counts, (3, 4, 4));
 
-    let finalized_command = finalize_command(&prepared_command, quota_a.clone(), 0x10b0);
+    let finalized_command = finalize_command(
+        &prepared_command,
+        quota_a.clone(),
+        verified.operation.version,
+        0x10b0,
+    );
     let mut forged_finalization = finalized_command.clone();
     forged_finalization.audit.idempotency_key_digest = digest('9');
     forged_finalization.audit.request_digest = digest('e');
@@ -1498,7 +1503,7 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(finalized.artifact.state, ArtifactState::Ready);
     assert_eq!(finalized.artifact.version, 5);
     assert_eq!(finalized.operation.state, JobState::Succeeded);
-    assert_eq!(finalized.operation.version, 4);
+    assert_eq!(finalized.operation.version, verified.operation.version + 1);
     assert_eq!(finalized.reference.state, ArtifactLinkState::Active);
     assert_eq!(
         finalized.reference.snapshot.reference_kind,
@@ -1742,7 +1747,12 @@ async fn artifact_upload_lifecycle_fixture() {
             .unwrap(),
         CommandOutcome::Replayed(cleaned)
     );
-    let mut duplicate_finalize = finalize_command(&duplicate_command, quota_a.clone(), 0x1540);
+    let mut duplicate_finalize = finalize_command(
+        &duplicate_command,
+        quota_a.clone(),
+        duplicate_verified.operation.version,
+        0x1540,
+    );
     duplicate_finalize.blob_id = duplicate_verified.blob.blob_id.clone();
     duplicate_finalize.expected_quota_account_version = 4;
     let CommandOutcome::Applied(duplicate_finalized) =
@@ -1898,7 +1908,12 @@ async fn artifact_upload_lifecycle_fixture() {
     .await
     .unwrap();
     assert_eq!(concurrent_blob_closure, (1, 1, 1));
-    let mut finalize_a = finalize_command(&concurrent_a, quota_a.clone(), 0x1640);
+    let mut finalize_a = finalize_command(
+        &concurrent_a,
+        quota_a.clone(),
+        verified_a.operation.version,
+        0x1640,
+    );
     finalize_a.blob_id = concurrent_shared_blob_id.clone();
     finalize_a.content_digest = digest('a');
     finalize_a.expected_quota_account_version = 7;
@@ -1906,7 +1921,12 @@ async fn artifact_upload_lifecycle_fixture() {
         execute_finalize(&repository, finalize_a).await.unwrap(),
         CommandOutcome::Applied(_)
     ));
-    let mut finalize_b = finalize_command(&concurrent_b, quota_a.clone(), 0x1740);
+    let mut finalize_b = finalize_command(
+        &concurrent_b,
+        quota_a.clone(),
+        verified_b.operation.version,
+        0x1740,
+    );
     finalize_b.blob_id = concurrent_shared_blob_id.clone();
     finalize_b.content_digest = digest('a');
     finalize_b.expected_quota_account_version = 8;
@@ -1988,7 +2008,12 @@ async fn artifact_upload_lifecycle_fixture() {
     .await
     .unwrap();
     assert_eq!(isolated_shape, (2, 0));
-    let mut isolated_finalize = finalize_command(&isolated_domain, quota_a.clone(), 0x1840);
+    let mut isolated_finalize = finalize_command(
+        &isolated_domain,
+        quota_a.clone(),
+        isolated_verified.operation.version,
+        0x1840,
+    );
     isolated_finalize.expected_quota_account_version = 10;
     assert!(matches!(
         execute_finalize(&repository, isolated_finalize)
@@ -2135,7 +2160,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let rescan_command = ScheduleArtifactRescan {
         audit: audit(&tenant_a, &allowed_principal, 0x1940, 'd', 'e'),
         rescan_operation_id: id(ResourceKind::Job, 0x1943),
-        rescan_job_id: id(ResourceKind::Job, 0x1944),
+        rescan_job_id: id(ResourceKind::Job, 0x1943),
         artifact_id: prepared_command.artifact_id.clone(),
         blob_id: prepared_command.blob_id.clone(),
         expected_artifact_version: 5,
@@ -2155,7 +2180,7 @@ async fn artifact_upload_lifecycle_fixture() {
     };
     assert_eq!(rescan.artifact.state, ArtifactState::Quarantined);
     assert_eq!(rescan.artifact.version, 6);
-    assert_eq!(rescan.operation.state, JobState::Running);
+    assert_eq!(rescan.operation.state, JobState::Ready);
     assert_eq!(rescan.scan_job_state.as_str(), "ready");
     assert_eq!(
         execute_schedule_rescan(&repository, rescan_command)
@@ -2185,7 +2210,10 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(rescanned.artifact.version, 7);
     assert_eq!(rescanned.blob.version, 3);
     assert_eq!(rescanned.operation.state, JobState::Succeeded);
-    assert_eq!(rescanned.operation.version, 2);
+    assert_eq!(
+        rescanned.operation.version,
+        rescan_completion.expected_operation_version + 1
+    );
     assert_eq!(
         execute_commit_scan(&repository, rescan_completion)
             .await
@@ -2196,7 +2224,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let corruption_rescan_command = ScheduleArtifactRescan {
         audit: audit(&tenant_a, &allowed_principal, 0x1970, '1', '2'),
         rescan_operation_id: id(ResourceKind::Job, 0x1973),
-        rescan_job_id: id(ResourceKind::Job, 0x1974),
+        rescan_job_id: id(ResourceKind::Job, 0x1973),
         artifact_id: prepared_command.artifact_id.clone(),
         blob_id: prepared_command.blob_id.clone(),
         expected_artifact_version: 7,
@@ -2279,7 +2307,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let mark_shared = MarkArtifactDeletion {
         audit: audit(&tenant_a, &allowed_principal, 0x1a20, '1', '2'),
         deletion_operation_id: id(ResourceKind::Job, 0x1a23),
-        deletion_job_id: id(ResourceKind::Job, 0x1a24),
+        deletion_job_id: id(ResourceKind::Job, 0x1a23),
         artifact_id: concurrent_a.artifact_id.clone(),
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 5,
@@ -2385,7 +2413,7 @@ async fn artifact_upload_lifecycle_fixture() {
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 6,
         expected_blob_version: 3,
-        expected_operation_version: 1,
+        expected_operation_version: u64::try_from(shared_fence.expected_job_version).unwrap(),
         fence: artifact_domain_fence(&shared_fence),
         evidence: ArtifactDeletionEvidence::ArtifactOnly {
             alias_artifact_id: alias_artifact_id.clone(),
@@ -2404,7 +2432,7 @@ async fn artifact_upload_lifecycle_fixture() {
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 6,
         expected_blob_version: 3,
-        expected_operation_version: 1,
+        expected_operation_version: u64::try_from(shared_fence.expected_job_version).unwrap(),
         fence: artifact_domain_fence(&shared_fence),
         evidence: ArtifactDeletionEvidence::ArtifactOnly {
             alias_artifact_id,
@@ -2449,7 +2477,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let mark_physical = MarkArtifactDeletion {
         audit: audit(&tenant_a, &allowed_principal, 0x1a40, 'b', 'c'),
         deletion_operation_id: id(ResourceKind::Job, 0x1a43),
-        deletion_job_id: id(ResourceKind::Job, 0x1a44),
+        deletion_job_id: id(ResourceKind::Job, 0x1a43),
         artifact_id: concurrent_b.artifact_id.clone(),
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 5,
@@ -2496,7 +2524,7 @@ async fn artifact_upload_lifecycle_fixture() {
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 6,
         expected_blob_version: 4,
-        expected_operation_version: 1,
+        expected_operation_version: u64::try_from(physical_fence.expected_job_version).unwrap(),
         fence: artifact_domain_fence(&physical_fence),
         evidence: ArtifactDeletionEvidence::BlobGeneration {
             object_generation: "wrong-generation".to_owned(),
@@ -2516,7 +2544,7 @@ async fn artifact_upload_lifecycle_fixture() {
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 6,
         expected_blob_version: 4,
-        expected_operation_version: 1,
+        expected_operation_version: u64::try_from(physical_fence.expected_job_version).unwrap(),
         fence: artifact_domain_fence(&physical_fence),
         evidence: ArtifactDeletionEvidence::BlobGeneration {
             object_generation: "s3-version-0001".to_owned(),
@@ -2720,7 +2748,7 @@ async fn artifact_upload_lifecycle_fixture() {
         (
             "retry_scheduled".to_owned(),
             "verifying".to_owned(),
-            "running".to_owned(),
+            "retry_scheduled".to_owned(),
             1,
             1,
         )
@@ -2780,7 +2808,12 @@ async fn artifact_upload_lifecycle_fixture() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let mut recovery_finalize = finalize_command(&recovery_artifact, quota_a.clone(), 0x1b40);
+    let mut recovery_finalize = finalize_command(
+        &recovery_artifact,
+        quota_a.clone(),
+        recovery_verified.operation.version,
+        0x1b40,
+    );
     recovery_finalize.content_digest = digest('3');
     recovery_finalize.expected_quota_account_version =
         u64::try_from(current_quota_version).unwrap();
@@ -2824,7 +2857,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let recovery_mark = MarkArtifactDeletion {
         audit: audit(&tenant_a, &allowed_principal, 0x1b60, 'a', 'b'),
         deletion_operation_id: id(ResourceKind::Job, 0x1b63),
-        deletion_job_id: id(ResourceKind::Job, 0x1b64),
+        deletion_job_id: id(ResourceKind::Job, 0x1b63),
         artifact_id: recovery_artifact.artifact_id.clone(),
         blob_id: recovery_artifact.blob_id.clone(),
         expected_artifact_version: 5,
@@ -2863,7 +2896,8 @@ async fn artifact_upload_lifecycle_fixture() {
         blob_id: recovery_artifact.blob_id.clone(),
         expected_artifact_version: 6,
         expected_blob_version: 4,
-        expected_operation_version: 1,
+        expected_operation_version: u64::try_from(uncertain_delete_fence.expected_job_version)
+            .unwrap(),
         fence: artifact_domain_fence(&uncertain_delete_fence),
         evidence: ArtifactDeletionEvidence::BlobGeneration {
             object_generation: "s3-version-0001".to_owned(),
@@ -2930,7 +2964,7 @@ async fn artifact_upload_lifecycle_fixture() {
         (
             "deleting".to_owned(),
             "deleting".to_owned(),
-            "failed".to_owned(),
+            "reconciliation_required".to_owned(),
             1,
         )
     );
@@ -2942,7 +2976,8 @@ async fn artifact_upload_lifecycle_fixture() {
         blob_id: recovery_artifact.blob_id.clone(),
         expected_artifact_version: 6,
         expected_blob_version: 4,
-        expected_operation_version: 1,
+        expected_operation_version: u64::try_from(uncertain_delete_fence.expected_job_version)
+            .unwrap(),
         fence: artifact_domain_fence(&uncertain_delete_fence),
         evidence: ArtifactDeletionEvidence::BlobGeneration {
             object_generation: "s3-version-0001".to_owned(),

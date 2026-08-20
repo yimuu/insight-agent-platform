@@ -96,7 +96,8 @@ pub fn decide_schedule_initial_scan(
     if artifact.state != ArtifactState::Uploaded
         || blob.state != BlobIntegrityState::Staging
         || blob.object_generation.is_none()
-        || operation.state != JobState::Running
+        || operation.state != JobState::Waiting
+        || !operation.state.can_transition_to(JobState::Ready)
         || !artifact.state.can_transition_to(ArtifactState::Verifying)
     {
         return Err(ArtifactWorkError::InvalidTransition);
@@ -110,7 +111,7 @@ pub fn decide_schedule_initial_scan(
         blob_id: command.blob_id.clone(),
         expected_artifact_version: artifact_version,
         expected_blob_version: blob.version,
-        expected_operation_version: operation.version,
+        expected_operation_version: increment(operation.version)?,
         object_generation: blob
             .object_generation
             .clone()
@@ -356,17 +357,17 @@ impl ArtifactJobPayload {
         match self {
             Self::Scan { scan } if scan.scan_kind == ArtifactScanKind::Initial => {
                 scan.validate()?;
-                require_owner(owner_id, ResourceKind::Job, &scan.operation_id)
+                require_owner(owner_id, ResourceKind::Artifact, &scan.artifact_id)
             }
             Self::Rescan { scan } if scan.scan_kind == ArtifactScanKind::Rescan => {
                 scan.validate()?;
-                require_owner(owner_id, ResourceKind::Job, &scan.operation_id)
+                require_owner(owner_id, ResourceKind::Artifact, &scan.artifact_id)
             }
             Self::Delete { deletion } => {
                 deletion
                     .canonical_digest()
                     .map_err(|_| ArtifactWorkError::InvalidJobPayload)?;
-                require_owner(owner_id, ResourceKind::Job, &deletion.operation_id)
+                require_owner(owner_id, ResourceKind::Artifact, &deletion.artifact_id)
             }
             Self::BlobCleanup { cleanup } => {
                 cleanup
@@ -803,6 +804,7 @@ impl CommitArtifactScanOutcome {
         self.audit.validate_at(now)?;
         self.evidence.validate()?;
         if self.scan_job_id.kind() != ResourceKind::Job
+            || self.scan_job_id != self.operation_id
             || self.evidence.scan_job_id != self.scan_job_id
             || self.operation_id.kind() != ResourceKind::Job
             || self.artifact_id.kind() != ResourceKind::Artifact
@@ -812,6 +814,7 @@ impl CommitArtifactScanOutcome {
             || self.expected_blob_version == 0
             || self.expected_operation_version == 0
             || self.fence.expected_version == 0
+            || self.expected_operation_version != self.fence.expected_version
             || self.fence.lease_generation == 0
             || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
         {
@@ -880,7 +883,6 @@ pub fn decide_commit_artifact_scan(
         || job.blob_id != command.blob_id
         || job.expected_artifact_version != command.expected_artifact_version
         || job.expected_blob_version != command.expected_blob_version
-        || job.expected_operation_version != command.expected_operation_version
         || artifact.version != command.expected_artifact_version
         || blob.version != command.expected_blob_version
         || job.object_generation != command.evidence.object_generation
@@ -932,11 +934,11 @@ pub fn decide_commit_artifact_scan(
     }
     let (artifact_state, operation_state) = match (job.scan_kind, command.evidence.disposition) {
         (ArtifactScanKind::Initial, ArtifactScanDisposition::Verified) => {
-            (ArtifactState::Verified, JobState::Running)
+            (ArtifactState::Verified, JobState::Waiting)
         }
         (ArtifactScanKind::Initial, ArtifactScanDisposition::Quarantined)
         | (ArtifactScanKind::Initial, ArtifactScanDisposition::Corrupt) => {
-            (ArtifactState::Quarantined, JobState::Running)
+            (ArtifactState::Quarantined, JobState::Waiting)
         }
         (ArtifactScanKind::Initial, ArtifactScanDisposition::Rejected) => {
             (ArtifactState::Rejected, JobState::Failed)
@@ -1215,18 +1217,19 @@ impl ArtifactScanExecution {
         self.audit.validate_at(now)?;
         self.scan.validate()?;
         if self.scan_job_id.kind() != ResourceKind::Job
+            || self.scan_job_id != self.operation_id
             || self.scan.operation_id != self.operation_id
             || self.scan.artifact_id != self.artifact_id
             || self.scan.blob_id != self.blob_id
             || self.scan.expected_artifact_version != self.expected_artifact_version
             || self.scan.expected_blob_version != self.expected_blob_version
-            || self.scan.expected_operation_version != self.expected_operation_version
             || self.operation_id.kind() != ResourceKind::Job
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.expected_operation_version == 0
             || self.duplicate_blob_cleanup_job_id.kind() != ResourceKind::Job
             || self.fence.expected_version == 0
+            || self.expected_operation_version != self.fence.expected_version
             || self.fence.lease_generation == 0
             || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
         {
@@ -1263,13 +1266,14 @@ impl ArtifactDeletionExecution {
             .canonical_digest()
             .map_err(|_| ArtifactWorkError::InvalidJobPayload)?;
         if self.deletion_job_id.kind() != ResourceKind::Job
+            || self.deletion_job_id != self.deletion.operation_id
             || self.expected_artifact_version == 0
             || self.expected_blob_version == 0
             || self.expected_operation_version == 0
             || self.deletion.expected_artifact_version != self.expected_artifact_version
             || self.deletion.expected_blob_version != self.expected_blob_version
-            || self.deletion.expected_operation_version != self.expected_operation_version
             || self.fence.expected_version == 0
+            || self.expected_operation_version != self.fence.expected_version
             || self.fence.lease_generation == 0
             || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
         {
@@ -1631,7 +1635,7 @@ fn validate_scan_schedule(
 ) -> Result<(), ArtifactWorkError> {
     if job_id.kind() != ResourceKind::Job
         || operation_id.kind() != ResourceKind::Job
-        || job_id == operation_id
+        || job_id != operation_id
         || artifact_id.kind() != ResourceKind::Artifact
         || blob_id.kind() != ResourceKind::InternalBlob
         || expected_artifact_version == 0
@@ -1857,7 +1861,7 @@ mod tests {
         let operation_id = id(ResourceKind::Job, 3);
         let artifact_id = id(ResourceKind::Artifact, 4);
         let blob_id = id(ResourceKind::InternalBlob, 5);
-        let scan_job_id = id(ResourceKind::Job, 6);
+        let scan_job_id = operation_id.clone();
         let artifact = ArtifactRecord {
             tenant_id: tenant_id.clone(),
             artifact_id: artifact_id.clone(),
@@ -1913,7 +1917,7 @@ mod tests {
             blob_id: blob_id.clone(),
             expected_artifact_version: artifact.version,
             expected_blob_version: blob.version,
-            expected_operation_version: 2,
+            expected_operation_version: 3,
             object_generation: "object-generation-1".to_owned(),
             scan_policy_revision: scan_policy_revision.clone(),
             scanner_contract_digest: scanner_contract_digest.clone(),
@@ -1963,7 +1967,7 @@ mod tests {
             blob_id,
             expected_artifact_version: artifact.version,
             expected_blob_version: blob.version,
-            expected_operation_version: 2,
+            expected_operation_version: 3,
             evidence,
             duplicate_blob_cleanup_job_id: id(ResourceKind::Job, 14),
         };
@@ -2065,7 +2069,7 @@ mod tests {
         let tenant_id = id(ResourceKind::Tenant, 90);
         let worker_id = id(ResourceKind::WorkerProcessGeneration, 91);
         let deletion_operation_id = id(ResourceKind::Job, 92);
-        let deletion_job_id = id(ResourceKind::Job, 93);
+        let deletion_job_id = deletion_operation_id.clone();
         let deletion = ArtifactDeletionJobSnapshot {
             schema_version: 1,
             operation_id: deletion_operation_id,
@@ -2074,7 +2078,7 @@ mod tests {
             mode: mode.clone(),
             expected_artifact_version: 6,
             expected_blob_version: 4,
-            expected_operation_version: 1,
+            expected_operation_version: 3,
             retry_backoff_milliseconds: 100,
         };
         let audit = ArtifactWorkerAudit {
@@ -2116,7 +2120,7 @@ mod tests {
             deletion: deletion.clone(),
             expected_artifact_version: 6,
             expected_blob_version: 4,
-            expected_operation_version: 1,
+            expected_operation_version: 3,
         };
         let command = CompleteArtifactDeletion {
             audit,
@@ -2126,7 +2130,7 @@ mod tests {
             blob_id: deletion.blob_id,
             expected_artifact_version: 6,
             expected_blob_version: 4,
-            expected_operation_version: 1,
+            expected_operation_version: 3,
             fence,
             evidence,
         };
@@ -2476,7 +2480,7 @@ mod tests {
         .unwrap();
         assert_eq!(decision.artifact_state, ArtifactState::Verified);
         assert_eq!(decision.blob_state, BlobIntegrityState::Verified);
-        assert_eq!(decision.operation_state, JobState::Running);
+        assert_eq!(decision.operation_state, JobState::Waiting);
         let current = decision.metadata.current_verification.unwrap();
         assert_eq!(current.scan_job_id, fixture.command.scan_job_id);
         assert_eq!(
@@ -2493,7 +2497,7 @@ mod tests {
         let upload_operation = ArtifactOperationRecord {
             tenant_id: initial.artifact.tenant_id.clone(),
             operation_id: initial.command.operation_id.clone(),
-            state: JobState::Running,
+            state: JobState::Waiting,
             version: 2,
             snapshot: ArtifactUploadOperationSnapshot {
                 schema_version: 1,
@@ -2540,7 +2544,7 @@ mod tests {
         let schedule = ScheduleArtifactRescan {
             audit: command_audit(&rescan.artifact.tenant_id, 60, rescan.now),
             rescan_operation_id: rescan.command.operation_id.clone(),
-            rescan_job_id: rescan.command.scan_job_id.clone(),
+            rescan_job_id: rescan.command.operation_id.clone(),
             artifact_id: rescan.artifact.artifact_id.clone(),
             blob_id: rescan.blob.blob_id.clone(),
             expected_artifact_version: rescan.artifact.version,
@@ -2725,9 +2729,9 @@ mod tests {
     ) -> JobProjection {
         let owner_id = match payload {
             ArtifactJobPayload::Scan { scan } | ArtifactJobPayload::Rescan { scan } => {
-                scan.operation_id.clone()
+                scan.artifact_id.clone()
             }
-            ArtifactJobPayload::Delete { deletion } => deletion.operation_id.clone(),
+            ArtifactJobPayload::Delete { deletion } => deletion.artifact_id.clone(),
             ArtifactJobPayload::BlobCleanup { cleanup } => cleanup.discarded_blob_id.clone(),
         };
         JobProjection {

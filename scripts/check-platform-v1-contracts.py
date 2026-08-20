@@ -588,7 +588,7 @@ def check_spec_registry_alignment(errors):
         {"work_class": "context", "owner_kind": "context_query"},
         {"work_class": "sandbox", "owner_kind": "job"},
         {"work_class": "interaction", "owner_kind": "interaction"},
-        {"work_class": "artifact", "owner_kind": "job"},
+        {"work_class": "artifact", "owner_kind": "artifact"},
         {"work_class": "artifact", "owner_kind": "internal_blob"},
         {"work_class": "recovery", "owner_kind": "run"},
         {"work_class": "recovery", "owner_kind": "node_execution"},

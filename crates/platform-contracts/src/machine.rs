@@ -372,7 +372,7 @@ pub const EXECUTION_WORK_OWNER_PAIRS: &[(WorkClass, ResourceKind)] = &[
     (WorkClass::Context, ResourceKind::ContextQuery),
     (WorkClass::Sandbox, ResourceKind::Job),
     (WorkClass::Interaction, ResourceKind::Interaction),
-    (WorkClass::Artifact, ResourceKind::Job),
+    (WorkClass::Artifact, ResourceKind::Artifact),
     (WorkClass::Artifact, ResourceKind::InternalBlob),
     (WorkClass::Recovery, ResourceKind::Run),
     (WorkClass::Recovery, ResourceKind::NodeExecution),

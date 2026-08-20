@@ -15,15 +15,15 @@ use insight_platform_artifacts::{
     decide_schedule_artifact_rescan, decide_schedule_initial_scan, ArtifactBlobCleanupExecution,
     ArtifactBlobCleanupSnapshot, ArtifactBlobRecord, ArtifactCommandError, ArtifactCommandLimits,
     ArtifactDeleteObjectAuthority, ArtifactDeletionAdmissionFacts, ArtifactDeletionEvidence,
-    ArtifactDeletionExecution, ArtifactDeletionJobSnapshot, ArtifactDeletionOperationSnapshot,
-    ArtifactDeletionRecord, ArtifactGrantRecord, ArtifactHoldRecord, ArtifactHoldSnapshot,
-    ArtifactJobPayload, ArtifactLinkState, ArtifactMetadataSnapshot, ArtifactObjectReadAuthority,
+    ArtifactDeletionExecution, ArtifactDeletionJobSnapshot, ArtifactDeletionRecord,
+    ArtifactGrantRecord, ArtifactHoldRecord, ArtifactHoldSnapshot, ArtifactJobPayload,
+    ArtifactLinkState, ArtifactMetadataSnapshot, ArtifactObjectReadAuthority,
     ArtifactObjectReadAuthorityError, ArtifactOperationRecord, ArtifactProvenanceRecord,
     ArtifactProvenanceSnapshot, ArtifactRecord, ArtifactRecoveryParentAction,
-    ArtifactReferenceRecord, ArtifactReferenceSnapshot, ArtifactRescanOperationSnapshot,
-    ArtifactScanDecision, ArtifactScanExecution, ArtifactScanKind, ArtifactScanObjectReadAuthority,
-    ArtifactScanRequest, ArtifactScanWorkRecord, ArtifactStore, ArtifactTransaction,
-    ArtifactWorkAuthority, ArtifactWorkError, ArtifactWorkerAudit, ArtifactWorkerOperationRecord,
+    ArtifactReferenceRecord, ArtifactReferenceSnapshot, ArtifactScanDecision,
+    ArtifactScanExecution, ArtifactScanKind, ArtifactScanObjectReadAuthority, ArtifactScanRequest,
+    ArtifactScanWorkRecord, ArtifactStore, ArtifactTransaction, ArtifactWorkAuthority,
+    ArtifactWorkError, ArtifactWorkerAudit, ArtifactWorkerOperationRecord,
     AuthorizedArtifactDeleteObject, AuthorizedArtifactScanObjectRead, CommitArtifactAttemptFailure,
     CommitArtifactBlobCleanup, CommitArtifactScanOutcome, CompleteArtifactDeletion,
     CompleteArtifactUpload, CompletedArtifactBlobCleanup, CompletedArtifactDeletion,
@@ -753,7 +753,7 @@ impl PgRepository {
                 })?,
                 recovery_now,
             )?;
-            let parent_versions = persist_artifact_recovery_parent_action(
+            let mut parent_versions = persist_artifact_recovery_parent_action(
                 &mut transaction,
                 &payload,
                 &parents,
@@ -769,6 +769,10 @@ impl PgRepository {
                 None,
             )
             .await?;
+            if parents.operation_id.as_ref() == Some(&job_id) {
+                parent_versions.operation_version =
+                    Some(parse_u64(job.version, "Artifact Operation Job version")?);
+            }
             append_scheduler_event(
                 &mut transaction,
                 &job.tenant_id,
@@ -1276,7 +1280,7 @@ async fn commit_artifact_attempt_failure(
         &command,
         database_now,
     )?;
-    let parent_versions = persist_artifact_recovery_parent_action(
+    let mut parent_versions = persist_artifact_recovery_parent_action(
         &mut transaction,
         &payload,
         &parents,
@@ -1292,6 +1296,10 @@ async fn commit_artifact_attempt_failure(
         Some(&command.fence),
     )
     .await?;
+    if parents.operation_id.as_ref() == Some(&command.job_id) {
+        parent_versions.operation_version =
+            Some(parse_u64(job.version, "Artifact Operation Job version")?);
+    }
     append_artifact_worker_event(
         &mut transaction,
         &command.audit,
@@ -1446,7 +1454,6 @@ async fn lock_artifact_recovery_parents(
             if marked.deletion.mode != deletion.mode
                 || marked.artifact.version != deletion.expected_artifact_version
                 || marked.blob.version != deletion.expected_blob_version
-                || marked.deletion.operation_version != deletion.expected_operation_version
                 || marked.artifact.state != ArtifactState::Deleting
                 || marked.deletion.operation_state != JobState::Running
                 || blob.version != marked.blob.version
@@ -1535,7 +1542,7 @@ async fn persist_artifact_recovery_parent_action(
     database_now: DateTime<Utc>,
 ) -> Result<ArtifactRecoveryParentVersions, RepositoryError> {
     let mut artifact_version = parents.artifact_version;
-    let mut operation_version = parents.operation_version;
+    let operation_version = parents.operation_version;
     match action {
         ArtifactRecoveryParentAction::None => {}
         ArtifactRecoveryParentAction::Scan {
@@ -1592,15 +1599,11 @@ async fn persist_artifact_recovery_parent_action(
                 )?;
                 artifact_version = Some(next);
             }
-            operation_version = Some(
-                persist_artifact_recovery_operation(
-                    transaction,
-                    parents,
-                    operation_state,
-                    database_now,
-                )
-                .await?,
-            );
+            if operation_state != JobState::Failed {
+                return Err(RepositoryError::InvalidInput(
+                    "Artifact scan recovery Operation decision is invalid".to_owned(),
+                ));
+            }
         }
         ArtifactRecoveryParentAction::Deletion { operation_state } => {
             if !matches!(payload, ArtifactJobPayload::Delete { .. })
@@ -1611,15 +1614,11 @@ async fn persist_artifact_recovery_parent_action(
                     "Artifact deletion recovery parent decision is invalid".to_owned(),
                 ));
             }
-            operation_version = Some(
-                persist_artifact_recovery_operation(
-                    transaction,
-                    parents,
-                    operation_state,
-                    database_now,
-                )
-                .await?,
-            );
+            if operation_state != JobState::Failed {
+                return Err(RepositoryError::InvalidInput(
+                    "Artifact deletion recovery Operation decision is invalid".to_owned(),
+                ));
+            }
         }
         ArtifactRecoveryParentAction::BlobCleanupReconciliation => {
             if !matches!(payload, ArtifactJobPayload::BlobCleanup { .. })
@@ -1636,53 +1635,6 @@ async fn persist_artifact_recovery_parent_action(
         blob_version: Some(parents.blob_version),
         operation_version,
     })
-}
-
-async fn persist_artifact_recovery_operation(
-    transaction: &mut Transaction<'_, Postgres>,
-    parents: &LockedArtifactRecoveryParents,
-    target: JobState,
-    database_now: DateTime<Utc>,
-) -> Result<u64, RepositoryError> {
-    let operation_id = parents
-        .operation_id
-        .as_ref()
-        .ok_or_else(|| RepositoryError::CorruptRow("missing Artifact Operation Job".to_owned()))?;
-    let current_state = parents.operation_state.ok_or_else(|| {
-        RepositoryError::CorruptRow("missing Artifact Operation Job state".to_owned())
-    })?;
-    let current_version = parents.operation_version.ok_or_else(|| {
-        RepositoryError::CorruptRow("missing Artifact Operation Job version".to_owned())
-    })?;
-    if !current_state.can_transition_to(target) {
-        return Err(RepositoryError::Conflict(
-            "Artifact Operation Job recovery transition",
-        ));
-    }
-    let next_version = current_version.checked_add(1).ok_or_else(|| {
-        RepositoryError::InvalidInput("Artifact Operation Job version overflowed".to_owned())
-    })?;
-    ensure_one(
-        sqlx::query(
-            r#"
-            UPDATE insight_platform.jobs
-            SET state = $4, version = $5, terminal_at = $6, updated_at = $6
-            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
-              AND work_class = 'artifact' AND owner_kind = 'artifact' AND state = 'running'
-            "#,
-        )
-        .bind(parents.tenant_id.to_string())
-        .bind(operation_id.to_string())
-        .bind(to_i64(current_version, "Artifact Operation Job version")?)
-        .bind(target.as_str())
-        .bind(to_i64(next_version, "Artifact Operation Job version")?)
-        .bind(database_now)
-        .execute(&mut **transaction)
-        .await?
-        .rows_affected(),
-        "Artifact recovery Operation Job",
-    )?;
-    Ok(next_version)
 }
 
 async fn persist_recovered_artifact_job(
@@ -1852,7 +1804,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
                 tenant_id, job_id, work_class, owner_kind, owner_id, state,
                 attempt_limit, scheduled_at, deadline, request_digest,
                 payload_schema_version, payload, payload_digest
-            ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'leased',
+            ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'waiting',
                       1, $4, $5, $6, $7, $8, $9)
             "#,
         )
@@ -2195,22 +2147,47 @@ impl ArtifactTransaction for PgArtifactTransaction {
             .rows_affected(),
             "Artifact scan scheduling",
         )?;
-        insert_artifact_scan_job(
-            &mut transaction,
-            ArtifactScanJobInsert {
-                tenant_id: &command.audit.tenant_id,
-                job_id: &command.scan_job_id,
-                operation_id: &command.operation_id,
-                job: ArtifactJobPayload::Scan {
-                    scan: decision.job.clone(),
-                },
-                request_digest: &command.audit.request_digest,
-                deadline: command.deadline,
-                database_now,
-                limits: self.limits,
-            },
-        )
-        .await?;
+        let job = ArtifactJobPayload::Scan {
+            scan: decision.job.clone(),
+        };
+        job.validate_for_owner(&command.artifact_id)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let payload = TypedPayload::new(1, &job)?;
+        let attempt_limit = i32::try_from(self.limits.maximum_job_attempts()).map_err(|_| {
+            RepositoryError::InvalidInput("Artifact scan attempt limit exceeds integer".to_owned())
+        })?;
+        ensure_one(
+            sqlx::query(
+                r#"
+                UPDATE insight_platform.jobs
+                SET state = 'ready', version = version + 1, attempt_limit = $4,
+                    scheduled_at = $5, deadline = $6, request_digest = $7,
+                    payload_schema_version = $8, payload = $9, payload_digest = $10,
+                    updated_at = $5
+                WHERE tenant_id = $1 AND job_id = $2 AND owner_id = $3
+                  AND work_class = 'artifact' AND owner_kind = 'artifact'
+                  AND state = 'waiting' AND version = $11
+                "#,
+            )
+            .bind(command.audit.tenant_id.to_string())
+            .bind(command.operation_id.to_string())
+            .bind(command.artifact_id.to_string())
+            .bind(attempt_limit)
+            .bind(database_now)
+            .bind(command.deadline)
+            .bind(command.audit.request_digest.to_string())
+            .bind(payload.schema_version)
+            .bind(&payload.value)
+            .bind(&payload.digest)
+            .bind(to_i64(
+                command.expected_operation_version,
+                "Artifact verify Job version",
+            )?)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected(),
+            "Artifact verify Job wake",
+        )?;
         append_command_event(
             &mut transaction,
             &command.audit,
@@ -2222,7 +2199,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
                 1,
                 &serde_json::json!({
                     "operation_job_id": command.operation_id,
-                    "scan_job_id": command.scan_job_id,
+                    "scan_job_id": command.operation_id,
                     "scan_kind": ArtifactScanKind::Initial,
                     "state": decision.artifact_state,
                 }),
@@ -2307,34 +2284,12 @@ impl ArtifactTransaction for PgArtifactTransaction {
             load_artifact_blob_record(&mut transaction, &command.audit.tenant_id, &command.blob_id)
                 .await?;
         let decision = decide_schedule_artifact_rescan(&artifact, &blob, &command, database_now)?;
-        let operation_payload = TypedPayload::from_versioned(1, &decision.operation, 262_144)?;
-        sqlx::query(
-            r#"
-            INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, state,
-                attempt_limit, scheduled_at, deadline, request_digest,
-                payload_schema_version, payload, payload_digest, started_at, created_at, updated_at
-            ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'running',
-                      1, $4, $5, $6, $7, $8, $9, $4, $4, $4)
-            "#,
-        )
-        .bind(command.audit.tenant_id.to_string())
-        .bind(command.rescan_operation_id.to_string())
-        .bind(command.artifact_id.to_string())
-        .bind(database_now)
-        .bind(command.deadline)
-        .bind(command.audit.request_digest.to_string())
-        .bind(operation_payload.schema_version)
-        .bind(&operation_payload.value)
-        .bind(&operation_payload.digest)
-        .execute(&mut *transaction)
-        .await?;
         insert_artifact_scan_job(
             &mut transaction,
             ArtifactScanJobInsert {
                 tenant_id: &command.audit.tenant_id,
                 job_id: &command.rescan_job_id,
-                operation_id: &command.rescan_operation_id,
+                artifact_id: &command.artifact_id,
                 job: ArtifactJobPayload::Rescan {
                     scan: decision.job.clone(),
                 },
@@ -3208,12 +3163,11 @@ impl ArtifactTransaction for PgArtifactTransaction {
             &command,
             database_now,
         )?;
-        let operation_payload = TypedPayload::from_versioned(1, &decision.operation, 1_048_576)?;
         let artifact_job = ArtifactJobPayload::Delete {
             deletion: decision.job.clone(),
         };
         artifact_job
-            .validate_for_owner(&command.deletion_operation_id)
+            .validate_for_owner(&command.artifact_id)
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         let job_payload = TypedPayload::new(1, &artifact_job)?;
         let artifact_version = to_i64(decision.artifact_version, "Artifact version")?;
@@ -3266,41 +3220,21 @@ impl ArtifactTransaction for PgArtifactTransaction {
             INSERT INTO insight_platform.jobs (
                 tenant_id, job_id, work_class, owner_kind, owner_id, state,
                 attempt_limit, scheduled_at, deadline, request_digest,
-                payload_schema_version, payload, payload_digest, started_at, created_at, updated_at
-            ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'running',
-                      1, $4, $5, $6, $7, $8, $9, $4, $4, $4)
+                payload_schema_version, payload, payload_digest, created_at, updated_at
+            ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'ready',
+                      $4, $5, $6, $7, $8, $9, $10, $5, $5)
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
         .bind(command.deletion_operation_id.to_string())
         .bind(command.artifact_id.to_string())
-        .bind(database_now)
-        .bind(command.deadline)
-        .bind(command.audit.request_digest.to_string())
-        .bind(operation_payload.schema_version)
-        .bind(&operation_payload.value)
-        .bind(&operation_payload.digest)
-        .execute(&mut *transaction)
-        .await?;
-        let attempt_limit = i32::try_from(self.limits.maximum_job_attempts()).map_err(|_| {
-            RepositoryError::InvalidInput(
-                "Artifact deletion attempt limit exceeds integer".to_owned(),
-            )
-        })?;
-        sqlx::query(
-            r#"
-            INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id,
-                state, attempt_limit, scheduled_at, deadline, request_digest,
-                payload_schema_version, payload, payload_digest
-            ) VALUES ($1, $2, 'artifact', 'job', $3, 'ready',
-                      $4, $5, $6, $7, $8, $9, $10)
-            "#,
+        .bind(
+            i32::try_from(self.limits.maximum_job_attempts()).map_err(|_| {
+                RepositoryError::InvalidInput(
+                    "Artifact deletion attempt limit exceeds integer".to_owned(),
+                )
+            })?,
         )
-        .bind(command.audit.tenant_id.to_string())
-        .bind(command.deletion_job_id.to_string())
-        .bind(command.deletion_operation_id.to_string())
-        .bind(attempt_limit)
         .bind(database_now)
         .bind(command.deadline)
         .bind(command.audit.request_digest.to_string())
@@ -3401,16 +3335,6 @@ impl ArtifactTransaction for PgArtifactTransaction {
         let (blob, aliases) =
             lock_blob_and_aliases(&mut transaction, &command.audit.tenant_id, &command.blob_id)
                 .await?;
-        sqlx::query(
-            "SELECT job_id FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2 AND work_class = 'artifact' AND owner_kind = 'artifact' FOR UPDATE",
-        )
-        .bind(command.audit.tenant_id.to_string())
-        .bind(command.deletion_operation_id.to_string())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(RepositoryError::NotFound(
-            "Artifact deletion Operation Job",
-        ))?;
         let marked = load_artifact_deletion(
             &mut transaction,
             &command.audit.tenant_id,
@@ -3497,10 +3421,10 @@ impl ArtifactTransaction for PgArtifactTransaction {
             sqlx::query(
                 r#"
                 UPDATE insight_platform.jobs
-                SET state = 'succeeded', version = version + 1,
-                    result_digest = $7, worker_id = NULL, lease_token_digest = NULL,
+                SET state = $7, version = $8,
+                    result_digest = $9, worker_id = NULL, lease_token_digest = NULL,
                     lease_expires_at = NULL, heartbeat_at = NULL,
-                    terminal_at = $8, updated_at = $8
+                    terminal_at = $10, updated_at = $10
                 WHERE tenant_id = $1 AND job_id = $2 AND version = $3
                   AND state = 'running' AND worker_id = $4 AND lease_epoch = $5
                   AND lease_token_digest = $6 AND invocation_id IS NULL
@@ -3518,35 +3442,14 @@ impl ArtifactTransaction for PgArtifactTransaction {
                 "Artifact deletion Job epoch",
             )?)
             .bind(command.fence.token_digest.to_string())
+            .bind(decision.operation_state.as_str())
+            .bind(operation_version)
             .bind(&evidence_payload.digest)
             .bind(database_now)
             .execute(&mut *transaction)
             .await?
             .rows_affected(),
             "Artifact deletion Job fence",
-        )?;
-        ensure_one(
-            sqlx::query(
-                r#"
-                UPDATE insight_platform.jobs
-                SET state = $4, version = $5, terminal_at = $6, updated_at = $6
-                WHERE tenant_id = $1 AND job_id = $2 AND version = $3
-                  AND work_class = 'artifact' AND owner_kind = 'artifact'
-                "#,
-            )
-            .bind(command.audit.tenant_id.to_string())
-            .bind(command.deletion_operation_id.to_string())
-            .bind(to_i64(
-                command.expected_operation_version,
-                "Artifact deletion Operation Job version",
-            )?)
-            .bind(decision.operation_state.as_str())
-            .bind(operation_version)
-            .bind(database_now)
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected(),
-            "Artifact deletion Operation Job",
         )?;
         append_artifact_worker_event(
             &mut transaction,
@@ -4228,7 +4131,7 @@ async fn lock_deletion_job(
     let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
     let payload: ArtifactJobPayload = decode_typed_payload(&payload, "Artifact Job")?;
     payload
-        .validate_for_owner(&command.deletion_operation_id)
+        .validate_for_owner(&command.artifact_id)
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     let ArtifactJobPayload::Delete { deletion: snapshot } = payload else {
         return Err(RepositoryError::CorruptRow(
@@ -4237,8 +4140,8 @@ async fn lock_deletion_job(
     };
     let valid = row.try_get::<String, _>("tenant_id")? == command.audit.tenant_id.to_string()
         && row.try_get::<String, _>("job_id")? == command.deletion_job_id.to_string()
-        && row.try_get::<String, _>("owner_kind")? == "job"
-        && row.try_get::<String, _>("owner_id")? == command.deletion_operation_id.to_string()
+        && row.try_get::<String, _>("owner_kind")? == "artifact"
+        && row.try_get::<String, _>("owner_id")? == command.artifact_id.to_string()
         && row.try_get::<Option<String>, _>("invocation_id")?.is_none()
         && row.try_get::<String, _>("state")? == "running"
         && row.try_get::<i64, _>("version")?
@@ -4263,7 +4166,7 @@ async fn lock_deletion_job(
         && snapshot.blob_id == command.blob_id
         && snapshot.expected_artifact_version == command.expected_artifact_version
         && snapshot.expected_blob_version == command.expected_blob_version
-        && snapshot.expected_operation_version == command.expected_operation_version;
+        && command.expected_operation_version == command.fence.expected_version;
     if !valid {
         return Err(RepositoryError::StaleFence);
     }
@@ -4311,33 +4214,15 @@ async fn load_artifact_deletion(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::NotFound("Artifact deletion Operation Job"))?;
-    let operation_payload = payload_from_row(
+    let job_payload = payload_from_row(
         &operation,
         "payload_schema_version",
         "payload",
         "payload_digest",
     )?;
-    let operation_snapshot: ArtifactDeletionOperationSnapshot =
-        decode_versioned_payload(&operation_payload, "Artifact deletion Operation Job")?;
-    let job = sqlx::query(
-        r#"
-        SELECT payload_schema_version, payload, payload_digest
-        FROM insight_platform.jobs
-        WHERE tenant_id = $1 AND job_id = $2 AND owner_kind = 'job'
-          AND owner_id = $3 AND invocation_id IS NULL AND work_class = 'artifact'
-        "#,
-    )
-    .bind(tenant_id.to_string())
-    .bind(job_id.to_string())
-    .bind(operation_id.to_string())
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(RepositoryError::NotFound("Artifact deletion Job"))?;
-    let job_payload =
-        payload_from_row(&job, "payload_schema_version", "payload", "payload_digest")?;
     let job_payload: ArtifactJobPayload = decode_typed_payload(&job_payload, "Artifact Job")?;
     job_payload
-        .validate_for_owner(operation_id)
+        .validate_for_owner(artifact_id)
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     let ArtifactJobPayload::Delete {
         deletion: job_snapshot,
@@ -4347,12 +4232,10 @@ async fn load_artifact_deletion(
             "Artifact deletion Job has the wrong payload variant".to_owned(),
         ));
     };
-    if operation_snapshot.artifact_id != *artifact_id
-        || operation_snapshot.blob_id != *blob_id
+    if operation_id != job_id
         || job_snapshot.operation_id != *operation_id
         || job_snapshot.artifact_id != *artifact_id
         || job_snapshot.blob_id != *blob_id
-        || operation_snapshot.mode != job_snapshot.mode
     {
         return Err(RepositoryError::CorruptRow(
             "Artifact deletion authority rows disagree".to_owned(),
@@ -4375,7 +4258,7 @@ async fn load_artifact_deletion(
             job_id: job_id.clone(),
             artifact_id: artifact_id.clone(),
             blob_id: blob_id.clone(),
-            mode: operation_snapshot.mode,
+            mode: job_snapshot.mode,
             deadline: operation.try_get("deadline")?,
         },
     })
@@ -4444,7 +4327,7 @@ async fn lock_artifact_and_blob(
 struct ArtifactScanJobInsert<'a> {
     tenant_id: &'a ResourceId,
     job_id: &'a ResourceId,
-    operation_id: &'a ResourceId,
+    artifact_id: &'a ResourceId,
     job: ArtifactJobPayload,
     request_digest: &'a Sha256Digest,
     deadline: DateTime<Utc>,
@@ -4458,7 +4341,7 @@ async fn insert_artifact_scan_job(
 ) -> Result<(), RepositoryError> {
     insert
         .job
-        .validate_for_owner(insert.operation_id)
+        .validate_for_owner(insert.artifact_id)
         .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
     let payload = TypedPayload::new(1, &insert.job)?;
     let attempt_limit = i32::try_from(insert.limits.maximum_job_attempts()).map_err(|_| {
@@ -4470,13 +4353,13 @@ async fn insert_artifact_scan_job(
             tenant_id, job_id, work_class, owner_kind, owner_id,
             state, attempt_limit, scheduled_at, deadline, request_digest,
             payload_schema_version, payload, payload_digest
-        ) VALUES ($1, $2, 'artifact', 'job', $3,
+        ) VALUES ($1, $2, 'artifact', 'artifact', $3,
                   'ready', $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(insert.tenant_id.to_string())
     .bind(insert.job_id.to_string())
-    .bind(insert.operation_id.to_string())
+    .bind(insert.artifact_id.to_string())
     .bind(attempt_limit)
     .bind(insert.database_now)
     .bind(insert.deadline)
@@ -4562,7 +4445,7 @@ async fn load_artifact_scan_work_inner(
     )?;
     let payload: ArtifactJobPayload = decode_typed_payload(&job_payload, "Artifact Job")?;
     payload
-        .validate_for_owner(operation_id)
+        .validate_for_owner(artifact_id)
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     let scan = match payload {
         ArtifactJobPayload::Scan { scan } => scan,
@@ -4573,8 +4456,8 @@ async fn load_artifact_scan_work_inner(
             ))
         }
     };
-    if job_row.try_get::<String, _>("owner_kind")? != "job"
-        || job_row.try_get::<String, _>("owner_id")? != operation_id.to_string()
+    if job_row.try_get::<String, _>("owner_kind")? != "artifact"
+        || job_row.try_get::<String, _>("owner_id")? != artifact_id.to_string()
         || job_row
             .try_get::<Option<String>, _>("invocation_id")?
             .is_some()
@@ -4587,65 +4470,6 @@ async fn load_artifact_scan_work_inner(
         ));
     }
 
-    let operation_sql = if for_update {
-        r#"
-        SELECT state, version, payload_schema_version, payload, payload_digest
-        FROM insight_platform.jobs
-        WHERE tenant_id = $1 AND job_id = $2
-          AND work_class = 'artifact'
-          AND owner_kind = 'artifact' AND owner_id = $3
-        FOR UPDATE
-        "#
-    } else {
-        r#"
-        SELECT state, version, payload_schema_version, payload, payload_digest
-        FROM insight_platform.jobs
-        WHERE tenant_id = $1 AND job_id = $2
-          AND work_class = 'artifact'
-          AND owner_kind = 'artifact' AND owner_id = $3
-        "#
-    };
-    let operation_row = sqlx::query(operation_sql)
-        .bind(tenant_id.to_string())
-        .bind(operation_id.to_string())
-        .bind(artifact_id.to_string())
-        .fetch_optional(&mut **transaction)
-        .await?
-        .ok_or(RepositoryError::NotFound("Artifact scan Operation Job"))?;
-    let operation_payload = payload_from_row(
-        &operation_row,
-        "payload_schema_version",
-        "payload",
-        "payload_digest",
-    )?;
-    match scan.scan_kind {
-        ArtifactScanKind::Initial => {
-            let upload: insight_platform_artifacts::ArtifactUploadOperationSnapshot =
-                decode_versioned_payload(&operation_payload, "Artifact upload Operation Job")?;
-            if upload.artifact_id != *artifact_id {
-                return Err(RepositoryError::CorruptRow(
-                    "Artifact upload operation has the wrong target".to_owned(),
-                ));
-            }
-        }
-        ArtifactScanKind::Rescan => {
-            let rescan: ArtifactRescanOperationSnapshot =
-                decode_versioned_payload(&operation_payload, "Artifact rescan Operation Job")?;
-            rescan
-                .validate()
-                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-            if rescan.artifact_id != *artifact_id
-                || rescan.blob_id != *expected_candidate_blob_id
-                || rescan.scan_policy_revision != scan.scan_policy_revision
-                || rescan.scanner_contract_digest != scan.scanner_contract_digest
-                || rescan.ruleset_digest != scan.ruleset_digest
-            {
-                return Err(RepositoryError::CorruptRow(
-                    "Artifact rescan operation and Job disagree".to_owned(),
-                ));
-            }
-        }
-    }
     let artifact = load_artifact_record(transaction, tenant_id, artifact_id).await?;
     let active_blob_id = artifact
         .blob_id
@@ -4659,12 +4483,12 @@ async fn load_artifact_scan_work_inner(
     let operation = ArtifactWorkerOperationRecord {
         tenant_id: tenant_id.clone(),
         operation_id: operation_id.clone(),
-        state: operation_row
+        state: job_row
             .try_get::<String, _>("state")?
             .parse::<JobState>()
             .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
         version: parse_u64(
-            operation_row.try_get("version")?,
+            job_row.try_get("version")?,
             "Artifact scan Operation Job version",
         )?,
         scan_kind: scan.scan_kind,
@@ -4673,8 +4497,7 @@ async fn load_artifact_scan_work_inner(
         job_state,
         JobState::Ready | JobState::Leased | JobState::Running | JobState::RetryScheduled
     ) && (artifact.version != scan.expected_artifact_version
-        || blob.version != scan.expected_blob_version
-        || operation.version != scan.expected_operation_version)
+        || blob.version != scan.expected_blob_version)
     {
         return Err(RepositoryError::CorruptRow(
             "Artifact scan Job parent versions disagree with current authority".to_owned(),
@@ -4886,10 +4709,15 @@ async fn persist_artifact_scan_decision(
             r#"
             UPDATE insight_platform.jobs
             SET state = $4, version = $5,
+                result_digest = CASE WHEN $4 IN ('succeeded', 'failed') THEN $7 ELSE NULL END,
+                worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
+                heartbeat_at = NULL,
                 terminal_at = CASE WHEN $4 IN ('succeeded', 'failed') THEN $6 ELSE NULL END,
                 updated_at = $6
             WHERE tenant_id = $1 AND job_id = $2 AND version = $3
               AND work_class = 'artifact' AND owner_kind = 'artifact'
+              AND state = 'running' AND worker_id = $8 AND lease_epoch = $9
+              AND lease_token_digest = $10
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -4904,20 +4732,18 @@ async fn persist_artifact_scan_decision(
             "Artifact scan Operation Job version",
         )?)
         .bind(database_now)
+        .bind(command.evidence.canonical_digest.to_string())
+        .bind(command.fence.worker_process_generation_id.to_string())
+        .bind(to_i64(
+            command.fence.lease_generation,
+            "Artifact verify Job lease generation",
+        )?)
+        .bind(command.fence.token_digest.to_string())
         .execute(&mut **transaction)
         .await?
         .rows_affected(),
         "Artifact scan Operation Job",
     )?;
-    complete_artifact_job(
-        transaction,
-        &command.audit.tenant_id,
-        &command.scan_job_id,
-        &command.fence,
-        &command.evidence.canonical_digest,
-        database_now,
-    )
-    .await?;
     if let Some(cleanup) = decision.duplicate_blob_cleanup.as_ref() {
         insert_scan_duplicate_blob_cleanup_job(transaction, command, cleanup, database_now, limits)
             .await?;
@@ -5619,11 +5445,12 @@ async fn load_artifact_bundle(
     .await?
     .ok_or(RepositoryError::NotFound("Artifact upload Job"))?;
 
+    let artifact = artifact_from_row(artifact)?;
     Ok(PreparedArtifact {
-        artifact: artifact_from_row(artifact)?,
+        operation: operation_from_row(operation, Some(&artifact))?,
+        artifact,
         blob: blob_from_row(blob)?,
         grant: grant_from_row(grant)?,
-        operation: operation_from_row(operation)?,
     })
 }
 
@@ -5731,8 +5558,41 @@ fn grant_from_row(row: PgRow) -> Result<ArtifactGrantRecord, RepositoryError> {
     })
 }
 
-fn operation_from_row(row: PgRow) -> Result<ArtifactOperationRecord, RepositoryError> {
+fn operation_from_row(
+    row: PgRow,
+    artifact: Option<&ArtifactRecord>,
+) -> Result<ArtifactOperationRecord, RepositoryError> {
     let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let snapshot = match decode_versioned_payload(&payload, "Artifact upload Job") {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            let payload: ArtifactJobPayload =
+                decode_typed_payload(&payload, "Artifact verify Job")?;
+            let ArtifactJobPayload::Scan { scan } = payload else {
+                return Err(RepositoryError::CorruptRow(
+                    "Artifact upload Job has the wrong payload variant".to_owned(),
+                ));
+            };
+            let artifact = artifact.ok_or_else(|| {
+                RepositoryError::CorruptRow(
+                    "Artifact verify Job cannot reconstruct its public upload target".to_owned(),
+                )
+            })?;
+            if scan.artifact_id != artifact.artifact_id {
+                return Err(RepositoryError::CorruptRow(
+                    "Artifact verify Job has the wrong target".to_owned(),
+                ));
+            }
+            insight_platform_artifacts::ArtifactUploadOperationSnapshot {
+                schema_version: 1,
+                artifact_id: artifact.artifact_id.clone(),
+                purpose: artifact.purpose,
+                expected_size_bytes: artifact.expected_size_bytes,
+                expected_digest: artifact.expected_digest.clone(),
+                retention_policy_revision_id: artifact.retention_policy_revision_id.clone(),
+            }
+        }
+    };
     Ok(ArtifactOperationRecord {
         tenant_id: parse_id(row.try_get("tenant_id")?, "Artifact operation tenant")?,
         operation_id: parse_id(row.try_get("job_id")?, "Artifact operation Job")?,
@@ -5741,7 +5601,7 @@ fn operation_from_row(row: PgRow) -> Result<ArtifactOperationRecord, RepositoryE
             .parse::<JobState>()
             .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
         version: parse_u64(row.try_get("version")?, "Artifact operation Job version")?,
-        snapshot: decode_versioned_payload(&payload, "Artifact upload Job")?,
+        snapshot,
         deadline: row.try_get("deadline")?,
         created_at: row.try_get("created_at")?,
     })
@@ -5893,10 +5753,11 @@ async fn load_verification_records(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::NotFound("Artifact verification Job"))?;
+    let operation = operation_from_row(operation, Some(&artifact))?;
     Ok(VerificationRecords {
         artifact,
         blob: blob_from_row(blob)?,
-        operation: operation_from_row(operation)?,
+        operation,
     })
 }
 

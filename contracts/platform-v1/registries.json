@@ -338,7 +338,7 @@
       "work_class": "interaction"
     },
     {
-      "owner_kind": "job",
+      "owner_kind": "artifact",
       "work_class": "artifact"
     },
     {

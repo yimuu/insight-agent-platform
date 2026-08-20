@@ -2,9 +2,7 @@ use crate::repository::{
     job_from_row, load_current_principal_snapshot, JobRecord, RepositoryError,
 };
 use chrono::Utc;
-use insight_platform_artifacts::{
-    ArtifactDeletionOperationSnapshot, ArtifactUploadOperationSnapshot,
-};
+use insight_platform_artifacts::{ArtifactJobPayload, ArtifactUploadOperationSnapshot};
 use insight_platform_contracts::{
     operation_etag, JobState, OperationViewV1, Permission, PublicJobKind, PublicJobState,
     PublicJobTarget, ReadOperation, ResourceId, SafeJobFailure, SafeJobResult, Sha256Digest,
@@ -162,20 +160,29 @@ async fn public_kind_and_target(
                 .owner_id
                 .parse()
                 .map_err(|_| OperationReadError::CorruptAuthority)?;
-            let kind = if serde_json::from_value::<ArtifactUploadOperationSnapshot>(
-                job.payload.value.clone(),
-            )
-            .is_ok()
+            let kind = match serde_json::from_value::<ArtifactJobPayload>(job.payload.value.clone())
             {
-                PublicJobKind::ArtifactVerify
-            } else {
-                let deletion: ArtifactDeletionOperationSnapshot =
-                    serde_json::from_value(job.payload.value.clone())
-                        .map_err(|_| OperationReadError::NotPublic)?;
-                deletion
-                    .canonical_digest()
-                    .map_err(|_| OperationReadError::CorruptAuthority)?;
-                PublicJobKind::ArtifactDelete
+                Ok(payload) => {
+                    payload
+                        .validate_for_owner(&artifact_id)
+                        .map_err(|_| OperationReadError::CorruptAuthority)?;
+                    match payload {
+                        ArtifactJobPayload::Scan { .. } | ArtifactJobPayload::Rescan { .. } => {
+                            PublicJobKind::ArtifactVerify
+                        }
+                        ArtifactJobPayload::Delete { .. } => PublicJobKind::ArtifactDelete,
+                        ArtifactJobPayload::BlobCleanup { .. } => {
+                            return Err(OperationReadError::NotPublic)
+                        }
+                    }
+                }
+                Err(_) => {
+                    serde_json::from_value::<ArtifactUploadOperationSnapshot>(
+                        job.payload.value.clone(),
+                    )
+                    .map_err(|_| OperationReadError::NotPublic)?;
+                    PublicJobKind::ArtifactVerify
+                }
             };
             Ok((kind, PublicJobTarget::Artifact { artifact_id }))
         }
