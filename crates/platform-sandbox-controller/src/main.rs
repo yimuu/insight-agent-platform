@@ -21,14 +21,10 @@ use insight_platform_sandbox_rpc::{
     proto::{
         sandbox_executor_authority_service_server::SandboxExecutorAuthorityServiceServer,
         sandbox_executor_broker_service_server::SandboxExecutorBrokerServiceServer,
-        sandbox_managed_mcp_session_authority_service_server::SandboxManagedMcpSessionAuthorityServiceServer,
-        sandbox_micro_vm_broker_service_server::SandboxMicroVmBrokerServiceServer,
         sandbox_secret_delivery_authority_service_server::SandboxSecretDeliveryAuthorityServiceServer,
     },
-    EgressBrokerWorkloadIdentity, MicroVmExecutorWorkloadIdentity, MicroVmProviderWorkloadIdentity,
-    SandboxArtifactResponseCapacity, SandboxAuthorityGrpcService, SandboxBrokerGrpcService,
-    SandboxExecutorAuthorityWorkloadIdentity, SandboxInternalRpcLimits,
-    SandboxManagedMcpSessionAuthorityGrpcService, SandboxMicroVmBrokerGrpcService,
+    EgressBrokerWorkloadIdentity, SandboxArtifactResponseCapacity, SandboxAuthorityGrpcService,
+    SandboxBrokerGrpcService, SandboxExecutorAuthorityWorkloadIdentity, SandboxInternalRpcLimits,
     SandboxProcessIsolationAttestorGrpcClient, SandboxSecretDeliveryAuthorityGrpcService,
     WasiExecutorWorkloadIdentity,
 };
@@ -220,24 +216,6 @@ async fn run() -> Result<(), ProcessError> {
     ))
     .max_encoding_message_size(maximum)
     .max_decoding_message_size(maximum);
-    let managed_session_authority_service = SandboxManagedMcpSessionAuthorityServiceServer::new(
-        SandboxManagedMcpSessionAuthorityGrpcService::new(
-            repository.clone(),
-            process_isolation.clone(),
-            limits,
-        ),
-    )
-    .max_encoding_message_size(maximum)
-    .max_decoding_message_size(maximum);
-    let micro_vm_broker_service =
-        SandboxMicroVmBrokerServiceServer::new(SandboxMicroVmBrokerGrpcService::new(
-            artifacts,
-            repository.clone(),
-            limits,
-            artifact_response_capacity,
-        ))
-        .max_encoding_message_size(maximum)
-        .max_decoding_message_size(maximum);
     let secret_delivery_authority_service = SandboxSecretDeliveryAuthorityServiceServer::new(
         SandboxSecretDeliveryAuthorityGrpcService::new(repository.clone(), limits),
     )
@@ -250,14 +228,6 @@ async fn run() -> Result<(), ProcessError> {
     let broker_service = tonic::service::interceptor::InterceptedService::new(
         broker_service,
         WasiExecutorWorkloadIdentity,
-    );
-    let managed_session_authority_service = tonic::service::interceptor::InterceptedService::new(
-        managed_session_authority_service,
-        MicroVmExecutorWorkloadIdentity,
-    );
-    let micro_vm_broker_service = tonic::service::interceptor::InterceptedService::new(
-        micro_vm_broker_service,
-        MicroVmProviderWorkloadIdentity,
     );
     let secret_delivery_authority_service = tonic::service::interceptor::InterceptedService::new(
         secret_delivery_authority_service,
@@ -290,8 +260,6 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::InvalidTls)?
         .add_service(authority_service)
         .add_service(broker_service)
-        .add_service(managed_session_authority_service)
-        .add_service(micro_vm_broker_service)
         .add_service(secret_delivery_authority_service)
         .serve_with_shutdown(address, async {
             let _ = shutdown_receiver.await;
