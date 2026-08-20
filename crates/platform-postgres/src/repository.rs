@@ -761,6 +761,39 @@ impl PgRepository {
         })
     }
 
+    pub async fn read_resource_for_principal(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        expected_kind: RegistryResourceKind,
+        resource_id: &ResourceId,
+    ) -> Result<ResourceRecord, RepositoryError> {
+        if resource_id.kind() != expected_kind.id_kind() {
+            return Err(RepositoryError::NotFound("resource"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal
+            .permissions
+            .contains(read_permission(expected_kind))
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let resource = load_resource(&mut transaction, tenant_id, resource_id).await?;
+        if resource.resource_kind != expected_kind.as_str() {
+            return Err(RepositoryError::NotFound("resource"));
+        }
+        transaction.commit().await?;
+        Ok(resource)
+    }
+
     pub async fn begin_security_transaction(
         &self,
     ) -> Result<PgSecurityTransaction, RepositoryError> {
@@ -19821,6 +19854,26 @@ fn write_permission(kind: RegistryResourceKind) -> Permission {
         RegistryResourceKind::SandboxRuntime
         | RegistryResourceKind::SandboxPackage
         | RegistryResourceKind::SandboxProfile => Permission::SandboxWrite,
+    }
+}
+
+fn read_permission(kind: RegistryResourceKind) -> Permission {
+    match kind {
+        RegistryResourceKind::Agent => Permission::AgentRead,
+        RegistryResourceKind::Skill => Permission::SkillRead,
+        RegistryResourceKind::CapabilityInterface
+        | RegistryResourceKind::CapabilityImplementation => Permission::CapabilityRead,
+        RegistryResourceKind::ContextSourceInterface
+        | RegistryResourceKind::ContextSourceImplementation
+        | RegistryResourceKind::ContextDataset => Permission::ContextRead,
+        RegistryResourceKind::McpServer => Permission::McpRead,
+        RegistryResourceKind::ModelProvider | RegistryResourceKind::ModelProfile => {
+            Permission::ModelRead
+        }
+        RegistryResourceKind::Policy => Permission::PolicyRead,
+        RegistryResourceKind::SandboxRuntime
+        | RegistryResourceKind::SandboxPackage
+        | RegistryResourceKind::SandboxProfile => Permission::SandboxRead,
     }
 }
 

@@ -4,14 +4,14 @@ use axum::{
     extract::{rejection::JsonRejection, Extension, Path, State},
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
-    canonical_digest, ApiProblem, ApiProblemCode, RegistryResourceKind, ResourceDocument,
-    ResourceDraftPayload, ResourceId, ResourceKind, Sha256Digest, MAX_FIELD_ERRORS,
-    MAX_SAFE_TEXT_BYTES,
+    canonical_digest, AdministrativeGate, ApiProblem, ApiProblemCode, EntityLifecycle,
+    RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
+    Sha256Digest, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -32,8 +32,8 @@ pub struct ResourceViewV1 {
     pub schema_version: u32,
     pub resource_id: ResourceId,
     pub resource_kind: RegistryResourceKind,
-    pub lifecycle_state: String,
-    pub gate_state: String,
+    pub lifecycle_state: EntityLifecycle,
+    pub gate_state: AdministrativeGate,
     pub draft_generation: u64,
     pub version: u64,
     pub draft: ResourceDraftPayload,
@@ -44,8 +44,6 @@ impl ResourceViewV1 {
     pub fn validate(&self) -> Result<(), ResourceApplicationError> {
         if self.schema_version != 1
             || self.resource_id.kind() != self.resource_kind.id_kind()
-            || self.lifecycle_state != "active"
-            || self.gate_state != "enabled"
             || self.draft_generation == 0
             || self.version == 0
             || self.draft.document.kind() != self.resource_kind
@@ -68,6 +66,14 @@ pub struct CreateResourceIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReadResourceIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub resource_kind: RegistryResourceKind,
+    pub resource_id: ResourceId,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceApplicationError {
     Invalid,
@@ -85,6 +91,11 @@ pub trait ResourceApplication: Send + Sync {
     async fn create_resource(
         &self,
         intent: CreateResourceIntent,
+    ) -> Result<ResourceViewV1, ResourceApplicationError>;
+
+    async fn read_resource(
+        &self,
+        intent: ReadResourceIntent,
     ) -> Result<ResourceViewV1, ResourceApplicationError>;
 }
 
@@ -116,7 +127,40 @@ impl ResourceHttpState {
 pub fn build_resource_router(state: ResourceHttpState) -> Router {
     Router::new()
         .route("/v1/{resource_noun}", post(create_resource))
+        .route("/v1/{resource_noun}/{resource_id}", get(read_resource))
         .with_state(state)
+}
+
+async fn read_resource(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path((resource_noun, resource_id)): Path<(String, String)>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    let Some(resource_kind) = resource_kind_for_noun(&resource_noun) else {
+        return problem(ResourceApplicationError::NotFound);
+    };
+    let resource_id: ResourceId = match resource_id.parse::<ResourceId>() {
+        Ok(resource_id) if resource_id.kind() == resource_kind.id_kind() => resource_id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let intent = ReadResourceIntent {
+        principal,
+        resource_kind,
+        resource_id,
+        deadline: state.clock.now()
+            + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS),
+    };
+    match state.application.read_resource(intent).await {
+        Ok(view) if view.validate().is_ok() => read_resource_response(view),
+        Ok(_) => problem(ResourceApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 async fn create_resource(
@@ -188,6 +232,16 @@ fn resource_response(resource_noun: String, view: ResourceViewV1) -> Response {
     let mut response = (StatusCode::CREATED, Json(view)).into_response();
     response.headers_mut().insert("etag", etag);
     response.headers_mut().insert("location", location);
+    no_store(response)
+}
+
+fn read_resource_response(view: ResourceViewV1) -> Response {
+    let etag = match HeaderValue::from_str(&view.etag) {
+        Ok(etag) => etag,
+        Err(_) => return problem(ResourceApplicationError::Internal),
+    };
+    let mut response = (StatusCode::OK, Json(view)).into_response();
+    response.headers_mut().insert("etag", etag);
     no_store(response)
 }
 
@@ -444,12 +498,34 @@ mod tests {
                 schema_version: 1,
                 resource_id: resource_id.clone(),
                 resource_kind: intent.resource_kind,
-                lifecycle_state: "active".to_owned(),
-                gate_state: "enabled".to_owned(),
+                lifecycle_state: EntityLifecycle::Active,
+                gate_state: AdministrativeGate::Enabled,
                 draft_generation: 1,
                 version: 1,
                 draft: intent.draft,
                 etag: resource_etag(&resource_id, 1),
+            })
+        }
+
+        async fn read_resource(
+            &self,
+            intent: ReadResourceIntent,
+        ) -> Result<ResourceViewV1, ResourceApplicationError> {
+            let draft = ResourceDraftPayload {
+                display_name: request_body().display_name,
+                document: request_body().document,
+                validation: None,
+            };
+            Ok(ResourceViewV1 {
+                schema_version: 1,
+                resource_id: intent.resource_id.clone(),
+                resource_kind: intent.resource_kind,
+                lifecycle_state: EntityLifecycle::Active,
+                gate_state: AdministrativeGate::Enabled,
+                draft_generation: 1,
+                version: 3,
+                draft,
+                etag: resource_etag(&intent.resource_id, 3),
             })
         }
     }
@@ -521,5 +597,44 @@ mod tests {
         let body = to_bytes(response.into_body(), 65_536).await.unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("policy.json"));
         assert!(application.intents.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_checks_nominal_route_identity_and_returns_current_etag() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application,
+            Arc::new(FixedClock(now)),
+        ));
+        let resource_id = id(ResourceKind::Policy, 4);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/policies/{resource_id}"))
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()["etag"], format!("\"{resource_id}-3\""));
+
+        let wrong_kind = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/agents/{resource_id}"))
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_kind.status(), StatusCode::NOT_FOUND);
     }
 }

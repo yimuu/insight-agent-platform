@@ -753,6 +753,54 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         registry_command!(repository, create_resource_draft, create_command).unwrap(),
         CommandOutcome::Replayed(_)
     ));
+    let readable = repository
+        .read_resource_for_principal(
+            &id(TENANT_ID),
+            &id(DENIED_PRINCIPAL_ID),
+            PrincipalKind::TenantAdmin,
+            insight_platform_contracts::RegistryResourceKind::Policy,
+            &id(RESOURCE_ID),
+        )
+        .await
+        .unwrap();
+    assert_eq!(readable.resource_id, RESOURCE_ID);
+    assert_eq!(readable.payload.value["display_name"], draft.display_name);
+    assert!(matches!(
+        repository
+            .read_resource_for_principal(
+                &id(TENANT_ID),
+                &id(PRINCIPAL_ID),
+                PrincipalKind::TenantAdmin,
+                insight_platform_contracts::RegistryResourceKind::Policy,
+                &id(RESOURCE_ID),
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    assert!(matches!(
+        repository
+            .read_resource_for_principal(
+                &id(TENANT_B_ID),
+                &id(DENIED_PRINCIPAL_ID),
+                PrincipalKind::TenantAdmin,
+                insight_platform_contracts::RegistryResourceKind::Policy,
+                &id(RESOURCE_ID),
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    assert!(matches!(
+        repository
+            .read_resource_for_principal(
+                &id(TENANT_ID),
+                &id(DENIED_PRINCIPAL_ID),
+                PrincipalKind::TenantAdmin,
+                insight_platform_contracts::RegistryResourceKind::Agent,
+                &id(RESOURCE_ID),
+            )
+            .await,
+        Err(RepositoryError::NotFound("resource"))
+    ));
     let server_retry = registry_command!(
         repository,
         create_resource_draft,

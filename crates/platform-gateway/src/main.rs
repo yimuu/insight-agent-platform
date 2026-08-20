@@ -19,13 +19,15 @@ use insight_platform_api::{
         OperationHttpState, SystemOperationClock,
     },
     resource::{
-        build_resource_router, resource_etag, CreateResourceIntent, ResourceApplication,
-        ResourceApplicationError, ResourceHttpState, ResourceViewV1, SystemResourceClock,
+        build_resource_router, resource_etag, CreateResourceIntent, ReadResourceIntent,
+        ResourceApplication, ResourceApplicationError, ResourceHttpState, ResourceViewV1,
+        SystemResourceClock,
     },
 };
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, CommandAudit, JsonLimits, OperationViewV1, PrincipalKind,
-    PrincipalSnapshot, ReadOperation, ResourceId, ResourceKind, Sha256Digest,
+    canonical_digest, parse_strict_json, AdministrativeGate, CommandAudit, EntityLifecycle,
+    JsonLimits, OperationViewV1, PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId,
+    ResourceKind, Sha256Digest,
 };
 use insight_platform_postgres::{
     operation_repository::OperationReadError,
@@ -222,12 +224,63 @@ impl ResourceApplication for PgResources {
             schema_version: 1,
             resource_id: resource_id.clone(),
             resource_kind: intent.resource_kind,
-            lifecycle_state: "active".to_owned(),
-            gate_state: "enabled".to_owned(),
+            lifecycle_state: EntityLifecycle::Active,
+            gate_state: AdministrativeGate::Enabled,
             draft_generation: 1,
             version: 1,
             draft,
             etag: resource_etag(&resource_id, 1),
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        intent: ReadResourceIntent,
+    ) -> Result<ResourceViewV1, ResourceApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let record = self
+            .0
+            .read_resource_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                intent.resource_kind,
+                &intent.resource_id,
+            )
+            .await
+            .map_err(map_resource_repository_error)?;
+        if record.payload.schema_version != 1 {
+            return Err(ResourceApplicationError::Internal);
+        }
+        let mut value = record.payload.value;
+        let object = value
+            .as_object_mut()
+            .ok_or(ResourceApplicationError::Internal)?;
+        object.remove("schema_version");
+        let draft =
+            serde_json::from_value(value).map_err(|_| ResourceApplicationError::Internal)?;
+        let version =
+            u64::try_from(record.version).map_err(|_| ResourceApplicationError::Internal)?;
+        let draft_generation = u64::try_from(record.draft_generation)
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        Ok(ResourceViewV1 {
+            schema_version: 1,
+            resource_id: intent.resource_id.clone(),
+            resource_kind: intent.resource_kind,
+            lifecycle_state: record
+                .lifecycle_state
+                .parse()
+                .map_err(|_| ResourceApplicationError::Internal)?,
+            gate_state: record
+                .gate_state
+                .parse()
+                .map_err(|_| ResourceApplicationError::Internal)?,
+            draft_generation,
+            version,
+            draft,
+            etag: resource_etag(&intent.resource_id, version),
         })
     }
 }
