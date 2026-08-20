@@ -1006,6 +1006,136 @@ impl PgRepository {
         Ok(run)
     }
 
+    pub async fn read_run_result_for_principal(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        run_id: &ResourceId,
+    ) -> Result<RunResultRecord, RepositoryError> {
+        if run_id.kind() != ResourceKind::Run {
+            return Err(RepositoryError::NotFound("run result"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::RuntimeRead) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let run = load_run(&mut transaction, tenant_id, run_id).await?;
+        let state: RunState = run
+            .state
+            .parse::<RunState>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if !matches!(
+            state,
+            RunState::Succeeded | RunState::Failed | RunState::Cancelled | RunState::TimedOut
+        ) {
+            return Err(RepositoryError::Conflict("run result is not terminal"));
+        }
+        let output_value_id = run
+            .output_value_id
+            .ok_or(RepositoryError::NotFound("run output value"))?;
+        let row = sqlx::query(
+            r#"
+            SELECT value.value_id, value.classification, value.schema_digest,
+                   value.content_digest, value.inline_value, value.artifact_id,
+                   artifact.state AS artifact_state,
+                   artifact.verified_media_type, blob.size_bytes
+            FROM insight_platform.run_values AS value
+            LEFT JOIN insight_platform.artifacts AS artifact
+              ON artifact.tenant_id = value.tenant_id AND artifact.artifact_id = value.artifact_id
+            LEFT JOIN insight_platform.artifact_blobs AS blob
+              ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+            WHERE value.tenant_id = $1 AND value.run_id = $2 AND value.value_id = $3
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(run_id.to_string())
+        .bind(&output_value_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("run output value"))?;
+        let value_id: ResourceId = row
+            .try_get::<String, _>("value_id")?
+            .parse::<ResourceId>()
+            .map_err(|_| RepositoryError::CorruptRow("RunValue ID is invalid".to_owned()))?;
+        let classification: DataClassification = row
+            .try_get::<String, _>("classification")?
+            .parse::<DataClassification>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let schema_digest: Sha256Digest = row
+            .try_get::<String, _>("schema_digest")?
+            .parse()
+            .map_err(|_| {
+                RepositoryError::CorruptRow("RunValue schema digest is invalid".to_owned())
+            })?;
+        let content_digest: Sha256Digest = row
+            .try_get::<String, _>("content_digest")?
+            .parse()
+            .map_err(|_| {
+                RepositoryError::CorruptRow("RunValue content digest is invalid".to_owned())
+            })?;
+        let inline: Option<Value> = row.try_get("inline_value")?;
+        let artifact_id: Option<String> = row.try_get("artifact_id")?;
+        let value = match (inline, artifact_id) {
+            (Some(value), None) => {
+                let observed: Sha256Digest = canonical_digest(&value)
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+                    .parse()
+                    .map_err(|_| {
+                        RepositoryError::CorruptRow("RunValue digest is invalid".to_owned())
+                    })?;
+                if observed != content_digest {
+                    return Err(RepositoryError::CorruptRow(
+                        "RunValue content digest differs".to_owned(),
+                    ));
+                }
+                ValueRef::Inline { value }
+            }
+            (None, Some(artifact_id))
+                if row
+                    .try_get::<Option<String>, _>("artifact_state")?
+                    .as_deref()
+                    == Some("ready") =>
+            {
+                let artifact = ArtifactRef::new(
+                    artifact_id.parse().map_err(|_| {
+                        RepositoryError::CorruptRow("Artifact ID is invalid".to_owned())
+                    })?,
+                    content_digest.clone(),
+                    u64::try_from(row.try_get::<i64, _>("size_bytes")?).map_err(|_| {
+                        RepositoryError::CorruptRow("Artifact size is invalid".to_owned())
+                    })?,
+                    row.try_get::<String, _>("verified_media_type")?,
+                    classification,
+                    None,
+                )
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+                ValueRef::Artifact { artifact }
+            }
+            _ => {
+                return Err(RepositoryError::CorruptRow(
+                    "RunValue storage shape is invalid".to_owned(),
+                ))
+            }
+        };
+        transaction.commit().await?;
+        Ok(RunResultRecord {
+            run_id: run_id.clone(),
+            value_id,
+            classification,
+            schema_digest,
+            content_digest,
+            value,
+        })
+    }
+
     pub async fn read_resource_for_writer(
         &self,
         tenant_id: &ResourceId,
@@ -17242,6 +17372,16 @@ pub struct RunRecord {
     pub terminal_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunResultRecord {
+    pub run_id: ResourceId,
+    pub value_id: ResourceId,
+    pub classification: DataClassification,
+    pub schema_digest: Sha256Digest,
+    pub content_digest: Sha256Digest,
+    pub value: ValueRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -29,7 +29,8 @@ use insight_platform_api::{
     },
     run::{
         build_run_router, run_etag, ControlRunIntent, CreateRunIntent, ReadRunIntent,
-        RunApplication, RunApplicationError, RunHttpState, RunViewV1, SystemRunClock,
+        RunApplication, RunApplicationError, RunHttpState, RunResultViewV1, RunViewV1,
+        SystemRunClock,
     },
 };
 use insight_platform_contracts::{
@@ -363,6 +364,39 @@ impl RunApplication for PgRuns {
             .await
             .map_err(map_run_repository_error)?;
         run_view_from_record(record)
+    }
+
+    async fn read_run_result(
+        &self,
+        intent: ReadRunIntent,
+    ) -> Result<RunResultViewV1, RunApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(RunApplicationError::Unavailable);
+        }
+        let result = self
+            .0
+            .read_run_result_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.run_id,
+            )
+            .await
+            .map_err(|error| match error {
+                RepositoryError::Conflict("run result is not terminal") => {
+                    RunApplicationError::NotTerminal
+                }
+                other => map_run_repository_error(other),
+            })?;
+        Ok(RunResultViewV1 {
+            schema_version: 1,
+            run_id: result.run_id,
+            value_id: result.value_id,
+            classification: result.classification,
+            schema_digest: result.schema_digest,
+            content_digest: result.content_digest,
+            value: result.value,
+        })
     }
 }
 

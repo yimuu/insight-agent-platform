@@ -926,6 +926,18 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(completed.run.active_work_count, 0);
     assert_eq!(completed.job.state, "succeeded");
     assert_eq!(completed.settled_quota_account_ids, vec![QUOTA_ACCOUNT_ID]);
+    let public_result = repository
+        .read_run_result_for_principal(
+            &id(TENANT_ID),
+            &id(DENIED_PRINCIPAL_ID),
+            PrincipalKind::AgentRunner,
+            &terminal_command.run_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(public_result.run_id, terminal_command.run_id);
+    assert_eq!(public_result.value_id, complete.output.as_ref().unwrap().value_id);
+    assert_eq!(public_result.value, complete.output.as_ref().unwrap().value);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT reserved_value FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND quota_account_id = $2",

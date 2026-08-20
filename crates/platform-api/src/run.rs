@@ -77,6 +77,30 @@ impl RunViewV1 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunResultViewV1 {
+    pub schema_version: u32,
+    pub run_id: ResourceId,
+    pub value_id: ResourceId,
+    pub classification: DataClassification,
+    pub schema_digest: Sha256Digest,
+    pub content_digest: Sha256Digest,
+    pub value: ValueRef,
+}
+
+impl RunResultViewV1 {
+    pub fn validate(&self) -> Result<(), RunApplicationError> {
+        if self.schema_version != 1
+            || self.run_id.kind() != ResourceKind::Run
+            || self.value_id.kind() != ResourceKind::RunValue
+        {
+            return Err(RunApplicationError::Internal);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ReadRunIntent {
     pub principal: AuthenticatedPrincipal,
@@ -111,6 +135,7 @@ pub enum RunApplicationError {
     NotFound,
     Conflict,
     IdempotencyConflict,
+    NotTerminal,
     Unavailable,
     Internal,
 }
@@ -133,6 +158,12 @@ pub trait RunApplication: Send + Sync {
         &self,
         _intent: ControlRunIntent,
     ) -> Result<RunViewV1, RunApplicationError> {
+        Err(RunApplicationError::Internal)
+    }
+    async fn read_run_result(
+        &self,
+        _intent: ReadRunIntent,
+    ) -> Result<RunResultViewV1, RunApplicationError> {
         Err(RunApplicationError::Internal)
     }
     async fn read_run(&self, intent: ReadRunIntent) -> Result<RunViewV1, RunApplicationError>;
@@ -170,8 +201,46 @@ pub fn build_run_router(state: RunHttpState) -> Router {
             "/v1/runs/{run_action}",
             get(read_run).post(control_run_action),
         )
+        .route("/v1/runs/{run_id}/result", get(read_run_result))
         .layer(DefaultBodyLimit::max(MAX_RUN_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn read_run_result(
+    State(state): State<RunHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path(run_id): Path<String>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(RunApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(RunApplicationError::Unauthenticated);
+    }
+    let run_id = match run_id.parse::<ResourceId>() {
+        Ok(id) if id.kind() == ResourceKind::Run => id,
+        _ => return problem(RunApplicationError::NotFound),
+    };
+    match state
+        .application
+        .read_run_result(ReadRunIntent {
+            principal,
+            run_id,
+            deadline: state.clock.now() + Duration::milliseconds(RUN_READ_DEADLINE_MILLISECONDS),
+        })
+        .await
+    {
+        Ok(view) if view.validate().is_ok() => {
+            let mut response = (StatusCode::OK, Json(view)).into_response();
+            response.headers_mut().insert(
+                CACHE_CONTROL,
+                HeaderValue::from_static("no-store, private, max-age=0"),
+            );
+            response
+        }
+        Ok(_) => problem(RunApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 async fn control_run_action(
@@ -495,6 +564,12 @@ fn problem(error: RunApplicationError) -> Response {
             "The idempotency key was used for a different Run request.",
             false,
         ),
+        RunApplicationError::NotTerminal => (
+            StatusCode::CONFLICT,
+            ApiProblemCode::RunNotTerminal,
+            "The Run is not terminal.",
+            false,
+        ),
         RunApplicationError::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             ApiProblemCode::TemporarilyUnavailable,
@@ -652,6 +727,23 @@ mod tests {
                 etag: run_etag(&intent.run_id, 4),
             })
         }
+
+        async fn read_run_result(
+            &self,
+            intent: ReadRunIntent,
+        ) -> Result<RunResultViewV1, RunApplicationError> {
+            Ok(RunResultViewV1 {
+                schema_version: 1,
+                run_id: intent.run_id,
+                value_id: id(ResourceKind::RunValue, 40),
+                classification: DataClassification::Internal,
+                schema_digest: digest('b'),
+                content_digest: digest('c'),
+                value: ValueRef::Inline {
+                    value: serde_json::json!({"answer": "done"}),
+                },
+            })
+        }
     }
 
     #[tokio::test]
@@ -719,6 +811,31 @@ mod tests {
         assert_eq!(
             response.headers().get("etag").unwrap(),
             &run_etag(&run_id, 4)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_result_returns_only_the_typed_terminal_value() {
+        let now = Utc::now();
+        let router = build_run_router(RunHttpState::new(
+            Arc::new(FixtureApplication),
+            Arc::new(FixedClock(now)),
+        ));
+        let run_id = id(ResourceKind::Run, 3);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/runs/{run_id}/result"))
+                    .extension(principal(now))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL).unwrap(),
+            "no-store, private, max-age=0"
         );
     }
 
