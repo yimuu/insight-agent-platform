@@ -2499,7 +2499,6 @@ dependencies = [
  "insight-platform-egress",
  "insight-platform-egress-rpc",
  "insight-platform-model-adapters",
- "insight-platform-sandbox-rpc",
  "insight-platform-secret-broker",
  "insight-platform-security-rpc",
  "serde",

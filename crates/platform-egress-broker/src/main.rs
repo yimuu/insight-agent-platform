@@ -5,12 +5,10 @@
 //! the two-method Security Authority mTLS RPC.
 
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
-    ResourceKind, Sha256Digest,
+    canonical_digest, parse_strict_json, JsonLimits, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_egress::{
-    AeadMcpRemoteTaskStateCodec, AeadMcpSubscriptionStateCodec,
-    BrokeredManagedMcpSandboxSecretDelivery, BrokeredMcpOAuthPkceSecretCleaner,
+    AeadMcpRemoteTaskStateCodec, AeadMcpSubscriptionStateCodec, BrokeredMcpOAuthPkceSecretCleaner,
     CapabilityGrpcEgressLimits, CapabilityHttpEgressLimits, HyperCapabilityGrpcEgressTransport,
     InstalledCapabilityGrpcEndpoint, InstalledCapabilityGrpcEndpointCatalog,
     InstalledCapabilityHttpEndpoint, InstalledCapabilityHttpEndpointCatalog,
@@ -31,9 +29,6 @@ use insight_platform_egress_rpc::{
 };
 use insight_platform_model_adapters::{
     BrokeredModelProviderWireConnector, ModelProviderEgressBroker,
-};
-use insight_platform_sandbox_rpc::{
-    SandboxInternalRpcLimits, SandboxSecretDeliveryAuthorityGrpcClient,
 };
 use insight_platform_secret_broker::{
     AwsSecretProviderCatalog, AwsSecretProviderCatalogConfig, BrokeredMcpOAuthSecretStore,
@@ -59,7 +54,6 @@ const CONFIG_DIGEST_ENV: &str = "PLATFORM_EGRESS_BROKER_CONFIG_DIGEST";
 const AUTHORITY_CA_PATH_ENV: &str = "PLATFORM_EGRESS_BROKER_AUTHORITY_CA_PATH";
 const AUTHORITY_CERT_PATH_ENV: &str = "PLATFORM_EGRESS_BROKER_AUTHORITY_CERT_PATH";
 const AUTHORITY_KEY_PATH_ENV: &str = "PLATFORM_EGRESS_BROKER_AUTHORITY_KEY_PATH";
-const SANDBOX_CONTROLLER_CA_PATH_ENV: &str = "PLATFORM_EGRESS_BROKER_SANDBOX_CONTROLLER_CA_PATH";
 const CLIENT_CA_PATH_ENV: &str = "PLATFORM_EGRESS_BROKER_CLIENT_CA_PATH";
 const SERVER_CERT_PATH_ENV: &str = "PLATFORM_EGRESS_BROKER_CERT_PATH";
 const SERVER_KEY_PATH_ENV: &str = "PLATFORM_EGRESS_BROKER_KEY_PATH";
@@ -75,8 +69,6 @@ struct ProcessConfig {
     listen_address: String,
     security_authority_endpoint: String,
     security_authority_tls_server_name: String,
-    sandbox_controller_endpoint: String,
-    sandbox_controller_tls_server_name: String,
     maximum_rpc_metadata_bytes: usize,
     maximum_rpc_payload_bytes: usize,
     security_authority_maximum_rpc_message_bytes: usize,
@@ -222,8 +214,6 @@ impl ProcessConfig {
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         let authority = Url::parse(&self.security_authority_endpoint)
             .map_err(|_| ProcessError::InvalidConfiguration)?;
-        let sandbox_controller = Url::parse(&self.sandbox_controller_endpoint)
-            .map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
             || listen.port() == 0
             || authority.scheme() != "https"
@@ -235,15 +225,6 @@ impl ProcessConfig {
             || authority.query().is_some()
             || authority.fragment().is_some()
             || !valid_tls_server_name(&self.security_authority_tls_server_name)
-            || sandbox_controller.scheme() != "https"
-            || sandbox_controller.host_str().is_none()
-            || sandbox_controller.port().is_none()
-            || sandbox_controller.username() != ""
-            || sandbox_controller.password().is_some()
-            || sandbox_controller.path() != "/"
-            || sandbox_controller.query().is_some()
-            || sandbox_controller.fragment().is_some()
-            || !valid_tls_server_name(&self.sandbox_controller_tls_server_name)
             || self.connect_timeout_milliseconds == 0
             || self.connect_timeout_milliseconds > 30_000
             || self.request_timeout_milliseconds == 0
@@ -330,14 +311,6 @@ async fn run() -> Result<(), ProcessError> {
         authority_channel,
         security_limits,
     ));
-    let sandbox_limits = SandboxInternalRpcLimits::from_profile(&checked_in_hard_limit_profile())
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let sandbox_controller_channel = connect_sandbox_controller(&config).await?;
-    let sandbox_secret_authority = Arc::new(SandboxSecretDeliveryAuthorityGrpcClient::new(
-        sandbox_controller_channel,
-        sandbox_limits,
-    ));
-
     let provider_catalog = AwsSecretProviderCatalog::install(config.secret_provider_catalog)
         .await
         .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -356,14 +329,6 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let secrets: Arc<dyn SecretMaterialResolver> = secret_resolver.clone();
-    let managed_mcp_sandbox_secrets = Arc::new(
-        BrokeredManagedMcpSandboxSecretDelivery::new(
-            sandbox_secret_authority,
-            Arc::clone(&secrets),
-            secret_limits.maximum_material_bytes,
-        )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
-    );
     let dns = Arc::new(TokioEgressDnsResolver);
 
     let verification_catalog =
@@ -467,9 +432,7 @@ async fn run() -> Result<(), ProcessError> {
             .with_mcp_streamable_http_subscription(
                 mcp_streamable_http_subscription,
                 mcp_subscription_bridge,
-            )
-            .with_managed_mcp_sandbox_secrets(managed_mcp_sandbox_secrets)
-            .with_managed_mcp_sandbox_session_states(subscription_state),
+            ),
     )
     .max_encoding_message_size(maximum)
     .max_decoding_message_size(maximum);
@@ -553,36 +516,6 @@ async fn connect_security_authority(
         .connect()
         .await
         .map_err(|_| ProcessError::SecurityAuthorityUnavailable)
-}
-
-async fn connect_sandbox_controller(
-    config: &ProcessConfig,
-) -> Result<tonic::transport::Channel, ProcessError> {
-    let tls = ClientTlsConfig::new()
-        .domain_name(config.sandbox_controller_tls_server_name.clone())
-        .ca_certificate(Certificate::from_pem(read_bounded(
-            &required_absolute_path(SANDBOX_CONTROLLER_CA_PATH_ENV)?,
-            MAX_TLS_FILE_BYTES,
-        )?))
-        .identity(Identity::from_pem(
-            read_bounded(
-                &required_absolute_path(AUTHORITY_CERT_PATH_ENV)?,
-                MAX_TLS_FILE_BYTES,
-            )?,
-            read_bounded(
-                &required_absolute_path(AUTHORITY_KEY_PATH_ENV)?,
-                MAX_TLS_FILE_BYTES,
-            )?,
-        ));
-    Endpoint::from_shared(config.sandbox_controller_endpoint.clone())
-        .map_err(|_| ProcessError::InvalidConfiguration)?
-        .connect_timeout(Duration::from_millis(config.connect_timeout_milliseconds))
-        .timeout(Duration::from_millis(config.request_timeout_milliseconds))
-        .tls_config(tls)
-        .map_err(|_| ProcessError::InvalidConfiguration)?
-        .connect()
-        .await
-        .map_err(|_| ProcessError::SandboxControllerUnavailable)
 }
 
 async fn shutdown_signal() {
@@ -688,7 +621,6 @@ enum ProcessError {
     InvalidConfiguration,
     FileUnavailable,
     SecurityAuthorityUnavailable,
-    SandboxControllerUnavailable,
     SecretProviderUnavailable,
     ServerFailure,
     ShutdownTimeout,
@@ -704,9 +636,6 @@ impl fmt::Display for ProcessError {
             Self::FileUnavailable => formatter.write_str("configuration file is unavailable"),
             Self::SecurityAuthorityUnavailable => {
                 formatter.write_str("Security Authority is unavailable")
-            }
-            Self::SandboxControllerUnavailable => {
-                formatter.write_str("Sandbox Controller is unavailable")
             }
             Self::SecretProviderUnavailable => {
                 formatter.write_str("Secret Provider readiness failed")

@@ -17,31 +17,22 @@ use insight_platform_contracts::{
     canonical_digest, parse_strict_json, JsonLimits, ResourceKind, SecretResolutionPolicy,
     Sha256Digest,
 };
-use insight_platform_egress::{
-    DeliveredManagedMcpSandboxSecret, ManagedMcpSandboxSecretBroker,
-    ManagedMcpSandboxSecretBrokerError,
-};
 use insight_platform_mcp_host::{
-    AuthorizedMcpOAuthPkceCleanup, EncryptedMcpState, McpOAuthAuthorizedGrant,
-    McpOAuthCredentialBroker, McpOAuthCredentialBrokerError, McpOAuthExchangeContract,
-    McpOAuthPkceSecretCleaner, McpOAuthPkceSecretCleanupDisposition,
-    McpOAuthPkceSecretCleanupError, McpOperationOutcome, McpRemoteTaskCancelOutcome,
-    McpStreamableHttpConnector, McpStreamableHttpRequest, McpStreamableHttpSubscriptionConnector,
-    McpStreamableHttpSubscriptionNotification, McpStreamableHttpSubscriptionRequest,
-    McpStreamableHttpSubscriptionSink, McpStreamableHttpSubscriptionSinkError,
-    McpStreamableHttpSubscriptionTermination, McpSubscriptionActivation, McpTransportFailure,
-    PreparedMcpSubscription, SafeMcpFailure, SensitiveMcpNotificationWire, SensitiveOAuthValue,
-    MAX_MCP_OAUTH_CODE_BYTES, MCP_OAUTH_PKCE_SECRET_PURPOSE,
+    AuthorizedMcpOAuthPkceCleanup, McpOAuthAuthorizedGrant, McpOAuthCredentialBroker,
+    McpOAuthCredentialBrokerError, McpOAuthExchangeContract, McpOAuthPkceSecretCleaner,
+    McpOAuthPkceSecretCleanupDisposition, McpOAuthPkceSecretCleanupError, McpOperationOutcome,
+    McpRemoteTaskCancelOutcome, McpStreamableHttpConnector, McpStreamableHttpRequest,
+    McpStreamableHttpSubscriptionConnector, McpStreamableHttpSubscriptionNotification,
+    McpStreamableHttpSubscriptionRequest, McpStreamableHttpSubscriptionSink,
+    McpStreamableHttpSubscriptionSinkError, McpStreamableHttpSubscriptionTermination,
+    McpSubscriptionActivation, McpTransportFailure, PreparedMcpSubscription, SafeMcpFailure,
+    SensitiveMcpNotificationWire, SensitiveOAuthValue, MAX_MCP_OAUTH_CODE_BYTES,
+    MCP_OAUTH_PKCE_SECRET_PURPOSE,
 };
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
     ModelAdapterFailureClass, ModelProviderWireConnector, ModelProviderWireEvent,
     ModelProviderWireProtocol, ModelProviderWireRequest, ModelProviderWireStream,
-};
-use insight_platform_sandbox::{
-    AuthorizedManagedMcpSandboxSecretDelivery, ManagedMcpSandboxOpaqueSessionClaims,
-    ManagedMcpSandboxSecretDeliveryEvidence, ManagedMcpSandboxSecretDeliveryRequest,
-    ManagedMcpSandboxSessionStateSealError, ManagedMcpSandboxSessionStateSealer,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -70,8 +61,6 @@ pub const MODEL_WORKER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/work
 pub const CAPABILITY_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/capability-worker";
 pub const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
-pub const MICROVM_PROVIDER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/sandbox-provider.microvm";
 pub const MAX_EGRESS_METADATA_BYTES_HARD: usize = 1_048_576;
 pub const MAX_EGRESS_PAYLOAD_BYTES_HARD: usize = 64 * 1_048_576;
 pub const MAX_EGRESS_RPC_MESSAGE_BYTES_HARD: usize =
@@ -107,11 +96,6 @@ const MCP_STREAMABLE_HTTP_SUBSCRIPTION_NOTIFICATION: &str =
     "mcp_streamable_http.subscription_notification/v1";
 const MCP_STREAMABLE_HTTP_SUBSCRIPTION_TERMINATION: &str =
     "mcp_streamable_http.subscription_termination/v1";
-const RESOLVE_MANAGED_MCP_SANDBOX_SECRET: &str = "sandbox_secret.resolve_managed_mcp/v1";
-const MANAGED_MCP_SANDBOX_SECRET_OUTCOME: &str = "sandbox_secret.managed_mcp_outcome/v1";
-const SEAL_MANAGED_MCP_SANDBOX_SESSION_STATE: &str = "sandbox_session.seal_managed_mcp/v1";
-const MANAGED_MCP_SANDBOX_SESSION_STATE_OUTCOME: &str =
-    "sandbox_session.managed_mcp_state_outcome/v1";
 
 pub const MAX_EGRESS_PENDING_MCP_SUBSCRIPTIONS_HARD: usize = 4_096;
 pub const MAX_EGRESS_ACTIVE_MCP_SUBSCRIPTIONS_HARD: usize = 65_536;
@@ -519,7 +503,6 @@ pub enum EgressCallerRole {
     ModelWorker,
     CapabilityWorker,
     McpHost,
-    MicroVmProvider,
 }
 
 impl EgressCallerRole {
@@ -528,7 +511,6 @@ impl EgressCallerRole {
             MODEL_WORKER_WORKLOAD_IDENTITY => Some(Self::ModelWorker),
             CAPABILITY_WORKER_WORKLOAD_IDENTITY => Some(Self::CapabilityWorker),
             MCP_HOST_WORKLOAD_IDENTITY => Some(Self::McpHost),
-            MICROVM_PROVIDER_WORKLOAD_IDENTITY => Some(Self::MicroVmProvider),
             _ => None,
         }
     }
@@ -602,13 +584,6 @@ fn require_role<T>(request: &Request<T>, expected: EgressCallerRole) -> Result<(
 enum UnaryOutcome<T, F> {
     Succeeded(T),
     Failed(F),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeliveredManagedMcpSandboxSecretWire {
-    authorization: AuthorizedManagedMcpSandboxSecretDelivery,
-    evidence: ManagedMcpSandboxSecretDeliveryEvidence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -704,78 +679,6 @@ impl EgressBrokerGrpcClient {
     ) -> Self {
         self.mcp_subscription_sink = Some(sink);
         self
-    }
-}
-
-#[async_trait]
-impl ManagedMcpSandboxSecretBroker for EgressBrokerGrpcClient {
-    async fn deliver(
-        &self,
-        request: ManagedMcpSandboxSecretDeliveryRequest,
-    ) -> Result<DeliveredManagedMcpSandboxSecret, ManagedMcpSandboxSecretBrokerError> {
-        request
-            .validate_shape()
-            .map_err(|_| ManagedMcpSandboxSecretBrokerError::Denied)?;
-        let envelope = encode_metadata(&request, RESOLVE_MANAGED_MCP_SANDBOX_SECRET, self.limits)
-            .map_err(|_| ManagedMcpSandboxSecretBrokerError::Denied)?;
-        let mut client = self.client.clone();
-        let response = client
-            .resolve_managed_mcp_sandbox_secret(Request::new(envelope))
-            .await
-            .map_err(managed_mcp_sandbox_secret_status_error)?;
-        let (wire, material): (DeliveredManagedMcpSandboxSecretWire, Vec<u8>) =
-            decode_metadata_payload(
-                response.into_inner(),
-                MANAGED_MCP_SANDBOX_SECRET_OUTCOME,
-                self.limits,
-            )
-            .map_err(|_| ManagedMcpSandboxSecretBrokerError::OutcomeUncertain)?;
-        DeliveredManagedMcpSandboxSecret::from_committed(
-            &request,
-            wire.authorization,
-            wire.evidence,
-            material,
-        )
-    }
-}
-
-#[async_trait]
-impl ManagedMcpSandboxSessionStateSealer for EgressBrokerGrpcClient {
-    async fn seal_managed_mcp_sandbox_session_state(
-        &self,
-        claims: ManagedMcpSandboxOpaqueSessionClaims,
-    ) -> Result<EncryptedMcpState, ManagedMcpSandboxSessionStateSealError> {
-        claims
-            .validate_shape(Utc::now())
-            .map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)?;
-        let expected_digest = claims
-            .canonical_digest()
-            .map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)?;
-        let envelope =
-            encode_metadata(&claims, SEAL_MANAGED_MCP_SANDBOX_SESSION_STATE, self.limits)
-                .map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)?;
-        let mut client = self.client.clone();
-        let state: EncryptedMcpState = client
-            .seal_managed_mcp_sandbox_session_state(Request::new(envelope))
-            .await
-            .map_err(|status| match status.code() {
-                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
-                    ManagedMcpSandboxSessionStateSealError::Unavailable
-                }
-                _ => ManagedMcpSandboxSessionStateSealError::Denied,
-            })
-            .and_then(|response| {
-                decode_metadata(
-                    response.into_inner(),
-                    MANAGED_MCP_SANDBOX_SESSION_STATE_OUTCOME,
-                    self.limits,
-                )
-                .map_err(|_| ManagedMcpSandboxSessionStateSealError::Denied)
-            })?;
-        if state.validate().is_err() || state.plaintext_digest != expected_digest {
-            return Err(ManagedMcpSandboxSessionStateSealError::Denied);
-        }
-        Ok(state)
     }
 }
 
@@ -1438,8 +1341,6 @@ pub struct EgressBrokerGrpcService<M, H, G> {
     mcp_streamable_http: Option<Arc<dyn McpStreamableHttpConnector>>,
     mcp_streamable_http_subscription: Option<Arc<dyn McpStreamableHttpSubscriptionConnector>>,
     mcp_subscription_bridge: Option<Arc<EgressMcpSubscriptionBridge>>,
-    managed_mcp_sandbox_secrets: Option<Arc<dyn ManagedMcpSandboxSecretBroker>>,
-    managed_mcp_sandbox_session_states: Option<Arc<dyn ManagedMcpSandboxSessionStateSealer>>,
     limits: EgressInternalRpcLimits,
 }
 
@@ -1454,8 +1355,6 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
             mcp_streamable_http: None,
             mcp_streamable_http_subscription: None,
             mcp_subscription_bridge: None,
-            managed_mcp_sandbox_secrets: None,
-            managed_mcp_sandbox_session_states: None,
             limits,
         }
     }
@@ -1485,22 +1384,6 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
     ) -> Self {
         self.mcp_streamable_http_subscription = Some(connector);
         self.mcp_subscription_bridge = Some(bridge);
-        self
-    }
-
-    pub fn with_managed_mcp_sandbox_secrets(
-        mut self,
-        broker: Arc<dyn ManagedMcpSandboxSecretBroker>,
-    ) -> Self {
-        self.managed_mcp_sandbox_secrets = Some(broker);
-        self
-    }
-
-    pub fn with_managed_mcp_sandbox_session_states(
-        mut self,
-        sealer: Arc<dyn ManagedMcpSandboxSessionStateSealer>,
-    ) -> Self {
-        self.managed_mcp_sandbox_session_states = Some(sealer);
         self
     }
 }
@@ -1776,82 +1659,6 @@ where
         Ok(Response::new(encode_metadata(
             &outcome,
             MCP_REMOTE_TASK_CANCEL_OUTCOME,
-            self.limits,
-        )?))
-    }
-
-    async fn resolve_managed_mcp_sandbox_secret(
-        &self,
-        request: Request<ClosedEgressEnvelope>,
-    ) -> Result<Response<ClosedEgressEnvelope>, Status> {
-        require_role(&request, EgressCallerRole::MicroVmProvider)?;
-        let broker = self
-            .managed_mcp_sandbox_secrets
-            .as_ref()
-            .ok_or_else(|| Status::unavailable("Sandbox Secret broker is not installed"))?;
-        let request: ManagedMcpSandboxSecretDeliveryRequest = decode_metadata(
-            request.into_inner(),
-            RESOLVE_MANAGED_MCP_SANDBOX_SECRET,
-            self.limits,
-        )?;
-        request
-            .validate_shape()
-            .map_err(|_| Status::invalid_argument("invalid Managed MCP Secret delivery"))?;
-        let delivered = broker
-            .deliver(request)
-            .await
-            .map_err(managed_mcp_sandbox_secret_error_status)?;
-        let wire = DeliveredManagedMcpSandboxSecretWire {
-            authorization: delivered.authorization.clone(),
-            evidence: delivered.evidence.clone(),
-        };
-        Ok(Response::new(encode_metadata_payload(
-            &wire,
-            delivered.into_material(),
-            MANAGED_MCP_SANDBOX_SECRET_OUTCOME,
-            self.limits,
-        )?))
-    }
-
-    async fn seal_managed_mcp_sandbox_session_state(
-        &self,
-        request: Request<ClosedEgressEnvelope>,
-    ) -> Result<Response<ClosedEgressEnvelope>, Status> {
-        require_role(&request, EgressCallerRole::MicroVmProvider)?;
-        let sealer = self
-            .managed_mcp_sandbox_session_states
-            .as_ref()
-            .ok_or_else(|| Status::unavailable("Sandbox session state sealer is not installed"))?;
-        let claims: ManagedMcpSandboxOpaqueSessionClaims = decode_metadata(
-            request.into_inner(),
-            SEAL_MANAGED_MCP_SANDBOX_SESSION_STATE,
-            self.limits,
-        )?;
-        claims
-            .validate_shape(Utc::now())
-            .map_err(|_| Status::invalid_argument("invalid Managed MCP session state"))?;
-        let expected_digest = claims
-            .canonical_digest()
-            .map_err(|_| Status::invalid_argument("invalid Managed MCP session state"))?;
-        let state = sealer
-            .seal_managed_mcp_sandbox_session_state(claims)
-            .await
-            .map_err(|error| match error {
-                ManagedMcpSandboxSessionStateSealError::Unavailable => {
-                    Status::unavailable("Sandbox session state sealer is unavailable")
-                }
-                ManagedMcpSandboxSessionStateSealError::Denied => {
-                    Status::permission_denied("Sandbox session state sealing was denied")
-                }
-            })?;
-        if state.validate().is_err() || state.plaintext_digest != expected_digest {
-            return Err(Status::failed_precondition(
-                "Sandbox session state sealer returned invalid evidence",
-            ));
-        }
-        Ok(Response::new(encode_metadata(
-            &state,
-            MANAGED_MCP_SANDBOX_SESSION_STATE_OUTCOME,
             self.limits,
         )?))
     }
@@ -2288,32 +2095,6 @@ fn raw_digest(bytes: &[u8]) -> Result<Sha256Digest, EgressRpcError> {
         write!(&mut encoded, "{byte:02x}").map_err(|_| EgressRpcError::InvalidEnvelope)?;
     }
     encoded.parse().map_err(|_| EgressRpcError::InvalidEnvelope)
-}
-
-fn managed_mcp_sandbox_secret_error_status(error: ManagedMcpSandboxSecretBrokerError) -> Status {
-    match error {
-        ManagedMcpSandboxSecretBrokerError::Unavailable => {
-            Status::unavailable("Sandbox Secret broker unavailable")
-        }
-        ManagedMcpSandboxSecretBrokerError::Denied => {
-            Status::permission_denied("Sandbox Secret delivery denied")
-        }
-        ManagedMcpSandboxSecretBrokerError::OutcomeUncertain => {
-            Status::aborted("Sandbox Secret delivery outcome is uncertain")
-        }
-    }
-}
-
-fn managed_mcp_sandbox_secret_status_error(status: Status) -> ManagedMcpSandboxSecretBrokerError {
-    match status.code() {
-        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
-            ManagedMcpSandboxSecretBrokerError::Unavailable
-        }
-        tonic::Code::Aborted | tonic::Code::AlreadyExists => {
-            ManagedMcpSandboxSecretBrokerError::OutcomeUncertain
-        }
-        _ => ManagedMcpSandboxSecretBrokerError::Denied,
-    }
 }
 
 fn combined_digest(
@@ -2896,8 +2677,6 @@ mod tests {
         model_key_pem: String,
         mcp_certificate_pem: String,
         mcp_key_pem: String,
-        provider_certificate_pem: String,
-        provider_key_pem: String,
         unknown_certificate_pem: String,
         unknown_key_pem: String,
     }
@@ -2934,8 +2713,6 @@ mod tests {
             client(CAPABILITY_WORKER_WORKLOAD_IDENTITY);
         let (model_certificate_pem, model_key_pem) = client(MODEL_WORKER_WORKLOAD_IDENTITY);
         let (mcp_certificate_pem, mcp_key_pem) = client(MCP_HOST_WORKLOAD_IDENTITY);
-        let (provider_certificate_pem, provider_key_pem) =
-            client(MICROVM_PROVIDER_WORKLOAD_IDENTITY);
         let (unknown_certificate_pem, unknown_key_pem) =
             client("spiffe://insight.platform/workload/api");
         MtlsFixture {
@@ -2948,8 +2725,6 @@ mod tests {
             model_key_pem,
             mcp_certificate_pem,
             mcp_key_pem,
-            provider_certificate_pem,
-            provider_key_pem,
             unknown_certificate_pem,
             unknown_key_pem,
         }
@@ -3145,43 +2920,6 @@ mod tests {
             tonic::Code::Unavailable
         );
 
-        let sandbox_secret_envelope = encode_metadata(
-            &serde_json::json!({"schema_version": 1}),
-            RESOLVE_MANAGED_MCP_SANDBOX_SECRET,
-            limits,
-        )
-        .unwrap();
-        assert_eq!(
-            mcp.resolve_managed_mcp_sandbox_secret(Request::new(sandbox_secret_envelope.clone()))
-                .await
-                .unwrap_err()
-                .code(),
-            tonic::Code::PermissionDenied
-        );
-        let mut provider = connect(
-            address,
-            &fixture,
-            &fixture.provider_certificate_pem,
-            &fixture.provider_key_pem,
-        )
-        .await;
-        assert_eq!(
-            provider
-                .resolve_managed_mcp_sandbox_secret(Request::new(sandbox_secret_envelope))
-                .await
-                .unwrap_err()
-                .code(),
-            tonic::Code::Unavailable
-        );
-        assert_eq!(
-            provider
-                .cancel_capability_http(Request::new(envelope.clone()))
-                .await
-                .unwrap_err()
-                .code(),
-            tonic::Code::PermissionDenied
-        );
-
         let subscription_envelope = encode_metadata(
             &serde_json::json!({"schema_version": 1}),
             ESTABLISH_MCP_STREAMABLE_HTTP_SUBSCRIPTION,
@@ -3227,7 +2965,6 @@ mod tests {
         drop(capability);
         drop(model);
         drop(mcp);
-        drop(provider);
         drop(unknown);
         let _ = shutdown_sender.send(());
         tokio::time::timeout(std::time::Duration::from_secs(5), server)
