@@ -271,11 +271,39 @@ def check_foundation_surfaces(errors):
     ]
     if any(fragment not in openapi for fragment in operation_contract):
         errors.append("public Operation Job projection OpenAPI contract is incomplete")
+    run_contract = [
+        "  /runs:",
+        "  /runs/{run_id}:",
+        "  /runs/{run_id}/result:",
+        "  /runs/{run_id}:pause:",
+        "  /runs/{run_id}:resume:",
+        "  /runs/{run_id}:cancel:",
+        "      operationId: createRun",
+        "      operationId: getRun",
+        "      operationId: getRunResult",
+        "      operationId: pauseRun",
+        "      operationId: resumeRun",
+        "      operationId: cancelRun",
+        "    CreateRunRequestV1:",
+        "    RunViewV1:",
+        "    RunResultViewV1:",
+    ]
+    if any(fragment not in openapi for fragment in run_contract):
+        errors.append("public Run OpenAPI contract is incomplete")
     path_lines = [
         line for line in openapi.splitlines()
         if line.startswith("  /") and line.endswith(":")
     ]
-    if path_lines != ["  /operations/{operation_id}:", "  /mcp/oauth/callback:"]:
+    if path_lines != [
+        "  /runs:",
+        "  /runs/{run_id}:",
+        "  /runs/{run_id}/result:",
+        "  /runs/{run_id}:pause:",
+        "  /runs/{run_id}:resume:",
+        "  /runs/{run_id}:cancel:",
+        "  /operations/{operation_id}:",
+        "  /mcp/oauth/callback:",
+    ]:
         errors.append("OpenAPI exposes a path outside the reviewed implementing slice")
     if any(token in openapi for token in ["access_token", "refresh_token", "error_description"]):
         errors.append("MCP OAuth callback OpenAPI exposes a forbidden sensitive query field")
