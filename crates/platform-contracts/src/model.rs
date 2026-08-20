@@ -289,44 +289,6 @@ impl StructuredOutputContract {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelArtifactDeliveryContract {
-    pub supported_modalities: Vec<ModelModality>,
-    pub provider_file_upload: bool,
-    pub maximum_artifacts: u32,
-    pub maximum_single_artifact_bytes: u64,
-    pub maximum_total_artifact_bytes: u64,
-    pub remote_retention_milliseconds: u64,
-}
-
-impl ModelArtifactDeliveryContract {
-    pub fn validate(&self, modalities: &ModelModalities) -> Result<(), ModelContractError> {
-        if self.supported_modalities.is_empty() {
-            if self.provider_file_upload
-                || self.maximum_artifacts != 0
-                || self.maximum_single_artifact_bytes != 0
-                || self.maximum_total_artifact_bytes != 0
-                || self.remote_retention_milliseconds != 0
-            {
-                return Err(ModelContractError::InvalidArtifactContract);
-            }
-            return Ok(());
-        }
-        validate_sorted_unique(&self.supported_modalities, 3)?;
-        if self.supported_modalities.iter().any(|modality| {
-            *modality == ModelModality::Text || !modalities.input.contains(modality)
-        }) || self.maximum_artifacts == 0
-            || self.maximum_single_artifact_bytes == 0
-            || self.maximum_total_artifact_bytes < self.maximum_single_artifact_bytes
-            || self.remote_retention_milliseconds == 0
-        {
-            return Err(ModelContractError::InvalidArtifactContract);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ModelUsageContract {
     pub provider_reports_usage: bool,
     pub reports_cached_input_tokens: bool,
@@ -375,7 +337,6 @@ pub struct ModelLimits {
     pub maximum_messages: u32,
     pub maximum_parts: u32,
     pub maximum_text_bytes: u32,
-    pub maximum_artifacts: u32,
     pub maximum_tools: u32,
     pub maximum_parallel_tool_calls: u32,
     pub maximum_rounds: u16,
@@ -394,7 +355,6 @@ impl ModelLimits {
             || self.maximum_parts == 0
             || self.maximum_parts > MAX_MODEL_PARTS
             || self.maximum_text_bytes == 0
-            || self.maximum_artifacts > MAX_MODEL_PARTS
             || self.maximum_tools > tools.maximum_tools
             || self.maximum_parallel_tool_calls > self.maximum_tools
             || self.maximum_rounds == 0
@@ -449,7 +409,6 @@ pub fn validate_model_profile_contract(
     context: &ContextWindowContract,
     tools: &ModelToolContract,
     structured_output: &StructuredOutputContract,
-    artifact_delivery: &ModelArtifactDeliveryContract,
     usage: &ModelUsageContract,
     data_handling: &ProviderDataHandlingContract,
     limits: &ModelLimits,
@@ -463,7 +422,6 @@ pub fn validate_model_profile_contract(
     context.validate()?;
     tools.validate()?;
     structured_output.validate()?;
-    artifact_delivery.validate(modalities)?;
     usage.validate()?;
     data_handling.validate()?;
     limits.validate(context, tools)?;
@@ -491,7 +449,6 @@ pub enum ModelContractError {
     InvalidLimits,
     InvalidToolContract,
     InvalidStructuredOutput,
-    InvalidArtifactContract,
     InvalidUsageContract,
     InvalidDataHandling,
     InvalidEvidence,
@@ -511,7 +468,6 @@ impl fmt::Display for ModelContractError {
             Self::InvalidLimits => "model limit contract is invalid",
             Self::InvalidToolContract => "model tool contract is invalid",
             Self::InvalidStructuredOutput => "structured output contract is invalid",
-            Self::InvalidArtifactContract => "model artifact delivery contract is invalid",
             Self::InvalidUsageContract => "model usage contract is invalid",
             Self::InvalidDataHandling => "provider data handling contract is invalid",
             Self::InvalidEvidence => "model catalog evidence is invalid",
@@ -608,14 +564,6 @@ mod tests {
             maximum_schema_bytes: 65_536,
             maximum_output_bytes: 262_144,
         };
-        let artifact_delivery = ModelArtifactDeliveryContract {
-            supported_modalities: vec![ModelModality::Image],
-            provider_file_upload: true,
-            maximum_artifacts: 8,
-            maximum_single_artifact_bytes: 8 * 1_048_576,
-            maximum_total_artifact_bytes: 32 * 1_048_576,
-            remote_retention_milliseconds: 3_600_000,
-        };
         let usage = ModelUsageContract {
             provider_reports_usage: true,
             reports_cached_input_tokens: true,
@@ -635,7 +583,6 @@ mod tests {
             maximum_messages: 128,
             maximum_parts: 512,
             maximum_text_bytes: 1_048_576,
-            maximum_artifacts: 8,
             maximum_tools: 32,
             maximum_parallel_tool_calls: 8,
             maximum_rounds: 16,
@@ -668,7 +615,6 @@ mod tests {
             &context,
             &tools,
             &structured,
-            &artifact_delivery,
             &usage,
             &data_handling,
             &limits,

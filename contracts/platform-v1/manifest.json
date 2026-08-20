@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:32d839a23e132f0a7c6695a4632831bbf9e4f56621ab0d18cad667330623e214",
+  "contract_digest": "sha256:fd901840e8c3405d2868f80b556f7194445f02d290791347a8ef44dddffe743a",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -79,12 +79,6 @@
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
       "sha256": "5cab3d2d2af2dfc45979194e845dde211d8f0694a869af721ad159c82f2ba05a"
-    },
-    {
-      "bytes": 1642,
-      "media_type": "application/json",
-      "path": "contracts/platform-v1/schemas/policies/model-output-artifact-io-policy.schema.json",
-      "sha256": "3e31fa8ef57f125ffc3310ebd7dc518ad039ae13025108bc1137ea2cdfdcc139"
     },
     {
       "bytes": 771,

@@ -569,7 +569,6 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         sandbox_resource: None,
         sandbox_network: None,
         sandbox_artifact_io: None,
-        model_output_artifact_io: None,
         sandbox_secret_resolution: None,
     });
     let retention_resource_payload = TypedPayload::new(
@@ -710,7 +709,6 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         sandbox_resource: None,
         sandbox_network: None,
         sandbox_artifact_io: None,
-        model_output_artifact_io: None,
         sandbox_secret_resolution: None,
     });
     let draft = ResourceDraftPayload {

@@ -15,7 +15,6 @@ failures = []
 
 for dependency in (
     "async-nats.workspace = true",
-    "insight-platform-artifact-rpc.workspace = true",
     "insight-platform-egress-rpc.workspace = true",
     "insight-platform-model-adapters.workspace = true",
     "insight-platform-postgres.workspace = true",
@@ -27,6 +26,7 @@ for forbidden in (
     "insight-platform-egress.workspace = true",
     "insight-platform-secret-broker.workspace = true",
     "insight-platform-artifact-broker.workspace = true",
+    "insight-platform-artifact-rpc.workspace = true",
 ):
     if forbidden in manifest:
         failures.append(f"Model Worker bypasses a broker boundary through {forbidden}")
@@ -39,11 +39,10 @@ for forbidden in ("reqwest", "aws_sdk", "SecretManager", "KmsClient"):
         failures.append(f"Model Worker owns a forbidden Provider/Secret client: {forbidden}")
 for required in (
     "BufferedNatsModelLiveDeltaSink",
-    "BrokeredModelRequestMaterializer",
+    "InlineModelRequestMaterializer",
     "InlineModelOutputMaterializer",
     "verify_schema",
     "EgressBrokerGrpcClient",
-    "ArtifactModelBrokerGrpcClient",
 ):
     if required not in source:
         failures.append(f"Model Worker production composition is missing {required}")
@@ -73,15 +72,12 @@ required_rendered = (
     'kind: PodDisruptionBudget',
     'command: ["/usr/local/bin/platform-model-worker"]',
     'insight.platform/workload-role: model-worker',
-    'insight.platform/workload-role: artifact-broker-model',
     'automountServiceAccountToken: false',
     'readOnlyRootFilesystem: true',
     'allowPrivilegeEscalation: false',
     'PLATFORM_MODEL_WORKER_DATABASE_URL',
     'PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH',
-    'PLATFORM_MODEL_WORKER_ARTIFACT_CERT_PATH',
     'PLATFORM_MODEL_WORKER_NATS_CERT_PATH',
-    'name: artifact-tls',
     'name: nats-tls',
 )
 for needle in required_rendered:
@@ -97,6 +93,8 @@ for forbidden in (
     'AWS_SECRET',
     'SECRET_MANAGER',
     'KMS_ENDPOINT',
+    'artifact-broker-model',
+    'PLATFORM_MODEL_WORKER_ARTIFACT_',
 ):
     if forbidden in rendered:
         failures.append(f"rendered Model Worker has forbidden capability {forbidden}")
@@ -110,9 +108,6 @@ negative_values = (
     ("--set-json", "networkPolicy.natsCidrs=[]", "PostgreSQL/NATS CIDRs"),
     ("--set", "networkPolicy.natsPort=0", "NATS port"),
     ("--set", "natsTls.keys.privateKey=", "NATS mTLS projected keys"),
-    ("--set", "artifactTls.keys.privateKey=", "Artifact mTLS projected keys"),
-    ("--set", "networkPolicy.artifactPort=0", "Artifact Broker port"),
-    ("--set", "networkPolicy.artifactPodSelector.insight\\.platform/workload-role=artifact-broker-sandbox", "only the Model Artifact Broker"),
     ("--set", "autoscaling.minReplicas=1", "at least two replicas"),
     ("--set", "autoscaling.maxReplicas=1", "maximum must be at least"),
 )

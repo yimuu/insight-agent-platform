@@ -1,6 +1,6 @@
 //! Versioned internal gRPC boundary for the independently deployed Artifact Broker.
 //!
-//! Model Workers and the Sandbox Controller submit exact, credential-free read authority
+//! The Sandbox Controller submits exact, credential-free read authority
 //! requests. The Broker returns bytes only after PostgreSQL authorization, exact-version object
 //! verification and a second authorization. The wire is bounded, canonical and chunked; it never
 //! carries an object locator, storage credential or generic operation name supplied by the caller.
@@ -9,9 +9,6 @@ use async_trait::async_trait;
 use futures::Stream;
 use insight_platform_contracts::{
     parse_strict_json, ArtifactRef, JsonLimits, ResourceKind, Sha256Digest,
-};
-use insight_platform_models::{
-    ModelArtifactBroker, ModelArtifactBrokerError, ModelArtifactReadRequest, ModelTurnLimits,
 };
 use insight_platform_sandbox::{
     MicroVmArtifactBroker, WasiArtifactBroker, WasiArtifactReadPurpose,
@@ -42,8 +39,6 @@ pub mod proto {
 }
 
 use proto::{
-    artifact_model_broker_service_client::ArtifactModelBrokerServiceClient,
-    artifact_model_broker_service_server::ArtifactModelBrokerService,
     artifact_sandbox_broker_service_client::ArtifactSandboxBrokerServiceClient,
     artifact_sandbox_broker_service_server::ArtifactSandboxBrokerService, ArtifactReadChunk,
     ClosedArtifactReadRequest,
@@ -55,8 +50,6 @@ pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-controller";
 pub const MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD: usize = 1_048_576;
 pub const MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD: usize = 262_144;
-const MODEL_REQUEST_READ_OPERATION: &str = "artifact.model_request.read/v1";
-const MODEL_REQUEST_CHUNK_OPERATION: &str = "artifact.model_request.chunk/v1";
 const WASI_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.wasi.read/v1";
 const WASI_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.wasi.chunk/v1";
 const MICRO_VM_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.microvm.read/v1";
@@ -169,75 +162,6 @@ fn require_exact_workload_uri(certificate: &[u8], expected: &str) -> Result<(), 
         ));
     }
     Ok(())
-}
-
-#[derive(Clone)]
-pub struct ArtifactModelBrokerGrpcClient {
-    client: ArtifactModelBrokerServiceClient<tonic::transport::Channel>,
-    rpc_limits: ArtifactInternalRpcLimits,
-    model_limits: ModelTurnLimits,
-}
-
-impl ArtifactModelBrokerGrpcClient {
-    pub fn new(
-        channel: tonic::transport::Channel,
-        rpc_limits: ArtifactInternalRpcLimits,
-        model_limits: ModelTurnLimits,
-    ) -> Self {
-        let maximum = rpc_limits.maximum_message_bytes();
-        Self {
-            client: ArtifactModelBrokerServiceClient::new(channel)
-                .max_encoding_message_size(maximum)
-                .max_decoding_message_size(maximum),
-            rpc_limits,
-            model_limits,
-        }
-    }
-}
-
-#[async_trait]
-impl ModelArtifactBroker for ArtifactModelBrokerGrpcClient {
-    async fn read_exact(
-        &self,
-        request: ModelArtifactReadRequest,
-    ) -> Result<Vec<u8>, ModelArtifactBrokerError> {
-        request
-            .validate(self.model_limits)
-            .map_err(|_| ModelArtifactBrokerError::Denied)?;
-        let artifact = request
-            .artifact()
-            .cloned()
-            .ok_or(ModelArtifactBrokerError::Denied)?;
-        let maximum_bytes = request.maximum_bytes;
-        let envelope = encode_request(MODEL_REQUEST_READ_OPERATION, &request, self.rpc_limits)
-            .map_err(|_| ModelArtifactBrokerError::Integrity)?;
-        let request_digest = envelope.request_digest.clone();
-        let deadline = SystemTime::from(request.deadline);
-        let rpc_request = request_with_domain_deadline(envelope, deadline)
-            .map_err(map_model_client_read_error)?;
-        let mut client = self.client.clone();
-        let mut response =
-            await_rpc_before_deadline(deadline, client.read_model_request(rpc_request))
-                .await
-                .map_err(map_model_client_read_error)?
-                .into_inner();
-        let expected_length = usize::try_from(artifact.byte_length())
-            .map_err(|_| ModelArtifactBrokerError::TooLarge)?;
-        if expected_length != maximum_bytes {
-            return Err(ModelArtifactBrokerError::Integrity);
-        }
-        collect_artifact_stream(
-            &mut response,
-            &request_digest,
-            MODEL_REQUEST_CHUNK_OPERATION,
-            &artifact,
-            maximum_bytes,
-            self.rpc_limits,
-            deadline,
-        )
-        .await
-        .map_err(map_model_client_read_error)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,14 +477,6 @@ impl Drop for LeasedArtifactBytes {
 }
 
 #[async_trait]
-pub trait ModelArtifactResponseBroker: Send + Sync {
-    async fn read_for_response(
-        &self,
-        request: ModelArtifactReadRequest,
-    ) -> Result<LeasedArtifactBytes, ModelArtifactBrokerError>;
-}
-
-#[async_trait]
 pub trait WasiArtifactResponseBroker: Send + Sync {
     async fn read_wasi_for_response(
         &self,
@@ -574,68 +490,6 @@ pub trait MicroVmArtifactResponseBroker: Send + Sync {
         &self,
         request: MicroVmArtifactReadRequest,
     ) -> Result<LeasedArtifactBytes, MicroVmArtifactBrokerError>;
-}
-
-pub struct ArtifactModelBrokerGrpcService<B> {
-    broker: Arc<B>,
-    rpc_limits: ArtifactInternalRpcLimits,
-    model_limits: ModelTurnLimits,
-}
-
-impl<B> ArtifactModelBrokerGrpcService<B> {
-    pub fn new(
-        broker: Arc<B>,
-        rpc_limits: ArtifactInternalRpcLimits,
-        model_limits: ModelTurnLimits,
-    ) -> Self {
-        Self {
-            broker,
-            rpc_limits,
-            model_limits,
-        }
-    }
-}
-
-#[tonic::async_trait]
-impl<B> ArtifactModelBrokerService for ArtifactModelBrokerGrpcService<B>
-where
-    B: ModelArtifactResponseBroker + 'static,
-{
-    type ReadModelRequestStream =
-        Pin<Box<dyn Stream<Item = Result<ArtifactReadChunk, Status>> + Send + 'static>>;
-
-    async fn read_model_request(
-        &self,
-        request: Request<ClosedArtifactReadRequest>,
-    ) -> Result<Response<Self::ReadModelRequestStream>, Status> {
-        let envelope = request.into_inner();
-        let request_digest = envelope.request_digest.clone();
-        let read: ModelArtifactReadRequest =
-            decode_request(envelope, MODEL_REQUEST_READ_OPERATION, self.rpc_limits)
-                .map_err(Status::from)?;
-        read.validate(self.model_limits)
-            .map_err(|_| Status::invalid_argument("invalid Artifact read request"))?;
-        let artifact = read
-            .artifact()
-            .cloned()
-            .ok_or_else(|| Status::invalid_argument("invalid Artifact read request"))?;
-        let deadline = SystemTime::from(read.deadline);
-        let read = tokio::time::timeout(
-            server_deadline_budget(deadline)?,
-            self.broker.read_for_response(read),
-        )
-        .await
-        .map_err(|_| Status::deadline_exceeded("Artifact read deadline elapsed"))?
-        .map_err(map_server_error)?;
-        artifact_read_stream(
-            read,
-            &request_digest,
-            MODEL_REQUEST_CHUNK_OPERATION,
-            &artifact,
-            self.rpc_limits.maximum_chunk_bytes(),
-            deadline,
-        )
-    }
 }
 
 /// Server adapter for the two exact Sandbox materialization authorities. Endpoint-role
@@ -971,20 +825,6 @@ fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
     encoded.parse().expect("SHA-256 encoding is canonical")
 }
 
-fn map_server_error(error: ModelArtifactBrokerError) -> Status {
-    match error {
-        ModelArtifactBrokerError::Unavailable => Status::unavailable("Artifact Broker unavailable"),
-        ModelArtifactBrokerError::Denied => Status::permission_denied("Artifact read denied"),
-        ModelArtifactBrokerError::NotFound => Status::not_found("Artifact not found"),
-        ModelArtifactBrokerError::TooLarge => {
-            Status::resource_exhausted("Artifact exceeds the read limit")
-        }
-        ModelArtifactBrokerError::Integrity => {
-            Status::data_loss("Artifact integrity verification failed")
-        }
-    }
-}
-
 fn map_wasi_server_error(error: WasiArtifactBrokerError) -> Status {
     match error {
         WasiArtifactBrokerError::Unavailable => Status::unavailable("Artifact Broker unavailable"),
@@ -1026,16 +866,6 @@ fn classify_client_status(status: Status) -> ArtifactClientReadError {
         tonic::Code::NotFound => ArtifactClientReadError::NotFound,
         tonic::Code::ResourceExhausted => ArtifactClientReadError::TooLarge,
         _ => ArtifactClientReadError::Integrity,
-    }
-}
-
-fn map_model_client_read_error(error: ArtifactClientReadError) -> ModelArtifactBrokerError {
-    match error {
-        ArtifactClientReadError::Unavailable => ModelArtifactBrokerError::Unavailable,
-        ArtifactClientReadError::Denied => ModelArtifactBrokerError::Denied,
-        ArtifactClientReadError::NotFound => ModelArtifactBrokerError::NotFound,
-        ArtifactClientReadError::TooLarge => ModelArtifactBrokerError::TooLarge,
-        ArtifactClientReadError::Integrity => ModelArtifactBrokerError::Integrity,
     }
 }
 
@@ -1087,10 +917,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use futures::StreamExt as _;
-    use insight_platform_contracts::{
-        checked_in_hard_limit_profile, ArtifactRef, DataClassification, ResourceId, ResourceKind,
-    };
-    use insight_platform_models::{ExactInvocationValueRef, InvocationValueStorage, JobFence};
+    use insight_platform_contracts::{ArtifactRef, DataClassification, ResourceId, ResourceKind};
     use insight_platform_sandbox::{MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind};
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
@@ -1123,37 +950,6 @@ mod tests {
             Some(display_name.to_owned()),
         )
         .unwrap()
-    }
-
-    fn request(bytes: &[u8]) -> ModelArtifactReadRequest {
-        let artifact = artifact(bytes, "model-request.json");
-        ModelArtifactReadRequest {
-            schema_version: 1,
-            tenant_id: id(ResourceKind::Tenant),
-            model_turn_id: id(ResourceKind::ModelTurn),
-            job_id: id(ResourceKind::Job),
-            exact: ExactInvocationValueRef {
-                schema_version: 1,
-                value_id: id(ResourceKind::RunValue),
-                run_id: id(ResourceKind::Run),
-                producing_node_id: Some(id(ResourceKind::NodeExecution)),
-                value_kind: "model_request".to_owned(),
-                classification: DataClassification::Internal,
-                schema_digest: digest('a'),
-                content_digest: digest_bytes(bytes),
-                storage: InvocationValueStorage::Artifact { artifact },
-            },
-            artifact_link_id: id(ResourceKind::ArtifactLink),
-            fence: JobFence {
-                expected_version: 2,
-                worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
-                lease_generation: 1,
-                token_digest: digest('b'),
-            },
-            request_digest: digest('c'),
-            maximum_bytes: bytes.len(),
-            deadline: Utc::now() + Duration::minutes(1),
-        }
     }
 
     fn wasi_request(bytes: &[u8]) -> WasiArtifactReadRequest {
@@ -1189,22 +985,6 @@ mod tests {
         }
     }
 
-    struct RecordingBroker {
-        bytes: Vec<u8>,
-        calls: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl ModelArtifactResponseBroker for RecordingBroker {
-        async fn read_for_response(
-            &self,
-            _request: ModelArtifactReadRequest,
-        ) -> Result<LeasedArtifactBytes, ModelArtifactBrokerError> {
-            self.calls.fetch_add(1, Ordering::AcqRel);
-            Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
-        }
-    }
-
     struct RecordingSandboxBroker {
         bytes: Vec<u8>,
         wasi_calls: AtomicUsize,
@@ -1235,21 +1015,7 @@ mod tests {
 
     struct AudienceCapacityBroker {
         bytes: Vec<u8>,
-        model: Arc<Semaphore>,
         sandbox: Arc<Semaphore>,
-    }
-
-    #[async_trait]
-    impl ModelArtifactResponseBroker for AudienceCapacityBroker {
-        async fn read_for_response(
-            &self,
-            _request: ModelArtifactReadRequest,
-        ) -> Result<LeasedArtifactBytes, ModelArtifactBrokerError> {
-            let permit = Arc::clone(&self.model)
-                .try_acquire_owned()
-                .map_err(|_| ModelArtifactBrokerError::Unavailable)?;
-            Ok(LeasedArtifactBytes::new(self.bytes.clone(), permit))
-        }
     }
 
     #[async_trait]
@@ -1286,8 +1052,6 @@ mod tests {
         model_key_pem: String,
         sandbox_controller_certificate_pem: String,
         sandbox_controller_key_pem: String,
-        wrong_certificate_pem: String,
-        wrong_key_pem: String,
     }
 
     fn mtls_fixture() -> MtlsFixture {
@@ -1324,14 +1088,6 @@ mod tests {
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
-        let (wrong_certificate_pem, wrong_key_pem) = issue(
-            vec![SanType::URI(
-                "spiffe://insight.platform/workload/capability-worker"
-                    .try_into()
-                    .unwrap(),
-            )],
-            ExtendedKeyUsagePurpose::ClientAuth,
-        );
         MtlsFixture {
             ca_pem: ca.pem(),
             server_certificate_pem,
@@ -1340,8 +1096,6 @@ mod tests {
             model_key_pem,
             sandbox_controller_certificate_pem,
             sandbox_controller_key_pem,
-            wrong_certificate_pem,
-            wrong_key_pem,
         }
     }
 
@@ -1368,28 +1122,23 @@ mod tests {
     #[test]
     fn request_envelope_is_canonical_and_digest_bound() {
         let limits = ArtifactInternalRpcLimits::default();
-        let read = request(br#"{"messages":[]}"#);
-        let envelope = encode_request(MODEL_REQUEST_READ_OPERATION, &read, limits).unwrap();
-        let decoded: ModelArtifactReadRequest =
-            decode_request(envelope.clone(), MODEL_REQUEST_READ_OPERATION, limits).unwrap();
-        assert_eq!(decoded, read);
+        let wasi = wasi_request(b"wasi-runtime");
+        let envelope = encode_request(WASI_ARTIFACT_READ_OPERATION, &wasi, limits).unwrap();
+        let decoded: WasiArtifactReadRequest =
+            decode_request(envelope.clone(), WASI_ARTIFACT_READ_OPERATION, limits).unwrap();
+        assert_eq!(decoded, wasi);
 
         let mut whitespace = envelope.clone();
         whitespace.canonical_request_json.push(b' ');
         whitespace.request_digest = digest_bytes(&whitespace.canonical_request_json).to_string();
-        assert!(decode_request::<ModelArtifactReadRequest>(
+        assert!(decode_request::<WasiArtifactReadRequest>(
             whitespace,
-            MODEL_REQUEST_READ_OPERATION,
+            WASI_ARTIFACT_READ_OPERATION,
             limits
         )
         .is_err());
 
-        let wasi = wasi_request(b"wasi-runtime");
-        let wasi_envelope = encode_request(WASI_ARTIFACT_READ_OPERATION, &wasi, limits).unwrap();
-        let decoded: WasiArtifactReadRequest =
-            decode_request(wasi_envelope.clone(), WASI_ARTIFACT_READ_OPERATION, limits).unwrap();
-        assert_eq!(decoded, wasi);
-        let mut digest_tamper = wasi_envelope;
+        let mut digest_tamper = envelope.clone();
         digest_tamper.request_digest = digest('9').to_string();
         assert!(decode_request::<WasiArtifactReadRequest>(
             digest_tamper,
@@ -1411,9 +1160,9 @@ mod tests {
 
         let mut drift = envelope;
         drift.operation = "artifact.generic.read/v1".to_owned();
-        assert!(decode_request::<ModelArtifactReadRequest>(
+        assert!(decode_request::<WasiArtifactReadRequest>(
             drift,
-            MODEL_REQUEST_READ_OPERATION,
+            WASI_ARTIFACT_READ_OPERATION,
             limits
         )
         .is_err());
@@ -1472,25 +1221,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_streams_hold_independent_model_and_sandbox_audience_capacity() {
+    async fn slow_streams_hold_sandbox_audience_capacity() {
         let bytes = br#"{"messages":[]}"#.to_vec();
         let broker = Arc::new(AudienceCapacityBroker {
             bytes: bytes.clone(),
-            model: Arc::new(Semaphore::new(1)),
             sandbox: Arc::new(Semaphore::new(1)),
         });
         let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
-        let model_limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
-        let model_service =
-            ArtifactModelBrokerGrpcService::new(Arc::clone(&broker), rpc_limits, model_limits);
         let sandbox_service =
             ArtifactSandboxBrokerGrpcService::new(Arc::clone(&broker), rpc_limits);
 
-        let model_envelope = || {
-            Request::new(
-                encode_request(MODEL_REQUEST_READ_OPERATION, &request(&bytes), rpc_limits).unwrap(),
-            )
-        };
         let wasi_envelope = || {
             Request::new(
                 encode_request(
@@ -1511,18 +1251,6 @@ mod tests {
                 .unwrap(),
             )
         };
-
-        let model_stream = model_service
-            .read_model_request(model_envelope())
-            .await
-            .unwrap()
-            .into_inner();
-        let rejected_model = model_service
-            .read_model_request(model_envelope())
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(rejected_model.code(), tonic::Code::Unavailable);
 
         let mut sandbox_stream = sandbox_service
             .read_wasi_artifact(wasi_envelope())
@@ -1545,39 +1273,29 @@ mod tests {
             .await
             .unwrap();
         drop(released_sandbox);
-
-        drop(model_stream);
-        let released_model = model_service
-            .read_model_request(model_envelope())
-            .await
-            .unwrap();
-        drop(released_model);
     }
 
     #[tokio::test(start_paused = true)]
     async fn stalled_stream_releases_lease_at_domain_deadline_without_poll_or_drop() {
         let bytes = br#"{"messages":[]}"#.to_vec();
-        let model_capacity = Arc::new(Semaphore::new(1));
+        let sandbox_capacity = Arc::new(Semaphore::new(1));
         let broker = Arc::new(AudienceCapacityBroker {
             bytes: bytes.clone(),
-            model: Arc::clone(&model_capacity),
-            sandbox: Arc::new(Semaphore::new(1)),
+            sandbox: Arc::clone(&sandbox_capacity),
         });
         let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
-        let model_limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
-        let service =
-            ArtifactModelBrokerGrpcService::new(Arc::clone(&broker), rpc_limits, model_limits);
+        let service = ArtifactSandboxBrokerGrpcService::new(Arc::clone(&broker), rpc_limits);
 
-        let mut stalled_request = request(&bytes);
+        let mut stalled_request = wasi_request(&bytes);
         stalled_request.deadline = Utc::now() + Duration::seconds(30);
         let mut stalled_stream = service
-            .read_model_request(Request::new(
-                encode_request(MODEL_REQUEST_READ_OPERATION, &stalled_request, rpc_limits).unwrap(),
+            .read_wasi_artifact(Request::new(
+                encode_request(WASI_ARTIFACT_READ_OPERATION, &stalled_request, rpc_limits).unwrap(),
             ))
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(model_capacity.available_permits(), 0);
+        assert_eq!(sandbox_capacity.available_permits(), 0);
 
         // Let the independently spawned deadline task register its timer, then advance time while
         // retaining the stream without polling it. HTTP/2 backpressure has the same ownership
@@ -1585,11 +1303,16 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(StdDuration::from_secs(31)).await;
         tokio::task::yield_now().await;
-        assert_eq!(model_capacity.available_permits(), 1);
+        assert_eq!(sandbox_capacity.available_permits(), 1);
 
         let released_capacity = service
-            .read_model_request(Request::new(
-                encode_request(MODEL_REQUEST_READ_OPERATION, &request(&bytes), rpc_limits).unwrap(),
+            .read_wasi_artifact(Request::new(
+                encode_request(
+                    WASI_ARTIFACT_READ_OPERATION,
+                    &wasi_request(&bytes),
+                    rpc_limits,
+                )
+                .unwrap(),
             ))
             .await
             .unwrap();
@@ -1597,85 +1320,6 @@ mod tests {
 
         let expired = stalled_stream.next().await.unwrap().unwrap_err();
         assert_eq!(expired.code(), tonic::Code::DeadlineExceeded);
-    }
-
-    #[tokio::test]
-    async fn real_mtls_streams_exact_bytes_and_rejects_wrong_role() {
-        let fixture = mtls_fixture();
-        let bytes = br#"{"messages":[]}"#.to_vec();
-        let broker = Arc::new(RecordingBroker {
-            bytes: bytes.clone(),
-            calls: AtomicUsize::new(0),
-        });
-        let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
-        let model_limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
-        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let address = incoming.local_addr().unwrap();
-        let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
-        let service =
-            proto::artifact_model_broker_service_server::ArtifactModelBrokerServiceServer::new(
-                ArtifactModelBrokerGrpcService::new(Arc::clone(&broker), rpc_limits, model_limits),
-            )
-            .max_encoding_message_size(rpc_limits.maximum_message_bytes())
-            .max_decoding_message_size(rpc_limits.maximum_message_bytes());
-        let service = tonic::service::interceptor::InterceptedService::new(
-            service,
-            ModelWorkerWorkloadIdentity,
-        );
-        let tls = ServerTlsConfig::new()
-            .identity(Identity::from_pem(
-                &fixture.server_certificate_pem,
-                &fixture.server_key_pem,
-            ))
-            .client_ca_root(Certificate::from_pem(&fixture.ca_pem));
-        let server = tokio::spawn(async move {
-            Server::builder()
-                .tls_config(tls)
-                .unwrap()
-                .add_service(service)
-                .serve_with_incoming_shutdown(incoming, async {
-                    let _ = shutdown_receiver.await;
-                })
-                .await
-                .unwrap();
-        });
-        let endpoint = format!("https://localhost:{}", address.port());
-
-        let accepted_channel = channel(
-            &endpoint,
-            &fixture,
-            &fixture.model_certificate_pem,
-            &fixture.model_key_pem,
-        )
-        .await;
-        let client = ArtifactModelBrokerGrpcClient::new(accepted_channel, rpc_limits, model_limits);
-        assert_eq!(client.read_exact(request(&bytes)).await.unwrap(), bytes);
-        assert_eq!(broker.calls.load(Ordering::Acquire), 1);
-
-        let wrong_channel = channel(
-            &endpoint,
-            &fixture,
-            &fixture.wrong_certificate_pem,
-            &fixture.wrong_key_pem,
-        )
-        .await;
-        let mut wrong_client = ArtifactModelBrokerServiceClient::new(wrong_channel);
-        let rejected = wrong_client
-            .read_model_request(
-                encode_request(MODEL_REQUEST_READ_OPERATION, &request(&bytes), rpc_limits).unwrap(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
-        assert_eq!(broker.calls.load(Ordering::Acquire), 1);
-
-        drop(client);
-        drop(wrong_client);
-        shutdown_sender.send(()).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), server)
-            .await
-            .unwrap()
-            .unwrap();
     }
 
     #[tokio::test]

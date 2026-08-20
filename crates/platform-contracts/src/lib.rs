@@ -15,7 +15,6 @@ pub mod limits;
 pub mod machine;
 pub mod mcp;
 pub mod model;
-pub mod model_policy;
 pub mod nominal;
 pub mod qualification;
 pub mod registry;
@@ -42,7 +41,6 @@ pub use limits::{
 pub use machine::{is_execution_work_owner_pair, EXECUTION_WORK_OWNER_PAIRS};
 pub use mcp::*;
 pub use model::*;
-pub use model_policy::*;
 pub use nominal::{
     canonical_schema_digest, is_known_pinned_nominal_reference, nominal_schemas,
     pinned_nominal_reference,

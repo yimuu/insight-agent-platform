@@ -73,8 +73,7 @@ impl ModelProviderAdapter for AnthropicMessagesAdapter {
 fn anthropic_request_body(
     request: &ModelAdapterExecutionRequest,
 ) -> Result<Value, ModelAdapterFailure> {
-    if !request.request.artifact_inputs.is_empty()
-        || request.profile.usage.reports_cost
+    if request.profile.usage.reports_cost
         || request.profile.usage.reports_reasoning_tokens
         || !request.profile.usage.provider_reports_usage
         || (request

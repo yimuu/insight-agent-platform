@@ -5,10 +5,6 @@ package insight.platform.v1;
 // Internal-only, credential-free Model input boundary for the independently deployed Artifact
 // Broker. The request is one strict canonical Rust contract. Verified object bytes are chunked so
 // gRPC message size never becomes the object-size authority.
-service ArtifactModelBrokerService {
-  rpc ReadModelRequest(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
-}
-
 // Internal-only Sandbox materialization boundary. The Sandbox Controller is the sole caller and
 // selects one of two closed domain requests; this service deliberately has no generic object-read
 // method and never accepts an object locator or storage credential.

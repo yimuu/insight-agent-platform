@@ -66,7 +66,6 @@ pub struct ModelTurnAdmissionSnapshot {
     pub provider_revision: ExactVersionRef,
     pub provider: ModelProviderResourceSpec,
     pub request: ExactInvocationValueRef,
-    pub request_artifact_link_id: Option<ResourceId>,
     pub request_digest: Sha256Digest,
     pub policies: Vec<ExactVersionRef>,
     pub principal: PrincipalSnapshot,
@@ -127,15 +126,10 @@ impl ModelTurnAdmissionSnapshot {
             || !self.policies.contains(&self.selection_policy)
             || self.model_closure.generation_defaults.schema_digest
                 != self.profile.parameter_schema_digest
-            || self.request_artifact_link_id.is_some()
-                != matches!(
-                    self.request.storage,
-                    insight_platform_invocations::InvocationValueStorage::Artifact { .. }
-                )
-            || self
-                .request_artifact_link_id
-                .as_ref()
-                .is_some_and(|id| id.kind() != ResourceKind::ArtifactLink)
+            || !matches!(
+                self.request.storage,
+                insight_platform_invocations::InvocationValueStorage::Inline
+            )
             || self.attempt_limit == 0
             || self.attempt_limit > limits.maximum_attempts()
             || digest_without_field(self, "canonical_digest")? != self.canonical_digest
@@ -546,7 +540,6 @@ pub fn decide_model_turn_admission(
         provider_revision: facts.provider_revision,
         provider: facts.provider,
         request,
-        request_artifact_link_id: command.request.artifact_link_id.clone(),
         request_digest,
         policies,
         principal: facts.principal,

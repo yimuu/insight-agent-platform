@@ -4,8 +4,8 @@
 {{- if not .Values.networkPolicy.enabled }}
 {{- fail "Artifact Broker NetworkPolicy must remain enabled" }}
 {{- end }}
-{{- if ne (join "," (keys .Values.brokers | sortAlpha)) "model,sandbox" }}
-{{- fail "brokers must contain exactly the isolated model and sandbox audiences" }}
+{{- if ne (join "," (keys .Values.brokers | sortAlpha)) "sandbox" }}
+{{- fail "brokers must contain exactly the sandbox audience" }}
 {{- end }}
 {{- range $audience, $broker := .Values.brokers }}
 {{- if lt (int $broker.replicas) 2 }}
@@ -40,23 +40,6 @@
 {{- fail (printf "%s Artifact Broker HPA CPU target must be in 1..100" $audience) }}
 {{- end }}
 {{- end }}
-{{- end }}
-{{- $model := index .Values.brokers "model" }}
-{{- $sandbox := index .Values.brokers "sandbox" }}
-{{- if eq $model.config.existingConfigMap $sandbox.config.existingConfigMap }}
-{{- fail "Model and Sandbox Artifact Brokers require isolated config maps" }}
-{{- end }}
-{{- if eq $model.database.existingSecret $sandbox.database.existingSecret }}
-{{- fail "Model and Sandbox Artifact Brokers require isolated database pools and credentials" }}
-{{- end }}
-{{- if eq $model.tls.existingSecret $sandbox.tls.existingSecret }}
-{{- fail "Model and Sandbox Artifact Brokers require isolated server identities" }}
-{{- end }}
-{{- if deepEqual $model.serviceAccount.annotations $sandbox.serviceAccount.annotations }}
-{{- fail "Model and Sandbox Artifact Brokers require isolated workload identities" }}
-{{- end }}
-{{- if or (empty .Values.networkPolicy.modelWorkerNamespaceSelector) (empty .Values.networkPolicy.modelWorkerPodSelector) }}
-{{- fail "exact Model Worker caller selectors are required" }}
 {{- end }}
 {{- if or (empty .Values.networkPolicy.sandboxControllerNamespaceSelector) (empty .Values.networkPolicy.sandboxControllerPodSelector) }}
 {{- fail "exact Sandbox Controller caller selectors are required" }}

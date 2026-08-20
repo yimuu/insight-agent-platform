@@ -1,26 +1,19 @@
 use crate::{
     invocation_repository::load_enabled_exact_published_version,
     repository::{
-        append_command_event, append_scheduler_event, begin_read_only_repeatable,
-        claim_command_receipt, decode_deployment_closure, decode_versioned_payload, job_from_row,
-        job_projection, load_deployment, load_job_for_update_by_text, load_resource,
-        load_run_for_update, require_tenant_permission, terminalize_command_receipt, JobRecord,
-        PgRepository, RepositoryError, RunRecord, TypedPayload,
-    },
-    sandbox_repository::{
-        load_authorized_artifact_object, ArtifactObjectReadProjection, ArtifactObjectReadPurpose,
+        append_command_event, append_scheduler_event, claim_command_receipt,
+        decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
+        load_deployment, load_job_for_update_by_text, load_resource, load_run_for_update,
+        require_tenant_permission, terminalize_command_receipt, JobRecord, PgRepository,
+        RepositoryError, RunRecord, TypedPayload,
     },
 };
 use chrono::{DateTime, Utc};
-use insight_platform_artifacts::{
-    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, ArtifactReferenceSnapshot,
-    AuthorizedArtifactObjectRead,
-};
 use insight_platform_contracts::{
-    canonical_digest, ArtifactPurpose, ArtifactRef, ArtifactReferenceKind, CommandOutcome,
-    DeploymentClosure, EntityLifecycle, FrozenSlotTarget, JobState, ModelTurnState,
-    NodeExecutionState, Permission, PlanNodeKind, QuotaDimension, RegistryResourceKind,
-    ResourceDocument, ResourceId, ResourceKind, RunState, Sha256Digest, ValueRef, WorkClass,
+    canonical_digest, ArtifactRef, CommandOutcome, DeploymentClosure, EntityLifecycle,
+    FrozenSlotTarget, JobState, ModelTurnState, NodeExecutionState, Permission, PlanNodeKind,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, RunState,
+    Sha256Digest, ValueRef, WorkClass,
 };
 use insight_platform_invocations::InvocationValueStorage;
 use insight_platform_jobs::{JobFence, JobProjection, LeasePolicy};
@@ -29,11 +22,11 @@ use insight_platform_models::{
     decide_model_cancellation_outcome, decide_model_control, decide_model_outcome,
     decide_model_turn_admission, decide_prepare_model_dispatch, decide_start_model_dispatch,
     CanonicalMessagePart, ClaimModelJobs, CommitModelCancellationOutcome, CommitModelOutcome,
-    ControlModelTurn, CreateModelTurn, ModelAdmissionFacts, ModelArtifactReadRequest,
-    ModelControlKind, ModelDispatchOutcome, ModelExecutionInput, ModelExecutionInputMaterial,
-    ModelJobPayload, ModelOutputValue, ModelQuotaCeiling, ModelQuotaSettlement, ModelRequestValue,
-    ModelTurnLimits, ModelTurnPayload, ModelTurnRecord, ModelTurnStore, ModelTurnTransaction,
-    ModelWorkerAudit, PrepareModelDispatch, PreparedModelDispatch, MODEL_QUOTA_LINES,
+    ControlModelTurn, CreateModelTurn, ModelAdmissionFacts, ModelControlKind, ModelDispatchOutcome,
+    ModelExecutionInput, ModelExecutionInputMaterial, ModelJobPayload, ModelOutputValue,
+    ModelQuotaCeiling, ModelQuotaSettlement, ModelRequestValue, ModelTurnLimits, ModelTurnPayload,
+    ModelTurnRecord, ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, PrepareModelDispatch,
+    PreparedModelDispatch, MODEL_QUOTA_LINES,
 };
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
@@ -76,60 +69,7 @@ impl ClaimedModelExecution {
         job_projection(&self.job)
     }
 
-    pub fn artifact_read_request(
-        &self,
-        limits: ModelTurnLimits,
-    ) -> Result<Option<ModelArtifactReadRequest>, RepositoryError> {
-        self.request_input
-            .validate()
-            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-        let projection = self.job_projection()?;
-        let lease = projection
-            .lease
-            .as_ref()
-            .ok_or(RepositoryError::LeaseExpired)?;
-        if projection.state != JobState::Running
-            || projection.version != self.fence.expected_version
-            || projection.lease_generation != self.fence.lease_generation
-            || lease.worker_process_generation_id != self.fence.worker_process_generation_id
-            || lease.token_digest != self.fence.token_digest
-            || self.turn.payload.current_job_id.as_ref() != Some(&projection.job_id)
-        {
-            return Err(RepositoryError::StaleFence);
-        }
-        let ModelExecutionInputMaterial::LinkedArtifact { artifact_link_id } =
-            &self.request_input.material
-        else {
-            return Ok(None);
-        };
-        let InvocationValueStorage::Artifact { artifact } = &self.request_input.exact.storage
-        else {
-            return Err(RepositoryError::CorruptRow(
-                "Artifact-backed Model request has Inline storage".to_owned(),
-            ));
-        };
-        let request = ModelArtifactReadRequest {
-            schema_version: 1,
-            tenant_id: self.turn.tenant_id.clone(),
-            model_turn_id: self.turn.model_turn_id.clone(),
-            job_id: projection.job_id,
-            exact: self.request_input.exact.clone(),
-            artifact_link_id: artifact_link_id.clone(),
-            fence: self.fence.clone(),
-            request_digest: self.turn.payload.admission.request_digest.clone(),
-            maximum_bytes: usize::try_from(artifact.byte_length()).map_err(|_| {
-                RepositoryError::CorruptRow("Model request Artifact is too large".to_owned())
-            })?,
-            deadline: self.turn.deadline,
-        };
-        request
-            .validate(limits)
-            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-        Ok(Some(request))
-    }
-
-    /// Builds the credential-free, exact Provider request after the canonical request bytes have
-    /// been materialized from their inline value or Ready Artifact and digest-checked.
+    /// Builds the credential-free Provider request after the frozen Inline value is digest-checked.
     pub fn adapter_execution(
         &self,
         request: insight_platform_models::CanonicalModelRequest,
@@ -214,148 +154,6 @@ impl ClaimedModelExecution {
             .validate_at(Utc::now())
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         Ok(command)
-    }
-}
-
-#[async_trait::async_trait]
-impl ArtifactObjectReadAuthority<ModelArtifactReadRequest> for PgRepository {
-    async fn authorize_object_read(
-        &self,
-        request: &ModelArtifactReadRequest,
-    ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
-        request
-            .validate(self.model_turn_limits())
-            .map_err(|_| ArtifactObjectReadAuthorityError::Denied)?;
-        let artifact = request
-            .artifact()
-            .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
-        let mut transaction = begin_read_only_repeatable(self.pool())
-            .await
-            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
-        let database_now = database_now(&mut transaction)
-            .await
-            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
-        let turn = load_model_turn(
-            &mut transaction,
-            &request.tenant_id,
-            &request.model_turn_id,
-            false,
-            self.model_turn_limits(),
-        )
-        .await
-        .map_err(classify_model_artifact_read_error)?;
-        let job = load_model_job(&mut transaction, &request.tenant_id, &request.job_id, false)
-            .await
-            .map_err(classify_model_artifact_read_error)?;
-        let projection = job_projection(&job).map_err(classify_model_artifact_read_error)?;
-        let payload: ModelJobPayload = decode_versioned_payload(&job.payload, "Model Job")
-            .map_err(classify_model_artifact_read_error)?;
-        payload
-            .validate_for(&turn, &projection, self.model_turn_limits())
-            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
-        let lease = projection
-            .lease
-            .as_ref()
-            .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
-        if turn.state != ModelTurnState::InFlight
-            || turn.payload.current_job_id.as_ref() != Some(&request.job_id)
-            || turn.payload.admission.request != request.exact
-            || turn.payload.admission.request_artifact_link_id.as_ref()
-                != Some(&request.artifact_link_id)
-            || turn.payload.admission.request_digest != request.request_digest
-            || turn.deadline != request.deadline
-            || request.deadline <= database_now
-            || projection.state != JobState::Running
-            || projection.version != request.fence.expected_version
-            || projection.lease_generation != request.fence.lease_generation
-            || lease.worker_process_generation_id != request.fence.worker_process_generation_id
-            || lease.token_digest != request.fence.token_digest
-            || lease.expires_at <= database_now
-        {
-            return Err(ArtifactObjectReadAuthorityError::Denied);
-        }
-        let value_and_link_match: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM insight_platform.run_values AS value
-                JOIN insight_platform.artifact_links AS link
-                  ON link.tenant_id = value.tenant_id
-                 AND link.artifact_link_id = $8
-                 AND link.link_kind = 'reference'
-                 AND link.owner_kind = 'model_turn'
-                 AND link.owner_id = $9
-                 AND link.target_artifact_id = value.artifact_id
-                 AND link.state = 'active'
-                 AND link.released_at IS NULL
-                 AND (link.expires_at IS NULL OR link.expires_at > $10)
-                WHERE value.tenant_id = $1 AND value.value_id = $2
-                  AND value.run_id = $3 AND value.node_id = $4
-                  AND value.value_kind = 'model_request'
-                  AND value.classification = $5
-                  AND value.schema_digest = $6
-                  AND value.content_digest = $7
-                  AND value.inline_value IS NULL
-                  AND value.artifact_id = $11
-            )
-            "#,
-        )
-        .bind(request.tenant_id.to_string())
-        .bind(request.exact.value_id.to_string())
-        .bind(request.exact.run_id.to_string())
-        .bind(
-            request
-                .exact
-                .producing_node_id
-                .as_ref()
-                .ok_or(ArtifactObjectReadAuthorityError::InvalidEvidence)?
-                .to_string(),
-        )
-        .bind(request.exact.classification.as_str())
-        .bind(request.exact.schema_digest.to_string())
-        .bind(request.exact.content_digest.to_string())
-        .bind(request.artifact_link_id.to_string())
-        .bind(request.model_turn_id.to_string())
-        .bind(database_now)
-        .bind(artifact.artifact_id().to_string())
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
-        if !value_and_link_match {
-            return Err(ArtifactObjectReadAuthorityError::Denied);
-        }
-        let authorized = load_authorized_artifact_object(
-            &mut transaction,
-            ArtifactObjectReadProjection {
-                tenant_id: &request.tenant_id,
-                owner_kind: "model_turn",
-                owner_id: &request.model_turn_id,
-                request_digest: &request.request_digest,
-                worker_process_generation_id: &request.fence.worker_process_generation_id,
-                provider_process_generation_id: None,
-                sandbox_identity_digest: None,
-                lease_generation: request.fence.lease_generation,
-                artifact,
-                purpose_domain: "model_request_value",
-                purpose_class: ArtifactObjectReadPurpose::ModelInput,
-            },
-        )
-        .await
-        .map_err(classify_model_artifact_read_error)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
-        Ok(authorized)
-    }
-}
-
-fn classify_model_artifact_read_error(error: RepositoryError) -> ArtifactObjectReadAuthorityError {
-    match error {
-        RepositoryError::Database(_) => ArtifactObjectReadAuthorityError::Unavailable,
-        RepositoryError::NotFound(_) => ArtifactObjectReadAuthorityError::NotFound,
-        RepositoryError::PermissionDenied => ArtifactObjectReadAuthorityError::Denied,
-        _ => ArtifactObjectReadAuthorityError::InvalidEvidence,
     }
 }
 
@@ -612,8 +410,6 @@ impl ModelTurnTransaction for PgModelTurnTransaction {
             &command.request,
         )
         .await?;
-        lock_model_request_artifacts(&mut transaction, &command.audit.tenant_id, &command.request)
-            .await?;
 
         let record = decide_model_turn_admission(
             &command,
@@ -669,7 +465,6 @@ impl ModelTurnTransaction for PgModelTurnTransaction {
         .await?;
         insert_model_request_value(&mut transaction, &record, &command.request).await?;
         insert_model_turn(&mut transaction, &record).await?;
-        insert_model_input_artifact_references(&mut transaction, &record, &command.request).await?;
         append_command_event(
             &mut transaction,
             &command.audit,
@@ -1063,38 +858,6 @@ async fn require_committed_tool_results(
     Ok(())
 }
 
-async fn lock_model_request_artifacts(
-    transaction: &mut Transaction<'_, Postgres>,
-    tenant_id: &ResourceId,
-    request: &ModelRequestValue,
-) -> Result<(), RepositoryError> {
-    let mut link_ids = BTreeSet::new();
-    let mut artifact_ids = BTreeSet::new();
-    if let ValueRef::Artifact { artifact } = &request.value {
-        let link_id = request.artifact_link_id.as_ref().ok_or_else(|| {
-            RepositoryError::InvalidInput("Artifact-backed Model request has no link ID".to_owned())
-        })?;
-        link_ids.insert(link_id.clone());
-        artifact_ids.insert(artifact.artifact_id().clone());
-        lock_ready_model_artifact(transaction, tenant_id, artifact).await?;
-    } else if request.artifact_link_id.is_some() {
-        return Err(RepositoryError::InvalidInput(
-            "inline Model request has an ArtifactLink".to_owned(),
-        ));
-    }
-    for input in &request.request.artifact_inputs {
-        if !link_ids.insert(input.artifact_link_id.clone())
-            || !artifact_ids.insert(input.artifact.artifact_id().clone())
-        {
-            return Err(RepositoryError::InvalidInput(
-                "Model request Artifact identities are not unique".to_owned(),
-            ));
-        }
-        lock_ready_model_artifact(transaction, tenant_id, &input.artifact).await?;
-    }
-    Ok(())
-}
-
 async fn lock_ready_model_artifact(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
@@ -1133,9 +896,10 @@ async fn insert_model_request_value(
     record: &ModelTurnRecord,
     request: &ModelRequestValue,
 ) -> Result<(), RepositoryError> {
-    let (inline_value, artifact_id) = match &request.value {
-        ValueRef::Inline { value } => (Some(value), None),
-        ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+    let ValueRef::Inline { value } = &request.value else {
+        return Err(RepositoryError::InvalidInput(
+            "Model request must use Inline storage".to_owned(),
+        ));
     };
     sqlx::query(
         r#"
@@ -1152,8 +916,8 @@ async fn insert_model_request_value(
     .bind(request.classification.as_str())
     .bind(request.schema_digest.to_string())
     .bind(request.content_digest.to_string())
-    .bind(inline_value)
-    .bind(artifact_id)
+    .bind(value)
+    .bind(Option::<String>::None)
     .bind(record.created_at)
     .execute(&mut **transaction)
     .await?;
@@ -1200,92 +964,6 @@ async fn insert_model_turn(
     Ok(())
 }
 
-async fn insert_model_input_artifact_references(
-    transaction: &mut Transaction<'_, Postgres>,
-    record: &ModelTurnRecord,
-    request: &ModelRequestValue,
-) -> Result<(), RepositoryError> {
-    let mut references = Vec::new();
-    if let ValueRef::Artifact { artifact } = &request.value {
-        references.push((
-            request.artifact_link_id.as_ref().ok_or_else(|| {
-                RepositoryError::InvalidInput(
-                    "Artifact-backed Model request has no link ID".to_owned(),
-                )
-            })?,
-            artifact,
-        ));
-    }
-    references.extend(
-        request
-            .request
-            .artifact_inputs
-            .iter()
-            .map(|input| (&input.artifact_link_id, &input.artifact)),
-    );
-    for (link_id, artifact) in references {
-        insert_model_artifact_reference(
-            transaction,
-            record,
-            link_id,
-            artifact,
-            ArtifactReferenceKind::Input,
-            ArtifactPurpose::RunInput,
-            record.created_at,
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn insert_model_artifact_reference(
-    transaction: &mut Transaction<'_, Postgres>,
-    record: &ModelTurnRecord,
-    link_id: &ResourceId,
-    artifact: &ArtifactRef,
-    reference_kind: ArtifactReferenceKind,
-    purpose: ArtifactPurpose,
-    database_now: DateTime<Utc>,
-) -> Result<(), RepositoryError> {
-    let snapshot = ArtifactReferenceSnapshot {
-        schema_version: 1,
-        artifact_id: artifact.artifact_id().clone(),
-        owner_id: record.model_turn_id.clone(),
-        reference_kind,
-        purpose,
-        created_by: record.payload.admission.principal.principal_id.clone(),
-    };
-    let payload = TypedPayload::from_versioned(1, &snapshot, 262_144)?;
-    sqlx::query(
-        r#"
-        INSERT INTO insight_platform.artifact_links (
-            tenant_id, artifact_link_id, link_kind, owner_kind, owner_id,
-            target_artifact_id, link_key_digest, state, payload_schema_version,
-            payload, payload_digest, created_at, updated_at
-        ) VALUES ($1, $2, 'reference', 'model_turn', $3, $4, $5,
-                  'active', $6, $7, $8, $9, $9)
-        "#,
-    )
-    .bind(record.tenant_id.to_string())
-    .bind(link_id.to_string())
-    .bind(record.model_turn_id.to_string())
-    .bind(artifact.artifact_id().to_string())
-    .bind(
-        snapshot
-            .link_key_digest()
-            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
-            .to_string(),
-    )
-    .bind(payload.schema_version)
-    .bind(&payload.value)
-    .bind(&payload.digest)
-    .bind(database_now)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
 fn require_model_create_replay(
     record: &ModelTurnRecord,
     command: &CreateModelTurn,
@@ -1309,7 +987,6 @@ fn require_model_create_replay(
             != command.selector_input_digest
         || record.request_value_id != command.request.value_id
         || record.payload.admission.request_digest != command.request.content_digest
-        || record.payload.admission.request_artifact_link_id != command.request.artifact_link_id
         || record.payload.admission.attempt_limit != command.requested_attempt_limit
         || record.payload.admission.quota_ceiling.cost_microunits != command.cost_ceiling_microunits
     {
@@ -1885,57 +1562,12 @@ async fn load_model_execution_input(
     let inline_value: Option<serde_json::Value> = row.try_get("inline_value")?;
     let artifact_id: Option<String> = row.try_get("artifact_id")?;
     let material = match (&exact.storage, inline_value, artifact_id) {
-        (InvocationValueStorage::Inline, Some(value), None)
-            if turn.payload.admission.request_artifact_link_id.is_none() =>
-        {
+        (InvocationValueStorage::Inline, Some(value), None) => {
             ModelExecutionInputMaterial::Inline { value }
-        }
-        (InvocationValueStorage::Artifact { artifact }, None, Some(stored_artifact_id))
-            if stored_artifact_id == artifact.artifact_id().to_string() =>
-        {
-            let link_id = turn
-                .payload
-                .admission
-                .request_artifact_link_id
-                .as_ref()
-                .ok_or_else(|| {
-                    RepositoryError::CorruptRow(
-                        "Artifact-backed Model request has no frozen ArtifactLink".to_owned(),
-                    )
-                })?;
-            lock_ready_model_artifact(transaction, &turn.tenant_id, artifact).await?;
-            let linked: bool = sqlx::query_scalar(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM insight_platform.artifact_links
-                    WHERE tenant_id = $1 AND artifact_link_id = $2
-                      AND link_kind = 'reference'
-                      AND owner_kind = 'model_turn' AND owner_id = $3
-                      AND target_artifact_id = $4 AND state = 'active'
-                      AND released_at IS NULL
-                      AND (expires_at IS NULL OR expires_at > clock_timestamp())
-                )
-                "#,
-            )
-            .bind(turn.tenant_id.to_string())
-            .bind(link_id.to_string())
-            .bind(turn.model_turn_id.to_string())
-            .bind(artifact.artifact_id().to_string())
-            .fetch_one(&mut **transaction)
-            .await?;
-            if !linked {
-                return Err(RepositoryError::NotFound(
-                    "active Model request ArtifactLink",
-                ));
-            }
-            ModelExecutionInputMaterial::LinkedArtifact {
-                artifact_link_id: link_id.clone(),
-            }
         }
         _ => {
             return Err(RepositoryError::CorruptRow(
-                "Model request storage differs from frozen admission".to_owned(),
+                "Model request is not the frozen Inline value".to_owned(),
             ));
         }
     };
@@ -3148,15 +2780,10 @@ async fn insert_model_output_value_and_references(
     output: &ModelOutputValue,
     database_now: DateTime<Utc>,
 ) -> Result<(), RepositoryError> {
-    if let ValueRef::Artifact { artifact } = &output.value {
-        lock_ready_model_artifact(transaction, &turn.tenant_id, artifact).await?;
-    }
-    for artifact in &output.artifact_outputs {
-        lock_ready_model_artifact(transaction, &turn.tenant_id, &artifact.artifact).await?;
-    }
-    let (inline_value, artifact_id) = match &output.value {
-        ValueRef::Inline { value } => (Some(value), None),
-        ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+    let ValueRef::Inline { value } = &output.value else {
+        return Err(RepositoryError::InvalidInput(
+            "Model response must use Inline storage".to_owned(),
+        ));
     };
     sqlx::query(
         r#"
@@ -3173,40 +2800,11 @@ async fn insert_model_output_value_and_references(
     .bind(output.classification.as_str())
     .bind(output.schema_digest.to_string())
     .bind(output.content_digest.to_string())
-    .bind(inline_value)
-    .bind(artifact_id)
+    .bind(value)
+    .bind(Option::<String>::None)
     .bind(database_now)
     .execute(&mut **transaction)
     .await?;
-    if let ValueRef::Artifact { artifact } = &output.value {
-        let link_id = output.artifact_link_id.as_ref().ok_or_else(|| {
-            RepositoryError::InvalidInput(
-                "Artifact-backed Model response has no link ID".to_owned(),
-            )
-        })?;
-        insert_model_artifact_reference(
-            transaction,
-            turn,
-            link_id,
-            artifact,
-            ArtifactReferenceKind::Output,
-            ArtifactPurpose::RunOutput,
-            database_now,
-        )
-        .await?;
-    }
-    for artifact in &output.artifact_outputs {
-        insert_model_artifact_reference(
-            transaction,
-            turn,
-            &artifact.artifact_link_id,
-            &artifact.artifact,
-            ArtifactReferenceKind::Output,
-            ArtifactPurpose::RunOutput,
-            database_now,
-        )
-        .await?;
-    }
     Ok(())
 }
 

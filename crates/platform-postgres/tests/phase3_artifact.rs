@@ -771,7 +771,6 @@ async fn seed_retention_root(
         sandbox_resource: None,
         sandbox_network: None,
         sandbox_artifact_io: None,
-        model_output_artifact_io: None,
         sandbox_secret_resolution: None,
     });
     let resource_payload = TypedPayload::new(
@@ -935,7 +934,6 @@ async fn seed_artifact_io_policy(
         sandbox_resource: None,
         sandbox_network: None,
         sandbox_artifact_io: None,
-        model_output_artifact_io: None,
         sandbox_secret_resolution: None,
     });
     let resource_payload = TypedPayload::new(

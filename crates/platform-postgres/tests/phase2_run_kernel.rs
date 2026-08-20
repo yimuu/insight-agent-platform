@@ -7332,7 +7332,6 @@ async fn seed_agent_registry(pool: &PgPool) -> RunBindingsSnapshot {
                 sandbox_resource: None,
                 sandbox_network: None,
                 sandbox_artifact_io: None,
-                model_output_artifact_io: None,
                 sandbox_secret_resolution: None,
             }),
             validation: ValidationSummary {

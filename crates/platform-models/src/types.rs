@@ -1,14 +1,11 @@
 use crate::{ModelTurnError, ModelTurnLimits};
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    canonical_digest, ArtifactRef, ClosedJsonValue, ClosedSchemaDocument, DataClassification,
-    DecimalMoney, Effect, ExactDeploymentRef, ExactVersionRef, ModelModality,
-    ModelProfileResourceSpec, ModelProviderResourceSpec, ResourceDocument, ResourceId,
-    ResourceKind, Sha256Digest, ValueRef,
+    canonical_digest, ClosedJsonValue, ClosedSchemaDocument, DataClassification, DecimalMoney,
+    Effect, ExactDeploymentRef, ExactVersionRef, ModelProfileResourceSpec,
+    ModelProviderResourceSpec, ResourceDocument, ResourceId, ResourceKind, Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::{ExactInvocationValueRef, InvocationValueStorage};
-use insight_platform_jobs::JobFence;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -93,31 +90,7 @@ impl ModelToolResult {
 )]
 pub enum CanonicalMessagePart {
     Text(String),
-    Image(ArtifactRef),
-    Audio(ArtifactRef),
-    Document(ArtifactRef),
     ToolResult(ModelToolResult),
-}
-
-impl CanonicalMessagePart {
-    fn modality(&self) -> Option<ModelModality> {
-        match self {
-            Self::Text(_) => Some(ModelModality::Text),
-            Self::Image(_) => Some(ModelModality::Image),
-            Self::Audio(_) => Some(ModelModality::Audio),
-            Self::Document(_) => Some(ModelModality::Document),
-            Self::ToolResult(_) => None,
-        }
-    }
-
-    fn artifact(&self) -> Option<&ArtifactRef> {
-        match self {
-            Self::Image(artifact) | Self::Audio(artifact) | Self::Document(artifact) => {
-                Some(artifact)
-            }
-            Self::Text(_) | Self::ToolResult(_) => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -193,51 +166,6 @@ impl ModelResponseContract {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelArtifactInput {
-    pub artifact: ArtifactRef,
-    pub artifact_link_id: ResourceId,
-    pub modality: ModelModality,
-    pub source_digest: Sha256Digest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelArtifactOutput {
-    pub artifact: ArtifactRef,
-    pub artifact_link_id: ResourceId,
-    pub modality: ModelModality,
-}
-
-impl ModelArtifactOutput {
-    fn validate(&self) -> Result<(), ModelTurnError> {
-        self.artifact
-            .validate()
-            .map_err(|_| ModelTurnError::InvalidArtifact)?;
-        if self.artifact_link_id.kind() != ResourceKind::ArtifactLink
-            || self.modality == ModelModality::Text
-        {
-            return Err(ModelTurnError::InvalidArtifact);
-        }
-        Ok(())
-    }
-}
-
-impl ModelArtifactInput {
-    fn validate(&self) -> Result<(), ModelTurnError> {
-        self.artifact
-            .validate()
-            .map_err(|_| ModelTurnError::InvalidArtifact)?;
-        if self.artifact_link_id.kind() != ResourceKind::ArtifactLink
-            || self.modality == ModelModality::Text
-        {
-            return Err(ModelTurnError::InvalidArtifact);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SafeTraceContext {
     pub trace_id_digest: Sha256Digest,
     pub parent_span_id_digest: Sha256Digest,
@@ -251,7 +179,6 @@ pub struct CanonicalModelRequest {
     pub messages: Vec<CanonicalMessage>,
     pub tools: Vec<ModelToolProjection>,
     pub response_contract: ModelResponseContract,
-    pub artifact_inputs: Vec<ModelArtifactInput>,
     pub generation_parameters: ClosedJsonValue,
     pub max_output_tokens: u32,
     pub input_token_estimate: u64,
@@ -321,7 +248,6 @@ impl CanonicalModelRequest {
         self.response_contract.validate(profile)?;
         self.validate_tools(provider, profile, limits)?;
         self.validate_messages(provider, profile, limits)?;
-        self.validate_artifacts(profile)?;
         let request_bytes = serde_json::to_vec(self)
             .map_err(|_| ModelTurnError::Canonicalization)?
             .len();
@@ -416,19 +342,6 @@ impl CanonicalModelRequest {
                         }
                         result.validate(limits)?;
                     }
-                    other => {
-                        let modality = other.modality().ok_or(ModelTurnError::InvalidMessage)?;
-                        if message.role == CanonicalMessageRole::Tool
-                            || !profile.modalities.input.contains(&modality)
-                        {
-                            return Err(ModelTurnError::InvalidMessage);
-                        }
-                        other
-                            .artifact()
-                            .ok_or(ModelTurnError::InvalidArtifact)?
-                            .validate()
-                            .map_err(|_| ModelTurnError::InvalidArtifact)?;
-                    }
                 }
             }
             if message.role == CanonicalMessageRole::Tool
@@ -446,56 +359,6 @@ impl CanonicalModelRequest {
                     .map_err(|_| ModelTurnError::InvalidLimits)?
         {
             return Err(ModelTurnError::InvalidMessage);
-        }
-        Ok(())
-    }
-
-    fn validate_artifacts(&self, profile: &ModelProfileResourceSpec) -> Result<(), ModelTurnError> {
-        let mut inputs = BTreeMap::new();
-        let mut link_ids = BTreeSet::new();
-        let mut total_bytes = 0u64;
-        for input in &self.artifact_inputs {
-            input.validate()?;
-            if !profile
-                .artifact_delivery
-                .supported_modalities
-                .contains(&input.modality)
-                || !profile.modalities.input.contains(&input.modality)
-                || input.artifact.classification().rank() > self.classification.rank()
-                || !link_ids.insert(input.artifact_link_id.clone())
-                || inputs
-                    .insert(input.artifact.artifact_id().clone(), input)
-                    .is_some()
-            {
-                return Err(ModelTurnError::InvalidArtifact);
-            }
-            total_bytes = total_bytes
-                .checked_add(input.artifact.byte_length())
-                .ok_or(ModelTurnError::InvalidLimits)?;
-            if input.artifact.byte_length()
-                > profile.artifact_delivery.maximum_single_artifact_bytes
-            {
-                return Err(ModelTurnError::InvalidArtifact);
-            }
-        }
-        if self.artifact_inputs.len()
-            > usize::try_from(profile.artifact_delivery.maximum_artifacts)
-                .map_err(|_| ModelTurnError::InvalidLimits)?
-            || total_bytes > profile.artifact_delivery.maximum_total_artifact_bytes
-        {
-            return Err(ModelTurnError::InvalidArtifact);
-        }
-        for message in &self.messages {
-            for part in &message.parts {
-                if let Some(artifact) = part.artifact() {
-                    let input = inputs
-                        .get(artifact.artifact_id())
-                        .ok_or(ModelTurnError::InvalidArtifact)?;
-                    if &input.artifact != artifact || Some(input.modality) != part.modality() {
-                        return Err(ModelTurnError::InvalidArtifact);
-                    }
-                }
-            }
         }
         Ok(())
     }
@@ -735,17 +598,6 @@ impl CanonicalModelResponse {
                         .checked_add(text.len())
                         .ok_or(ModelTurnError::InvalidLimits)?;
                 }
-                CanonicalMessagePart::Image(artifact)
-                | CanonicalMessagePart::Audio(artifact)
-                | CanonicalMessagePart::Document(artifact) => {
-                    let modality = part.modality().ok_or(ModelTurnError::InvalidResponse)?;
-                    if !profile.modalities.output.contains(&modality) {
-                        return Err(ModelTurnError::InvalidResponse);
-                    }
-                    artifact
-                        .validate()
-                        .map_err(|_| ModelTurnError::InvalidArtifact)?;
-                }
                 CanonicalMessagePart::ToolResult(_) => return Err(ModelTurnError::InvalidResponse),
             }
         }
@@ -846,20 +698,16 @@ pub struct ModelRequestValue {
     pub schema_digest: Sha256Digest,
     pub content_digest: Sha256Digest,
     pub value: ValueRef,
-    pub artifact_link_id: Option<ResourceId>,
     pub request: CanonicalModelRequest,
 }
 
 /// Exact logical Model request material handed to a Model Worker after a durable claim.
 ///
-/// PostgreSQL may return bounded inline JSON directly. Artifact-backed request bytes remain
-/// behind the Artifact broker; the claim carries only the already-frozen link identity so the
-/// worker cannot substitute an arbitrary object reference.
+/// PostgreSQL returns the bounded Inline JSON frozen at admission.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelExecutionInputMaterial {
     Inline { value: serde_json::Value },
-    LinkedArtifact { artifact_link_id: ResourceId },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -887,83 +735,10 @@ impl ModelExecutionInput {
                     return Err(ModelTurnError::InvalidRequestValue);
                 }
             }
-            (
-                InvocationValueStorage::Artifact { .. },
-                ModelExecutionInputMaterial::LinkedArtifact { artifact_link_id },
-            ) if artifact_link_id.kind() == ResourceKind::ArtifactLink => {}
             _ => return Err(ModelTurnError::InvalidRequestValue),
         }
         Ok(())
     }
-}
-
-/// Credential-free authorization request for materializing one Artifact-backed logical Model
-/// request. The physical object locator and storage credentials are deliberately absent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelArtifactReadRequest {
-    pub schema_version: u32,
-    pub tenant_id: ResourceId,
-    pub model_turn_id: ResourceId,
-    pub job_id: ResourceId,
-    pub exact: ExactInvocationValueRef,
-    pub artifact_link_id: ResourceId,
-    pub fence: JobFence,
-    pub request_digest: Sha256Digest,
-    pub maximum_bytes: usize,
-    pub deadline: DateTime<Utc>,
-}
-
-impl ModelArtifactReadRequest {
-    pub fn validate(&self, limits: ModelTurnLimits) -> Result<(), ModelTurnError> {
-        self.exact
-            .validate()
-            .map_err(|_| ModelTurnError::InvalidRequestValue)?;
-        let InvocationValueStorage::Artifact { artifact } = &self.exact.storage else {
-            return Err(ModelTurnError::InvalidRequestValue);
-        };
-        if self.schema_version != 1
-            || self.tenant_id.kind() != ResourceKind::Tenant
-            || self.model_turn_id.kind() != ResourceKind::ModelTurn
-            || self.job_id.kind() != ResourceKind::Job
-            || self.artifact_link_id.kind() != ResourceKind::ArtifactLink
-            || self.fence.expected_version == 0
-            || self.fence.worker_process_generation_id.kind()
-                != ResourceKind::WorkerProcessGeneration
-            || self.fence.lease_generation == 0
-            || self.exact.value_kind != "model_request"
-            || self.maximum_bytes == 0
-            || self.maximum_bytes > limits.maximum_request_bytes()
-            || u64::try_from(self.maximum_bytes).ok() != Some(artifact.byte_length())
-        {
-            return Err(ModelTurnError::InvalidRequestValue);
-        }
-        Ok(())
-    }
-
-    pub fn artifact(&self) -> Option<&ArtifactRef> {
-        match &self.exact.storage {
-            InvocationValueStorage::Artifact { artifact } => Some(artifact),
-            InvocationValueStorage::Inline => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelArtifactBrokerError {
-    Unavailable,
-    Denied,
-    NotFound,
-    TooLarge,
-    Integrity,
-}
-
-#[async_trait]
-pub trait ModelArtifactBroker: Send + Sync {
-    async fn read_exact(
-        &self,
-        request: ModelArtifactReadRequest,
-    ) -> Result<Vec<u8>, ModelArtifactBrokerError>;
 }
 
 impl ModelRequestValue {
@@ -977,10 +752,6 @@ impl ModelRequestValue {
             || run_id.kind() != ResourceKind::Run
             || node_id.kind() != ResourceKind::NodeExecution
             || self.classification != self.request.classification
-            || self
-                .artifact_link_id
-                .as_ref()
-                .is_some_and(|id| id.kind() != ResourceKind::ArtifactLink)
         {
             return Err(ModelTurnError::InvalidRequestValue);
         }
@@ -992,21 +763,9 @@ impl ModelRequestValue {
         let request_digest = digest(&request_value)?;
         let storage = match &self.value {
             ValueRef::Inline { value }
-                if value == &request_value
-                    && request_digest == self.content_digest
-                    && self.artifact_link_id.is_none() =>
+                if value == &request_value && request_digest == self.content_digest =>
             {
                 InvocationValueStorage::Inline
-            }
-            ValueRef::Artifact { artifact }
-                if artifact.content_digest() == &self.content_digest
-                    && artifact.classification() == self.classification
-                    && self.artifact_link_id.is_some()
-                    && request_digest == self.content_digest =>
-            {
-                InvocationValueStorage::Artifact {
-                    artifact: artifact.clone(),
-                }
             }
             _ => return Err(ModelTurnError::InvalidRequestValue),
         };
@@ -1036,8 +795,6 @@ pub struct ModelOutputValue {
     pub schema_digest: Sha256Digest,
     pub content_digest: Sha256Digest,
     pub value: ValueRef,
-    pub artifact_link_id: Option<ResourceId>,
-    pub artifact_outputs: Vec<ModelArtifactOutput>,
     pub response: CanonicalModelResponse,
     pub validation_evidence_digest: Sha256Digest,
 }
@@ -1053,37 +810,20 @@ impl ModelOutputValue {
         if self.value_id.kind() != ResourceKind::RunValue
             || self.schema_digest != request.response_contract.output_schema_digest
             || self.classification.rank() < request.classification.rank()
-            || self
-                .artifact_link_id
-                .as_ref()
-                .is_some_and(|id| id.kind() != ResourceKind::ArtifactLink)
         {
             return Err(ModelTurnError::InvalidOutputValue);
         }
         self.value
             .validate(limits.inline_value_limits())
             .map_err(|_| ModelTurnError::InvalidOutputValue)?;
-        self.validate_artifacts()?;
         let response_value =
             serde_json::to_value(&self.response).map_err(|_| ModelTurnError::Canonicalization)?;
         let response_digest = digest(&response_value)?;
         let storage = match &self.value {
             ValueRef::Inline { value }
-                if value == &response_value
-                    && response_digest == self.content_digest
-                    && self.artifact_link_id.is_none() =>
+                if value == &response_value && response_digest == self.content_digest =>
             {
                 InvocationValueStorage::Inline
-            }
-            ValueRef::Artifact { artifact }
-                if artifact.content_digest() == &self.content_digest
-                    && artifact.classification() == self.classification
-                    && self.artifact_link_id.is_some()
-                    && response_digest == self.content_digest =>
-            {
-                InvocationValueStorage::Artifact {
-                    artifact: artifact.clone(),
-                }
             }
             _ => return Err(ModelTurnError::InvalidOutputValue),
         };
@@ -1102,51 +842,6 @@ impl ModelOutputValue {
             .validate()
             .map_err(|_| ModelTurnError::InvalidOutputValue)?;
         Ok(exact)
-    }
-
-    fn validate_artifacts(&self) -> Result<(), ModelTurnError> {
-        let mut artifacts = BTreeMap::new();
-        let mut link_ids = BTreeSet::new();
-        for output in &self.artifact_outputs {
-            output.validate()?;
-            if !link_ids.insert(output.artifact_link_id.clone())
-                || artifacts
-                    .insert(output.artifact.artifact_id().clone(), output)
-                    .is_some()
-            {
-                return Err(ModelTurnError::InvalidArtifact);
-            }
-        }
-        let mut referenced = BTreeSet::new();
-        if let Some(message) = &self.response.message {
-            for part in &message.parts {
-                if let Some(artifact) = part.artifact() {
-                    let output = artifacts
-                        .get(artifact.artifact_id())
-                        .ok_or(ModelTurnError::InvalidArtifact)?;
-                    if &output.artifact != artifact || Some(output.modality) != part.modality() {
-                        return Err(ModelTurnError::InvalidArtifact);
-                    }
-                    referenced.insert(artifact.artifact_id().clone());
-                }
-            }
-        }
-        if referenced.len() != artifacts.len() {
-            return Err(ModelTurnError::InvalidArtifact);
-        }
-        if self
-            .artifact_link_id
-            .as_ref()
-            .is_some_and(|link_id| link_ids.contains(link_id))
-            || matches!(
-                &self.value,
-                ValueRef::Artifact { artifact }
-                    if artifacts.contains_key(artifact.artifact_id())
-            )
-        {
-            return Err(ModelTurnError::InvalidArtifact);
-        }
-        Ok(())
     }
 }
 

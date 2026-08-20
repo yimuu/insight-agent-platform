@@ -31,12 +31,9 @@ for dependency in (
 for composition in (
     "ArtifactBrokerAudience",
     "PLATFORM_ARTIFACT_BROKER_AUDIENCE",
-    "BrokeredModelArtifactBroker",
     "BrokeredSandboxArtifactBroker",
-    "ArtifactModelBrokerGrpcService",
     "ArtifactSandboxBrokerGrpcService",
-    "add_optional_service(model_service)",
-    "add_optional_service(sandbox_service)",
+    "add_service(sandbox_service)",
 ):
     if composition not in service_source:
         failures.append(f"Artifact service is missing audience-isolated composition {composition}")
@@ -53,14 +50,11 @@ for sdk in ("aws-config", "aws-sdk-kms", "aws-sdk-s3"):
         failures.append(f"Artifact Broker core is missing provider SDK {sdk}")
 
 expected_methods = {
-    "rpc ReadModelRequest(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);",
     "rpc ReadWasiArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);",
     "rpc ReadMicroVmArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);",
 }
 if any(method not in proto for method in expected_methods) or proto.count("  rpc ") != len(expected_methods):
-    failures.append("Artifact internal RPC must expose exactly the reviewed Model and Sandbox read methods")
-if not re.search(r"service ArtifactModelBrokerService\s*\{\s*rpc ReadModelRequest", proto, re.DOTALL):
-    failures.append("Model audience service is missing its sole read method")
+    failures.append("Artifact internal RPC must expose exactly the reviewed Sandbox read methods")
 if not re.search(r"service ArtifactSandboxBrokerService\s*\{\s*rpc ReadWasiArtifact.*rpc ReadMicroVmArtifact", proto, re.DOTALL):
     failures.append("Sandbox audience service is missing its two typed read methods")
 if "insight-platform-sandbox.workspace = true" not in rpc_manifest:
@@ -86,20 +80,15 @@ helm lint "$chart"
 helm template platform "$chart" --include-crds >"$rendered"
 
 negative_values=(
-  "--set|brokers.model.replicas=1"
   "--set|brokers.sandbox.replicas=1"
   "--set|image.digest=latest"
   "--set|brokers.extra.replicas=2"
-  "--set-json|brokers.model=null"
+  "--set-json|brokers.sandbox=null"
   "--set-json|networkPolicy.postgresCidrs=[]"
   "--set-json|networkPolicy.storageProviderCidrs=[]"
-  "--set|networkPolicy.modelWorkerPodSelector="
   "--set|networkPolicy.sandboxControllerPodSelector="
-  "--set|brokers.model.serviceAccount.annotations="
+  "--set|brokers.sandbox.serviceAccount.annotations="
   "--set|brokers.sandbox.autoscaling.minReplicas=1"
-  "--set|brokers.sandbox.config.existingConfigMap=insight-platform-artifact-broker-model-candidate"
-  "--set|brokers.sandbox.database.existingSecret=insight-platform-artifact-broker-model-database"
-  "--set|brokers.sandbox.tls.existingSecret=insight-platform-artifact-broker-model-server-tls"
 )
 for case in "${negative_values[@]}"; do
   flag=${case%%|*}
@@ -121,15 +110,15 @@ pdbs = docs.select { |doc| doc["kind"] == "PodDisruptionBudget" }
 hpas = docs.select { |doc| doc["kind"] == "HorizontalPodAutoscaler" }
 policies = docs.select { |doc| doc["kind"] == "NetworkPolicy" }
 
-failures << "must render two isolated Deployments" unless deployments.length == 2
-failures << "must render two isolated Services" unless services.length == 2
-failures << "must render two isolated ServiceAccounts" unless service_accounts.length == 2
-failures << "must render two PodDisruptionBudgets" unless pdbs.length == 2
-failures << "must render two HorizontalPodAutoscalers" unless hpas.length == 2
-failures << "must render default-deny plus two audience policies" unless policies.length == 3
+failures << "must render one Sandbox Deployment" unless deployments.length == 1
+failures << "must render one Sandbox Service" unless services.length == 1
+failures << "must render one Sandbox ServiceAccount" unless service_accounts.length == 1
+failures << "must render one PodDisruptionBudget" unless pdbs.length == 1
+failures << "must render one HorizontalPodAutoscaler" unless hpas.length == 1
+failures << "must render default-deny plus one caller policy" unless policies.length == 2
 
 identities = {}
-%w[model sandbox].each do |audience|
+%w[sandbox].each do |audience|
   role = "artifact-broker-#{audience}"
   name = "insight-platform-artifact-broker-#{audience}"
   deployment = deployments.find { |doc| doc.dig("metadata", "name") == name }
@@ -169,19 +158,13 @@ identities = {}
   failures << "#{audience} workload identity is missing" if account.dig("metadata", "annotations").to_h.empty?
 
   ingress = policy.dig("spec", "ingress")
-  expected_namespace = audience == "model" ? {"insight.platform/workload-namespace" => "model-worker"} : {"insight.platform/sandbox-controller-namespace" => "true"}
-  expected_pod = audience == "model" ? {"insight.platform/workload-role" => "model-worker"} : {"insight.platform/workload-role" => "sandbox-controller"}
+  expected_namespace = {"insight.platform/sandbox-controller-namespace" => "true"}
+  expected_pod = {"insight.platform/workload-role" => "sandbox-controller"}
   from = ingress&.first&.fetch("from", [])
   caller = from&.first
   failures << "#{audience} ingress must contain exactly its caller" unless from&.length == 1 && caller&.dig("namespaceSelector", "matchLabels") == expected_namespace && caller&.dig("podSelector", "matchLabels") == expected_pod
   service_port = service.dig("spec", "ports", 0, "port")
   failures << "#{audience} ingress port must match its Service" unless ingress&.first&.dig("ports", 0, "port") == service_port
-end
-
-if identities.keys.sort == %w[model sandbox]
-  %i[service_account annotations database_secret config_map tls_secret].each do |key|
-    failures << "Model and Sandbox must use distinct #{key.to_s.tr('_', ' ')}" if identities.dig("model", key) == identities.dig("sandbox", key)
-  end
 end
 
 rendered = File.read(ARGV.fetch(0))
@@ -193,5 +176,5 @@ if failures.any?
   failures.each { |failure| warn "Artifact Broker deployment: #{failure}" }
   exit 1
 end
-puts "Artifact Broker deployment contract passed (2 audience-isolated workloads, 3 NetworkPolicies)."
+puts "Artifact Broker deployment contract passed (Sandbox-only materialization, 2 NetworkPolicies)."
 RUBY

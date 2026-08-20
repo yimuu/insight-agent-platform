@@ -1,5 +1,4 @@
 use chrono::{DateTime, Duration, Utc};
-use insight_platform_artifacts::{ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError};
 use insight_platform_contracts::{
     canonical_digest, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
     AuthoringPackage, CapabilityArtifactContract, CapabilityBackendBinding,
@@ -11,16 +10,16 @@ use insight_platform_contracts::{
     CommandOutcome, ContextWindowContract, DataClassification, DataRegion, DecimalMoney,
     DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactSecretBindingRef,
     ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, InstalledModelAdapter, JobState,
-    ModelArtifactDeliveryContract, ModelCatalogEvidence, ModelDeploymentClosure,
-    ModelIdentityStability, ModelLimits, ModelModalities, ModelProfileResourceSpec,
-    ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelToolContract, ModelTurnState,
-    ModelUsageContract, NativeCapabilityContract, Permission, PermissionSet, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
-    ProviderTrainingPolicy, PublishedVersionPayload, QuotaDimension, RegistryResourceKind,
-    ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, SecretBindingPayload,
-    SecretPurpose, SecretResolutionPolicy, Sha256Digest, StructuredOutputContract, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    ModelCatalogEvidence, ModelDeploymentClosure, ModelIdentityStability, ModelLimits,
+    ModelModalities, ModelProfileResourceSpec, ModelProviderDeploymentClosure,
+    ModelProviderResourceSpec, ModelToolContract, ModelTurnState, ModelUsageContract,
+    NativeCapabilityContract, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, ProviderDataHandlingContract,
+    ProviderModelIdentity, ProviderRequestLimits, ProviderTrainingPolicy, PublishedVersionPayload,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    RunBindingsSnapshot, SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest,
+    StructuredOutputContract, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef,
+    WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_models::{
@@ -303,7 +302,6 @@ struct Fixture {
     scope_id: ResourceId,
     primary_node_id: ResourceId,
     cancel_node_id: ResourceId,
-    artifact_node_id: ResourceId,
     capability_deployment: ExactDeploymentRef,
     capability_interface_revision: ExactVersionRef,
     argument_schema: insight_platform_models::ClosedSchemaDocument,
@@ -471,76 +469,6 @@ async fn insert_ready_artifact(
     .unwrap();
 }
 
-async fn insert_ready_model_request_artifact(
-    pool: &PgPool,
-    fixture: &Fixture,
-    artifact: &ArtifactRef,
-    suffix: u16,
-) {
-    let blob_id = id(ResourceKind::InternalBlob, suffix);
-    let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    let metadata = TypedPayload::new(
-        1,
-        &json!({
-            "display_name": artifact.display_name(),
-        }),
-    )
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO insight_platform.artifact_blobs (
-            tenant_id, blob_id, backend, storage_binding_digest, security_domain_digest,
-            object_reference_ciphertext, object_generation, key_id, encryption_domain_id,
-            content_digest, size_bytes, state, version, verified_at, created_at, updated_at
-        ) VALUES ($1, $2, 's3', $3, $4, $5, 'model-request-generation-1',
-                  'model-request-kms-key', $6, $7, $8, 'verified', 1, $9, $9, $9)
-        "#,
-    )
-    .bind(fixture.tenant_id.to_string())
-    .bind(blob_id.to_string())
-    .bind(named_digest("model_request_storage_binding").to_string())
-    .bind(named_digest("model_request_security_domain").to_string())
-    .bind(b"encrypted-model-request-locator".to_vec())
-    .bind(id(ResourceKind::EncryptionDomain, suffix).to_string())
-    .bind(artifact.content_digest().to_string())
-    .bind(i64::try_from(artifact.byte_length()).unwrap())
-    .bind(database_now)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO insight_platform.artifacts (
-            tenant_id, artifact_id, blob_id, purpose, classification, expected_size_bytes,
-            expected_digest, declared_media_type, verified_media_type, state, version,
-            metadata_schema_version, metadata, metadata_digest, retention_policy_revision_id,
-            retain_until, created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, 'run_input', $4, $5, $6, $7, $7, 'ready', 1,
-                  $8, $9, $10, $11, $12, $13, $14, $14)
-        "#,
-    )
-    .bind(fixture.tenant_id.to_string())
-    .bind(artifact.artifact_id().to_string())
-    .bind(blob_id.to_string())
-    .bind(artifact.classification().as_str())
-    .bind(i64::try_from(artifact.byte_length()).unwrap())
-    .bind(artifact.content_digest().to_string())
-    .bind(artifact.media_type())
-    .bind(metadata.schema_version)
-    .bind(&metadata.value)
-    .bind(&metadata.digest)
-    .bind(fixture.provider_closure.data_policy.revision_id.to_string())
-    .bind(database_now + Duration::days(1))
-    .bind(fixture.principal_id.to_string())
-    .bind(database_now)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
 fn validation() -> ValidationSummary {
     ValidationSummary {
         validator_digest: digest('8'),
@@ -583,7 +511,6 @@ async fn seed_policy_versions(
                     sandbox_resource: None,
                     sandbox_network: None,
                     sandbox_artifact_io: None,
-                    model_output_artifact_io: None,
                     sandbox_secret_resolution: None,
                 }),
                 validation: validation(),
@@ -848,14 +775,6 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             maximum_output_bytes: 1_048_576,
         },
         parameter_schema_digest: parameter_schema_digest.clone(),
-        artifact_delivery: ModelArtifactDeliveryContract {
-            supported_modalities: vec![],
-            provider_file_upload: false,
-            maximum_artifacts: 0,
-            maximum_single_artifact_bytes: 0,
-            maximum_total_artifact_bytes: 0,
-            remote_retention_milliseconds: 0,
-        },
         usage: ModelUsageContract {
             provider_reports_usage: true,
             reports_cached_input_tokens: false,
@@ -875,7 +794,6 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             maximum_messages: 16,
             maximum_parts: 32,
             maximum_text_bytes: 32_768,
-            maximum_artifacts: 0,
             maximum_tools: 8,
             maximum_parallel_tool_calls: 8,
             maximum_rounds: 8,
@@ -1180,7 +1098,6 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let scope_id = id(ResourceKind::ScopeInstance, 0x51);
     let primary_node_id = id(ResourceKind::NodeExecution, 0x52);
     let cancel_node_id = id(ResourceKind::NodeExecution, 0x53);
-    let artifact_node_id = id(ResourceKind::NodeExecution, 0x55);
     let seed_input_value_id = id(ResourceKind::RunValue, 0x54);
     let principal_snapshot = PrincipalSnapshot::build(
         tenant_id.clone(),
@@ -1298,7 +1215,6 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     for (node_id, logical_key, ordinal) in [
         (&primary_node_id, "model-primary", 1_i32),
         (&cancel_node_id, "model-cancel", 2_i32),
-        (&artifact_node_id, "model-artifact", 3_i32),
     ] {
         sqlx::query(
             r#"
@@ -1343,7 +1259,6 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         scope_id,
         primary_node_id,
         cancel_node_id,
-        artifact_node_id,
         capability_deployment,
         capability_interface_revision: interface_revision,
         argument_schema,
@@ -1383,7 +1298,6 @@ fn command_for_node(fixture: &Fixture, node_id: &ResourceId, base: u16) -> Creat
             allow_tool_intents: true,
             allow_message_with_tool_intents: false,
         },
-        artifact_inputs: vec![],
         generation_parameters: ClosedJsonValue::build(
             fixture.parameter_schema_digest.clone(),
             json!({"temperature": 0}),
@@ -1429,7 +1343,6 @@ fn command_for_node(fixture: &Fixture, node_id: &ResourceId, base: u16) -> Creat
             value: ValueRef::Inline {
                 value: request_json,
             },
-            artifact_link_id: None,
             request,
         },
         requested_attempt_limit: 3,
@@ -1522,8 +1435,6 @@ fn output(
         schema_digest: fixture.output_schema.canonical_digest.clone(),
         content_digest,
         value: ValueRef::Inline { value },
-        artifact_link_id: None,
-        artifact_outputs: vec![],
         response,
         validation_evidence_digest: digest('c'),
     }
@@ -2039,123 +1950,4 @@ async fn model_turn_fixture() {
     .await
     .unwrap();
     assert_eq!(race_receipts, 1);
-
-    let mut artifact_command = command_for_node(&fixture, &fixture.artifact_node_id, 0x500);
-    let request_value = serde_json::to_value(&artifact_command.request.request).unwrap();
-    let request_bytes = serde_jcs::to_vec(&request_value).unwrap();
-    let request_content_digest: Sha256Digest =
-        canonical_digest(&request_value).unwrap().parse().unwrap();
-    let request_artifact = ArtifactRef::new(
-        id(ResourceKind::Artifact, 0x510),
-        request_content_digest.clone(),
-        u64::try_from(request_bytes.len()).unwrap(),
-        "application/json",
-        artifact_command.request.classification,
-        Some("model-request.json".to_owned()),
-    )
-    .unwrap();
-    insert_ready_model_request_artifact(&pool, &fixture, &request_artifact, 0x511).await;
-    artifact_command.request.content_digest = request_content_digest;
-    artifact_command.request.value = ValueRef::Artifact {
-        artifact: request_artifact.clone(),
-    };
-    artifact_command.request.artifact_link_id = Some(id(ResourceKind::ArtifactLink, 0x512));
-    let artifact_claim = admit_prepare_and_claim(&repository, &artifact_command, 0x520).await;
-    assert!(matches!(
-        &artifact_claim.claimed.request_input.material,
-        ModelExecutionInputMaterial::LinkedArtifact { artifact_link_id }
-            if Some(artifact_link_id) == artifact_command.request.artifact_link_id.as_ref()
-    ));
-    let limits =
-        ModelTurnLimits::from_profile(&insight_platform_contracts::checked_in_hard_limit_profile())
-            .unwrap();
-    let read_request = artifact_claim
-        .claimed
-        .artifact_read_request(limits)
-        .unwrap()
-        .unwrap();
-    assert_eq!(read_request.artifact(), Some(&request_artifact));
-    let authorized = <PgRepository as ArtifactObjectReadAuthority<_>>::authorize_object_read(
-        &repository,
-        &read_request,
-    )
-    .await
-    .unwrap();
-    assert_eq!(authorized.tenant_id, fixture.tenant_id);
-    assert_eq!(authorized.artifact, request_artifact);
-    let replay = <PgRepository as ArtifactObjectReadAuthority<_>>::authorize_object_read(
-        &repository,
-        &read_request,
-    )
-    .await
-    .unwrap();
-    assert_eq!(replay.authorization_digest, authorized.authorization_digest);
-
-    if let Ok(configured_role) = std::env::var("PLATFORM_ARTIFACT_BROKER_TEST_ROLE") {
-        assert_eq!(configured_role, "platform_artifact_broker_qualification");
-        let restricted_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .after_connect(|connection, _metadata| {
-                Box::pin(async move {
-                    sqlx::query("SET ROLE platform_artifact_broker_qualification")
-                        .execute(connection)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&database_url)
-            .await
-            .unwrap();
-        verify_schema(&restricted_pool).await.unwrap();
-        let restricted_repository = PgRepository::new(restricted_pool.clone());
-        let restricted = <PgRepository as ArtifactObjectReadAuthority<_>>::authorize_object_read(
-            &restricted_repository,
-            &read_request,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            restricted.authorization_digest,
-            authorized.authorization_digest
-        );
-        let forbidden_update = sqlx::query(
-            "UPDATE insight_platform.jobs SET version = version WHERE tenant_id = $1 AND job_id = $2",
-        )
-        .bind(read_request.tenant_id.to_string())
-        .bind(read_request.job_id.to_string())
-        .execute(&restricted_pool)
-        .await
-        .unwrap_err();
-        assert_eq!(
-            forbidden_update
-                .as_database_error()
-                .and_then(|failure| failure.code().map(|code| code.into_owned()))
-                .as_deref(),
-            Some("42501")
-        );
-        let forbidden_read =
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM insight_platform.secret_bindings")
-                .fetch_one(&restricted_pool)
-                .await
-                .unwrap_err();
-        assert_eq!(
-            forbidden_read
-                .as_database_error()
-                .and_then(|failure| failure.code().map(|code| code.into_owned()))
-                .as_deref(),
-            Some("42501")
-        );
-        restricted_pool.close().await;
-    }
-
-    let mut stale_read = read_request;
-    stale_read.fence.expected_version += 1;
-    assert!(matches!(
-        <PgRepository as ArtifactObjectReadAuthority<_>>::authorize_object_read(
-            &repository,
-            &stale_read,
-        )
-        .await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
 }

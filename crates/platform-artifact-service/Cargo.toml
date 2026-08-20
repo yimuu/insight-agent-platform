@@ -15,7 +15,6 @@ async-trait.workspace = true
 insight-platform-artifact-broker.workspace = true
 insight-platform-artifact-rpc.workspace = true
 insight-platform-contracts.workspace = true
-insight-platform-models.workspace = true
 insight-platform-postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true

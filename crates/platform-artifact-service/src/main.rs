@@ -1,30 +1,21 @@
 //! Independently deployed Artifact Broker composition.
 //!
-//! This binary is deployed once per closed caller audience. Each process combines only that
-//! audience's restricted Artifact read projection with S3/KMS access and registers only its exact
-//! mTLS service. Model Workers and the Sandbox Controller never share a pool or capacity bulkhead
-//! and never receive a locator, storage credential, KMS plaintext or database authority.
+//! The Sandbox Controller receives only exact, credential-free reads. Model-specific Artifact
+//! production and materialization are intentionally absent from the first release.
 
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
-    BrokeredModelArtifactBroker, BrokeredSandboxArtifactBroker,
+    BrokeredSandboxArtifactBroker,
 };
 use insight_platform_artifact_rpc::{
-    proto::{
-        artifact_model_broker_service_server::ArtifactModelBrokerServiceServer,
-        artifact_sandbox_broker_service_server::ArtifactSandboxBrokerServiceServer,
-    },
-    ArtifactInternalRpcLimits, ArtifactModelBrokerGrpcService, ArtifactSandboxBrokerGrpcService,
-    LeasedArtifactBytes, MicroVmArtifactBrokerError, MicroVmArtifactReadRequest,
-    MicroVmArtifactResponseBroker, ModelArtifactResponseBroker, ModelWorkerWorkloadIdentity,
+    proto::artifact_sandbox_broker_service_server::ArtifactSandboxBrokerServiceServer,
+    ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcService, LeasedArtifactBytes,
+    MicroVmArtifactBrokerError, MicroVmArtifactReadRequest, MicroVmArtifactResponseBroker,
     SandboxControllerWorkloadIdentity, WasiArtifactBrokerError, WasiArtifactReadRequest,
     WasiArtifactResponseBroker,
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
-};
-use insight_platform_models::{
-    ModelArtifactBrokerError, ModelArtifactReadRequest, ModelTurnLimits,
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use serde::Deserialize;
@@ -43,22 +34,6 @@ const CERT_PATH_ENV: &str = "PLATFORM_ARTIFACT_BROKER_CERT_PATH";
 const KEY_PATH_ENV: &str = "PLATFORM_ARTIFACT_BROKER_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
-
-struct ModelRpcArtifactBroker {
-    broker: BrokeredModelArtifactBroker,
-}
-
-#[async_trait::async_trait]
-impl ModelArtifactResponseBroker for ModelRpcArtifactBroker {
-    async fn read_for_response(
-        &self,
-        request: ModelArtifactReadRequest,
-    ) -> Result<LeasedArtifactBytes, ModelArtifactBrokerError> {
-        let read = self.broker.read_for_response(request).await?;
-        let (bytes, permit) = read.into_response_parts();
-        Ok(LeasedArtifactBytes::new(bytes, permit))
-    }
-}
 
 struct SandboxRpcArtifactBroker {
     broker: BrokeredSandboxArtifactBroker,
@@ -106,14 +81,12 @@ struct ArtifactBrokerProcessConfig {
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ArtifactBrokerAudience {
-    Model,
     Sandbox,
 }
 
 impl ArtifactBrokerAudience {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Model => "model",
             Self::Sandbox => "sandbox",
         }
     }
@@ -184,20 +157,13 @@ impl ArtifactBrokerProcessConfig {
         let broker = self.broker_limits()?;
         let rpc = self.rpc_limits()?;
         let hard_limits = checked_in_hard_limit_profile();
-        let model_limits = ModelTurnLimits::from_profile(&hard_limits)
-            .map_err(|_| ProcessError::InvalidConfiguration)?;
         let sandbox_input_bytes =
             usize::try_from(hard_limits.capability_sandbox.input_bytes.hard_max)
                 .map_err(|_| ProcessError::InvalidConfiguration)?;
         let sandbox_runtime_bundle_bytes =
             usize::try_from(hard_limits.capability_sandbox.runtime_bundle_bytes.hard_max)
                 .map_err(|_| ProcessError::InvalidConfiguration)?;
-        let required_read_bytes = match self.audience {
-            ArtifactBrokerAudience::Model => model_limits.maximum_request_bytes(),
-            ArtifactBrokerAudience::Sandbox => {
-                sandbox_input_bytes.max(sandbox_runtime_bundle_bytes)
-            }
-        };
+        let required_read_bytes = sandbox_input_bytes.max(sandbox_runtime_bundle_bytes);
         if self.schema_version != 1
             || !(2..=64).contains(&self.database_max_connections)
             || self.database_acquire_timeout_milliseconds == 0
@@ -250,8 +216,6 @@ async fn main() {
 
 async fn run() -> Result<(), ProcessError> {
     let config = ArtifactBrokerProcessConfig::load()?;
-    let model_limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile())
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .acquire_timeout(Duration::from_millis(
@@ -273,40 +237,20 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::ProviderUnavailable)?;
     let (unsealer, stores) = providers.into_components();
     let broker_limits = config.broker_limits()?;
-    let (model_broker, sandbox_broker) = match config.audience {
-        ArtifactBrokerAudience::Model => {
-            let broker =
-                BrokeredModelArtifactBroker::new(repository, unsealer, stores, broker_limits)
-                    .map_err(|_| ProcessError::InvalidConfiguration)?;
-            (Some(Arc::new(ModelRpcArtifactBroker { broker })), None)
-        }
-        ArtifactBrokerAudience::Sandbox => {
-            let broker = BrokeredSandboxArtifactBroker::new(
-                repository.clone(),
-                repository,
-                unsealer,
-                stores,
-                broker_limits,
-            )
-            .map_err(|_| ProcessError::InvalidConfiguration)?;
-            (None, Some(Arc::new(SandboxRpcArtifactBroker { broker })))
-        }
-    };
+    let broker = BrokeredSandboxArtifactBroker::new(
+        repository.clone(),
+        repository,
+        unsealer,
+        stores,
+        broker_limits,
+    )
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let sandbox_broker = Arc::new(SandboxRpcArtifactBroker { broker });
     let rpc_limits = config.rpc_limits()?;
     let maximum = rpc_limits.maximum_message_bytes();
-    let model_service = model_broker.map(|broker| {
-        let service = ArtifactModelBrokerServiceServer::new(ArtifactModelBrokerGrpcService::new(
-            broker,
-            rpc_limits,
-            model_limits,
-        ))
-        .max_encoding_message_size(maximum)
-        .max_decoding_message_size(maximum);
-        tonic::service::interceptor::InterceptedService::new(service, ModelWorkerWorkloadIdentity)
-    });
-    let sandbox_service = sandbox_broker.map(|broker| {
+    let sandbox_service = {
         let service = ArtifactSandboxBrokerServiceServer::new(
-            ArtifactSandboxBrokerGrpcService::new(broker, rpc_limits),
+            ArtifactSandboxBrokerGrpcService::new(sandbox_broker, rpc_limits),
         )
         .max_encoding_message_size(maximum)
         .max_decoding_message_size(maximum);
@@ -314,7 +258,7 @@ async fn run() -> Result<(), ProcessError> {
             service,
             SandboxControllerWorkloadIdentity,
         )
-    });
+    };
     let tls = ServerTlsConfig::new()
         .identity(Identity::from_pem(
             read_bounded_file(&required_absolute_path(CERT_PATH_ENV)?, MAX_TLS_FILE_BYTES)?,
@@ -339,8 +283,7 @@ async fn run() -> Result<(), ProcessError> {
     let server = Server::builder()
         .tls_config(tls)
         .map_err(|_| ProcessError::InvalidTls)?
-        .add_optional_service(model_service)
-        .add_optional_service(sandbox_service)
+        .add_service(sandbox_service)
         .serve_with_shutdown(address, async {
             let _ = shutdown_receiver.await;
         });
@@ -454,7 +397,7 @@ mod tests {
     fn valid_config() -> ArtifactBrokerProcessConfig {
         serde_json::from_value(serde_json::json!({
             "schema_version": 1,
-            "audience": "model",
+            "audience": "sandbox",
             "listen_address": "0.0.0.0:9443",
             "database_max_connections": 8,
             "database_acquire_timeout_milliseconds": 5000,
@@ -501,8 +444,8 @@ mod tests {
     fn process_config_closes_provider_database_and_rpc_bounds() {
         let valid = valid_config();
         valid.validate().unwrap();
-        valid.validate_deployment_audience("model").unwrap();
-        assert!(valid.validate_deployment_audience("sandbox").is_err());
+        valid.validate_deployment_audience("sandbox").unwrap();
+        assert!(valid.validate_deployment_audience("model").is_err());
         assert!(
             serde_json::from_value::<ArtifactBrokerAudience>(serde_json::json!("other")).is_err()
         );

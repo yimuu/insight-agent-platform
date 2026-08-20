@@ -1123,7 +1123,6 @@ async fn require_active_sandbox_artifact_grant(
 pub(crate) enum ArtifactObjectReadPurpose {
     Package,
     SandboxInput,
-    ModelInput,
 }
 
 pub(crate) struct ArtifactObjectReadProjection<'a> {
@@ -1191,7 +1190,6 @@ pub(crate) async fn load_authorized_artifact_object(
             }
             purpose
         }
-        ArtifactObjectReadPurpose::ModelInput => ArtifactPurpose::RunInput,
     };
     if row.try_get::<String, _>("purpose")? != expected_purpose.as_str()
         || row.try_get::<String, _>("classification")? != request.artifact.classification().as_str()

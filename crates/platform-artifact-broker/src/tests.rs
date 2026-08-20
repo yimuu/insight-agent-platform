@@ -5,10 +5,6 @@ use insight_platform_artifacts::{
     EncryptedArtifactObjectReference,
 };
 use insight_platform_contracts::{ArtifactRef, DataClassification, ResourceId, ResourceKind};
-use insight_platform_models::{
-    ExactInvocationValueRef, InvocationValueStorage, JobFence, ModelArtifactBroker,
-    ModelArtifactReadRequest,
-};
 use insight_platform_sandbox::{
     MicroVmArtifactBroker, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
     MicroVmSandboxWorkloadKind, WasiArtifactReadPurpose, WasiArtifactReadRequest,
@@ -80,17 +76,6 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for FixtureAuthorit
     async fn authorize_object_read(
         &self,
         _request: &MicroVmArtifactReadRequest,
-    ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.projection(self.drift_after_first && call > 0))
-    }
-}
-
-#[async_trait]
-impl ArtifactObjectReadAuthority<ModelArtifactReadRequest> for FixtureAuthority {
-    async fn authorize_object_read(
-        &self,
-        _request: &ModelArtifactReadRequest,
     ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.projection(self.drift_after_first && call > 0))
@@ -331,87 +316,6 @@ async fn micro_vm_reads_share_the_exact_object_pipeline() {
 
     assert_eq!(
         MicroVmArtifactBroker::read_exact(&fixture.broker, request)
-            .await
-            .unwrap(),
-        bytes
-    );
-}
-
-#[tokio::test]
-async fn model_reads_share_the_exact_object_pipeline() {
-    let value = serde_json::json!({"messages": []});
-    let bytes = serde_jcs::to_vec(&value).unwrap();
-    let tenant_id = id(ResourceKind::Tenant);
-    let artifact = ArtifactRef::new(
-        id(ResourceKind::Artifact),
-        sha256(&bytes),
-        u64::try_from(bytes.len()).unwrap(),
-        "application/json",
-        DataClassification::Internal,
-        Some("model-request.json".to_owned()),
-    )
-    .unwrap();
-    let storage_binding_digest = digest('b');
-    let authority = Arc::new(FixtureAuthority {
-        tenant_id: tenant_id.clone(),
-        blob_id: id(ResourceKind::InternalBlob),
-        artifact: artifact.clone(),
-        storage_binding_digest: storage_binding_digest.clone(),
-        encryption_domain_id: id(ResourceKind::EncryptionDomain),
-        authorization_digest: digest('c'),
-        drift_after_first: false,
-        calls: AtomicUsize::new(0),
-    });
-    let store = Arc::new(FixtureStore {
-        binding: storage_binding_digest.clone(),
-        metadata: Mutex::new(ArtifactObjectMetadata {
-            object_generation: "version-1".to_owned(),
-            byte_length: u64::try_from(bytes.len()).unwrap(),
-        }),
-        bytes: Mutex::new(bytes.clone()),
-    });
-    let broker = BrokeredModelArtifactBroker::new(
-        authority,
-        Arc::new(FixtureUnsealer {
-            plaintext: Mutex::new(locator(&storage_binding_digest, "version-1")),
-        }),
-        InstalledArtifactObjectStoreCatalog::new(vec![store]).unwrap(),
-        ArtifactBrokerLimits::default(),
-    )
-    .unwrap();
-    let exact = ExactInvocationValueRef {
-        schema_version: 1,
-        value_id: id(ResourceKind::RunValue),
-        run_id: id(ResourceKind::Run),
-        producing_node_id: Some(id(ResourceKind::NodeExecution)),
-        value_kind: "model_request".to_owned(),
-        classification: DataClassification::Internal,
-        schema_digest: digest('d'),
-        content_digest: artifact.content_digest().clone(),
-        storage: InvocationValueStorage::Artifact {
-            artifact: artifact.clone(),
-        },
-    };
-    let request = ModelArtifactReadRequest {
-        schema_version: 1,
-        tenant_id,
-        model_turn_id: id(ResourceKind::ModelTurn),
-        job_id: id(ResourceKind::Job),
-        exact,
-        artifact_link_id: id(ResourceKind::ArtifactLink),
-        fence: JobFence {
-            expected_version: 2,
-            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
-            lease_generation: 1,
-            token_digest: digest('e'),
-        },
-        request_digest: digest('f'),
-        maximum_bytes: bytes.len(),
-        deadline: Utc::now() + ChronoDuration::minutes(1),
-    };
-
-    assert_eq!(
-        ModelArtifactBroker::read_exact(&broker, request)
             .await
             .unwrap(),
         bytes

@@ -4,11 +4,11 @@ use insight_platform_contracts::{
     canonical_digest, AgentDeploymentClosure, ArtifactRef, AuthoringPackage, ClosedJsonValue,
     CommandAudit, ContextWindowContract, DataClassification, DataRegion, DecimalMoney,
     ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding,
-    FrozenSlotTarget, InstalledModelAdapter, ModelArtifactDeliveryContract, ModelCatalogEvidence,
-    ModelDeploymentClosure, ModelIdentityStability, ModelLimits, ModelModalities,
-    ModelProfileResourceSpec, ModelProviderDeploymentClosure, ModelProviderResourceSpec,
-    ModelToolContract, ModelUsageContract, Permission, PermissionSet, PrincipalKind,
-    PrincipalSnapshot, ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
+    FrozenSlotTarget, InstalledModelAdapter, ModelCatalogEvidence, ModelDeploymentClosure,
+    ModelIdentityStability, ModelLimits, ModelModalities, ModelProfileResourceSpec,
+    ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelToolContract,
+    ModelUsageContract, Permission, PermissionSet, PrincipalKind, PrincipalSnapshot,
+    ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
     ProviderTrainingPolicy, ResourceId, ResourceKind, RunBindingsSnapshot, SecretPurpose,
     SecretResolutionPolicy, Sha256Digest, StructuredOutputContract, ValueRef,
 };
@@ -199,14 +199,6 @@ fn fixture() -> Fixture {
             maximum_output_bytes: 1_048_576,
         },
         parameter_schema_digest: parameter_schema_digest.clone(),
-        artifact_delivery: ModelArtifactDeliveryContract {
-            supported_modalities: vec![],
-            provider_file_upload: false,
-            maximum_artifacts: 0,
-            maximum_single_artifact_bytes: 0,
-            maximum_total_artifact_bytes: 0,
-            remote_retention_milliseconds: 0,
-        },
         usage: ModelUsageContract {
             provider_reports_usage: true,
             reports_cached_input_tokens: false,
@@ -226,7 +218,6 @@ fn fixture() -> Fixture {
             maximum_messages: 16,
             maximum_parts: 32,
             maximum_text_bytes: 32_768,
-            maximum_artifacts: 0,
             maximum_tools: 8,
             maximum_parallel_tool_calls: 8,
             maximum_rounds: 8,
@@ -326,7 +317,6 @@ fn fixture() -> Fixture {
             allow_tool_intents: true,
             allow_message_with_tool_intents: false,
         },
-        artifact_inputs: vec![],
         generation_parameters: ClosedJsonValue::build(
             parameter_schema_digest,
             json!({"temperature": 0}),
@@ -366,7 +356,6 @@ fn fixture() -> Fixture {
             value: ValueRef::Inline {
                 value: request_json,
             },
-            artifact_link_id: None,
             request: request.clone(),
         },
         requested_attempt_limit: 3,
@@ -503,8 +492,6 @@ fn output(fixture: &Fixture, response: CanonicalModelResponse) -> ModelOutputVal
             .clone(),
         content_digest: crate::types::digest(&response).unwrap(),
         value: ValueRef::Inline { value },
-        artifact_link_id: None,
-        artifact_outputs: Vec::new(),
         response,
         validation_evidence_digest: sha('3'),
     }
@@ -537,15 +524,14 @@ fn claimed_model_input_binds_exact_inline_bytes() {
 }
 
 #[test]
-fn model_artifact_read_request_closes_value_link_and_job_fence() {
+fn model_request_rejects_artifact_backed_storage() {
     let fixture = fixture();
     let value = serde_json::to_value(&fixture.request).unwrap();
-    let bytes = serde_json::to_vec(&value).unwrap();
     let content_digest: Sha256Digest = canonical_digest(&value).unwrap().parse().unwrap();
     let artifact = ArtifactRef::new(
         id(ResourceKind::Artifact, 0x501),
         content_digest.clone(),
-        u64::try_from(bytes.len()).unwrap(),
+        16,
         "application/json",
         fixture.request.classification,
         Some("model-request.json".to_owned()),
@@ -553,40 +539,13 @@ fn model_artifact_read_request_closes_value_link_and_job_fence() {
     .unwrap();
     let mut request_value = fixture.command.request.clone();
     request_value.content_digest = content_digest;
-    request_value.value = ValueRef::Artifact {
-        artifact: artifact.clone(),
-    };
-    request_value.artifact_link_id = Some(id(ResourceKind::ArtifactLink, 0x502));
-    let exact = request_value
-        .exact_for(
+    request_value.value = ValueRef::Artifact { artifact };
+    assert_eq!(
+        request_value.exact_for(
             &fixture.command.run_id,
             &fixture.command.node_execution_id,
             fixture.limits,
-        )
-        .unwrap();
-    let mut request = ModelArtifactReadRequest {
-        schema_version: 1,
-        tenant_id: fixture.command.audit.tenant_id.clone(),
-        model_turn_id: fixture.command.model_turn_id.clone(),
-        job_id: id(ResourceKind::Job, 0x503),
-        exact,
-        artifact_link_id: request_value.artifact_link_id.unwrap(),
-        fence: JobFence {
-            expected_version: 2,
-            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x504),
-            lease_generation: 1,
-            token_digest: sha('f'),
-        },
-        request_digest: sha('e'),
-        maximum_bytes: bytes.len(),
-        deadline: fixture.request.deadline,
-    };
-    request.validate(fixture.limits).unwrap();
-    assert_eq!(request.artifact(), Some(&artifact));
-
-    request.maximum_bytes += 1;
-    assert_eq!(
-        request.validate(fixture.limits),
+        ),
         Err(ModelTurnError::InvalidRequestValue)
     );
 }

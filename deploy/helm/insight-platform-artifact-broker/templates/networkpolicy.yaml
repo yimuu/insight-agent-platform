@@ -19,17 +19,10 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
-{{- if eq $audience "model" }}
-        - namespaceSelector:
-            matchLabels: {{ toYaml $root.Values.networkPolicy.modelWorkerNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml $root.Values.networkPolicy.modelWorkerPodSelector | nindent 16 }}
-{{- else }}
         - namespaceSelector:
             matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxControllerNamespaceSelector | nindent 16 }}
           podSelector:
             matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxControllerPodSelector | nindent 16 }}
-{{- end }}
       ports: [{protocol: TCP, port: {{ int $broker.port }}}]
   egress:
     - to:

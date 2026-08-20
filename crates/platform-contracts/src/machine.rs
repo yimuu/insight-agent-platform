@@ -21,7 +21,7 @@ use crate::{
     },
     schema::{ALLOWED_SCHEMA_KEYWORDS, CLOSED_SCHEMA_PROFILE_ID},
     state::{all_state_machines, AttemptCommitDisposition},
-    types::{MAX_ARTIFACT_BYTES, MAX_PUBLIC_EVENT_SAFE_SUMMARY_BYTES},
+    types::MAX_PUBLIC_EVENT_SAFE_SUMMARY_BYTES,
     MAX_CANDIDATE_COMPONENT_IMAGES, MAX_CANDIDATE_WORKER_MANIFESTS,
 };
 use serde::Serialize;
@@ -266,7 +266,6 @@ pub const CONTRACT_MANIFEST_INPUTS: &[&str] = &[
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/candidate-manifest.schema.json",
     "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
-    "contracts/platform-v1/schemas/policies/model-output-artifact-io-policy.schema.json",
     "contracts/platform-v1/schemas/policies/scheduling-policy.schema.json",
     "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
     "contracts/platform-v1/schemas/nominal/artifact-ref.schema.json",
@@ -522,10 +521,6 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
             pretty(&artifact_retention_policy_schema),
         ),
         (
-            "schemas/policies/model-output-artifact-io-policy.schema.json",
-            pretty(&model_output_artifact_io_policy_schema()),
-        ),
-        (
             "schemas/policies/scheduling-policy.schema.json",
             pretty(&scheduling_policy_schema),
         ),
@@ -566,51 +561,6 @@ fn artifact_retention_policy_schema() -> Value {
             },
             "retain_provenance_sources": {"type": "boolean"},
             "delete_requires_approval": {"type": "boolean"}
-        }
-    })
-}
-
-fn model_output_artifact_io_policy_schema() -> Value {
-    json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "urn:insight:platform:v1:model-output-artifact-io-policy",
-        "title": "ModelOutputArtifactIoPolicyDocument",
-        "description": "Closed Artifact I/O policy for canonical Artifact-backed Model responses. Candidate storage and effective HardLimit facts are validated separately at admission.",
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-            "schema_version",
-            "staging_grace_seconds",
-            "verified_media_type",
-            "classification_ceiling",
-            "maximum_materialized_bytes",
-            "storage_binding_digest",
-            "encryption_domain_id",
-            "content_validation_profile_digest"
-        ],
-        "properties": {
-            "schema_version": {"type": "integer", "const": 1},
-            "staging_grace_seconds": {
-                "type": "integer", "minimum": 1, "maximum": MAX_SAFE_JSON_INTEGER
-            },
-            "verified_media_type": {"type": "string", "const": "application/json"},
-            "classification_ceiling": {
-                "type": "string",
-                "enum": wire_values(DataClassification::ALL, |value| value.as_str())
-            },
-            "maximum_materialized_bytes": {
-                "type": "integer", "minimum": 1, "maximum": MAX_ARTIFACT_BYTES
-            },
-            "storage_binding_digest": {
-                "type": "string", "pattern": "^sha256:[0-9a-f]{64}$"
-            },
-            "encryption_domain_id": {
-                "type": "string",
-                "pattern": "^enc_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-            },
-            "content_validation_profile_digest": {
-                "type": "string", "pattern": "^sha256:[0-9a-f]{64}$"
-            }
         }
     })
 }

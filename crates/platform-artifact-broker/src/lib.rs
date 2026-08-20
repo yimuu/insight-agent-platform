@@ -10,9 +10,6 @@ use insight_platform_artifacts::{
     ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, AuthorizedArtifactObjectRead,
 };
 use insight_platform_contracts::{parse_strict_json, JsonLimits, Sha256Digest};
-use insight_platform_models::{
-    ModelArtifactBroker, ModelArtifactBrokerError, ModelArtifactReadRequest,
-};
 use insight_platform_sandbox::{
     MicroVmArtifactBroker, MicroVmArtifactBrokerError, MicroVmArtifactReadRequest,
     WasiArtifactBroker, WasiArtifactBrokerError, WasiArtifactReadRequest,
@@ -260,11 +257,6 @@ pub struct BrokeredSandboxArtifactBroker {
     core: ArtifactBrokerCore,
 }
 
-pub struct BrokeredModelArtifactBroker {
-    authority: Arc<dyn ArtifactObjectReadAuthority<ModelArtifactReadRequest>>,
-    core: ArtifactBrokerCore,
-}
-
 /// An exact Artifact read whose audience permit remains owned until the caller finishes with the
 /// returned bytes. RPC adapters must move this lease into the response stream.
 pub struct BrokeredArtifactRead {
@@ -350,20 +342,6 @@ impl ArtifactReadRequest for MicroVmArtifactReadRequest {
     }
 }
 
-impl ArtifactReadRequest for ModelArtifactReadRequest {
-    fn deadline(&self) -> chrono::DateTime<Utc> {
-        self.deadline
-    }
-
-    fn maximum_bytes(&self) -> usize {
-        self.maximum_bytes
-    }
-
-    fn artifact(&self) -> Option<&insight_platform_contracts::ArtifactRef> {
-        self.artifact()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArtifactBrokerReadError {
     Unavailable,
@@ -387,30 +365,6 @@ impl BrokeredSandboxArtifactBroker {
             micro_vm_authority,
             core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
         })
-    }
-}
-
-impl BrokeredModelArtifactBroker {
-    pub fn new(
-        authority: Arc<dyn ArtifactObjectReadAuthority<ModelArtifactReadRequest>>,
-        unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
-        stores: InstalledArtifactObjectStoreCatalog,
-        limits: ArtifactBrokerLimits,
-    ) -> Result<Self, ArtifactBrokerConfigurationError> {
-        Ok(Self {
-            authority,
-            core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
-        })
-    }
-
-    pub async fn read_for_response(
-        &self,
-        request: ModelArtifactReadRequest,
-    ) -> Result<BrokeredArtifactRead, ModelArtifactBrokerError> {
-        self.core
-            .read(self.authority.as_ref(), &request)
-            .await
-            .map_err(map_model_broker_error)
     }
 }
 
@@ -575,18 +529,6 @@ impl MicroVmArtifactBroker for BrokeredSandboxArtifactBroker {
     }
 }
 
-#[async_trait]
-impl ModelArtifactBroker for BrokeredModelArtifactBroker {
-    async fn read_exact(
-        &self,
-        request: ModelArtifactReadRequest,
-    ) -> Result<Vec<u8>, ModelArtifactBrokerError> {
-        self.read_for_response(request)
-            .await
-            .map(BrokeredArtifactRead::into_bytes)
-    }
-}
-
 fn parse_locator(bytes: &[u8]) -> Result<ArtifactObjectLocator, ArtifactBrokerReadError> {
     let value = parse_strict_json(
         bytes,
@@ -694,16 +636,6 @@ fn map_micro_vm_broker_error(error: ArtifactBrokerReadError) -> MicroVmArtifactB
         ArtifactBrokerReadError::NotFound => MicroVmArtifactBrokerError::NotFound,
         ArtifactBrokerReadError::TooLarge => MicroVmArtifactBrokerError::TooLarge,
         ArtifactBrokerReadError::Integrity => MicroVmArtifactBrokerError::Integrity,
-    }
-}
-
-fn map_model_broker_error(error: ArtifactBrokerReadError) -> ModelArtifactBrokerError {
-    match error {
-        ArtifactBrokerReadError::Unavailable => ModelArtifactBrokerError::Unavailable,
-        ArtifactBrokerReadError::Denied => ModelArtifactBrokerError::Denied,
-        ArtifactBrokerReadError::NotFound => ModelArtifactBrokerError::NotFound,
-        ArtifactBrokerReadError::TooLarge => ModelArtifactBrokerError::TooLarge,
-        ArtifactBrokerReadError::Integrity => ModelArtifactBrokerError::Integrity,
     }
 }
 

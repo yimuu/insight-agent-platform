@@ -4,8 +4,8 @@ use futures::{stream, StreamExt};
 use insight_platform_contracts::{
     checked_in_hard_limit_profile, ArtifactRef, AuthoringPackage, ClosedJsonValue, CommandOutcome,
     ContextWindowContract, DataClassification, DataRegion, Effect, ExactSecretBindingRef,
-    ExactVersionRef, InstalledModelAdapter, ModelArtifactDeliveryContract, ModelCatalogEvidence,
-    ModelIdentityStability, ModelLimits, ModelModalities, ModelToolContract, ModelUsageContract,
+    ExactVersionRef, InstalledModelAdapter, ModelCatalogEvidence, ModelIdentityStability,
+    ModelLimits, ModelModalities, ModelToolContract, ModelUsageContract,
     ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
     ProviderTrainingPolicy, SecretPurpose, SecretResolutionPolicy, StructuredOutputContract,
     ValueRef,
@@ -168,14 +168,6 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
             maximum_output_bytes: 1_048_576,
         },
         parameter_schema_digest: parameter_schema_digest.clone(),
-        artifact_delivery: ModelArtifactDeliveryContract {
-            supported_modalities: vec![],
-            provider_file_upload: false,
-            maximum_artifacts: 0,
-            maximum_single_artifact_bytes: 0,
-            maximum_total_artifact_bytes: 0,
-            remote_retention_milliseconds: 0,
-        },
         usage: ModelUsageContract {
             provider_reports_usage: true,
             reports_cached_input_tokens: false,
@@ -195,7 +187,6 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
             maximum_messages: 16,
             maximum_parts: 32,
             maximum_text_bytes: 32_768,
-            maximum_artifacts: 0,
             maximum_tools: 0,
             maximum_parallel_tool_calls: 0,
             maximum_rounds: 8,
@@ -254,7 +245,6 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
             allow_tool_intents: false,
             allow_message_with_tool_intents: false,
         },
-        artifact_inputs: vec![],
         generation_parameters: ClosedJsonValue::build(
             parameter_schema_digest,
             serde_json::json!({"temperature": 0}),
@@ -608,8 +598,6 @@ impl ModelOutputMaterializer for InlineMaterializer {
                 .clone(),
             content_digest,
             value: ValueRef::Inline { value },
-            artifact_link_id: None,
-            artifact_outputs: vec![],
             response: *success.response,
             validation_evidence_digest: sha('5'),
         })
@@ -626,7 +614,7 @@ impl ModelOutputMaterializer for RejectingMaterializer {
     ) -> Result<(), ModelAdapterFailure> {
         Err(ModelAdapterFailure {
             class: ModelAdapterFailureClass::RejectedBeforeDispatch,
-            safe_code: "model_output_artifact_required".to_owned(),
+            safe_code: "model_output_too_large".to_owned(),
             safe_message: "Output requires Artifact materialization".to_owned(),
             evidence_digest: sha('8'),
             request_sent: false,
@@ -765,7 +753,7 @@ async fn output_capacity_rejection_is_committed_without_provider_dispatch() {
     else {
         panic!("preflight rejection was not committed as a permanent failure")
     };
-    assert_eq!(failure.safe_code, "model_output_artifact_required");
+    assert_eq!(failure.safe_code, "model_output_too_large");
     assert!(!measurement.observation.request_sent);
     assert!(measurement.usage.is_none());
 }

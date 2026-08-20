@@ -12,12 +12,12 @@ use crate::{
     ContextDatasetGenerationSpec, ContextImplementationContract, ContextInterfaceLimits,
     ContextPaginationContract, ContextRankingContract, ContextWindowContract, DataRegion, Effect,
     InstalledModelAdapter, McpAuthPolicyDocument, McpProtocolPolicyDocument, McpServerLimits,
-    McpTransportBinding, McpTransportKind, ModelArtifactDeliveryContract, ModelCatalogEvidence,
-    ModelLimits, ModelModalities, ModelOutputArtifactIoPolicyDocument, ModelToolContract,
-    ModelUsageContract, PolicyKind, PrincipalSnapshot, ProviderDataHandlingContract,
-    ProviderModelIdentity, ProviderRequestLimits, ResourceId, ResourceKind, SandboxAbiVersion,
-    SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass, SandboxRuntimeFamily,
-    SecretPurpose, Sha256Digest, StructuredOutputContract,
+    McpTransportBinding, McpTransportKind, ModelCatalogEvidence, ModelLimits, ModelModalities,
+    ModelToolContract, ModelUsageContract, PolicyKind, PrincipalSnapshot,
+    ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits, ResourceId,
+    ResourceKind, SandboxAbiVersion, SandboxCleanupPolicy, SandboxEntrypointKind,
+    SandboxIsolationClass, SandboxRuntimeFamily, SecretPurpose, Sha256Digest,
+    StructuredOutputContract,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, error::Error, fmt, str::FromStr};
@@ -465,7 +465,6 @@ authoring_spec!(ModelProfileResourceSpec {
     tools: ModelToolContract,
     structured_output: StructuredOutputContract,
     parameter_schema_digest: Sha256Digest,
-    artifact_delivery: ModelArtifactDeliveryContract,
     usage: ModelUsageContract,
     data_handling: ProviderDataHandlingContract,
     limits: ModelLimits,
@@ -549,7 +548,6 @@ pub struct PolicyResourceSpec {
     pub sandbox_resource: Option<crate::SandboxResourcePolicyDocument>,
     pub sandbox_network: Option<crate::SandboxNetworkPolicyDocument>,
     pub sandbox_artifact_io: Option<crate::SandboxArtifactIoPolicyDocument>,
-    pub model_output_artifact_io: Option<ModelOutputArtifactIoPolicyDocument>,
     pub sandbox_secret_resolution: Option<crate::SandboxSecretResolutionPolicyDocument>,
 }
 
@@ -567,7 +565,6 @@ impl PolicyResourceSpec {
             self.sandbox_resource.is_some(),
             self.sandbox_network.is_some(),
             self.sandbox_artifact_io.is_some(),
-            self.model_output_artifact_io.is_some(),
             self.sandbox_secret_resolution.is_some(),
         ]
         .into_iter()
@@ -641,19 +638,6 @@ impl PolicyResourceSpec {
                     self.sandbox_artifact_io.as_ref().expect("guarded above"),
                     &self.rules_digest,
                 )
-            }
-            PolicyKind::ArtifactIo
-                if document_count == 1 && self.model_output_artifact_io.is_some() =>
-            {
-                let document = self
-                    .model_output_artifact_io
-                    .as_ref()
-                    .expect("guarded above");
-                document.validate()?;
-                if document.canonical_digest()? != self.rules_digest {
-                    return Err(ResourceContractError::InvalidPolicyDocument);
-                }
-                Ok(())
             }
             PolicyKind::SecretResolution
                 if document_count == 1 && self.sandbox_secret_resolution.is_some() =>
@@ -930,7 +914,6 @@ impl ResourceDocument {
                     &spec.context,
                     &spec.tools,
                     &spec.structured_output,
-                    &spec.artifact_delivery,
                     &spec.usage,
                     &spec.data_handling,
                     &spec.limits,
@@ -2460,7 +2443,6 @@ mod tests {
             sandbox_resource: None,
             sandbox_network: None,
             sandbox_artifact_io: None,
-            model_output_artifact_io: None,
             sandbox_secret_resolution: None,
         };
         spec.validate().unwrap();
@@ -2476,75 +2458,6 @@ mod tests {
         unbounded.gc_grace_seconds = 0;
         assert_eq!(
             unbounded.validate(),
-            Err(ResourceContractError::InvalidPolicyDocument)
-        );
-    }
-
-    #[test]
-    fn model_output_artifact_io_policy_is_a_single_rules_digest_bound_variant() {
-        let document = ModelOutputArtifactIoPolicyDocument {
-            schema_version: crate::MODEL_OUTPUT_ARTIFACT_IO_POLICY_VERSION,
-            staging_grace_seconds: 60,
-            verified_media_type: crate::MODEL_OUTPUT_VERIFIED_MEDIA_TYPE.to_owned(),
-            classification_ceiling: DataClassification::Confidential,
-            maximum_materialized_bytes: 16_777_216,
-            storage_binding_digest: digest('d'),
-            encryption_domain_id: id("enc_0198f1c3-8f49-7c3e-b1f3-773c28367ba2"),
-            content_validation_profile_digest: digest('e'),
-        };
-        let mut spec = PolicyResourceSpec {
-            authoring_package: AuthoringPackage {
-                artifact: ArtifactRef::new(
-                    id("art_0198f1c3-8f49-7c3e-b1f3-773c28367ba3"),
-                    digest('a'),
-                    16,
-                    "application/json",
-                    DataClassification::Internal,
-                    Some("model-output-artifact-io-policy.json".to_owned()),
-                )
-                .unwrap(),
-                manifest_digest: digest('b'),
-            },
-            contract_digest: digest('c'),
-            dependency_versions: vec![],
-            policy_versions: vec![],
-            policy_kind: PolicyKind::ArtifactIo,
-            rules_digest: document.canonical_digest().unwrap(),
-            scheduling: None,
-            retention: None,
-            mcp_protocol: None,
-            mcp_auth: None,
-            sandbox_isolation: None,
-            sandbox_resource: None,
-            sandbox_network: None,
-            sandbox_artifact_io: None,
-            model_output_artifact_io: Some(document),
-            sandbox_secret_resolution: None,
-        };
-        spec.validate().unwrap();
-
-        spec.rules_digest = digest('0');
-        assert_eq!(
-            spec.validate(),
-            Err(ResourceContractError::InvalidPolicyDocument)
-        );
-
-        spec.rules_digest = spec
-            .model_output_artifact_io
-            .as_ref()
-            .unwrap()
-            .canonical_digest()
-            .unwrap();
-        spec.retention = Some(ArtifactRetentionPolicy {
-            version: 1,
-            minimum_retention_seconds: 0,
-            gc_grace_seconds: 1,
-            tombstone_retention_seconds: 1,
-            retain_provenance_sources: false,
-            delete_requires_approval: false,
-        });
-        assert_eq!(
-            spec.validate(),
             Err(ResourceContractError::InvalidPolicyDocument)
         );
     }
@@ -2577,7 +2490,6 @@ mod tests {
             sandbox_resource: None,
             sandbox_network: None,
             sandbox_artifact_io: None,
-            model_output_artifact_io: None,
             sandbox_secret_resolution: None,
         };
         spec.validate().unwrap();
