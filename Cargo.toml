@@ -36,6 +36,7 @@ members = [
     "crates/platform-sandbox-attestor",
     "crates/platform-sandbox-executor",
     "crates/platform-sandbox-rpc",
+    "crates/platform-sandbox-gvisor",
     "crates/platform-sandbox-wasi",
     "crates/platform-scheduler",
     "crates/platform-secret-broker",
@@ -147,6 +148,7 @@ insight-platform-sandbox-controller = { path = "crates/platform-sandbox-controll
 insight-platform-sandbox-attestor = { path = "crates/platform-sandbox-attestor" }
 insight-platform-sandbox-executor = { path = "crates/platform-sandbox-executor" }
 insight-platform-sandbox-rpc = { path = "crates/platform-sandbox-rpc" }
+insight-platform-sandbox-gvisor = { path = "crates/platform-sandbox-gvisor" }
 insight-platform-sandbox-wasi = { path = "crates/platform-sandbox-wasi" }
 insight-platform-scheduler = { path = "crates/platform-scheduler" }
 insight-platform-secret-broker = { path = "crates/platform-secret-broker" }

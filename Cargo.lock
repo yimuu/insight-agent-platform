@@ -2789,6 +2789,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-sandbox-gvisor"
+version = "0.1.0"
+dependencies = [
+ "insight-platform-contracts",
+ "serde",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "insight-platform-sandbox-rpc"
 version = "0.1.0"
 dependencies = [
