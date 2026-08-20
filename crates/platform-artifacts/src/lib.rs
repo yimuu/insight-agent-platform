@@ -15,8 +15,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
     canonical_digest, ArtifactGrantOperation, ArtifactPurpose, ArtifactRef, ArtifactReferenceKind,
     ArtifactState, ArtifactWorkloadAudience, BlobIntegrityState, CommandAudit, CommandOutcome,
-    DataClassification, HardLimitProfile, ManagementOperationState, ResourceId, ResourceKind,
-    Sha256Digest,
+    DataClassification, HardLimitProfile, JobState, ResourceId, ResourceKind, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
@@ -475,7 +474,7 @@ pub struct UploadCompletionDecision {
     pub blob_version: u64,
     pub grant_state: ArtifactLinkState,
     pub grant_version: u64,
-    pub operation_state: ManagementOperationState,
+    pub operation_state: JobState,
     pub operation_version: u64,
 }
 
@@ -511,11 +510,9 @@ pub fn decide_complete_upload(
     if artifact.state != ArtifactState::Staging
         || blob.state != insight_platform_contracts::BlobIntegrityState::Staging
         || grant.state != ArtifactLinkState::Active
-        || operation.state != ManagementOperationState::Queued
+        || operation.state != JobState::Leased
         || !artifact.state.can_transition_to(ArtifactState::Uploaded)
-        || !operation
-            .state
-            .can_transition_to(ManagementOperationState::Running)
+        || !operation.state.can_transition_to(JobState::Running)
     {
         return Err(ArtifactCommandError::InvalidTransition);
     }
@@ -543,7 +540,7 @@ pub fn decide_complete_upload(
         blob_version: next_version(blob.version)?,
         grant_state: ArtifactLinkState::Consumed,
         grant_version: next_version(grant.version)?,
-        operation_state: ManagementOperationState::Running,
+        operation_state: JobState::Running,
         operation_version: next_version(operation.version)?,
     })
 }
@@ -1259,7 +1256,7 @@ pub struct CompleteArtifactDeletionDecision {
     pub artifact_version: u64,
     pub blob_state: BlobIntegrityState,
     pub blob_version: u64,
-    pub operation_state: ManagementOperationState,
+    pub operation_state: JobState,
     pub operation_version: u64,
 }
 
@@ -1290,11 +1287,11 @@ pub fn decide_complete_artifact_deletion(
         return Err(ArtifactCommandError::StaleVersion);
     }
     if artifact.state != ArtifactState::Deleting
-        || deletion.operation_state != ManagementOperationState::Running
+        || deletion.operation_state != JobState::Running
         || !artifact.state.can_transition_to(ArtifactState::Deleted)
         || !deletion
             .operation_state
-            .can_transition_to(ManagementOperationState::Succeeded)
+            .can_transition_to(JobState::Succeeded)
     {
         return Err(ArtifactCommandError::InvalidTransition);
     }
@@ -1340,7 +1337,7 @@ pub fn decide_complete_artifact_deletion(
         artifact_version: next_version(artifact.version)?,
         blob_state,
         blob_version,
-        operation_state: ManagementOperationState::Succeeded,
+        operation_state: JobState::Succeeded,
         operation_version: next_version(deletion.operation_version)?,
     })
 }
@@ -1422,7 +1419,7 @@ impl FinalizeArtifact {
 pub struct FinalizeArtifactDecision {
     pub artifact_state: ArtifactState,
     pub artifact_version: u64,
-    pub operation_state: ManagementOperationState,
+    pub operation_state: JobState,
     pub operation_version: u64,
     pub reference: ArtifactReferenceSnapshot,
     pub artifact_ref: ArtifactRef,
@@ -1462,11 +1459,9 @@ pub fn decide_finalize_artifact(
     if artifact.state != ArtifactState::Verified
         || blob.state != BlobIntegrityState::Verified
         || grant.state != ArtifactLinkState::Consumed
-        || operation.state != ManagementOperationState::Running
+        || operation.state != JobState::Running
         || !artifact.state.can_transition_to(ArtifactState::Ready)
-        || !operation
-            .state
-            .can_transition_to(ManagementOperationState::Succeeded)
+        || !operation.state.can_transition_to(JobState::Succeeded)
     {
         return Err(ArtifactCommandError::InvalidTransition);
     }
@@ -1497,7 +1492,7 @@ pub fn decide_finalize_artifact(
     Ok(FinalizeArtifactDecision {
         artifact_state: ArtifactState::Ready,
         artifact_version: next_version(artifact.version)?,
-        operation_state: ManagementOperationState::Succeeded,
+        operation_state: JobState::Succeeded,
         operation_version: next_version(operation.version)?,
         reference,
         artifact_ref,
@@ -1557,7 +1552,7 @@ pub struct ArtifactGrantRecord {
 pub struct ArtifactOperationRecord {
     pub tenant_id: ResourceId,
     pub operation_id: ResourceId,
-    pub state: ManagementOperationState,
+    pub state: JobState,
     pub version: u64,
     pub snapshot: ArtifactUploadOperationSnapshot,
     pub deadline: DateTime<Utc>,
@@ -1623,7 +1618,7 @@ pub struct ArtifactReferenceRecord {
 pub struct ArtifactDeletionRecord {
     pub tenant_id: ResourceId,
     pub operation_id: ResourceId,
-    pub operation_state: ManagementOperationState,
+    pub operation_state: JobState,
     pub operation_version: u64,
     pub job_id: ResourceId,
     pub artifact_id: ResourceId,
@@ -2043,7 +2038,7 @@ mod tests {
             operation: ArtifactOperationRecord {
                 tenant_id: command.audit.tenant_id.clone(),
                 operation_id: command.operation_id.clone(),
-                state: ManagementOperationState::Queued,
+                state: JobState::Leased,
                 version: 1,
                 snapshot: command.operation_snapshot(),
                 deadline: command.operation_deadline,
@@ -2148,7 +2143,7 @@ mod tests {
         assert_eq!(decision.blob_version, 2);
         assert_eq!(decision.grant_state, ArtifactLinkState::Consumed);
         assert_eq!(decision.grant_version, 2);
-        assert_eq!(decision.operation_state, ManagementOperationState::Running);
+        assert_eq!(decision.operation_state, JobState::Running);
         assert_eq!(decision.operation_version, 2);
 
         let mut forged = completion.clone();
@@ -2205,7 +2200,7 @@ mod tests {
         bundle.blob.version = 2;
         bundle.grant.state = ArtifactLinkState::Consumed;
         bundle.grant.version = 2;
-        bundle.operation.state = ManagementOperationState::Running;
+        bundle.operation.state = JobState::Running;
         bundle.operation.version = 2;
 
         bundle.artifact.state = ArtifactState::Verified;
@@ -2247,10 +2242,7 @@ mod tests {
         .unwrap();
         assert_eq!(final_decision.artifact_state, ArtifactState::Ready);
         assert_eq!(final_decision.artifact_version, 5);
-        assert_eq!(
-            final_decision.operation_state,
-            ManagementOperationState::Succeeded
-        );
+        assert_eq!(final_decision.operation_state, JobState::Succeeded);
         assert_eq!(final_decision.operation_version, 4);
         assert_eq!(final_decision.artifact_ref.content_digest(), &digest('9'));
         assert_eq!(
@@ -2418,7 +2410,7 @@ mod tests {
         let shared_deletion = ArtifactDeletionRecord {
             tenant_id: target.tenant_id.clone(),
             operation_id: mark.deletion_operation_id.clone(),
-            operation_state: ManagementOperationState::Running,
+            operation_state: JobState::Running,
             operation_version: 1,
             job_id: mark.deletion_job_id.clone(),
             artifact_id: target.artifact_id.clone(),

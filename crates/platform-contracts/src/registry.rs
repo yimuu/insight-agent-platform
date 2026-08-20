@@ -296,16 +296,12 @@ string_enum! {
 }
 
 string_enum! {
-    pub enum ManagementOperationKind, "management operation kind" {
-        Validation => "validation",
-        Import => "import",
-        Discovery => "discovery",
-        Build => "build",
-        ArtifactUpload => "artifact_upload",
+    pub enum PublicJobKind, "public job kind" {
+        ResourceValidation => "resource_validation",
+        McpDiscovery => "mcp_discovery",
+        ContextDatasetBuild => "context_dataset_build",
         ArtifactVerify => "artifact_verify",
-        ArtifactRescan => "artifact_rescan",
-        ArtifactDelete => "artifact_delete",
-        Export => "export"
+        ArtifactDelete => "artifact_delete"
     }
 }
 
@@ -1340,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_and_management_operation_registries_are_unique_and_closed() {
+    fn artifact_and_public_job_registries_are_unique_and_closed() {
         fn unique<T>(values: &[T], wire: impl Fn(&T) -> &'static str) -> bool {
             values
                 .iter()
@@ -1355,8 +1351,8 @@ mod tests {
         assert!(unique(ArtifactGrantOperation::ALL, |value| value.as_str()));
         assert!(unique(ArtifactWorkloadAudience::ALL, |value| value.as_str()));
         assert!(unique(BlobIntegrityState::ALL, |value| value.as_str()));
-        assert!(unique(ManagementOperationKind::ALL, |value| value.as_str()));
-        assert!("artifact_scan".parse::<ManagementOperationKind>().is_err());
+        assert!(unique(PublicJobKind::ALL, |value| value.as_str()));
+        assert!("artifact_scan".parse::<PublicJobKind>().is_err());
         assert!("read".parse::<ArtifactGrantOperation>().is_err());
     }
 }

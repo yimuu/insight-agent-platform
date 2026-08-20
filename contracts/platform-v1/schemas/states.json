@@ -1572,66 +1572,6 @@
           "deleting"
         ]
       ]
-    },
-    {
-      "name": "management_operation",
-      "states": [
-        "queued",
-        "running",
-        "cancelling",
-        "succeeded",
-        "failed",
-        "cancelled",
-        "timed_out"
-      ],
-      "terminal_states": [
-        "succeeded",
-        "failed",
-        "cancelled",
-        "timed_out"
-      ],
-      "transitions": [
-        [
-          "queued",
-          "running"
-        ],
-        [
-          "queued",
-          "cancelled"
-        ],
-        [
-          "queued",
-          "timed_out"
-        ],
-        [
-          "running",
-          "cancelling"
-        ],
-        [
-          "running",
-          "succeeded"
-        ],
-        [
-          "running",
-          "failed"
-        ],
-        [
-          "running",
-          "timed_out"
-        ],
-        [
-          "cancelling",
-          "failed"
-        ],
-        [
-          "cancelling",
-          "cancelled"
-        ],
-        [
-          "cancelling",
-          "timed_out"
-        ]
-      ]
     }
   ]
 }

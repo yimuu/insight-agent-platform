@@ -7,7 +7,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, ArtifactState, BlobIntegrityState, CommandAudit, CommandOutcome,
-    ExactVersionRef, JobState, ManagementOperationState, ResourceId, ResourceKind, Sha256Digest,
+    ExactVersionRef, JobState, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_jobs::{
     decide_expired_lease, decide_reconciliation, decide_retry, decide_terminal, JobFence,
@@ -96,7 +96,7 @@ pub fn decide_schedule_initial_scan(
     if artifact.state != ArtifactState::Uploaded
         || blob.state != BlobIntegrityState::Staging
         || blob.object_generation.is_none()
-        || operation.state != ManagementOperationState::Running
+        || operation.state != JobState::Running
         || !artifact.state.can_transition_to(ArtifactState::Verifying)
     {
         return Err(ArtifactWorkError::InvalidTransition);
@@ -417,10 +417,10 @@ pub enum ArtifactRecoveryParentAction {
     None,
     Scan {
         artifact_state: ArtifactState,
-        operation_state: ManagementOperationState,
+        operation_state: JobState,
     },
     Deletion {
-        operation_state: ManagementOperationState,
+        operation_state: JobState,
     },
     BlobCleanupReconciliation,
 }
@@ -479,11 +479,11 @@ pub fn decide_expired_artifact_attempt(
             ArtifactJobPayload::Scan { .. } | ArtifactJobPayload::Rescan { .. } => {
                 ArtifactRecoveryParentAction::Scan {
                     artifact_state: ArtifactState::Quarantined,
-                    operation_state: ManagementOperationState::TimedOut,
+                    operation_state: JobState::TimedOut,
                 }
             }
             ArtifactJobPayload::Delete { .. } => ArtifactRecoveryParentAction::Deletion {
-                operation_state: ManagementOperationState::TimedOut,
+                operation_state: JobState::TimedOut,
             },
             ArtifactJobPayload::BlobCleanup { .. } => {
                 ArtifactRecoveryParentAction::BlobCleanupReconciliation
@@ -493,11 +493,11 @@ pub fn decide_expired_artifact_attempt(
             ArtifactJobPayload::Scan { .. } | ArtifactJobPayload::Rescan { .. } => {
                 ArtifactRecoveryParentAction::Scan {
                     artifact_state: ArtifactState::Quarantined,
-                    operation_state: ManagementOperationState::Failed,
+                    operation_state: JobState::Failed,
                 }
             }
             ArtifactJobPayload::Delete { .. } => ArtifactRecoveryParentAction::Deletion {
-                operation_state: ManagementOperationState::Failed,
+                operation_state: JobState::Failed,
             },
             ArtifactJobPayload::BlobCleanup { .. } => {
                 ArtifactRecoveryParentAction::BlobCleanupReconciliation
@@ -561,7 +561,7 @@ pub fn decide_artifact_backend_failure(
                         .map_err(|_| ArtifactWorkError::InvalidTransition)?,
                     ArtifactRecoveryParentAction::Scan {
                         artifact_state: ArtifactState::Quarantined,
-                        operation_state: ManagementOperationState::Failed,
+                        operation_state: JobState::Failed,
                     },
                 ),
             }
@@ -571,7 +571,7 @@ pub fn decide_artifact_backend_failure(
                 .map_err(|_| ArtifactWorkError::InvalidTransition)?,
             ArtifactRecoveryParentAction::Scan {
                 artifact_state: ArtifactState::Quarantined,
-                operation_state: ManagementOperationState::Failed,
+                operation_state: JobState::Failed,
             },
         ),
         ArtifactJobPayload::Delete {
@@ -584,7 +584,7 @@ pub fn decide_artifact_backend_failure(
             decide_reconciliation(current, &command.fence, database_now)
                 .map_err(|_| ArtifactWorkError::InvalidTransition)?,
             ArtifactRecoveryParentAction::Deletion {
-                operation_state: ManagementOperationState::Failed,
+                operation_state: JobState::Failed,
             },
         ),
         ArtifactJobPayload::BlobCleanup { .. } => (
@@ -827,7 +827,7 @@ pub struct ArtifactScanDecision {
     pub artifact_version: u64,
     pub blob_state: BlobIntegrityState,
     pub blob_version: u64,
-    pub operation_state: ManagementOperationState,
+    pub operation_state: JobState,
     pub operation_version: u64,
     pub metadata: ArtifactMetadataSnapshot,
     pub artifact_blob_id: ResourceId,
@@ -838,7 +838,7 @@ pub struct ArtifactScanDecision {
 pub struct ArtifactWorkerOperationRecord {
     pub tenant_id: ResourceId,
     pub operation_id: ResourceId,
-    pub state: ManagementOperationState,
+    pub state: JobState,
     pub version: u64,
     pub scan_kind: ArtifactScanKind,
 }
@@ -874,7 +874,7 @@ pub fn decide_commit_artifact_scan(
         || operation.operation_id != command.operation_id
         || operation.scan_kind != job.scan_kind
         || operation.version != command.expected_operation_version
-        || operation.state != ManagementOperationState::Running
+        || operation.state != JobState::Running
         || job.operation_id != command.operation_id
         || job.artifact_id != command.artifact_id
         || job.blob_id != command.blob_id
@@ -932,28 +932,26 @@ pub fn decide_commit_artifact_scan(
     }
     let (artifact_state, operation_state) = match (job.scan_kind, command.evidence.disposition) {
         (ArtifactScanKind::Initial, ArtifactScanDisposition::Verified) => {
-            (ArtifactState::Verified, ManagementOperationState::Running)
+            (ArtifactState::Verified, JobState::Running)
         }
         (ArtifactScanKind::Initial, ArtifactScanDisposition::Quarantined)
-        | (ArtifactScanKind::Initial, ArtifactScanDisposition::Corrupt) => (
-            ArtifactState::Quarantined,
-            ManagementOperationState::Running,
-        ),
+        | (ArtifactScanKind::Initial, ArtifactScanDisposition::Corrupt) => {
+            (ArtifactState::Quarantined, JobState::Running)
+        }
         (ArtifactScanKind::Initial, ArtifactScanDisposition::Rejected) => {
-            (ArtifactState::Rejected, ManagementOperationState::Failed)
+            (ArtifactState::Rejected, JobState::Failed)
         }
         (ArtifactScanKind::Rescan, ArtifactScanDisposition::Verified) => {
-            (ArtifactState::Ready, ManagementOperationState::Succeeded)
+            (ArtifactState::Ready, JobState::Succeeded)
         }
-        (ArtifactScanKind::Rescan, ArtifactScanDisposition::Quarantined) => (
-            ArtifactState::Quarantined,
-            ManagementOperationState::Succeeded,
-        ),
+        (ArtifactScanKind::Rescan, ArtifactScanDisposition::Quarantined) => {
+            (ArtifactState::Quarantined, JobState::Succeeded)
+        }
         (ArtifactScanKind::Rescan, ArtifactScanDisposition::Rejected) => {
-            (ArtifactState::Rejected, ManagementOperationState::Succeeded)
+            (ArtifactState::Rejected, JobState::Succeeded)
         }
         (ArtifactScanKind::Rescan, ArtifactScanDisposition::Corrupt) => {
-            (ArtifactState::Corrupt, ManagementOperationState::Succeeded)
+            (ArtifactState::Corrupt, JobState::Succeeded)
         }
     };
     let expected_state = match job.scan_kind {
@@ -1970,7 +1968,7 @@ mod tests {
             operation: ArtifactWorkerOperationRecord {
                 tenant_id: command.audit.tenant_id.clone(),
                 operation_id: command.operation_id.clone(),
-                state: ManagementOperationState::Running,
+                state: JobState::Running,
                 version: command.expected_operation_version,
                 scan_kind,
             },
@@ -2468,7 +2466,7 @@ mod tests {
         .unwrap();
         assert_eq!(decision.artifact_state, ArtifactState::Verified);
         assert_eq!(decision.blob_state, BlobIntegrityState::Verified);
-        assert_eq!(decision.operation_state, ManagementOperationState::Running);
+        assert_eq!(decision.operation_state, JobState::Running);
         let current = decision.metadata.current_verification.unwrap();
         assert_eq!(current.scan_job_id, fixture.command.scan_job_id);
         assert_eq!(
@@ -2485,7 +2483,7 @@ mod tests {
         let upload_operation = ArtifactOperationRecord {
             tenant_id: initial.artifact.tenant_id.clone(),
             operation_id: initial.command.operation_id.clone(),
-            state: ManagementOperationState::Running,
+            state: JobState::Running,
             version: 2,
             snapshot: ArtifactUploadOperationSnapshot {
                 schema_version: 1,
@@ -2608,10 +2606,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decision.artifact_state, ArtifactState::Ready);
-        assert_eq!(
-            decision.operation_state,
-            ManagementOperationState::Succeeded
-        );
+        assert_eq!(decision.operation_state, JobState::Succeeded);
     }
 
     #[test]
@@ -2824,7 +2819,7 @@ mod tests {
         assert_eq!(
             decision.parent_action,
             ArtifactRecoveryParentAction::Deletion {
-                operation_state: ManagementOperationState::Failed,
+                operation_state: JobState::Failed,
             }
         );
     }
@@ -2847,7 +2842,7 @@ mod tests {
             decision.parent_action,
             ArtifactRecoveryParentAction::Scan {
                 artifact_state: ArtifactState::Quarantined,
-                operation_state: ManagementOperationState::Failed,
+                operation_state: JobState::Failed,
             }
         );
     }
@@ -2897,7 +2892,7 @@ mod tests {
             failed.parent_action,
             ArtifactRecoveryParentAction::Scan {
                 artifact_state: ArtifactState::Quarantined,
-                operation_state: ManagementOperationState::Failed,
+                operation_state: JobState::Failed,
             }
         );
     }

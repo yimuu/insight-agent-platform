@@ -411,18 +411,6 @@ closed_state_machine! {
     }
 }
 
-closed_state_machine! {
-    pub enum ManagementOperationState, "management_operation" {
-        Queued => "queued" => [Running, Cancelled, TimedOut],
-        Running => "running" => [Succeeded, Failed, Cancelling, TimedOut],
-        Cancelling => "cancelling" => [Cancelled, Failed, TimedOut],
-        Succeeded => "succeeded" => [],
-        Failed => "failed" => [],
-        Cancelled => "cancelled" => [],
-        TimedOut => "timed_out" => []
-    }
-}
-
 pub fn all_state_machines() -> Vec<StateMachineDescriptor> {
     vec![
         EntityLifecycle::descriptor(),
@@ -447,7 +435,6 @@ pub fn all_state_machines() -> Vec<StateMachineDescriptor> {
         ModelTurnState::descriptor(),
         SandboxJobState::descriptor(),
         ArtifactState::descriptor(),
-        ManagementOperationState::descriptor(),
     ]
 }
 

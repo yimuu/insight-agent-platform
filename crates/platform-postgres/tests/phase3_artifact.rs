@@ -17,9 +17,9 @@ use insight_platform_artifacts::{
 use insight_platform_contracts::{
     ArtifactPurpose, ArtifactRef, ArtifactReferenceKind, ArtifactRetentionPolicy, ArtifactState,
     BlobIntegrityState, CommandAudit, CommandOutcome, DataClassification, Effect, ExactVersionRef,
-    ManagementOperationState, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind, Sha256Digest, TenantConfig,
+    JobState, Permission, PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
+    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, ResourceDocument,
+    ResourceDraftPayload, ResourceId, ResourceKind, Sha256Digest, TenantConfig,
     TenantPrincipalPayload, ValidationSummary,
 };
 use insight_platform_jobs::JobFence as DomainJobFence;
@@ -1257,7 +1257,7 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(completed.blob.version, 2);
     assert_eq!(completed.grant.state, ArtifactLinkState::Consumed);
     assert_eq!(completed.grant.version, 2);
-    assert_eq!(completed.operation.state, ManagementOperationState::Running);
+    assert_eq!(completed.operation.state, JobState::Running);
     assert_eq!(completed.operation.version, 2);
     let replayed_completion = execute_complete(&repository, completed_command.clone())
         .await
@@ -1416,7 +1416,7 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(verified.blob.version, 3);
     assert_eq!(verified.blob.content_digest, Some(digest('8')));
     assert_eq!(verified.blob.size_bytes, Some(1_024));
-    assert_eq!(verified.operation.state, ManagementOperationState::Running);
+    assert_eq!(verified.operation.state, JobState::Running);
     assert_eq!(verified.operation.version, 3);
     assert_eq!(verified.scan_job_state.as_str(), "succeeded");
     assert_eq!(
@@ -1467,10 +1467,7 @@ async fn artifact_upload_lifecycle_fixture() {
     };
     assert_eq!(finalized.artifact.state, ArtifactState::Ready);
     assert_eq!(finalized.artifact.version, 5);
-    assert_eq!(
-        finalized.operation.state,
-        ManagementOperationState::Succeeded
-    );
+    assert_eq!(finalized.operation.state, JobState::Succeeded);
     assert_eq!(finalized.operation.version, 4);
     assert_eq!(finalized.reference.state, ArtifactLinkState::Active);
     assert_eq!(
@@ -2092,7 +2089,7 @@ async fn artifact_upload_lifecycle_fixture() {
     };
     assert_eq!(rescan.artifact.state, ArtifactState::Quarantined);
     assert_eq!(rescan.artifact.version, 6);
-    assert_eq!(rescan.operation.state, ManagementOperationState::Running);
+    assert_eq!(rescan.operation.state, JobState::Running);
     assert_eq!(rescan.scan_job_state.as_str(), "ready");
     assert_eq!(
         execute_schedule_rescan(&repository, rescan_command)
@@ -2121,10 +2118,7 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(rescanned.artifact.state, ArtifactState::Ready);
     assert_eq!(rescanned.artifact.version, 7);
     assert_eq!(rescanned.blob.version, 3);
-    assert_eq!(
-        rescanned.operation.state,
-        ManagementOperationState::Succeeded
-    );
+    assert_eq!(rescanned.operation.state, JobState::Succeeded);
     assert_eq!(rescanned.operation.version, 2);
     assert_eq!(
         execute_commit_scan(&repository, rescan_completion)

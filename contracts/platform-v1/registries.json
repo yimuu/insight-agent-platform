@@ -413,17 +413,6 @@
       "ordinal": 70
     }
   ],
-  "management_operation_kinds": [
-    "validation",
-    "import",
-    "discovery",
-    "build",
-    "artifact_upload",
-    "artifact_verify",
-    "artifact_rescan",
-    "artifact_delete",
-    "export"
-  ],
   "mcp_authorization_principal_kinds": [
     "per_user",
     "service_identity"
@@ -704,6 +693,13 @@
     "service_identity"
   ],
   "profile": "insight.platform/v1",
+  "public_job_kinds": [
+    "resource_validation",
+    "mcp_discovery",
+    "context_dataset_build",
+    "artifact_verify",
+    "artifact_delete"
+  ],
   "quota_accounting_modes": [
     "leased",
     "consumable",

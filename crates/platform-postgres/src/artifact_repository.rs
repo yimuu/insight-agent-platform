@@ -31,9 +31,8 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, BlobIntegrityState,
-    CommandOutcome, DataClassification, Effect, ExactVersionRef, JobState,
-    ManagementOperationState, Permission, PolicyKind, PublishedVersionPayload, ResourceDocument,
-    ResourceId, ResourceKind, Sha256Digest,
+    CommandOutcome, DataClassification, Effect, ExactVersionRef, JobState, Permission, PolicyKind,
+    PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskState};
@@ -467,7 +466,7 @@ struct LockedArtifactRecoveryParents {
     blob_state: BlobIntegrityState,
     blob_version: u64,
     operation_id: Option<ResourceId>,
-    operation_state: Option<ManagementOperationState>,
+    operation_state: Option<JobState>,
     operation_version: Option<u64>,
 }
 
@@ -519,7 +518,7 @@ async fn lock_artifact_recovery_parents(
                             "negative Artifact Job lease generation".to_owned(),
                         )
                     })?
-                || locked.record.operation.state != ManagementOperationState::Running
+                || locked.record.operation.state != JobState::Running
                 || locked.record.artifact.state
                     != match scan.scan_kind {
                         ArtifactScanKind::Initial => ArtifactState::Verifying,
@@ -584,7 +583,7 @@ async fn lock_artifact_recovery_parents(
                 || marked.blob.version != deletion.expected_blob_version
                 || marked.deletion.operation_version != deletion.expected_operation_version
                 || marked.artifact.state != ArtifactState::Deleting
-                || marked.deletion.operation_state != ManagementOperationState::Running
+                || marked.deletion.operation_state != JobState::Running
                 || blob.version != marked.blob.version
                 || blob.state != marked.blob.state
             {
@@ -682,7 +681,7 @@ async fn persist_artifact_recovery_parent_action(
                 payload,
                 ArtifactJobPayload::Scan { .. } | ArtifactJobPayload::Rescan { .. }
             ) || artifact_state != ArtifactState::Quarantined
-                || parents.operation_state != Some(ManagementOperationState::Running)
+                || parents.operation_state != Some(JobState::Running)
             {
                 return Err(RepositoryError::InvalidInput(
                     "Artifact scan recovery parent decision is invalid".to_owned(),
@@ -741,7 +740,7 @@ async fn persist_artifact_recovery_parent_action(
         ArtifactRecoveryParentAction::Deletion { operation_state } => {
             if !matches!(payload, ArtifactJobPayload::Delete { .. })
                 || parents.artifact_state != Some(ArtifactState::Deleting)
-                || parents.operation_state != Some(ManagementOperationState::Running)
+                || parents.operation_state != Some(JobState::Running)
             {
                 return Err(RepositoryError::InvalidInput(
                     "Artifact deletion recovery parent decision is invalid".to_owned(),
@@ -777,7 +776,7 @@ async fn persist_artifact_recovery_parent_action(
 async fn persist_artifact_recovery_operation(
     transaction: &mut Transaction<'_, Postgres>,
     parents: &LockedArtifactRecoveryParents,
-    target: ManagementOperationState,
+    target: JobState,
     database_now: DateTime<Utc>,
 ) -> Result<u64, RepositoryError> {
     let operation_id = parents.operation_id.as_ref().ok_or_else(|| {
@@ -993,7 +992,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
                 tenant_id, invocation_id, invocation_kind, owner_kind, owner_id,
                 logical_key, state, payload_schema_version, payload, payload_digest, deadline
             ) VALUES ($1, $2, 'management_operation', 'artifact', $3,
-                      'artifact_upload', 'queued', $4, $5, $6, $7)
+                      'artifact_upload', 'leased', $4, $5, $6, $7)
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -3506,7 +3505,7 @@ async fn load_artifact_deletion(
             operation_id: operation_id.clone(),
             operation_state: operation
                 .try_get::<String, _>("state")?
-                .parse::<ManagementOperationState>()
+                .parse::<JobState>()
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
             operation_version: parse_u64(
                 operation.try_get("version")?,
@@ -3817,7 +3816,7 @@ async fn load_artifact_scan_work_inner(
         operation_id: operation_id.clone(),
         state: operation_row
             .try_get::<String, _>("state")?
-            .parse::<ManagementOperationState>()
+            .parse::<JobState>()
             .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
         version: parse_u64(
             operation_row.try_get("version")?,
@@ -4852,7 +4851,7 @@ fn operation_from_row(row: PgRow) -> Result<ArtifactOperationRecord, RepositoryE
         operation_id: parse_id(row.try_get("invocation_id")?, "ManagementOperation")?,
         state: row
             .try_get::<String, _>("state")?
-            .parse::<ManagementOperationState>()
+            .parse::<JobState>()
             .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
         version: parse_u64(row.try_get("version")?, "ManagementOperation version")?,
         snapshot: decode_versioned_payload(&payload, "Artifact upload ManagementOperation")?,
@@ -5230,7 +5229,7 @@ async fn load_finalized_artifact(
     .await?;
     if records.artifact.state != ArtifactState::Ready
         || records.blob.state != BlobIntegrityState::Verified
-        || records.operation.state != ManagementOperationState::Succeeded
+        || records.operation.state != JobState::Succeeded
     {
         return Err(RepositoryError::CorruptRow(
             "finalized Artifact aggregate is not terminal-ready".to_owned(),

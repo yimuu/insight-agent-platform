@@ -516,9 +516,9 @@ def check_spec_registry_alignment(errors):
             "model_worker", "mcp_host", "sandbox_gateway", "artifact_worker",
         ],
         "blob_integrity_states": ["staging", "verified", "corrupt", "deleting", "deleted"],
-        "management_operation_kinds": [
-            "validation", "import", "discovery", "build", "artifact_upload",
-            "artifact_verify", "artifact_rescan", "artifact_delete", "export",
+        "public_job_kinds": [
+            "resource_validation", "mcp_discovery", "context_dataset_build",
+            "artifact_verify", "artifact_delete",
         ],
     }
     for registry, expected in expected_artifact_registries.items():

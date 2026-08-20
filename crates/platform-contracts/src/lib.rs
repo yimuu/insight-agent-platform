@@ -57,9 +57,9 @@ pub use registry::{
     CodeTrustClass, ContextBackendKind, ContextBackendOutcomeKind, ContextCitationStrength,
     ContextConsistencyMode, CursorPurpose, CursorPurposeMismatch, DataClassification,
     DependencySlotKind, Effect, EventDurability, EventEnvelopeError, FailureClass, FailureSource,
-    InteractionKind, LockRank, ManagementOperationKind, McpAuthorizationPrincipalKind,
-    McpOAuthClientAuthenticationKind, McpTransportKind, ModelIdentityStability, ModelModality,
-    Permission, PlanNodeKind, PlatformFailureCode, PolicyKind, PolicyReferenceRole, PrincipalKind,
+    InteractionKind, LockRank, McpAuthorizationPrincipalKind, McpOAuthClientAuthenticationKind,
+    McpTransportKind, ModelIdentityStability, ModelModality, Permission, PlanNodeKind,
+    PlatformFailureCode, PolicyKind, PolicyReferenceRole, PrincipalKind, PublicJobKind,
     PublicRunEventSourceKind, PublicRunEventType, QuotaAccountingMode, QuotaDimension,
     QuotaScopeKind, QuotaWindowKind, Retryability, SandboxAbiVersion, SandboxCleanupPolicy,
     SandboxEntrypointKind, SandboxIsolationClass, SandboxRuntimeFamily, SchedulerPriority,
@@ -85,9 +85,9 @@ pub use security::{
 pub use state::{
     AdministrativeGate, ApprovalState, ArtifactState, AttemptCommitDisposition,
     AttemptObservationState, ContextQueryState, EntityLifecycle, InteractionState, InvocationState,
-    JobState, ManagementOperationState, McpAuthorizationState, McpSessionState, ModelTurnState,
-    NodeExecutionState, PrincipalBindingState, PrincipalIdentityState, RunState, SandboxJobState,
-    ScopeState, SecretBindingState, WakeContractState,
+    JobState, McpAuthorizationState, McpSessionState, ModelTurnState, NodeExecutionState,
+    PrincipalBindingState, PrincipalIdentityState, RunState, SandboxJobState, ScopeState,
+    SecretBindingState, WakeContractState,
 };
 pub use types::{
     ApiProblem, ArtifactRef, DecimalMoney, DeclaredFailureCode, DurablePublicRunEventData, Failure,
