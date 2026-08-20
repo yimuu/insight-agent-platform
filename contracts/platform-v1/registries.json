@@ -1221,31 +1221,6 @@
     },
     {
       "exposure": "internal",
-      "name": "release_candidate",
-      "prefix": "cand"
-    },
-    {
-      "exposure": "internal",
-      "name": "qualification_profile",
-      "prefix": "qpr"
-    },
-    {
-      "exposure": "internal",
-      "name": "qualification",
-      "prefix": "qlf"
-    },
-    {
-      "exposure": "internal",
-      "name": "release",
-      "prefix": "rel"
-    },
-    {
-      "exposure": "internal",
-      "name": "approval_receipt",
-      "prefix": "aprr"
-    },
-    {
-      "exposure": "internal",
       "name": "artifact_link",
       "prefix": "alk"
     }

@@ -669,11 +669,10 @@ fn candidate_manifest_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "urn:insight:platform:v1:candidate-manifest",
         "title": "CandidateManifest",
-        "description": "Immutable digest closure that binds every Gate A-G result to one exact source, contract, schema, image, worker, configuration, limit, policy and qualification profile set.",
+        "description": "Content-addressed CI/CD closure for one exact source, contract, schema, image, worker, configuration, limit, policy and qualification profile set; it is not runtime state.",
         "type": "object",
         "additionalProperties": false,
         "required": [
-            "candidate_id",
             "git_commit",
             "contract_digest",
             "database_schema_version",
@@ -682,14 +681,10 @@ fn candidate_manifest_schema() -> Value {
             "deployment_config_digest",
             "hard_limit_profile_digest",
             "policy_baseline_digest",
-            "qualification_profile",
+            "qualification_profile_digest",
             "created_at"
         ],
         "properties": {
-            "candidate_id": {
-                "type": "string",
-                "pattern": "^cand_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-            },
             "git_commit": {
                 "type": "string",
                 "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"
@@ -720,10 +715,7 @@ fn candidate_manifest_schema() -> Value {
             "deployment_config_digest": digest.clone(),
             "hard_limit_profile_digest": digest.clone(),
             "policy_baseline_digest": digest,
-            "qualification_profile": {
-                "type": "string",
-                "pattern": "^qpr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-            },
+            "qualification_profile_digest": digest,
             "created_at": {
                 "type": "string",
                 "format": "date-time",

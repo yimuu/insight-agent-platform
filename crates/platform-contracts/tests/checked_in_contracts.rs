@@ -93,21 +93,15 @@ fn candidate_manifest_schema_matches_the_closed_rust_contract() {
         critical_control_reserved_slots: 2,
     };
     let candidate = CandidateManifest::build(NewCandidateManifest {
-        candidate_id: ResourceId::from_uuid_v7(ResourceKind::ReleaseCandidate, Uuid::now_v7())
-            .unwrap(),
         git_commit: format!("sha1:{}", "b".repeat(40)).parse().unwrap(),
         contract_digest: sha('c'),
-        database_schema_version: 6,
+        database_schema_version: 7,
         component_images: BTreeMap::from([("runtime-api".parse().unwrap(), sha('d'))]),
         worker_manifests: std::slice::from_ref(&worker),
         deployment_config_digest: sha('e'),
         hard_limit_profile: &checked_in_hard_limit_profile(),
         policy_baseline_digest: sha('f'),
-        qualification_profile: ResourceId::from_uuid_v7(
-            ResourceKind::QualificationProfile,
-            Uuid::now_v7(),
-        )
-        .unwrap(),
+        qualification_profile_digest: sha('9'),
         created_at: "2026-08-14T12:00:00.000000Z".parse().unwrap(),
     })
     .unwrap();

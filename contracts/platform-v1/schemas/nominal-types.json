@@ -57,10 +57,10 @@
       "pinned_reference": "urn:insight:platform:v1:nominal:UtcTimestamp@sha256:3d11c3a9848b65b6ee13c396fb586e4869d1d12dc7436cedde6a611339b5187b"
     },
     {
-      "canonical_digest": "sha256:3df0cac96e407c5eca2a698e06ad142382e50fc09275e048481f335b53e047d1",
+      "canonical_digest": "sha256:f8a3553517f703e85a00fb5d03641fbbfae332779503e266e5a6bf462e7bd380",
       "name": "UuidV7Id",
       "path": "schemas/nominal/uuid-v7-id.schema.json",
-      "pinned_reference": "urn:insight:platform:v1:nominal:UuidV7Id@sha256:3df0cac96e407c5eca2a698e06ad142382e50fc09275e048481f335b53e047d1"
+      "pinned_reference": "urn:insight:platform:v1:nominal:UuidV7Id@sha256:f8a3553517f703e85a00fb5d03641fbbfae332779503e266e5a6bf462e7bd380"
     }
   ]
 }

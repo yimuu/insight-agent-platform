@@ -423,20 +423,6 @@ closed_state_machine! {
     }
 }
 
-closed_state_machine! {
-    pub enum ReleaseState, "release" {
-        Built => "built" => [Staged],
-        Staged => "staged" => [Qualifying],
-        Qualifying => "qualifying" => [Qualified],
-        Qualified => "qualified" => [Approved],
-        Approved => "approved" => [Deploying],
-        Deploying => "deploying" => [Active],
-        Active => "active" => [Draining],
-        Draining => "draining" => [Retired],
-        Retired => "retired" => []
-    }
-}
-
 pub fn all_state_machines() -> Vec<StateMachineDescriptor> {
     vec![
         EntityLifecycle::descriptor(),
@@ -462,7 +448,6 @@ pub fn all_state_machines() -> Vec<StateMachineDescriptor> {
         SandboxJobState::descriptor(),
         ArtifactState::descriptor(),
         ManagementOperationState::descriptor(),
-        ReleaseState::descriptor(),
     ]
 }
 

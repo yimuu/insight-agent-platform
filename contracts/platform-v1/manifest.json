@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:0c9cae9b36828133efa5b8bd8e321e506c171a31bd4005fba618416972dc9b27",
+  "contract_digest": "sha256:f9eb220695fe908b6bc433dd67d888e82e41a947b51789d5a32af997daf07c8f",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -9,10 +9,10 @@
       "sha256": "eee830280057a612f9331e6594f3e7c7165618509e597588eab25369605dd041"
     },
     {
-      "bytes": 28148,
+      "bytes": 27657,
       "media_type": "application/json",
       "path": "contracts/platform-v1/registries.json",
-      "sha256": "fff40929fd0cf9be55f65c792bf8d9bdb828020de455be152f77c65494a343bb"
+      "sha256": "1102a95ec04595a2a96d9848904716438e31f3b6908e0a3887ef35ff8b828109"
     },
     {
       "bytes": 1912,
@@ -39,22 +39,22 @@
       "sha256": "b3992a4633c1feb8f8c532457e16a2312c43e9bc1572221446c824131e0c95f3"
     },
     {
-      "bytes": 764,
+      "bytes": 742,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/resource-id.schema.json",
-      "sha256": "af77d09957583e7a698870bcd2d1d89de6d5c25152a425bfa0a3175179b2d482"
+      "sha256": "f932832eca0557ff6b4a0f33a09eb7a707b05dffed530340b3d9770a2426b029"
     },
     {
-      "bytes": 28307,
+      "bytes": 27475,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/states.json",
-      "sha256": "d8ed59100f3eeba8314856f0e9a0f2950b544fa0d198233c7f3826a4dfd70a3c"
+      "sha256": "b409ad81677cf6b00da0ad7222e2146a647b76964189653d5c55695ad72383af"
     },
     {
       "bytes": 3466,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/nominal-types.json",
-      "sha256": "c446e8c6147304b4304ac06c0869226531bd767b214fbf1bf6194c45c4e3123f"
+      "sha256": "df7220bde85044ddea1f24a7b8cb5afddfbc58df9c25c70227cc85c82b535a91"
     },
     {
       "bytes": 16831,
@@ -69,10 +69,10 @@
       "sha256": "07851119c32bc17ffcce1f2c28d0e833e2689697992623fff03ac2fc36f5ca7d"
     },
     {
-      "bytes": 2497,
+      "bytes": 2292,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/candidate-manifest.schema.json",
-      "sha256": "a3ee754ce9324dbebc40cb22cd70f029a47042e4c8ff846b4c991e737af1b00e"
+      "sha256": "414309c64439d438088bb4ebed13049c3a9d1c8a514e2b5752ff6656f73c6caa"
     },
     {
       "bytes": 1117,
@@ -141,10 +141,10 @@
       "sha256": "33ad3b836e6eef72cd7dedee974a0a6f7eccd385cf7d5f2a9e78d7b1c6940f88"
     },
     {
-      "bytes": 764,
+      "bytes": 742,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/nominal/uuid-v7-id.schema.json",
-      "sha256": "6b957495688903bd82c13ea6edce3a57a1f2053ff6011eefac44139d01a8aa7a"
+      "sha256": "a3402e784aa3b707ff93797a4c605c2cdb397d8c3f45c0a39cdbad570e17f9d2"
     },
     {
       "bytes": 11262,

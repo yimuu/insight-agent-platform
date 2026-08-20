@@ -1,7 +1,4 @@
-use crate::{
-    canonical_digest, HardLimitProfile, ResourceId, ResourceKind, Sha256Digest, UtcTimestamp,
-    WorkerManifest,
-};
+use crate::{canonical_digest, HardLimitProfile, Sha256Digest, UtcTimestamp, WorkerManifest};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -125,12 +122,11 @@ impl<'de> Deserialize<'de> for ComponentRole {
     }
 }
 
-/// Immutable input to Gate A-G. It intentionally contains digests and nominal identities only;
-/// qualification evidence points back to its canonical digest and cannot mutate this document.
+/// Content-addressed CI/CD release closure. This is an artifact payload, not a runtime Resource,
+/// database aggregate, public management object, or promotion authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateManifest {
-    pub candidate_id: ResourceId,
     pub git_commit: GitCommit,
     pub contract_digest: Sha256Digest,
     pub database_schema_version: u32,
@@ -139,12 +135,11 @@ pub struct CandidateManifest {
     pub deployment_config_digest: Sha256Digest,
     pub hard_limit_profile_digest: Sha256Digest,
     pub policy_baseline_digest: Sha256Digest,
-    pub qualification_profile: ResourceId,
+    pub qualification_profile_digest: Sha256Digest,
     pub created_at: UtcTimestamp,
 }
 
 pub struct NewCandidateManifest<'a> {
-    pub candidate_id: ResourceId,
     pub git_commit: GitCommit,
     pub contract_digest: Sha256Digest,
     pub database_schema_version: u32,
@@ -153,7 +148,7 @@ pub struct NewCandidateManifest<'a> {
     pub deployment_config_digest: Sha256Digest,
     pub hard_limit_profile: &'a HardLimitProfile,
     pub policy_baseline_digest: Sha256Digest,
-    pub qualification_profile: ResourceId,
+    pub qualification_profile_digest: Sha256Digest,
     pub created_at: UtcTimestamp,
 }
 
@@ -174,7 +169,6 @@ impl CandidateManifest {
         let hard_limit_profile_digest =
             digest(input.hard_limit_profile, "hard_limit_profile_digest")?;
         let candidate = Self {
-            candidate_id: input.candidate_id,
             git_commit: input.git_commit,
             contract_digest: input.contract_digest,
             database_schema_version: input.database_schema_version,
@@ -183,7 +177,7 @@ impl CandidateManifest {
             deployment_config_digest: input.deployment_config_digest,
             hard_limit_profile_digest,
             policy_baseline_digest: input.policy_baseline_digest,
-            qualification_profile: input.qualification_profile,
+            qualification_profile_digest: input.qualification_profile_digest,
             created_at: input.created_at,
         };
         candidate.validate_against(input.hard_limit_profile, input.worker_manifests)?;
@@ -191,15 +185,6 @@ impl CandidateManifest {
     }
 
     pub fn validate(&self) -> Result<(), CandidateManifestError> {
-        if self.candidate_id.kind() != ResourceKind::ReleaseCandidate {
-            return Err(invalid("candidate_id", "must be a ReleaseCandidate ID"));
-        }
-        if self.qualification_profile.kind() != ResourceKind::QualificationProfile {
-            return Err(invalid(
-                "qualification_profile",
-                "must be a QualificationProfile ID",
-            ));
-        }
         if self.database_schema_version == 0 {
             return Err(invalid(
                 "database_schema_version",
@@ -352,12 +337,6 @@ mod tests {
     use crate::{
         checked_in_hard_limit_profile, WorkClass, WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
     };
-    use uuid::Uuid;
-
-    fn id(kind: ResourceKind) -> ResourceId {
-        ResourceId::from_uuid_v7(kind, Uuid::now_v7()).unwrap()
-    }
-
     fn sha(character: char) -> Sha256Digest {
         format!("sha256:{}", character.to_string().repeat(64))
             .parse()
@@ -381,7 +360,6 @@ mod tests {
         hard_limit_profile: &HardLimitProfile,
     ) -> Result<CandidateManifest, CandidateManifestError> {
         CandidateManifest::build(NewCandidateManifest {
-            candidate_id: id(ResourceKind::ReleaseCandidate),
             git_commit: format!("sha1:{}", "a".repeat(40)).parse().unwrap(),
             contract_digest: sha('b'),
             database_schema_version: 6,
@@ -393,7 +371,7 @@ mod tests {
             deployment_config_digest: sha('e'),
             hard_limit_profile,
             policy_baseline_digest: sha('f'),
-            qualification_profile: id(ResourceKind::QualificationProfile),
+            qualification_profile_digest: sha('9'),
             created_at: "2026-08-14T12:00:00.000000Z".parse().unwrap(),
         })
     }
@@ -445,7 +423,6 @@ mod tests {
         ];
         assert_eq!(
             CandidateManifest::build(NewCandidateManifest {
-                candidate_id: id(ResourceKind::ReleaseCandidate),
                 git_commit: format!("sha1:{}", "a".repeat(40)).parse().unwrap(),
                 contract_digest: sha('b'),
                 database_schema_version: 6,
@@ -454,7 +431,7 @@ mod tests {
                 deployment_config_digest: sha('e'),
                 hard_limit_profile: &checked_in_hard_limit_profile(),
                 policy_baseline_digest: sha('f'),
-                qualification_profile: id(ResourceKind::QualificationProfile),
+                qualification_profile_digest: sha('9'),
                 created_at: "2026-08-14T12:00:00.000000Z".parse().unwrap(),
             })
             .unwrap_err()

@@ -2,12 +2,8 @@
   "$id": "urn:insight:platform:v1:candidate-manifest",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Immutable digest closure that binds every Gate A-G result to one exact source, contract, schema, image, worker, configuration, limit, policy and qualification profile set.",
+  "description": "Content-addressed CI/CD closure for one exact source, contract, schema, image, worker, configuration, limit, policy and qualification profile set; it is not runtime state.",
   "properties": {
-    "candidate_id": {
-      "pattern": "^cand_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-      "type": "string"
-    },
     "component_images": {
       "additionalProperties": {
         "pattern": "^sha256:[0-9a-f]{64}$",
@@ -50,8 +46,8 @@
       "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
     },
-    "qualification_profile": {
-      "pattern": "^qpr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "qualification_profile_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
     },
     "worker_manifests": {
@@ -67,7 +63,6 @@
     }
   },
   "required": [
-    "candidate_id",
     "git_commit",
     "contract_digest",
     "database_schema_version",
@@ -76,7 +71,7 @@
     "deployment_config_digest",
     "hard_limit_profile_digest",
     "policy_baseline_digest",
-    "qualification_profile",
+    "qualification_profile_digest",
     "created_at"
   ],
   "title": "CandidateManifest",

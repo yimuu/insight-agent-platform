@@ -1632,57 +1632,6 @@
           "timed_out"
         ]
       ]
-    },
-    {
-      "name": "release",
-      "states": [
-        "built",
-        "staged",
-        "qualifying",
-        "qualified",
-        "approved",
-        "deploying",
-        "active",
-        "draining",
-        "retired"
-      ],
-      "terminal_states": [
-        "retired"
-      ],
-      "transitions": [
-        [
-          "built",
-          "staged"
-        ],
-        [
-          "staged",
-          "qualifying"
-        ],
-        [
-          "qualifying",
-          "qualified"
-        ],
-        [
-          "qualified",
-          "approved"
-        ],
-        [
-          "approved",
-          "deploying"
-        ],
-        [
-          "deploying",
-          "active"
-        ],
-        [
-          "active",
-          "draining"
-        ],
-        [
-          "draining",
-          "retired"
-        ]
-      ]
     }
   ]
 }

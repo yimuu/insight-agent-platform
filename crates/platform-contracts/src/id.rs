@@ -79,11 +79,6 @@ pub enum ResourceKind {
     Validation,
     Evidence,
     ServerRequest,
-    ReleaseCandidate,
-    QualificationProfile,
-    Qualification,
-    Release,
-    ApprovalReceipt,
     ArtifactLink,
 }
 
@@ -211,11 +206,6 @@ descriptors! {
     Validation => ("val", "validation", Public),
     Evidence => ("evd", "evidence", Public),
     ServerRequest => ("req", "server_request", CorrelationOnly),
-    ReleaseCandidate => ("cand", "release_candidate", Internal),
-    QualificationProfile => ("qpr", "qualification_profile", Internal),
-    Qualification => ("qlf", "qualification", Internal),
-    Release => ("rel", "release", Internal),
-    ApprovalReceipt => ("aprr", "approval_receipt", Internal),
     ArtifactLink => ("alk", "artifact_link", Internal),
 }
 
