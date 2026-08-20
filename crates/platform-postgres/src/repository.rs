@@ -105,7 +105,8 @@ pub const DEFAULT_SCHEDULER_LIMITS: SchedulerHardLimits = SchedulerHardLimits {
     maximum_batch: 64,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TypedPayload {
     pub schema_version: i32,
     pub value: Value,
@@ -1083,7 +1084,7 @@ impl PgRegistryTransaction {
     pub async fn request_resource_validation(
         &mut self,
         command: RequestResourceValidation,
-    ) -> Result<CommandOutcome<JobRecord>, RepositoryError> {
+    ) -> Result<CommandOutcome<RegistryValidationAccepted>, RepositoryError> {
         command.validate_at(Utc::now())?;
         let mut transaction = self.transaction.begin().await?;
         if claim_command_receipt(
@@ -1095,9 +1096,14 @@ impl PgRegistryTransaction {
         )
         .await?
         {
-            let job = load_job(&mut transaction, &command.audit.tenant_id, &command.job_id).await?;
+            let accepted = load_registry_validation_receipt(
+                &mut transaction,
+                &command.audit,
+                &command.resource_id,
+            )
+            .await?;
             transaction.commit().await?;
-            return Ok(CommandOutcome::Replayed(job));
+            return Ok(CommandOutcome::Replayed(accepted));
         }
         let locked = load_resource_for_update(
             &mut transaction,
@@ -1115,12 +1121,12 @@ impl PgRegistryTransaction {
             .document_digest()
             .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
         if locked.version != command.expected_resource_version
-            || document_digest != command.expected_draft_digest
             || locked.lifecycle_state == "retired"
         {
             return Err(RepositoryError::Conflict("resource"));
         }
-        let validation_job = RegistryValidationJobPayload::from_request(&command, kind)?;
+        let validation_job =
+            RegistryValidationJobPayload::from_request(&command, kind, document_digest)?;
         let payload = TypedPayload::from_versioned(1, &validation_job, 262_144)?;
         let row = sqlx::query(
             r#"
@@ -1158,22 +1164,23 @@ impl PgRegistryTransaction {
             &TypedPayload::new(
                 1,
                 &serde_json::json!({
-                    "draft_digest": command.expected_draft_digest,
+                    "draft_digest": validation_job.draft_digest,
                     "job_id": command.job_id,
                     "resource_id": command.resource_id,
                 }),
             )?,
         )
         .await?;
-        terminalize_command_receipt(
+        let accepted = RegistryValidationAccepted { job };
+        terminalize_registry_validation_receipt(
             &mut transaction,
             &command.audit,
-            &command.job_id.to_string(),
-            "accepted",
+            &command.resource_id,
+            &accepted,
         )
         .await?;
         transaction.commit().await?;
-        Ok(CommandOutcome::Applied(job))
+        Ok(CommandOutcome::Applied(accepted))
     }
 
     pub async fn publish_resource_versions(
@@ -2307,7 +2314,7 @@ impl RegistryTransaction for PgRegistryTransaction {
     type ResourceRecord = ResourceRecord;
     type PublishedResource = PublishedResource;
     type DeploymentRecord = DeploymentRecord;
-    type ValidationJob = JobRecord;
+    type ValidationJob = RegistryValidationAccepted;
 
     async fn create_resource_draft(
         &mut self,
@@ -16807,7 +16814,8 @@ impl NewJob {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobRecord {
     pub tenant_id: String,
     pub job_id: String,
@@ -16842,6 +16850,26 @@ pub struct JobRecord {
     pub terminal_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistryValidationAccepted {
+    pub job: JobRecord,
+}
+
+impl Deref for RegistryValidationAccepted {
+    type Target = JobRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.job
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryValidationReceiptResult {
+    schema_version: u32,
+    job: JobRecord,
 }
 
 fn validate_claimed_job_payload(job: &JobRecord) -> Result<(), RepositoryError> {
@@ -19669,6 +19697,87 @@ async fn terminalize_resource_update_receipt(
     .bind(payload.schema_version)
     .bind(&payload.value)
     .bind(&payload.digest)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("command receipt"));
+    }
+    Ok(())
+}
+
+async fn load_registry_validation_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    resource_id: &ResourceId,
+) -> Result<RegistryValidationAccepted, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'resource' AND scope_id = $2 AND dedupe_owner_id = $3
+          AND operation = 'resource.validate' AND idempotency_key_digest = $4
+          AND request_digest = $5 AND state = 'succeeded'
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(resource_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or_else(|| {
+        RepositoryError::CorruptRow("registry validation Receipt result is missing".to_owned())
+    })?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let result: RegistryValidationReceiptResult =
+        decode_versioned_payload(&payload, "registry validation Receipt result")?;
+    if result.schema_version != 1
+        || result.job.tenant_id != audit.tenant_id.to_string()
+        || result.job.work_class != WorkClass::RegistryValidation.as_str()
+        || result.job.state != JobState::Ready.as_str()
+        || result.job.version != 1
+    {
+        return Err(RepositoryError::CorruptRow(
+            "registry validation Receipt result is inconsistent".to_owned(),
+        ));
+    }
+    validate_claimed_job_payload(&result.job)?;
+    Ok(RegistryValidationAccepted { job: result.job })
+}
+
+async fn terminalize_registry_validation_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    resource_id: &ResourceId,
+    accepted: &RegistryValidationAccepted,
+) -> Result<(), RepositoryError> {
+    let result = RegistryValidationReceiptResult {
+        schema_version: 1,
+        job: accepted.job.clone(),
+    };
+    let payload = TypedPayload::from_versioned(1, &result, 262_144)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = 'accepted', response_reference_id = $4,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND scope_kind = 'resource' AND scope_id = $8 AND state = 'processing'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(&accepted.job.job_id)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(resource_id.to_string())
     .execute(&mut **transaction)
     .await?
     .rows_affected();

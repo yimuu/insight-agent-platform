@@ -211,7 +211,6 @@ async fn prove_sandbox_package_runtime_bundle_publication(
             audit: audit(TENANT_ID, PRINCIPAL_ID, "8a20", '3', '4'),
             resource_id: package_resource_id.clone(),
             expected_resource_version: 1,
-            expected_draft_digest: draft_digest.clone(),
             job_id: sandbox_id(ResourceKind::Job, 8),
             validator_digest: validator_digest.clone(),
             validation_profile_digest: digest('8'),
@@ -832,28 +831,46 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
 
     let draft_digest = draft.document_digest().unwrap();
     let now = Utc::now();
+    let validation_request = RequestResourceValidation {
+        audit: audit(TENANT_ID, PRINCIPAL_ID, "7c20", 'c', 'd'),
+        resource_id: id(RESOURCE_ID),
+        expected_resource_version: 1,
+        job_id: id(JOB_ID),
+        validator_digest: digest('e'),
+        validation_profile_digest: digest('f'),
+        attempt_limit: 3,
+        scheduled_at: now,
+        deadline: now + Duration::minutes(5),
+    };
     let validation_job = applied(
         registry_command!(
             repository,
             request_resource_validation,
-            RequestResourceValidation {
-                audit: audit(TENANT_ID, PRINCIPAL_ID, "7c20", 'c', 'd'),
-                resource_id: id(RESOURCE_ID),
-                expected_resource_version: 1,
-                expected_draft_digest: draft_digest.clone(),
-                job_id: id(JOB_ID),
-                validator_digest: digest('e'),
-                validation_profile_digest: digest('f'),
-                attempt_limit: 3,
-                scheduled_at: now,
-                deadline: now + Duration::minutes(5),
-            }
+            validation_request.clone()
         )
         .unwrap(),
     );
     assert_eq!(validation_job.state, "ready");
     assert_eq!(validation_job.work_class, "registry_validation");
     assert_eq!(validation_job.owner_kind, "job");
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET version = 2, updated_at = clock_timestamp() WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(JOB_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut replay_request = validation_request;
+    replay_request.job_id = sandbox_id(ResourceKind::Job, 0x99);
+    let replayed_validation =
+        registry_command!(repository, request_resource_validation, replay_request).unwrap();
+    let CommandOutcome::Replayed(replayed_validation) = replayed_validation else {
+        panic!("expected exact historical validation acceptance replay");
+    };
+    assert_eq!(replayed_validation.job_id, JOB_ID);
+    assert_eq!(replayed_validation.version, 1);
+    assert_eq!(replayed_validation.state, "ready");
 
     let validation = ValidationSummary {
         validator_digest: digest('e'),

@@ -21,7 +21,7 @@ use insight_platform_api::{
     resource::{
         build_resource_router, resource_etag, CreateResourceIntent, ReadResourceIntent,
         ResourceApplication, ResourceApplicationError, ResourceHttpState, ResourceViewV1,
-        SystemResourceClock, UpdateResourceDraftIntent,
+        SystemResourceClock, UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
 };
 use insight_platform_contracts::{
@@ -30,11 +30,13 @@ use insight_platform_contracts::{
     ResourceKind, Sha256Digest,
 };
 use insight_platform_postgres::{
-    operation_repository::OperationReadError,
+    operation_repository::{project_registry_validation_operation, OperationReadError},
     repository::{PgRepository, RepositoryError},
     verify_schema,
 };
-use insight_platform_registry::{CreateResourceDraft, UpdateResourceDraft};
+use insight_platform_registry::{
+    CreateResourceDraft, RequestResourceValidation, UpdateResourceDraft,
+};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{
@@ -61,6 +63,8 @@ struct ProcessConfig {
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
     shutdown_grace_milliseconds: u64,
+    registry_validator_digest: Sha256Digest,
+    registry_validation_profile_digest: Sha256Digest,
     oidc: InstalledOidcVerifierConfig,
 }
 
@@ -167,7 +171,11 @@ impl OperationApplication for PgOperations {
 }
 
 #[derive(Clone)]
-struct PgResources(Arc<PgRepository>);
+struct PgResources {
+    repository: Arc<PgRepository>,
+    validator_digest: Sha256Digest,
+    validation_profile_digest: Sha256Digest,
+}
 
 #[async_trait]
 impl ResourceApplication for PgResources {
@@ -193,7 +201,7 @@ impl ResourceApplication for PgResources {
         };
         let draft = intent.draft;
         let mut transaction = self
-            .0
+            .repository
             .begin_registry_transaction()
             .await
             .map_err(map_resource_repository_error)?;
@@ -241,7 +249,7 @@ impl ResourceApplication for PgResources {
             return Err(ResourceApplicationError::Unavailable);
         }
         let record = self
-            .0
+            .repository
             .read_resource_for_principal(
                 &intent.principal.tenant_id,
                 &intent.principal.principal_id,
@@ -276,7 +284,7 @@ impl ResourceApplication for PgResources {
             receipt_expires_at: now + chrono::Duration::hours(24),
         };
         let mut transaction = self
-            .0
+            .repository
             .begin_registry_transaction()
             .await
             .map_err(map_resource_repository_error)?;
@@ -298,6 +306,65 @@ impl ResourceApplication for PgResources {
             | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
         };
         resource_view_from_record(record, intent.resource_kind, &intent.resource_id)
+    }
+
+    async fn validate_resource_draft(
+        &self,
+        intent: ValidateResourceDraftIntent,
+    ) -> Result<OperationViewV1, ResourceApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let expected_resource_version = i64::try_from(intent.expected_resource_version)
+            .map_err(|_| ResourceApplicationError::Invalid)?;
+        let audit = CommandAudit {
+            tenant_id: intent.principal.tenant_id,
+            principal_id: intent.principal.principal_id,
+            principal_kind: intent.principal.principal_kind,
+            receipt_id: new_id(ResourceKind::Receipt)?,
+            event_id: new_id(ResourceKind::Event)?,
+            outbox_id: new_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: intent.idempotency_key_digest,
+            request_digest: intent.request_digest,
+            receipt_expires_at: now + chrono::Duration::hours(24),
+        };
+        let mut transaction = self
+            .repository
+            .begin_registry_transaction()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let outcome = transaction
+            .request_resource_validation(RequestResourceValidation {
+                audit,
+                resource_id: intent.resource_id,
+                expected_resource_version,
+                job_id: new_id(ResourceKind::Job)?,
+                validator_digest: self.validator_digest.clone(),
+                validation_profile_digest: self.validation_profile_digest.clone(),
+                attempt_limit: 3,
+                scheduled_at: now,
+                deadline: now + chrono::Duration::minutes(5),
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let accepted = match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(accepted)
+            | insight_platform_contracts::CommandOutcome::Replayed(accepted) => accepted,
+        };
+        project_registry_validation_operation(accepted.job).map_err(|error| match error {
+            OperationReadError::InvalidRequest => ResourceApplicationError::Invalid,
+            OperationReadError::Denied => ResourceApplicationError::Denied,
+            OperationReadError::NotFound | OperationReadError::NotPublic => {
+                ResourceApplicationError::NotFound
+            }
+            OperationReadError::AuthorityUnavailable => ResourceApplicationError::Unavailable,
+            OperationReadError::CorruptAuthority => ResourceApplicationError::Internal,
+        })
     }
 }
 
@@ -366,6 +433,8 @@ fn map_resource_repository_error(error: RepositoryError) -> ResourceApplicationE
 fn build_router(
     repository: Arc<PgRepository>,
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
+    validator_digest: Sha256Digest,
+    validation_profile_digest: Sha256Digest,
 ) -> Router {
     let authentication = PublicAuthenticationState::new(
         Arc::new(verifier),
@@ -377,7 +446,11 @@ fn build_router(
         Arc::new(SystemOperationClock),
     ));
     let resource = build_resource_router(ResourceHttpState::new(
-        Arc::new(PgResources(repository)),
+        Arc::new(PgResources {
+            repository,
+            validator_digest,
+            validation_profile_digest,
+        }),
         Arc::new(SystemResourceClock),
     ));
     let protected = operation
@@ -495,11 +568,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let repository = Arc::new(PgRepository::new(pool));
     let listener = tokio::net::TcpListener::bind(&config.listen_address).await?;
     tracing::info!(listen_address = %config.listen_address, "public gateway ready");
-    axum::serve(listener, build_router(repository, verifier))
-        .with_graceful_shutdown(shutdown_signal(Duration::from_millis(
-            config.shutdown_grace_milliseconds,
-        )))
-        .await?;
+    axum::serve(
+        listener,
+        build_router(
+            repository,
+            verifier,
+            config.registry_validator_digest,
+            config.registry_validation_profile_digest,
+        ),
+    )
+    .with_graceful_shutdown(shutdown_signal(Duration::from_millis(
+        config.shutdown_grace_milliseconds,
+    )))
+    .await?;
     Ok(())
 }
 
@@ -508,6 +589,12 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+
+    fn fixed_digest(character: char) -> Sha256Digest {
+        format!("sha256:{}", character.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
 
     fn oidc_config() -> InstalledOidcVerifierConfig {
         let keys = serde_json::json!({"keys": [{
@@ -531,6 +618,8 @@ mod tests {
             database_max_connections: 8,
             database_acquire_timeout_milliseconds: 1_000,
             shutdown_grace_milliseconds: 5_000,
+            registry_validator_digest: fixed_digest('1'),
+            registry_validation_profile_digest: fixed_digest('2'),
             oidc: oidc_config(),
         };
         assert!(config.validate().is_ok());
@@ -549,6 +638,8 @@ mod tests {
         let router = build_router(
             Arc::new(PgRepository::new(pool)),
             oidc_config().install().unwrap(),
+            fixed_digest('1'),
+            fixed_digest('2'),
         );
         let live = router
             .clone()

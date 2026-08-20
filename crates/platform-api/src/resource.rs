@@ -1,7 +1,8 @@
 use crate::authentication::AuthenticatedPrincipal;
 use async_trait::async_trait;
 use axum::{
-    extract::{rejection::JsonRejection, Extension, Path, State},
+    body::Bytes,
+    extract::{rejection::JsonRejection, DefaultBodyLimit, Extension, Path, State},
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -10,8 +11,8 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
     canonical_digest, AdministrativeGate, ApiProblem, ApiProblemCode, EntityLifecycle,
-    RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
-    Sha256Digest, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
+    OperationViewV1, RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId,
+    ResourceKind, Sha256Digest, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
 const IF_MATCH: &str = "if-match";
 const RESOURCE_COMMAND_DEADLINE_MILLISECONDS: i64 = 5_000;
+const MAX_RESOURCE_REQUEST_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +89,17 @@ pub struct UpdateResourceDraftIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ValidateResourceDraftIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub resource_kind: RegistryResourceKind,
+    pub resource_id: ResourceId,
+    pub expected_resource_version: u64,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceApplicationError {
     Invalid,
@@ -116,6 +129,11 @@ pub trait ResourceApplication: Send + Sync {
         &self,
         intent: UpdateResourceDraftIntent,
     ) -> Result<ResourceViewV1, ResourceApplicationError>;
+
+    async fn validate_resource_draft(
+        &self,
+        intent: ValidateResourceDraftIntent,
+    ) -> Result<OperationViewV1, ResourceApplicationError>;
 }
 
 pub trait ResourceClock: Send + Sync {
@@ -151,7 +169,79 @@ pub fn build_resource_router(state: ResourceHttpState) -> Router {
             "/v1/{resource_noun}/{resource_id}/draft",
             put(update_resource_draft),
         )
+        .route(
+            "/v1/{resource_noun}/{resource_id}/draft:validate",
+            post(validate_resource_draft),
+        )
+        .layer(DefaultBodyLimit::max(MAX_RESOURCE_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn validate_resource_draft(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path((resource_noun, resource_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !body.is_empty() {
+        return problem(ResourceApplicationError::Invalid);
+    }
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    let Some(resource_kind) = resource_kind_for_noun(&resource_noun) else {
+        return problem(ResourceApplicationError::NotFound);
+    };
+    let resource_id = match resource_id.parse::<ResourceId>() {
+        Ok(resource_id) if resource_id.kind() == resource_kind.id_kind() => resource_id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let expected_resource_version = match expected_resource_version(&headers, &resource_id) {
+        Ok(version) => version,
+        Err(error) => return problem(error),
+    };
+    let idempotency_key_digest = match idempotency_key_digest_for_operation(
+        &headers,
+        &principal,
+        resource_kind,
+        "resource.validate_draft",
+        Some(&resource_id),
+    ) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let request_digest = match digest(&serde_json::json!({
+        "expected_resource_version": expected_resource_version,
+        "idempotency_key_digest": idempotency_key_digest,
+        "operation": "resource.validate_draft",
+        "principal_id": principal.principal_id,
+        "resource_id": resource_id,
+        "resource_kind": resource_kind,
+        "schema_version": 1,
+        "tenant_id": principal.tenant_id,
+    })) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let intent = ValidateResourceDraftIntent {
+        principal,
+        resource_kind,
+        resource_id,
+        expected_resource_version,
+        idempotency_key_digest,
+        request_digest,
+        deadline: state.clock.now()
+            + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS),
+    };
+    match state.application.validate_resource_draft(intent).await {
+        Ok(view) if view.validate().is_ok() => operation_accepted_response(view),
+        Ok(_) => problem(ResourceApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 async fn update_resource_draft(
@@ -346,6 +436,21 @@ fn read_resource_response(view: ResourceViewV1) -> Response {
     };
     let mut response = (StatusCode::OK, Json(view)).into_response();
     response.headers_mut().insert("etag", etag);
+    no_store(response)
+}
+
+fn operation_accepted_response(view: OperationViewV1) -> Response {
+    let etag = match HeaderValue::from_str(&view.etag) {
+        Ok(etag) => etag,
+        Err(_) => return problem(ResourceApplicationError::Internal),
+    };
+    let location = match HeaderValue::from_str(&format!("/v1/operations/{}", view.operation_id)) {
+        Ok(location) => location,
+        Err(_) => return problem(ResourceApplicationError::Internal),
+    };
+    let mut response = (StatusCode::ACCEPTED, Json(view)).into_response();
+    response.headers_mut().insert("etag", etag);
+    response.headers_mut().insert("location", location);
     no_store(response)
 }
 
@@ -551,8 +656,9 @@ mod tests {
     use super::*;
     use axum::{body::to_bytes, http::Request};
     use insight_platform_contracts::{
-        ArtifactRef, AuthnStrength, AuthoringPackage, DataClassification, Permission,
-        PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalKind,
+        operation_etag, ArtifactRef, AuthnStrength, AuthoringPackage, DataClassification,
+        Permission, PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalKind, PublicJobKind,
+        PublicJobState, PublicJobTarget, UtcTimestamp,
     };
     use std::sync::Mutex;
     use tower::ServiceExt;
@@ -699,6 +805,30 @@ mod tests {
                 version: intent.expected_resource_version + 1,
                 draft: intent.draft,
                 etag: resource_etag(&intent.resource_id, intent.expected_resource_version + 1),
+            })
+        }
+
+        async fn validate_resource_draft(
+            &self,
+            intent: ValidateResourceDraftIntent,
+        ) -> Result<OperationViewV1, ResourceApplicationError> {
+            let operation_id = id(ResourceKind::Job, 8);
+            let now = UtcTimestamp::from_datetime(Utc::now());
+            Ok(OperationViewV1 {
+                operation_id: operation_id.clone(),
+                tenant_id: intent.principal.tenant_id,
+                kind: PublicJobKind::ResourceValidation,
+                target: PublicJobTarget::ResourceVersion {
+                    resource_id: intent.resource_id,
+                    resource_version: intent.expected_resource_version,
+                },
+                state: PublicJobState::Queued,
+                progress: None,
+                result: None,
+                error: None,
+                created_at: now.clone(),
+                updated_at: now,
+                etag: operation_etag(&operation_id.to_string(), 1),
             })
         }
     }
@@ -877,5 +1007,52 @@ mod tests {
             .unwrap();
         assert_eq!(missing.status(), StatusCode::PRECONDITION_REQUIRED);
         assert_eq!(application.intents.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn draft_validation_returns_job_operation_and_rejects_a_body() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application,
+            Arc::new(FixedClock(now)),
+        ));
+        let resource_id = id(ResourceKind::Policy, 4);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/policies/{resource_id}/draft:validate"))
+                    .header(IDEMPOTENCY_KEY, "validate-policy-1")
+                    .header(IF_MATCH, resource_etag(&resource_id, 3))
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response.headers()["location"],
+            "/v1/operations/job_0198f1cc-32e4-75e1-a9e8-d95ca0f80008"
+        );
+
+        let with_body = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/policies/{resource_id}/draft:validate"))
+                    .header(IDEMPOTENCY_KEY, "validate-policy-2")
+                    .header(IF_MATCH, resource_etag(&resource_id, 3))
+                    .extension(principal(now))
+                    .body(axum::body::Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(with_body.status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -89,6 +89,31 @@ impl crate::repository::PgRepository {
     }
 }
 
+pub fn project_registry_validation_operation(
+    job: JobRecord,
+) -> Result<OperationViewV1, OperationReadError> {
+    if WorkClass::from_str(&job.work_class).map_err(|_| OperationReadError::CorruptAuthority)?
+        != WorkClass::RegistryValidation
+    {
+        return Err(OperationReadError::NotPublic);
+    }
+    let payload: RegistryValidationJobPayload =
+        serde_json::from_value(job.payload.value.clone())
+            .map_err(|_| OperationReadError::CorruptAuthority)?;
+    let owner: ResourceId = job
+        .owner_id
+        .parse()
+        .map_err(|_| OperationReadError::CorruptAuthority)?;
+    payload
+        .validate_for_owner(&owner)
+        .map_err(|_| OperationReadError::CorruptAuthority)?;
+    let target = PublicJobTarget::ResourceVersion {
+        resource_id: payload.resource_id,
+        resource_version: payload.expected_resource_version,
+    };
+    project_operation(job, PublicJobKind::ResourceValidation, target)
+}
+
 async fn public_kind_and_target(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     job: &JobRecord,

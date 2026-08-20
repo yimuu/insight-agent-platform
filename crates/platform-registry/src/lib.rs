@@ -67,7 +67,6 @@ pub struct RequestResourceValidation {
     pub audit: CommandAudit,
     pub resource_id: ResourceId,
     pub expected_resource_version: i64,
-    pub expected_draft_digest: Sha256Digest,
     pub job_id: ResourceId,
     pub validator_digest: Sha256Digest,
     pub validation_profile_digest: Sha256Digest,
@@ -108,6 +107,7 @@ impl RegistryValidationJobPayload {
     pub fn from_request(
         command: &RequestResourceValidation,
         resource_kind: RegistryResourceKind,
+        draft_digest: Sha256Digest,
     ) -> Result<Self, RegistryCommandError> {
         let expected_resource_version = u64::try_from(command.expected_resource_version)
             .map_err(|_| RegistryCommandError::InvalidValidationJob)?;
@@ -117,7 +117,7 @@ impl RegistryValidationJobPayload {
             resource_id: command.resource_id.clone(),
             resource_kind,
             expected_resource_version,
-            draft_digest: command.expected_draft_digest.clone(),
+            draft_digest,
             validator_digest: command.validator_digest.clone(),
             validation_profile_digest: command.validation_profile_digest.clone(),
         };
