@@ -679,7 +679,7 @@ impl ManagedMcpSandboxSecretDeliveryAuthority for PgRepository {
             FROM insight_platform.receipts
             WHERE tenant_id = $1
               AND receipt_kind = 'sandbox_secret_delivery'
-              AND scope_kind = 'sandbox_job' AND scope_id = $2
+              AND scope_kind = 'job' AND scope_id = $2
               AND dedupe_owner_id = $3 AND operation = 'sandbox.secret.deliver'
               AND state IN ('processing', 'succeeded')
             "#,
@@ -723,7 +723,7 @@ impl ManagedMcpSandboxSecretDeliveryAuthority for PgRepository {
                 tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
                 dedupe_owner_id, operation, idempotency_key_digest, request_digest, state,
                 payload_schema_version, payload, payload_digest, expires_at
-            ) VALUES ($1, $2, 'sandbox_secret_delivery', 'sandbox_job', $3,
+            ) VALUES ($1, $2, 'sandbox_secret_delivery', 'job', $3,
                       $4, 'sandbox.secret.deliver', $5, $6, 'processing', $7, $8, $9, $10)
             ON CONFLICT DO NOTHING
             "#,
@@ -794,7 +794,7 @@ impl ManagedMcpSandboxSecretDeliveryAuthority for PgRepository {
             FROM insight_platform.receipts
             WHERE tenant_id = $1 AND receipt_id = $2
               AND receipt_kind = 'sandbox_secret_delivery'
-              AND scope_kind = 'sandbox_job' AND scope_id = $3
+              AND scope_kind = 'job' AND scope_id = $3
               AND dedupe_owner_id = $4 AND operation = 'sandbox.secret.deliver'
               AND idempotency_key_digest = $5
             FOR UPDATE
@@ -990,7 +990,7 @@ async fn load_managed_mcp_secret_delivery_receipt(
         FROM insight_platform.receipts
         WHERE tenant_id = $1
           AND receipt_kind = 'sandbox_secret_delivery'
-          AND scope_kind = 'sandbox_job' AND scope_id = $2
+          AND scope_kind = 'job' AND scope_id = $2
           AND dedupe_owner_id = $3 AND operation = 'sandbox.secret.deliver'
           AND idempotency_key_digest = $4
         FOR UPDATE
@@ -1088,7 +1088,7 @@ async fn require_active_sandbox_artifact_grant(
                payload_schema_version, payload, payload_digest, expires_at
         FROM insight_platform.artifact_links
         WHERE tenant_id = $1 AND artifact_link_id = $2
-          AND link_kind = 'grant' AND owner_kind = 'sandbox_job'
+          AND link_kind = 'grant' AND owner_kind = 'job'
           AND owner_id = $3
         "#,
     )
@@ -1829,7 +1829,7 @@ impl PgRepository {
              AND event.aggregate_id = job.job_id
              AND event.aggregate_version = job.version
              AND event.event_type IN ('sandbox.job.completed', 'sandbox.job.failed')
-            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'sandbox_job'
+            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'job'
               AND (
                   (job.state IN ('succeeded', 'failed', 'cancelled', 'timed_out')
                    AND job.terminal_at IS NOT NULL)
@@ -1897,7 +1897,7 @@ impl PgRepository {
             r#"
             SELECT job.*, job.lease_expires_at AS scan_sort_at
             FROM insight_platform.jobs AS job
-            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'sandbox_job'
+            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'job'
               AND job.state IN ('leased', 'running', 'cancelling')
               AND job.lease_expires_at <= $1 AND job.terminal_at IS NULL
               AND job.worker_id IS NOT NULL AND job.lease_epoch > 0
@@ -2021,7 +2021,7 @@ impl PgRepository {
              AND invocation.invocation_id = job.invocation_id
              AND invocation.invocation_kind = 'capability'
             AND invocation.state = 'deferred'
-            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'sandbox_job'
+            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'job'
               AND job.state = 'ready' AND job.terminal_at IS NULL
               AND job.worker_id IS NULL AND job.scheduled_at <= $1
               AND job.deadline > $1
@@ -2072,7 +2072,7 @@ impl PgRepository {
                 SELECT *
                 FROM insight_platform.jobs
                 WHERE tenant_id = $1 AND job_id = $2
-                  AND work_class = 'sandbox' AND owner_kind = 'sandbox_job'
+                  AND work_class = 'sandbox' AND owner_kind = 'job'
                   AND invocation_id = $3 AND state = 'ready'
                   AND terminal_at IS NULL AND worker_id IS NULL
                   AND scheduled_at <= $4 AND deadline > $4
@@ -2224,7 +2224,7 @@ impl PgRepository {
               ON job.tenant_id = invocation.tenant_id
              AND job.invocation_id = invocation.invocation_id
              AND job.work_class = 'sandbox'
-             AND job.owner_kind = 'sandbox_job'
+             AND job.owner_kind = 'job'
              AND job.state IN ('leased', 'running', 'cancelling')
              AND job.worker_id = $3
              AND job.lease_epoch > 0
@@ -2293,7 +2293,7 @@ impl PgRepository {
                 ORDER BY event.aggregate_version DESC, event.occurred_at DESC, event.event_id DESC
                 LIMIT 1
             ) AS source ON TRUE
-            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'sandbox_job'
+            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'job'
               AND job.state IN ('leased', 'running', 'cancelling')
               AND job.worker_id = $1 AND job.lease_epoch > 0
               AND job.terminal_at IS NULL
@@ -3035,7 +3035,7 @@ impl SandboxGatewayAuthority for PgRepository {
                 state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
                 deadline, priority, request_digest, quota_reservation_id,
                 payload_schema_version, payload, payload_digest, created_at, updated_at
-            ) VALUES ($1, $2, 'sandbox', 'sandbox_job', $3, $4, $5, $6,
+            ) VALUES ($1, $2, 'sandbox', 'job', $3, $4, $5, $6,
                       'ready', 1, 0, 1, 0, $7, $8, 0, $9, $10,
                       $11, $12, $13, $7, $7)
             "#,
@@ -4531,7 +4531,7 @@ async fn lock_and_persist_sandbox_artifact_grants(
                 source_artifact_id, target_artifact_id, link_key_digest, state,
                 version, payload_schema_version, payload, payload_digest,
                 expires_at, created_at, updated_at
-            ) VALUES ($1, $2, 'grant', 'sandbox_job', $3, $4, $5, $6, 'active',
+            ) VALUES ($1, $2, 'grant', 'job', $3, $4, $5, $6, 'active',
                       1, $7, $8, $9, $10, $11, $11)
             "#,
         )
@@ -5707,7 +5707,7 @@ pub(crate) async fn release_and_confirm_sandbox_artifact_grants(
         UPDATE insight_platform.artifact_links
         SET state = 'released', version = version + 1,
             released_at = $3, updated_at = $3
-        WHERE tenant_id = $1 AND owner_kind = 'sandbox_job' AND owner_id = $2
+        WHERE tenant_id = $1 AND owner_kind = 'job' AND owner_id = $2
           AND link_kind = 'grant' AND state = 'active' AND released_at IS NULL
         "#,
     )
@@ -5721,7 +5721,7 @@ pub(crate) async fn release_and_confirm_sandbox_artifact_grants(
         r#"
         SELECT count(*)
         FROM insight_platform.artifact_links
-        WHERE tenant_id = $1 AND owner_kind = 'sandbox_job' AND owner_id = $2
+        WHERE tenant_id = $1 AND owner_kind = 'job' AND owner_id = $2
           AND link_kind = 'grant' AND state = 'released' AND released_at IS NOT NULL
         "#,
     )

@@ -6,10 +6,7 @@ use insight_platform_artifact_broker::{
     BrokeredSandboxArtifactBroker, DecryptedArtifactObjectReference, InstalledArtifactObjectStore,
     InstalledArtifactObjectStoreCatalog,
 };
-use insight_platform_artifacts::{
-    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, ArtifactReferenceSnapshot,
-    AuthorizedArtifactObjectRead,
-};
+use insight_platform_artifacts::{ArtifactReferenceSnapshot, AuthorizedArtifactObjectRead};
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ArtifactGrantOperation, ArtifactPurpose, ArtifactRef,
     ArtifactReferenceKind, ArtifactRetentionPolicy, AuthoringPackage, CapabilityArtifactContract,
@@ -34,7 +31,6 @@ use insight_platform_invocations::{
     InvocationOrigin, InvocationPolicyDecisionBundle, InvocationSelectionEvidence, InvocationStore,
     InvocationTransaction, InvocationValueStorage,
 };
-use insight_platform_jobs::{decide_claim, JobFence, LeasePolicy};
 use insight_platform_postgres::{
     repository::{
         NewPrincipal, NewTenant, NewTenantPrincipal, PgRepository, RepositoryError,
@@ -44,12 +40,10 @@ use insight_platform_postgres::{
     verify_schema,
 };
 use insight_platform_sandbox::{
-    decide_accept, decide_advance_phase, decide_begin_execution, AcceptSandboxExecution,
-    ClaimSandboxJobs, CollectedSandbox, CommitSandboxPhase, DestroySandbox, ExecuteSandboxJob,
-    HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor, InstalledSandboxBackendRegistry,
-    MergeSandboxCapabilityOutcome, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
-    MicroVmGrantRevoker, MicroVmSandboxWorkloadKind, PreparedSandbox, RecoverExpiredSandboxLease,
-    RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants, RunningSandbox, SafeSandboxTraceContext,
+    AcceptSandboxExecution, ClaimSandboxJobs, CollectedSandbox, CommitSandboxPhase, DestroySandbox,
+    ExecuteSandboxJob, HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor,
+    InstalledSandboxBackendRegistry, MergeSandboxCapabilityOutcome, PreparedSandbox,
+    RecoverExpiredSandboxLease, RevokeWasiSandboxGrants, RunningSandbox, SafeSandboxTraceContext,
     SandboxBackendFailure, SandboxCleanupDisposition, SandboxCleanupEvidence,
     SandboxCompletedOutput, SandboxControlAuthority, SandboxControllerAudit,
     SandboxExecutionAuthority, SandboxExecutionOutcome, SandboxExecutionPolicyClosure,
@@ -1501,327 +1495,6 @@ async fn insert_sandbox_input_reference(
     .unwrap();
 }
 
-async fn prove_micro_vm_artifact_read_binding(
-    pool: &PgPool,
-    repository: &PgRepository,
-    fixture: &Fixture,
-    database_now: DateTime<Utc>,
-) {
-    let limits = insight_platform_sandbox::SandboxCommandLimits::from_profile(
-        &insight_platform_contracts::checked_in_hard_limit_profile(),
-    )
-    .unwrap();
-    let mut request = fixture.command.request.clone();
-    request.sandbox_job_id = id(ResourceKind::Job, 360);
-    request.job_id = id(ResourceKind::Job, 360);
-    request.output_value_id = id(ResourceKind::RunValue, 360);
-    request.callback.sandbox_job_id = request.sandbox_job_id.clone();
-    request.callback.invocation_id = request.invocation_id.clone();
-    request.callback.binding_digest = sha('0');
-    request.callback = request.callback.seal().unwrap();
-    rebind_sandbox_input_grant(&mut request, 362);
-    request.runtime.supported_isolation = vec![SandboxIsolationClass::MicroVm];
-    request.runtime.guest_kernel_digest = Some(sha('7'));
-    request.profile.minimum_isolation = SandboxIsolationClass::MicroVm;
-    request.policies.isolation.minimum_isolation = SandboxIsolationClass::MicroVm;
-    request
-        .policies
-        .isolation
-        .require_hardware_virtualization_for_microvm = true;
-    request.isolation_class = SandboxIsolationClass::MicroVm;
-    request.resources.wasm_fuel = None;
-    request.resources.wasm_memory_pages = None;
-    let insight_platform_sandbox::SandboxExecutionSource::SandboxCapability {
-        capability_deployment_closure,
-    } = &mut request.execution_source
-    else {
-        panic!("fixture must be a Sandbox Capability");
-    };
-    let CapabilityBackendBinding::Sandbox { isolation, .. } =
-        &mut capability_deployment_closure.backend
-    else {
-        panic!("fixture Capability must use the Sandbox backend");
-    };
-    *isolation = SandboxIsolationClass::MicroVm;
-    request.request_digest = sha('0');
-    request = request.seal().unwrap();
-    request
-        .validate_submission_at(database_now, limits)
-        .unwrap();
-
-    let accepted = decide_accept(
-        &AcceptSandboxExecution {
-            audit: CommandAudit {
-                tenant_id: fixture.tenant_id.clone(),
-                principal_id: fixture.principal_id.clone(),
-                principal_kind: PrincipalKind::ServiceIdentity,
-                receipt_id: id(ResourceKind::Receipt, 363),
-                event_id: id(ResourceKind::Event, 364),
-                outbox_id: id(ResourceKind::OutboxEvent, 365),
-                idempotency_key_digest: sha('7'),
-                request_digest: request.request_digest.clone(),
-                receipt_expires_at: database_now + Duration::minutes(5),
-            },
-            request: request.clone(),
-            usage_reservation_id: id(ResourceKind::UsageReservation, 366),
-            quota_entry_ids: (367..371)
-                .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
-                .collect(),
-        },
-        database_now,
-        limits,
-    )
-    .unwrap();
-    let worker_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 371);
-    let lease_token_digest = sha('8');
-    let claimed = decide_claim(
-        &accepted.job,
-        database_now,
-        worker_process_generation_id.clone(),
-        lease_token_digest.clone(),
-        LeasePolicy {
-            requested_milliseconds: 30_000,
-            hard_maximum_milliseconds: 60_000,
-        },
-    )
-    .unwrap();
-    let fence = |job: &insight_platform_jobs::JobProjection| JobFence {
-        expected_version: job.version,
-        worker_process_generation_id: worker_process_generation_id.clone(),
-        lease_generation: job.lease_generation,
-        token_digest: lease_token_digest.clone(),
-    };
-    let preparing = decide_begin_execution(
-        &claimed,
-        &accepted.payload,
-        &fence(&claimed),
-        insight_platform_sandbox::WasiExecutorProcessBinding {
-            executor_identity_digest: sha('9'),
-            attestor_route: "https://10.0.0.8:9443".parse().unwrap(),
-        },
-        sha('a'),
-        database_now + Duration::milliseconds(1),
-        limits,
-    )
-    .unwrap();
-    let leased_request = request
-        .clone()
-        .bind_lease_generation(claimed.lease_generation)
-        .unwrap();
-    let provider_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 372);
-    let sandbox_identity_digest = sha('b');
-    let starting = decide_advance_phase(
-        &preparing.job,
-        &preparing.payload,
-        &fence(&preparing.job),
-        insight_platform_sandbox::AdvanceSandboxPhase {
-            target: insight_platform_contracts::SandboxJobState::Starting,
-            phase_evidence_digest: sha('c'),
-            prepared: Some(PreparedSandbox {
-                provider_process_generation_id: Some(provider_process_generation_id.clone()),
-                sandbox_identity_digest: sandbox_identity_digest.clone(),
-                request_digest: leased_request.request_digest.clone(),
-                attempt_no: leased_request.attempt_no,
-                lease_generation: leased_request.lease_generation,
-                prepare_evidence_digest: sha('c'),
-            }),
-            database_now: database_now + Duration::milliseconds(2),
-        },
-        limits,
-    )
-    .unwrap();
-    let stored_payload =
-        insight_platform_sandbox::SandboxJobPayload::capability_execution(starting.payload.clone());
-    let stored_payload = typed_payload(&stored_payload);
-    let lease = starting.job.lease.as_ref().unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id, state, version,
-            attempt_no, attempt_limit, lease_epoch, worker_id, lease_token_digest,
-            lease_expires_at, heartbeat_at, scheduled_at, deadline, priority,
-            request_digest, payload_schema_version, payload, payload_digest,
-            started_at, created_at, updated_at
-        ) VALUES (
-            $1, $2, 'sandbox', 'sandbox_job', $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12, $13, $14, $15, 0, $16, $17, $18, $19, $20, $14, $14
-        )
-        "#,
-    )
-    .bind(starting.job.tenant_id.to_string())
-    .bind(starting.job.job_id.to_string())
-    .bind(starting.job.owner.owner_id.to_string())
-    .bind(request.invocation_id.to_string())
-    .bind(starting.job.state.to_string())
-    .bind(i64::try_from(starting.job.version).unwrap())
-    .bind(i32::try_from(starting.job.attempt_count).unwrap())
-    .bind(i32::try_from(starting.job.attempt_limit).unwrap())
-    .bind(i64::try_from(starting.job.lease_generation).unwrap())
-    .bind(lease.worker_process_generation_id.to_string())
-    .bind(lease.token_digest.to_string())
-    .bind(lease.expires_at)
-    .bind(lease.heartbeat_at)
-    .bind(starting.job.scheduled_at)
-    .bind(starting.job.deadline)
-    .bind(request.request_digest.to_string())
-    .bind(stored_payload.schema_version)
-    .bind(&stored_payload.value)
-    .bind(&stored_payload.digest)
-    .bind(database_now)
-    .execute(pool)
-    .await
-    .unwrap();
-
-    let artifact_read = MicroVmArtifactReadRequest {
-        workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
-        tenant_id: leased_request.tenant_id.clone(),
-        sandbox_job_id: leased_request.sandbox_job_id.clone(),
-        request_digest: leased_request.request_digest.clone(),
-        executor_worker_process_generation_id: worker_process_generation_id.clone(),
-        provider_process_generation_id: provider_process_generation_id.clone(),
-        sandbox_identity_digest: sandbox_identity_digest.clone(),
-        lease_generation: leased_request.lease_generation,
-        artifact: leased_request.package.runtime_bundle_artifact.clone(),
-        purpose: MicroVmArtifactReadPurpose::RuntimeBundle,
-        read_grant: None,
-        maximum_bytes: usize::try_from(
-            leased_request.package.runtime_bundle_artifact.byte_length(),
-        )
-        .unwrap(),
-        deadline: leased_request.deadline,
-    };
-    let wasi_artifact_read = WasiArtifactReadRequest {
-        tenant_id: leased_request.tenant_id.clone(),
-        sandbox_job_id: leased_request.sandbox_job_id.clone(),
-        request_digest: leased_request.request_digest.clone(),
-        worker_process_generation_id: worker_process_generation_id.clone(),
-        lease_generation: leased_request.lease_generation,
-        artifact: leased_request.package.runtime_bundle_artifact.clone(),
-        purpose: WasiArtifactReadPurpose::RuntimeBundle,
-        read_grant: None,
-        maximum_bytes: usize::try_from(
-            leased_request.package.runtime_bundle_artifact.byte_length(),
-        )
-        .unwrap(),
-        deadline: leased_request.deadline,
-    };
-    let authorized = repository
-        .authorize_object_read(&artifact_read)
-        .await
-        .unwrap();
-    assert_eq!(authorized.artifact, artifact_read.artifact);
-    let wasi_authorized = repository
-        .authorize_object_read(&wasi_artifact_read)
-        .await
-        .unwrap();
-
-    let renewed = repository
-        .heartbeat_sandbox_execution(HeartbeatSandboxExecution {
-            tenant_id: leased_request.tenant_id.clone(),
-            sandbox_job_id: leased_request.sandbox_job_id.clone(),
-            job_id: leased_request.job_id.clone(),
-            fence: fence(&starting.job),
-            lease_milliseconds: 60_000,
-        })
-        .await
-        .unwrap();
-    assert_eq!(renewed.job.version, starting.job.version + 1);
-    assert_eq!(renewed.job.lease_generation, starting.job.lease_generation);
-    let heartbeat_authorized = repository
-        .authorize_object_read(&artifact_read)
-        .await
-        .unwrap();
-    let wasi_heartbeat_authorized = repository
-        .authorize_object_read(&wasi_artifact_read)
-        .await
-        .unwrap();
-    assert_eq!(
-        heartbeat_authorized.authorization_digest,
-        authorized.authorization_digest
-    );
-    assert_eq!(
-        wasi_heartbeat_authorized.authorization_digest,
-        wasi_authorized.authorization_digest
-    );
-
-    let mut wrong_provider = artifact_read.clone();
-    wrong_provider.provider_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 373);
-    assert!(matches!(
-        repository.authorize_object_read(&wrong_provider).await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
-    let mut wrong_sandbox_identity = artifact_read.clone();
-    wrong_sandbox_identity.sandbox_identity_digest = sha('d');
-    assert!(matches!(
-        repository
-            .authorize_object_read(&wrong_sandbox_identity)
-            .await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
-
-    let rebound_provider = id(ResourceKind::WorkerProcessGeneration, 374);
-    let rebound_identity = sha('e');
-    let mut rebound_payload = starting.payload;
-    let rebound_prepared = rebound_payload.prepared.as_mut().unwrap();
-    rebound_prepared.provider_process_generation_id = Some(rebound_provider.clone());
-    rebound_prepared.sandbox_identity_digest = rebound_identity.clone();
-    rebound_payload = rebound_payload.seal().unwrap();
-    rebound_payload.validate_for(&starting.job, limits).unwrap();
-    let rebound_payload = typed_payload(
-        &insight_platform_sandbox::SandboxJobPayload::capability_execution(rebound_payload),
-    );
-    sqlx::query(
-        r#"
-        UPDATE insight_platform.jobs
-        SET payload_schema_version = $3, payload = $4, payload_digest = $5
-        WHERE tenant_id = $1 AND job_id = $2
-        "#,
-    )
-    .bind(fixture.tenant_id.to_string())
-    .bind(request.job_id.to_string())
-    .bind(rebound_payload.schema_version)
-    .bind(&rebound_payload.value)
-    .bind(&rebound_payload.digest)
-    .execute(pool)
-    .await
-    .unwrap();
-    let mut rebound_read = artifact_read;
-    rebound_read.provider_process_generation_id = rebound_provider;
-    rebound_read.sandbox_identity_digest = rebound_identity;
-    let rebound_authorized = repository
-        .authorize_object_read(&rebound_read)
-        .await
-        .unwrap();
-    assert_ne!(
-        rebound_authorized.authorization_digest,
-        authorized.authorization_digest
-    );
-
-    sqlx::query(
-        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2",
-    )
-    .bind(fixture.tenant_id.to_string())
-    .bind(request.job_id.to_string())
-    .execute(pool)
-    .await
-    .unwrap();
-    assert!(matches!(
-        repository.authorize_object_read(&rebound_read).await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
-    assert!(matches!(
-        repository.authorize_object_read(&wasi_artifact_read).await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
-
-    sqlx::query("DELETE FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2")
-        .bind(fixture.tenant_id.to_string())
-        .bind(request.job_id.to_string())
-        .execute(pool)
-        .await
-        .unwrap();
-}
-
 fn usage() -> SandboxResourceUsage {
     SandboxResourceUsage {
         cpu_milliseconds: 1_500,
@@ -1944,7 +1617,6 @@ struct WasiBackend {
     artifact_broker: Arc<dyn WasiArtifactBroker>,
     validator: Arc<PgRepository>,
     grant_revoker: Arc<PgRepository>,
-    micro_vm_grant_revoker: Arc<PgRepository>,
     worker_process_generation_id: ResourceId,
 }
 
@@ -2175,52 +1847,6 @@ impl SandboxExecutorBackend for WasiBackend {
         &self,
         command: DestroySandbox,
     ) -> Result<SandboxCleanupEvidence, SandboxBackendFailure> {
-        let micro_vm_revoke = RevokeMicroVmSandboxGrants {
-            workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
-            tenant_id: command.tenant_id.clone(),
-            sandbox_job_id: command.sandbox_job_id.clone(),
-            request_digest: command.request_digest.clone(),
-            executor_worker_process_generation_id: self.worker_process_generation_id.clone(),
-            provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 998),
-            sandbox_identity_digest: command.sandbox_identity_digest.clone(),
-            attempt_no: command.attempt_no,
-            lease_generation: command.lease_generation,
-        };
-        let mut stale_micro_vm_revoke = micro_vm_revoke.clone();
-        stale_micro_vm_revoke.executor_worker_process_generation_id =
-            id(ResourceKind::WorkerProcessGeneration, 999);
-        if MicroVmGrantRevoker::revoke_exact(
-            self.micro_vm_grant_revoker.as_ref(),
-            stale_micro_vm_revoke,
-        )
-        .await
-        .is_ok()
-        {
-            return Err(test_backend_failure(
-                insight_platform_sandbox::SandboxBackendFailureStage::Destroying,
-            ));
-        }
-        let micro_vm_first = MicroVmGrantRevoker::revoke_exact(
-            self.micro_vm_grant_revoker.as_ref(),
-            micro_vm_revoke.clone(),
-        )
-        .await
-        .map_err(|_| {
-            test_backend_failure(insight_platform_sandbox::SandboxBackendFailureStage::Destroying)
-        })?;
-        let micro_vm_replay = MicroVmGrantRevoker::revoke_exact(
-            self.micro_vm_grant_revoker.as_ref(),
-            micro_vm_revoke,
-        )
-        .await
-        .map_err(|_| {
-            test_backend_failure(insight_platform_sandbox::SandboxBackendFailureStage::Destroying)
-        })?;
-        if micro_vm_first != micro_vm_replay {
-            return Err(test_backend_failure(
-                insight_platform_sandbox::SandboxBackendFailureStage::Destroying,
-            ));
-        }
         let revoke = RevokeWasiSandboxGrants {
             tenant_id: command.tenant_id.clone(),
             sandbox_job_id: command.sandbox_job_id.clone(),
@@ -2415,17 +2041,13 @@ async fn sandbox_fixture() {
     let now = database_now;
     let fixture = fixture(now);
     seed(&pool, &repository, &fixture).await;
-    prove_micro_vm_artifact_read_binding(&pool, &repository, &fixture, database_now).await;
 
     let mut drifted_closure = fixture.command.clone();
-    let closure = match &mut drifted_closure.request.execution_source {
-        insight_platform_sandbox::SandboxExecutionSource::SandboxCapability {
-            capability_deployment_closure,
-        }
-        | insight_platform_sandbox::SandboxExecutionSource::ManagedMcp {
-            capability_deployment_closure,
-            ..
-        } => capability_deployment_closure,
+    let insight_platform_sandbox::SandboxExecutionSource::SandboxCapability {
+        capability_deployment_closure: closure,
+    } = &mut drifted_closure.request.execution_source
+    else {
+        panic!("first-release fixture must use a Sandbox Capability");
     };
     closure
         .policies
@@ -3032,7 +2654,6 @@ async fn sandbox_fixture() {
             artifact_broker: Arc::clone(&artifact_broker) as Arc<dyn WasiArtifactBroker>,
             validator: Arc::clone(&repository),
             grant_revoker: Arc::clone(&repository),
-            micro_vm_grant_revoker: Arc::clone(&repository),
             worker_process_generation_id: fixture.worker_id.clone(),
         }))
         .unwrap();
