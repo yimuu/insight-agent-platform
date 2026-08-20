@@ -1239,6 +1239,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   │   │       │   │   ├── tokio-rustls v0.26.4 (*)
 │       │       │   │   │       │   │   ├── tokio feature "default" (*)
 │       │       │   │   │       │   │   ├── http feature "default" (*)
+│       │       │   │   │       │   │   ├── log feature "default" (*)
 │       │       │   │   │       │   │   ├── hyper-util feature "client-legacy"
 │       │       │   │   │       │   │   │   ├── hyper-util v0.1.20
 │       │       │   │   │       │   │   │   │   ├── futures-util v0.3.32 (*)
@@ -2190,10 +2191,13 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │       └── tower-http feature "follow-redirect"
 │       │       │           ├── tower-http v0.6.11
 │       │       │           │   ├── futures-util v0.3.32 (*)
+│       │       │           │   ├── mime v0.3.17
+│       │       │           │   ├── tracing v0.1.44 (*)
 │       │       │           │   ├── pin-project-lite feature "default" (*)
 │       │       │           │   ├── bytes feature "default" (*)
 │       │       │           │   ├── http feature "default" (*)
 │       │       │           │   ├── http-body feature "default" (*)
+│       │       │           │   ├── base64 feature "default" (*)
 │       │       │           │   ├── tower-service feature "default" (*)
 │       │       │           │   ├── bitflags feature "default" (*)
 │       │       │           │   ├── tower feature "default" (*)
@@ -3818,6 +3822,11 @@ insight-platform-artifact-broker v0.1.0 (<workspace>/crates/platform-artifact-br
         ├── serde feature "derive" (*)
         ├── tokio-util feature "default" (*)
         ├── tokio-util feature "rt" (*)
+        ├── sha2 feature "default" (*)
+        ├── uuid feature "default" (*)
+        ├── uuid feature "serde" (*)
+        ├── uuid feature "v4" (*)
+        ├── uuid feature "v7" (*)
         ├── url feature "default" (*)
         ├── serde_json feature "default" (*)
         ├── chrono feature "default" (*)
@@ -3839,7 +3848,8 @@ insight-platform-artifact-broker v0.1.0 (<workspace>/crates/platform-artifact-br
 ├── uuid feature "default" (*)
 ├── uuid feature "serde" (*)
 ├── uuid feature "v4" (*)
-└── uuid feature "v7" (*)
+├── uuid feature "v7" (*)
+└── insight-platform-jobs feature "default" (command-line) (*)
 
 insight-platform-artifact-rpc v0.1.0 (<workspace>/crates/platform-artifact-rpc)
 ├── x509-parser v0.18.1
@@ -4271,9 +4281,21 @@ insight-platform-artifact-service v0.1.0 (<workspace>/crates/platform-artifact-s
 ├── tokio feature "sync" (*)
 ├── tokio feature "test-util" (*)
 ├── tokio feature "time" (*)
+├── bytes feature "default" (*)
 ├── serde feature "default" (*)
 ├── serde feature "derive" (*)
+├── sha2 feature "default" (*)
+├── base64 feature "default" (*)
+├── uuid feature "default" (*)
+├── uuid feature "serde" (*)
+├── uuid feature "v4" (*)
+├── uuid feature "v7" (*)
+├── axum feature "default" (*)
 ├── serde_json feature "default" (*)
+├── chrono feature "default" (*)
+├── chrono feature "serde" (*)
+├── futures feature "default" (*)
+├── jsonwebtoken feature "aws_lc_rs" (*)
 ├── sqlx feature "chrono" (*)
 ├── sqlx feature "json" (*)
 ├── sqlx feature "macros" (*)
@@ -4282,8 +4304,11 @@ insight-platform-artifact-service v0.1.0 (<workspace>/crates/platform-artifact-s
 ├── sqlx feature "sqlite" (*)
 ├── sqlx feature "tls-rustls-aws-lc-rs" (*)
 ├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-jobs feature "default" (command-line) (*)
 ├── insight-platform-artifact-broker feature "default" (command-line)
 │   └── insight-platform-artifact-broker v0.1.0 (<workspace>/crates/platform-artifact-broker) (*)
+├── insight-platform-artifacts feature "default" (command-line) (*)
+├── insight-platform-sandbox feature "default" (command-line) (*)
 ├── insight-platform-artifact-rpc feature "default" (command-line)
 │   └── insight-platform-artifact-rpc v0.1.0 (<workspace>/crates/platform-artifact-rpc) (*)
 ├── tonic feature "channel" (*)
@@ -5056,406 +5081,712 @@ insight-platform-sandbox-executor v0.1.0 (<workspace>/crates/platform-sandbox-ex
 ├── tonic feature "tls-aws-lc" (*)
 ├── insight-platform-worker feature "default" (command-line) (*)
 ├── insight-platform-sandbox-rpc feature "default" (command-line) (*)
-└── insight-platform-sandbox-wasi feature "default" (command-line)
-    └── insight-platform-sandbox-wasi v0.1.0 (<workspace>/crates/platform-sandbox-wasi)
-        ├── async-trait feature "default" (*)
-        ├── tokio feature "default" (*)
-        ├── tokio feature "fs" (*)
-        ├── tokio feature "io-util" (*)
-        ├── tokio feature "macros" (*)
-        ├── tokio feature "net" (*)
-        ├── tokio feature "process" (*)
-        ├── tokio feature "rt-multi-thread" (*)
-        ├── tokio feature "signal" (*)
-        ├── tokio feature "sync" (*)
-        ├── tokio feature "test-util" (*)
-        ├── tokio feature "time" (*)
-        ├── serde feature "default" (*)
-        ├── serde feature "derive" (*)
-        ├── sha2 feature "default" (*)
-        ├── serde_json feature "default" (*)
-        ├── chrono feature "default" (*)
-        ├── chrono feature "serde" (*)
-        ├── insight-platform-contracts feature "default" (command-line) (*)
-        ├── insight-platform-sandbox feature "default" (command-line) (*)
-        ├── wasmtime feature "cranelift"
-        │   ├── wasmtime v42.0.0
-        │   │   ├── log v0.4.33
-        │   │   ├── async-trait feature "default" (*)
-        │   │   ├── serde feature "alloc" (*)
-        │   │   ├── serde_derive feature "default" (*)
-        │   │   ├── libc feature "default" (*)
-        │   │   ├── once_cell feature "default" (*)
-        │   │   ├── cfg-if feature "default" (*)
-        │   │   ├── smallvec feature "default" (*)
-        │   │   ├── smallvec feature "union"
-        │   │   │   └── smallvec v1.15.2 (*)
-        │   │   ├── bitflags feature "default" (*)
-        │   │   ├── rustix feature "default" (*)
-        │   │   ├── rustix feature "mm"
-        │   │   │   └── rustix v1.1.4 (*)
-        │   │   ├── rustix feature "param"
-        │   │   │   └── rustix v1.1.4 (*)
-        │   │   ├── bumpalo feature "default"
-        │   │   │   └── bumpalo v3.20.3
-        │   │   │       └── allocator-api2 v0.2.21
-        │   │   ├── mach2 feature "default"
-        │   │   │   └── mach2 v0.4.3
-        │   │   │       └── libc v0.2.186
-        │   │   ├── object feature "elf"
-        │   │   │   └── object v0.37.3
-        │   │   │       ├── crc32fast v1.5.0 (*)
-        │   │   │       ├── indexmap v2.14.0 (*)
-        │   │   │       ├── memchr v2.8.2
-        │   │   │       └── hashbrown feature "default-hasher"
-        │   │   │           └── hashbrown v0.15.5
-        │   │   │               └── foldhash v0.1.5
-        │   │   ├── object feature "read_core"
-        │   │   │   └── object v0.37.3 (*)
-        │   │   ├── object feature "unaligned"
-        │   │   │   └── object v0.37.3 (*)
-        │   │   ├── postcard feature "alloc"
-        │   │   │   ├── postcard v1.1.3
-        │   │   │   │   ├── cobs v0.3.0
-        │   │   │   │   │   └── thiserror v2.0.18 (*)
-        │   │   │   │   └── serde feature "derive" (*)
-        │   │   │   └── serde feature "alloc" (*)
-        │   │   ├── pulley-interpreter feature "default"
-        │   │   │   └── pulley-interpreter v42.0.0
-        │   │   │       ├── log v0.4.33
-        │   │   │       ├── cranelift-bitset feature "default"
-        │   │   │       │   └── cranelift-bitset v0.129.0
-        │   │   │       │       ├── serde feature "alloc" (*)
-        │   │   │       │       ├── serde_derive feature "default" (*)
-        │   │   │       │       └── wasmtime-internal-core feature "default"
-        │   │   │       │           └── wasmtime-internal-core v42.0.0
-        │   │   │       │               └── libm feature "default"
-        │   │   │       │                   ├── libm v0.2.16
-        │   │   │       │                   └── libm feature "arch"
-        │   │   │       │                       └── libm v0.2.16
-        │   │   │       ├── wasmtime-internal-core feature "default" (*)
-        │   │   │       └── pulley-macros feature "default"
-        │   │   │           └── pulley-macros v42.0.0 (proc-macro)
-        │   │   │               ├── proc-macro2 feature "default" (*)
-        │   │   │               ├── quote feature "default" (*)
-        │   │   │               ├── syn feature "default" (*)
-        │   │   │               └── syn feature "full" (*)
-        │   │   ├── wasmtime-internal-core feature "default" (*)
-        │   │   ├── target-lexicon feature "default"
-        │   │   │   └── target-lexicon v0.13.5
-        │   │   ├── wasmparser feature "simd"
-        │   │   │   └── wasmparser v0.244.0
-        │   │   │       ├── semver v1.0.28
-        │   │   │       ├── serde feature "alloc" (*)
-        │   │   │       └── bitflags feature "default" (*)
-        │   │   ├── wasmtime-environ feature "default"
-        │   │   │   └── wasmtime-environ v42.0.0
-        │   │   │       ├── anyhow v1.0.104
-        │   │   │       ├── log v0.4.33
-        │   │   │       ├── serde feature "alloc" (*)
-        │   │   │       ├── serde_derive feature "default" (*)
-        │   │   │       ├── indexmap feature "serde"
-        │   │   │       │   └── indexmap v2.14.0 (*)
-        │   │   │       ├── smallvec feature "default" (*)
-        │   │   │       ├── smallvec feature "serde" (*)
-        │   │   │       ├── smallvec feature "union" (*)
-        │   │   │       ├── object feature "elf" (*)
-        │   │   │       ├── object feature "read_core" (*)
-        │   │   │       ├── hashbrown feature "default-hasher" (*)
-        │   │   │       ├── postcard feature "alloc" (*)
-        │   │   │       ├── cranelift-bitset feature "default" (*)
-        │   │   │       ├── cranelift-bitset feature "enable-serde"
-        │   │   │       │   └── cranelift-bitset v0.129.0 (*)
-        │   │   │       ├── wasmtime-internal-core feature "default" (*)
-        │   │   │       ├── target-lexicon feature "default" (*)
-        │   │   │       ├── wasmparser feature "features"
-        │   │   │       │   └── wasmparser v0.244.0 (*)
-        │   │   │       ├── wasmparser feature "serde"
-        │   │   │       │   └── wasmparser v0.244.0 (*)
-        │   │   │       ├── wasmparser feature "simd" (*)
-        │   │   │       ├── wasmparser feature "validate"
-        │   │   │       │   └── wasmparser v0.244.0 (*)
-        │   │   │       ├── cranelift-entity feature "default"
-        │   │   │       │   └── cranelift-entity v0.129.0
-        │   │   │       │       ├── serde feature "alloc" (*)
-        │   │   │       │       ├── serde_derive feature "default" (*)
-        │   │   │       │       ├── cranelift-bitset feature "default" (*)
-        │   │   │       │       └── wasmtime-internal-core feature "default" (*)
-        │   │   │       ├── cranelift-entity feature "enable-serde"
-        │   │   │       │   ├── cranelift-entity v0.129.0 (*)
-        │   │   │       │   ├── cranelift-bitset feature "enable-serde" (*)
-        │   │   │       │   ├── cranelift-entity feature "serde"
-        │   │   │       │   │   └── cranelift-entity v0.129.0 (*)
-        │   │   │       │   └── cranelift-entity feature "serde_derive"
-        │   │   │       │       └── cranelift-entity v0.129.0 (*)
-        │   │   │       ├── gimli feature "read"
-        │   │   │       │   ├── gimli v0.33.0
-        │   │   │       │   │   ├── fnv v1.0.7
-        │   │   │       │   │   ├── hashbrown v0.16.1 (*)
-        │   │   │       │   │   └── indexmap v2.14.0 (*)
-        │   │   │       │   └── gimli feature "read-core"
-        │   │   │       │       └── gimli v0.33.0 (*)
-        │   │   │       ├── wasm-encoder feature "default"
-        │   │   │       │   ├── wasm-encoder v0.244.0
-        │   │   │       │   │   └── leb128fmt v0.1.0
-        │   │   │       │   ├── wasm-encoder feature "component-model"
-        │   │   │       │   │   └── wasm-encoder v0.244.0 (*)
-        │   │   │       │   └── wasm-encoder feature "std"
-        │   │   │       │       └── wasm-encoder v0.244.0 (*)
-        │   │   │       └── wasmprinter feature "default"
-        │   │   │           ├── wasmprinter v0.244.0
-        │   │   │           │   ├── anyhow feature "default" (*)
-        │   │   │           │   ├── wasmparser feature "simd" (*)
-        │   │   │           │   ├── wasmparser feature "std"
-        │   │   │           │   │   └── wasmparser v0.244.0 (*)
-        │   │   │           │   └── termcolor feature "default"
-        │   │   │           │       └── termcolor v1.4.1
-        │   │   │           ├── wasmprinter feature "component-model"
-        │   │   │           │   ├── wasmprinter v0.244.0 (*)
-        │   │   │           │   └── wasmparser feature "component-model"
-        │   │   │           │       └── wasmparser v0.244.0 (*)
-        │   │   │           └── wasmprinter feature "validate"
-        │   │   │               ├── wasmprinter v0.244.0 (*)
-        │   │   │               ├── wasmparser feature "features" (*)
-        │   │   │               └── wasmparser feature "validate" (*)
-        │   │   ├── wasmtime-internal-cranelift feature "default"
-        │   │   │   └── wasmtime-internal-cranelift v42.0.0
-        │   │   │       ├── cranelift-control v0.129.2
-        │   │   │       │   └── arbitrary feature "default"
-        │   │   │       │       └── arbitrary v1.4.2
-        │   │   │       ├── log v0.4.33
-        │   │   │       ├── cfg-if feature "default" (*)
-        │   │   │       ├── smallvec feature "default" (*)
-        │   │   │       ├── smallvec feature "union" (*)
-        │   │   │       ├── thiserror feature "default" (*)
-        │   │   │       ├── itertools feature "default" (*)
-        │   │   │       ├── object feature "elf" (*)
-        │   │   │       ├── object feature "read_core" (*)
-        │   │   │       ├── object feature "std"
-        │   │   │       │   ├── object v0.37.3 (*)
-        │   │   │       │   └── memchr feature "std" (*)
-        │   │   │       ├── object feature "write"
-        │   │   │       │   ├── object v0.37.3 (*)
-        │   │   │       │   ├── object feature "coff"
-        │   │   │       │   │   └── object v0.37.3 (*)
-        │   │   │       │   ├── object feature "elf" (*)
-        │   │   │       │   ├── object feature "macho"
-        │   │   │       │   │   └── object v0.37.3 (*)
-        │   │   │       │   ├── object feature "pe"
-        │   │   │       │   │   ├── object v0.37.3 (*)
-        │   │   │       │   │   └── object feature "coff" (*)
-        │   │   │       │   ├── object feature "write_std"
-        │   │   │       │   │   ├── object v0.37.3 (*)
-        │   │   │       │   │   ├── crc32fast feature "std" (*)
-        │   │   │       │   │   ├── indexmap feature "std" (*)
-        │   │   │       │   │   ├── object feature "std" (*)
-        │   │   │       │   │   └── object feature "write_core"
-        │   │   │       │   │       └── object v0.37.3 (*)
-        │   │   │       │   └── object feature "xcoff"
-        │   │   │       │       └── object v0.37.3 (*)
-        │   │   │       ├── pulley-interpreter feature "default" (*)
-        │   │   │       ├── wasmtime-internal-core feature "default" (*)
-        │   │   │       ├── target-lexicon feature "default" (*)
-        │   │   │       ├── wasmparser feature "simd" (*)
-        │   │   │       ├── wasmtime-environ feature "compile"
-        │   │   │       │   ├── wasmtime-environ v42.0.0 (*)
-        │   │   │       │   ├── object feature "write_core" (*)
-        │   │   │       │   ├── wasmtime-environ feature "std"
-        │   │   │       │   │   ├── wasmtime-environ v42.0.0 (*)
-        │   │   │       │   │   ├── indexmap feature "std" (*)
-        │   │   │       │   │   ├── anyhow feature "std" (*)
-        │   │   │       │   │   ├── object feature "std" (*)
-        │   │   │       │   │   ├── wasmtime-internal-core feature "std"
-        │   │   │       │   │   │   └── wasmtime-internal-core v42.0.0 (*)
-        │   │   │       │   │   └── wasmparser feature "std" (*)
-        │   │   │       │   └── gimli feature "write"
-        │   │   │       │       └── gimli v0.33.0 (*)
-        │   │   │       ├── wasmtime-environ feature "default" (*)
-        │   │   │       ├── cranelift-entity feature "default" (*)
-        │   │   │       ├── gimli feature "read" (*)
-        │   │   │       ├── gimli feature "std"
-        │   │   │       │   └── gimli v0.33.0 (*)
-        │   │   │       ├── cranelift-codegen feature "host-arch"
-        │   │   │       │   └── cranelift-codegen v0.129.0
-        │   │   │       │       ├── cranelift-control v0.129.2 (*)
-        │   │   │       │       ├── log v0.4.33
-        │   │   │       │       ├── rustc-hash v2.1.3
-        │   │   │       │       ├── smallvec feature "default" (*)
-        │   │   │       │       ├── smallvec feature "union" (*)
-        │   │   │       │       ├── bumpalo feature "default" (*)
-        │   │   │       │       ├── hashbrown feature "default-hasher" (*)
-        │   │   │       │       ├── pulley-interpreter feature "default" (*)
-        │   │   │       │       ├── cranelift-bitset feature "default" (*)
-        │   │   │       │       ├── wasmtime-internal-core feature "default" (*)
-        │   │   │       │       ├── libm feature "default" (*)
-        │   │   │       │       ├── target-lexicon feature "default" (*)
-        │   │   │       │       ├── cranelift-entity feature "default" (*)
-        │   │   │       │       ├── gimli feature "read" (*)
-        │   │   │       │       ├── gimli feature "write" (*)
-        │   │   │       │       ├── cranelift-assembler-x64 feature "default"
-        │   │   │       │       │   └── cranelift-assembler-x64 v0.129.2
-        │   │   │       │       │       [build-dependencies]
-        │   │   │       │       │       └── cranelift-assembler-x64-meta feature "default"
-        │   │   │       │       │           └── cranelift-assembler-x64-meta v0.129.2
-        │   │   │       │       │               └── cranelift-srcgen feature "default"
-        │   │   │       │       │                   └── cranelift-srcgen v0.129.2
-        │   │   │       │       ├── cranelift-bforest feature "default"
-        │   │   │       │       │   └── cranelift-bforest v0.129.0
-        │   │   │       │       │       └── cranelift-entity feature "default" (*)
-        │   │   │       │       ├── cranelift-codegen-shared feature "default"
-        │   │   │       │       │   └── cranelift-codegen-shared v0.129.2
-        │   │   │       │       ├── regalloc2 feature "checker"
-        │   │   │       │       │   └── regalloc2 v0.13.5
-        │   │   │       │       │       ├── hashbrown v0.15.5 (*)
-        │   │   │       │       │       ├── log v0.4.33
-        │   │   │       │       │       ├── rustc-hash v2.1.3
-        │   │   │       │       │       ├── allocator-api2 feature "alloc" (*)
-        │   │   │       │       │       ├── smallvec feature "default" (*)
-        │   │   │       │       │       ├── smallvec feature "union" (*)
-        │   │   │       │       │       ├── bumpalo feature "allocator-api2"
-        │   │   │       │       │       │   └── bumpalo v3.20.3 (*)
-        │   │   │       │       │       └── bumpalo feature "default" (*)
-        │   │   │       │       └── regalloc2 feature "default"
-        │   │   │       │           ├── regalloc2 v0.13.5 (*)
-        │   │   │       │           └── regalloc2 feature "std"
-        │   │   │       │               └── regalloc2 v0.13.5 (*)
-        │   │   │       │       [build-dependencies]
-        │   │   │       │       ├── cranelift-codegen-meta feature "default"
-        │   │   │       │       │   └── cranelift-codegen-meta v0.129.0
-        │   │   │       │       │       ├── heck feature "default" (*)
-        │   │   │       │       │       ├── cranelift-assembler-x64-meta feature "default" (*)
-        │   │   │       │       │       ├── cranelift-srcgen feature "default" (*)
-        │   │   │       │       │       ├── cranelift-codegen-shared feature "default" (*)
-        │   │   │       │       │       └── pulley-interpreter feature "default"
-        │   │   │       │       │           └── pulley-interpreter v42.0.0
-        │   │   │       │       │               ├── log v0.4.33
-        │   │   │       │       │               ├── pulley-macros feature "default" (*)
-        │   │   │       │       │               └── cranelift-bitset feature "default"
-        │   │   │       │       │                   └── cranelift-bitset v0.129.0
-        │   │   │       │       │                       └── wasmtime-internal-core feature "default"
-        │   │   │       │       │                           └── wasmtime-internal-core v42.0.0
-        │   │   │       │       │                               └── libm feature "default" (*)
-        │   │   │       │       └── cranelift-isle feature "default"
-        │   │   │       │           └── cranelift-isle v0.129.0
-        │   │   │       ├── cranelift-codegen feature "std"
-        │   │   │       │   ├── cranelift-codegen v0.129.0 (*)
-        │   │   │       │   ├── gimli feature "std" (*)
-        │   │   │       │   ├── cranelift-codegen feature "gimli"
-        │   │   │       │   │   └── cranelift-codegen v0.129.0 (*)
-        │   │   │       │   ├── cranelift-control feature "fuzz"
-        │   │   │       │   │   └── cranelift-control v0.129.2 (*)
-        │   │   │       │   └── rustc-hash feature "std"
-        │   │   │       │       └── rustc-hash v2.1.3
-        │   │   │       ├── cranelift-codegen feature "timing"
-        │   │   │       │   └── cranelift-codegen v0.129.0 (*)
-        │   │   │       ├── cranelift-codegen feature "unwind"
-        │   │   │       │   ├── cranelift-codegen v0.129.0 (*)
-        │   │   │       │   └── cranelift-codegen feature "gimli" (*)
-        │   │   │       ├── cranelift-frontend feature "default"
-        │   │   │       │   ├── cranelift-frontend v0.129.0
-        │   │   │       │   │   ├── log v0.4.33
-        │   │   │       │   │   ├── smallvec feature "default" (*)
-        │   │   │       │   │   ├── smallvec feature "union" (*)
-        │   │   │       │   │   ├── target-lexicon feature "default" (*)
-        │   │   │       │   │   ├── cranelift-codegen feature "std" (*)
-        │   │   │       │   │   └── cranelift-codegen feature "unwind" (*)
-        │   │   │       │   └── cranelift-frontend feature "std"
-        │   │   │       │       ├── cranelift-frontend v0.129.0 (*)
-        │   │   │       │       └── cranelift-codegen feature "std" (*)
-        │   │   │       ├── cranelift-native feature "default"
-        │   │   │       │   ├── cranelift-native v0.129.0
-        │   │   │       │   │   ├── target-lexicon feature "default" (*)
-        │   │   │       │   │   ├── cranelift-codegen feature "std" (*)
-        │   │   │       │   │   └── cranelift-codegen feature "unwind" (*)
-        │   │   │       │   └── cranelift-native feature "std"
-        │   │   │       │       ├── cranelift-native v0.129.0 (*)
-        │   │   │       │       └── cranelift-codegen feature "std" (*)
-        │   │   │       ├── wasmtime-internal-unwinder feature "cranelift"
-        │   │   │       │   └── wasmtime-internal-unwinder v42.0.0
-        │   │   │       │       ├── log v0.4.33
-        │   │   │       │       ├── cfg-if feature "default" (*)
-        │   │   │       │       ├── object feature "elf" (*)
-        │   │   │       │       ├── object feature "read_core" (*)
-        │   │   │       │       ├── wasmtime-environ feature "default" (*)
-        │   │   │       │       ├── cranelift-codegen feature "std" (*)
-        │   │   │       │       └── cranelift-codegen feature "unwind" (*)
-        │   │   │       ├── wasmtime-internal-unwinder feature "default"
-        │   │   │       │   └── wasmtime-internal-unwinder v42.0.0 (*)
-        │   │   │       └── wasmtime-internal-versioned-export-macros feature "default"
-        │   │   │           └── wasmtime-internal-versioned-export-macros v42.0.0 (proc-macro)
-        │   │   │               ├── proc-macro2 feature "default" (*)
-        │   │   │               ├── quote feature "default" (*)
-        │   │   │               ├── syn feature "default" (*)
-        │   │   │               └── syn feature "full" (*)
-        │   │   ├── wasmtime-internal-cranelift feature "pulley"
-        │   │   │   ├── wasmtime-internal-cranelift v42.0.0 (*)
-        │   │   │   └── cranelift-codegen feature "pulley"
-        │   │   │       ├── cranelift-codegen v0.129.0 (*)
-        │   │   │       ├── pulley-interpreter feature "disas"
-        │   │   │       │   ├── pulley-interpreter v42.0.0 (*)
-        │   │   │       │   └── pulley-interpreter feature "decode"
-        │   │   │       │       └── pulley-interpreter v42.0.0 (*)
-        │   │   │       ├── pulley-interpreter feature "encode"
-        │   │   │       │   └── pulley-interpreter v42.0.0 (*)
-        │   │   │       ├── cranelift-codegen feature "pulley-interpreter"
-        │   │   │       │   └── cranelift-codegen v0.129.0 (*)
-        │   │   │       └── cranelift-codegen-meta feature "pulley"
-        │   │   │           └── cranelift-codegen-meta v0.129.0 (*)
-        │   │   ├── wasmtime-internal-unwinder feature "default" (*)
-        │   │   ├── wasmtime-internal-versioned-export-macros feature "default" (*)
-        │   │   └── wasmtime-internal-jit-icache-coherence feature "default"
-        │   │       └── wasmtime-internal-jit-icache-coherence v42.0.0
-        │   │           ├── libc feature "default" (*)
-        │   │           ├── cfg-if feature "default" (*)
-        │   │           └── wasmtime-internal-core feature "default" (*)
-        │   │   [build-dependencies]
-        │   │   ├── cc feature "default" (*)
-        │   │   └── wasmtime-internal-versioned-export-macros feature "default" (*)
-        │   ├── wasmtime feature "std"
-        │   │   ├── wasmtime v42.0.0 (*)
-        │   │   ├── wasmtime feature "once_cell"
-        │   │   │   └── wasmtime v42.0.0 (*)
-        │   │   ├── wasmtime feature "wasmtime-jit-icache-coherence"
-        │   │   │   └── wasmtime v42.0.0 (*)
-        │   │   ├── object feature "std" (*)
-        │   │   ├── postcard feature "use-std"
-        │   │   │   ├── postcard v1.1.3 (*)
-        │   │   │   ├── serde feature "std" (*)
-        │   │   │   └── postcard feature "alloc" (*)
-        │   │   ├── pulley-interpreter feature "std"
-        │   │   │   ├── pulley-interpreter v42.0.0 (*)
-        │   │   │   └── wasmtime-internal-core feature "std" (*)
-        │   │   ├── wasmtime-internal-core feature "std" (*)
-        │   │   └── wasmtime-environ feature "std" (*)
-        │   ├── wasmtime feature "wasmtime-unwinder"
-        │   │   └── wasmtime v42.0.0 (*)
-        │   └── wasmtime-internal-unwinder feature "cranelift" (*)
-        ├── wasmtime feature "runtime"
-        │   ├── wasmtime v42.0.0 (*)
-        │   └── pulley-interpreter feature "interp"
-        │       ├── pulley-interpreter v42.0.0 (*)
-        │       ├── pulley-interpreter feature "decode" (*)
-        │       └── pulley-interpreter feature "encode" (*)
-        └── wasmtime feature "std" (*)
-        [dev-dependencies]
-        └── wat feature "default"
-            ├── wat v1.244.0
-            │   └── wast feature "wasm-module"
-            │       └── wast v244.0.0
-            │           ├── leb128fmt v0.1.0
-            │           ├── memchr feature "default" (*)
-            │           ├── bumpalo feature "default" (*)
-            │           ├── wasm-encoder feature "std" (*)
-            │           └── unicode-width feature "default"
-            │               ├── unicode-width v0.2.2
-            │               └── unicode-width feature "cjk"
-            │                   └── unicode-width v0.2.2
-            └── wat feature "component-model"
-                ├── wat v1.244.0 (*)
-                └── wast feature "component-model"
-                    ├── wast v244.0.0 (*)
-                    ├── wasm-encoder feature "component-model" (*)
-                    └── wast feature "wasm-module" (*)
+├── insight-platform-sandbox-gvisor feature "default" (command-line)
+│   └── insight-platform-sandbox-gvisor v0.1.0 (<workspace>/crates/platform-sandbox-gvisor)
+│       ├── async-trait feature "default" (*)
+│       ├── tokio feature "default" (*)
+│       ├── tokio feature "fs" (*)
+│       ├── tokio feature "io-util" (*)
+│       ├── tokio feature "macros" (*)
+│       ├── tokio feature "net" (*)
+│       ├── tokio feature "process" (*)
+│       ├── tokio feature "rt-multi-thread" (*)
+│       ├── tokio feature "signal" (*)
+│       ├── tokio feature "sync" (*)
+│       ├── tokio feature "test-util" (*)
+│       ├── tokio feature "time" (*)
+│       ├── serde feature "default" (*)
+│       ├── serde feature "derive" (*)
+│       ├── sha2 feature "default" (*)
+│       ├── serde_json feature "default" (*)
+│       └── insight-platform-contracts feature "default" (command-line) (*)
+│       [dev-dependencies]
+│       ├── uuid feature "default" (*)
+│       ├── uuid feature "serde" (*)
+│       ├── uuid feature "v4" (*)
+│       ├── uuid feature "v7" (*)
+│       └── tempfile feature "default" (*)
+├── insight-platform-sandbox-wasi feature "default" (command-line)
+│   └── insight-platform-sandbox-wasi v0.1.0 (<workspace>/crates/platform-sandbox-wasi)
+│       ├── async-trait feature "default" (*)
+│       ├── tokio feature "default" (*)
+│       ├── tokio feature "fs" (*)
+│       ├── tokio feature "io-util" (*)
+│       ├── tokio feature "macros" (*)
+│       ├── tokio feature "net" (*)
+│       ├── tokio feature "process" (*)
+│       ├── tokio feature "rt-multi-thread" (*)
+│       ├── tokio feature "signal" (*)
+│       ├── tokio feature "sync" (*)
+│       ├── tokio feature "test-util" (*)
+│       ├── tokio feature "time" (*)
+│       ├── serde feature "default" (*)
+│       ├── serde feature "derive" (*)
+│       ├── sha2 feature "default" (*)
+│       ├── serde_json feature "default" (*)
+│       ├── chrono feature "default" (*)
+│       ├── chrono feature "serde" (*)
+│       ├── insight-platform-contracts feature "default" (command-line) (*)
+│       ├── insight-platform-sandbox feature "default" (command-line) (*)
+│       ├── wasmtime feature "cranelift"
+│       │   ├── wasmtime v42.0.0
+│       │   │   ├── log v0.4.33
+│       │   │   ├── async-trait feature "default" (*)
+│       │   │   ├── serde feature "alloc" (*)
+│       │   │   ├── serde_derive feature "default" (*)
+│       │   │   ├── libc feature "default" (*)
+│       │   │   ├── once_cell feature "default" (*)
+│       │   │   ├── cfg-if feature "default" (*)
+│       │   │   ├── smallvec feature "default" (*)
+│       │   │   ├── smallvec feature "union"
+│       │   │   │   └── smallvec v1.15.2 (*)
+│       │   │   ├── bitflags feature "default" (*)
+│       │   │   ├── rustix feature "default" (*)
+│       │   │   ├── rustix feature "mm"
+│       │   │   │   └── rustix v1.1.4 (*)
+│       │   │   ├── rustix feature "param"
+│       │   │   │   └── rustix v1.1.4 (*)
+│       │   │   ├── bumpalo feature "default"
+│       │   │   │   └── bumpalo v3.20.3
+│       │   │   │       └── allocator-api2 v0.2.21
+│       │   │   ├── mach2 feature "default"
+│       │   │   │   └── mach2 v0.4.3
+│       │   │   │       └── libc v0.2.186
+│       │   │   ├── object feature "elf"
+│       │   │   │   └── object v0.37.3
+│       │   │   │       ├── crc32fast v1.5.0 (*)
+│       │   │   │       ├── indexmap v2.14.0 (*)
+│       │   │   │       ├── memchr v2.8.2
+│       │   │   │       └── hashbrown feature "default-hasher"
+│       │   │   │           └── hashbrown v0.15.5
+│       │   │   │               └── foldhash v0.1.5
+│       │   │   ├── object feature "read_core"
+│       │   │   │   └── object v0.37.3 (*)
+│       │   │   ├── object feature "unaligned"
+│       │   │   │   └── object v0.37.3 (*)
+│       │   │   ├── postcard feature "alloc"
+│       │   │   │   ├── postcard v1.1.3
+│       │   │   │   │   ├── cobs v0.3.0
+│       │   │   │   │   │   └── thiserror v2.0.18 (*)
+│       │   │   │   │   └── serde feature "derive" (*)
+│       │   │   │   └── serde feature "alloc" (*)
+│       │   │   ├── pulley-interpreter feature "default"
+│       │   │   │   └── pulley-interpreter v42.0.0
+│       │   │   │       ├── log v0.4.33
+│       │   │   │       ├── cranelift-bitset feature "default"
+│       │   │   │       │   └── cranelift-bitset v0.129.0
+│       │   │   │       │       ├── serde feature "alloc" (*)
+│       │   │   │       │       ├── serde_derive feature "default" (*)
+│       │   │   │       │       └── wasmtime-internal-core feature "default"
+│       │   │   │       │           └── wasmtime-internal-core v42.0.0
+│       │   │   │       │               └── libm feature "default"
+│       │   │   │       │                   ├── libm v0.2.16
+│       │   │   │       │                   └── libm feature "arch"
+│       │   │   │       │                       └── libm v0.2.16
+│       │   │   │       ├── wasmtime-internal-core feature "default" (*)
+│       │   │   │       └── pulley-macros feature "default"
+│       │   │   │           └── pulley-macros v42.0.0 (proc-macro)
+│       │   │   │               ├── proc-macro2 feature "default" (*)
+│       │   │   │               ├── quote feature "default" (*)
+│       │   │   │               ├── syn feature "default" (*)
+│       │   │   │               └── syn feature "full" (*)
+│       │   │   ├── wasmtime-internal-core feature "default" (*)
+│       │   │   ├── target-lexicon feature "default"
+│       │   │   │   └── target-lexicon v0.13.5
+│       │   │   ├── wasmparser feature "simd"
+│       │   │   │   └── wasmparser v0.244.0
+│       │   │   │       ├── semver v1.0.28
+│       │   │   │       ├── serde feature "alloc" (*)
+│       │   │   │       └── bitflags feature "default" (*)
+│       │   │   ├── wasmtime-environ feature "default"
+│       │   │   │   └── wasmtime-environ v42.0.0
+│       │   │   │       ├── anyhow v1.0.104
+│       │   │   │       ├── log v0.4.33
+│       │   │   │       ├── serde feature "alloc" (*)
+│       │   │   │       ├── serde_derive feature "default" (*)
+│       │   │   │       ├── indexmap feature "serde"
+│       │   │   │       │   └── indexmap v2.14.0 (*)
+│       │   │   │       ├── smallvec feature "default" (*)
+│       │   │   │       ├── smallvec feature "serde" (*)
+│       │   │   │       ├── smallvec feature "union" (*)
+│       │   │   │       ├── object feature "elf" (*)
+│       │   │   │       ├── object feature "read_core" (*)
+│       │   │   │       ├── hashbrown feature "default-hasher" (*)
+│       │   │   │       ├── postcard feature "alloc" (*)
+│       │   │   │       ├── cranelift-bitset feature "default" (*)
+│       │   │   │       ├── cranelift-bitset feature "enable-serde"
+│       │   │   │       │   └── cranelift-bitset v0.129.0 (*)
+│       │   │   │       ├── wasmtime-internal-core feature "default" (*)
+│       │   │   │       ├── target-lexicon feature "default" (*)
+│       │   │   │       ├── wasmparser feature "features"
+│       │   │   │       │   └── wasmparser v0.244.0 (*)
+│       │   │   │       ├── wasmparser feature "serde"
+│       │   │   │       │   └── wasmparser v0.244.0 (*)
+│       │   │   │       ├── wasmparser feature "simd" (*)
+│       │   │   │       ├── wasmparser feature "validate"
+│       │   │   │       │   └── wasmparser v0.244.0 (*)
+│       │   │   │       ├── cranelift-entity feature "default"
+│       │   │   │       │   └── cranelift-entity v0.129.0
+│       │   │   │       │       ├── serde feature "alloc" (*)
+│       │   │   │       │       ├── serde_derive feature "default" (*)
+│       │   │   │       │       ├── cranelift-bitset feature "default" (*)
+│       │   │   │       │       └── wasmtime-internal-core feature "default" (*)
+│       │   │   │       ├── cranelift-entity feature "enable-serde"
+│       │   │   │       │   ├── cranelift-entity v0.129.0 (*)
+│       │   │   │       │   ├── cranelift-bitset feature "enable-serde" (*)
+│       │   │   │       │   ├── cranelift-entity feature "serde"
+│       │   │   │       │   │   └── cranelift-entity v0.129.0 (*)
+│       │   │   │       │   └── cranelift-entity feature "serde_derive"
+│       │   │   │       │       └── cranelift-entity v0.129.0 (*)
+│       │   │   │       ├── gimli feature "read"
+│       │   │   │       │   ├── gimli v0.33.0
+│       │   │   │       │   │   ├── fnv v1.0.7
+│       │   │   │       │   │   ├── hashbrown v0.16.1 (*)
+│       │   │   │       │   │   └── indexmap v2.14.0 (*)
+│       │   │   │       │   └── gimli feature "read-core"
+│       │   │   │       │       └── gimli v0.33.0 (*)
+│       │   │   │       ├── wasm-encoder feature "default"
+│       │   │   │       │   ├── wasm-encoder v0.244.0
+│       │   │   │       │   │   └── leb128fmt v0.1.0
+│       │   │   │       │   ├── wasm-encoder feature "component-model"
+│       │   │   │       │   │   └── wasm-encoder v0.244.0 (*)
+│       │   │   │       │   └── wasm-encoder feature "std"
+│       │   │   │       │       └── wasm-encoder v0.244.0 (*)
+│       │   │   │       └── wasmprinter feature "default"
+│       │   │   │           ├── wasmprinter v0.244.0
+│       │   │   │           │   ├── anyhow feature "default" (*)
+│       │   │   │           │   ├── wasmparser feature "simd" (*)
+│       │   │   │           │   ├── wasmparser feature "std"
+│       │   │   │           │   │   └── wasmparser v0.244.0 (*)
+│       │   │   │           │   └── termcolor feature "default"
+│       │   │   │           │       └── termcolor v1.4.1
+│       │   │   │           ├── wasmprinter feature "component-model"
+│       │   │   │           │   ├── wasmprinter v0.244.0 (*)
+│       │   │   │           │   └── wasmparser feature "component-model"
+│       │   │   │           │       └── wasmparser v0.244.0 (*)
+│       │   │   │           └── wasmprinter feature "validate"
+│       │   │   │               ├── wasmprinter v0.244.0 (*)
+│       │   │   │               ├── wasmparser feature "features" (*)
+│       │   │   │               └── wasmparser feature "validate" (*)
+│       │   │   ├── wasmtime-internal-cranelift feature "default"
+│       │   │   │   └── wasmtime-internal-cranelift v42.0.0
+│       │   │   │       ├── cranelift-control v0.129.2
+│       │   │   │       │   └── arbitrary feature "default"
+│       │   │   │       │       └── arbitrary v1.4.2
+│       │   │   │       ├── log v0.4.33
+│       │   │   │       ├── cfg-if feature "default" (*)
+│       │   │   │       ├── smallvec feature "default" (*)
+│       │   │   │       ├── smallvec feature "union" (*)
+│       │   │   │       ├── thiserror feature "default" (*)
+│       │   │   │       ├── itertools feature "default" (*)
+│       │   │   │       ├── object feature "elf" (*)
+│       │   │   │       ├── object feature "read_core" (*)
+│       │   │   │       ├── object feature "std"
+│       │   │   │       │   ├── object v0.37.3 (*)
+│       │   │   │       │   └── memchr feature "std" (*)
+│       │   │   │       ├── object feature "write"
+│       │   │   │       │   ├── object v0.37.3 (*)
+│       │   │   │       │   ├── object feature "coff"
+│       │   │   │       │   │   └── object v0.37.3 (*)
+│       │   │   │       │   ├── object feature "elf" (*)
+│       │   │   │       │   ├── object feature "macho"
+│       │   │   │       │   │   └── object v0.37.3 (*)
+│       │   │   │       │   ├── object feature "pe"
+│       │   │   │       │   │   ├── object v0.37.3 (*)
+│       │   │   │       │   │   └── object feature "coff" (*)
+│       │   │   │       │   ├── object feature "write_std"
+│       │   │   │       │   │   ├── object v0.37.3 (*)
+│       │   │   │       │   │   ├── crc32fast feature "std" (*)
+│       │   │   │       │   │   ├── indexmap feature "std" (*)
+│       │   │   │       │   │   ├── object feature "std" (*)
+│       │   │   │       │   │   └── object feature "write_core"
+│       │   │   │       │   │       └── object v0.37.3 (*)
+│       │   │   │       │   └── object feature "xcoff"
+│       │   │   │       │       └── object v0.37.3 (*)
+│       │   │   │       ├── pulley-interpreter feature "default" (*)
+│       │   │   │       ├── wasmtime-internal-core feature "default" (*)
+│       │   │   │       ├── target-lexicon feature "default" (*)
+│       │   │   │       ├── wasmparser feature "simd" (*)
+│       │   │   │       ├── wasmtime-environ feature "compile"
+│       │   │   │       │   ├── wasmtime-environ v42.0.0 (*)
+│       │   │   │       │   ├── object feature "write_core" (*)
+│       │   │   │       │   ├── wasmtime-environ feature "std"
+│       │   │   │       │   │   ├── wasmtime-environ v42.0.0 (*)
+│       │   │   │       │   │   ├── indexmap feature "std" (*)
+│       │   │   │       │   │   ├── anyhow feature "std" (*)
+│       │   │   │       │   │   ├── object feature "std" (*)
+│       │   │   │       │   │   ├── wasmtime-internal-core feature "std"
+│       │   │   │       │   │   │   └── wasmtime-internal-core v42.0.0 (*)
+│       │   │   │       │   │   └── wasmparser feature "std" (*)
+│       │   │   │       │   └── gimli feature "write"
+│       │   │   │       │       └── gimli v0.33.0 (*)
+│       │   │   │       ├── wasmtime-environ feature "default" (*)
+│       │   │   │       ├── cranelift-entity feature "default" (*)
+│       │   │   │       ├── gimli feature "read" (*)
+│       │   │   │       ├── gimli feature "std"
+│       │   │   │       │   └── gimli v0.33.0 (*)
+│       │   │   │       ├── cranelift-codegen feature "host-arch"
+│       │   │   │       │   └── cranelift-codegen v0.129.0
+│       │   │   │       │       ├── cranelift-control v0.129.2 (*)
+│       │   │   │       │       ├── log v0.4.33
+│       │   │   │       │       ├── rustc-hash v2.1.3
+│       │   │   │       │       ├── smallvec feature "default" (*)
+│       │   │   │       │       ├── smallvec feature "union" (*)
+│       │   │   │       │       ├── bumpalo feature "default" (*)
+│       │   │   │       │       ├── hashbrown feature "default-hasher" (*)
+│       │   │   │       │       ├── pulley-interpreter feature "default" (*)
+│       │   │   │       │       ├── cranelift-bitset feature "default" (*)
+│       │   │   │       │       ├── wasmtime-internal-core feature "default" (*)
+│       │   │   │       │       ├── libm feature "default" (*)
+│       │   │   │       │       ├── target-lexicon feature "default" (*)
+│       │   │   │       │       ├── cranelift-entity feature "default" (*)
+│       │   │   │       │       ├── gimli feature "read" (*)
+│       │   │   │       │       ├── gimli feature "write" (*)
+│       │   │   │       │       ├── cranelift-assembler-x64 feature "default"
+│       │   │   │       │       │   └── cranelift-assembler-x64 v0.129.2
+│       │   │   │       │       │       [build-dependencies]
+│       │   │   │       │       │       └── cranelift-assembler-x64-meta feature "default"
+│       │   │   │       │       │           └── cranelift-assembler-x64-meta v0.129.2
+│       │   │   │       │       │               └── cranelift-srcgen feature "default"
+│       │   │   │       │       │                   └── cranelift-srcgen v0.129.2
+│       │   │   │       │       ├── cranelift-bforest feature "default"
+│       │   │   │       │       │   └── cranelift-bforest v0.129.0
+│       │   │   │       │       │       └── cranelift-entity feature "default" (*)
+│       │   │   │       │       ├── cranelift-codegen-shared feature "default"
+│       │   │   │       │       │   └── cranelift-codegen-shared v0.129.2
+│       │   │   │       │       ├── regalloc2 feature "checker"
+│       │   │   │       │       │   └── regalloc2 v0.13.5
+│       │   │   │       │       │       ├── hashbrown v0.15.5 (*)
+│       │   │   │       │       │       ├── log v0.4.33
+│       │   │   │       │       │       ├── rustc-hash v2.1.3
+│       │   │   │       │       │       ├── allocator-api2 feature "alloc" (*)
+│       │   │   │       │       │       ├── smallvec feature "default" (*)
+│       │   │   │       │       │       ├── smallvec feature "union" (*)
+│       │   │   │       │       │       ├── bumpalo feature "allocator-api2"
+│       │   │   │       │       │       │   └── bumpalo v3.20.3 (*)
+│       │   │   │       │       │       └── bumpalo feature "default" (*)
+│       │   │   │       │       └── regalloc2 feature "default"
+│       │   │   │       │           ├── regalloc2 v0.13.5 (*)
+│       │   │   │       │           └── regalloc2 feature "std"
+│       │   │   │       │               └── regalloc2 v0.13.5 (*)
+│       │   │   │       │       [build-dependencies]
+│       │   │   │       │       ├── cranelift-codegen-meta feature "default"
+│       │   │   │       │       │   └── cranelift-codegen-meta v0.129.0
+│       │   │   │       │       │       ├── heck feature "default" (*)
+│       │   │   │       │       │       ├── cranelift-assembler-x64-meta feature "default" (*)
+│       │   │   │       │       │       ├── cranelift-srcgen feature "default" (*)
+│       │   │   │       │       │       ├── cranelift-codegen-shared feature "default" (*)
+│       │   │   │       │       │       └── pulley-interpreter feature "default"
+│       │   │   │       │       │           └── pulley-interpreter v42.0.0
+│       │   │   │       │       │               ├── log v0.4.33
+│       │   │   │       │       │               ├── pulley-macros feature "default" (*)
+│       │   │   │       │       │               └── cranelift-bitset feature "default"
+│       │   │   │       │       │                   └── cranelift-bitset v0.129.0
+│       │   │   │       │       │                       └── wasmtime-internal-core feature "default"
+│       │   │   │       │       │                           └── wasmtime-internal-core v42.0.0
+│       │   │   │       │       │                               └── libm feature "default" (*)
+│       │   │   │       │       └── cranelift-isle feature "default"
+│       │   │   │       │           └── cranelift-isle v0.129.0
+│       │   │   │       ├── cranelift-codegen feature "std"
+│       │   │   │       │   ├── cranelift-codegen v0.129.0 (*)
+│       │   │   │       │   ├── gimli feature "std" (*)
+│       │   │   │       │   ├── cranelift-codegen feature "gimli"
+│       │   │   │       │   │   └── cranelift-codegen v0.129.0 (*)
+│       │   │   │       │   ├── cranelift-control feature "fuzz"
+│       │   │   │       │   │   └── cranelift-control v0.129.2 (*)
+│       │   │   │       │   └── rustc-hash feature "std"
+│       │   │   │       │       └── rustc-hash v2.1.3
+│       │   │   │       ├── cranelift-codegen feature "timing"
+│       │   │   │       │   └── cranelift-codegen v0.129.0 (*)
+│       │   │   │       ├── cranelift-codegen feature "unwind"
+│       │   │   │       │   ├── cranelift-codegen v0.129.0 (*)
+│       │   │   │       │   └── cranelift-codegen feature "gimli" (*)
+│       │   │   │       ├── cranelift-frontend feature "default"
+│       │   │   │       │   ├── cranelift-frontend v0.129.0
+│       │   │   │       │   │   ├── log v0.4.33
+│       │   │   │       │   │   ├── smallvec feature "default" (*)
+│       │   │   │       │   │   ├── smallvec feature "union" (*)
+│       │   │   │       │   │   ├── target-lexicon feature "default" (*)
+│       │   │   │       │   │   ├── cranelift-codegen feature "std" (*)
+│       │   │   │       │   │   └── cranelift-codegen feature "unwind" (*)
+│       │   │   │       │   └── cranelift-frontend feature "std"
+│       │   │   │       │       ├── cranelift-frontend v0.129.0 (*)
+│       │   │   │       │       └── cranelift-codegen feature "std" (*)
+│       │   │   │       ├── cranelift-native feature "default"
+│       │   │   │       │   ├── cranelift-native v0.129.0
+│       │   │   │       │   │   ├── target-lexicon feature "default" (*)
+│       │   │   │       │   │   ├── cranelift-codegen feature "std" (*)
+│       │   │   │       │   │   └── cranelift-codegen feature "unwind" (*)
+│       │   │   │       │   └── cranelift-native feature "std"
+│       │   │   │       │       ├── cranelift-native v0.129.0 (*)
+│       │   │   │       │       └── cranelift-codegen feature "std" (*)
+│       │   │   │       ├── wasmtime-internal-unwinder feature "cranelift"
+│       │   │   │       │   └── wasmtime-internal-unwinder v42.0.0
+│       │   │   │       │       ├── log v0.4.33
+│       │   │   │       │       ├── cfg-if feature "default" (*)
+│       │   │   │       │       ├── object feature "elf" (*)
+│       │   │   │       │       ├── object feature "read_core" (*)
+│       │   │   │       │       ├── wasmtime-environ feature "default" (*)
+│       │   │   │       │       ├── cranelift-codegen feature "std" (*)
+│       │   │   │       │       └── cranelift-codegen feature "unwind" (*)
+│       │   │   │       ├── wasmtime-internal-unwinder feature "default"
+│       │   │   │       │   └── wasmtime-internal-unwinder v42.0.0 (*)
+│       │   │   │       └── wasmtime-internal-versioned-export-macros feature "default"
+│       │   │   │           └── wasmtime-internal-versioned-export-macros v42.0.0 (proc-macro)
+│       │   │   │               ├── proc-macro2 feature "default" (*)
+│       │   │   │               ├── quote feature "default" (*)
+│       │   │   │               ├── syn feature "default" (*)
+│       │   │   │               └── syn feature "full" (*)
+│       │   │   ├── wasmtime-internal-cranelift feature "pulley"
+│       │   │   │   ├── wasmtime-internal-cranelift v42.0.0 (*)
+│       │   │   │   └── cranelift-codegen feature "pulley"
+│       │   │   │       ├── cranelift-codegen v0.129.0 (*)
+│       │   │   │       ├── pulley-interpreter feature "disas"
+│       │   │   │       │   ├── pulley-interpreter v42.0.0 (*)
+│       │   │   │       │   └── pulley-interpreter feature "decode"
+│       │   │   │       │       └── pulley-interpreter v42.0.0 (*)
+│       │   │   │       ├── pulley-interpreter feature "encode"
+│       │   │   │       │   └── pulley-interpreter v42.0.0 (*)
+│       │   │   │       ├── cranelift-codegen feature "pulley-interpreter"
+│       │   │   │       │   └── cranelift-codegen v0.129.0 (*)
+│       │   │   │       └── cranelift-codegen-meta feature "pulley"
+│       │   │   │           └── cranelift-codegen-meta v0.129.0 (*)
+│       │   │   ├── wasmtime-internal-unwinder feature "default" (*)
+│       │   │   ├── wasmtime-internal-versioned-export-macros feature "default" (*)
+│       │   │   └── wasmtime-internal-jit-icache-coherence feature "default"
+│       │   │       └── wasmtime-internal-jit-icache-coherence v42.0.0
+│       │   │           ├── libc feature "default" (*)
+│       │   │           ├── cfg-if feature "default" (*)
+│       │   │           └── wasmtime-internal-core feature "default" (*)
+│       │   │   [build-dependencies]
+│       │   │   ├── cc feature "default" (*)
+│       │   │   └── wasmtime-internal-versioned-export-macros feature "default" (*)
+│       │   ├── wasmtime feature "std"
+│       │   │   ├── wasmtime v42.0.0 (*)
+│       │   │   ├── wasmtime feature "once_cell"
+│       │   │   │   └── wasmtime v42.0.0 (*)
+│       │   │   ├── wasmtime feature "wasmtime-jit-icache-coherence"
+│       │   │   │   └── wasmtime v42.0.0 (*)
+│       │   │   ├── object feature "std" (*)
+│       │   │   ├── postcard feature "use-std"
+│       │   │   │   ├── postcard v1.1.3 (*)
+│       │   │   │   ├── serde feature "std" (*)
+│       │   │   │   └── postcard feature "alloc" (*)
+│       │   │   ├── pulley-interpreter feature "std"
+│       │   │   │   ├── pulley-interpreter v42.0.0 (*)
+│       │   │   │   └── wasmtime-internal-core feature "std" (*)
+│       │   │   ├── wasmtime-internal-core feature "std" (*)
+│       │   │   └── wasmtime-environ feature "std" (*)
+│       │   ├── wasmtime feature "wasmtime-unwinder"
+│       │   │   └── wasmtime v42.0.0 (*)
+│       │   └── wasmtime-internal-unwinder feature "cranelift" (*)
+│       ├── wasmtime feature "runtime"
+│       │   ├── wasmtime v42.0.0 (*)
+│       │   └── pulley-interpreter feature "interp"
+│       │       ├── pulley-interpreter v42.0.0 (*)
+│       │       ├── pulley-interpreter feature "decode" (*)
+│       │       └── pulley-interpreter feature "encode" (*)
+│       └── wasmtime feature "std" (*)
+│       [dev-dependencies]
+│       └── wat feature "default"
+│           ├── wat v1.244.0
+│           │   └── wast feature "wasm-module"
+│           │       └── wast v244.0.0
+│           │           ├── leb128fmt v0.1.0
+│           │           ├── memchr feature "default" (*)
+│           │           ├── bumpalo feature "default" (*)
+│           │           ├── wasm-encoder feature "std" (*)
+│           │           └── unicode-width feature "default"
+│           │               ├── unicode-width v0.2.2
+│           │               └── unicode-width feature "cjk"
+│           │                   └── unicode-width v0.2.2
+│           └── wat feature "component-model"
+│               ├── wat v1.244.0 (*)
+│               └── wast feature "component-model"
+│                   ├── wast v244.0.0 (*)
+│                   ├── wasm-encoder feature "component-model" (*)
+│                   └── wast feature "wasm-module" (*)
+├── k8s-openapi feature "default"
+│   ├── k8s-openapi v0.28.0
+│   │   ├── serde v1.0.228 (*)
+│   │   ├── base64 feature "alloc" (*)
+│   │   ├── serde_json feature "alloc"
+│   │   │   ├── serde_json v1.0.150 (*)
+│   │   │   └── serde_core feature "alloc" (*)
+│   │   ├── jiff feature "alloc"
+│   │   │   ├── jiff v0.2.35
+│   │   │   │   ├── jiff-core v0.1.0
+│   │   │   │   └── serde_core v1.0.228
+│   │   │   ├── serde_core feature "alloc" (*)
+│   │   │   └── jiff-core feature "alloc"
+│   │   │       └── jiff-core v0.1.0
+│   │   └── jiff feature "serde"
+│   │       └── jiff v0.2.35 (*)
+│   └── k8s-openapi feature "std"
+│       └── k8s-openapi v0.28.0 (*)
+├── k8s-openapi feature "v1_34"
+│   └── k8s-openapi v0.28.0 (*)
+├── kube feature "aws-lc-rs"
+│   ├── kube v4.2.0
+│   │   ├── k8s-openapi v0.28.0 (*)
+│   │   ├── kube-client v4.2.0
+│   │   │   ├── k8s-openapi v0.28.0 (*)
+│   │   │   ├── rustls v0.23.41 (*)
+│   │   │   ├── tokio feature "default" (*)
+│   │   │   ├── tokio feature "rt" (*)
+│   │   │   ├── tokio feature "signal" (*)
+│   │   │   ├── tokio feature "sync" (*)
+│   │   │   ├── tokio feature "time" (*)
+│   │   │   ├── bytes feature "default" (*)
+│   │   │   ├── serde feature "default" (*)
+│   │   │   ├── serde feature "derive" (*)
+│   │   │   ├── either feature "default" (*)
+│   │   │   ├── http feature "default" (*)
+│   │   │   ├── http-body feature "default" (*)
+│   │   │   ├── http-body-util feature "default" (*)
+│   │   │   ├── tokio-util feature "codec" (*)
+│   │   │   ├── tokio-util feature "default" (*)
+│   │   │   ├── tokio-util feature "io" (*)
+│   │   │   ├── tracing feature "default" (*)
+│   │   │   ├── tracing feature "log" (*)
+│   │   │   ├── hyper feature "client" (*)
+│   │   │   ├── hyper feature "default" (*)
+│   │   │   ├── hyper feature "http1" (*)
+│   │   │   ├── hyper-rustls feature "http1" (*)
+│   │   │   ├── hyper-rustls feature "logging"
+│   │   │   │   ├── hyper-rustls v0.27.9 (*)
+│   │   │   │   ├── hyper-rustls feature "log"
+│   │   │   │   │   └── hyper-rustls v0.27.9 (*)
+│   │   │   │   ├── rustls feature "logging" (*)
+│   │   │   │   └── tokio-rustls feature "logging" (*)
+│   │   │   ├── hyper-rustls feature "native-tokio" (*)
+│   │   │   ├── hyper-rustls feature "tls12" (*)
+│   │   │   ├── hyper-util feature "client" (*)
+│   │   │   ├── hyper-util feature "client-legacy" (*)
+│   │   │   ├── hyper-util feature "default" (*)
+│   │   │   ├── hyper-util feature "http1" (*)
+│   │   │   ├── hyper-util feature "tokio" (*)
+│   │   │   ├── base64 feature "default" (*)
+│   │   │   ├── tower feature "buffer" (*)
+│   │   │   ├── tower feature "default" (*)
+│   │   │   ├── tower feature "filter"
+│   │   │   │   ├── tower v0.5.3 (*)
+│   │   │   │   ├── tower feature "futures-util" (*)
+│   │   │   │   └── tower feature "pin-project-lite" (*)
+│   │   │   ├── tower feature "retry" (*)
+│   │   │   ├── tower feature "util" (*)
+│   │   │   ├── serde_json feature "default" (*)
+│   │   │   ├── futures feature "std" (*)
+│   │   │   ├── thiserror feature "default" (*)
+│   │   │   ├── rustls-platform-verifier feature "default" (*)
+│   │   │   ├── tower-http feature "auth"
+│   │   │   │   ├── tower-http v0.6.11 (*)
+│   │   │   │   ├── tower-http feature "base64"
+│   │   │   │   │   └── tower-http v0.6.11 (*)
+│   │   │   │   └── tower-http feature "validate-request"
+│   │   │   │       ├── tower-http v0.6.11 (*)
+│   │   │   │       └── tower-http feature "mime"
+│   │   │   │           └── tower-http v0.6.11 (*)
+│   │   │   ├── tower-http feature "default"
+│   │   │   │   └── tower-http v0.6.11 (*)
+│   │   │   ├── tower-http feature "map-response-body"
+│   │   │   │   └── tower-http v0.6.11 (*)
+│   │   │   ├── tower-http feature "trace"
+│   │   │   │   ├── tower-http v0.6.11 (*)
+│   │   │   │   └── tower-http feature "tracing"
+│   │   │   │       └── tower-http v0.6.11 (*)
+│   │   │   ├── tower-http feature "util"
+│   │   │   │   ├── tower-http v0.6.11 (*)
+│   │   │   │   └── tower-http feature "tower" (*)
+│   │   │   ├── pem feature "default" (*)
+│   │   │   ├── hyper-timeout feature "default" (*)
+│   │   │   ├── jiff feature "serde" (*)
+│   │   │   ├── jiff feature "std"
+│   │   │   │   ├── jiff v0.2.35 (*)
+│   │   │   │   ├── serde_core feature "std" (*)
+│   │   │   │   ├── jiff feature "alloc" (*)
+│   │   │   │   └── jiff-core feature "std"
+│   │   │   │       ├── jiff-core v0.1.0
+│   │   │   │       └── jiff-core feature "alloc" (*)
+│   │   │   ├── jsonpath-rust feature "default"
+│   │   │   │   └── jsonpath-rust v1.0.8
+│   │   │   │       ├── serde_json feature "default" (*)
+│   │   │   │       ├── regex feature "default" (*)
+│   │   │   │       ├── pest feature "default" (*)
+│   │   │   │       ├── pest_derive feature "default" (*)
+│   │   │   │       └── thiserror feature "default" (*)
+│   │   │   ├── kube-core feature "default"
+│   │   │   │   └── kube-core v4.2.0
+│   │   │   │       ├── k8s-openapi v0.28.0 (*)
+│   │   │   │       ├── serde feature "default" (*)
+│   │   │   │       ├── serde feature "derive" (*)
+│   │   │   │       ├── http feature "default" (*)
+│   │   │   │       ├── form_urlencoded feature "default" (*)
+│   │   │   │       ├── serde_json feature "default" (*)
+│   │   │   │       ├── thiserror feature "default" (*)
+│   │   │   │       ├── jiff feature "std" (*)
+│   │   │   │       ├── derive_more feature "default"
+│   │   │   │       │   ├── derive_more v2.1.1
+│   │   │   │       │   │   └── derive_more-impl feature "default"
+│   │   │   │       │   │       └── derive_more-impl v2.1.1 (proc-macro)
+│   │   │   │       │   │           ├── proc-macro2 feature "default" (*)
+│   │   │   │       │   │           ├── quote feature "default" (*)
+│   │   │   │       │   │           └── syn feature "default" (*)
+│   │   │   │       │   │           [build-dependencies]
+│   │   │   │       │   │           └── rustc_version feature "default" (*)
+│   │   │   │       │   └── derive_more feature "std"
+│   │   │   │       │       └── derive_more v2.1.1 (*)
+│   │   │   │       ├── derive_more feature "from"
+│   │   │   │       │   ├── derive_more v2.1.1 (*)
+│   │   │   │       │   └── derive_more-impl feature "from"
+│   │   │   │       │       ├── derive_more-impl v2.1.1 (proc-macro) (*)
+│   │   │   │       │       └── syn feature "extra-traits" (*)
+│   │   │   │       └── serde-value feature "default"
+│   │   │   │           └── serde-value v0.7.0
+│   │   │   │               ├── serde feature "default" (*)
+│   │   │   │               └── ordered-float feature "default"
+│   │   │   │                   ├── ordered-float v2.10.1
+│   │   │   │                   │   └── num-traits v0.2.19 (*)
+│   │   │   │                   └── ordered-float feature "std"
+│   │   │   │                       ├── ordered-float v2.10.1 (*)
+│   │   │   │                       └── num-traits feature "std" (*)
+│   │   │   ├── secrecy feature "default"
+│   │   │   │   └── secrecy v0.10.3
+│   │   │   │       └── zeroize feature "alloc" (*)
+│   │   │   └── serde-saphyr feature "default"
+│   │   │       ├── serde-saphyr v0.0.29
+│   │   │       │   ├── serde_core feature "default" (*)
+│   │   │       │   ├── num-traits feature "default" (*)
+│   │   │       │   ├── smallvec feature "default" (*)
+│   │   │       │   ├── base64 feature "default" (*)
+│   │   │       │   ├── zmij feature "default" (*)
+│   │   │       │   ├── ahash feature "default" (*)
+│   │   │       │   ├── annotate-snippets feature "default"
+│   │   │       │   │   ├── annotate-snippets v0.12.16
+│   │   │       │   │   │   ├── anstyle v1.0.14
+│   │   │       │   │   │   └── unicode-width feature "default" (*)
+│   │   │       │   │   └── annotate-snippets feature "std"
+│   │   │       │   │       ├── annotate-snippets v0.12.16 (*)
+│   │   │       │   │       └── anstyle feature "std"
+│   │   │       │   │           └── anstyle v1.0.14
+│   │   │       │   ├── encoding_rs_io feature "default"
+│   │   │       │   │   └── encoding_rs_io v0.1.8
+│   │   │       │   │       └── encoding_rs feature "default"
+│   │   │       │   │           ├── encoding_rs v0.8.35
+│   │   │       │   │           │   └── cfg-if feature "default" (*)
+│   │   │       │   │           └── encoding_rs feature "alloc"
+│   │   │       │   │               └── encoding_rs v0.8.35 (*)
+│   │   │       │   ├── granit-parser feature "default"
+│   │   │       │   │   └── granit-parser v0.0.7
+│   │   │       │   │       ├── arraydeque v0.5.1
+│   │   │       │   │       └── smallvec feature "default" (*)
+│   │   │       │   └── nohash-hasher feature "default"
+│   │   │       │       ├── nohash-hasher v0.2.0
+│   │   │       │       └── nohash-hasher feature "std"
+│   │   │       │           └── nohash-hasher v0.2.0
+│   │   │       ├── serde-saphyr feature "deserialize"
+│   │   │       │   └── serde-saphyr v0.0.29 (*)
+│   │   │       └── serde-saphyr feature "serialize"
+│   │   │           └── serde-saphyr v0.0.29 (*)
+│   │   └── kube-core feature "default" (*)
+│   └── kube-client feature "aws-lc-rs"
+│       ├── kube-client v4.2.0 (*)
+│       └── hyper-rustls feature "aws-lc-rs" (*)
+├── kube feature "client"
+│   ├── kube v4.2.0 (*)
+│   ├── kube feature "config"
+│   │   ├── kube v4.2.0 (*)
+│   │   ├── kube feature "kube-client"
+│   │   │   └── kube v4.2.0 (*)
+│   │   └── kube-client feature "config"
+│   │       ├── kube-client v4.2.0 (*)
+│   │       ├── kube-client feature "__non_core"
+│   │       │   ├── kube-client v4.2.0 (*)
+│   │       │   ├── kube-client feature "base64"
+│   │       │   │   └── kube-client v4.2.0 (*)
+│   │       │   ├── kube-client feature "serde-saphyr"
+│   │       │   │   └── kube-client v4.2.0 (*)
+│   │       │   └── kube-client feature "tracing"
+│   │       │       └── kube-client v4.2.0 (*)
+│   │       └── kube-client feature "pem"
+│   │           └── kube-client v4.2.0 (*)
+│   ├── kube feature "kube-client" (*)
+│   └── kube-client feature "client"
+│       ├── kube-client v4.2.0 (*)
+│       ├── kube-client feature "__non_core" (*)
+│       ├── kube-client feature "bytes"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "config" (*)
+│       ├── kube-client feature "either"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "futures"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "http-body"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "http-body-util"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "hyper"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "hyper-timeout"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "hyper-util"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "jiff"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "jsonpath-rust"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "tokio"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "tokio-util"
+│       │   └── kube-client v4.2.0 (*)
+│       ├── kube-client feature "tower"
+│       │   └── kube-client v4.2.0 (*)
+│       └── kube-client feature "tower-http"
+│           └── kube-client v4.2.0 (*)
+└── kube feature "rustls-tls"
+    ├── kube v4.2.0 (*)
+    ├── kube feature "client" (*)
+    ├── kube feature "kube-client" (*)
+    └── kube-client feature "rustls-tls"
+        ├── kube-client v4.2.0 (*)
+        ├── kube-client feature "hyper-rustls"
+        │   └── kube-client v4.2.0 (*)
+        └── kube-client feature "rustls"
+            └── kube-client v4.2.0 (*)
+
+insight-platform-sandbox-guest v0.1.0 (<workspace>/crates/platform-sandbox-guest)
+├── tokio feature "default" (*)
+├── tokio feature "fs" (*)
+├── tokio feature "io-util" (*)
+├── tokio feature "macros" (*)
+├── tokio feature "net" (*)
+├── tokio feature "process" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "sync" (*)
+├── tokio feature "test-util" (*)
+├── tokio feature "time" (*)
+├── serde feature "default" (*)
+├── serde feature "derive" (*)
+├── serde_json feature "default" (*)
+├── chrono feature "default" (*)
+├── chrono feature "serde" (*)
+├── insight-platform-contracts feature "default" (command-line) (*)
+├── insight-platform-sandbox feature "default" (command-line) (*)
+├── insight-platform-artifact-rpc feature "default" (command-line) (*)
+├── tonic feature "channel" (*)
+├── tonic feature "codegen" (*)
+├── tonic feature "router" (*)
+├── tonic feature "server" (*)
+└── tonic feature "tls-aws-lc" (*)
+[dev-dependencies]
+├── uuid feature "default" (*)
+├── uuid feature "serde" (*)
+├── uuid feature "v4" (*)
+├── uuid feature "v7" (*)
+└── tempfile feature "default" (*)
+
+insight-platform-sandbox-gvisor v0.1.0 (<workspace>/crates/platform-sandbox-gvisor) (*)
 
 insight-platform-sandbox-rpc v0.1.0 (<workspace>/crates/platform-sandbox-rpc) (*)
 
