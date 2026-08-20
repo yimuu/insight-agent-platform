@@ -805,21 +805,11 @@ impl PgRegistryTransaction {
     ) -> Result<CommandOutcome<ResourceRecord>, RepositoryError> {
         command.validate_at(Utc::now())?;
         let mut transaction = self.transaction.begin().await?;
-        if claim_command_receipt(
-            &mut transaction,
-            &command.audit,
-            "resource",
-            &command.resource_id.to_string(),
-            "resource.create_draft",
-        )
-        .await?
+        if let Some(resource_id) =
+            claim_resource_create_receipt(&mut transaction, &command.audit).await?
         {
-            let record = load_resource(
-                &mut transaction,
-                &command.audit.tenant_id,
-                &command.resource_id,
-            )
-            .await?;
+            let record =
+                load_resource(&mut transaction, &command.audit.tenant_id, &resource_id).await?;
             transaction.commit().await?;
             return Ok(CommandOutcome::Replayed(record));
         }
@@ -19423,6 +19413,83 @@ pub(crate) async fn claim_command_receipt(
         return Err(RepositoryError::Conflict("command receipt"));
     }
     Ok(true)
+}
+
+/// Resource creation is collection-scoped because the server generates the Resource ID. A replay
+/// therefore resolves the first winner through the Receipt response reference rather than trusting
+/// a newly generated candidate ID.
+async fn claim_resource_create_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+) -> Result<Option<ResourceId>, RepositoryError> {
+    let scope_id = audit.tenant_id.to_string();
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "operation": "resource.create_draft",
+            "principal_id": audit.principal_id,
+            "scope_id": scope_id,
+            "scope_kind": "resource_collection",
+        }),
+        65_536,
+    )?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest,
+            state, payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'command', 'resource_collection', $1, $3,
+                  'resource.create_draft', $4, $5, 'processing', $6, $7, $8, $9)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(audit.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(None);
+    }
+    let existing = sqlx::query(
+        r#"
+        SELECT request_digest, state, response_reference_id
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'resource_collection' AND scope_id = $1
+          AND dedupe_owner_id = $2 AND operation = 'resource.create_draft'
+          AND idempotency_key_digest = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if existing.try_get::<String, _>("request_digest")? != audit.request_digest.to_string() {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if existing.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("command receipt"));
+    }
+    let resource_id = existing
+        .try_get::<Option<String>, _>("response_reference_id")?
+        .ok_or_else(|| RepositoryError::CorruptRow("create Receipt has no result".to_owned()))?
+        .parse()
+        .map_err(|_| RepositoryError::CorruptRow("create Receipt result is invalid".to_owned()))?;
+    Ok(Some(resource_id))
 }
 
 pub(crate) async fn terminalize_command_receipt(

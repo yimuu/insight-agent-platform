@@ -753,6 +753,20 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         registry_command!(repository, create_resource_draft, create_command).unwrap(),
         CommandOutcome::Replayed(_)
     ));
+    let server_retry = registry_command!(
+        repository,
+        create_resource_draft,
+        CreateResourceDraft {
+            audit: create_audit.clone(),
+            resource_id: id(ROLLBACK_RESOURCE_ID),
+            draft: draft.clone(),
+        }
+    )
+    .unwrap();
+    assert!(matches!(
+        server_retry,
+        CommandOutcome::Replayed(record) if record.resource_id == RESOURCE_ID
+    ));
     let mut conflict_audit = audit(TENANT_ID, PRINCIPAL_ID, "7c13", '9', 'b');
     conflict_audit.idempotency_key_digest = create_audit.idempotency_key_digest.clone();
     assert!(matches!(
