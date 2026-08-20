@@ -64,7 +64,7 @@ Draft规范和未通过资格的代码不是current behavior。CI报告只表示
 
 gVisor node/runtime必须显式标记并且只允许`runsc`，不允许runc fallback。guest Pod不允许privileged、hostPath、device、
 host PID/network、metadata、Kubernetes API或runtime socket。Launcher使用独立ServiceAccount，只允许execution namespace中的
-`create/get/watch/delete pods`和`get pods/status,pods/log`；禁止Secret、ConfigMap、ServiceAccount、RBAC、Node、RuntimeClass、
+`create/get/watch/delete pods`和`get pods/status`；禁止Pod log、Secret、ConfigMap、ServiceAccount、RBAC、Node、RuntimeClass、
 exec、attach和port-forward，并由fail-closed admission锁定可创建Pod的完整安全closure。WASI与gVisor使用不同pool与identity，
 都不与API/Scheduler Pod共享进程或service account。
 

@@ -152,8 +152,8 @@ runtime socket。root filesystem只读，scratch/tmpfs有byte/inode与lifetime�
 cgroup、PID、CPU、memory、I/O和pids limit由发布profile固定。fail-closed admission固定RuntimeClass、image digest、
 ServiceAccount、resource/volume/network closure；plain runc fallback是否定合同。
 
-Launcher只拥有`create/get/watch/delete` Pod、`get` status/log的namespace-scoped RBAC，不能改变admission policy。每个Pod UID、
-Job/attempt/lease generation、request digest、runtime/image digest和resource closure必须相互绑定。Pod phase、exit与log只是外部
+Launcher只拥有`create/get/watch/delete` Pod、`get` status的namespace-scoped RBAC，不允许Pod log且不能改变admission policy。每个Pod UID、
+Job/attempt/lease generation、request digest、runtime/image digest和resource closure必须相互绑定。Pod phase、exit与termination message只是外部
 physical evidence；Executor复核fence、canonical result与Artifact grant后才能向Controller报告。watch中断、delete不确定、node loss
 或runtime evidence漂移进入bounded reconcile/absence proof，不能伪造terminal success。
 

@@ -20,7 +20,7 @@ device、host PID/network、runtime socket、metadata 和通用 Kubernetes API�
 
 - Pod 必须使用按发布清单固定的 `RuntimeClass=runsc`，并调度到 NodeRestriction 保护的 gVisor node pool；
 - 每个 fenced Job attempt 使用全新 Pod UID、filesystem、process/network namespace，terminal/lease loss 后删除；
-- Launcher RBAC只允许该namespace中的`create/get/watch/delete` Pod与`get` Pod status/log，不允许Secret、ConfigMap、
+- Launcher RBAC只允许该namespace中的`create/get/watch/delete` Pod与`get` Pod status，不允许Pod log、Secret、ConfigMap、
   ServiceAccount、RBAC、Node、RuntimeClass、exec、attach、port-forward或任意其他资源；
 - fail-closed ValidatingAdmissionPolicy把owner、镜像digest、runtimeClass、ServiceAccount、security context、volume、probe、
   resource、network和label/annotation closure固定到发布清单；Launcher不能通过构造Pod获得更大权限；
@@ -28,7 +28,7 @@ device、host PID/network、runtime socket、metadata 和通用 Kubernetes API�
   runtime socket；package/input/output只通过Artifact Data Worker的一次性、fenced grant，network默认deny；
 - `runsc`由节点容器运行时安装并按digest/版本生成node qualification evidence。不存在runc fallback；RuntimeClass或node
   evidence漂移时admission/claim/readiness fail closed；
-- Kubernetes Pod只是physical attempt；shared Job仍是lease/retry/current physical-work authority。Pod status/log是需复核的
+- Kubernetes Pod只是physical attempt；shared Job仍是lease/retry/current physical-work authority。Pod status/termination message是需复核的
   外部evidence，不成为业务current-state authority。
 
 WASI Executor继续使用node-local process attestation且不获得Kubernetes API。gVisor Launcher使用独立mTLS workload identity、

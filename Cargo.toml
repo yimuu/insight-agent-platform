@@ -84,6 +84,8 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http2", "tokio"] }
 ipnet = "2"
 jsonschema = { version = "0.47", default-features = false }
+k8s-openapi = { version = "0.28", features = ["v1_34"] }
+kube = { version = "4.2", default-features = false, features = ["client", "ring", "rustls-tls"] }
 libc = "0.2"
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 log = "0.4"
