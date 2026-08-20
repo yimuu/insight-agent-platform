@@ -15,6 +15,10 @@ config:
 database:
   existingSecret: insight-platform-gateway-database
   urlKey: database-url
+runEventCursorKey:
+  existingSecret: insight-platform-gateway-run-event-cursor
+  key: cursor-key
+  digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 ingress:
   enabled: true

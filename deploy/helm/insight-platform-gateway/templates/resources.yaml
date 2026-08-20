@@ -64,6 +64,8 @@ spec:
             - {name: PLATFORM_GATEWAY_CONFIG_DIGEST, value: {{ .Values.config.digest | quote }}}
             - name: PLATFORM_GATEWAY_DATABASE_URL
               valueFrom: {secretKeyRef: {name: {{ .Values.database.existingSecret }}, key: {{ .Values.database.urlKey }}}}
+            - {name: PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH, value: /etc/insight/run-event-cursor/key}
+            - {name: PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST, value: {{ .Values.runEventCursorKey.digest | quote }}}
           startupProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
           readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
           livenessProbe: {httpGet: {path: /livez, port: http}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
@@ -74,12 +76,17 @@ spec:
             capabilities: {drop: ["ALL"]}
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: run-event-cursor-key, mountPath: /etc/insight/run-event-cursor, readOnly: true}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - name: config
           configMap:
             name: {{ .Values.config.existingConfigMap }}
             items: [{key: {{ .Values.config.fileKey }}, path: gateway.json}]
+        - name: run-event-cursor-key
+          secret:
+            secretName: {{ .Values.runEventCursorKey.existingSecret }}
+            items: [{key: {{ .Values.runEventCursorKey.key }}, path: key}]
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
 ---
 apiVersion: v1

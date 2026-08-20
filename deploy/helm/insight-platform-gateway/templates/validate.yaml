@@ -16,6 +16,12 @@
 {{- if empty .Values.database.existingSecret }}
 {{- fail "Gateway database Secret is required" }}
 {{- end }}
+{{- if or (empty .Values.runEventCursorKey.existingSecret) (empty .Values.runEventCursorKey.key) }}
+{{- fail "Gateway Run event cursor Secret reference is required" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.runEventCursorKey.digest) }}
+{{- fail "Gateway Run event cursor key digest must be lowercase sha256" }}
+{{- end }}
 {{- if empty .Values.networkPolicy.postgresCidrs }}
 {{- fail "networkPolicy.postgresCidrs is required" }}
 {{- end }}
