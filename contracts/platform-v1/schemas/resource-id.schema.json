@@ -2,7 +2,7 @@
   "$id": "urn:insight:platform:v1:resource-id",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Known resource prefix followed by one canonical lowercase RFC 9562 UUIDv7. Field kind validation is additional and mandatory.",
-  "pattern": "^(ten|prn|svc|wrk|spr|sbd|agt|aif|arev|adep|skl|srev|sact|cap|cirev|cim|cimp|cdep|ctx|xirev|xim|ximp|xdep|xcb|dset|dgen|cqry|cobs|cit|mcp|mrev|mcdep|mdsc|mab|mop|mpr|mprev|mpdep|mdl|mdrev|mdep|mturn|ures|pol|prev|srt|srrev|spk|sprev|sxp|sxrev|sjob|run|rval|nex|scp|inv|crun|art|agr|blb|enc|int|apr|job|tsk|rcp|out|qac|qle|evt|op|val|evd|req|alk)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+  "pattern": "^(ten|prn|svc|wrk|spr|sbd|agt|aif|arev|adep|skl|srev|sact|cap|cirev|cim|cimp|cdep|ctx|xirev|xim|ximp|xdep|xcb|dset|dgen|cqry|cobs|cit|mcp|mrev|mcdep|mdsc|mab|mop|mpr|mprev|mpdep|mdl|mdrev|mdep|mturn|ures|pol|prev|srt|srrev|spk|sprev|sxp|sxrev|sjob|run|val|nod|scp|inv|crun|art|grt|blb|enc|int|apr|job|tsk|rcp|obx|qac|qle|evt|op|req|lnk)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
   "title": "PlatformResourceId",
   "type": "string"
 }

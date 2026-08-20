@@ -83,7 +83,7 @@ mod tests {
             principal_kind: PrincipalKind::AgentRunner,
             receipt_id: id("evt_0198f1c3-8f49-7c3e-b1f3-773c28367b92"),
             event_id: id("evt_0198f1c3-8f49-7c3e-b1f3-773c28367b93"),
-            outbox_id: id("out_0198f1c3-8f49-7c3e-b1f3-773c28367b94"),
+            outbox_id: id("obx_0198f1c3-8f49-7c3e-b1f3-773c28367b94"),
             idempotency_key_digest: digest('a'),
             request_digest: digest('b'),
             receipt_expires_at: Utc::now() + chrono::Duration::minutes(1),

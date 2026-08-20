@@ -1112,12 +1112,12 @@
     {
       "exposure": "internal",
       "name": "run_value",
-      "prefix": "rval"
+      "prefix": "val"
     },
     {
       "exposure": "public",
       "name": "node_execution",
-      "prefix": "nex"
+      "prefix": "nod"
     },
     {
       "exposure": "internal",
@@ -1142,7 +1142,7 @@
     {
       "exposure": "internal",
       "name": "artifact_grant",
-      "prefix": "agr"
+      "prefix": "grt"
     },
     {
       "exposure": "internal",
@@ -1182,7 +1182,7 @@
     {
       "exposure": "internal",
       "name": "outbox_event",
-      "prefix": "out"
+      "prefix": "obx"
     },
     {
       "exposure": "internal",
@@ -1205,16 +1205,6 @@
       "prefix": "op"
     },
     {
-      "exposure": "public",
-      "name": "validation",
-      "prefix": "val"
-    },
-    {
-      "exposure": "public",
-      "name": "evidence",
-      "prefix": "evd"
-    },
-    {
       "exposure": "correlation_only",
       "name": "server_request",
       "prefix": "req"
@@ -1222,7 +1212,7 @@
     {
       "exposure": "internal",
       "name": "artifact_link",
-      "prefix": "alk"
+      "prefix": "lnk"
     }
   ],
   "revision_prefixes": [
