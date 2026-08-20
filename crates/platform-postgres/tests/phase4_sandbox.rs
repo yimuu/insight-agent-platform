@@ -2577,14 +2577,17 @@ async fn sandbox_fixture() {
         deadline: leased_request.deadline,
     };
     let artifact_read_authority = if let Ok(configured_role) =
-        std::env::var("PLATFORM_ARTIFACT_BROKER_TEST_ROLE")
+        std::env::var("PLATFORM_ARTIFACT_DATA_READER_TEST_ROLE")
     {
-        assert_eq!(configured_role, "platform_artifact_broker_qualification");
+        assert_eq!(
+            configured_role,
+            "platform_artifact_data_reader_qualification"
+        );
         let restricted_pool = PgPoolOptions::new()
             .max_connections(2)
             .after_connect(|connection, _metadata| {
                 Box::pin(async move {
-                    sqlx::query("SET ROLE platform_artifact_broker_qualification")
+                    sqlx::query("SET ROLE platform_artifact_data_reader_qualification")
                         .execute(connection)
                         .await?;
                     Ok(())

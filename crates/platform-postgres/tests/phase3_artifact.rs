@@ -26,8 +26,8 @@ use insight_platform_jobs::JobFence as DomainJobFence;
 use insight_platform_postgres::{
     artifact_repository::{ArtifactRecoverySlot, DriveExpiredArtifactJobs},
     repository::{
-        ClaimJobs, JobFence, NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal,
-        PgRepository, RepositoryError, SafetyScanShard, TypedPayload,
+        ArtifactWorkerRole, ClaimArtifactJobs, JobFence, NewPrincipal, NewQuotaAccount, NewTenant,
+        NewTenantPrincipal, PgRepository, RepositoryError, SafetyScanShard, TypedPayload,
     },
     verify_schema,
 };
@@ -684,10 +684,23 @@ async fn claim_and_start_artifact_job(
     job_id: &ResourceId,
     worker_id: &ResourceId,
 ) -> JobFence {
+    let payload_kind: String = sqlx::query_scalar(
+        "SELECT payload ->> 'kind' FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_one(repository.pool())
+    .await
+    .unwrap();
+    let role = match payload_kind.as_str() {
+        "scan" | "rescan" => ArtifactWorkerRole::DataWorker,
+        "delete" | "blob_cleanup" => ArtifactWorkerRole::Maintenance,
+        _ => panic!("unexpected Artifact payload kind {payload_kind}"),
+    };
     let tokens = "0123456789abcdef".chars().map(digest).collect::<Vec<_>>();
     let claimed = repository
-        .claim_jobs(ClaimJobs {
-            work_class: "artifact".to_owned(),
+        .claim_artifact_jobs(ClaimArtifactJobs {
+            role,
             worker_id: worker_id.clone(),
             limit: u16::try_from(tokens.len()).unwrap(),
             lease_milliseconds: 120_000,

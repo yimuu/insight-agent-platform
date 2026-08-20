@@ -1,0 +1,160 @@
+{{- $root := . -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    insight.platform/artifact-namespace: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+{{- range $role, $component := .Values.roles }}
+{{- $context := dict "role" $role }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "insight-platform-artifact.name" $context }}
+  namespace: {{ $root.Values.namespace }}
+  annotations: {{ toYaml $component.serviceAccount.annotations | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-artifact.name" $context }}
+  namespace: {{ $root.Values.namespace }}
+spec:
+  type: ClusterIP
+  selector: {{ include "insight-platform-artifact.labels" $context | nindent 4 }}
+  ports:
+    {{- range $port := $component.ports }}
+    - {name: {{ $port.name }}, protocol: TCP, port: {{ int $port.port }}, targetPort: {{ $port.name }}}
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "insight-platform-artifact.name" $context }}
+  namespace: {{ $root.Values.namespace }}
+  labels: {{ include "insight-platform-artifact.labels" $context | nindent 4 }}
+spec:
+  replicas: {{ int $component.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {{ include "insight-platform-artifact.labels" $context | nindent 6 }}
+  template:
+    metadata:
+      labels: {{ include "insight-platform-artifact.labels" $context | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "insight-platform-artifact.name" $context }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      imagePullSecrets: {{ toYaml $root.Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: {{ include "insight-platform-artifact.labels" $context | nindent 14 }}
+      containers:
+        - name: {{ $role }}
+          image: {{ include "insight-platform-artifact.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: [{{ $component.command | quote }}]
+          ports:
+            {{- range $port := $component.ports }}
+            - {name: {{ $port.name }}, containerPort: {{ int $port.port }}, protocol: TCP}
+            {{- end }}
+          env:
+            {{- if eq $role "gateway" }}
+            - {name: PLATFORM_ARTIFACT_GATEWAY_CONFIG, value: /etc/insight/config/config.json}
+            - {name: PLATFORM_ARTIFACT_GATEWAY_CONFIG_DIGEST, value: {{ $component.config.digest | quote }}}
+            - name: PLATFORM_ARTIFACT_GATEWAY_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ $component.database.existingSecret }}, key: {{ $component.database.urlKey }}}}
+            {{- else if eq $role "data-worker" }}
+            - {name: PLATFORM_ARTIFACT_DATA_WORKER_AUDIENCE, value: data_worker}
+            - {name: PLATFORM_ARTIFACT_DATA_WORKER_CONFIG, value: /etc/insight/config/config.json}
+            - {name: PLATFORM_ARTIFACT_DATA_WORKER_CONFIG_DIGEST, value: {{ $component.config.digest | quote }}}
+            - name: PLATFORM_ARTIFACT_DATA_WORKER_READ_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ $component.database.readExistingSecret }}, key: {{ $component.database.urlKey }}}}
+            - name: PLATFORM_ARTIFACT_DATA_WORKER_WORK_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ $component.database.workExistingSecret }}, key: {{ $component.database.urlKey }}}}
+            - {name: PLATFORM_ARTIFACT_DATA_WORKER_CLIENT_CA_PATH, value: /etc/insight/tls/client-ca.pem}
+            - {name: PLATFORM_ARTIFACT_DATA_WORKER_CERT_PATH, value: /etc/insight/tls/server.pem}
+            - {name: PLATFORM_ARTIFACT_DATA_WORKER_KEY_PATH, value: /etc/insight/tls/server-key.pem}
+            {{- else }}
+            - {name: PLATFORM_ARTIFACT_MAINTENANCE_CONFIG, value: /etc/insight/config/config.json}
+            - {name: PLATFORM_ARTIFACT_MAINTENANCE_CONFIG_DIGEST, value: {{ $component.config.digest | quote }}}
+            - name: PLATFORM_ARTIFACT_MAINTENANCE_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ $component.database.existingSecret }}, key: {{ $component.database.urlKey }}}}
+            {{- end }}
+          startupProbe: {tcpSocket: {port: {{ (index $component.ports 0).name }}}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {tcpSocket: {port: {{ (index $component.ports 0).name }}}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {tcpSocket: {port: {{ (index $component.ports 0).name }}}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          resources: {{ toYaml $component.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            {{- if eq $role "data-worker" }}
+            - {name: tls, mountPath: /etc/insight/tls, readOnly: true}
+            {{- end }}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $component.config.existingConfigMap }}
+            items: [{key: {{ $component.config.fileKey }}, path: config.json}]
+        {{- if eq $role "data-worker" }}
+        - name: tls
+          secret:
+            secretName: {{ $component.tls.existingSecret }}
+            items:
+              - {key: {{ $component.tls.keys.clientCa }}, path: client-ca.pem}
+              - {key: {{ $component.tls.keys.serverCertificate }}, path: server.pem}
+              - {key: {{ $component.tls.keys.serverPrivateKey }}, path: server-key.pem}
+        {{- end }}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+{{- if $root.Values.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "insight-platform-artifact.name" $context }}
+  namespace: {{ $root.Values.namespace }}
+spec:
+  minAvailable: {{ int $root.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {{ include "insight-platform-artifact.labels" $context | nindent 6 }}
+{{- end }}
+{{- if $root.Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "insight-platform-artifact.name" $context }}
+  namespace: {{ $root.Values.namespace }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "insight-platform-artifact.name" $context }}}
+  minReplicas: {{ int $root.Values.autoscaling.minReplicas }}
+  maxReplicas: {{ int $root.Values.autoscaling.maxReplicas }}
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 300}
+    scaleUp: {stabilizationWindowSeconds: 30}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ int $root.Values.autoscaling.targetCPUUtilizationPercentage }}}
+{{- end }}
+{{- end }}

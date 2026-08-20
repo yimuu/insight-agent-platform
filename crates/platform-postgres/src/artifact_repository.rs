@@ -1,9 +1,10 @@
 use crate::repository::{
-    append_command_event, append_scheduler_event, claim_command_receipt, decode_typed_payload,
-    job_from_row, job_projection, load_job_for_update_by_text, payload_from_row,
-    require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page,
-    terminalize_command_receipt, validate_safety_scan_request, JobRecord, PgRepository,
-    RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
+    append_command_event, append_scheduler_event, begin_read_only_repeatable,
+    claim_command_receipt, decode_typed_payload, job_from_row, job_projection,
+    load_job_for_update_by_text, payload_from_row, require_tenant_permission,
+    safety_scan_cursor_from_row, safety_scan_page, terminalize_command_receipt,
+    validate_safety_scan_request, JobRecord, PgRepository, RepositoryError, SafetyScanCursor,
+    SafetyScanPage, SafetyScanShard, TypedPayload,
 };
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{
@@ -11,20 +12,23 @@ use insight_platform_artifacts::{
     decide_complete_artifact_deletion, decide_complete_upload, decide_create_artifact_provenance,
     decide_expired_artifact_attempt, decide_finalize_artifact, decide_mark_artifact_deletion,
     decide_place_artifact_hold, decide_release_artifact_hold, decide_release_artifact_reference,
-    decide_schedule_artifact_rescan, decide_schedule_initial_scan, ArtifactBlobCleanupSnapshot,
-    ArtifactBlobRecord, ArtifactCommandError, ArtifactCommandLimits,
-    ArtifactDeletionAdmissionFacts, ArtifactDeletionEvidence, ArtifactDeletionJobSnapshot,
-    ArtifactDeletionOperationSnapshot, ArtifactDeletionRecord, ArtifactGrantRecord,
-    ArtifactHoldRecord, ArtifactHoldSnapshot, ArtifactJobPayload, ArtifactLinkState,
-    ArtifactMetadataSnapshot, ArtifactOperationRecord, ArtifactProvenanceRecord,
+    decide_schedule_artifact_rescan, decide_schedule_initial_scan, ArtifactBlobCleanupExecution,
+    ArtifactBlobCleanupSnapshot, ArtifactBlobRecord, ArtifactCommandError, ArtifactCommandLimits,
+    ArtifactDeleteObjectAuthority, ArtifactDeletionAdmissionFacts, ArtifactDeletionEvidence,
+    ArtifactDeletionExecution, ArtifactDeletionJobSnapshot, ArtifactDeletionOperationSnapshot,
+    ArtifactDeletionRecord, ArtifactGrantRecord, ArtifactHoldRecord, ArtifactHoldSnapshot,
+    ArtifactJobPayload, ArtifactLinkState, ArtifactMetadataSnapshot,
+    ArtifactObjectReadAuthorityError, ArtifactOperationRecord, ArtifactProvenanceRecord,
     ArtifactProvenanceSnapshot, ArtifactRecord, ArtifactRecoveryParentAction,
     ArtifactReferenceRecord, ArtifactReferenceSnapshot, ArtifactRescanOperationSnapshot,
-    ArtifactScanDecision, ArtifactScanKind, ArtifactScanWorkRecord, ArtifactStore,
-    ArtifactTransaction, ArtifactWorkAuthority, ArtifactWorkError, ArtifactWorkerAudit,
-    ArtifactWorkerOperationRecord, CommitArtifactAttemptFailure, CommitArtifactBlobCleanup,
-    CommitArtifactScanOutcome, CompleteArtifactDeletion, CompleteArtifactUpload,
-    CompletedArtifactBlobCleanup, CompletedArtifactDeletion, CompletedArtifactUpload,
-    CreateArtifactProvenance, FinalizeArtifact, FinalizedArtifact, MarkArtifactDeletion,
+    ArtifactScanDecision, ArtifactScanExecution, ArtifactScanKind, ArtifactScanObjectReadAuthority,
+    ArtifactScanRequest, ArtifactScanWorkRecord, ArtifactStore, ArtifactTransaction,
+    ArtifactWorkAuthority, ArtifactWorkError, ArtifactWorkerAudit, ArtifactWorkerOperationRecord,
+    AuthorizedArtifactDeleteObject, AuthorizedArtifactScanObjectRead, CommitArtifactAttemptFailure,
+    CommitArtifactBlobCleanup, CommitArtifactScanOutcome, CompleteArtifactDeletion,
+    CompleteArtifactUpload, CompletedArtifactBlobCleanup, CompletedArtifactDeletion,
+    CompletedArtifactUpload, CreateArtifactProvenance, DeleteArtifactBlobGeneration,
+    EncryptedArtifactObjectReference, FinalizeArtifact, FinalizedArtifact, MarkArtifactDeletion,
     MarkedArtifactDeletion, PlaceArtifactHold, PrepareArtifact, PreparedArtifact,
     ReleaseArtifactHold, ReleaseArtifactReference, ScheduleArtifactRescan,
     ScheduleInitialArtifactScan, UploadGrantSnapshot,
@@ -32,13 +36,15 @@ use insight_platform_artifacts::{
 use insight_platform_contracts::{
     ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, BlobIntegrityState,
     CommandOutcome, DataClassification, Effect, ExactVersionRef, JobState, Permission, PolicyKind,
-    PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind, Sha256Digest,
+    PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind, Sha256Digest, WorkClass,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskState};
 use serde::de::DeserializeOwned;
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::{collections::BTreeSet, str::FromStr};
+
+use crate::repository::ArtifactWorkerRole;
 
 pub struct PgArtifactTransaction {
     transaction: Transaction<'static, Postgres>,
@@ -63,6 +69,48 @@ impl ArtifactRecoverySlot {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ArtifactExecutionSlot {
+    pub receipt_id: ResourceId,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+    pub duplicate_blob_cleanup_job_id: ResourceId,
+    pub receipt_expires_at: DateTime<Utc>,
+}
+
+impl ArtifactExecutionSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.receipt_id.kind() != ResourceKind::Receipt
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.duplicate_blob_cleanup_job_id.kind() != ResourceKind::Job
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact execution slot identity is invalid".to_owned(),
+            ));
+        }
+        let identities = [
+            self.receipt_id.to_string(),
+            self.event_id.to_string(),
+            self.outbox_id.to_string(),
+            self.duplicate_blob_cleanup_job_id.to_string(),
+        ];
+        if identities.iter().collect::<BTreeSet<_>>().len() != identities.len() {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact execution slot identities must be unique".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartedArtifactExecution {
+    Scan(ArtifactScanExecution),
+    Deletion(ArtifactDeletionExecution),
+    BlobCleanup(ArtifactBlobCleanupExecution),
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +164,175 @@ impl PgRepository {
             transaction: self.pool().begin().await?,
             limits: self.artifact_limits(),
         })
+    }
+
+    pub async fn load_started_artifact_execution(
+        &self,
+        role: ArtifactWorkerRole,
+        tenant_id: ResourceId,
+        job_id: ResourceId,
+        fence: JobFence,
+        slot: ArtifactExecutionSlot,
+    ) -> Result<StartedArtifactExecution, RepositoryError> {
+        slot.validate()?;
+        if tenant_id.kind() != ResourceKind::Tenant || job_id.kind() != ResourceKind::Job {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact execution target identity is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool().begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        if slot.receipt_expires_at <= database_now {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact execution receipt expiry is invalid".to_owned(),
+            ));
+        }
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &tenant_id.to_string(),
+            &job_id.to_string(),
+        )
+        .await?;
+        if current.work_class != WorkClass::Artifact.as_str() {
+            return Err(RepositoryError::NotFound("Artifact Job"));
+        }
+        let payload: ArtifactJobPayload = decode_typed_payload(&current.payload, "Artifact Job")?;
+        let role_matches = matches!(
+            (role, &payload),
+            (
+                ArtifactWorkerRole::DataWorker,
+                ArtifactJobPayload::Scan { .. } | ArtifactJobPayload::Rescan { .. }
+            ) | (
+                ArtifactWorkerRole::Maintenance,
+                ArtifactJobPayload::Delete { .. } | ArtifactJobPayload::BlobCleanup { .. }
+            )
+        );
+        if !role_matches {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let request_digest: Sha256Digest =
+            insight_platform_contracts::canonical_digest(&serde_json::json!({
+                "fence": fence,
+                "job_id": job_id,
+                "operation": "artifact.execute",
+                "payload_digest": current.payload.digest,
+                "schema_version": 1,
+                "tenant_id": tenant_id,
+            }))
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+            .parse::<Sha256Digest>()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let idempotency_key_digest: Sha256Digest =
+            insight_platform_contracts::canonical_digest(&serde_json::json!({
+                "job_id": job_id,
+                "lease_generation": fence.lease_generation,
+                "operation": "artifact.attempt",
+                "schema_version": 1,
+                "tenant_id": tenant_id,
+            }))
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+            .parse::<Sha256Digest>()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let audit = ArtifactWorkerAudit {
+            tenant_id: tenant_id.clone(),
+            worker_process_generation_id: fence.worker_process_generation_id.clone(),
+            receipt_id: slot.receipt_id,
+            event_id: slot.event_id,
+            outbox_id: slot.outbox_id,
+            idempotency_key_digest,
+            request_digest,
+            receipt_expires_at: slot.receipt_expires_at,
+        };
+        let execution = match payload {
+            ArtifactJobPayload::Scan { scan } | ArtifactJobPayload::Rescan { scan } => {
+                let loaded = load_artifact_scan_work_inner(
+                    &mut transaction,
+                    &tenant_id,
+                    &scan.artifact_id,
+                    &scan.blob_id,
+                    &scan.operation_id,
+                    &job_id,
+                    true,
+                )
+                .await?;
+                require_artifact_job_fence(
+                    &loaded,
+                    &fence,
+                    &audit.worker_process_generation_id,
+                    database_now,
+                )?;
+                StartedArtifactExecution::Scan(ArtifactScanExecution {
+                    audit,
+                    scan_job_id: job_id,
+                    fence,
+                    operation_id: loaded.record.operation.operation_id.clone(),
+                    artifact_id: loaded.record.artifact.artifact_id.clone(),
+                    blob_id: loaded.record.blob.blob_id.clone(),
+                    expected_artifact_version: loaded.record.artifact.version,
+                    expected_blob_version: loaded.record.blob.version,
+                    expected_operation_version: loaded.record.operation.version,
+                    scan: loaded.record.scan,
+                    duplicate_blob_cleanup_job_id: slot.duplicate_blob_cleanup_job_id,
+                })
+            }
+            ArtifactJobPayload::Delete { deletion } => {
+                require_current_job_fence(
+                    &current,
+                    &fence,
+                    &audit.worker_process_generation_id,
+                    database_now,
+                )?;
+                let marked = load_artifact_deletion(
+                    &mut transaction,
+                    &tenant_id,
+                    &deletion.artifact_id,
+                    &deletion.blob_id,
+                    &deletion.operation_id,
+                    &job_id,
+                )
+                .await?;
+                StartedArtifactExecution::Deletion(ArtifactDeletionExecution {
+                    audit,
+                    deletion_job_id: job_id,
+                    fence,
+                    expected_artifact_version: marked.artifact.version,
+                    expected_blob_version: marked.blob.version,
+                    expected_operation_version: marked.deletion.operation_version,
+                    deletion,
+                })
+            }
+            ArtifactJobPayload::BlobCleanup { cleanup } => {
+                let loaded = lock_blob_cleanup_work(
+                    &mut transaction,
+                    &tenant_id,
+                    &cleanup.discarded_blob_id,
+                    &job_id,
+                )
+                .await?;
+                require_raw_artifact_job_fence(
+                    &loaded.job_state,
+                    loaded.job_version,
+                    loaded.lease_epoch,
+                    loaded.worker_id.as_deref(),
+                    loaded.lease_token_digest.as_deref(),
+                    loaded.lease_expires_at,
+                    &fence,
+                    &audit.worker_process_generation_id,
+                    database_now,
+                )?;
+                StartedArtifactExecution::BlobCleanup(ArtifactBlobCleanupExecution {
+                    audit,
+                    cleanup_job_id: job_id,
+                    fence,
+                    expected_blob_version: loaded.blob.version,
+                    cleanup,
+                })
+            }
+        };
+        transaction.commit().await?;
+        Ok(execution)
     }
 
     pub async fn drive_expired_artifact_jobs(
@@ -341,6 +558,352 @@ impl ArtifactWorkAuthority for PgRepository {
         ArtifactTransaction::commit(transaction).await?;
         Ok(outcome)
     }
+}
+
+#[async_trait::async_trait]
+impl ArtifactScanObjectReadAuthority<ArtifactScanRequest> for PgRepository {
+    async fn authorize_scan_object_read(
+        &self,
+        request: &ArtifactScanRequest,
+    ) -> Result<AuthorizedArtifactScanObjectRead, ArtifactObjectReadAuthorityError> {
+        authorize_artifact_scan_object(self, request)
+            .await
+            .map_err(map_scan_object_authority_error)
+    }
+}
+
+async fn authorize_artifact_scan_object(
+    repository: &PgRepository,
+    request: &ArtifactScanRequest,
+) -> Result<AuthorizedArtifactScanObjectRead, RepositoryError> {
+    if request.tenant_id.kind() != ResourceKind::Tenant
+        || request.job_id.kind() != ResourceKind::Job
+    {
+        return Err(RepositoryError::PermissionDenied);
+    }
+    request
+        .job
+        .validate()
+        .map_err(|_| RepositoryError::PermissionDenied)?;
+    let mut transaction = begin_read_only_repeatable(repository.pool()).await?;
+    let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *transaction)
+        .await?;
+    let row = sqlx::query(
+        r#"
+        SELECT
+            job.state AS job_state, job.version AS job_version,
+            job.lease_epoch, job.worker_id, job.lease_token_digest, job.lease_expires_at,
+            job.owner_kind, job.owner_id, job.invocation_id,
+            job.payload_schema_version AS job_payload_schema_version,
+            job.payload AS job_payload, job.payload_digest AS job_payload_digest,
+            artifact.state AS artifact_state, artifact.version AS artifact_version,
+            artifact.expected_size_bytes, artifact.expected_digest,
+            artifact.declared_media_type,
+            blob.backend, blob.storage_binding_digest, blob.object_reference_ciphertext,
+            blob.key_id, blob.encryption_domain_id, blob.object_generation,
+            blob.state AS blob_state, blob.version AS blob_version
+        FROM insight_platform.jobs AS job
+        JOIN insight_platform.artifacts AS artifact
+          ON artifact.tenant_id = job.tenant_id AND artifact.artifact_id = $3
+        JOIN insight_platform.artifact_blobs AS blob
+          ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+        WHERE job.tenant_id = $1 AND job.job_id = $2 AND job.work_class = 'artifact'
+        "#,
+    )
+    .bind(request.tenant_id.to_string())
+    .bind(request.job_id.to_string())
+    .bind(request.job.artifact_id.to_string())
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("Artifact scan object authority"))?;
+    let typed = payload_from_row(
+        &row,
+        "job_payload_schema_version",
+        "job_payload",
+        "job_payload_digest",
+    )?;
+    let payload: ArtifactJobPayload = decode_typed_payload(&typed, "Artifact Job")?;
+    let persisted_scan = match payload {
+        ArtifactJobPayload::Scan { scan } | ArtifactJobPayload::Rescan { scan } => scan,
+        _ => return Err(RepositoryError::PermissionDenied),
+    };
+    let state = row
+        .try_get::<String, _>("job_state")?
+        .parse::<JobState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    require_raw_artifact_job_fence(
+        &state,
+        parse_u64(row.try_get("job_version")?, "Artifact scan Job version")?,
+        parse_u64(row.try_get("lease_epoch")?, "Artifact scan lease epoch")?,
+        row.try_get::<Option<String>, _>("worker_id")?.as_deref(),
+        row.try_get::<Option<String>, _>("lease_token_digest")?
+            .as_deref(),
+        row.try_get("lease_expires_at")?,
+        &request.fence,
+        &request.fence.worker_process_generation_id,
+        database_now,
+    )?;
+    let expected_artifact_state = match request.job.scan_kind {
+        ArtifactScanKind::Initial => ArtifactState::Verifying,
+        ArtifactScanKind::Rescan => ArtifactState::Quarantined,
+    };
+    let expected_blob_state = match request.job.scan_kind {
+        ArtifactScanKind::Initial => BlobIntegrityState::Staging,
+        ArtifactScanKind::Rescan => BlobIntegrityState::Verified,
+    };
+    let valid = persisted_scan == request.job
+        && row.try_get::<String, _>("owner_kind")? == "job"
+        && row.try_get::<String, _>("owner_id")? == request.job.operation_id.to_string()
+        && row.try_get::<Option<String>, _>("invocation_id")?.is_none()
+        && row
+            .try_get::<String, _>("artifact_state")?
+            .parse::<ArtifactState>()
+            .is_ok_and(|value| value == expected_artifact_state)
+        && parse_u64(
+            row.try_get("artifact_version")?,
+            "Artifact scan Artifact version",
+        )? == request.job.expected_artifact_version
+        && row
+            .try_get::<String, _>("blob_state")?
+            .parse::<BlobIntegrityState>()
+            .is_ok_and(|value| value == expected_blob_state)
+        && parse_u64(row.try_get("blob_version")?, "Artifact scan Blob version")?
+            == request.job.expected_blob_version
+        && row
+            .try_get::<Option<String>, _>("object_generation")?
+            .as_deref()
+            == Some(request.job.object_generation.as_str());
+    if !valid {
+        return Err(RepositoryError::PermissionDenied);
+    }
+    let expected_size = parse_u64(
+        row.try_get("expected_size_bytes")?,
+        "Artifact expected scan bytes",
+    )?;
+    let authorization_digest: Sha256Digest =
+        insight_platform_contracts::canonical_digest(&serde_json::json!({
+            "artifact_id": request.job.artifact_id,
+            "blob_id": request.job.blob_id,
+            "fence": request.fence,
+            "job_id": request.job_id,
+            "job_payload_digest": typed.digest,
+            "object_generation": request.job.object_generation,
+            "schema_version": 1,
+            "tenant_id": request.tenant_id,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse::<Sha256Digest>()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let projection = AuthorizedArtifactScanObjectRead {
+        tenant_id: request.tenant_id.clone(),
+        artifact_id: request.job.artifact_id.clone(),
+        blob_id: request.job.blob_id.clone(),
+        backend: row.try_get("backend")?,
+        storage_binding_digest: row
+            .try_get::<String, _>("storage_binding_digest")?
+            .parse::<Sha256Digest>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        encryption_domain_id: row
+            .try_get::<String, _>("encryption_domain_id")?
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?,
+        key_id: row.try_get("key_id")?,
+        object_reference_ciphertext: EncryptedArtifactObjectReference::new(
+            row.try_get("object_reference_ciphertext")?,
+        )
+        .map_err(|_| RepositoryError::CorruptRow("Artifact object ciphertext".to_owned()))?,
+        object_generation: request.job.object_generation.clone(),
+        maximum_bytes: expected_size,
+        expected_digest: row
+            .try_get::<Option<String>, _>("expected_digest")?
+            .map(|value| value.parse::<Sha256Digest>())
+            .transpose()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        declared_media_type: row.try_get("declared_media_type")?,
+        authorization_digest,
+    };
+    projection
+        .validate()
+        .map_err(|_| RepositoryError::CorruptRow("Artifact scan projection".to_owned()))?;
+    transaction.commit().await?;
+    Ok(projection)
+}
+
+fn map_scan_object_authority_error(error: RepositoryError) -> ArtifactObjectReadAuthorityError {
+    match error {
+        RepositoryError::Database(_) => ArtifactObjectReadAuthorityError::Unavailable,
+        RepositoryError::NotFound(_) => ArtifactObjectReadAuthorityError::NotFound,
+        RepositoryError::PermissionDenied | RepositoryError::StaleFence => {
+            ArtifactObjectReadAuthorityError::Denied
+        }
+        _ => ArtifactObjectReadAuthorityError::InvalidEvidence,
+    }
+}
+
+#[async_trait::async_trait]
+impl ArtifactDeleteObjectAuthority<DeleteArtifactBlobGeneration> for PgRepository {
+    async fn authorize_delete_object(
+        &self,
+        request: &DeleteArtifactBlobGeneration,
+    ) -> Result<AuthorizedArtifactDeleteObject, ArtifactObjectReadAuthorityError> {
+        authorize_artifact_delete_object(self, request)
+            .await
+            .map_err(map_scan_object_authority_error)
+    }
+}
+
+async fn authorize_artifact_delete_object(
+    repository: &PgRepository,
+    request: &DeleteArtifactBlobGeneration,
+) -> Result<AuthorizedArtifactDeleteObject, RepositoryError> {
+    if request.tenant_id.kind() != ResourceKind::Tenant
+        || request.job_id.kind() != ResourceKind::Job
+        || request.blob_id.kind() != ResourceKind::InternalBlob
+        || request.object_generation.is_empty()
+    {
+        return Err(RepositoryError::PermissionDenied);
+    }
+    let mut transaction = begin_read_only_repeatable(repository.pool()).await?;
+    let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *transaction)
+        .await?;
+    let row = sqlx::query(
+        r#"
+        SELECT
+            job.state AS job_state, job.version AS job_version,
+            job.lease_epoch, job.worker_id, job.lease_token_digest, job.lease_expires_at,
+            job.owner_id,
+            job.payload_schema_version AS job_payload_schema_version,
+            job.payload AS job_payload, job.payload_digest AS job_payload_digest,
+            blob.backend, blob.storage_binding_digest, blob.object_reference_ciphertext,
+            blob.key_id, blob.encryption_domain_id, blob.object_generation,
+            blob.state AS blob_state, blob.version AS blob_version
+        FROM insight_platform.jobs AS job
+        JOIN insight_platform.artifact_blobs AS blob
+          ON blob.tenant_id = job.tenant_id AND blob.blob_id = $3
+        WHERE job.tenant_id = $1 AND job.job_id = $2 AND job.work_class = 'artifact'
+        "#,
+    )
+    .bind(request.tenant_id.to_string())
+    .bind(request.job_id.to_string())
+    .bind(request.blob_id.to_string())
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound(
+        "Artifact deletion object authority",
+    ))?;
+    let typed = payload_from_row(
+        &row,
+        "job_payload_schema_version",
+        "job_payload",
+        "job_payload_digest",
+    )?;
+    let payload: ArtifactJobPayload = decode_typed_payload(&typed, "Artifact Job")?;
+    let (payload_blob_id, payload_generation, payload_blob_version) = match &payload {
+        ArtifactJobPayload::Delete { deletion } => match &deletion.mode {
+            insight_platform_artifacts::ArtifactDeletionMode::BlobGeneration {
+                object_generation,
+            } => (
+                &deletion.blob_id,
+                object_generation,
+                deletion.expected_blob_version,
+            ),
+            insight_platform_artifacts::ArtifactDeletionMode::ArtifactOnly { .. } => {
+                return Err(RepositoryError::PermissionDenied)
+            }
+        },
+        ArtifactJobPayload::BlobCleanup { cleanup } => (
+            &cleanup.discarded_blob_id,
+            &cleanup.object_generation,
+            cleanup.expected_blob_version,
+        ),
+        _ => return Err(RepositoryError::PermissionDenied),
+    };
+    let owner_id: ResourceId = row.try_get::<String, _>("owner_id")?.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    payload
+        .validate_for_owner(&owner_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let state = row
+        .try_get::<String, _>("job_state")?
+        .parse::<JobState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    require_raw_artifact_job_fence(
+        &state,
+        parse_u64(row.try_get("job_version")?, "Artifact deletion Job version")?,
+        parse_u64(row.try_get("lease_epoch")?, "Artifact deletion lease epoch")?,
+        row.try_get::<Option<String>, _>("worker_id")?.as_deref(),
+        row.try_get::<Option<String>, _>("lease_token_digest")?
+            .as_deref(),
+        row.try_get("lease_expires_at")?,
+        &request.fence,
+        &request.fence.worker_process_generation_id,
+        database_now,
+    )?;
+    let valid = payload_blob_id == &request.blob_id
+        && payload_generation == &request.object_generation
+        && row
+            .try_get::<String, _>("blob_state")?
+            .parse::<BlobIntegrityState>()
+            .is_ok_and(|value| value == BlobIntegrityState::Deleting)
+        && parse_u64(
+            row.try_get("blob_version")?,
+            "Artifact deletion Blob version",
+        )? == payload_blob_version
+        && row
+            .try_get::<Option<String>, _>("object_generation")?
+            .as_deref()
+            == Some(request.object_generation.as_str());
+    if !valid {
+        return Err(RepositoryError::PermissionDenied);
+    }
+    let authorization_digest: Sha256Digest =
+        insight_platform_contracts::canonical_digest(&serde_json::json!({
+            "blob_id": request.blob_id,
+            "fence": request.fence,
+            "job_id": request.job_id,
+            "job_payload_digest": typed.digest,
+            "object_generation": request.object_generation,
+            "operation": "artifact.delete_generation",
+            "schema_version": 1,
+            "tenant_id": request.tenant_id,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse::<Sha256Digest>()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let projection = AuthorizedArtifactDeleteObject {
+        tenant_id: request.tenant_id.clone(),
+        blob_id: request.blob_id.clone(),
+        backend: row.try_get("backend")?,
+        storage_binding_digest: row
+            .try_get::<String, _>("storage_binding_digest")?
+            .parse::<Sha256Digest>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        encryption_domain_id: row
+            .try_get::<String, _>("encryption_domain_id")?
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?,
+        key_id: row.try_get("key_id")?,
+        object_reference_ciphertext: EncryptedArtifactObjectReference::new(
+            row.try_get("object_reference_ciphertext")?,
+        )
+        .map_err(|_| RepositoryError::CorruptRow("Artifact object ciphertext".to_owned()))?,
+        object_generation: request.object_generation.clone(),
+        authorization_digest,
+    };
+    projection
+        .validate()
+        .map_err(|_| RepositoryError::CorruptRow("Artifact deletion projection".to_owned()))?;
+    transaction.commit().await?;
+    Ok(projection)
 }
 
 async fn commit_artifact_attempt_failure(
@@ -3839,6 +4402,29 @@ fn require_artifact_job_fence(
         &current.record.scan_job_state,
         current.record.scan_job_version,
         current.lease_epoch,
+        current.worker_id.as_deref(),
+        current.lease_token_digest.as_deref(),
+        current.lease_expires_at,
+        fence,
+        audit_worker_id,
+        database_now,
+    )
+}
+
+fn require_current_job_fence(
+    current: &JobRecord,
+    fence: &JobFence,
+    audit_worker_id: &ResourceId,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let state = current
+        .state
+        .parse::<JobState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    require_raw_artifact_job_fence(
+        &state,
+        parse_u64(current.version, "Artifact Job version")?,
+        parse_u64(current.lease_epoch, "Artifact Job lease epoch")?,
         current.worker_id.as_deref(),
         current.lease_token_digest.as_deref(),
         current.lease_expires_at,

@@ -1,0 +1,35 @@
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must be an exact lowercase sha256 digest" }}
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+{{- fail "Artifact NetworkPolicy must remain enabled" }}
+{{- end }}
+{{- if ne (join "," (keys .Values.roles | sortAlpha)) "data-worker,gateway,maintenance" }}
+{{- fail "roles must contain exactly gateway, data-worker, and maintenance" }}
+{{- end }}
+{{- $identities := dict -}}
+{{- range $role, $component := .Values.roles }}
+{{- if lt (int $component.replicas) 2 }}{{ fail (printf "%s requires at least two replicas" $role) }}{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $component.config.digest) }}{{ fail (printf "%s config digest is invalid" $role) }}{{- end }}
+{{- if or (empty $component.command) (empty $component.config.existingConfigMap) (empty $component.config.fileKey) }}{{ fail (printf "%s immutable process configuration is required" $role) }}{{- end }}
+{{- if empty $component.database.urlKey }}{{ fail (printf "%s independent database credential is required" $role) }}{{- end }}
+{{- if eq $role "data-worker" }}
+{{- if or (empty $component.database.readExistingSecret) (empty $component.database.workExistingSecret) (eq $component.database.readExistingSecret $component.database.workExistingSecret) }}{{ fail "Data Worker requires distinct read and mutation database Secrets" }}{{- end }}
+{{- else if empty $component.database.existingSecret }}{{ fail (printf "%s independent database credential is required" $role) }}{{- end }}
+{{- if empty $component.serviceAccount.annotations }}{{ fail (printf "%s workload identity is required" $role) }}{{- end }}
+{{- $sa := toJson $component.serviceAccount.annotations -}}
+{{- if hasKey $identities $sa }}{{ fail "Artifact roles cannot share a storage workload identity" }}{{- end }}
+{{- $_ := set $identities $sa true -}}
+{{- $dbSecrets := list $component.database.existingSecret -}}
+{{- if eq $role "data-worker" }}{{ $dbSecrets = list $component.database.readExistingSecret $component.database.workExistingSecret }}{{- end }}
+{{- range $db := $dbSecrets }}
+{{- if hasKey $identities $db }}{{ fail "Artifact roles cannot share a database Secret" }}{{- end }}
+{{- $_ := set $identities $db true -}}
+{{- end }}
+{{- if eq $role "data-worker" }}
+{{- if or (empty $component.tls.existingSecret) (empty $component.tls.keys.clientCa) (empty $component.tls.keys.serverCertificate) (empty $component.tls.keys.serverPrivateKey) }}{{ fail "Data Worker mTLS inputs are required" }}{{- end }}
+{{- end }}
+{{- end }}
+{{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.storageProviderCidrs) (empty .Values.networkPolicy.kmsProviderCidrs) (empty .Values.networkPolicy.workloadIdentityCidrs) }}
+{{- fail "PostgreSQL, storage, KMS, and workload identity CIDRs are required" }}
+{{- end }}

@@ -5,9 +5,9 @@
 
 use super::{
     valid_opaque_object_key, ArtifactBrokerConfigurationError, ArtifactObjectBytes,
-    ArtifactObjectMetadata, ArtifactObjectReferenceUnsealError, ArtifactObjectReferenceUnsealer,
-    ArtifactObjectStoreError, DecryptedArtifactObjectReference, InstalledArtifactObjectStore,
-    InstalledArtifactObjectStoreCatalog, MAX_ARTIFACT_BROKER_TIMEOUT,
+    ArtifactObjectDeletionReceipt, ArtifactObjectMetadata, ArtifactObjectReferenceUnsealError,
+    ArtifactObjectReferenceUnsealer, ArtifactObjectStoreError, DecryptedArtifactObjectReference,
+    InstalledArtifactObjectStore, InstalledArtifactObjectStoreCatalog, MAX_ARTIFACT_BROKER_TIMEOUT,
     MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS,
 };
 use async_trait::async_trait;
@@ -15,7 +15,10 @@ use aws_config::BehaviorVersion;
 use aws_sdk_kms::{primitives::Blob, types::EncryptionAlgorithmSpec, Client as KmsClient};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::Client as S3Client;
-use insight_platform_artifacts::{AuthorizedArtifactObjectRead, MAX_ARTIFACT_KMS_KEY_ID_BYTES};
+use insight_platform_artifacts::{
+    AuthorizedArtifactDeleteObject, AuthorizedArtifactObjectRead, AuthorizedArtifactScanObjectRead,
+    MAX_ARTIFACT_KMS_KEY_ID_BYTES,
+};
 use insight_platform_contracts::{canonical_digest, ResourceId, ResourceKind, Sha256Digest};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -708,6 +711,43 @@ impl InstalledArtifactObjectStore for AwsS3ObjectStore {
         }
         ArtifactObjectBytes::new(metadata, bytes, provider_limit)
     }
+
+    async fn delete_exact(
+        &self,
+        object_key: &str,
+        object_generation: &str,
+    ) -> Result<ArtifactObjectDeletionReceipt, ArtifactObjectStoreError> {
+        if !valid_opaque_object_key(object_key) || !valid_object_generation(object_generation) {
+            return Err(ArtifactObjectStoreError::Rejected);
+        }
+        let output = self
+            .client
+            .delete_object()
+            .bucket(&*self.bucket)
+            .key(object_key)
+            .version_id(object_generation)
+            .send()
+            .await
+            .map_err(|_| ArtifactObjectStoreError::Unavailable)?;
+        if output.version_id() != Some(object_generation) || output.delete_marker() == Some(true) {
+            return Err(ArtifactObjectStoreError::InvalidEvidence);
+        }
+        let provider_receipt_digest = canonical_digest(&serde_json::json!({
+            "delete_marker": output.delete_marker().unwrap_or(false),
+            "kind": "s3_delete_object",
+            "object_generation": object_generation,
+            "request_charged": output.request_charged().map(|value| value.as_str()),
+            "schema_version": 1,
+            "storage_binding_digest": self.storage_binding_digest,
+        }))
+        .map_err(|_| ArtifactObjectStoreError::InvalidEvidence)?
+        .parse()
+        .map_err(|_| ArtifactObjectStoreError::InvalidEvidence)?;
+        Ok(ArtifactObjectDeletionReceipt {
+            object_generation: object_generation.to_owned(),
+            provider_receipt_digest,
+        })
+    }
 }
 
 struct AwsKmsKeyBinding {
@@ -719,41 +759,35 @@ struct AwsKmsArtifactObjectReferenceUnsealer {
     bindings: BTreeMap<Sha256Digest, Arc<AwsKmsKeyBinding>>,
 }
 
-impl fmt::Debug for AwsKmsArtifactObjectReferenceUnsealer {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AwsKmsArtifactObjectReferenceUnsealer")
-            .field("binding_count", &self.bindings.len())
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl ArtifactObjectReferenceUnsealer for AwsKmsArtifactObjectReferenceUnsealer {
-    async fn unseal(
+impl AwsKmsArtifactObjectReferenceUnsealer {
+    async fn decrypt_reference(
         &self,
-        authorized: &AuthorizedArtifactObjectRead,
+        tenant_id: &ResourceId,
+        blob_id: &ResourceId,
+        storage_binding_digest: &Sha256Digest,
+        encryption_domain_id: &ResourceId,
+        key_id: &str,
+        ciphertext: &[u8],
     ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError> {
         let binding = self
             .bindings
-            .get(&authorized.storage_binding_digest)
+            .get(storage_binding_digest)
             .ok_or(ArtifactObjectReferenceUnsealError::Rejected)?;
-        if binding.key_id.as_ref() != authorized.key_id {
+        if binding.key_id.as_ref() != key_id {
             return Err(ArtifactObjectReferenceUnsealError::Rejected);
         }
         let encryption_context = object_encryption_context(
-            &authorized.tenant_id,
-            &authorized.blob_id,
-            &authorized.storage_binding_digest,
-            &authorized.encryption_domain_id,
-            &authorized.key_id,
+            tenant_id,
+            blob_id,
+            storage_binding_digest,
+            encryption_domain_id,
+            key_id,
         );
-
         let output = binding
             .client
             .decrypt()
-            .ciphertext_blob(Blob::new(authorized.object_reference_ciphertext.as_bytes()))
-            .key_id(&authorized.key_id)
+            .ciphertext_blob(Blob::new(ciphertext))
+            .key_id(key_id)
             .set_encryption_context(Some(encryption_context))
             .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
             .send()
@@ -772,7 +806,7 @@ impl ArtifactObjectReferenceUnsealer for AwsKmsArtifactObjectReferenceUnsealer {
                 }
                 _ => ArtifactObjectReferenceUnsealError::Unavailable,
             })?;
-        if output.key_id() != Some(authorized.key_id.as_str())
+        if output.key_id() != Some(key_id)
             || output.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
             || output.ciphertext_for_recipient().is_some()
         {
@@ -782,11 +816,69 @@ impl ArtifactObjectReferenceUnsealer for AwsKmsArtifactObjectReferenceUnsealer {
             }
             return Err(ArtifactObjectReferenceUnsealError::InvalidEvidence);
         }
-        let plaintext = output
-            .plaintext
-            .ok_or(ArtifactObjectReferenceUnsealError::InvalidEvidence)?
-            .into_inner();
-        DecryptedArtifactObjectReference::new(plaintext)
+        DecryptedArtifactObjectReference::new(
+            output
+                .plaintext
+                .ok_or(ArtifactObjectReferenceUnsealError::InvalidEvidence)?
+                .into_inner(),
+        )
+    }
+}
+
+impl fmt::Debug for AwsKmsArtifactObjectReferenceUnsealer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AwsKmsArtifactObjectReferenceUnsealer")
+            .field("binding_count", &self.bindings.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl ArtifactObjectReferenceUnsealer for AwsKmsArtifactObjectReferenceUnsealer {
+    async fn unseal(
+        &self,
+        authorized: &AuthorizedArtifactObjectRead,
+    ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError> {
+        self.decrypt_reference(
+            &authorized.tenant_id,
+            &authorized.blob_id,
+            &authorized.storage_binding_digest,
+            &authorized.encryption_domain_id,
+            &authorized.key_id,
+            authorized.object_reference_ciphertext.as_bytes(),
+        )
+        .await
+    }
+
+    async fn unseal_scan(
+        &self,
+        authorized: &AuthorizedArtifactScanObjectRead,
+    ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError> {
+        self.decrypt_reference(
+            &authorized.tenant_id,
+            &authorized.blob_id,
+            &authorized.storage_binding_digest,
+            &authorized.encryption_domain_id,
+            &authorized.key_id,
+            authorized.object_reference_ciphertext.as_bytes(),
+        )
+        .await
+    }
+
+    async fn unseal_delete(
+        &self,
+        authorized: &AuthorizedArtifactDeleteObject,
+    ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError> {
+        self.decrypt_reference(
+            &authorized.tenant_id,
+            &authorized.blob_id,
+            &authorized.storage_binding_digest,
+            &authorized.encryption_domain_id,
+            &authorized.key_id,
+            authorized.object_reference_ciphertext.as_bytes(),
+        )
+        .await
     }
 }
 

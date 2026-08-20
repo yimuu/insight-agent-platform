@@ -1,29 +1,45 @@
 {{- if .Values.networkPolicy.enabled }}
-{{- $root := . -}}
+{{- $root := . }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: default-deny, namespace: {{ .Values.namespace }}}
 spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
-{{ range $audience, $broker := .Values.brokers }}
-{{ $context := dict "audience" $audience }}
+{{- range $role, $component := .Values.roles }}
+{{- $context := dict "role" $role }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "insight-platform-artifact-broker.name" $context }}
+  name: {{ include "insight-platform-artifact.name" $context }}
   namespace: {{ $root.Values.namespace }}
 spec:
   podSelector:
-    matchLabels:
-      {{- include "insight-platform-artifact-broker.labels" $context | nindent 6 }}
+    matchLabels: {{ include "insight-platform-artifact.labels" $context | nindent 6 }}
   policyTypes: [Ingress, Egress]
   ingress:
+    {{- if eq $role "gateway" }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml $root.Values.networkPolicy.publicGatewayNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml $root.Values.networkPolicy.publicGatewayPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int (index $component.ports 0).port }}}]
+    {{- else if eq $role "data-worker" }}
     - from:
         - namespaceSelector:
             matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxControllerNamespaceSelector | nindent 16 }}
           podSelector:
             matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxControllerPodSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: {{ int $broker.port }}}]
+      ports: [{protocol: TCP, port: 9443}]
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxGuestNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxGuestPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: 9444}]
+    {{- else }}
+    []
+    {{- end }}
   egress:
     - to:
         - namespaceSelector:
@@ -51,5 +67,5 @@ spec:
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       ports: [{protocol: TCP, port: 443}]
-{{ end }}
+{{- end }}
 {{- end }}

@@ -1116,6 +1116,7 @@ pub fn decide_commit_blob_cleanup(
 pub struct ArtifactScanRequest {
     pub tenant_id: ResourceId,
     pub job_id: ResourceId,
+    pub fence: JobFence,
     pub job: ArtifactScanJobSnapshot,
 }
 
@@ -1125,6 +1126,7 @@ pub struct DeleteArtifactBlobGeneration {
     pub job_id: ResourceId,
     pub blob_id: ResourceId,
     pub object_generation: String,
+    pub fence: JobFence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1350,6 +1352,7 @@ where
         let request = ArtifactScanRequest {
             tenant_id: execution.audit.tenant_id.clone(),
             job_id: execution.scan_job_id.clone(),
+            fence: execution.fence.clone(),
             job: execution.scan.clone(),
         };
         let evidence = match self.scanner.scan(request).await {
@@ -1411,6 +1414,7 @@ where
             job_id: execution.cleanup_job_id.clone(),
             blob_id: execution.cleanup.discarded_blob_id.clone(),
             object_generation: execution.cleanup.object_generation.clone(),
+            fence: execution.fence.clone(),
         };
         let evidence = match self.blob_backend.delete_generation(request).await {
             Ok(evidence) => evidence,
@@ -1482,6 +1486,7 @@ where
                     job_id: execution.deletion_job_id.clone(),
                     blob_id: execution.deletion.blob_id.clone(),
                     object_generation: object_generation.clone(),
+                    fence: execution.fence.clone(),
                 };
                 let backend_evidence = match self.blob_backend.delete_generation(request).await {
                     Ok(evidence) => evidence,
@@ -2167,6 +2172,7 @@ mod tests {
             Some(&ArtifactScanRequest {
                 tenant_id: expected.audit.tenant_id.clone(),
                 job_id: expected.scan_job_id.clone(),
+                fence: expected.fence.clone(),
                 job: fixture.job.clone(),
             })
         );
@@ -2214,6 +2220,7 @@ mod tests {
                 job_id: expected.cleanup_job_id.clone(),
                 blob_id: expected.discarded_blob_id.clone(),
                 object_generation: expected.evidence.object_generation.clone(),
+                fence: expected.fence.clone(),
             }]
         );
         assert_eq!(
@@ -2399,6 +2406,7 @@ mod tests {
                 job_id: physical_expected.deletion_job_id.clone(),
                 blob_id: physical_expected.blob_id.clone(),
                 object_generation: backend_evidence.object_generation.clone(),
+                fence: physical_expected.fence.clone(),
             }]
         );
         assert_eq!(

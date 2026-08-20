@@ -68,7 +68,7 @@
 {{- if or (lt (int .Values.networkPolicy.kubernetesApiPort) 1) (gt (int .Values.networkPolicy.kubernetesApiPort) 65535) (lt (int .Values.networkPolicy.artifactDataWorkerPort) 1) (gt (int .Values.networkPolicy.artifactDataWorkerPort) 65535) }}
 {{- fail "Kubernetes API and Artifact Data Worker ports must be fixed valid ports" }}
 {{- end }}
-{{- if or (not (deepEqual .Values.networkPolicy.artifactBrokerNamespaceSelector (dict "insight.platform/artifact-namespace" "true"))) (not (deepEqual .Values.networkPolicy.artifactBrokerPodSelector (dict "insight.platform/workload-role" "artifact-broker-sandbox"))) }}
+{{- if or (not (deepEqual .Values.networkPolicy.artifactBrokerNamespaceSelector (dict "insight.platform/artifact-namespace" "true"))) (not (deepEqual .Values.networkPolicy.artifactBrokerPodSelector (dict "insight.platform/workload-role" "artifact-data-worker"))) }}
 {{- fail "Controller must target only the isolated Sandbox Artifact Broker" }}
 {{- end }}
 {{- if or (lt (int .Values.networkPolicy.artifactBrokerPort) 1) (gt (int .Values.networkPolicy.artifactBrokerPort) 65535) }}

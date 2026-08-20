@@ -24,8 +24,8 @@ controller:
     maxConnections: 10
   serviceAccount: {}
   artifactBroker:
-    endpoint: https://insight-platform-artifact-broker-sandbox.platform-artifacts.svc:9443
-    tlsServerName: insight-platform-artifact-broker-sandbox.platform-artifacts.svc
+    endpoint: https://insight-platform-artifact-data-worker.platform-artifacts.svc:9443
+    tlsServerName: insight-platform-artifact-data-worker.platform-artifacts.svc
     maximumRequestBytes: 1048576
     maximumChunkBytes: 262144
     maximumInFlightResponses: 1
@@ -178,7 +178,7 @@ networkPolicy:
   postgresCidrs: [10.10.0.0/24]
   natsCidrs: [10.20.0.0/24]
   artifactBrokerNamespaceSelector: {insight.platform/artifact-namespace: "true"}
-  artifactBrokerPodSelector: {insight.platform/workload-role: artifact-broker-sandbox}
+  artifactBrokerPodSelector: {insight.platform/workload-role: artifact-data-worker}
   artifactBrokerPort: 9443
   natsPort: 4222
   kubernetesApiCidrs: [10.30.0.0/24]

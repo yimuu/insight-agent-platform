@@ -7,7 +7,7 @@ use insight_platform_artifacts::{
 use insight_platform_contracts::{ArtifactRef, DataClassification, ResourceId, ResourceKind};
 use insight_platform_sandbox::{WasiArtifactReadPurpose, WasiArtifactReadRequest};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Mutex,
 };
 use uuid::Uuid;
@@ -80,12 +80,27 @@ impl ArtifactObjectReferenceUnsealer for FixtureUnsealer {
     ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError> {
         DecryptedArtifactObjectReference::new(self.plaintext.lock().unwrap().clone())
     }
+
+    async fn unseal_scan(
+        &self,
+        _authorized: &AuthorizedArtifactScanObjectRead,
+    ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError> {
+        DecryptedArtifactObjectReference::new(self.plaintext.lock().unwrap().clone())
+    }
+
+    async fn unseal_delete(
+        &self,
+        _authorized: &AuthorizedArtifactDeleteObject,
+    ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError> {
+        DecryptedArtifactObjectReference::new(self.plaintext.lock().unwrap().clone())
+    }
 }
 
 struct FixtureStore {
     binding: Sha256Digest,
     metadata: Mutex<ArtifactObjectMetadata>,
     bytes: Mutex<Vec<u8>>,
+    deleted: AtomicBool,
 }
 
 #[async_trait]
@@ -105,6 +120,9 @@ impl InstalledArtifactObjectStore for FixtureStore {
     ) -> Result<ArtifactObjectMetadata, ArtifactObjectStoreError> {
         assert_eq!(object_key, "opaque/object-1");
         assert_eq!(object_generation, "version-1");
+        if self.deleted.load(Ordering::SeqCst) {
+            return Err(ArtifactObjectStoreError::NotFound);
+        }
         Ok(self.metadata.lock().unwrap().clone())
     }
 
@@ -121,6 +139,19 @@ impl InstalledArtifactObjectStore for FixtureStore {
             self.bytes.lock().unwrap().clone(),
             maximum_bytes,
         )
+    }
+
+    async fn delete_exact(
+        &self,
+        object_key: &str,
+        object_generation: &str,
+    ) -> Result<ArtifactObjectDeletionReceipt, ArtifactObjectStoreError> {
+        assert_eq!(object_key, "opaque/object-1");
+        self.deleted.store(true, Ordering::SeqCst);
+        Ok(ArtifactObjectDeletionReceipt {
+            object_generation: object_generation.to_owned(),
+            provider_receipt_digest: digest('e'),
+        })
     }
 }
 
@@ -181,6 +212,7 @@ fn fixture_with_limits(
             byte_length: u64::try_from(bytes.len()).unwrap(),
         }),
         bytes: Mutex::new(bytes.to_vec()),
+        deleted: AtomicBool::new(false),
     });
     let broker = BrokeredSandboxArtifactBroker::new(
         authority,
@@ -217,6 +249,38 @@ fn locator(binding: &Sha256Digest, _generation: &str) -> Vec<u8> {
         "storage_binding_digest": binding,
     }))
     .unwrap()
+}
+
+struct FixtureDeleteAuthority {
+    tenant_id: ResourceId,
+    blob_id: ResourceId,
+    storage_binding_digest: Sha256Digest,
+    encryption_domain_id: ResourceId,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ArtifactDeleteObjectAuthority<DeleteArtifactBlobGeneration> for FixtureDeleteAuthority {
+    async fn authorize_delete_object(
+        &self,
+        _request: &DeleteArtifactBlobGeneration,
+    ) -> Result<AuthorizedArtifactDeleteObject, ArtifactObjectReadAuthorityError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(AuthorizedArtifactDeleteObject {
+            tenant_id: self.tenant_id.clone(),
+            blob_id: self.blob_id.clone(),
+            backend: "s3".to_owned(),
+            storage_binding_digest: self.storage_binding_digest.clone(),
+            encryption_domain_id: self.encryption_domain_id.clone(),
+            key_id: "kms-key-1".to_owned(),
+            object_reference_ciphertext: EncryptedArtifactObjectReference::new(
+                b"ciphertext".to_vec(),
+            )
+            .unwrap(),
+            object_generation: "version-1".to_owned(),
+            authorization_digest: digest('c'),
+        })
+    }
 }
 
 #[tokio::test]
@@ -323,4 +387,54 @@ async fn noncanonical_locator_and_content_digest_mismatch_fail_closed() {
         WasiArtifactBroker::read_exact(&corrupt.broker, corrupt.request).await,
         Err(WasiArtifactBrokerError::Integrity)
     );
+}
+
+#[tokio::test]
+async fn physical_delete_is_reauthorized_and_proves_exact_generation_absence() {
+    let tenant_id = id(ResourceKind::Tenant);
+    let blob_id = id(ResourceKind::InternalBlob);
+    let binding = digest('b');
+    let authority = Arc::new(FixtureDeleteAuthority {
+        tenant_id: tenant_id.clone(),
+        blob_id: blob_id.clone(),
+        storage_binding_digest: binding.clone(),
+        encryption_domain_id: id(ResourceKind::EncryptionDomain),
+        calls: AtomicUsize::new(0),
+    });
+    let store = Arc::new(FixtureStore {
+        binding: binding.clone(),
+        metadata: Mutex::new(ArtifactObjectMetadata {
+            object_generation: "version-1".to_owned(),
+            byte_length: 7,
+        }),
+        bytes: Mutex::new(b"payload".to_vec()),
+        deleted: AtomicBool::new(false),
+    });
+    let backend = BrokeredArtifactDeletionBackend::new(
+        authority.clone(),
+        Arc::new(FixtureUnsealer {
+            plaintext: Mutex::new(locator(&binding, "version-1")),
+        }),
+        InstalledArtifactObjectStoreCatalog::new(vec![store.clone()]).unwrap(),
+        ArtifactBrokerLimits::default(),
+    )
+    .unwrap();
+    let evidence = backend
+        .delete_generation(DeleteArtifactBlobGeneration {
+            tenant_id,
+            job_id: id(ResourceKind::Job),
+            blob_id,
+            object_generation: "version-1".to_owned(),
+            fence: insight_platform_jobs::JobFence {
+                expected_version: 2,
+                worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+                lease_generation: 1,
+                token_digest: digest('d'),
+            },
+        })
+        .await
+        .unwrap();
+    evidence.validate().unwrap();
+    assert!(store.deleted.load(Ordering::SeqCst));
+    assert_eq!(authority.calls.load(Ordering::SeqCst), 3);
 }

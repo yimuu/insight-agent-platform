@@ -1,0 +1,65 @@
+image:
+  repository: insight-agent-platform
+  digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+namespace: platform-artifacts
+
+roles:
+  gateway:
+    command: /usr/local/bin/platform-artifact-gateway
+    replicas: 2
+    ports: [{name: http, port: 8080}]
+    config: {existingConfigMap: insight-platform-artifact-gateway-config, fileKey: artifact-gateway.json, digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+    database: {existingSecret: insight-platform-artifact-gateway-database, urlKey: database-url}
+    serviceAccount:
+      annotations: {eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-gateway}
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {cpu: "2", memory: 1Gi}
+  data-worker:
+    command: /usr/local/bin/platform-artifact-data-worker
+    replicas: 2
+    ports: [{name: controller-grpc, port: 9443}, {name: guest-grpc, port: 9444}]
+    config: {existingConfigMap: insight-platform-artifact-data-worker-config, fileKey: artifact-data-worker.json, digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
+    database:
+      readExistingSecret: insight-platform-artifact-data-reader-database
+      workExistingSecret: insight-platform-artifact-data-worker-database
+      urlKey: database-url
+    serviceAccount:
+      annotations: {eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-data-worker}
+    tls:
+      existingSecret: insight-platform-artifact-data-worker-server-tls
+      keys: {clientCa: client-ca.pem, serverCertificate: server.pem, serverPrivateKey: server-key.pem}
+    resources:
+      requests: {cpu: 500m, memory: 512Mi}
+      limits: {cpu: "4", memory: 2Gi}
+  maintenance:
+    command: /usr/local/bin/platform-artifact-maintenance
+    replicas: 2
+    ports: [{name: http, port: 8081}]
+    config: {existingConfigMap: insight-platform-artifact-maintenance-config, fileKey: artifact-maintenance.json, digest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}
+    database: {existingSecret: insight-platform-artifact-maintenance-database, urlKey: database-url}
+    serviceAccount:
+      annotations: {eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-maintenance}
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {cpu: "2", memory: 1Gi}
+
+podDisruptionBudget: {enabled: true, minAvailable: 1}
+autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 32, targetCPUUtilizationPercentage: 70}
+
+networkPolicy:
+  enabled: true
+  publicGatewayNamespaceSelector: {insight.platform/public-gateway-namespace: "true"}
+  publicGatewayPodSelector: {insight.platform/workload-role: public-gateway}
+  sandboxControllerNamespaceSelector: {insight.platform/sandbox-controller-namespace: "true"}
+  sandboxControllerPodSelector: {insight.platform/workload-role: sandbox-controller}
+  sandboxGuestNamespaceSelector: {insight.platform/sandbox-guest-namespace: "true"}
+  sandboxGuestPodSelector: {insight.platform/workload-role: gvisor-guest}
+  dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
+  dnsPodSelector: {k8s-app: kube-dns}
+  postgresCidrs: [10.10.0.0/24]
+  storageProviderCidrs: [10.50.0.0/24]
+  kmsProviderCidrs: [10.60.0.0/24]
+  workloadIdentityCidrs: [10.40.0.0/24]

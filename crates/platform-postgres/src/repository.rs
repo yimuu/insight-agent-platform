@@ -1741,6 +1741,36 @@ impl PgRepository {
 
     pub async fn claim_jobs(&self, command: ClaimJobs) -> Result<Vec<JobRecord>, RepositoryError> {
         command.validate()?;
+        self.claim_jobs_filtered(command, None).await
+    }
+
+    /// Claims Artifact work through a closed physical-role lane. The JSON predicate is part of
+    /// the same `FOR UPDATE SKIP LOCKED` transaction as the lease, so one Artifact role cannot
+    /// temporarily steal another role's work and starve its dedicated queue.
+    pub async fn claim_artifact_jobs(
+        &self,
+        command: ClaimArtifactJobs,
+    ) -> Result<Vec<JobRecord>, RepositoryError> {
+        command.validate()?;
+        let payload_kinds = command.role.payload_kinds();
+        self.claim_jobs_filtered(
+            ClaimJobs {
+                work_class: WorkClass::Artifact.as_str().to_owned(),
+                worker_id: command.worker_id,
+                limit: command.limit,
+                lease_milliseconds: command.lease_milliseconds,
+                lease_token_digests: command.lease_token_digests,
+            },
+            Some(payload_kinds),
+        )
+        .await
+    }
+
+    async fn claim_jobs_filtered(
+        &self,
+        command: ClaimJobs,
+        artifact_payload_kinds: Option<&'static [&'static str]>,
+    ) -> Result<Vec<JobRecord>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
@@ -1756,6 +1786,7 @@ impl PgRepository {
               AND scheduled_at <= $3
               AND (retry_at IS NULL OR retry_at <= $3)
               AND deadline > $3
+              AND ($4::text[] IS NULL OR payload ->> 'kind' = ANY($4::text[]))
             ORDER BY priority DESC, COALESCE(retry_at, scheduled_at), job_id
             FOR UPDATE SKIP LOCKED
             LIMIT $2
@@ -1764,6 +1795,7 @@ impl PgRepository {
         .bind(&command.work_class)
         .bind(i64::from(command.limit))
         .bind(database_now)
+        .bind(artifact_payload_kinds.map(|kinds| kinds.to_vec()))
         .fetch_all(&mut *transaction)
         .await?;
         let mut claimed = Vec::with_capacity(candidates.len());
@@ -16806,6 +16838,30 @@ pub struct ClaimJobs {
     pub lease_token_digests: Vec<Sha256Digest>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactWorkerRole {
+    DataWorker,
+    Maintenance,
+}
+
+impl ArtifactWorkerRole {
+    const fn payload_kinds(self) -> &'static [&'static str] {
+        match self {
+            Self::DataWorker => &["scan", "rescan"],
+            Self::Maintenance => &["delete", "blob_cleanup"],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaimArtifactJobs {
+    pub role: ArtifactWorkerRole,
+    pub worker_id: ResourceId,
+    pub limit: u16,
+    pub lease_milliseconds: i64,
+    pub lease_token_digests: Vec<Sha256Digest>,
+}
+
 pub const MAX_ORCHESTRATION_QUOTA_LINES: usize = 4;
 pub const MAX_CHILD_RUN_DEPTH: u16 = 32;
 pub const MAX_DESCENDANT_RUNS: u32 = 500;
@@ -19036,34 +19092,58 @@ impl ClaimJobs {
             .work_class
             .parse::<WorkClass>()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
-        if work_class == WorkClass::Sandbox {
+        if matches!(work_class, WorkClass::Sandbox | WorkClass::Artifact) {
             return Err(RepositoryError::InvalidInput(
-                "Sandbox Jobs require the dedicated parent-gated claim path".to_owned(),
+                "Sandbox and Artifact Jobs require dedicated role-gated claim paths".to_owned(),
             ));
         }
-        if self.worker_id.kind() != ResourceKind::WorkerProcessGeneration {
-            return Err(RepositoryError::InvalidInput(
-                "worker ID must identify a WorkerProcessGeneration".to_owned(),
-            ));
-        }
-        let unique_tokens = self
-            .lease_token_digests
-            .iter()
-            .map(ToString::to_string)
-            .collect::<BTreeSet<_>>();
-        if self.limit == 0
-            || self.limit > 256
-            || self.lease_milliseconds <= 0
-            || self.lease_milliseconds > MAX_JOB_LEASE_MILLISECONDS
-            || self.lease_token_digests.len() != usize::from(self.limit)
-            || unique_tokens.len() != self.lease_token_digests.len()
-        {
-            return Err(RepositoryError::InvalidInput(
-                "claim limit or lease is outside the platform bound".to_owned(),
-            ));
-        }
-        Ok(())
+        validate_claim_bounds(
+            &self.worker_id,
+            self.limit,
+            self.lease_milliseconds,
+            &self.lease_token_digests,
+        )
     }
+}
+
+impl ClaimArtifactJobs {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        validate_claim_bounds(
+            &self.worker_id,
+            self.limit,
+            self.lease_milliseconds,
+            &self.lease_token_digests,
+        )
+    }
+}
+
+fn validate_claim_bounds(
+    worker_id: &ResourceId,
+    limit: u16,
+    lease_milliseconds: i64,
+    lease_token_digests: &[Sha256Digest],
+) -> Result<(), RepositoryError> {
+    if worker_id.kind() != ResourceKind::WorkerProcessGeneration {
+        return Err(RepositoryError::InvalidInput(
+            "worker ID must identify a WorkerProcessGeneration".to_owned(),
+        ));
+    }
+    let unique_tokens = lease_token_digests
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    if limit == 0
+        || limit > 256
+        || lease_milliseconds <= 0
+        || lease_milliseconds > MAX_JOB_LEASE_MILLISECONDS
+        || lease_token_digests.len() != usize::from(limit)
+        || unique_tokens.len() != lease_token_digests.len()
+    {
+        return Err(RepositoryError::InvalidInput(
+            "claim limit or lease is outside the platform bound".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -22080,6 +22160,23 @@ mod tests {
             generic_claim.validate(),
             Err(RepositoryError::InvalidInput(_))
         ));
+
+        let generic_artifact_claim = ClaimJobs {
+            work_class: WorkClass::Artifact.as_str().to_owned(),
+            ..generic_claim.clone()
+        };
+        assert!(matches!(
+            generic_artifact_claim.validate(),
+            Err(RepositoryError::InvalidInput(_))
+        ));
+        assert_eq!(
+            ArtifactWorkerRole::DataWorker.payload_kinds(),
+            &["scan", "rescan"]
+        );
+        assert_eq!(
+            ArtifactWorkerRole::Maintenance.payload_kinds(),
+            &["delete", "blob_cleanup"]
+        );
     }
 
     #[test]

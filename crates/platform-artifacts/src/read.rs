@@ -117,6 +117,140 @@ pub trait ArtifactObjectReadAuthority<R>: Send + Sync {
     ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError>;
 }
 
+/// Exact pre-verification object authority used only by the Artifact Data Worker scanner.
+/// Unlike a normal read, content digest and media type may not yet be authoritative.
+pub struct AuthorizedArtifactScanObjectRead {
+    pub tenant_id: ResourceId,
+    pub artifact_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub backend: String,
+    pub storage_binding_digest: Sha256Digest,
+    pub encryption_domain_id: ResourceId,
+    pub key_id: String,
+    pub object_reference_ciphertext: EncryptedArtifactObjectReference,
+    pub object_generation: String,
+    pub maximum_bytes: u64,
+    pub expected_digest: Option<Sha256Digest>,
+    pub declared_media_type: Option<String>,
+    pub authorization_digest: Sha256Digest,
+}
+
+impl AuthorizedArtifactScanObjectRead {
+    pub fn validate(&self) -> Result<(), ArtifactObjectReadAuthorityError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.blob_id.kind() != ResourceKind::InternalBlob
+            || self.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || !stable_code(&self.backend, MAX_ARTIFACT_STORAGE_BACKEND_BYTES)
+            || self.key_id.is_empty()
+            || self.key_id.len() > MAX_ARTIFACT_KMS_KEY_ID_BYTES
+            || self.key_id.chars().any(char::is_control)
+            || self.object_generation.is_empty()
+            || self.object_generation.len() > MAX_ARTIFACT_OBJECT_GENERATION_BYTES
+            || self.object_generation.chars().any(char::is_control)
+            || self.maximum_bytes == 0
+            || self.declared_media_type.as_deref().is_some_and(|value| {
+                value.is_empty()
+                    || value.len() > 255
+                    || !value.is_ascii()
+                    || value.chars().any(char::is_control)
+            })
+        {
+            return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for AuthorizedArtifactScanObjectRead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizedArtifactScanObjectRead")
+            .field("tenant_id", &self.tenant_id)
+            .field("artifact_id", &self.artifact_id)
+            .field("blob_id", &self.blob_id)
+            .field("backend", &self.backend)
+            .field("storage_binding_digest", &self.storage_binding_digest)
+            .field("key_id", &"[redacted]")
+            .field(
+                "object_reference_ciphertext",
+                &self.object_reference_ciphertext,
+            )
+            .field("object_generation", &"[redacted]")
+            .field("maximum_bytes", &self.maximum_bytes)
+            .field("expected_digest", &self.expected_digest)
+            .field("declared_media_type", &self.declared_media_type)
+            .field("authorization_digest", &self.authorization_digest)
+            .finish()
+    }
+}
+
+#[async_trait]
+pub trait ArtifactScanObjectReadAuthority<R>: Send + Sync {
+    async fn authorize_scan_object_read(
+        &self,
+        request: &R,
+    ) -> Result<AuthorizedArtifactScanObjectRead, ArtifactObjectReadAuthorityError>;
+}
+
+pub struct AuthorizedArtifactDeleteObject {
+    pub tenant_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub backend: String,
+    pub storage_binding_digest: Sha256Digest,
+    pub encryption_domain_id: ResourceId,
+    pub key_id: String,
+    pub object_reference_ciphertext: EncryptedArtifactObjectReference,
+    pub object_generation: String,
+    pub authorization_digest: Sha256Digest,
+}
+
+impl AuthorizedArtifactDeleteObject {
+    pub fn validate(&self) -> Result<(), ArtifactObjectReadAuthorityError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.blob_id.kind() != ResourceKind::InternalBlob
+            || self.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || !stable_code(&self.backend, MAX_ARTIFACT_STORAGE_BACKEND_BYTES)
+            || self.key_id.is_empty()
+            || self.key_id.len() > MAX_ARTIFACT_KMS_KEY_ID_BYTES
+            || self.key_id.chars().any(char::is_control)
+            || self.object_generation.is_empty()
+            || self.object_generation.len() > MAX_ARTIFACT_OBJECT_GENERATION_BYTES
+            || self.object_generation.chars().any(char::is_control)
+        {
+            return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for AuthorizedArtifactDeleteObject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizedArtifactDeleteObject")
+            .field("tenant_id", &self.tenant_id)
+            .field("blob_id", &self.blob_id)
+            .field("backend", &self.backend)
+            .field("storage_binding_digest", &self.storage_binding_digest)
+            .field("key_id", &"[redacted]")
+            .field(
+                "object_reference_ciphertext",
+                &self.object_reference_ciphertext,
+            )
+            .field("object_generation", &"[redacted]")
+            .field("authorization_digest", &self.authorization_digest)
+            .finish()
+    }
+}
+
+#[async_trait]
+pub trait ArtifactDeleteObjectAuthority<R>: Send + Sync {
+    async fn authorize_delete_object(
+        &self,
+        request: &R,
+    ) -> Result<AuthorizedArtifactDeleteObject, ArtifactObjectReadAuthorityError>;
+}
+
 fn stable_code(value: &str, maximum: usize) -> bool {
     !value.is_empty()
         && value.len() <= maximum

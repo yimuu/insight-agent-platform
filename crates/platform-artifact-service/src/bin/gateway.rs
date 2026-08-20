@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, State},
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -232,8 +232,11 @@ async fn run() -> Result<(), GatewayError> {
     };
     let app = Router::new()
         .route("/readyz", get(ready))
-        .route("/v1/artifacts/prepare-upload", post(prepare_upload))
-        .route("/v1/artifacts/complete-upload", post(complete_upload))
+        .route("/v1/artifacts:prepare-upload", post(prepare_upload))
+        .route(
+            "/v1/artifacts/{artifact_id}:complete-upload",
+            post(complete_upload),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(state);
     let address: SocketAddr = config
@@ -358,9 +361,13 @@ async fn prepare_upload_inner(
 
 async fn complete_upload(
     State(state): State<GatewayState>,
+    AxumPath(artifact_id): AxumPath<ResourceId>,
     headers: HeaderMap,
     Json(request): Json<CompleteUploadRequest>,
 ) -> Response {
+    if artifact_id != request.artifact_id {
+        return problem(HttpError::Invalid);
+    }
     match complete_upload_inner(state, &headers, request).await {
         Ok(response) => no_store((StatusCode::ACCEPTED, Json(response)).into_response()),
         Err(error) => problem(error),

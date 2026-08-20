@@ -7,7 +7,10 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use insight_platform_artifacts::{
-    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, AuthorizedArtifactObjectRead,
+    ArtifactBackendFailure, ArtifactBlobBackend, ArtifactBlobDeletionEvidence,
+    ArtifactDeleteObjectAuthority, ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError,
+    ArtifactScanObjectReadAuthority, ArtifactScanRequest, AuthorizedArtifactDeleteObject,
+    AuthorizedArtifactObjectRead, AuthorizedArtifactScanObjectRead, DeleteArtifactBlobGeneration,
 };
 use insight_platform_contracts::{parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_sandbox::{
@@ -118,6 +121,20 @@ pub trait ArtifactObjectReferenceUnsealer: Send + Sync {
         &self,
         authorized: &AuthorizedArtifactObjectRead,
     ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError>;
+
+    async fn unseal_scan(
+        &self,
+        _authorized: &AuthorizedArtifactScanObjectRead,
+    ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError> {
+        Err(ArtifactObjectReferenceUnsealError::Rejected)
+    }
+
+    async fn unseal_delete(
+        &self,
+        _authorized: &AuthorizedArtifactDeleteObject,
+    ) -> Result<DecryptedArtifactObjectReference, ArtifactObjectReferenceUnsealError> {
+        Err(ArtifactObjectReferenceUnsealError::Rejected)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,12 +154,34 @@ impl ArtifactObjectLocator {
             && self.storage_binding_digest == authorized.storage_binding_digest
             && valid_opaque_object_key(&self.object_key)
     }
+
+    fn validate_for_delete(&self, authorized: &AuthorizedArtifactDeleteObject) -> bool {
+        self.schema_version == 1
+            && self.backend == "s3"
+            && self.backend == authorized.backend
+            && self.storage_binding_digest == authorized.storage_binding_digest
+            && valid_opaque_object_key(&self.object_key)
+    }
+
+    fn validate_for_scan(&self, authorized: &AuthorizedArtifactScanObjectRead) -> bool {
+        self.schema_version == 1
+            && self.backend == "s3"
+            && self.backend == authorized.backend
+            && self.storage_binding_digest == authorized.storage_binding_digest
+            && valid_opaque_object_key(&self.object_key)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactObjectMetadata {
     pub object_generation: String,
     pub byte_length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactObjectDeletionReceipt {
+    pub object_generation: String,
+    pub provider_receipt_digest: Sha256Digest,
 }
 
 /// Non-clone object bytes. Providers must enforce their own streaming ceiling before creating it.
@@ -218,6 +257,14 @@ pub trait InstalledArtifactObjectStore: Send + Sync {
         object_generation: &str,
         maximum_bytes: usize,
     ) -> Result<ArtifactObjectBytes, ArtifactObjectStoreError>;
+
+    async fn delete_exact(
+        &self,
+        _object_key: &str,
+        _object_generation: &str,
+    ) -> Result<ArtifactObjectDeletionReceipt, ArtifactObjectStoreError> {
+        Err(ArtifactObjectStoreError::Rejected)
+    }
 }
 
 #[derive(Clone)]
@@ -253,6 +300,53 @@ impl InstalledArtifactObjectStoreCatalog {
 pub struct BrokeredSandboxArtifactBroker {
     wasi_authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
     core: ArtifactBrokerCore,
+}
+
+pub struct BrokeredArtifactScannerReader {
+    authority: Arc<dyn ArtifactScanObjectReadAuthority<ArtifactScanRequest>>,
+    core: ArtifactBrokerCore,
+}
+
+#[derive(Clone)]
+pub struct BrokeredArtifactDeletionBackend {
+    authority: Arc<dyn ArtifactDeleteObjectAuthority<DeleteArtifactBlobGeneration>>,
+    core: Arc<ArtifactBrokerCore>,
+}
+
+pub struct BrokeredArtifactScanRead {
+    bytes: Vec<u8>,
+    content_digest: Sha256Digest,
+    declared_media_type: Option<String>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl BrokeredArtifactScanRead {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn content_digest(&self) -> &Sha256Digest {
+        &self.content_digest
+    }
+
+    pub fn declared_media_type(&self) -> Option<&str> {
+        self.declared_media_type.as_deref()
+    }
+}
+
+impl Drop for BrokeredArtifactScanRead {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactScanReadError {
+    Unavailable,
+    Denied,
+    NotFound,
+    TooLarge,
+    Integrity,
 }
 
 /// An exact Artifact read whose audience permit remains owned until the caller finishes with the
@@ -347,6 +441,315 @@ impl BrokeredSandboxArtifactBroker {
             wasi_authority,
             core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
         })
+    }
+}
+
+impl BrokeredArtifactScannerReader {
+    pub fn new(
+        authority: Arc<dyn ArtifactScanObjectReadAuthority<ArtifactScanRequest>>,
+        unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
+        stores: InstalledArtifactObjectStoreCatalog,
+        limits: ArtifactBrokerLimits,
+    ) -> Result<Self, ArtifactBrokerConfigurationError> {
+        Ok(Self {
+            authority,
+            core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
+        })
+    }
+
+    pub async fn read_for_scan(
+        &self,
+        request: &ArtifactScanRequest,
+    ) -> Result<BrokeredArtifactScanRead, ArtifactScanReadError> {
+        let permit = self
+            .core
+            .in_flight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ArtifactScanReadError::Unavailable)?;
+        let result = timeout(self.core.limits.operation_timeout, async {
+            let authorized = self
+                .authority
+                .authorize_scan_object_read(request)
+                .await
+                .map_err(map_scan_authority_error)?;
+            authorized
+                .validate()
+                .map_err(|_| ArtifactScanReadError::Integrity)?;
+            let maximum_bytes = usize::try_from(authorized.maximum_bytes)
+                .map_err(|_| ArtifactScanReadError::TooLarge)?;
+            if maximum_bytes == 0 || maximum_bytes > self.core.limits.maximum_read_bytes {
+                return Err(ArtifactScanReadError::TooLarge);
+            }
+            let store = self
+                .core
+                .stores
+                .get(&authorized.storage_binding_digest)
+                .ok_or(ArtifactScanReadError::Denied)?;
+            if store.backend() != authorized.backend {
+                return Err(ArtifactScanReadError::Integrity);
+            }
+            let plaintext = self
+                .core
+                .unsealer
+                .unseal_scan(&authorized)
+                .await
+                .map_err(map_scan_unseal_error)?;
+            let locator = parse_locator(plaintext.expose()).map_err(map_scan_read_error)?;
+            if !locator.validate_for_scan(&authorized) {
+                return Err(ArtifactScanReadError::Integrity);
+            }
+            let head = store
+                .head_exact(&locator.object_key, &authorized.object_generation)
+                .await
+                .map_err(map_scan_store_error)?;
+            if head.object_generation != authorized.object_generation
+                || head.byte_length != authorized.maximum_bytes
+            {
+                return Err(ArtifactScanReadError::Integrity);
+            }
+            let object = store
+                .read_exact(
+                    &locator.object_key,
+                    &authorized.object_generation,
+                    maximum_bytes,
+                )
+                .await
+                .map_err(map_scan_store_error)?;
+            if object.metadata != head {
+                return Err(ArtifactScanReadError::Integrity);
+            }
+            let content_digest = sha256(object.expose());
+            if authorized
+                .expected_digest
+                .as_ref()
+                .is_some_and(|expected| expected != &content_digest)
+            {
+                return Err(ArtifactScanReadError::Integrity);
+            }
+            let final_authorization = self
+                .authority
+                .authorize_scan_object_read(request)
+                .await
+                .map_err(map_scan_authority_error)?;
+            if final_authorization.authorization_digest != authorized.authorization_digest {
+                return Err(ArtifactScanReadError::Denied);
+            }
+            Ok((
+                object.into_bytes(),
+                content_digest,
+                authorized.declared_media_type,
+            ))
+        })
+        .await
+        .map_err(|_| ArtifactScanReadError::Unavailable)??;
+        Ok(BrokeredArtifactScanRead {
+            bytes: result.0,
+            content_digest: result.1,
+            declared_media_type: result.2,
+            _permit: permit,
+        })
+    }
+}
+
+impl BrokeredArtifactDeletionBackend {
+    pub fn new(
+        authority: Arc<dyn ArtifactDeleteObjectAuthority<DeleteArtifactBlobGeneration>>,
+        unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
+        stores: InstalledArtifactObjectStoreCatalog,
+        limits: ArtifactBrokerLimits,
+    ) -> Result<Self, ArtifactBrokerConfigurationError> {
+        Ok(Self {
+            authority,
+            core: Arc::new(ArtifactBrokerCore::new(unsealer, stores, limits)?),
+        })
+    }
+
+    async fn delete_inner(
+        &self,
+        request: &DeleteArtifactBlobGeneration,
+    ) -> Result<ArtifactBlobDeletionEvidence, ArtifactBackendFailure> {
+        let authorized = self
+            .authority
+            .authorize_delete_object(request)
+            .await
+            .map_err(map_delete_authority_failure)?;
+        authorized
+            .validate()
+            .map_err(|_| delete_failure(false, "artifact_delete_evidence_invalid"))?;
+        let store = self
+            .core
+            .stores
+            .get(&authorized.storage_binding_digest)
+            .ok_or_else(|| delete_failure(false, "artifact_delete_binding_unavailable"))?;
+        if store.backend() != authorized.backend {
+            return Err(delete_failure(false, "artifact_delete_binding_invalid"));
+        }
+        let plaintext = self
+            .core
+            .unsealer
+            .unseal_delete(&authorized)
+            .await
+            .map_err(map_delete_unseal_failure)?;
+        let locator = parse_locator(plaintext.expose())
+            .map_err(|_| delete_failure(false, "artifact_delete_locator_invalid"))?;
+        if !locator.validate_for_delete(&authorized) {
+            return Err(delete_failure(false, "artifact_delete_locator_invalid"));
+        }
+        let preflight = store
+            .head_exact(&locator.object_key, &authorized.object_generation)
+            .await;
+        let already_absent = match preflight {
+            Ok(metadata) => {
+                if metadata.object_generation != authorized.object_generation {
+                    return Err(delete_failure(false, "artifact_delete_generation_mismatch"));
+                }
+                false
+            }
+            Err(ArtifactObjectStoreError::NotFound) => true,
+            Err(error) => return Err(map_delete_store_failure(error)),
+        };
+        let final_authority = self
+            .authority
+            .authorize_delete_object(request)
+            .await
+            .map_err(map_delete_authority_failure)?;
+        if final_authority.authorization_digest != authorized.authorization_digest {
+            return Err(delete_failure(false, "artifact_delete_authority_changed"));
+        }
+        let provider_receipt_digest = if already_absent {
+            canonical_delete_digest(&serde_json::json!({
+                "kind": "already_absent",
+                "object_generation": authorized.object_generation,
+                "schema_version": 1,
+                "storage_binding_digest": authorized.storage_binding_digest,
+            }))?
+        } else {
+            store
+                .delete_exact(&locator.object_key, &authorized.object_generation)
+                .await
+                .map_err(map_delete_store_failure)?
+                .provider_receipt_digest
+        };
+        match store
+            .head_exact(&locator.object_key, &authorized.object_generation)
+            .await
+        {
+            Err(ArtifactObjectStoreError::NotFound) => {}
+            Ok(_) => return Err(delete_failure(false, "artifact_delete_still_present")),
+            Err(error) => return Err(map_delete_store_failure(error)),
+        }
+        let post_authority = self
+            .authority
+            .authorize_delete_object(request)
+            .await
+            .map_err(map_delete_authority_failure)?;
+        if post_authority.authorization_digest != authorized.authorization_digest {
+            return Err(delete_failure(false, "artifact_delete_authority_changed"));
+        }
+        let observed_at = Utc::now();
+        let absence_evidence_digest = canonical_delete_digest(&serde_json::json!({
+            "authorization_digest": authorized.authorization_digest,
+            "blob_id": authorized.blob_id,
+            "kind": "exact_generation_absent",
+            "object_generation": authorized.object_generation,
+            "observed_at": observed_at,
+            "provider_receipt_digest": provider_receipt_digest,
+            "schema_version": 1,
+            "storage_binding_digest": authorized.storage_binding_digest,
+            "tenant_id": authorized.tenant_id,
+        }))?;
+        Ok(ArtifactBlobDeletionEvidence {
+            schema_version: 1,
+            object_generation: request.object_generation.clone(),
+            backend_receipt_digest: provider_receipt_digest,
+            absence_evidence_digest,
+            observed_at,
+        })
+    }
+}
+
+impl ArtifactBlobBackend for BrokeredArtifactDeletionBackend {
+    async fn delete_generation(
+        &self,
+        request: DeleteArtifactBlobGeneration,
+    ) -> Result<ArtifactBlobDeletionEvidence, ArtifactBackendFailure> {
+        let _permit = self
+            .core
+            .in_flight
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| delete_failure(true, "artifact_delete_lane_saturated"))?;
+        timeout(
+            self.core.limits.operation_timeout,
+            self.delete_inner(&request),
+        )
+        .await
+        .map_err(|_| delete_failure(true, "artifact_delete_timeout"))?
+    }
+}
+
+fn canonical_delete_digest(
+    value: &serde_json::Value,
+) -> Result<Sha256Digest, ArtifactBackendFailure> {
+    insight_platform_contracts::canonical_digest(value)
+        .map_err(|_| delete_failure(false, "artifact_delete_evidence_invalid"))?
+        .parse()
+        .map_err(|_| delete_failure(false, "artifact_delete_evidence_invalid"))
+}
+
+fn delete_failure(retryable: bool, reason_class: &str) -> ArtifactBackendFailure {
+    ArtifactBackendFailure {
+        retryable,
+        reason_class: reason_class.to_owned(),
+    }
+}
+
+fn map_delete_authority_failure(error: ArtifactObjectReadAuthorityError) -> ArtifactBackendFailure {
+    match error {
+        ArtifactObjectReadAuthorityError::Unavailable => {
+            delete_failure(true, "artifact_delete_authority_unavailable")
+        }
+        ArtifactObjectReadAuthorityError::Denied => {
+            delete_failure(false, "artifact_delete_authority_denied")
+        }
+        ArtifactObjectReadAuthorityError::NotFound => {
+            delete_failure(false, "artifact_delete_authority_not_found")
+        }
+        ArtifactObjectReadAuthorityError::InvalidEvidence => {
+            delete_failure(false, "artifact_delete_authority_invalid")
+        }
+    }
+}
+
+fn map_delete_unseal_failure(error: ArtifactObjectReferenceUnsealError) -> ArtifactBackendFailure {
+    match error {
+        ArtifactObjectReferenceUnsealError::Unavailable => {
+            delete_failure(true, "artifact_delete_kms_unavailable")
+        }
+        ArtifactObjectReferenceUnsealError::Rejected => {
+            delete_failure(false, "artifact_delete_kms_denied")
+        }
+        ArtifactObjectReferenceUnsealError::InvalidEvidence => {
+            delete_failure(false, "artifact_delete_kms_invalid")
+        }
+    }
+}
+
+fn map_delete_store_failure(error: ArtifactObjectStoreError) -> ArtifactBackendFailure {
+    match error {
+        ArtifactObjectStoreError::Unavailable => {
+            delete_failure(true, "artifact_delete_storage_unavailable")
+        }
+        ArtifactObjectStoreError::NotFound => {
+            delete_failure(false, "artifact_delete_generation_not_found")
+        }
+        ArtifactObjectStoreError::Rejected => {
+            delete_failure(false, "artifact_delete_storage_denied")
+        }
+        ArtifactObjectStoreError::TooLarge | ArtifactObjectStoreError::InvalidEvidence => {
+            delete_failure(false, "artifact_delete_storage_invalid")
+        }
     }
 }
 
@@ -585,6 +988,43 @@ fn map_wasi_broker_error(error: ArtifactBrokerReadError) -> WasiArtifactBrokerEr
         ArtifactBrokerReadError::NotFound => WasiArtifactBrokerError::NotFound,
         ArtifactBrokerReadError::TooLarge => WasiArtifactBrokerError::TooLarge,
         ArtifactBrokerReadError::Integrity => WasiArtifactBrokerError::Integrity,
+    }
+}
+
+fn map_scan_authority_error(error: ArtifactObjectReadAuthorityError) -> ArtifactScanReadError {
+    match error {
+        ArtifactObjectReadAuthorityError::Unavailable => ArtifactScanReadError::Unavailable,
+        ArtifactObjectReadAuthorityError::Denied => ArtifactScanReadError::Denied,
+        ArtifactObjectReadAuthorityError::NotFound => ArtifactScanReadError::NotFound,
+        ArtifactObjectReadAuthorityError::InvalidEvidence => ArtifactScanReadError::Integrity,
+    }
+}
+
+fn map_scan_unseal_error(error: ArtifactObjectReferenceUnsealError) -> ArtifactScanReadError {
+    match error {
+        ArtifactObjectReferenceUnsealError::Unavailable => ArtifactScanReadError::Unavailable,
+        ArtifactObjectReferenceUnsealError::Rejected => ArtifactScanReadError::Denied,
+        ArtifactObjectReferenceUnsealError::InvalidEvidence => ArtifactScanReadError::Integrity,
+    }
+}
+
+fn map_scan_store_error(error: ArtifactObjectStoreError) -> ArtifactScanReadError {
+    match error {
+        ArtifactObjectStoreError::Unavailable => ArtifactScanReadError::Unavailable,
+        ArtifactObjectStoreError::NotFound => ArtifactScanReadError::NotFound,
+        ArtifactObjectStoreError::Rejected => ArtifactScanReadError::Denied,
+        ArtifactObjectStoreError::TooLarge => ArtifactScanReadError::TooLarge,
+        ArtifactObjectStoreError::InvalidEvidence => ArtifactScanReadError::Integrity,
+    }
+}
+
+fn map_scan_read_error(error: ArtifactBrokerReadError) -> ArtifactScanReadError {
+    match error {
+        ArtifactBrokerReadError::Unavailable => ArtifactScanReadError::Unavailable,
+        ArtifactBrokerReadError::Denied => ArtifactScanReadError::Denied,
+        ArtifactBrokerReadError::NotFound => ArtifactScanReadError::NotFound,
+        ArtifactBrokerReadError::TooLarge => ArtifactScanReadError::TooLarge,
+        ArtifactBrokerReadError::Integrity => ArtifactScanReadError::Integrity,
     }
 }
 
