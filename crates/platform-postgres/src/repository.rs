@@ -973,6 +973,32 @@ impl PgRepository {
         Ok(deployment)
     }
 
+    pub async fn read_run_for_principal(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        run_id: &ResourceId,
+    ) -> Result<RunRecord, RepositoryError> {
+        if run_id.kind() != ResourceKind::Run {
+            return Err(RepositoryError::NotFound("run"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::RuntimeRead) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let run = load_run(&mut transaction, tenant_id, run_id).await?;
+        transaction.commit().await?;
+        Ok(run)
+    }
+
     pub async fn read_resource_for_writer(
         &self,
         tenant_id: &ResourceId,

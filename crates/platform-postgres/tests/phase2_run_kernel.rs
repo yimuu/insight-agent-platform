@@ -1345,6 +1345,29 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(admitted.version, 1);
     assert_eq!(admitted.bindings, bindings);
     assert_eq!(
+        repository
+            .read_run_for_principal(
+                &id(TENANT_ID),
+                &id(DENIED_PRINCIPAL_ID),
+                PrincipalKind::AgentRunner,
+                &command.run_id,
+            )
+            .await
+            .unwrap(),
+        admitted
+    );
+    assert!(matches!(
+        repository
+            .read_run_for_principal(
+                &id(TENANT_B_ID),
+                &id(DENIED_PRINCIPAL_ID),
+                PrincipalKind::AgentRunner,
+                &command.run_id,
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    assert_eq!(
         admitted.input_value_id.as_deref(),
         Some(command.input.value_id.to_string().as_str())
     );

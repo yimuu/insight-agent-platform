@@ -27,6 +27,10 @@ use insight_platform_api::{
         ResourceHttpState, ResourceVersionViewV1, ResourceViewV1, SystemResourceClock,
         UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
+    run::{
+        build_run_router, run_etag, ReadRunIntent, RunApplication, RunApplicationError,
+        RunHttpState, RunViewV1, SystemRunClock,
+    },
 };
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ActiveTarget, AdministrativeGate, CommandAudit,
@@ -173,6 +177,74 @@ impl OperationApplication for PgOperations {
                 OperationReadError::AuthorityUnavailable => OperationApplicationError::Unavailable,
                 OperationReadError::CorruptAuthority => OperationApplicationError::Internal,
             })
+    }
+}
+
+#[derive(Clone)]
+struct PgRuns(Arc<PgRepository>);
+
+#[async_trait]
+impl RunApplication for PgRuns {
+    async fn read_run(&self, intent: ReadRunIntent) -> Result<RunViewV1, RunApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(RunApplicationError::Unavailable);
+        }
+        let record = self
+            .0
+            .read_run_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.run_id,
+            )
+            .await
+            .map_err(map_run_repository_error)?;
+        let run_id: ResourceId = record
+            .run_id
+            .parse()
+            .map_err(|_| RunApplicationError::Internal)?;
+        let agent_deployment_id = record
+            .agent_deployment_id
+            .parse()
+            .map_err(|_| RunApplicationError::Internal)?;
+        let input_value_id = record
+            .input_value_id
+            .ok_or(RunApplicationError::Internal)?
+            .parse()
+            .map_err(|_| RunApplicationError::Internal)?;
+        let output_value_id = record
+            .output_value_id
+            .map(|id| id.parse())
+            .transpose()
+            .map_err(|_| RunApplicationError::Internal)?;
+        let state = record
+            .state
+            .parse()
+            .map_err(|_| RunApplicationError::Internal)?;
+        let version = u64::try_from(record.version).map_err(|_| RunApplicationError::Internal)?;
+        Ok(RunViewV1 {
+            schema_version: 1,
+            run_id: run_id.clone(),
+            agent_deployment_id,
+            state,
+            version,
+            input_value_id,
+            output_value_id,
+            pause_generation: u64::try_from(record.pause_generation)
+                .map_err(|_| RunApplicationError::Internal)?,
+            cancel_generation: u64::try_from(record.cancel_generation)
+                .map_err(|_| RunApplicationError::Internal)?,
+            deadline: insight_platform_contracts::UtcTimestamp::from_datetime(record.deadline),
+            started_at: record
+                .started_at
+                .map(insight_platform_contracts::UtcTimestamp::from_datetime),
+            terminal_at: record
+                .terminal_at
+                .map(insight_platform_contracts::UtcTimestamp::from_datetime),
+            created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
+            updated_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.updated_at),
+            etag: run_etag(&run_id, version),
+        })
     }
 }
 
@@ -927,6 +999,22 @@ fn map_resource_repository_error(error: RepositoryError) -> ResourceApplicationE
     }
 }
 
+fn map_run_repository_error(error: RepositoryError) -> RunApplicationError {
+    match error {
+        RepositoryError::PermissionDenied => RunApplicationError::Denied,
+        RepositoryError::NotFound(_) => RunApplicationError::NotFound,
+        RepositoryError::Database(_) | RepositoryError::LeaseExpired => {
+            RunApplicationError::Unavailable
+        }
+        RepositoryError::InvalidInput(_)
+        | RepositoryError::Conflict(_)
+        | RepositoryError::IdempotencyConflict
+        | RepositoryError::QuotaExceeded
+        | RepositoryError::CorruptRow(_)
+        | RepositoryError::StaleFence => RunApplicationError::Internal,
+    }
+}
+
 fn build_router(
     repository: Arc<PgRepository>,
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
@@ -944,18 +1032,24 @@ fn build_router(
     ));
     let resource = build_resource_router(ResourceHttpState::new(
         Arc::new(PgResources {
-            repository,
+            repository: repository.clone(),
             validator_digest,
             validation_profile_digest,
         }),
         Arc::new(SystemResourceClock),
     ));
-    let protected = operation
-        .merge(resource)
-        .route_layer(middleware::from_fn_with_state(
-            authentication,
-            authenticate_public_request,
-        ));
+    let run = build_run_router(RunHttpState::new(
+        Arc::new(PgRuns(repository.clone())),
+        Arc::new(SystemRunClock),
+    ));
+    let protected =
+        operation
+            .merge(resource)
+            .merge(run)
+            .route_layer(middleware::from_fn_with_state(
+                authentication,
+                authenticate_public_request,
+            ));
     Router::new()
         .route("/livez", get(live))
         .route("/readyz", get(ready))
