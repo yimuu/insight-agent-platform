@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted |
-| 日期 | 2026-08-20 |
+| 日期 | 2026-08-21 |
 | 依赖 | 03、04、07、09、10、15 |
 | 直接下游 | 17、18 |
 
@@ -30,15 +30,20 @@ Sandbox Controller  -- durable Job authority through repository port
         |
         | closed fenced executor protocol
         v
-WASI Executor pool | gVisor Executor pool
+WASI Executor pool | gVisor Pod Launcher pool
+                            |
+                            +-- admission-locked single-Job Pod (`RuntimeClass=runsc`)
         |
         +-- Artifact Data Worker
         +-- Egress/Secret Broker (gVisor only, policy gated)
 ```
 
-Sandbox Controller、WASI Executor和gVisor Executor与API/Model/MCP分别使用独立Deployment、ServiceAccount、queue、
+Sandbox Controller、WASI Executor和gVisor Pod Launcher与API/Model/MCP分别使用独立Deployment、ServiceAccount、queue、
 DB/storage connection pool、permit和NetworkPolicy。Executor无数据库凭据，不得直接改写Run、NodeExecution、
 Invocation或Job。
+
+只有gVisor Pod Launcher可通过专用ServiceAccount访问单一execution namespace的闭集Pod API；它不得读取Secret/ConfigMap、
+修改RBAC/ServiceAccount/Node/RuntimeClass或使用exec/attach/port-forward。Controller、WASI Executor与guest Pod不获得该权限。
 
 ## 3. Runtime Catalog 与发布
 
@@ -138,12 +143,19 @@ fuel exhausted、memory limit、ABI violation、invalid UTF-8/JSON/schema和epoc
 
 ## 8. gVisor 执行合同
 
-gVisor使用签名且按digest固定的OCI image与`runsc`运行时。每个Job创建全新sandbox，执行后销毁；
+gVisor使用签名且按digest固定的OCI image与节点安装的`runsc` RuntimeClass。Launcher为每个fenced Job attempt创建全新
+single-Job Pod，执行后删除；
 warm pool只复用无tenant状态的image/cache，不复用tenant filesystem、process、Secret或network namespace。
 
-必须禁止privileged、host PID/network、hostPath、device、Kubernetes API、metadata endpoint、Docker socket和
+guest Pod必须禁止privileged、host PID/network、hostPath、device、Kubernetes API、metadata endpoint、Docker socket和
 runtime socket。root filesystem只读，scratch/tmpfs有byte/inode与lifetime上限。seccomp、capability、user namespace、
-cgroup、PID、CPU、memory、I/O和pids limit由发布profile固定。plain runc fallback是否定合同。
+cgroup、PID、CPU、memory、I/O和pids limit由发布profile固定。fail-closed admission固定RuntimeClass、image digest、
+ServiceAccount、resource/volume/network closure；plain runc fallback是否定合同。
+
+Launcher只拥有`create/get/watch/delete` Pod、`get` status/log的namespace-scoped RBAC，不能改变admission policy。每个Pod UID、
+Job/attempt/lease generation、request digest、runtime/image digest和resource closure必须相互绑定。Pod phase、exit与log只是外部
+physical evidence；Executor复核fence、canonical result与Artifact grant后才能向Controller报告。watch中断、delete不确定、node loss
+或runtime evidence漂移进入bounded reconcile/absence proof，不能伪造terminal success。
 
 ## 9. Artifact、network 与Secret
 
@@ -189,7 +201,8 @@ image/module必须签名、SBOM、provenance和scan验证；node/runtime policy�
 - API/Model/MCP/Capability Worker无spawn/import runtime能力；
 - 同一Job只有一个Executor generation可commit，旧generation被拒绝；
 - WASI import/fuel/memory/ABI/output schema负向fixture fail closed；
-- gVisor部署不存在runc fallback、hostPath、privileged、device、metadata或Kubernetes API通路；
+- gVisor guest不存在runc fallback、hostPath、privileged、device、metadata或Kubernetes API通路；Launcher只有admission锁定的
+  namespace-scoped Pod lifecycle权限，所有越权verb/resource/subresource被RBAC与admission双重拒绝；
 - package/input/output Artifact都复核exact digest、length、tenant、port和Job fence；
 - Secret/network未声明时默认deny，terminal后grant可证明撤销；
 - cancel、timeout、process kill和Controller restart后不留存活process、credential或scratch；
@@ -198,7 +211,7 @@ image/module必须签名、SBOM、provenance和scan验证；node/runtime policy�
 ## 14. 分层证据
 
 - domain/protocol：closed schema、selection、limit与fence tests；
-- runtime：real Wasmtime和real gVisor conformance/escape/cleanup tests；
+- runtime：real Wasmtime和真实Kubernetes `RuntimeClass=runsc`的gVisor conformance/escape/cleanup/watch/restart tests；
 - repository/process：PostgreSQL lease、crash、cancel和recovery tests；
 - release：production-equivalent node/runtime/NetworkPolicy/saturation qualification。
 

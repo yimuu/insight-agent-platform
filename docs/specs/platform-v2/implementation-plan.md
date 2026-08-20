@@ -4,7 +4,7 @@
 |---|---|
 | 状态 | Accepted / Implementing |
 | 日期 | 2026-08-20 |
-| 合同输入 | 00～18、cross-review CR-166、ADR-0001、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-166/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则
@@ -157,7 +157,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
    - publication-time package/dependency/image/SBOM/provenance/scan freeze；
    - shared Job fenced Controller protocol、Executor无DB凭据；
    - real WASI ABI/fuel/memory/interrupt；
-   - real gVisor `runsc`、single-Job sandbox、no-runc-fallback、filesystem/network/Secret/Artifact grant与cleanup；
+   - 真实`RuntimeClass=runsc`、admission-locked single-Job Pod、受限Launcher RBAC、no-runc-fallback、filesystem/network/Secret/Artifact grant与cleanup；
    - process kill、Controller restart、timeout/cancel和orphan reconciliation。
 
 5. **Real Model/provider path**

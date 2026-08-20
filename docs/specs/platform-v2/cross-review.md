@@ -3,8 +3,8 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation Authorized |
-| 日期 | 2026-08-20 |
-| 输入 | 00～18 live tree、ADR-0001、AGENTS.md |
+| 日期 | 2026-08-21 |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md |
 | 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复和fixture闭包 |
 
 ## 1. 结论
@@ -34,6 +34,7 @@ CR-166取代CR-165的过度设计。全量审查确认首版目标收敛为：
 | 11 Skill | Accepted / Implementation In Progress | 未改变Skill“方法包、非运行时”语义；脚本仍必须发布为Sandbox Capability |
 | 12～18 | Accepted | 已按CR-166重写/修订并获统一acceptance |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
+| ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | Accepted / Implementing | 从Accepted合同生成；仍不表示current behavior |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
@@ -135,7 +136,7 @@ Receipt replay必须从stored typed result重建原status/body/ETag/Location，�
 | Runtime API | Run/Task/Artifact public command | Scheduler decision、Secret resolution |
 | Scheduler/Worker | exact WorkClass claim/commit | arbitrary owner/table、active head mutation |
 | MCP Host | remote Streamable HTTP protocol | stdio spawn、raw token、Sandbox execution |
-| Sandbox Controller/Executor | fenced WASI/gVisor execution | API process spawn、Executor DB write、runc fallback |
+| Sandbox Controller/Executor | fenced WASI execution；admission-locked gVisor single-Job Pod lifecycle | API process spawn、Executor DB write、runc fallback、通用Kubernetes管理 |
 | Artifact Gateway | principal upload/download | internal workload authority、maintenance |
 | Artifact Data Worker | closed workload stage/read/verify/derive | public principal API、Ready owner commit |
 | Artifact Maintenance | closed retention/delete/GC transition | 新business reference、public upload |
@@ -147,7 +148,7 @@ Secret value和任意JSON owner不是可信请求输入。
 ## 10. 容量与拓扑
 
 最低隔舱：API、Orchestration/Recovery、Model、Native/Remote Capability、Context、MCP、Sandbox Controller、
-WASI Executor、gVisor Executor、Artifact Gateway、Artifact Data Worker、Artifact Maintenance、Egress/Secret Broker。
+WASI Executor、gVisor Pod Launcher/guest pool、Artifact Gateway、Artifact Data Worker、Artifact Maintenance、Egress/Secret Broker。
 
 隔舱意味独立queue、permit、DB/storage/client pool、ServiceAccount与autoscaling signal，不意味每个domain都拆成服务。
 Sandbox或Artifact饱和时API、Scheduler、Model和critical-control仍必须准入。Model没有output materialization专用池；
@@ -219,10 +220,11 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 | Model output导致Producer/Broker/容量/Artifact状态爆炸 | 首版Inline-only，文件由Capability/Sandbox Artifact port产生 |
 | Artifact八role权限与容量矩阵过度分裂 | 收敛为Gateway/Data Worker/Maintenance三role，内部用closed caller capability区分 |
 | microVM/Managed stdio在首版引入Provider/session/child Job恢复 | Sandbox只WASI+gVisor，MCP只remote HTTP，全部推迟 |
+| direct runsc嵌套Pod同时要求无host/cgroup/runtime权限，拓扑不可启动 | ADR-0002：受限Launcher创建admission-locked `RuntimeClass=runsc` single-Job Pod；guest无Kubernetes API，Job仍是唯一physical-work authority |
 
 ## 15. Acceptance 记录
 
-CR-166的以下一次性门禁已用于把00～10、12～18、ADR-0001和implementation plan作为同一合同批次accept：
+CR-166及2026-08-21实现反馈cross-review的以下门禁已用于把00～10、12～18、ADR-0001、ADR-0002和implementation plan作为同一合同批次accept：
 
 1. `rg` stale-contract scan确认microVM、Managed stdio、Installation Release、ManagementOperation、
    Model Artifact Producer和八role只出现在历史/否定/明确推迟语境，不再是首版正向requirement；
@@ -230,6 +232,7 @@ CR-166的以下一次性门禁已用于把00～10、12～18、ADR-0001和impleme
 3. `git diff --check`通过；
 4. implementation-plan的每个phase都只从Reviewed合同引用可观测行为和分层证据；
 5. 批准前不对外声明target API、topology、capacity、schema v7或runtime已经上线。
+6. gVisor topology复核确认Launcher Kubernetes权限不传播给Controller/WASI/guest，admission与RBAC是结构性双闸，Pod status不成为第二Job authority。
 
 ## 16. 未决项
 

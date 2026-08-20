@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted |
-| 日期 | 2026-08-20 |
+| 日期 | 2026-08-21 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
 
@@ -53,7 +53,7 @@ Draft规范和未通过资格的代码不是current behavior。CI报告只表示
 
 ## 4. Kubernetes 安全基线
 
-所有workload必须：
+除下述gVisor Launcher的exact Kubernetes token例外外，所有workload必须：
 
 - 固定image digest、runAsNonRoot、readOnlyRootFilesystem、drop capabilities和seccomp profile；
 - 显式CPU/memory/ephemeral-storage request和limit；
@@ -62,8 +62,11 @@ Draft规范和未通过资格的代码不是current behavior。CI报告只表示
 - topology spread、PodDisruptionBudget、graceful drain和bounded startup/readiness/liveness probe；
 - 从同一startup manifest对照component role、region、image、protocol、profile和policy digest。
 
-gVisor node/runtime必须显式标记并且只允许`runsc`，不允许runc fallback、privileged、hostPath、device、host PID/network、
-metadata或Kubernetes API。WASI与gVisor可使用不同node pool；都不与API/Scheduler Pod共享进程或service account。
+gVisor node/runtime必须显式标记并且只允许`runsc`，不允许runc fallback。guest Pod不允许privileged、hostPath、device、
+host PID/network、metadata、Kubernetes API或runtime socket。Launcher使用独立ServiceAccount，只允许execution namespace中的
+`create/get/watch/delete pods`和`get pods/status,pods/log`；禁止Secret、ConfigMap、ServiceAccount、RBAC、Node、RuntimeClass、
+exec、attach和port-forward，并由fail-closed admission锁定可创建Pod的完整安全closure。WASI与gVisor使用不同pool与identity，
+都不与API/Scheduler Pod共享进程或service account。
 
 ## 5. Network 与依赖拓扑
 
@@ -185,7 +188,9 @@ code/image/schema digest、seed、topology、start/end time、tool version、res
 - concurrent Run admission/activation、Job claim/lease loss、Receipt replay、Event/Outbox recovery；
 - cross-tenant authorization、ID/owner kind、schema/JSONB、Secret/log redaction负向测试；
 - MCP remote Streamable HTTP、OAuth、discovery、Task和subscription的真实协议fixture；
-- real WASI与gVisor的ABI/limit/escape/cleanup/process-kill/restart测试；
+- real WASI与真实`runsc` RuntimeClass gVisor的ABI/limit/escape/cleanup/process-kill/watch-restart/node-loss测试；
+- gVisor Launcher RBAC逐verb/resource/subresource负向矩阵，以及绕过runtimeClass/image/resource/volume/network/fence字段的
+  admission负向矩阵；
 - Artifact Gateway/Data Worker/Maintenance三role权限矩阵、S3/KMS fault、retention/GC和饱和测试；
 - Model Inline hard limit、tool loop、budget、provider fault和无Artifact fallback测试；
 - 一个隔舱饱和时API/Scheduler/critical-control和其他隔舱仍满足profile SLO；

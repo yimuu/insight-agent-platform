@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted |
-| 日期 | 2026-08-20 |
+| 日期 | 2026-08-21 |
 | 依赖 | [`00-overview.md`](00-overview.md) |
 | 直接下游 | 02、03、04、05、18 |
 
@@ -152,7 +152,7 @@ Execution Plane 分为以下 bulkhead：
 | Model Executor | Provider adapter、stream、tool-call response | 是 |
 | Capability Dispatcher | Native/HTTP/gRPC 调用与结果归一化 | 是 |
 | MCP Host | MCP session、OAuth、remote Task、subscription | 是 |
-| Sandbox Executor | Python、Node、WASM、受信任 Shell | 是且必须物理分离 |
+| Sandbox Executor | WASI进程执行或gVisor single-Job Pod launch/observe/cleanup | 是且必须物理分离 |
 | Context Worker | 检索、重排、citation assembly | 是 |
 | Artifact Gateway | public upload/download、授权与流控 | 是 |
 | Artifact Data Worker | Context、MCP、Capability与Sandbox的受信读写、验证与派生 | 是 |
@@ -181,7 +181,7 @@ permit，也不能使 API readiness 失败。
 | `capability-worker` | Capability Invocation dispatch | Script process |
 | `context-worker` | Context Query、授权过滤、检索与 citation assembly | Capability 副作用与 Agent Plan |
 | `mcp-host` | MCP 协议与连接状态 | Agent Plan |
-| `sandbox-executor` | 代码运行、资源和网络隔离 | Run state authority |
+| `sandbox-executor` | WASI代码运行；或受限创建/观察/清理gVisor single-Job Pod | Run state authority、任意Kubernetes管理 |
 | `artifact-gateway` | public upload/download、grant与边界限流 | 业务owner状态推进、内部Worker凭据 |
 | `artifact-data-worker` | exact owner绑定的stage/read/verify/derive | public API、Run/Invocation current state |
 | `artifact-maintenance` | scan、retention、quarantine、delete和GC | 新业务引用、public upload/download |
@@ -202,6 +202,10 @@ credential-free closed request，并只返回sanitized metadata与bounded byte s
 KMS/AEAD reference unsealer和进程安装的外部Secret Provider client。普通Management/Runtime/Host代码不得依赖受信resolution
 projection；Sandbox若通过内部`SecretBrokerService`消费同一能力，Secret也只能进入一次性内存/tmpfs grant，不能回到普通Worker。
 
+gVisor物理实现由[ADR-0002](../../adr/0002-gvisor-kubernetes-launcher.md)固定：专用Launcher只在一个execution namespace内
+使用受限Pod API，所有guest Pod由fail-closed admission锁定到exact `runsc` RuntimeClass和发布清单。这个例外不授予Controller、
+API、Scheduler、WASI Executor或guest Pod任何Kubernetes API；Pod status不是第二Job authority。
+
 ## 6. 依赖规则
 
 允许的依赖方向：
@@ -218,7 +222,7 @@ Storage / transport implementations
 
 以下依赖被禁止：
 
-- Domain crate 依赖 Axum、SQLx、NATS、Kubernetes SDK 或具体 Provider SDK；
+- Domain crate 依赖 Axum、SQLx、NATS、Kubernetes SDK 或具体 Provider SDK（gVisor Launcher adapter可在domain port之外依赖Kubernetes client）；
 - Storage crate 依赖 API 或 Runtime composition；
 - Skill crate 依赖 Sandbox、MCP transport 或 Secret resolver；
 - MCP wire crate 依赖 Agent DSL；
