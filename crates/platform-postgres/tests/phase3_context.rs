@@ -85,6 +85,49 @@ fn closed_object_schema(property: &str) -> ClosedJsonSchema {
     .unwrap()
 }
 
+fn readonly_sql_plan_schema() -> ClosedJsonSchema {
+    let properties = [
+        "schema_version",
+        "catalog_context_query_id",
+        "catalog_observation_id",
+        "catalog_observation_digest",
+        "catalog_projection_digest",
+        "execution",
+        "from",
+        "joins",
+        "projections",
+        "predicates",
+        "group_by",
+        "order_by",
+        "parameters",
+        "limit",
+        "offset",
+        "generated_sql_digest",
+        "validation_evidence_digest",
+        "canonical_digest",
+    ];
+    let property_schemas = properties
+        .iter()
+        .map(|property| {
+            (
+                (*property).to_owned(),
+                json!({
+                    "description": "Field in the closed, typed read-only SQL plan.",
+                    "x-platform-classification": "internal"
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": property_schemas,
+        "required": properties,
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
+
 fn version(kind: ResourceKind, suffix: u16) -> ExactVersionRef {
     ExactVersionRef::new(id(kind, suffix), named_digest(&format!("version-{suffix}"))).unwrap()
 }
@@ -721,7 +764,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let readonly_capability_interface = version(ResourceKind::CapabilityInterfaceRevision, 0x33);
     let readonly_capability_implementation =
         version(ResourceKind::CapabilityImplementationRevision, 0x34);
-    let readonly_input_schema = closed_object_schema("sql_plan");
+    let readonly_input_schema = readonly_sql_plan_schema();
     let readonly_input_schema_digest = readonly_input_schema.canonical_digest.clone();
     insert_version(
         pool,
