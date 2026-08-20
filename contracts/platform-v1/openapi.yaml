@@ -136,6 +136,90 @@ paths:
         "403": {$ref: "#/components/responses/ApiProblem"}
         "404": {$ref: "#/components/responses/ApiProblem"}
         "409": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:
+    get:
+      operationId: getTask
+      summary: Read a safe authorized Task projection
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: Safe Task prompt metadata and owner link.
+          headers:
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaskViewV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:submit-input:
+    post:
+      operationId: submitTaskInput
+      summary: Submit a typed Task response and atomically wake its owner
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SubmitTaskInputV1"}
+      responses:
+        "200": {$ref: "#/components/responses/TaskControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:approve:
+    post:
+      operationId: approveTask
+      summary: Approve an exact pending approval Task
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/TaskControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:reject:
+    post:
+      operationId: rejectTask
+      summary: Reject or decline an exact pending Task
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/TaskControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:cancel:
+    post:
+      operationId: cancelTask
+      summary: Cancel an interaction Task through its owner adapter
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/TaskControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
   /operations/{operation_id}:
     get:
       operationId: getOperation
@@ -315,6 +399,11 @@ components:
       in: path
       required: true
       schema: {$ref: "#/components/schemas/RunId"}
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/TaskId"}
     IfMatch:
       name: If-Match
       in: header
@@ -343,6 +432,14 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/RunViewV1"}
+    TaskControlResponse:
+      description: The durable Task first-winner projection.
+      headers:
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/TaskViewV1"}
   headers:
     NoStore:
       schema:
@@ -369,6 +466,9 @@ components:
     AgentDeploymentId:
       type: string
       pattern: "^adep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    TaskId:
+      type: string
+      pattern: "^(int|apv)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     DataClassification:
       type: string
       enum: [public, internal, confidential, restricted]
@@ -436,6 +536,42 @@ components:
         schema_digest: {$ref: "#/components/schemas/Digest"}
         content_digest: {$ref: "#/components/schemas/Digest"}
         value: {$ref: "#/components/schemas/ValueRef"}
+    SubmitTaskInputV1:
+      type: object
+      additionalProperties: false
+      required: [classification, schema_digest, value]
+      properties:
+        classification: {$ref: "#/components/schemas/DataClassification"}
+        schema_digest: {$ref: "#/components/schemas/Digest"}
+        value: {$ref: "#/components/schemas/ValueRef"}
+    TaskViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, task_id, task_kind, state, generation, version, safe_prompt_key, response_schema_digest, owner, deadline, responded_at, created_at, updated_at, etag]
+      properties:
+        schema_version: {const: 1}
+        task_id: {$ref: "#/components/schemas/TaskId"}
+        task_kind: {type: string, enum: [approval, interaction_form, interaction_url_consent, interaction_business_input, external_authorization, human_work]}
+        state: {type: string, enum: [pending, responded, declined, approved, rejected, cancelled, expired]}
+        generation: {type: integer, minimum: 1}
+        version: {type: integer, minimum: 1}
+        safe_prompt_key: {type: string, minLength: 1, maxLength: 128, pattern: "^[a-z][a-z0-9_.-]*$"}
+        response_schema_digest: {oneOf: [{$ref: "#/components/schemas/Digest"}, {type: "null"}]}
+        owner:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [kind, run_id]
+              properties: {kind: {const: run}, run_id: {$ref: "#/components/schemas/RunId"}}
+            - type: object
+              additionalProperties: false
+              required: [kind, invocation_id]
+              properties: {kind: {const: invocation}, invocation_id: {$ref: "#/components/schemas/PlatformResourceId"}}
+        deadline: {$ref: "#/components/schemas/UtcTimestamp"}
+        responded_at: {oneOf: [{$ref: "#/components/schemas/UtcTimestamp"}, {type: "null"}]}
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        etag: {type: string, minLength: 1, maxLength: 128}
     JobId:
       type: string
       pattern: "^job_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

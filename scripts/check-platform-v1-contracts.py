@@ -290,6 +290,22 @@ def check_foundation_surfaces(errors):
     ]
     if any(fragment not in openapi for fragment in run_contract):
         errors.append("public Run OpenAPI contract is incomplete")
+    task_contract = [
+        "  /tasks/{task_id}:",
+        "  /tasks/{task_id}:submit-input:",
+        "  /tasks/{task_id}:approve:",
+        "  /tasks/{task_id}:reject:",
+        "  /tasks/{task_id}:cancel:",
+        "      operationId: getTask",
+        "      operationId: submitTaskInput",
+        "      operationId: approveTask",
+        "      operationId: rejectTask",
+        "      operationId: cancelTask",
+        "    SubmitTaskInputV1:",
+        "    TaskViewV1:",
+    ]
+    if any(fragment not in openapi for fragment in task_contract):
+        errors.append("public Task OpenAPI contract is incomplete")
     path_lines = [
         line for line in openapi.splitlines()
         if line.startswith("  /") and line.endswith(":")
@@ -301,6 +317,11 @@ def check_foundation_surfaces(errors):
         "  /runs/{run_id}:pause:",
         "  /runs/{run_id}:resume:",
         "  /runs/{run_id}:cancel:",
+        "  /tasks/{task_id}:",
+        "  /tasks/{task_id}:submit-input:",
+        "  /tasks/{task_id}:approve:",
+        "  /tasks/{task_id}:reject:",
+        "  /tasks/{task_id}:cancel:",
         "  /operations/{operation_id}:",
         "  /mcp/oauth/callback:",
     ]:
