@@ -795,6 +795,68 @@ impl PgRepository {
         Ok(resource)
     }
 
+    pub async fn read_resource_version_for_principal(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        expected_kind: RegistryResourceKind,
+        resource_id: &ResourceId,
+        resource_version_id: &ResourceId,
+    ) -> Result<ResourceVersionRecord, RepositoryError> {
+        if resource_id.kind() != expected_kind.id_kind()
+            || !expected_kind.allows_version_kind(resource_version_id.kind())
+        {
+            return Err(RepositoryError::NotFound("resource version"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal
+            .permissions
+            .contains(read_permission(expected_kind))
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT version.tenant_id, version.resource_version_id, version.resource_id,
+                   version.resource_version_kind, version.revision_no, version.content_digest,
+                   version.artifact_id, version.payload_schema_version, version.payload,
+                   version.payload_digest, version.created_by, version.created_at,
+                   resource.resource_kind AS parent_resource_kind
+            FROM insight_platform.resource_versions AS version
+            JOIN insight_platform.resources AS resource
+              ON resource.tenant_id = version.tenant_id
+             AND resource.resource_id = version.resource_id
+            WHERE version.tenant_id = $1 AND version.resource_id = $2
+              AND version.resource_version_id = $3
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(resource_version_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("resource version"))?;
+        if row.try_get::<String, _>("parent_resource_kind")? != expected_kind.as_str() {
+            return Err(RepositoryError::NotFound("resource version"));
+        }
+        let record = resource_version_from_row(row)?;
+        if record.resource_version_kind != resource_version_id.kind().descriptor().name {
+            return Err(RepositoryError::CorruptRow(
+                "resource version kind differs from its nominal ID".to_owned(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(record)
+    }
+
     pub async fn begin_security_transaction(
         &self,
     ) -> Result<PgSecurityTransaction, RepositoryError> {

@@ -945,6 +945,45 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     assert_eq!(published.resource.version, 3);
     assert!(published.resource.active_version_id.is_none());
     assert!(published.resource.active_deployment_id.is_none());
+    let readable_version = repository
+        .read_resource_version_for_principal(
+            &id(TENANT_ID),
+            &id(DENIED_PRINCIPAL_ID),
+            PrincipalKind::TenantAdmin,
+            insight_platform_contracts::RegistryResourceKind::Policy,
+            &id(RESOURCE_ID),
+            &id(VERSION_ID),
+        )
+        .await
+        .unwrap();
+    assert_eq!(readable_version.resource_version_id, VERSION_ID);
+    assert_eq!(readable_version.content_digest, digest('6').to_string());
+    assert!(matches!(
+        repository
+            .read_resource_version_for_principal(
+                &id(TENANT_ID),
+                &id(PRINCIPAL_ID),
+                PrincipalKind::TenantAdmin,
+                insight_platform_contracts::RegistryResourceKind::Policy,
+                &id(RESOURCE_ID),
+                &id(VERSION_ID),
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    assert!(matches!(
+        repository
+            .read_resource_version_for_principal(
+                &id(TENANT_ID),
+                &id(DENIED_PRINCIPAL_ID),
+                PrincipalKind::TenantAdmin,
+                insight_platform_contracts::RegistryResourceKind::Policy,
+                &id(RETENTION_POLICY_ID),
+                &id(VERSION_ID),
+            )
+            .await,
+        Err(RepositoryError::NotFound("resource version"))
+    ));
 
     let target = ActiveTarget::Version {
         version: ExactVersionRef::new(id(VERSION_ID), digest('6')).unwrap(),

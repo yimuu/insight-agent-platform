@@ -19,8 +19,9 @@ use insight_platform_api::{
         OperationHttpState, SystemOperationClock,
     },
     resource::{
-        build_resource_router, resource_etag, CreateResourceIntent, ReadResourceIntent,
-        ResourceApplication, ResourceApplicationError, ResourceHttpState, ResourceViewV1,
+        build_resource_router, resource_etag, resource_version_etag, CreateResourceIntent,
+        ReadResourceIntent, ReadResourceVersionIntent, ResourceApplication,
+        ResourceApplicationError, ResourceHttpState, ResourceVersionViewV1, ResourceViewV1,
         SystemResourceClock, UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
 };
@@ -364,6 +365,63 @@ impl ResourceApplication for PgResources {
             }
             OperationReadError::AuthorityUnavailable => ResourceApplicationError::Unavailable,
             OperationReadError::CorruptAuthority => ResourceApplicationError::Internal,
+        })
+    }
+
+    async fn read_resource_version(
+        &self,
+        intent: ReadResourceVersionIntent,
+    ) -> Result<ResourceVersionViewV1, ResourceApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let record = self
+            .repository
+            .read_resource_version_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                intent.resource_kind,
+                &intent.resource_id,
+                &intent.resource_version_id,
+            )
+            .await
+            .map_err(map_resource_repository_error)?;
+        if record.payload.schema_version != 1
+            || record.resource_id != intent.resource_id.to_string()
+            || record.resource_version_id != intent.resource_version_id.to_string()
+        {
+            return Err(ResourceApplicationError::Internal);
+        }
+        let mut value = record.payload.value;
+        value
+            .as_object_mut()
+            .ok_or(ResourceApplicationError::Internal)?
+            .remove("schema_version");
+        let payload =
+            serde_json::from_value(value).map_err(|_| ResourceApplicationError::Internal)?;
+        let revision_no =
+            u64::try_from(record.revision_no).map_err(|_| ResourceApplicationError::Internal)?;
+        let content_digest: Sha256Digest = record
+            .content_digest
+            .parse()
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let artifact_id = record
+            .artifact_id
+            .map(|artifact_id| artifact_id.parse())
+            .transpose()
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        Ok(ResourceVersionViewV1 {
+            schema_version: 1,
+            resource_id: intent.resource_id,
+            resource_kind: intent.resource_kind,
+            resource_version_id: intent.resource_version_id.clone(),
+            revision_no,
+            content_digest: content_digest.clone(),
+            artifact_id,
+            payload,
+            created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
+            etag: resource_version_etag(&intent.resource_version_id, &content_digest),
         })
     }
 }

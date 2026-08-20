@@ -11,8 +11,9 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
     canonical_digest, AdministrativeGate, ApiProblem, ApiProblemCode, EntityLifecycle,
-    OperationViewV1, RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId,
-    ResourceKind, Sha256Digest, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
+    OperationViewV1, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
+    ResourceDraftPayload, ResourceId, ResourceKind, Sha256Digest, UtcTimestamp, MAX_FIELD_ERRORS,
+    MAX_SAFE_TEXT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -41,6 +42,45 @@ pub struct ResourceViewV1 {
     pub version: u64,
     pub draft: ResourceDraftPayload,
     pub etag: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceVersionViewV1 {
+    pub schema_version: u32,
+    pub resource_id: ResourceId,
+    pub resource_kind: RegistryResourceKind,
+    pub resource_version_id: ResourceId,
+    pub revision_no: u64,
+    pub content_digest: Sha256Digest,
+    pub artifact_id: Option<ResourceId>,
+    pub payload: PublishedVersionPayload,
+    pub created_at: UtcTimestamp,
+    pub etag: String,
+}
+
+impl ResourceVersionViewV1 {
+    pub fn validate(&self) -> Result<(), ResourceApplicationError> {
+        if self.schema_version != 1
+            || self.resource_id.kind() != self.resource_kind.id_kind()
+            || !self
+                .resource_kind
+                .allows_version_kind(self.resource_version_id.kind())
+            || self.revision_no == 0
+            || self
+                .artifact_id
+                .as_ref()
+                .is_some_and(|artifact_id| artifact_id.kind() != ResourceKind::Artifact)
+            || self
+                .payload
+                .validate_for(self.resource_kind, &self.resource_version_id)
+                .is_err()
+            || self.etag != resource_version_etag(&self.resource_version_id, &self.content_digest)
+        {
+            return Err(ResourceApplicationError::Internal);
+        }
+        Ok(())
+    }
 }
 
 impl ResourceViewV1 {
@@ -100,6 +140,15 @@ pub struct ValidateResourceDraftIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReadResourceVersionIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub resource_kind: RegistryResourceKind,
+    pub resource_id: ResourceId,
+    pub resource_version_id: ResourceId,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceApplicationError {
     Invalid,
@@ -134,6 +183,11 @@ pub trait ResourceApplication: Send + Sync {
         &self,
         intent: ValidateResourceDraftIntent,
     ) -> Result<OperationViewV1, ResourceApplicationError>;
+
+    async fn read_resource_version(
+        &self,
+        intent: ReadResourceVersionIntent,
+    ) -> Result<ResourceVersionViewV1, ResourceApplicationError>;
 }
 
 pub trait ResourceClock: Send + Sync {
@@ -173,8 +227,49 @@ pub fn build_resource_router(state: ResourceHttpState) -> Router {
             "/v1/{resource_noun}/{resource_id}/draft:validate",
             post(validate_resource_draft),
         )
+        .route(
+            "/v1/{resource_noun}/{resource_id}/versions/{resource_version_id}",
+            get(read_resource_version),
+        )
         .layer(DefaultBodyLimit::max(MAX_RESOURCE_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn read_resource_version(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path((resource_noun, resource_id, resource_version_id)): Path<(String, String, String)>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    let Some(resource_kind) = resource_kind_for_noun(&resource_noun) else {
+        return problem(ResourceApplicationError::NotFound);
+    };
+    let resource_id = match resource_id.parse::<ResourceId>() {
+        Ok(resource_id) if resource_id.kind() == resource_kind.id_kind() => resource_id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let resource_version_id = match resource_version_id.parse::<ResourceId>() {
+        Ok(version_id) if resource_kind.allows_version_kind(version_id.kind()) => version_id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let intent = ReadResourceVersionIntent {
+        principal,
+        resource_kind,
+        resource_id,
+        resource_version_id,
+        deadline: state.clock.now()
+            + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS),
+    };
+    match state.application.read_resource_version(intent).await {
+        Ok(view) if view.validate().is_ok() => read_resource_version_response(view),
+        Ok(_) => problem(ResourceApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 async fn validate_resource_draft(
@@ -439,6 +534,16 @@ fn read_resource_response(view: ResourceViewV1) -> Response {
     no_store(response)
 }
 
+fn read_resource_version_response(view: ResourceVersionViewV1) -> Response {
+    let etag = match HeaderValue::from_str(&view.etag) {
+        Ok(etag) => etag,
+        Err(_) => return problem(ResourceApplicationError::Internal),
+    };
+    let mut response = (StatusCode::OK, Json(view)).into_response();
+    response.headers_mut().insert("etag", etag);
+    no_store(response)
+}
+
 fn operation_accepted_response(view: OperationViewV1) -> Response {
     let etag = match HeaderValue::from_str(&view.etag) {
         Ok(etag) => etag,
@@ -564,6 +669,17 @@ pub fn resource_etag(resource_id: &ResourceId, version: u64) -> String {
     format!("\"{resource_id}-{version}\"")
 }
 
+pub fn resource_version_etag(
+    resource_version_id: &ResourceId,
+    content_digest: &Sha256Digest,
+) -> String {
+    format!(
+        "\"{}-{}\"",
+        resource_version_id,
+        content_digest.as_str().trim_start_matches("sha256:")
+    )
+}
+
 fn problem(error: ResourceApplicationError) -> Response {
     let (status, code, title, retryable) = match error {
         ResourceApplicationError::Invalid => (
@@ -658,7 +774,7 @@ mod tests {
     use insight_platform_contracts::{
         operation_etag, ArtifactRef, AuthnStrength, AuthoringPackage, DataClassification,
         Permission, PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalKind, PublicJobKind,
-        PublicJobState, PublicJobTarget, UtcTimestamp,
+        PublicJobState, PublicJobTarget, UtcTimestamp, ValidationSummary,
     };
     use std::sync::Mutex;
     use tower::ServiceExt;
@@ -829,6 +945,34 @@ mod tests {
                 created_at: now.clone(),
                 updated_at: now,
                 etag: operation_etag(&operation_id.to_string(), 1),
+            })
+        }
+
+        async fn read_resource_version(
+            &self,
+            intent: ReadResourceVersionIntent,
+        ) -> Result<ResourceVersionViewV1, ResourceApplicationError> {
+            let content_digest = fixed_digest('9');
+            Ok(ResourceVersionViewV1 {
+                schema_version: 1,
+                resource_id: intent.resource_id,
+                resource_kind: intent.resource_kind,
+                resource_version_id: intent.resource_version_id.clone(),
+                revision_no: 2,
+                content_digest: content_digest.clone(),
+                artifact_id: None,
+                payload: PublishedVersionPayload {
+                    document: request_body().document,
+                    validation: ValidationSummary {
+                        validator_digest: fixed_digest('4'),
+                        validated_draft_digest: fixed_digest('5'),
+                        dependency_closure_digest: fixed_digest('6'),
+                        security_evidence_digest: fixed_digest('7'),
+                        warnings: Vec::new(),
+                    },
+                },
+                created_at: UtcTimestamp::from_datetime(Utc::now()),
+                etag: resource_version_etag(&intent.resource_version_id, &content_digest),
             })
         }
     }
@@ -1054,5 +1198,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(with_body.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn published_version_read_is_nominal_and_immutable() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application,
+            Arc::new(FixedClock(now)),
+        ));
+        let resource_id = id(ResourceKind::Policy, 4);
+        let version_id = id(ResourceKind::PolicyRevision, 9);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/policies/{resource_id}/versions/{version_id}"))
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()["etag"],
+            resource_version_etag(&version_id, &fixed_digest('9'))
+        );
+
+        let wrong_version_kind = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/policies/{resource_id}/versions/{}",
+                        id(ResourceKind::AgentPlanRevision, 10)
+                    ))
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_version_kind.status(), StatusCode::NOT_FOUND);
     }
 }
