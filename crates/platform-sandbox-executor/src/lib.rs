@@ -30,10 +30,12 @@ use uuid::Uuid;
 mod gvisor_backend;
 mod gvisor_broker;
 mod gvisor_kubernetes;
+mod gvisor_kubernetes_backend;
 
 pub use gvisor_backend::*;
 pub use gvisor_broker::*;
 pub use gvisor_kubernetes::*;
+pub use gvisor_kubernetes_backend::*;
 
 pub trait ExecutorIdentityFactory: Send + Sync {
     fn new_resource_id(&self, kind: ResourceKind) -> Result<ResourceId, ExecutorIdentityError>;

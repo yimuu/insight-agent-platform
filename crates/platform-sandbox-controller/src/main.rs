@@ -24,7 +24,7 @@ use insight_platform_sandbox_rpc::{
     },
     SandboxArtifactResponseCapacity, SandboxAuthorityGrpcService, SandboxBrokerGrpcService,
     SandboxExecutorAuthorityWorkloadIdentity, SandboxInternalRpcLimits,
-    SandboxProcessIsolationAttestorGrpcClient, WasiExecutorWorkloadIdentity,
+    SandboxProcessIsolationAttestorGrpcClient,
 };
 use ipnet::IpNet;
 use serde::Deserialize;
@@ -220,7 +220,7 @@ async fn run() -> Result<(), ProcessError> {
     );
     let broker_service = tonic::service::interceptor::InterceptedService::new(
         broker_service,
-        WasiExecutorWorkloadIdentity,
+        SandboxExecutorAuthorityWorkloadIdentity,
     );
 
     let ca = read_bounded(

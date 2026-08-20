@@ -3,14 +3,14 @@ use insight_platform_contracts::{canonical_digest, ResourceId, ResourceKind, Sha
 use insight_platform_sandbox::{SandboxExecutionRequest, SandboxResourceEnvelope};
 use k8s_openapi::{
     api::core::v1::{
-        Capabilities, Container, EmptyDirVolumeSource, EnvVar, Pod, PodSecurityContext, PodSpec,
-        ProjectedVolumeSource, ResourceRequirements, SeccompProfile, SecurityContext,
-        ServiceAccountTokenProjection, Volume, VolumeMount, VolumeProjection,
+        Capabilities, Container, EmptyDirVolumeSource, EnvVar, Pod, PodSchedulingGate,
+        PodSecurityContext, PodSpec, ProjectedVolumeSource, ResourceRequirements, SeccompProfile,
+        SecurityContext, ServiceAccountTokenProjection, Volume, VolumeMount, VolumeProjection,
     },
     apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::ObjectMeta},
 };
 use kube::{
-    api::{DeleteParams, PostParams, Preconditions},
+    api::{DeleteParams, Patch, PatchParams, PostParams, Preconditions},
     Api, Client,
 };
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,7 @@ const SCRATCH_VOLUME: &str = "scratch";
 const BOOTSTRAP_TOKEN_PATH: &str = "/var/run/secrets/insight.platform/token";
 const TERMINATION_MESSAGE_PATH: &str = "/dev/termination-log";
 const MAX_TERMINATION_MESSAGE_BYTES: usize = 4_096;
+const START_SCHEDULING_GATE: &str = "insight.platform/await-fenced-start";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,7 +42,7 @@ pub struct KubernetesGvisorRuntimeConfig {
 impl KubernetesGvisorRuntimeConfig {
     pub fn validate(&self) -> Result<(), KubernetesGvisorError> {
         if !dns_label(&self.namespace)
-            || !dns_label(&self.runtime_class_name)
+            || self.runtime_class_name != "runsc"
             || !dns_label(&self.guest_service_account_name)
             || !closed_image_repository(&self.guest_image_repository)
             || !absolute_guest_command(&self.guest_command)
@@ -115,6 +116,14 @@ pub trait KubernetesGvisorPodRuntime: Send + Sync {
         request: &SandboxExecutionRequest,
         worker_process_generation_id: &ResourceId,
     ) -> Result<LaunchedGvisorPod, KubernetesGvisorError>;
+
+    async fn find_exact(
+        &self,
+        request: &SandboxExecutionRequest,
+        worker_process_generation_id: &ResourceId,
+    ) -> Result<Option<LaunchedGvisorPod>, KubernetesGvisorError>;
+
+    async fn start(&self, pod: &LaunchedGvisorPod) -> Result<Sha256Digest, KubernetesGvisorError>;
 
     async fn wait_for_exit(
         &self,
@@ -190,41 +199,97 @@ impl KubernetesGvisorPodRuntime for SystemKubernetesGvisorPodRuntime {
             )
             .await
             .map_err(map_kube_error)?;
-        validate_returned_pod(&planned, &created)?;
-        let name = created
-            .metadata
-            .name
-            .clone()
-            .ok_or(KubernetesGvisorError::Integrity)?;
-        let uid = created
-            .metadata
-            .uid
-            .clone()
-            .ok_or(KubernetesGvisorError::Integrity)?;
-        let launch_evidence_digest = digest(&serde_json::json!({
-            "schema_version": 1,
-            "kind": "gvisor_pod_launched",
-            "namespace": self.config.namespace,
-            "name": name,
-            "uid": uid,
-            "request_digest": request.request_digest,
-            "worker_process_generation_id": worker_process_generation_id,
-            "pod_contract_digest": digest(&planned)?,
-        }))?;
-        let launched = LaunchedGvisorPod {
-            namespace: self.config.namespace.clone(),
-            name,
-            uid,
-            request_digest: request.request_digest.clone(),
-            worker_process_generation_id: worker_process_generation_id.clone(),
-            launch_evidence_digest,
-        };
+        let launched = launched_from_pod(
+            &self.config,
+            request,
+            worker_process_generation_id,
+            &planned,
+            &created,
+        )?;
         launched.validate_for(
             request,
             worker_process_generation_id,
             &self.config.namespace,
         )?;
         Ok(launched)
+    }
+
+    async fn find_exact(
+        &self,
+        request: &SandboxExecutionRequest,
+        worker_process_generation_id: &ResourceId,
+    ) -> Result<Option<LaunchedGvisorPod>, KubernetesGvisorError> {
+        let planned = build_guest_pod(&self.config, request, worker_process_generation_id)?;
+        let name = planned
+            .metadata
+            .name
+            .as_deref()
+            .ok_or(KubernetesGvisorError::Integrity)?;
+        let Some(current) = self.pods.get_opt(name).await.map_err(map_kube_error)? else {
+            return Ok(None);
+        };
+        let launched = launched_from_pod(
+            &self.config,
+            request,
+            worker_process_generation_id,
+            &planned,
+            &current,
+        )?;
+        launched.validate_for(
+            request,
+            worker_process_generation_id,
+            &self.config.namespace,
+        )?;
+        Ok(Some(launched))
+    }
+
+    async fn start(&self, pod: &LaunchedGvisorPod) -> Result<Sha256Digest, KubernetesGvisorError> {
+        let current = self
+            .pods
+            .get_opt(&pod.name)
+            .await
+            .map_err(map_kube_error)?
+            .ok_or(KubernetesGvisorError::NotFound)?;
+        require_uid(&current, &pod.uid)?;
+        if current
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.scheduling_gates.as_ref())
+            != Some(&vec![PodSchedulingGate {
+                name: START_SCHEDULING_GATE.to_owned(),
+            }])
+        {
+            return Err(KubernetesGvisorError::Integrity);
+        }
+        let resource_version = current
+            .metadata
+            .resource_version
+            .as_deref()
+            .ok_or(KubernetesGvisorError::Integrity)?;
+        let patch = serde_json::json!({
+            "metadata": {"uid": pod.uid, "resourceVersion": resource_version},
+            "spec": {"schedulingGates": []}
+        });
+        let started = self
+            .pods
+            .patch(&pod.name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map_err(map_kube_error)?;
+        require_uid(&started, &pod.uid)?;
+        if started
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.scheduling_gates.as_ref())
+            .is_none_or(|gates| !gates.is_empty())
+        {
+            return Err(KubernetesGvisorError::Integrity);
+        }
+        digest(&serde_json::json!({
+            "schema_version": 1,
+            "kind": "gvisor_pod_scheduling_gate_released",
+            "pod_uid": pod.uid,
+            "request_digest": pod.request_digest,
+        }))
     }
 
     async fn wait_for_exit(
@@ -313,6 +378,44 @@ impl KubernetesGvisorPodRuntime for SystemKubernetesGvisorPodRuntime {
         }
         Ok(false)
     }
+}
+
+fn launched_from_pod(
+    config: &KubernetesGvisorRuntimeConfig,
+    request: &SandboxExecutionRequest,
+    worker_process_generation_id: &ResourceId,
+    planned: &Pod,
+    actual: &Pod,
+) -> Result<LaunchedGvisorPod, KubernetesGvisorError> {
+    validate_returned_pod(planned, actual)?;
+    let name = actual
+        .metadata
+        .name
+        .clone()
+        .ok_or(KubernetesGvisorError::Integrity)?;
+    let uid = actual
+        .metadata
+        .uid
+        .clone()
+        .ok_or(KubernetesGvisorError::Integrity)?;
+    let launch_evidence_digest = digest(&serde_json::json!({
+        "schema_version": 1,
+        "kind": "gvisor_pod_launched",
+        "namespace": config.namespace,
+        "name": name,
+        "uid": uid,
+        "request_digest": request.request_digest,
+        "worker_process_generation_id": worker_process_generation_id,
+        "pod_contract_digest": digest(planned)?,
+    }))?;
+    Ok(LaunchedGvisorPod {
+        namespace: config.namespace.clone(),
+        name,
+        uid,
+        request_digest: request.request_digest.clone(),
+        worker_process_generation_id: worker_process_generation_id.clone(),
+        launch_evidence_digest,
+    })
 }
 
 fn build_guest_pod(
@@ -464,6 +567,9 @@ fn build_guest_pod_contract(
             host_pid: Some(false),
             restart_policy: Some("Never".to_owned()),
             runtime_class_name: Some(config.runtime_class_name.clone()),
+            scheduling_gates: Some(vec![PodSchedulingGate {
+                name: START_SCHEDULING_GATE.to_owned(),
+            }]),
             security_context: Some(PodSecurityContext {
                 run_as_group: Some(65_532),
                 run_as_non_root: Some(true),
