@@ -37,22 +37,25 @@ use insight_platform_invocations::{
 use insight_platform_jobs::{decide_claim, decide_heartbeat, JobProjection, LeasePolicy};
 use insight_platform_sandbox::{
     decide_accept, decide_advance_phase, decide_begin_execution, decide_execution_outcome,
-    decide_expired_lease_recovery, decide_prestart_control, AcceptSandboxExecution,
+    decide_expired_lease_recovery, decide_prestart_control, guest_read_requests,
+    gvisor_guest_pod_name, AcceptSandboxExecution, AuthorizedGvisorGuestBootstrap,
     ClaimSandboxJobs, ClaimedSandboxJob, CommitSandboxOutcome, CommitSandboxPhase,
-    ExpiredSandboxLease, HeartbeatSandboxExecution, MergeSandboxCapabilityOutcome,
-    PendingSandboxCapabilityOutcome, RecoverExpiredSandboxLease, RecoverSandboxControlSignals,
-    ResolveSandboxControlEvent, RevokeWasiSandboxGrants, SandboxClaimAuthority,
-    SandboxClaimFailure, SandboxCommandLimits, SandboxControlAuthority, SandboxControlScanCursor,
-    SandboxControlSignalPage, SandboxControlSignalSource, SandboxExecutionAuthority,
-    SandboxExecutionJobPayload, SandboxExecutionOutcome, SandboxExecutionPolicyClosure,
-    SandboxExecutionRequest, SandboxExecutionSource, SandboxGatewayAuthority, SandboxJobPayload,
-    SandboxLeaseRecoveryAction, SandboxLeaseRecoveryAuthority, SandboxLeaseRecoveryDisposition,
-    SandboxLeaseRecoveryResult, SandboxPhaseDecision, SandboxPrestartControlOutcome,
-    SandboxRecoveryAudit, SandboxResourceEnvelope, SandboxResourceUsage, SandboxStopReason,
-    SandboxStopSignal, SandboxWorkerAudit, ScopedArtifactGrant, ScopedSecretGrant,
-    StopUnclaimedSandboxJob, WasiArtifactReadPurpose, WasiArtifactReadRequest,
-    WasiGrantRevocationError, WasiGrantRevocationEvidence, WasiGrantRevoker, WasiValueDirection,
-    WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator, SANDBOX_QUOTA_LINES,
+    ExpiredSandboxLease, GvisorGuestBootstrapAuthority, GvisorGuestBootstrapError,
+    GvisorGuestBootstrapRequest, GvisorGuestExecutionPlan, HeartbeatSandboxExecution,
+    MergeSandboxCapabilityOutcome, PendingSandboxCapabilityOutcome, RecoverExpiredSandboxLease,
+    RecoverSandboxControlSignals, ResolveSandboxControlEvent, RevokeWasiSandboxGrants,
+    SandboxClaimAuthority, SandboxClaimFailure, SandboxCommandLimits, SandboxControlAuthority,
+    SandboxControlScanCursor, SandboxControlSignalPage, SandboxControlSignalSource,
+    SandboxExecutionAuthority, SandboxExecutionJobPayload, SandboxExecutionOutcome,
+    SandboxExecutionPolicyClosure, SandboxExecutionRequest, SandboxExecutionSource,
+    SandboxGatewayAuthority, SandboxJobPayload, SandboxLeaseRecoveryAction,
+    SandboxLeaseRecoveryAuthority, SandboxLeaseRecoveryDisposition, SandboxLeaseRecoveryResult,
+    SandboxPhaseDecision, SandboxPrestartControlOutcome, SandboxRecoveryAudit,
+    SandboxResourceEnvelope, SandboxResourceUsage, SandboxStopReason, SandboxStopSignal,
+    SandboxWorkerAudit, ScopedArtifactGrant, ScopedSecretGrant, StopUnclaimedSandboxJob,
+    WasiArtifactReadPurpose, WasiArtifactReadRequest, WasiGrantRevocationError,
+    WasiGrantRevocationEvidence, WasiGrantRevoker, WasiValueDirection, WasiValueValidationError,
+    WasiValueValidationRequest, WasiValueValidator, SANDBOX_QUOTA_LINES,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -387,6 +390,124 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
             .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
         Ok(authorized)
     }
+}
+
+#[async_trait::async_trait]
+impl GvisorGuestBootstrapAuthority for PgRepository {
+    async fn authorize_guest_bootstrap(
+        &self,
+        request: &GvisorGuestBootstrapRequest,
+    ) -> Result<AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapError> {
+        request.validate()?;
+        let job_id = ResourceId::from_uuid_v7(ResourceKind::Job, request.sandbox_job_id.uuid())
+            .map_err(|_| GvisorGuestBootstrapError::Denied)?;
+        let mut transaction = begin_read_only_repeatable(self.pool())
+            .await
+            .map_err(|_| GvisorGuestBootstrapError::Unavailable)?;
+        let database_now = database_now(&mut transaction)
+            .await
+            .map_err(|_| GvisorGuestBootstrapError::Unavailable)?;
+        let current = load_sandbox_job_read_only(
+            &mut transaction,
+            &request.tenant_id,
+            &job_id,
+            self.sandbox_limits(),
+        )
+        .await
+        .map_err(classify_guest_bootstrap_repository_error)?;
+        require_sandbox_command_owner(&current, &request.sandbox_job_id, &request.tenant_id)
+            .map_err(classify_guest_bootstrap_repository_error)?;
+        let lease = current
+            .job
+            .lease
+            .as_ref()
+            .ok_or(GvisorGuestBootstrapError::Denied)?;
+        let leased_request = current
+            .payload
+            .request
+            .as_ref()
+            .clone()
+            .bind_lease_generation(current.job.lease_generation)
+            .map_err(|_| GvisorGuestBootstrapError::InvalidEvidence)?;
+        let prepared = current
+            .payload
+            .prepared
+            .as_ref()
+            .ok_or(GvisorGuestBootstrapError::Denied)?;
+        let expected_pod_name = gvisor_guest_pod_name(
+            &leased_request.request_digest,
+            leased_request.attempt_no,
+            leased_request.lease_generation,
+            &lease.worker_process_generation_id,
+        )?;
+        let observed_identity = request.pod.sandbox_identity_digest(
+            &leased_request.request_digest,
+            &lease.worker_process_generation_id,
+        )?;
+        if leased_request.request_digest != request.request_digest
+            || lease.expires_at <= database_now
+            || leased_request.deadline <= database_now
+            || request.pod.pod_name != expected_pod_name
+            || prepared.sandbox_identity_digest != observed_identity
+            || !matches!(
+                current.payload.physical_state,
+                SandboxJobState::Starting | SandboxJobState::Running
+            )
+        {
+            return Err(GvisorGuestBootstrapError::Denied);
+        }
+        let plan = GvisorGuestExecutionPlan {
+            schema_version: 1,
+            request_digest: leased_request.request_digest.clone(),
+            runtime_family: leased_request.runtime.runtime_family,
+            entrypoint_kind: leased_request.package.entrypoint_kind,
+            entrypoint: leased_request.package.entrypoint.clone(),
+            runtime_bundle_artifact: leased_request.package.runtime_bundle_artifact.clone(),
+            input_ref: leased_request.input_ref.clone(),
+            resources: leased_request.resources.clone(),
+            deadline: leased_request.deadline,
+            plan_digest: zero_digest(),
+        }
+        .seal()?;
+        let (package_read, input_read) = guest_read_requests(
+            &plan,
+            &leased_request.tenant_id,
+            &leased_request.sandbox_job_id,
+            &lease.worker_process_generation_id,
+            leased_request.lease_generation,
+            &leased_request.artifact_grants,
+        )?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| GvisorGuestBootstrapError::Unavailable)?;
+        Ok(AuthorizedGvisorGuestBootstrap {
+            plan,
+            package_read,
+            input_read,
+        })
+    }
+}
+
+fn classify_guest_bootstrap_repository_error(error: RepositoryError) -> GvisorGuestBootstrapError {
+    match error {
+        RepositoryError::Database(_) => GvisorGuestBootstrapError::Unavailable,
+        RepositoryError::NotFound(_) => GvisorGuestBootstrapError::NotFound,
+        RepositoryError::CorruptRow(_) => GvisorGuestBootstrapError::InvalidEvidence,
+        RepositoryError::Conflict(_)
+        | RepositoryError::StaleFence
+        | RepositoryError::LeaseExpired
+        | RepositoryError::InvalidInput(_)
+        | RepositoryError::QuotaExceeded
+        | RepositoryError::PermissionDenied
+        | RepositoryError::IdempotencyConflict => GvisorGuestBootstrapError::Denied,
+    }
+}
+
+fn zero_digest() -> Sha256Digest {
+    format!("sha256:{}", "0".repeat(64))
+        .parse()
+        .expect("zero SHA-256 digest is valid")
 }
 
 #[async_trait::async_trait]

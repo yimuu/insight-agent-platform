@@ -124,6 +124,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
       "guest_image_repository" .Values.gvisor.guestImageRepository
       "guest_command" .Values.gvisor.guestCommand
       "bootstrap_endpoint" .Values.gvisor.bootstrapEndpoint
+      "bootstrap_ca_path" .Values.gvisor.bootstrapCaPath
       "bootstrap_token_audience" .Values.gvisor.bootstrapTokenAudience
       "bootstrap_token_expiration_seconds" (int .Values.gvisor.bootstrapTokenExpirationSeconds)
       "observation_poll_milliseconds" (int .Values.gvisor.observationPollMilliseconds)))

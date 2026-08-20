@@ -35,6 +35,7 @@ members = [
     "crates/platform-sandbox-controller",
     "crates/platform-sandbox-attestor",
     "crates/platform-sandbox-executor",
+    "crates/platform-sandbox-guest",
     "crates/platform-sandbox-rpc",
     "crates/platform-sandbox-gvisor",
     "crates/platform-sandbox-wasi",

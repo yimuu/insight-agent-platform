@@ -7,6 +7,7 @@
 mod backend;
 mod broker;
 mod control;
+mod gvisor_guest;
 mod state;
 mod types;
 mod worker;
@@ -14,6 +15,7 @@ mod worker;
 pub use backend::*;
 pub use broker::*;
 pub use control::*;
+pub use gvisor_guest::*;
 pub use state::*;
 pub use types::*;
 pub use worker::*;

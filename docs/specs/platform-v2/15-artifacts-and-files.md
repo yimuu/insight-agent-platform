@@ -219,6 +219,9 @@ maintenance backlog。预留在object I/O前发生，terminal/recovery原子sett
 Gateway、Data Worker和Maintenance必须使用三个独立Deployment、ServiceAccount、DB pool、storage identity、queue、permit
 和autoscaling signal。一个role饱和不得占用其他role、API、Scheduler、Model、MCP或Sandbox的保留容量。
 Data Worker内部的read、stage、verify/derive使用独立有界queue/permit/byte budget，防止大写入或scanner饱和阻塞读取；
+gVisor guest read使用独立token-authenticated listener：只接受专用audience的短期Pod-bound ServiceAccount JWT，离线验证
+发布时安装的JWKS，并在每次package/input读取前复核exact Pod UID、Job fence、request digest与Artifact grant。该listener不接受
+public principal，也不复用Controller mTLS identity。
 这些是同一role的capacity lane，不创建新server identity、aggregate或state machine。
 
 ## 13. Persistence 与machine contract

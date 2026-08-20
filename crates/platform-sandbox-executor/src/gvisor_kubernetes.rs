@@ -1,11 +1,14 @@
 use async_trait::async_trait;
 use insight_platform_contracts::{canonical_digest, ResourceId, ResourceKind, Sha256Digest};
-use insight_platform_sandbox::{SandboxExecutionRequest, SandboxResourceEnvelope};
+use insight_platform_sandbox::{
+    gvisor_guest_pod_name, SandboxExecutionRequest, SandboxResourceEnvelope,
+};
 use k8s_openapi::{
     api::core::v1::{
-        Capabilities, Container, EmptyDirVolumeSource, EnvVar, Pod, PodSchedulingGate,
-        PodSecurityContext, PodSpec, ProjectedVolumeSource, ResourceRequirements, SeccompProfile,
-        SecurityContext, ServiceAccountTokenProjection, Volume, VolumeMount, VolumeProjection,
+        Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, ObjectFieldSelector,
+        Pod, PodSchedulingGate, PodSecurityContext, PodSpec, ProjectedVolumeSource,
+        ResourceRequirements, SeccompProfile, SecurityContext, ServiceAccountTokenProjection,
+        Volume, VolumeMount, VolumeProjection,
     },
     apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::ObjectMeta},
 };
@@ -14,7 +17,6 @@ use kube::{
     Api, Client,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, time::Duration};
 
 const GVISOR_GUEST_CONTAINER: &str = "sandbox-guest";
@@ -34,6 +36,7 @@ pub struct KubernetesGvisorRuntimeConfig {
     pub guest_image_repository: String,
     pub guest_command: String,
     pub bootstrap_endpoint: String,
+    pub bootstrap_ca_path: String,
     pub bootstrap_token_audience: String,
     pub bootstrap_token_expiration_seconds: i64,
     pub observation_poll_milliseconds: u64,
@@ -47,6 +50,7 @@ impl KubernetesGvisorRuntimeConfig {
             || !closed_image_repository(&self.guest_image_repository)
             || !absolute_guest_command(&self.guest_command)
             || !closed_https_endpoint(&self.bootstrap_endpoint)
+            || !absolute_guest_command(&self.bootstrap_ca_path)
             || !stable_audience(&self.bootstrap_token_audience)
             || !(60..=3_600).contains(&self.bootstrap_token_expiration_seconds)
             || !(10..=10_000).contains(&self.observation_poll_milliseconds)
@@ -142,6 +146,7 @@ pub struct SystemKubernetesGvisorPodRuntime {
 }
 
 struct GvisorPodContract<'a> {
+    tenant_id: &'a ResourceId,
     request_digest: &'a Sha256Digest,
     sandbox_job_id: &'a ResourceId,
     attempt_no: u32,
@@ -154,6 +159,7 @@ struct GvisorPodContract<'a> {
 impl<'a> From<&'a SandboxExecutionRequest> for GvisorPodContract<'a> {
     fn from(request: &'a SandboxExecutionRequest) -> Self {
         Self {
+            tenant_id: &request.tenant_id,
             request_digest: &request.request_digest,
             sandbox_job_id: &request.sandbox_job_id,
             attempt_no: request.attempt_no,
@@ -519,8 +525,31 @@ fn build_guest_pod_contract(
                 ..EnvVar::default()
             },
             EnvVar {
+                name: "INSIGHT_SANDBOX_BOOTSTRAP_CA_PATH".to_owned(),
+                value: Some(config.bootstrap_ca_path.clone()),
+                ..EnvVar::default()
+            },
+            EnvVar {
+                name: "INSIGHT_SANDBOX_TENANT_ID".to_owned(),
+                value: Some(request.tenant_id.to_string()),
+                ..EnvVar::default()
+            },
+            EnvVar {
+                name: "INSIGHT_SANDBOX_JOB_ID".to_owned(),
+                value: Some(request.sandbox_job_id.to_string()),
+                ..EnvVar::default()
+            },
+            EnvVar {
                 name: "INSIGHT_SANDBOX_REQUEST_DIGEST".to_owned(),
                 value: Some(request.request_digest.to_string()),
+                ..EnvVar::default()
+            },
+            downward_env("INSIGHT_SANDBOX_POD_NAMESPACE", "metadata.namespace"),
+            downward_env("INSIGHT_SANDBOX_POD_NAME", "metadata.name"),
+            downward_env("INSIGHT_SANDBOX_POD_UID", "metadata.uid"),
+            EnvVar {
+                name: "INSIGHT_SANDBOX_SERVICE_ACCOUNT_NAME".to_owned(),
+                value: Some(config.guest_service_account_name.clone()),
                 ..EnvVar::default()
             },
         ]),
@@ -616,6 +645,20 @@ fn build_guest_pod_contract(
     };
     validate_planned_pod(&pod, config, request)?;
     Ok(pod)
+}
+
+fn downward_env(name: &str, field_path: &str) -> EnvVar {
+    EnvVar {
+        name: name.to_owned(),
+        value_from: Some(EnvVarSource {
+            field_ref: Some(ObjectFieldSelector {
+                api_version: Some("v1".to_owned()),
+                field_path: field_path.to_owned(),
+            }),
+            ..EnvVarSource::default()
+        }),
+        ..EnvVar::default()
+    }
 }
 
 fn pod_resources(
@@ -773,14 +816,13 @@ fn require_uid(pod: &Pod, expected: &str) -> Result<(), KubernetesGvisorError> {
 }
 
 fn pod_name(request: &GvisorPodContract<'_>, worker_process_generation_id: &ResourceId) -> String {
-    let digest = Sha256::digest(format!(
-        "{}:{}:{}:{}",
+    gvisor_guest_pod_name(
         request.request_digest,
         request.attempt_no,
         request.lease_generation,
-        worker_process_generation_id
-    ));
-    format!("insight-gv-{}", lower_hex(&digest[..16]))
+        worker_process_generation_id,
+    )
+    .expect("validated gVisor Pod contract has a deterministic name")
 }
 
 fn map_kube_error(error: kube::Error) -> KubernetesGvisorError {
@@ -850,16 +892,6 @@ fn stable_audience(value: &str) -> bool {
         })
 }
 
-fn lower_hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut value = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        value.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        value.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    value
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,6 +916,7 @@ mod tests {
             guest_image_repository: "registry.example/insight/sandbox-guest".to_owned(),
             guest_command: "/opt/insight/bin/sandbox-guest".to_owned(),
             bootstrap_endpoint: "https://sandbox-bootstrap.platform.svc:7445".to_owned(),
+            bootstrap_ca_path: "/opt/insight/trust/data-worker-ca.pem".to_owned(),
             bootstrap_token_audience: "insight.platform/sandbox-guest".to_owned(),
             bootstrap_token_expiration_seconds: 600,
             observation_poll_milliseconds: 100,
@@ -891,6 +924,7 @@ mod tests {
     }
 
     struct TestPodContract {
+        tenant_id: ResourceId,
         request_digest: Sha256Digest,
         sandbox_job_id: ResourceId,
         runtime_digest: Sha256Digest,
@@ -901,6 +935,7 @@ mod tests {
     impl TestPodContract {
         fn view(&self) -> GvisorPodContract<'_> {
             GvisorPodContract {
+                tenant_id: &self.tenant_id,
                 request_digest: &self.request_digest,
                 sandbox_job_id: &self.sandbox_job_id,
                 attempt_no: 1,
@@ -914,6 +949,7 @@ mod tests {
 
     fn contract() -> TestPodContract {
         TestPodContract {
+            tenant_id: id(ResourceKind::Tenant),
             request_digest: sha('d'),
             sandbox_job_id: id(ResourceKind::Job),
             runtime_digest: sha('a'),

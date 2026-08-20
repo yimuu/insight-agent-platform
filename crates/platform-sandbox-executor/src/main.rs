@@ -724,6 +724,7 @@ mod tests {
             guest_image_repository: "registry.example/insight/sandbox-guest".to_owned(),
             guest_command: "/opt/insight/bin/sandbox-guest".to_owned(),
             bootstrap_endpoint: "https://sandbox-bootstrap.platform.svc:7445".to_owned(),
+            bootstrap_ca_path: "/opt/insight/trust/data-worker-ca.pem".to_owned(),
             bootstrap_token_audience: "insight.platform/sandbox-guest".to_owned(),
             bootstrap_token_expiration_seconds: 600,
             observation_poll_milliseconds: 100,

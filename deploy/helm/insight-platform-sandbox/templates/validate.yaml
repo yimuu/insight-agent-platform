@@ -42,6 +42,9 @@
 {{- if or (empty .Values.gvisor.guestServiceAccount) (empty .Values.gvisor.guestImageRepository) (contains "@" .Values.gvisor.guestImageRepository) (contains ":latest" .Values.gvisor.guestImageRepository) (ne .Values.gvisor.guestCommand "/usr/local/bin/platform-sandbox-guest") }}
 {{- fail "gVisor guest identity, immutable image repository, and entrypoint are required" }}
 {{- end }}
+{{- if or (not (hasPrefix "/" .Values.gvisor.bootstrapCaPath)) (contains ".." .Values.gvisor.bootstrapCaPath) }}
+{{- fail "gVisor guest must use the immutable image-baked Artifact Data Worker CA path" }}
+{{- end }}
 {{- if or (lt (int .Values.gvisor.bootstrapTokenExpirationSeconds) 60) (gt (int .Values.gvisor.bootstrapTokenExpirationSeconds) 3600) (lt (int .Values.gvisor.observationPollMilliseconds) 10) (gt (int .Values.gvisor.observationPollMilliseconds) 10000) }}
 {{- fail "gVisor bootstrap token and observation bounds are invalid" }}
 {{- end }}

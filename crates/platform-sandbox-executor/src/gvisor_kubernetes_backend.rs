@@ -10,15 +10,15 @@ use insight_platform_contracts::{
     Sha256Digest, ValueRef,
 };
 use insight_platform_sandbox::{
-    AbortSandboxExecution, CollectedSandbox, DestroySandbox, ExpiredSandboxLease,
-    InstalledSandboxBackendDescriptor, PreparedSandbox, RevokeWasiSandboxGrants, RunningSandbox,
-    SandboxAbortEvidence, SandboxBackendFailure, SandboxBackendFailureStage,
-    SandboxCleanupDisposition, SandboxCleanupEvidence, SandboxCompletedOutput,
-    SandboxExecutionOutcome, SandboxExecutionRequest, SandboxExecutorBackend,
-    SandboxIsolationBackendKind, SandboxLeaseRecoveryEvidence, SandboxNetworkMode,
-    SandboxResourceUsage, SandboxTerminationEvidence, SandboxUncertainty, TerminateSandbox,
-    WasiGrantRevocationError, WasiGrantRevoker, WasiValueDirection, WasiValueValidationError,
-    WasiValueValidationRequest, WasiValueValidator,
+    gvisor_pod_identity_digest, AbortSandboxExecution, CollectedSandbox, DestroySandbox,
+    ExpiredSandboxLease, InstalledSandboxBackendDescriptor, PreparedSandbox,
+    RevokeWasiSandboxGrants, RunningSandbox, SandboxAbortEvidence, SandboxBackendFailure,
+    SandboxBackendFailureStage, SandboxCleanupDisposition, SandboxCleanupEvidence,
+    SandboxCompletedOutput, SandboxExecutionOutcome, SandboxExecutionRequest,
+    SandboxExecutorBackend, SandboxIsolationBackendKind, SandboxLeaseRecoveryEvidence,
+    SandboxNetworkMode, SandboxResourceUsage, SandboxTerminationEvidence, SandboxUncertainty,
+    TerminateSandbox, WasiGrantRevocationError, WasiGrantRevoker, WasiValueDirection,
+    WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator,
 };
 use serde::Deserialize;
 use std::{
@@ -857,18 +857,14 @@ fn current_identity(
 }
 
 fn identity_digest(pod: &LaunchedGvisorPod) -> Sha256Digest {
-    canonical_digest(&serde_json::json!({
-        "schema_version": 1,
-        "kind": "gvisor_pod_identity",
-        "namespace": pod.namespace,
-        "name": pod.name,
-        "uid": pod.uid,
-        "request_digest": pod.request_digest,
-        "worker_process_generation_id": pod.worker_process_generation_id,
-    }))
-    .expect("closed gVisor Pod identity is canonical")
-    .parse()
-    .expect("canonical digest has SHA-256 shape")
+    gvisor_pod_identity_digest(
+        &pod.namespace,
+        &pod.name,
+        &pod.uid,
+        &pod.request_digest,
+        &pod.worker_process_generation_id,
+    )
+    .expect("validated gVisor Pod identity is canonical")
 }
 
 fn evidence_digest_for_pod(

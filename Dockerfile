@@ -17,7 +17,8 @@ RUN cargo build --locked --release --bin insight-agent-platform \
     && cargo build --locked --release -p insight-platform-security-authority --bin platform-security-authority \
     && cargo build --locked --release -p insight-platform-sandbox-controller --bin platform-sandbox-controller \
     && cargo build --locked --release -p insight-platform-sandbox-attestor --bin platform-sandbox-attestor \
-    && cargo build --locked --release -p insight-platform-sandbox-executor --bin platform-sandbox-executor
+    && cargo build --locked --release -p insight-platform-sandbox-executor --bin platform-sandbox-executor \
+    && cargo build --locked --release -p insight-platform-sandbox-guest --bin platform-sandbox-guest
 
 FROM debian:bullseye-slim@sha256:f313b4bd62667092a59b3a664d7d3ab8b5e65f41675f48e81455a15dc5abe792 AS runtime-base
 
@@ -53,3 +54,19 @@ ENV PLATFORM_CONFIG=/app/config/platform.yaml
 EXPOSE 3000
 
 ENTRYPOINT ["/usr/local/bin/insight-agent-platform"]
+
+# The gVisor RuntimeClass isolates this single-Job image. Runtime dependencies are resolved only
+# while publishing this immutable image; the guest never invokes a package manager.
+FROM runtime-base AS sandbox-guest
+
+USER root
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends python3=3.9.2-3 nodejs=12.22.12~dfsg-1~deb11u4 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /workspace/target/release/platform-sandbox-guest /usr/local/bin/platform-sandbox-guest
+RUN mkdir -p /scratch \
+    && chown 65532:65532 /scratch \
+    && chmod 0700 /scratch
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/platform-sandbox-guest"]

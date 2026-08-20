@@ -1,4 +1,4 @@
-//! Independently deployed Artifact Broker composition.
+//! Independently deployed Artifact Data Worker composition.
 //!
 //! The Sandbox Controller receives only exact, credential-free reads. Model-specific Artifact
 //! production and materialization are intentionally absent from the first release.
@@ -7,16 +7,26 @@ use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
     BrokeredSandboxArtifactBroker,
 };
+mod guest_identity;
+
+use guest_identity::GvisorGuestIdentityConfig;
 use insight_platform_artifact_rpc::{
-    proto::artifact_sandbox_broker_service_server::ArtifactSandboxBrokerServiceServer,
-    ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcService, LeasedArtifactBytes,
-    SandboxControllerWorkloadIdentity, WasiArtifactBrokerError, WasiArtifactReadRequest,
-    WasiArtifactResponseBroker,
+    proto::{
+        artifact_gvisor_guest_service_server::ArtifactGvisorGuestServiceServer,
+        artifact_sandbox_broker_service_server::ArtifactSandboxBrokerServiceServer,
+    },
+    ArtifactGvisorGuestGrpcService, ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcService,
+    GvisorGuestResponseMaterializer, LeasedArtifactBytes, SandboxControllerWorkloadIdentity,
+    WasiArtifactBrokerError, WasiArtifactReadRequest, WasiArtifactResponseBroker,
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_sandbox::{
+    AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapAuthority, GvisorGuestBootstrapError,
+    GvisorGuestBootstrapRequest,
+};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{
@@ -38,6 +48,28 @@ struct SandboxRpcArtifactBroker {
     broker: BrokeredSandboxArtifactBroker,
 }
 
+struct GvisorGuestMaterializer {
+    authority: Arc<PgRepository>,
+    broker: Arc<SandboxRpcArtifactBroker>,
+}
+
+#[async_trait::async_trait]
+impl GvisorGuestResponseMaterializer for GvisorGuestMaterializer {
+    async fn authorize_guest(
+        &self,
+        request: &GvisorGuestBootstrapRequest,
+    ) -> Result<AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapError> {
+        self.authority.authorize_guest_bootstrap(request).await
+    }
+
+    async fn read_guest_for_response(
+        &self,
+        request: WasiArtifactReadRequest,
+    ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError> {
+        self.broker.read_wasi_for_response(request).await
+    }
+}
+
 #[async_trait::async_trait]
 impl WasiArtifactResponseBroker for SandboxRpcArtifactBroker {
     async fn read_wasi_for_response(
@@ -55,7 +87,9 @@ impl WasiArtifactResponseBroker for SandboxRpcArtifactBroker {
 struct ArtifactBrokerProcessConfig {
     schema_version: u32,
     audience: ArtifactBrokerAudience,
-    listen_address: String,
+    controller_listen_address: String,
+    guest_listen_address: String,
+    guest_identity: GvisorGuestIdentityConfig,
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
     artifact_provider_catalog: AwsArtifactProviderCatalogConfig,
@@ -68,13 +102,13 @@ struct ArtifactBrokerProcessConfig {
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ArtifactBrokerAudience {
-    Sandbox,
+    DataWorker,
 }
 
 impl ArtifactBrokerAudience {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Sandbox => "sandbox",
+            Self::DataWorker => "data_worker",
         }
     }
 }
@@ -134,8 +168,12 @@ impl ArtifactBrokerProcessConfig {
     }
 
     fn validate(&self) -> Result<(), ProcessError> {
-        let _: SocketAddr = self
-            .listen_address
+        let controller_address: SocketAddr = self
+            .controller_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let guest_address: SocketAddr = self
+            .guest_listen_address
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         self.artifact_provider_catalog
@@ -152,6 +190,8 @@ impl ArtifactBrokerProcessConfig {
                 .map_err(|_| ProcessError::InvalidConfiguration)?;
         let required_read_bytes = sandbox_input_bytes.max(sandbox_runtime_bundle_bytes);
         if self.schema_version != 1
+            || controller_address == guest_address
+            || self.guest_identity.clone().install().is_err()
             || !(2..=64).contains(&self.database_max_connections)
             || self.database_acquire_timeout_milliseconds == 0
             || self.database_acquire_timeout_milliseconds > 30_000
@@ -196,7 +236,7 @@ impl ArtifactBrokerProcessConfig {
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("platform-artifact-broker failed: {error}");
+        eprintln!("platform-artifact-data-worker failed: {error}");
         std::process::exit(1);
     }
 }
@@ -224,14 +264,15 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::ProviderUnavailable)?;
     let (unsealer, stores) = providers.into_components();
     let broker_limits = config.broker_limits()?;
-    let broker = BrokeredSandboxArtifactBroker::new(repository, unsealer, stores, broker_limits)
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let broker =
+        BrokeredSandboxArtifactBroker::new(repository.clone(), unsealer, stores, broker_limits)
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
     let sandbox_broker = Arc::new(SandboxRpcArtifactBroker { broker });
     let rpc_limits = config.rpc_limits()?;
     let maximum = rpc_limits.maximum_message_bytes();
     let sandbox_service = {
         let service = ArtifactSandboxBrokerServiceServer::new(
-            ArtifactSandboxBrokerGrpcService::new(sandbox_broker, rpc_limits),
+            ArtifactSandboxBrokerGrpcService::new(Arc::clone(&sandbox_broker), rpc_limits),
         )
         .max_encoding_message_size(maximum)
         .max_decoding_message_size(maximum);
@@ -240,11 +281,30 @@ async fn run() -> Result<(), ProcessError> {
             SandboxControllerWorkloadIdentity,
         )
     };
-    let tls = ServerTlsConfig::new()
-        .identity(Identity::from_pem(
-            read_bounded_file(&required_absolute_path(CERT_PATH_ENV)?, MAX_TLS_FILE_BYTES)?,
-            read_bounded_file(&required_absolute_path(KEY_PATH_ENV)?, MAX_TLS_FILE_BYTES)?,
+    let guest_materializer = Arc::new(GvisorGuestMaterializer {
+        authority: repository,
+        broker: Arc::clone(&sandbox_broker),
+    });
+    let guest_service = {
+        let service = ArtifactGvisorGuestServiceServer::new(ArtifactGvisorGuestGrpcService::new(
+            guest_materializer,
+            rpc_limits,
         ))
+        .max_encoding_message_size(maximum)
+        .max_decoding_message_size(maximum);
+        tonic::service::interceptor::InterceptedService::new(
+            service,
+            config
+                .guest_identity
+                .clone()
+                .install()
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+        )
+    };
+    let cert = read_bounded_file(&required_absolute_path(CERT_PATH_ENV)?, MAX_TLS_FILE_BYTES)?;
+    let key = read_bounded_file(&required_absolute_path(KEY_PATH_ENV)?, MAX_TLS_FILE_BYTES)?;
+    let controller_tls = ServerTlsConfig::new()
+        .identity(Identity::from_pem(cert.clone(), key.clone()))
         .client_ca_root(Certificate::from_pem(read_bounded_file(
             &required_absolute_path(CLIENT_CA_PATH_ENV)?,
             MAX_TLS_FILE_BYTES,
@@ -252,34 +312,58 @@ async fn run() -> Result<(), ProcessError> {
         .timeout(Duration::from_millis(
             config.tls_handshake_timeout_milliseconds,
         ));
-    let address = config
-        .listen_address
+    let guest_tls = ServerTlsConfig::new()
+        .identity(Identity::from_pem(cert, key))
+        .timeout(Duration::from_millis(
+            config.tls_handshake_timeout_milliseconds,
+        ));
+    let controller_address = config
+        .controller_listen_address
+        .parse()
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let guest_address = config
+        .guest_listen_address
         .parse()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
     eprintln!(
-        "platform-artifact-broker started for {} audience",
+        "platform-artifact-data-worker started for {} audience",
         config.audience.as_str()
     );
-    let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
-    let server = Server::builder()
-        .tls_config(tls)
+    let (controller_shutdown_sender, controller_shutdown_receiver) =
+        tokio::sync::oneshot::channel();
+    let (guest_shutdown_sender, guest_shutdown_receiver) = tokio::sync::oneshot::channel();
+    let controller_server = Server::builder()
+        .tls_config(controller_tls)
         .map_err(|_| ProcessError::InvalidTls)?
         .add_service(sandbox_service)
-        .serve_with_shutdown(address, async {
-            let _ = shutdown_receiver.await;
+        .serve_with_shutdown(controller_address, async {
+            let _ = controller_shutdown_receiver.await;
         });
-    tokio::pin!(server);
+    let guest_server = Server::builder()
+        .tls_config(guest_tls)
+        .map_err(|_| ProcessError::InvalidTls)?
+        .add_service(guest_service)
+        .serve_with_shutdown(guest_address, async {
+            let _ = guest_shutdown_receiver.await;
+        });
+    tokio::pin!(controller_server);
+    tokio::pin!(guest_server);
     tokio::select! {
-        result = &mut server => result.map_err(|_| ProcessError::RpcUnavailable),
+        result = &mut controller_server => result.map_err(|_| ProcessError::RpcUnavailable),
+        result = &mut guest_server => result.map_err(|_| ProcessError::RpcUnavailable),
         signal = shutdown_signal() => {
             signal?;
-            let _ = shutdown_sender.send(());
+            let _ = controller_shutdown_sender.send(());
+            let _ = guest_shutdown_sender.send(());
             tokio::time::timeout(
                 Duration::from_millis(config.shutdown_grace_milliseconds),
-                &mut server,
+                async {
+                    tokio::try_join!(&mut controller_server, &mut guest_server)
+                },
             )
             .await
             .map_err(|_| ProcessError::ShutdownDeadlineExceeded)?
+            .map(|_| ())
             .map_err(|_| ProcessError::RpcUnavailable)
         }
     }
@@ -378,8 +462,24 @@ mod tests {
     fn valid_config() -> ArtifactBrokerProcessConfig {
         serde_json::from_value(serde_json::json!({
             "schema_version": 1,
-            "audience": "sandbox",
-            "listen_address": "0.0.0.0:9443",
+            "audience": "data_worker",
+            "controller_listen_address": "0.0.0.0:9443",
+            "guest_listen_address": "0.0.0.0:9444",
+            "guest_identity": {
+                "issuer": "https://kubernetes.default.svc.cluster.local",
+                "audience": "insight-platform-gvisor-guest",
+                "namespace": "insight-platform-sandbox-guests",
+                "service_account_name": "insight-platform-gvisor-guest",
+                "jwks": {"keys": [{
+                    "kty": "RSA",
+                    "kid": "guest-key-1",
+                    "use": "sig",
+                    "alg": "RS256",
+                    "n": "sXch4-7u-lQpR0lJHJj3-JpGcC7dCqHj8P5mW52w8GQ",
+                    "e": "AQAB"
+                }]},
+                "jwks_digest": "sha256:ed90fd7173d7d068236917e3cf1f9f58a55977a88a6355375591ee694347ad49"
+            },
             "database_max_connections": 8,
             "database_acquire_timeout_milliseconds": 5000,
             "artifact_provider_catalog": {
@@ -425,7 +525,7 @@ mod tests {
     fn process_config_closes_provider_database_and_rpc_bounds() {
         let valid = valid_config();
         valid.validate().unwrap();
-        valid.validate_deployment_audience("sandbox").unwrap();
+        valid.validate_deployment_audience("data_worker").unwrap();
         assert!(valid.validate_deployment_audience("model").is_err());
         assert!(
             serde_json::from_value::<ArtifactBrokerAudience>(serde_json::json!("other")).is_err()
@@ -440,7 +540,7 @@ mod tests {
         assert!(invalid_read.validate().is_err());
 
         let mut invalid_sandbox_read = valid.clone();
-        invalid_sandbox_read.audience = ArtifactBrokerAudience::Sandbox;
+        invalid_sandbox_read.audience = ArtifactBrokerAudience::DataWorker;
         invalid_sandbox_read.broker.maximum_read_bytes = 1024;
         assert!(invalid_sandbox_read.validate().is_err());
 

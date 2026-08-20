@@ -95,6 +95,7 @@ gvisor:
   guestImageRepository: insight-sandbox-guest
   guestCommand: /usr/local/bin/platform-sandbox-guest
   bootstrapEndpoint: https://insight-platform-artifact-data-worker.platform-artifacts.svc:9444
+  bootstrapCaPath: /etc/ssl/certs/ca-certificates.crt
   bootstrapTokenAudience: insight.platform/sandbox-guest
   bootstrapTokenExpirationSeconds: 600
   observationPollMilliseconds: 100

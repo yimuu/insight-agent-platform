@@ -10,7 +10,10 @@ use futures::Stream;
 use insight_platform_contracts::{
     parse_strict_json, ArtifactRef, JsonLimits, ResourceKind, Sha256Digest,
 };
-use insight_platform_sandbox::{WasiArtifactBroker, WasiArtifactReadPurpose};
+use insight_platform_sandbox::{
+    AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapError, GvisorGuestBootstrapRequest,
+    GvisorGuestExecutionPlan, GvisorGuestPodIdentity, WasiArtifactBroker, WasiArtifactReadPurpose,
+};
 pub use insight_platform_sandbox::{WasiArtifactBrokerError, WasiArtifactReadRequest};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -34,9 +37,11 @@ pub mod proto {
 }
 
 use proto::{
+    artifact_gvisor_guest_service_client::ArtifactGvisorGuestServiceClient,
+    artifact_gvisor_guest_service_server::ArtifactGvisorGuestService,
     artifact_sandbox_broker_service_client::ArtifactSandboxBrokerServiceClient,
     artifact_sandbox_broker_service_server::ArtifactSandboxBrokerService, ArtifactReadChunk,
-    ClosedArtifactReadRequest,
+    ClosedArtifactReadRequest, ClosedGvisorGuestPlan,
 };
 
 pub const ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
@@ -47,6 +52,10 @@ pub const MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD: usize = 1_048_576;
 pub const MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD: usize = 262_144;
 const WASI_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.wasi.read/v1";
 const WASI_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.wasi.chunk/v1";
+const GVISOR_GUEST_AUTHORIZE_OPERATION: &str = "artifact.gvisor.guest.authorize/v1";
+const GVISOR_GUEST_READ_OPERATION: &str = "artifact.gvisor.guest.read/v1";
+const GVISOR_GUEST_PACKAGE_CHUNK_OPERATION: &str = "artifact.gvisor.guest.package.chunk/v1";
+const GVISOR_GUEST_INPUT_CHUNK_OPERATION: &str = "artifact.gvisor.guest.input.chunk/v1";
 const RPC_MESSAGE_OVERHEAD_BYTES: usize = 8_192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +345,170 @@ impl WasiArtifactBroker for ArtifactSandboxBrokerGrpcClient {
     }
 }
 
+#[derive(Clone)]
+pub struct ArtifactGvisorGuestGrpcClient {
+    client: ArtifactGvisorGuestServiceClient<tonic::transport::Channel>,
+    rpc_limits: ArtifactInternalRpcLimits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GvisorGuestClientError {
+    Unavailable,
+    Denied,
+    InvalidEvidence,
+    TooLarge,
+}
+
+impl ArtifactGvisorGuestGrpcClient {
+    pub fn new(channel: tonic::transport::Channel, rpc_limits: ArtifactInternalRpcLimits) -> Self {
+        let maximum = rpc_limits.maximum_message_bytes();
+        Self {
+            client: ArtifactGvisorGuestServiceClient::new(channel)
+                .max_encoding_message_size(maximum)
+                .max_decoding_message_size(maximum),
+            rpc_limits,
+        }
+    }
+
+    pub async fn authorize(
+        &self,
+        request: GvisorGuestBootstrapRequest,
+        bearer_token: &str,
+    ) -> Result<GvisorGuestExecutionPlan, GvisorGuestClientError> {
+        request
+            .validate()
+            .map_err(|_| GvisorGuestClientError::Denied)?;
+        let domain_request_digest = request.request_digest.clone();
+        let envelope = encode_request(GVISOR_GUEST_AUTHORIZE_OPERATION, &request, self.rpc_limits)
+            .map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
+        let deadline = SystemTime::now()
+            .checked_add(StdDuration::from_secs(30))
+            .ok_or(GvisorGuestClientError::Unavailable)?;
+        let request = bearer_request(envelope, bearer_token, deadline)?;
+        let mut client = self.client.clone();
+        let response = await_rpc_before_deadline(deadline, client.authorize_guest(request))
+            .await
+            .map_err(map_guest_client_read_error)?
+            .into_inner();
+        if response.schema_version != ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION
+            || response.operation != GVISOR_GUEST_AUTHORIZE_OPERATION
+            || response.canonical_plan_json.is_empty()
+            || response.canonical_plan_json.len() > self.rpc_limits.maximum_request_bytes()
+            || response.plan_digest != digest_bytes(&response.canonical_plan_json).to_string()
+        {
+            return Err(GvisorGuestClientError::InvalidEvidence);
+        }
+        let value = parse_strict_json(
+            &response.canonical_plan_json,
+            JsonLimits {
+                max_bytes: self.rpc_limits.maximum_request_bytes(),
+                max_depth: 64,
+                max_items_per_array: 1_024,
+                max_properties_per_object: 1_024,
+                max_string_bytes: self.rpc_limits.maximum_request_bytes(),
+            },
+        )
+        .map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
+        if serde_jcs::to_vec(&value).ok().as_deref() != Some(&response.canonical_plan_json) {
+            return Err(GvisorGuestClientError::InvalidEvidence);
+        }
+        let plan: GvisorGuestExecutionPlan =
+            serde_json::from_value(value).map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
+        plan.validate()
+            .map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
+        if plan.request_digest != domain_request_digest {
+            return Err(GvisorGuestClientError::InvalidEvidence);
+        }
+        Ok(plan)
+    }
+
+    pub async fn read_artifact(
+        &self,
+        bootstrap: GvisorGuestBootstrapRequest,
+        plan: &GvisorGuestExecutionPlan,
+        section: GvisorGuestArtifactSection,
+        bearer_token: &str,
+    ) -> Result<Vec<u8>, GvisorGuestClientError> {
+        if bootstrap.request_digest != plan.request_digest {
+            return Err(GvisorGuestClientError::Denied);
+        }
+        let artifact = match section {
+            GvisorGuestArtifactSection::RuntimeBundle => plan.runtime_bundle_artifact.clone(),
+            GvisorGuestArtifactSection::InputValue => match &plan.input_ref {
+                insight_platform_contracts::ValueRef::Artifact { artifact } => artifact.clone(),
+                insight_platform_contracts::ValueRef::Inline { .. } => {
+                    return Err(GvisorGuestClientError::Denied)
+                }
+            },
+        };
+        let read = GvisorGuestArtifactReadRequest {
+            bootstrap,
+            section: section.clone(),
+        };
+        let envelope = encode_request(GVISOR_GUEST_READ_OPERATION, &read, self.rpc_limits)
+            .map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
+        let request_digest = envelope.request_digest.clone();
+        let deadline = SystemTime::from(plan.deadline);
+        let request = bearer_request(envelope, bearer_token, deadline)?;
+        let mut client = self.client.clone();
+        let mut response = await_rpc_before_deadline(deadline, client.read_guest_artifact(request))
+            .await
+            .map_err(map_guest_client_read_error)?
+            .into_inner();
+        let operation = match section {
+            GvisorGuestArtifactSection::RuntimeBundle => GVISOR_GUEST_PACKAGE_CHUNK_OPERATION,
+            GvisorGuestArtifactSection::InputValue => GVISOR_GUEST_INPUT_CHUNK_OPERATION,
+        };
+        collect_artifact_stream(
+            &mut response,
+            &request_digest,
+            operation,
+            &artifact,
+            usize::try_from(artifact.byte_length())
+                .map_err(|_| GvisorGuestClientError::TooLarge)?,
+            self.rpc_limits,
+            deadline,
+        )
+        .await
+        .map_err(map_guest_client_read_error)
+    }
+}
+
+fn bearer_request<T>(
+    message: T,
+    bearer_token: &str,
+    deadline: SystemTime,
+) -> Result<Request<T>, GvisorGuestClientError> {
+    if bearer_token.is_empty()
+        || bearer_token.len() > 16_384
+        || !bearer_token.is_ascii()
+        || bearer_token.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(GvisorGuestClientError::Denied);
+    }
+    let remaining = remaining_until(deadline).ok_or(GvisorGuestClientError::Unavailable)?;
+    let authorization = format!("Bearer {bearer_token}")
+        .parse()
+        .map_err(|_| GvisorGuestClientError::Denied)?;
+    let mut request = Request::new(message);
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    request.set_timeout(remaining);
+    Ok(request)
+}
+
+fn map_guest_client_read_error(error: ArtifactClientReadError) -> GvisorGuestClientError {
+    match error {
+        ArtifactClientReadError::Unavailable => GvisorGuestClientError::Unavailable,
+        ArtifactClientReadError::Denied | ArtifactClientReadError::NotFound => {
+            GvisorGuestClientError::Denied
+        }
+        ArtifactClientReadError::TooLarge => GvisorGuestClientError::TooLarge,
+        ArtifactClientReadError::Integrity => GvisorGuestClientError::InvalidEvidence,
+    }
+}
+
 fn validate_wasi_read_request(
     request: &WasiArtifactReadRequest,
 ) -> Result<(), WasiArtifactBrokerError> {
@@ -401,6 +574,171 @@ fn server_deadline_budget(deadline: SystemTime) -> Result<StdDuration, Status> {
 pub struct LeasedArtifactBytes {
     bytes: Vec<u8>,
     lease: Option<Box<dyn Send + 'static>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GvisorGuestArtifactSection {
+    RuntimeBundle,
+    InputValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GvisorGuestArtifactReadRequest {
+    bootstrap: GvisorGuestBootstrapRequest,
+    section: GvisorGuestArtifactSection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedGvisorGuestIdentity(pub GvisorGuestPodIdentity);
+
+#[async_trait]
+pub trait GvisorGuestResponseMaterializer: Send + Sync {
+    async fn authorize_guest(
+        &self,
+        request: &GvisorGuestBootstrapRequest,
+    ) -> Result<AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapError>;
+
+    async fn read_guest_for_response(
+        &self,
+        request: WasiArtifactReadRequest,
+    ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError>;
+}
+
+pub struct ArtifactGvisorGuestGrpcService<M> {
+    materializer: Arc<M>,
+    rpc_limits: ArtifactInternalRpcLimits,
+}
+
+impl<M> ArtifactGvisorGuestGrpcService<M> {
+    pub fn new(materializer: Arc<M>, rpc_limits: ArtifactInternalRpcLimits) -> Self {
+        Self {
+            materializer,
+            rpc_limits,
+        }
+    }
+
+    fn authenticated_request<T>(
+        &self,
+        request: &Request<T>,
+        claimed: &GvisorGuestBootstrapRequest,
+    ) -> Result<(), Status> {
+        let authenticated = request
+            .extensions()
+            .get::<AuthenticatedGvisorGuestIdentity>()
+            .ok_or_else(|| Status::unauthenticated("gVisor guest token is required"))?;
+        if authenticated.0 != claimed.pod {
+            return Err(Status::permission_denied(
+                "gVisor guest token does not match Pod identity",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tonic::async_trait]
+impl<M> ArtifactGvisorGuestService for ArtifactGvisorGuestGrpcService<M>
+where
+    M: GvisorGuestResponseMaterializer + 'static,
+{
+    type ReadGuestArtifactStream = ArtifactReadStream;
+
+    async fn authorize_guest(
+        &self,
+        request: Request<ClosedArtifactReadRequest>,
+    ) -> Result<Response<ClosedGvisorGuestPlan>, Status> {
+        let bootstrap: GvisorGuestBootstrapRequest = decode_request(
+            request.get_ref().clone(),
+            GVISOR_GUEST_AUTHORIZE_OPERATION,
+            self.rpc_limits,
+        )
+        .map_err(Status::from)?;
+        self.authenticated_request(&request, &bootstrap)?;
+        let authorized = self
+            .materializer
+            .authorize_guest(&bootstrap)
+            .await
+            .map_err(map_guest_bootstrap_error)?;
+        authorized
+            .plan
+            .validate()
+            .map_err(map_guest_bootstrap_error)?;
+        let canonical_plan_json = serde_jcs::to_vec(&authorized.plan)
+            .map_err(|_| Status::data_loss("guest plan is not canonical"))?;
+        if canonical_plan_json.is_empty()
+            || canonical_plan_json.len() > self.rpc_limits.maximum_request_bytes()
+        {
+            return Err(Status::resource_exhausted("guest plan exceeds RPC bound"));
+        }
+        Ok(Response::new(ClosedGvisorGuestPlan {
+            schema_version: ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION,
+            operation: GVISOR_GUEST_AUTHORIZE_OPERATION.to_owned(),
+            plan_digest: digest_bytes(&canonical_plan_json).to_string(),
+            canonical_plan_json,
+        }))
+    }
+
+    async fn read_guest_artifact(
+        &self,
+        request: Request<ClosedArtifactReadRequest>,
+    ) -> Result<Response<Self::ReadGuestArtifactStream>, Status> {
+        let request_digest = request.get_ref().request_digest.clone();
+        let read: GvisorGuestArtifactReadRequest = decode_request(
+            request.get_ref().clone(),
+            GVISOR_GUEST_READ_OPERATION,
+            self.rpc_limits,
+        )
+        .map_err(Status::from)?;
+        self.authenticated_request(&request, &read.bootstrap)?;
+        let authorized = self
+            .materializer
+            .authorize_guest(&read.bootstrap)
+            .await
+            .map_err(map_guest_bootstrap_error)?;
+        let exact = match read.section {
+            GvisorGuestArtifactSection::RuntimeBundle => authorized.package_read,
+            GvisorGuestArtifactSection::InputValue => authorized
+                .input_read
+                .ok_or_else(|| Status::failed_precondition("guest input is Inline"))?,
+        };
+        let artifact = exact.artifact.clone();
+        let maximum_bytes = exact.maximum_bytes;
+        let deadline = SystemTime::from(exact.deadline);
+        let response_read = tokio::time::timeout(
+            server_deadline_budget(deadline)?,
+            self.materializer.read_guest_for_response(exact),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("guest Artifact read deadline elapsed"))?
+        .map_err(map_wasi_server_error)?;
+        require_broker_bytes(response_read.as_bytes(), &artifact, maximum_bytes)?;
+        let chunk_operation = match read.section {
+            GvisorGuestArtifactSection::RuntimeBundle => GVISOR_GUEST_PACKAGE_CHUNK_OPERATION,
+            GvisorGuestArtifactSection::InputValue => GVISOR_GUEST_INPUT_CHUNK_OPERATION,
+        };
+        artifact_read_stream(
+            response_read,
+            &request_digest,
+            chunk_operation,
+            &artifact,
+            self.rpc_limits.maximum_chunk_bytes(),
+            deadline,
+        )
+    }
+}
+
+fn map_guest_bootstrap_error(error: GvisorGuestBootstrapError) -> Status {
+    match error {
+        GvisorGuestBootstrapError::Unavailable => {
+            Status::unavailable("guest bootstrap authority unavailable")
+        }
+        GvisorGuestBootstrapError::Denied => Status::permission_denied("guest bootstrap denied"),
+        GvisorGuestBootstrapError::NotFound => Status::not_found("guest bootstrap not found"),
+        GvisorGuestBootstrapError::InvalidEvidence => {
+            Status::failed_precondition("guest bootstrap evidence is invalid")
+        }
+    }
 }
 
 impl LeasedArtifactBytes {

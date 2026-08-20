@@ -2475,10 +2475,13 @@ name = "insight-platform-artifact-service"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "insight-platform-artifact-broker",
  "insight-platform-artifact-rpc",
  "insight-platform-contracts",
  "insight-platform-postgres",
+ "insight-platform-sandbox",
+ "jsonwebtoken",
  "serde",
  "serde_json",
  "sqlx",
@@ -2823,9 +2826,11 @@ dependencies = [
  "insight-platform-mcp-host",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "tokio-util",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2892,6 +2897,22 @@ dependencies = [
  "tonic",
  "tower",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "insight-platform-sandbox-guest"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "insight-platform-artifact-rpc",
+ "insight-platform-contracts",
+ "insight-platform-sandbox",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tonic",
  "uuid",
 ]
 

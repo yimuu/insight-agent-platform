@@ -12,6 +12,14 @@ service ArtifactSandboxBrokerService {
   rpc ReadWasiArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
 }
 
+// Token-authenticated boundary exposed only to admission-locked gVisor guest Pods. The caller
+// never supplies an object locator or storage credential. Authorization is re-evaluated for the
+// plan and for every exact package/input read.
+service ArtifactGvisorGuestService {
+  rpc AuthorizeGuest(ClosedArtifactReadRequest) returns (ClosedGvisorGuestPlan);
+  rpc ReadGuestArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
+}
+
 message ClosedArtifactReadRequest {
   uint32 schema_version = 1;
   string operation = 2;
@@ -29,4 +37,11 @@ message ArtifactReadChunk {
   string content_digest = 7;
   uint64 total_length = 8;
   bool terminal = 9;
+}
+
+message ClosedGvisorGuestPlan {
+  uint32 schema_version = 1;
+  string operation = 2;
+  bytes canonical_plan_json = 3;
+  string plan_digest = 4;
 }
