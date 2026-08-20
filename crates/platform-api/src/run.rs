@@ -1,6 +1,7 @@
 use crate::authentication::AuthenticatedPrincipal;
 use async_trait::async_trait;
 use axum::{
+    body::Bytes,
     extract::{rejection::JsonRejection, DefaultBodyLimit, Extension, Path, State},
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -19,6 +20,7 @@ const RUN_READ_DEADLINE_MILLISECONDS: i64 = 5_000;
 const RUN_COMMAND_DEADLINE_MILLISECONDS: i64 = 10_000;
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
 const MAX_RUN_REQUEST_BYTES: usize = 1_048_576;
+const IF_MATCH: &str = "if-match";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +93,16 @@ pub struct CreateRunIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ControlRunIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub run_id: ResourceId,
+    pub expected_run_version: u64,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunApplicationError {
     Unauthenticated,
@@ -106,6 +118,21 @@ pub enum RunApplicationError {
 #[async_trait]
 pub trait RunApplication: Send + Sync {
     async fn create_run(&self, _intent: CreateRunIntent) -> Result<RunViewV1, RunApplicationError> {
+        Err(RunApplicationError::Internal)
+    }
+    async fn pause_run(&self, _intent: ControlRunIntent) -> Result<RunViewV1, RunApplicationError> {
+        Err(RunApplicationError::Internal)
+    }
+    async fn resume_run(
+        &self,
+        _intent: ControlRunIntent,
+    ) -> Result<RunViewV1, RunApplicationError> {
+        Err(RunApplicationError::Internal)
+    }
+    async fn cancel_run(
+        &self,
+        _intent: ControlRunIntent,
+    ) -> Result<RunViewV1, RunApplicationError> {
         Err(RunApplicationError::Internal)
     }
     async fn read_run(&self, intent: ReadRunIntent) -> Result<RunViewV1, RunApplicationError>;
@@ -139,9 +166,139 @@ impl RunHttpState {
 pub fn build_run_router(state: RunHttpState) -> Router {
     Router::new()
         .route("/v1/runs", post(create_run))
-        .route("/v1/runs/{run_id}", get(read_run))
+        .route(
+            "/v1/runs/{run_action}",
+            get(read_run).post(control_run_action),
+        )
         .layer(DefaultBodyLimit::max(MAX_RUN_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn control_run_action(
+    State(state): State<RunHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path(run_action): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !body.is_empty() {
+        return problem(RunApplicationError::Invalid);
+    }
+    let Some(Extension(principal)) = principal else {
+        return problem(RunApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(RunApplicationError::Unauthenticated);
+    }
+    let (run_id, operation) = if let Some(id) = run_action.strip_suffix(":pause") {
+        (id, "run.pause")
+    } else if let Some(id) = run_action.strip_suffix(":resume") {
+        (id, "run.resume")
+    } else if let Some(id) = run_action.strip_suffix(":cancel") {
+        (id, "run.cancel")
+    } else {
+        return problem(RunApplicationError::NotFound);
+    };
+    let run_id = match run_id.parse::<ResourceId>() {
+        Ok(id) if id.kind() == ResourceKind::Run => id,
+        _ => return problem(RunApplicationError::NotFound),
+    };
+    let expected_run_version = match expected_run_version(&headers, &run_id) {
+        Ok(version) => version,
+        Err(error) => return problem(error),
+    };
+    let idempotency_key_digest =
+        match control_idempotency_digest(&headers, &principal, &run_id, operation) {
+            Ok(digest) => digest,
+            Err(error) => return problem(error),
+        };
+    let request_digest = match canonical_digest(&serde_json::json!({
+        "expected_run_version": expected_run_version,
+        "idempotency_key_digest": idempotency_key_digest,
+        "operation": operation,
+        "principal_id": principal.principal_id,
+        "run_id": run_id,
+        "schema_version": 1,
+        "tenant_id": principal.tenant_id,
+    }))
+    .ok()
+    .and_then(|value| value.parse().ok())
+    {
+        Some(digest) => digest,
+        None => return problem(RunApplicationError::Invalid),
+    };
+    let intent = ControlRunIntent {
+        principal,
+        run_id,
+        expected_run_version,
+        idempotency_key_digest,
+        request_digest,
+        deadline: state.clock.now() + Duration::milliseconds(RUN_COMMAND_DEADLINE_MILLISECONDS),
+    };
+    let result = match operation {
+        "run.pause" => state.application.pause_run(intent).await,
+        "run.resume" => state.application.resume_run(intent).await,
+        "run.cancel" => state.application.cancel_run(intent).await,
+        _ => unreachable!(),
+    };
+    match result {
+        Ok(view) if view.validate().is_ok() => run_response(view),
+        Ok(_) => problem(RunApplicationError::Internal),
+        Err(error) => problem(error),
+    }
+}
+
+fn expected_run_version(
+    headers: &HeaderMap,
+    run_id: &ResourceId,
+) -> Result<u64, RunApplicationError> {
+    let mut values = headers.get_all(IF_MATCH).iter();
+    let value = values.next().ok_or(RunApplicationError::Invalid)?;
+    if values.next().is_some() {
+        return Err(RunApplicationError::Invalid);
+    }
+    let value = value.to_str().map_err(|_| RunApplicationError::Invalid)?;
+    let prefix = format!("\"{run_id}-");
+    let version = value
+        .strip_prefix(&prefix)
+        .and_then(|v| v.strip_suffix('"'))
+        .ok_or(RunApplicationError::Invalid)?;
+    if version.is_empty() || version.starts_with('0') {
+        return Err(RunApplicationError::Invalid);
+    }
+    version.parse().map_err(|_| RunApplicationError::Invalid)
+}
+
+fn control_idempotency_digest(
+    headers: &HeaderMap,
+    principal: &AuthenticatedPrincipal,
+    run_id: &ResourceId,
+    operation: &str,
+) -> Result<Sha256Digest, RunApplicationError> {
+    let mut values = headers.get_all(IDEMPOTENCY_KEY).iter();
+    let value = values.next().ok_or(RunApplicationError::Invalid)?;
+    if values.next().is_some() {
+        return Err(RunApplicationError::Invalid);
+    }
+    let key = value.to_str().map_err(|_| RunApplicationError::Invalid)?;
+    if key.is_empty()
+        || key.len() > 255
+        || !key.is_ascii()
+        || key.bytes().any(|b| b.is_ascii_control())
+    {
+        return Err(RunApplicationError::Invalid);
+    }
+    canonical_digest(&serde_json::json!({
+        "key": key,
+        "operation": operation,
+        "principal_id": principal.principal_id,
+        "run_id": run_id,
+        "schema_version": 1,
+        "tenant_id": principal.tenant_id,
+    }))
+    .map_err(|_| RunApplicationError::Invalid)?
+    .parse()
+    .map_err(|_| RunApplicationError::Invalid)
 }
 
 async fn create_run(
@@ -471,6 +628,30 @@ mod tests {
                 etag: run_etag(&intent.run_id, 3),
             })
         }
+
+        async fn pause_run(
+            &self,
+            intent: ControlRunIntent,
+        ) -> Result<RunViewV1, RunApplicationError> {
+            let now = UtcTimestamp::from_datetime(Utc::now());
+            Ok(RunViewV1 {
+                schema_version: 1,
+                run_id: intent.run_id.clone(),
+                agent_deployment_id: id(ResourceKind::AgentDeployment, 4),
+                state: RunState::Queued,
+                version: 4,
+                input_value_id: id(ResourceKind::RunValue, 5),
+                output_value_id: None,
+                pause_generation: 1,
+                cancel_generation: 0,
+                deadline: now.clone(),
+                started_at: None,
+                terminal_at: None,
+                created_at: now.clone(),
+                updated_at: now,
+                etag: run_etag(&intent.run_id, 4),
+            })
+        }
     }
 
     #[tokio::test]
@@ -510,6 +691,34 @@ mod tests {
         assert_eq!(
             response.headers().get("etag").unwrap(),
             &run_etag(&id(ResourceKind::Run, 30), 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_pause_requires_empty_body_strong_etag_and_idempotency() {
+        let now = Utc::now();
+        let router = build_run_router(RunHttpState::new(
+            Arc::new(FixtureApplication),
+            Arc::new(FixedClock(now)),
+        ));
+        let run_id = id(ResourceKind::Run, 3);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/runs/{run_id}:pause"))
+                    .header("if-match", run_etag(&run_id, 3))
+                    .header("idempotency-key", "pause-1")
+                    .extension(principal(now))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("etag").unwrap(),
+            &run_etag(&run_id, 4)
         );
     }
 

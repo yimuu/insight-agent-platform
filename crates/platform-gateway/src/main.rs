@@ -28,8 +28,8 @@ use insight_platform_api::{
         UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
     run::{
-        build_run_router, run_etag, CreateRunIntent, ReadRunIntent, RunApplication,
-        RunApplicationError, RunHttpState, RunViewV1, SystemRunClock,
+        build_run_router, run_etag, ControlRunIntent, CreateRunIntent, ReadRunIntent,
+        RunApplication, RunApplicationError, RunHttpState, RunViewV1, SystemRunClock,
     },
 };
 use insight_platform_contracts::{
@@ -38,7 +38,9 @@ use insight_platform_contracts::{
     PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId, ResourceKind, RunBindingsSnapshot,
     Sha256Digest, ValueRef,
 };
-use insight_platform_orchestrator::{AdmitRun, PlanNodeKey, RunInputValue};
+use insight_platform_orchestrator::{
+    AdmitRun, PlanNodeKey, RequestRunCancel, RunInputValue, SetRunPause,
+};
 use insight_platform_postgres::{
     operation_repository::{project_registry_validation_operation, OperationReadError},
     repository::{PgRepository, RepositoryError},
@@ -305,6 +307,47 @@ impl RunApplication for PgRuns {
         run_view_from_record(record)
     }
 
+    async fn pause_run(&self, intent: ControlRunIntent) -> Result<RunViewV1, RunApplicationError> {
+        self.set_pause(intent, true).await
+    }
+
+    async fn resume_run(&self, intent: ControlRunIntent) -> Result<RunViewV1, RunApplicationError> {
+        self.set_pause(intent, false).await
+    }
+
+    async fn cancel_run(&self, intent: ControlRunIntent) -> Result<RunViewV1, RunApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(RunApplicationError::Unavailable);
+        }
+        let current = self.read_control_target(&intent).await?;
+        let command = RequestRunCancel {
+            audit: run_control_audit(&intent)?,
+            run_id: intent.run_id,
+            expected_run_version: i64::try_from(intent.expected_run_version)
+                .map_err(|_| RunApplicationError::Invalid)?,
+            expected_cancel_generation: u64::try_from(current.cancel_generation)
+                .map_err(|_| RunApplicationError::Internal)?,
+            reason_code: "operator_request".to_owned(),
+        };
+        let mut transaction = self
+            .0
+            .begin_run_transaction()
+            .await
+            .map_err(map_run_repository_error)?;
+        let outcome = transaction
+            .request_run_cancel(command)
+            .await
+            .map_err(map_run_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_run_repository_error)?;
+        run_view_from_record(match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(record)
+            | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
+        })
+    }
+
     async fn read_run(&self, intent: ReadRunIntent) -> Result<RunViewV1, RunApplicationError> {
         if intent.deadline <= chrono::Utc::now() {
             return Err(RunApplicationError::Unavailable);
@@ -321,6 +364,78 @@ impl RunApplication for PgRuns {
             .map_err(map_run_repository_error)?;
         run_view_from_record(record)
     }
+}
+
+impl PgRuns {
+    async fn read_control_target(
+        &self,
+        intent: &ControlRunIntent,
+    ) -> Result<insight_platform_postgres::repository::RunRecord, RunApplicationError> {
+        self.0
+            .read_run_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.run_id,
+            )
+            .await
+            .map_err(map_run_repository_error)
+    }
+
+    async fn set_pause(
+        &self,
+        intent: ControlRunIntent,
+        requested: bool,
+    ) -> Result<RunViewV1, RunApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(RunApplicationError::Unavailable);
+        }
+        let current = self.read_control_target(&intent).await?;
+        let command = SetRunPause {
+            audit: run_control_audit(&intent)?,
+            run_id: intent.run_id,
+            expected_run_version: i64::try_from(intent.expected_run_version)
+                .map_err(|_| RunApplicationError::Invalid)?,
+            expected_pause_generation: u64::try_from(current.pause_generation)
+                .map_err(|_| RunApplicationError::Internal)?,
+            requested,
+        };
+        let mut transaction = self
+            .0
+            .begin_run_transaction()
+            .await
+            .map_err(map_run_repository_error)?;
+        let outcome = transaction
+            .set_run_pause(command)
+            .await
+            .map_err(map_run_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_run_repository_error)?;
+        run_view_from_record(match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(record)
+            | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
+        })
+    }
+}
+
+fn run_control_audit(intent: &ControlRunIntent) -> Result<CommandAudit, RunApplicationError> {
+    let make_id = |kind| {
+        ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7())
+            .map_err(|_| RunApplicationError::Internal)
+    };
+    Ok(CommandAudit {
+        tenant_id: intent.principal.tenant_id.clone(),
+        principal_id: intent.principal.principal_id.clone(),
+        principal_kind: intent.principal.principal_kind,
+        receipt_id: make_id(ResourceKind::Receipt)?,
+        event_id: make_id(ResourceKind::Event)?,
+        outbox_id: make_id(ResourceKind::OutboxEvent)?,
+        idempotency_key_digest: intent.idempotency_key_digest.clone(),
+        request_digest: intent.request_digest.clone(),
+        receipt_expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+    })
 }
 
 fn run_view_from_record(
