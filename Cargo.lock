@@ -2660,6 +2660,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-gateway"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "insight-platform-api",
+ "insight-platform-contracts",
+ "insight-platform-postgres",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "insight-platform-invocations"
 version = "0.1.0"
 dependencies = [

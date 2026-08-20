@@ -18,6 +18,7 @@ members = [
     "crates/platform-callback-api",
     "crates/platform-contracts",
     "crates/platform-context",
+    "crates/platform-gateway",
     "crates/platform-egress",
     "crates/platform-egress-broker",
     "crates/platform-egress-rpc",
@@ -133,6 +134,7 @@ insight-platform-capability-adapters = { path = "crates/platform-capability-adap
 insight-platform-callback-api = { path = "crates/platform-callback-api" }
 insight-platform-contracts = { path = "crates/platform-contracts" }
 insight-platform-context = { path = "crates/platform-context" }
+insight-platform-gateway = { path = "crates/platform-gateway" }
 insight-platform-egress = { path = "crates/platform-egress" }
 insight-platform-egress-broker = { path = "crates/platform-egress-broker" }
 insight-platform-egress-rpc = { path = "crates/platform-egress-rpc" }
