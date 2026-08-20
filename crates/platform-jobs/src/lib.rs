@@ -809,7 +809,7 @@ mod tests {
             job_id: id("job", "6001"),
             work_class: WorkClass::Orchestration,
             owner: JobOwnerRef {
-                owner_id: id("nex", "6001"),
+                owner_id: id("nod", "6001"),
                 owner_kind: ResourceKind::NodeExecution,
             },
             state: JobState::Ready,

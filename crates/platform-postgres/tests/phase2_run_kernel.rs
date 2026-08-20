@@ -4243,7 +4243,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_event_id: fixture_platform_id("evt", "92b7"),
             job_outbox_id: fixture_platform_id("out", "92b7"),
             activations: vec![ControllerActivationSlot {
-                node_execution_id: fixture_platform_id("nex", "92b8"),
+                node_execution_id: fixture_platform_id("nod", "92b8"),
                 orchestration_job_id: fixture_platform_id("job", "92b9"),
                 scope: None,
                 node_event_id: fixture_platform_id("evt", "92ba"),
@@ -4655,7 +4655,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_event_id: fixture_platform_id("evt", "94c7"),
             job_outbox_id: fixture_platform_id("out", "94c7"),
             activations: vec![ControllerActivationSlot {
-                node_execution_id: fixture_platform_id("nex", "94c8"),
+                node_execution_id: fixture_platform_id("nod", "94c8"),
                 orchestration_job_id: fixture_platform_id("job", "94c9"),
                 scope: None,
                 node_event_id: fixture_platform_id("evt", "94ca"),
@@ -5155,7 +5155,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_event_id: fixture_platform_id("evt", "9627"),
             job_outbox_id: fixture_platform_id("out", "9627"),
             activations: vec![ControllerActivationSlot {
-                node_execution_id: fixture_platform_id("nex", "9628"),
+                node_execution_id: fixture_platform_id("nod", "9628"),
                 orchestration_job_id: fixture_platform_id("job", "9629"),
                 scope: None,
                 node_event_id: fixture_platform_id("evt", "962a"),
@@ -5241,7 +5241,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_event_id: fixture_platform_id("evt", "9647"),
             job_outbox_id: fixture_platform_id("out", "9647"),
             activations: vec![ControllerActivationSlot {
-                node_execution_id: fixture_platform_id("nex", "9648"),
+                node_execution_id: fixture_platform_id("nod", "9648"),
                 orchestration_job_id: fixture_platform_id("job", "9649"),
                 scope: None,
                 node_event_id: fixture_platform_id("evt", "964a"),
@@ -5490,7 +5490,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_event_id: fixture_platform_id("evt", "9727"),
             job_outbox_id: fixture_platform_id("out", "9727"),
             activations: vec![ControllerActivationSlot {
-                node_execution_id: fixture_platform_id("nex", "9728"),
+                node_execution_id: fixture_platform_id("nod", "9728"),
                 orchestration_job_id: fixture_platform_id("job", "9729"),
                 scope: Some(ControllerScopeSlot {
                     scope_instance_id: fixture_platform_id("scp", "972a"),
@@ -5503,7 +5503,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 job_outbox_id: fixture_platform_id("out", "972c"),
             }],
             pending_nodes: vec![ControllerPendingNodeSlot {
-                node_execution_id: fixture_platform_id("nex", "972e"),
+                node_execution_id: fixture_platform_id("nod", "972e"),
                 node_event_id: fixture_platform_id("evt", "972f"),
                 node_outbox_id: fixture_platform_id("out", "972f"),
             }],
@@ -5692,7 +5692,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_event_id: fixture_platform_id("evt", "9767"),
             job_outbox_id: fixture_platform_id("out", "9767"),
             activations: vec![ControllerActivationSlot {
-                node_execution_id: fixture_platform_id("nex", "9768"),
+                node_execution_id: fixture_platform_id("nod", "9768"),
                 orchestration_job_id: fixture_platform_id("job", "9769"),
                 scope: None,
                 node_event_id: fixture_platform_id("evt", "976a"),
@@ -5819,7 +5819,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_outbox_id: fixture_platform_id("out", "9827"),
             activations: vec![
                 ControllerActivationSlot {
-                    node_execution_id: fixture_platform_id("nex", "9828"),
+                    node_execution_id: fixture_platform_id("nod", "9828"),
                     orchestration_job_id: fixture_platform_id("job", "9829"),
                     scope: Some(ControllerScopeSlot {
                         scope_instance_id: fixture_platform_id("scp", "982a"),
@@ -5832,7 +5832,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                     job_outbox_id: fixture_platform_id("out", "982c"),
                 },
                 ControllerActivationSlot {
-                    node_execution_id: fixture_platform_id("nex", "9838"),
+                    node_execution_id: fixture_platform_id("nod", "9838"),
                     orchestration_job_id: fixture_platform_id("job", "9839"),
                     scope: Some(ControllerScopeSlot {
                         scope_instance_id: fixture_platform_id("scp", "983a"),
@@ -5846,7 +5846,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 },
             ],
             pending_nodes: vec![ControllerPendingNodeSlot {
-                node_execution_id: fixture_platform_id("nex", "9840"),
+                node_execution_id: fixture_platform_id("nod", "9840"),
                 node_event_id: fixture_platform_id("evt", "9841"),
                 node_outbox_id: fixture_platform_id("out", "9841"),
             }],
@@ -5947,7 +5947,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_event_id: fixture_platform_id("evt", "9857"),
             job_outbox_id: fixture_platform_id("out", "9857"),
             activations: vec![ControllerActivationSlot {
-                node_execution_id: fixture_platform_id("nex", "9858"),
+                node_execution_id: fixture_platform_id("nod", "9858"),
                 orchestration_job_id: fixture_platform_id("job", "9859"),
                 scope: Some(ControllerScopeSlot {
                     scope_instance_id: fixture_platform_id("scp", "985a"),
@@ -5960,7 +5960,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 job_outbox_id: fixture_platform_id("out", "985c"),
             }],
             pending_nodes: vec![ControllerPendingNodeSlot {
-                node_execution_id: fixture_platform_id("nex", "985e"),
+                node_execution_id: fixture_platform_id("nod", "985e"),
                 node_event_id: fixture_platform_id("evt", "985f"),
                 node_outbox_id: fixture_platform_id("out", "985f"),
             }],
@@ -6256,7 +6256,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_event_id: fixture_platform_id("evt", "98d7"),
             job_outbox_id: fixture_platform_id("out", "98d7"),
             activations: vec![ControllerActivationSlot {
-                node_execution_id: fixture_platform_id("nex", "98d8"),
+                node_execution_id: fixture_platform_id("nod", "98d8"),
                 orchestration_job_id: fixture_platform_id("job", "98d9"),
                 scope: None,
                 node_event_id: fixture_platform_id("evt", "98da"),
@@ -6387,7 +6387,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_outbox_id: fixture_platform_id("out", "9918"),
             activations: vec![
                 ControllerActivationSlot {
-                    node_execution_id: fixture_platform_id("nex", "9919"),
+                    node_execution_id: fixture_platform_id("nod", "9919"),
                     orchestration_job_id: fixture_platform_id("job", "991a"),
                     scope: Some(ControllerScopeSlot {
                         scope_instance_id: fixture_platform_id("scp", "991b"),
@@ -6400,7 +6400,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                     job_outbox_id: fixture_platform_id("out", "991e"),
                 },
                 ControllerActivationSlot {
-                    node_execution_id: fixture_platform_id("nex", "991f"),
+                    node_execution_id: fixture_platform_id("nod", "991f"),
                     orchestration_job_id: fixture_platform_id("job", "9920"),
                     scope: Some(ControllerScopeSlot {
                         scope_instance_id: fixture_platform_id("scp", "9921"),
@@ -6414,7 +6414,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 },
             ],
             pending_nodes: vec![ControllerPendingNodeSlot {
-                node_execution_id: fixture_platform_id("nex", "9925"),
+                node_execution_id: fixture_platform_id("nod", "9925"),
                 node_event_id: fixture_platform_id("evt", "9926"),
                 node_outbox_id: fixture_platform_id("out", "9926"),
             }],
@@ -7042,7 +7042,7 @@ fn fork_controller_step(
             activations: leg_suffixes
                 .into_iter()
                 .map(|suffixes| ControllerActivationSlot {
-                    node_execution_id: fixture_platform_id("nex", suffixes[0]),
+                    node_execution_id: fixture_platform_id("nod", suffixes[0]),
                     orchestration_job_id: fixture_platform_id("job", suffixes[1]),
                     scope: Some(ControllerScopeSlot {
                         scope_instance_id: fixture_platform_id("scp", suffixes[2]),
@@ -7056,7 +7056,7 @@ fn fork_controller_step(
                 })
                 .collect(),
             pending_nodes: vec![ControllerPendingNodeSlot {
-                node_execution_id: fixture_platform_id("nex", pending_suffixes[0]),
+                node_execution_id: fixture_platform_id("nod", pending_suffixes[0]),
                 node_event_id: fixture_platform_id("evt", pending_suffixes[1]),
                 node_outbox_id: fixture_platform_id("out", pending_suffixes[1]),
             }],
