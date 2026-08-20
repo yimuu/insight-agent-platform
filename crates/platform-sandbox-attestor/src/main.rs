@@ -15,9 +15,9 @@ use insight_platform_sandbox_rpc::{
         sandbox_executor_process_registration_service_server::SandboxExecutorProcessRegistrationServiceServer,
         sandbox_process_isolation_attestor_service_server::SandboxProcessIsolationAttestorServiceServer,
     },
-    SandboxControllerWorkloadIdentity, SandboxExecutorProcessRegistrationGrpcService,
-    SandboxInternalRpcLimits, SandboxProcessIsolationAttestorGrpcService,
-    WasiExecutorNodeRegistrationIdentity,
+    SandboxControllerWorkloadIdentity, SandboxExecutorNodeRegistrationIdentity,
+    SandboxExecutorProcessRegistrationGrpcService, SandboxInternalRpcLimits,
+    SandboxProcessIsolationAttestorGrpcService,
 };
 use serde::Deserialize;
 use std::{
@@ -185,7 +185,7 @@ async fn run() -> Result<(), ProcessError> {
     .max_decoding_message_size(maximum);
     let registration_service = tonic::service::interceptor::InterceptedService::new(
         registration_service,
-        WasiExecutorNodeRegistrationIdentity,
+        SandboxExecutorNodeRegistrationIdentity,
     );
     let registration_tls = server_tls(
         REGISTRATION_CA_PATH_ENV,

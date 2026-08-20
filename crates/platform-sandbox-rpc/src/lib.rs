@@ -64,10 +64,14 @@ use proto::{
 pub const SANDBOX_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
 pub const WASI_EXECUTOR_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-executor.wasi";
+pub const GVISOR_EXECUTOR_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/sandbox-executor.gvisor";
 pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-controller";
+#[cfg(any())]
 pub const MICROVM_EXECUTOR_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-executor.microvm";
+#[cfg(any())]
 pub const MICROVM_PROVIDER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-provider.microvm";
 pub const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
@@ -186,7 +190,7 @@ impl tonic::service::Interceptor for SandboxExecutorAuthorityWorkloadIdentity {
             leaf.as_ref(),
             &[
                 WASI_EXECUTOR_WORKLOAD_IDENTITY,
-                MICROVM_EXECUTOR_WORKLOAD_IDENTITY,
+                GVISOR_EXECUTOR_WORKLOAD_IDENTITY,
             ],
         )?;
         Ok(request)
@@ -205,6 +209,23 @@ impl tonic::service::Interceptor for WasiExecutorNodeRegistrationIdentity {
     }
 }
 
+/// Authorizes either of the two first-release Executor roles and binds the request to the
+/// kernel-authenticated process connected through the node-local Unix socket.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SandboxExecutorNodeRegistrationIdentity;
+
+impl tonic::service::Interceptor for SandboxExecutorNodeRegistrationIdentity {
+    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        authorize_node_registration_roles(
+            request,
+            &[
+                WASI_EXECUTOR_WORKLOAD_IDENTITY,
+                GVISOR_EXECUTOR_WORKLOAD_IDENTITY,
+            ],
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 #[cfg(any())]
 pub struct MicroVmExecutorNodeRegistrationIdentity;
@@ -217,8 +238,15 @@ impl tonic::service::Interceptor for MicroVmExecutorNodeRegistrationIdentity {
 }
 
 fn authorize_node_registration(
-    mut request: Request<()>,
+    request: Request<()>,
     expected_workload_identity: &str,
+) -> Result<Request<()>, Status> {
+    authorize_node_registration_roles(request, &[expected_workload_identity])
+}
+
+fn authorize_node_registration_roles(
+    mut request: Request<()>,
+    expected_workload_identities: &[&str],
 ) -> Result<Request<()>, Status> {
     let connection = request
         .extensions()
@@ -230,7 +258,7 @@ fn authorize_node_registration(
     let leaf = certificates
         .first()
         .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
-    require_exact_workload_uri(leaf.as_ref(), expected_workload_identity)?;
+    require_allowed_workload_uri(leaf.as_ref(), expected_workload_identities)?;
     let credentials = connection
         .get_ref()
         .peer_cred
@@ -3618,6 +3646,8 @@ mod tests {
         provider_server_key_pem: String,
         wasi_certificate_pem: String,
         wasi_key_pem: String,
+        gvisor_certificate_pem: String,
+        gvisor_key_pem: String,
         #[cfg(any())]
         microvm_certificate_pem: String,
         #[cfg(any())]
@@ -3669,6 +3699,12 @@ mod tests {
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
+        let (gvisor_certificate_pem, gvisor_key_pem) = issue(
+            vec![SanType::URI(
+                GVISOR_EXECUTOR_WORKLOAD_IDENTITY.try_into().unwrap(),
+            )],
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
         let (controller_certificate_pem, controller_key_pem) = issue(
             vec![SanType::URI(
                 SANDBOX_CONTROLLER_WORKLOAD_IDENTITY.try_into().unwrap(),
@@ -3707,6 +3743,8 @@ mod tests {
             provider_server_key_pem,
             wasi_certificate_pem,
             wasi_key_pem,
+            gvisor_certificate_pem,
+            gvisor_key_pem,
             #[cfg(any())]
             microvm_certificate_pem,
             #[cfg(any())]
@@ -4438,19 +4476,19 @@ mod tests {
         let exact = certificate_with_sans(vec![expected.clone()]);
         require_exact_workload_uri(&exact, WASI_EXECUTOR_WORKLOAD_IDENTITY).unwrap();
 
-        let micro_vm = certificate_with_sans(vec![SanType::URI(
-            MICROVM_EXECUTOR_WORKLOAD_IDENTITY.try_into().unwrap(),
+        let gvisor = certificate_with_sans(vec![SanType::URI(
+            GVISOR_EXECUTOR_WORKLOAD_IDENTITY.try_into().unwrap(),
         )]);
         require_allowed_workload_uri(
-            &micro_vm,
+            &gvisor,
             &[
                 WASI_EXECUTOR_WORKLOAD_IDENTITY,
-                MICROVM_EXECUTOR_WORKLOAD_IDENTITY,
+                GVISOR_EXECUTOR_WORKLOAD_IDENTITY,
             ],
         )
         .unwrap();
         assert_eq!(
-            require_exact_workload_uri(&micro_vm, WASI_EXECUTOR_WORKLOAD_IDENTITY)
+            require_exact_workload_uri(&gvisor, WASI_EXECUTOR_WORKLOAD_IDENTITY)
                 .unwrap_err()
                 .code(),
             tonic::Code::PermissionDenied
@@ -4493,12 +4531,12 @@ mod tests {
             tonic::Code::PermissionDenied
         );
 
-        let microvm = certificate_with_sans(vec![SanType::URI(
-            MICROVM_EXECUTOR_WORKLOAD_IDENTITY.try_into().unwrap(),
+        let gvisor = certificate_with_sans(vec![SanType::URI(
+            GVISOR_EXECUTOR_WORKLOAD_IDENTITY.try_into().unwrap(),
         )]);
-        require_exact_workload_uri(&microvm, MICROVM_EXECUTOR_WORKLOAD_IDENTITY).unwrap();
+        require_exact_workload_uri(&gvisor, GVISOR_EXECUTOR_WORKLOAD_IDENTITY).unwrap();
         assert_eq!(
-            require_exact_workload_uri(&microvm, WASI_EXECUTOR_WORKLOAD_IDENTITY)
+            require_exact_workload_uri(&gvisor, WASI_EXECUTOR_WORKLOAD_IDENTITY)
                 .unwrap_err()
                 .code(),
             tonic::Code::PermissionDenied
@@ -4509,7 +4547,7 @@ mod tests {
         )]);
         require_exact_workload_uri(&egress, EGRESS_BROKER_WORKLOAD_IDENTITY).unwrap();
         assert_eq!(
-            require_exact_workload_uri(&egress, MICROVM_PROVIDER_WORKLOAD_IDENTITY)
+            require_exact_workload_uri(&egress, GVISOR_EXECUTOR_WORKLOAD_IDENTITY)
                 .unwrap_err()
                 .code(),
             tonic::Code::PermissionDenied
@@ -5509,7 +5547,7 @@ mod tests {
         .max_decoding_message_size(limits.maximum_message_bytes());
         let registration_service = tonic::service::interceptor::InterceptedService::new(
             registration_service,
-            WasiExecutorNodeRegistrationIdentity,
+            SandboxExecutorNodeRegistrationIdentity,
         );
         let tls = ServerTlsConfig::new()
             .identity(Identity::from_pem(
@@ -5573,7 +5611,7 @@ mod tests {
         .max_decoding_message_size(limits.maximum_message_bytes());
         let registration_service = tonic::service::interceptor::InterceptedService::new(
             registration_service,
-            WasiExecutorNodeRegistrationIdentity,
+            SandboxExecutorNodeRegistrationIdentity,
         );
         let registration_tls = ServerTlsConfig::new()
             .identity(Identity::from_pem(
@@ -5595,8 +5633,8 @@ mod tests {
         let registration_channel = mtls_uds_channel(
             socket_path.clone(),
             &fixture,
-            &fixture.wasi_certificate_pem,
-            &fixture.wasi_key_pem,
+            &fixture.gvisor_certificate_pem,
+            &fixture.gvisor_key_pem,
         )
         .await;
         let registration = SandboxExecutorProcessRegistrationGrpcClient::new(
