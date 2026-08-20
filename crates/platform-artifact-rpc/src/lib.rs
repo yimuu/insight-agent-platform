@@ -10,13 +10,8 @@ use futures::Stream;
 use insight_platform_contracts::{
     parse_strict_json, ArtifactRef, JsonLimits, ResourceKind, Sha256Digest,
 };
-use insight_platform_sandbox::{
-    MicroVmArtifactBroker, WasiArtifactBroker, WasiArtifactReadPurpose,
-};
-pub use insight_platform_sandbox::{
-    MicroVmArtifactBrokerError, MicroVmArtifactReadRequest, WasiArtifactBrokerError,
-    WasiArtifactReadRequest,
-};
+use insight_platform_sandbox::{WasiArtifactBroker, WasiArtifactReadPurpose};
+pub use insight_platform_sandbox::{WasiArtifactBrokerError, WasiArtifactReadRequest};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -52,8 +47,6 @@ pub const MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD: usize = 1_048_576;
 pub const MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD: usize = 262_144;
 const WASI_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.wasi.read/v1";
 const WASI_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.wasi.chunk/v1";
-const MICRO_VM_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.microvm.read/v1";
-const MICRO_VM_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.microvm.chunk/v1";
 const RPC_MESSAGE_OVERHEAD_BYTES: usize = 8_192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,8 +282,8 @@ fn validate_chunk(
     Ok(())
 }
 
-/// Credential-free client used only by the Sandbox Controller. The closed WASI and microVM
-/// methods deliberately share transport plumbing but remain distinct domain operations.
+/// Credential-free client used only by the Sandbox Controller. The closed WASI method keeps
+/// runtime selection out of untrusted requests.
 #[derive(Clone)]
 pub struct ArtifactSandboxBrokerGrpcClient {
     client: ArtifactSandboxBrokerServiceClient<tonic::transport::Channel>,
@@ -340,41 +333,6 @@ impl WasiArtifactBroker for ArtifactSandboxBrokerGrpcClient {
         )
         .await
         .map_err(map_wasi_client_read_error)
-    }
-}
-
-#[async_trait]
-impl MicroVmArtifactBroker for ArtifactSandboxBrokerGrpcClient {
-    async fn read_exact(
-        &self,
-        request: MicroVmArtifactReadRequest,
-    ) -> Result<Vec<u8>, MicroVmArtifactBrokerError> {
-        request.validate()?;
-        let artifact = request.artifact.clone();
-        let maximum_bytes = request.maximum_bytes;
-        let envelope = encode_request(MICRO_VM_ARTIFACT_READ_OPERATION, &request, self.rpc_limits)
-            .map_err(|_| MicroVmArtifactBrokerError::Integrity)?;
-        let request_digest = envelope.request_digest.clone();
-        let deadline = SystemTime::from(request.deadline);
-        let request = request_with_domain_deadline(envelope, deadline)
-            .map_err(map_micro_vm_client_read_error)?;
-        let mut client = self.client.clone();
-        let mut response =
-            await_rpc_before_deadline(deadline, client.read_micro_vm_artifact(request))
-                .await
-                .map_err(map_micro_vm_client_read_error)?
-                .into_inner();
-        collect_artifact_stream(
-            &mut response,
-            &request_digest,
-            MICRO_VM_ARTIFACT_CHUNK_OPERATION,
-            &artifact,
-            maximum_bytes,
-            self.rpc_limits,
-            deadline,
-        )
-        .await
-        .map_err(map_micro_vm_client_read_error)
     }
 }
 
@@ -484,15 +442,7 @@ pub trait WasiArtifactResponseBroker: Send + Sync {
     ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError>;
 }
 
-#[async_trait]
-pub trait MicroVmArtifactResponseBroker: Send + Sync {
-    async fn read_micro_vm_for_response(
-        &self,
-        request: MicroVmArtifactReadRequest,
-    ) -> Result<LeasedArtifactBytes, MicroVmArtifactBrokerError>;
-}
-
-/// Server adapter for the two exact Sandbox materialization authorities. Endpoint-role
+/// Server adapter for the exact Sandbox materialization authority. Endpoint-role
 /// authorization is installed by the process around the generated service and therefore runs
 /// before either method decodes a request or invokes the domain broker.
 pub struct ArtifactSandboxBrokerGrpcService<B> {
@@ -537,39 +487,6 @@ impl<B> ArtifactSandboxBrokerGrpcService<B> {
             deadline,
         )
     }
-
-    async fn read_micro_vm(
-        &self,
-        envelope: ClosedArtifactReadRequest,
-    ) -> Result<Response<ArtifactReadStream>, Status>
-    where
-        B: MicroVmArtifactResponseBroker + 'static,
-    {
-        let request_digest = envelope.request_digest.clone();
-        let read: MicroVmArtifactReadRequest =
-            decode_request(envelope, MICRO_VM_ARTIFACT_READ_OPERATION, self.rpc_limits)
-                .map_err(Status::from)?;
-        read.validate().map_err(map_micro_vm_server_error)?;
-        let artifact = read.artifact.clone();
-        let maximum_bytes = read.maximum_bytes;
-        let deadline = SystemTime::from(read.deadline);
-        let response_read = tokio::time::timeout(
-            server_deadline_budget(deadline)?,
-            self.broker.read_micro_vm_for_response(read),
-        )
-        .await
-        .map_err(|_| Status::deadline_exceeded("Artifact read deadline elapsed"))?
-        .map_err(map_micro_vm_server_error)?;
-        require_broker_bytes(response_read.as_bytes(), &artifact, maximum_bytes)?;
-        artifact_read_stream(
-            response_read,
-            &request_digest,
-            MICRO_VM_ARTIFACT_CHUNK_OPERATION,
-            &artifact,
-            self.rpc_limits.maximum_chunk_bytes(),
-            deadline,
-        )
-    }
 }
 
 type ArtifactReadStream =
@@ -578,23 +495,15 @@ type ArtifactReadStream =
 #[tonic::async_trait]
 impl<B> ArtifactSandboxBrokerService for ArtifactSandboxBrokerGrpcService<B>
 where
-    B: WasiArtifactResponseBroker + MicroVmArtifactResponseBroker + 'static,
+    B: WasiArtifactResponseBroker + 'static,
 {
     type ReadWasiArtifactStream = ArtifactReadStream;
-    type ReadMicroVmArtifactStream = ArtifactReadStream;
 
     async fn read_wasi_artifact(
         &self,
         request: Request<ClosedArtifactReadRequest>,
     ) -> Result<Response<Self::ReadWasiArtifactStream>, Status> {
         self.read_wasi(request.into_inner()).await
-    }
-
-    async fn read_micro_vm_artifact(
-        &self,
-        request: Request<ClosedArtifactReadRequest>,
-    ) -> Result<Response<Self::ReadMicroVmArtifactStream>, Status> {
-        self.read_micro_vm(request.into_inner()).await
     }
 }
 
@@ -839,22 +748,6 @@ fn map_wasi_server_error(error: WasiArtifactBrokerError) -> Status {
     }
 }
 
-fn map_micro_vm_server_error(error: MicroVmArtifactBrokerError) -> Status {
-    match error {
-        MicroVmArtifactBrokerError::Unavailable => {
-            Status::unavailable("Artifact Broker unavailable")
-        }
-        MicroVmArtifactBrokerError::Denied => Status::permission_denied("Artifact read denied"),
-        MicroVmArtifactBrokerError::NotFound => Status::not_found("Artifact not found"),
-        MicroVmArtifactBrokerError::TooLarge => {
-            Status::resource_exhausted("Artifact exceeds the read limit")
-        }
-        MicroVmArtifactBrokerError::Integrity => {
-            Status::data_loss("Artifact integrity verification failed")
-        }
-    }
-}
-
 fn classify_client_status(status: Status) -> ArtifactClientReadError {
     match status.code() {
         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
@@ -876,16 +769,6 @@ fn map_wasi_client_read_error(error: ArtifactClientReadError) -> WasiArtifactBro
         ArtifactClientReadError::NotFound => WasiArtifactBrokerError::NotFound,
         ArtifactClientReadError::TooLarge => WasiArtifactBrokerError::TooLarge,
         ArtifactClientReadError::Integrity => WasiArtifactBrokerError::Integrity,
-    }
-}
-
-fn map_micro_vm_client_read_error(error: ArtifactClientReadError) -> MicroVmArtifactBrokerError {
-    match error {
-        ArtifactClientReadError::Unavailable => MicroVmArtifactBrokerError::Unavailable,
-        ArtifactClientReadError::Denied => MicroVmArtifactBrokerError::Denied,
-        ArtifactClientReadError::NotFound => MicroVmArtifactBrokerError::NotFound,
-        ArtifactClientReadError::TooLarge => MicroVmArtifactBrokerError::TooLarge,
-        ArtifactClientReadError::Integrity => MicroVmArtifactBrokerError::Integrity,
     }
 }
 
@@ -918,7 +801,6 @@ mod tests {
     use chrono::{Duration, Utc};
     use futures::StreamExt as _;
     use insight_platform_contracts::{ArtifactRef, DataClassification, ResourceId, ResourceKind};
-    use insight_platform_sandbox::{MicroVmArtifactReadPurpose, MicroVmSandboxWorkloadKind};
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose, SanType,
@@ -967,28 +849,9 @@ mod tests {
         }
     }
 
-    fn micro_vm_request(bytes: &[u8]) -> MicroVmArtifactReadRequest {
-        MicroVmArtifactReadRequest {
-            workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
-            tenant_id: id(ResourceKind::Tenant),
-            sandbox_job_id: id(ResourceKind::Job),
-            request_digest: digest('e'),
-            executor_worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
-            provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
-            sandbox_identity_digest: digest('f'),
-            lease_generation: 3,
-            artifact: artifact(bytes, "runtime.ext4"),
-            purpose: MicroVmArtifactReadPurpose::RuntimeBundle,
-            read_grant: None,
-            maximum_bytes: bytes.len(),
-            deadline: Utc::now() + Duration::minutes(1),
-        }
-    }
-
     struct RecordingSandboxBroker {
         bytes: Vec<u8>,
         wasi_calls: AtomicUsize,
-        micro_vm_calls: AtomicUsize,
     }
 
     #[async_trait]
@@ -998,17 +861,6 @@ mod tests {
             _request: WasiArtifactReadRequest,
         ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError> {
             self.wasi_calls.fetch_add(1, Ordering::AcqRel);
-            Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
-        }
-    }
-
-    #[async_trait]
-    impl MicroVmArtifactResponseBroker for RecordingSandboxBroker {
-        async fn read_micro_vm_for_response(
-            &self,
-            _request: MicroVmArtifactReadRequest,
-        ) -> Result<LeasedArtifactBytes, MicroVmArtifactBrokerError> {
-            self.micro_vm_calls.fetch_add(1, Ordering::AcqRel);
             Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
         }
     }
@@ -1027,19 +879,6 @@ mod tests {
             let permit = Arc::clone(&self.sandbox)
                 .try_acquire_owned()
                 .map_err(|_| WasiArtifactBrokerError::Unavailable)?;
-            Ok(LeasedArtifactBytes::new(self.bytes.clone(), permit))
-        }
-    }
-
-    #[async_trait]
-    impl MicroVmArtifactResponseBroker for AudienceCapacityBroker {
-        async fn read_micro_vm_for_response(
-            &self,
-            _request: MicroVmArtifactReadRequest,
-        ) -> Result<LeasedArtifactBytes, MicroVmArtifactBrokerError> {
-            let permit = Arc::clone(&self.sandbox)
-                .try_acquire_owned()
-                .map_err(|_| MicroVmArtifactBrokerError::Unavailable)?;
             Ok(LeasedArtifactBytes::new(self.bytes.clone(), permit))
         }
     }
@@ -1147,17 +986,6 @@ mod tests {
         )
         .is_err());
 
-        let micro_vm = micro_vm_request(b"microvm-runtime");
-        let mut operation_tamper =
-            encode_request(MICRO_VM_ARTIFACT_READ_OPERATION, &micro_vm, limits).unwrap();
-        operation_tamper.operation = WASI_ARTIFACT_READ_OPERATION.to_owned();
-        assert!(decode_request::<MicroVmArtifactReadRequest>(
-            operation_tamper,
-            MICRO_VM_ARTIFACT_READ_OPERATION,
-            limits,
-        )
-        .is_err());
-
         let mut drift = envelope;
         drift.operation = "artifact.generic.read/v1".to_owned();
         assert!(decode_request::<WasiArtifactReadRequest>(
@@ -1241,35 +1069,24 @@ mod tests {
                 .unwrap(),
             )
         };
-        let micro_vm_envelope = || {
-            Request::new(
-                encode_request(
-                    MICRO_VM_ARTIFACT_READ_OPERATION,
-                    &micro_vm_request(&bytes),
-                    rpc_limits,
-                )
-                .unwrap(),
-            )
-        };
-
         let mut sandbox_stream = sandbox_service
             .read_wasi_artifact(wasi_envelope())
             .await
             .unwrap()
             .into_inner();
-        let rejected_micro_vm = sandbox_service
-            .read_micro_vm_artifact(micro_vm_envelope())
+        let rejected_concurrent = sandbox_service
+            .read_wasi_artifact(wasi_envelope())
             .await
             .err()
             .unwrap();
-        assert_eq!(rejected_micro_vm.code(), tonic::Code::Unavailable);
+        assert_eq!(rejected_concurrent.code(), tonic::Code::Unavailable);
 
         while let Some(chunk) = sandbox_stream.next().await {
             chunk.unwrap();
         }
         assert_eq!(broker.sandbox.available_permits(), 1);
         let released_sandbox = sandbox_service
-            .read_micro_vm_artifact(micro_vm_envelope())
+            .read_wasi_artifact(wasi_envelope())
             .await
             .unwrap();
         drop(released_sandbox);
@@ -1323,13 +1140,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandbox_mtls_streams_wasi_and_micro_vm_and_rejects_wrong_role_before_authority() {
+    async fn sandbox_mtls_streams_wasi_and_rejects_wrong_role_before_authority() {
         let fixture = mtls_fixture();
         let bytes = b"sandbox-runtime-material".to_vec();
         let broker = Arc::new(RecordingSandboxBroker {
             bytes: bytes.clone(),
             wasi_calls: AtomicUsize::new(0),
-            micro_vm_calls: AtomicUsize::new(0),
         });
         let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
         let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -1378,14 +1194,7 @@ mod tests {
                 .unwrap(),
             bytes
         );
-        assert_eq!(
-            MicroVmArtifactBroker::read_exact(&client, micro_vm_request(&bytes))
-                .await
-                .unwrap(),
-            bytes
-        );
         assert_eq!(broker.wasi_calls.load(Ordering::Acquire), 1);
-        assert_eq!(broker.micro_vm_calls.load(Ordering::Acquire), 1);
 
         let wrong_channel = channel(
             &endpoint,
@@ -1407,20 +1216,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(rejected_wasi.code(), tonic::Code::PermissionDenied);
-        let rejected_micro_vm = wrong_client
-            .read_micro_vm_artifact(
-                encode_request(
-                    MICRO_VM_ARTIFACT_READ_OPERATION,
-                    &micro_vm_request(&bytes),
-                    rpc_limits,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(rejected_micro_vm.code(), tonic::Code::PermissionDenied);
         assert_eq!(broker.wasi_calls.load(Ordering::Acquire), 1);
-        assert_eq!(broker.micro_vm_calls.load(Ordering::Acquire), 1);
 
         drop(client);
         drop(wrong_client);

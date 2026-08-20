@@ -10,7 +10,6 @@ package insight.platform.v1;
 // method and never accepts an object locator or storage credential.
 service ArtifactSandboxBrokerService {
   rpc ReadWasiArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
-  rpc ReadMicroVmArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
 }
 
 message ClosedArtifactReadRequest {

@@ -51,12 +51,11 @@ for sdk in ("aws-config", "aws-sdk-kms", "aws-sdk-s3"):
 
 expected_methods = {
     "rpc ReadWasiArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);",
-    "rpc ReadMicroVmArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);",
 }
 if any(method not in proto for method in expected_methods) or proto.count("  rpc ") != len(expected_methods):
     failures.append("Artifact internal RPC must expose exactly the reviewed Sandbox read methods")
-if not re.search(r"service ArtifactSandboxBrokerService\s*\{\s*rpc ReadWasiArtifact.*rpc ReadMicroVmArtifact", proto, re.DOTALL):
-    failures.append("Sandbox audience service is missing its two typed read methods")
+if not re.search(r"service ArtifactSandboxBrokerService\s*\{\s*rpc ReadWasiArtifact", proto, re.DOTALL):
+    failures.append("Sandbox audience service is missing its typed Phase 1 read method")
 if "insight-platform-sandbox.workspace = true" not in rpc_manifest:
     failures.append("Artifact RPC is missing the closed Sandbox read contracts")
 if "/usr/local/bin/platform-artifact-broker" not in dockerfile:

@@ -5,10 +5,7 @@ use insight_platform_artifacts::{
     EncryptedArtifactObjectReference,
 };
 use insight_platform_contracts::{ArtifactRef, DataClassification, ResourceId, ResourceKind};
-use insight_platform_sandbox::{
-    MicroVmArtifactBroker, MicroVmArtifactReadPurpose, MicroVmArtifactReadRequest,
-    MicroVmSandboxWorkloadKind, WasiArtifactReadPurpose, WasiArtifactReadRequest,
-};
+use insight_platform_sandbox::{WasiArtifactReadPurpose, WasiArtifactReadRequest};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Mutex,
@@ -65,17 +62,6 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for FixtureAuthority {
     async fn authorize_object_read(
         &self,
         _request: &WasiArtifactReadRequest,
-    ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.projection(self.drift_after_first && call > 0))
-    }
-}
-
-#[async_trait]
-impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for FixtureAuthority {
-    async fn authorize_object_read(
-        &self,
-        _request: &MicroVmArtifactReadRequest,
     ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.projection(self.drift_after_first && call > 0))
@@ -197,7 +183,6 @@ fn fixture_with_limits(
         bytes: Mutex::new(bytes.to_vec()),
     });
     let broker = BrokeredSandboxArtifactBroker::new(
-        authority.clone(),
         authority,
         Arc::new(FixtureUnsealer {
             plaintext: Mutex::new(plaintext),
@@ -285,39 +270,6 @@ async fn audience_permit_is_held_until_the_response_lease_is_dropped() {
             .await
             .unwrap()
             .as_bytes(),
-        bytes
-    );
-}
-
-#[tokio::test]
-async fn micro_vm_reads_share_the_exact_object_pipeline() {
-    let bytes = b"microvm-runtime";
-    let fixture = fixture(
-        bytes,
-        locator(&digest('b'), "version-1"),
-        false,
-        "version-1",
-    );
-    let request = MicroVmArtifactReadRequest {
-        workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
-        tenant_id: fixture.request.tenant_id.clone(),
-        sandbox_job_id: fixture.request.sandbox_job_id.clone(),
-        request_digest: fixture.request.request_digest.clone(),
-        executor_worker_process_generation_id: fixture.request.worker_process_generation_id.clone(),
-        provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
-        sandbox_identity_digest: digest('e'),
-        lease_generation: fixture.request.lease_generation,
-        artifact: fixture.request.artifact.clone(),
-        purpose: MicroVmArtifactReadPurpose::RuntimeBundle,
-        read_grant: None,
-        maximum_bytes: fixture.request.maximum_bytes,
-        deadline: fixture.request.deadline,
-    };
-
-    assert_eq!(
-        MicroVmArtifactBroker::read_exact(&fixture.broker, request)
-            .await
-            .unwrap(),
         bytes
     );
 }

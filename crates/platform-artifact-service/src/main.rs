@@ -10,7 +10,6 @@ use insight_platform_artifact_broker::{
 use insight_platform_artifact_rpc::{
     proto::artifact_sandbox_broker_service_server::ArtifactSandboxBrokerServiceServer,
     ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcService, LeasedArtifactBytes,
-    MicroVmArtifactBrokerError, MicroVmArtifactReadRequest, MicroVmArtifactResponseBroker,
     SandboxControllerWorkloadIdentity, WasiArtifactBrokerError, WasiArtifactReadRequest,
     WasiArtifactResponseBroker,
 };
@@ -46,18 +45,6 @@ impl WasiArtifactResponseBroker for SandboxRpcArtifactBroker {
         request: WasiArtifactReadRequest,
     ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError> {
         let read = self.broker.read_wasi_for_response(request).await?;
-        let (bytes, permit) = read.into_response_parts();
-        Ok(LeasedArtifactBytes::new(bytes, permit))
-    }
-}
-
-#[async_trait::async_trait]
-impl MicroVmArtifactResponseBroker for SandboxRpcArtifactBroker {
-    async fn read_micro_vm_for_response(
-        &self,
-        request: MicroVmArtifactReadRequest,
-    ) -> Result<LeasedArtifactBytes, MicroVmArtifactBrokerError> {
-        let read = self.broker.read_micro_vm_for_response(request).await?;
         let (bytes, permit) = read.into_response_parts();
         Ok(LeasedArtifactBytes::new(bytes, permit))
     }
@@ -237,14 +224,8 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::ProviderUnavailable)?;
     let (unsealer, stores) = providers.into_components();
     let broker_limits = config.broker_limits()?;
-    let broker = BrokeredSandboxArtifactBroker::new(
-        repository.clone(),
-        repository,
-        unsealer,
-        stores,
-        broker_limits,
-    )
-    .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let broker = BrokeredSandboxArtifactBroker::new(repository, unsealer, stores, broker_limits)
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
     let sandbox_broker = Arc::new(SandboxRpcArtifactBroker { broker });
     let rpc_limits = config.rpc_limits()?;
     let maximum = rpc_limits.maximum_message_bytes();
