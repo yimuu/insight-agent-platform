@@ -393,6 +393,7 @@ impl InvocationTransaction for PgInvocationTransaction {
         let task_state = match command.decision {
             CapabilityApprovalDecision::Approve => TaskState::Approved,
             CapabilityApprovalDecision::Reject => TaskState::Rejected,
+            CapabilityApprovalDecision::Cancel => TaskState::Cancelled,
         };
         let next_task = decide_task_resolution(
             &task_projection,
@@ -400,7 +401,8 @@ impl InvocationTransaction for PgInvocationTransaction {
                 expected_generation: command.expected_task_generation,
                 expected_version: command.expected_task_version,
                 target: task_state,
-                principal: Some(resolver),
+                principal: (command.decision != CapabilityApprovalDecision::Cancel)
+                    .then_some(resolver),
                 response_value_id: None,
                 response_schema_digest: None,
             },
@@ -1685,6 +1687,7 @@ fn require_approval_replay(
     let expected = match decision {
         CapabilityApprovalDecision::Approve => InvocationState::Ready,
         CapabilityApprovalDecision::Reject => InvocationState::Failed,
+        CapabilityApprovalDecision::Cancel => InvocationState::Cancelled,
     };
     if record.state != expected {
         return Err(RepositoryError::Conflict("Capability approval replay"));

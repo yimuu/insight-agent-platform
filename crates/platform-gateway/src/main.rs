@@ -276,9 +276,8 @@ impl TaskApplication for PgTasks {
             let decision = match intent.action {
                 TaskActionV1::Approve => CapabilityApprovalDecision::Approve,
                 TaskActionV1::Reject => CapabilityApprovalDecision::Reject,
-                TaskActionV1::SubmitInput | TaskActionV1::Cancel => {
-                    return Err(TaskApplicationError::Invalid);
-                }
+                TaskActionV1::Cancel => CapabilityApprovalDecision::Cancel,
+                TaskActionV1::SubmitInput => return Err(TaskApplicationError::Invalid),
             };
             let payload = decode_task_payload(&current)?;
             let (expected_invocation_version, eligible_principal_rule_digest) =

@@ -583,6 +583,7 @@ struct Fixture {
     run_id: ResourceId,
     ready_node_id: ResourceId,
     approval_node_id: ResourceId,
+    approval_cancel_node_id: ResourceId,
     deferred_node_id: ResourceId,
     uncertain_node_id: ResourceId,
     cancel_node_id: ResourceId,
@@ -974,6 +975,47 @@ async fn run_capability_phase3_fixture() {
     .await
     .unwrap();
     assert_eq!(orphan_negative_receipts, 0);
+
+    let mut cancel_approval = command_for_artifact(&fixture, 0x1d0);
+    cancel_approval.node_execution_id = fixture.approval_cancel_node_id.clone();
+    cancel_approval.origin = InvocationOrigin::PlanNode {
+        node_execution_id: fixture.approval_cancel_node_id.clone(),
+    };
+    let cancel_awaiting = match execute_admit(&repository, cancel_approval.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("first cancellable approval admission replayed"),
+    };
+    let mut cancel = approval_resolution(&fixture, &cancel_approval, 0x1e0, false);
+    cancel.decision = CapabilityApprovalDecision::Cancel;
+    let cancelled = match execute_approval(&repository, cancel.clone()).await.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("first approval cancellation replayed"),
+    };
+    assert_eq!(
+        cancel_awaiting.state,
+        insight_platform_contracts::InvocationState::AwaitingApproval
+    );
+    assert_eq!(
+        cancelled.state,
+        insight_platform_contracts::InvocationState::Cancelled
+    );
+    assert!(cancelled.payload.failure.is_none());
+    assert!(matches!(
+        execute_approval(&repository, cancel).await.unwrap(),
+        CommandOutcome::Replayed(record) if record == cancelled
+    ));
+    let cancelled_task_state: String = sqlx::query_scalar(
+        "SELECT state FROM insight_platform.tasks WHERE tenant_id = $1 AND task_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(cancel_approval.approval_task_id.unwrap().to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cancelled_task_state, "cancelled");
 
     // A non-idempotent dispatch may defer and request input after its only physical attempt has
     // started. Callback/input continuation must rotate the lease fence without consuming attempt 2.
@@ -2158,6 +2200,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let scope_id = id(ResourceKind::ScopeInstance, 0x31);
     let ready_node_id = id(ResourceKind::NodeExecution, 0x32);
     let approval_node_id = id(ResourceKind::NodeExecution, 0x33);
+    let approval_cancel_node_id = id(ResourceKind::NodeExecution, 0x3e);
     let deferred_node_id = id(ResourceKind::NodeExecution, 0x3a);
     let uncertain_node_id = id(ResourceKind::NodeExecution, 0x3b);
     let cancel_node_id = id(ResourceKind::NodeExecution, 0x3c);
@@ -2231,6 +2274,11 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         (&uncertain_node_id, "capability-uncertain", 4_i32),
         (&cancel_node_id, "capability-cancel", 5_i32),
         (&cancel_worker_node_id, "capability-cancel-worker", 6_i32),
+        (
+            &approval_cancel_node_id,
+            "capability-approval-cancel",
+            7_i32,
+        ),
     ] {
         sqlx::query(
             r#"
@@ -2327,6 +2375,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         run_id,
         ready_node_id,
         approval_node_id,
+        approval_cancel_node_id,
         deferred_node_id,
         uncertain_node_id,
         cancel_node_id,

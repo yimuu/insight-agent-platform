@@ -1359,6 +1359,7 @@ pub fn decide_capability_admission(
 pub enum CapabilityApprovalDecision {
     Approve,
     Reject,
+    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -1434,6 +1435,10 @@ pub fn decide_approval_transition(
                 details_ref: None,
                 source: FailureSource::Capability,
             });
+            next.terminal_at = Some(database_now);
+        }
+        CapabilityApprovalDecision::Cancel => {
+            next.state = InvocationState::Cancelled;
             next.terminal_at = Some(database_now);
         }
     }
@@ -1875,6 +1880,15 @@ mod tests {
             eligible_principal_rule_digest: digest_value('c'),
             decision: CapabilityApprovalDecision::Approve,
         };
+        let mut cancel_command = command.clone();
+        cancel_command.decision = CapabilityApprovalDecision::Cancel;
+        let cancelled =
+            decide_approval_transition(&current, &cancel_command, now + Duration::seconds(1))
+                .unwrap();
+        assert_eq!(cancelled.state, InvocationState::Cancelled);
+        assert_eq!(cancelled.version, 2);
+        assert_eq!(cancelled.terminal_at, Some(now + Duration::seconds(1)));
+        assert!(cancelled.payload.failure.is_none());
         let approved =
             decide_approval_transition(&current, &command, now + Duration::seconds(1)).unwrap();
         assert_eq!(approved.state, InvocationState::Ready);
