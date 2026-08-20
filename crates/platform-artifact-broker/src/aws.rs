@@ -322,6 +322,16 @@ impl AwsArtifactProviderCatalog {
         self.upload
     }
 
+    pub fn into_gateway_components(
+        self,
+    ) -> (
+        AwsArtifactUploadProvider,
+        Arc<dyn ArtifactObjectReferenceUnsealer>,
+        InstalledArtifactObjectStoreCatalog,
+    ) {
+        (self.upload, self.unsealer, self.stores)
+    }
+
     pub async fn check_readiness(&self) -> Result<(), AwsArtifactProviderReadinessError> {
         for readiness in &self.readiness {
             readiness.check().await?;

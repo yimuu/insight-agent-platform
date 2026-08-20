@@ -11,6 +11,7 @@ use insight_platform_artifacts::{
     ArtifactDeleteObjectAuthority, ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError,
     ArtifactScanObjectReadAuthority, ArtifactScanRequest, AuthorizedArtifactDeleteObject,
     AuthorizedArtifactObjectRead, AuthorizedArtifactScanObjectRead, DeleteArtifactBlobGeneration,
+    GatewayArtifactReadRequest,
 };
 use insight_platform_contracts::{parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_sandbox::{
@@ -302,6 +303,13 @@ pub struct BrokeredSandboxArtifactBroker {
     core: ArtifactBrokerCore,
 }
 
+/// Public-Gateway Artifact reader. It shares the exact-generation, double-authorization path with
+/// sandbox reads while retaining an independent audience semaphore in the Gateway process.
+pub struct BrokeredGatewayArtifactReader {
+    authority: Arc<dyn ArtifactObjectReadAuthority<GatewayArtifactReadRequest>>,
+    core: ArtifactBrokerCore,
+}
+
 pub struct BrokeredArtifactScannerReader {
     authority: Arc<dyn ArtifactScanObjectReadAuthority<ArtifactScanRequest>>,
     core: ArtifactBrokerCore,
@@ -420,6 +428,20 @@ impl ArtifactReadRequest for WasiArtifactReadRequest {
     }
 }
 
+impl ArtifactReadRequest for GatewayArtifactReadRequest {
+    fn deadline(&self) -> chrono::DateTime<Utc> {
+        self.deadline
+    }
+
+    fn maximum_bytes(&self) -> usize {
+        self.maximum_bytes
+    }
+
+    fn artifact(&self) -> Option<&insight_platform_contracts::ArtifactRef> {
+        Some(&self.artifact)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArtifactBrokerReadError {
     Unavailable,
@@ -441,6 +463,51 @@ impl BrokeredSandboxArtifactBroker {
             wasi_authority,
             core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
         })
+    }
+}
+
+impl BrokeredGatewayArtifactReader {
+    pub fn new(
+        authority: Arc<dyn ArtifactObjectReadAuthority<GatewayArtifactReadRequest>>,
+        unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
+        stores: InstalledArtifactObjectStoreCatalog,
+        limits: ArtifactBrokerLimits,
+    ) -> Result<Self, ArtifactBrokerConfigurationError> {
+        Ok(Self {
+            authority,
+            core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
+        })
+    }
+
+    pub async fn read(
+        &self,
+        request: &GatewayArtifactReadRequest,
+    ) -> Result<BrokeredArtifactRead, GatewayArtifactReadError> {
+        self.core
+            .read(self.authority.as_ref(), request)
+            .await
+            .map_err(GatewayArtifactReadError::from)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayArtifactReadError {
+    Unavailable,
+    Denied,
+    NotFound,
+    TooLarge,
+    Integrity,
+}
+
+impl From<ArtifactBrokerReadError> for GatewayArtifactReadError {
+    fn from(value: ArtifactBrokerReadError) -> Self {
+        match value {
+            ArtifactBrokerReadError::Unavailable => Self::Unavailable,
+            ArtifactBrokerReadError::Denied => Self::Denied,
+            ArtifactBrokerReadError::NotFound => Self::NotFound,
+            ArtifactBrokerReadError::TooLarge => Self::TooLarge,
+            ArtifactBrokerReadError::Integrity => Self::Integrity,
+        }
     }
 }
 

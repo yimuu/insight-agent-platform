@@ -3,15 +3,16 @@ use insight_platform_artifacts::{
     ArtifactBackendFailure, ArtifactBlobBackend, ArtifactBlobCleanupExecution,
     ArtifactBlobDeletionEvidence, ArtifactDeletionEvidence, ArtifactDeletionExecution,
     ArtifactDeletionJobSnapshot, ArtifactDeletionMode, ArtifactHoldKind, ArtifactHoldRecord,
-    ArtifactJobPayload, ArtifactLinkState, ArtifactProvenanceRecord, ArtifactReferenceRecord,
+    ArtifactJobPayload, ArtifactLinkState, ArtifactObjectReadAuthority,
+    ArtifactObjectReadAuthorityError, ArtifactProvenanceRecord, ArtifactReferenceRecord,
     ArtifactScanDisposition, ArtifactScanEvidence, ArtifactScanEvidenceDraft,
     ArtifactScanExecution, ArtifactScanRequest, ArtifactScanWorkRecord, ArtifactScanner,
     ArtifactTransaction, ArtifactWorkerAudit, ArtifactWorkerService, CommitArtifactBlobCleanup,
     CommitArtifactScanOutcome, CompleteArtifactDeletion, CompleteArtifactUpload,
     CompletedArtifactDeletion, CompletedArtifactUpload, CreateArtifactProvenance,
-    DeleteArtifactBlobGeneration, FinalizeArtifact, FinalizedArtifact, MarkArtifactDeletion,
-    MarkedArtifactDeletion, PlaceArtifactHold, PrepareArtifact, PreparedArtifact,
-    ReleaseArtifactHold, ReleaseArtifactReference, ScheduleArtifactRescan,
+    DeleteArtifactBlobGeneration, FinalizeArtifact, FinalizedArtifact, GatewayArtifactReadRequest,
+    MarkArtifactDeletion, MarkedArtifactDeletion, PlaceArtifactHold, PrepareArtifact,
+    PreparedArtifact, ReleaseArtifactHold, ReleaseArtifactReference, ScheduleArtifactRescan,
     ScheduleInitialArtifactScan,
 };
 use insight_platform_contracts::{
@@ -1111,6 +1112,7 @@ async fn artifact_upload_lifecycle_fixture() {
                     permissions: PermissionSet::new(vec![
                         Permission::ApprovalRespond,
                         Permission::ArtifactDelete,
+                        Permission::ArtifactRead,
                         Permission::ArtifactWrite,
                         Permission::ArtifactHold,
                     ])
@@ -1508,6 +1510,42 @@ async fn artifact_upload_lifecycle_fixture() {
     );
     assert_eq!(finalized.artifact_ref.content_digest(), &digest('8'));
     assert_eq!(finalized.artifact_ref.byte_length(), 1_024);
+    let gateway_snapshot = repository
+        .load_gateway_artifact(
+            tenant_a.clone(),
+            allowed_principal.clone(),
+            PrincipalKind::TenantAdmin,
+            prepared_command.artifact_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gateway_snapshot.artifact.state, ArtifactState::Ready);
+    assert_eq!(
+        gateway_snapshot.content,
+        Some(finalized.artifact_ref.clone())
+    );
+    let gateway_read = GatewayArtifactReadRequest {
+        tenant_id: tenant_a.clone(),
+        principal_id: allowed_principal.clone(),
+        principal_kind: PrincipalKind::TenantAdmin,
+        artifact: finalized.artifact_ref.clone(),
+        request_digest: digest('f'),
+        maximum_bytes: 1_024,
+        deadline: Utc::now() + Duration::minutes(1),
+    };
+    let authorized = repository
+        .authorize_object_read(&gateway_read)
+        .await
+        .unwrap();
+    assert_eq!(authorized.artifact, finalized.artifact_ref);
+    assert_eq!(authorized.blob_id, prepared_command.blob_id);
+    let mut wrong_tenant_read = gateway_read;
+    wrong_tenant_read.tenant_id = tenant_b.clone();
+    assert!(matches!(
+        repository.authorize_object_read(&wrong_tenant_read).await,
+        Err(ArtifactObjectReadAuthorityError::NotFound)
+            | Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
     assert_eq!(
         execute_finalize(&repository, finalized_command.clone())
             .await

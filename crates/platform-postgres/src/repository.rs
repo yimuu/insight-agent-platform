@@ -19598,16 +19598,24 @@ pub(crate) async fn require_tenant_permission(
     audit: &CommandAudit,
     permission: Permission,
 ) -> Result<PrincipalSnapshot, RepositoryError> {
-    let snapshot = load_current_principal_snapshot(transaction, audit).await?;
+    let snapshot = load_current_principal_snapshot(
+        transaction,
+        &audit.tenant_id,
+        &audit.principal_id,
+        audit.principal_kind,
+    )
+    .await?;
     if !snapshot.permissions.contains(permission) {
         return Err(RepositoryError::PermissionDenied);
     }
     Ok(snapshot)
 }
 
-async fn load_current_principal_snapshot(
+pub(crate) async fn load_current_principal_snapshot(
     transaction: &mut Transaction<'_, Postgres>,
-    audit: &CommandAudit,
+    tenant_id: &ResourceId,
+    principal_id: &ResourceId,
+    principal_kind: PrincipalKind,
 ) -> Result<PrincipalSnapshot, RepositoryError> {
     let row = sqlx::query(
         r#"
@@ -19625,9 +19633,9 @@ async fn load_current_principal_snapshot(
           AND binding.state = 'active' AND principal.state = 'active'
         "#,
     )
-    .bind(audit.tenant_id.to_string())
-    .bind(audit.principal_id.to_string())
-    .bind(audit.principal_kind.as_str())
+    .bind(tenant_id.to_string())
+    .bind(principal_id.to_string())
+    .bind(principal_kind.as_str())
     .fetch_optional(&mut **transaction)
     .await?;
     let Some(row) = row else {
@@ -19642,9 +19650,9 @@ async fn load_current_principal_snapshot(
     let permissions: TenantPrincipalPayload =
         decode_typed_payload(&permissions_payload, "tenant principal permissions")?;
     let snapshot = PrincipalSnapshot::build(
-        audit.tenant_id.clone(),
-        audit.principal_id.clone(),
-        audit.principal_kind,
+        tenant_id.clone(),
+        principal_id.clone(),
+        principal_kind,
         permissions.permissions,
         u64::try_from(row.try_get::<i64, _>("principal_version")?)
             .map_err(|_| RepositoryError::CorruptRow("negative principal version".to_owned()))?,

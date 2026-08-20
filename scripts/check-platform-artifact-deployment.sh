@@ -15,6 +15,7 @@ manifest = (root / "crates/platform-artifact-service/Cargo.toml").read_text()
 dockerfile = (root / "Dockerfile").read_text()
 postgres = (root / "crates/platform-postgres/src/repository.rs").read_text()
 artifact_repository = (root / "crates/platform-postgres/src/artifact_repository.rs").read_text()
+gateway = (root / "crates/platform-artifact-service/src/bin/gateway.rs").read_text()
 grants = (root / "crates/platform-postgres/artifact-role-grants.sql").read_text()
 failures = []
 for binary in ("platform-artifact-gateway", "platform-artifact-data-worker", "platform-artifact-maintenance"):
@@ -30,10 +31,20 @@ for boundary in (
 for authority in (
     "ArtifactScanObjectReadAuthority",
     "ArtifactDeleteObjectAuthority",
+    "ArtifactObjectReadAuthority<GatewayArtifactReadRequest>",
     "require_raw_artifact_job_fence",
 ):
     if authority not in artifact_repository:
         failures.append(f"missing exact Artifact authority {authority}")
+for route in (
+    "/v1/artifacts:prepare-upload",
+    "/v1/artifacts/{artifact_id}:complete-upload",
+    'route("/v1/artifacts/{artifact_id}", get(get_artifact))',
+    "/v1/artifacts/{artifact_id}/content",
+    "/v1/artifacts/{artifact_id}:delete",
+):
+    if route not in gateway:
+        failures.append(f"missing public Artifact Gateway route {route}")
 for role in ("artifact_gateway_role", "artifact_data_reader_role", "artifact_data_worker_role", "artifact_maintenance_role"):
     if role not in grants:
         failures.append(f"missing PostgreSQL role grant matrix entry {role}")

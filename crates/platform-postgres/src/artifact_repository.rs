@@ -1,10 +1,10 @@
 use crate::repository::{
     append_command_event, append_scheduler_event, begin_read_only_repeatable,
     claim_command_receipt, decode_typed_payload, job_from_row, job_projection,
-    load_job_for_update_by_text, payload_from_row, require_tenant_permission,
-    safety_scan_cursor_from_row, safety_scan_page, terminalize_command_receipt,
-    validate_safety_scan_request, JobRecord, PgRepository, RepositoryError, SafetyScanCursor,
-    SafetyScanPage, SafetyScanShard, TypedPayload,
+    load_current_principal_snapshot, load_job_for_update_by_text, payload_from_row,
+    require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page,
+    terminalize_command_receipt, validate_safety_scan_request, JobRecord, PgRepository,
+    RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
 };
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{
@@ -17,7 +17,7 @@ use insight_platform_artifacts::{
     ArtifactDeleteObjectAuthority, ArtifactDeletionAdmissionFacts, ArtifactDeletionEvidence,
     ArtifactDeletionExecution, ArtifactDeletionJobSnapshot, ArtifactDeletionOperationSnapshot,
     ArtifactDeletionRecord, ArtifactGrantRecord, ArtifactHoldRecord, ArtifactHoldSnapshot,
-    ArtifactJobPayload, ArtifactLinkState, ArtifactMetadataSnapshot,
+    ArtifactJobPayload, ArtifactLinkState, ArtifactMetadataSnapshot, ArtifactObjectReadAuthority,
     ArtifactObjectReadAuthorityError, ArtifactOperationRecord, ArtifactProvenanceRecord,
     ArtifactProvenanceSnapshot, ArtifactRecord, ArtifactRecoveryParentAction,
     ArtifactReferenceRecord, ArtifactReferenceSnapshot, ArtifactRescanOperationSnapshot,
@@ -28,15 +28,16 @@ use insight_platform_artifacts::{
     CommitArtifactBlobCleanup, CommitArtifactScanOutcome, CompleteArtifactDeletion,
     CompleteArtifactUpload, CompletedArtifactBlobCleanup, CompletedArtifactDeletion,
     CompletedArtifactUpload, CreateArtifactProvenance, DeleteArtifactBlobGeneration,
-    EncryptedArtifactObjectReference, FinalizeArtifact, FinalizedArtifact, MarkArtifactDeletion,
-    MarkedArtifactDeletion, PlaceArtifactHold, PrepareArtifact, PreparedArtifact,
-    ReleaseArtifactHold, ReleaseArtifactReference, ScheduleArtifactRescan,
-    ScheduleInitialArtifactScan, UploadGrantSnapshot,
+    EncryptedArtifactObjectReference, FinalizeArtifact, FinalizedArtifact,
+    GatewayArtifactReadRequest, MarkArtifactDeletion, MarkedArtifactDeletion, PlaceArtifactHold,
+    PrepareArtifact, PreparedArtifact, ReleaseArtifactHold, ReleaseArtifactReference,
+    ScheduleArtifactRescan, ScheduleInitialArtifactScan, UploadGrantSnapshot,
 };
 use insight_platform_contracts::{
     ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, BlobIntegrityState,
     CommandOutcome, DataClassification, Effect, ExactVersionRef, JobState, Permission, PolicyKind,
-    PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind, Sha256Digest, WorkClass,
+    PrincipalKind, PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind,
+    Sha256Digest, WorkClass,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskState};
@@ -49,6 +50,193 @@ use crate::repository::ArtifactWorkerRole;
 pub struct PgArtifactTransaction {
     transaction: Transaction<'static, Postgres>,
     limits: ArtifactCommandLimits,
+}
+
+/// Safe database projection consumed by the public Artifact Gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayArtifactSnapshot {
+    pub artifact: ArtifactRecord,
+    pub content: Option<ArtifactRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayArtifactDeletionTarget {
+    pub artifact: ArtifactRecord,
+    pub blob: ArtifactBlobRecord,
+}
+
+#[async_trait::async_trait]
+impl ArtifactObjectReadAuthority<GatewayArtifactReadRequest> for PgRepository {
+    async fn authorize_object_read(
+        &self,
+        request: &GatewayArtifactReadRequest,
+    ) -> Result<
+        insight_platform_artifacts::AuthorizedArtifactObjectRead,
+        ArtifactObjectReadAuthorityError,
+    > {
+        request.validate_at(Utc::now())?;
+        let mut transaction = begin_read_only_repeatable(self.pool())
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            &request.tenant_id,
+            &request.principal_id,
+            request.principal_kind,
+        )
+        .await
+        .map_err(classify_gateway_artifact_read_error)?;
+        if !principal.permissions.contains(Permission::ArtifactRead) {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT artifact.version AS artifact_version,
+                   artifact.classification, artifact.verified_media_type,
+                   artifact.metadata_schema_version, artifact.metadata, artifact.metadata_digest,
+                   blob.blob_id, blob.backend, blob.storage_binding_digest,
+                   blob.object_reference_ciphertext, blob.object_generation,
+                   blob.key_id, blob.encryption_domain_id, blob.content_digest,
+                   blob.size_bytes, blob.version AS blob_version,
+                   reference.artifact_link_id AS reference_id,
+                   reference.version AS reference_version,
+                   reference.link_key_digest AS reference_digest
+            FROM insight_platform.artifacts AS artifact
+            JOIN insight_platform.artifact_blobs AS blob
+              ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+            JOIN LATERAL (
+                SELECT artifact_link_id, version, link_key_digest
+                FROM insight_platform.artifact_links
+                WHERE tenant_id = artifact.tenant_id
+                  AND target_artifact_id = artifact.artifact_id
+                  AND link_kind = 'reference' AND state = 'active'
+                  AND released_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > clock_timestamp())
+                ORDER BY artifact_link_id
+                LIMIT 1
+            ) AS reference ON true
+            WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
+              AND artifact.state = 'ready' AND artifact.terminal_at IS NULL
+              AND blob.state = 'verified' AND blob.deleted_at IS NULL
+            "#,
+        )
+        .bind(request.tenant_id.to_string())
+        .bind(request.artifact.artifact_id().to_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?
+        .ok_or(ArtifactObjectReadAuthorityError::NotFound)?;
+        let metadata = payload_from_row(
+            &row,
+            "metadata_schema_version",
+            "metadata",
+            "metadata_digest",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        if row.try_get::<String, _>("classification").ok().as_deref()
+            != Some(request.artifact.classification().as_str())
+            || row
+                .try_get::<Option<String>, _>("verified_media_type")
+                .ok()
+                .flatten()
+                .as_deref()
+                != Some(request.artifact.media_type())
+            || row
+                .try_get::<Option<String>, _>("content_digest")
+                .ok()
+                .flatten()
+                .as_deref()
+                != Some(request.artifact.content_digest().as_str())
+            || row.try_get::<Option<i64>, _>("size_bytes").ok().flatten()
+                != i64::try_from(request.artifact.byte_length()).ok()
+            || metadata
+                .value
+                .get("display_name")
+                .and_then(serde_json::Value::as_str)
+                != request.artifact.display_name()
+        {
+            return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
+        }
+        let blob_id = parse_id(
+            row.try_get("blob_id")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            "Artifact Blob",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        let storage_binding_digest = parse_digest(
+            row.try_get("storage_binding_digest")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            "Artifact storage binding",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        let encryption_domain_id = parse_id(
+            row.try_get("encryption_domain_id")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            "Artifact encryption domain",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        let ciphertext: Vec<u8> = row
+            .try_get("object_reference_ciphertext")
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let authorization_digest: Sha256Digest = insight_platform_contracts::canonical_digest(
+            &serde_json::json!({
+                "artifact": request.artifact,
+                "artifact_version": row.try_get::<i64, _>("artifact_version").map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+                "blob_id": blob_id,
+                "blob_version": row.try_get::<i64, _>("blob_version").map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+                "object_reference_ciphertext": ciphertext,
+                "principal_binding_generation": principal.binding_generation,
+                "principal_permissions_digest": principal.permissions_digest,
+                "principal_id": request.principal_id,
+                "reference_digest": row.try_get::<String, _>("reference_digest").map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+                "reference_id": row.try_get::<String, _>("reference_id").map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+                "reference_version": row.try_get::<i64, _>("reference_version").map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+                "request_digest": request.request_digest,
+                "schema_version": 1,
+                "tenant_id": request.tenant_id,
+            }),
+        )
+        .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?
+        .parse()
+        .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let authorized = insight_platform_artifacts::AuthorizedArtifactObjectRead {
+            tenant_id: request.tenant_id.clone(),
+            blob_id,
+            artifact: request.artifact.clone(),
+            backend: row
+                .try_get("backend")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            storage_binding_digest,
+            encryption_domain_id,
+            key_id: row
+                .try_get("key_id")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            object_reference_ciphertext: EncryptedArtifactObjectReference::new(ciphertext)
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            object_generation: row
+                .try_get::<Option<String>, _>("object_generation")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?
+                .ok_or(ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            authorization_digest,
+        };
+        authorized.validate()?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        Ok(authorized)
+    }
+}
+
+fn classify_gateway_artifact_read_error(
+    error: RepositoryError,
+) -> ArtifactObjectReadAuthorityError {
+    match error {
+        RepositoryError::Database(_) => ArtifactObjectReadAuthorityError::Unavailable,
+        RepositoryError::NotFound(_) => ArtifactObjectReadAuthorityError::NotFound,
+        RepositoryError::CorruptRow(_) => ArtifactObjectReadAuthorityError::InvalidEvidence,
+        _ => ArtifactObjectReadAuthorityError::Denied,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +345,123 @@ pub struct RecoveredArtifactJob {
 }
 
 impl PgRepository {
+    pub async fn load_gateway_artifact(
+        &self,
+        tenant_id: ResourceId,
+        principal_id: ResourceId,
+        principal_kind: PrincipalKind,
+        artifact_id: ResourceId,
+    ) -> Result<GatewayArtifactSnapshot, RepositoryError> {
+        if tenant_id.kind() != ResourceKind::Tenant
+            || principal_id.kind() != ResourceKind::Principal
+            || artifact_id.kind() != ResourceKind::Artifact
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact Gateway identity is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = begin_read_only_repeatable(self.pool()).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            &tenant_id,
+            &principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::ArtifactRead) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let artifact = load_artifact_record(&mut transaction, &tenant_id, &artifact_id).await?;
+        let content = if artifact.state == ArtifactState::Ready {
+            let row = sqlx::query(
+                r#"
+                SELECT blob.content_digest, blob.size_bytes
+                FROM insight_platform.artifact_blobs AS blob
+                WHERE blob.tenant_id = $1 AND blob.blob_id = $2
+                  AND blob.state = 'verified' AND blob.deleted_at IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM insight_platform.artifact_links AS reference
+                    WHERE reference.tenant_id = $1
+                      AND reference.target_artifact_id = $3
+                      AND reference.link_kind = 'reference'
+                      AND reference.state = 'active'
+                      AND reference.released_at IS NULL
+                      AND (reference.expires_at IS NULL OR reference.expires_at > clock_timestamp())
+                  )
+                "#,
+            )
+            .bind(tenant_id.to_string())
+            .bind(
+                artifact
+                    .blob_id
+                    .as_ref()
+                    .ok_or_else(|| {
+                        RepositoryError::CorruptRow("Ready Artifact has no Blob".to_owned())
+                    })?
+                    .to_string(),
+            )
+            .bind(artifact_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            row.map(|row| artifact_ref_from_gateway_rows(&artifact, &row))
+                .transpose()?
+        } else {
+            None
+        };
+        transaction.commit().await?;
+        Ok(GatewayArtifactSnapshot { artifact, content })
+    }
+
+    pub async fn load_gateway_artifact_deletion_target(
+        &self,
+        tenant_id: ResourceId,
+        principal_id: ResourceId,
+        principal_kind: PrincipalKind,
+        artifact_id: ResourceId,
+    ) -> Result<GatewayArtifactDeletionTarget, RepositoryError> {
+        if tenant_id.kind() != ResourceKind::Tenant
+            || principal_id.kind() != ResourceKind::Principal
+            || artifact_id.kind() != ResourceKind::Artifact
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact Gateway deletion identity is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = begin_read_only_repeatable(self.pool()).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            &tenant_id,
+            &principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::ArtifactDelete) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let artifact = load_artifact_record(&mut transaction, &tenant_id, &artifact_id).await?;
+        let blob_id = artifact
+            .blob_id
+            .as_ref()
+            .ok_or(RepositoryError::NotFound("Artifact Blob"))?;
+        let row = sqlx::query(
+            r#"
+            SELECT tenant_id, blob_id, backend, storage_binding_digest,
+                   security_domain_digest, object_generation, encryption_domain_id,
+                   content_digest, size_bytes, state, version
+            FROM insight_platform.artifact_blobs
+            WHERE tenant_id = $1 AND blob_id = $2
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(blob_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("Artifact Blob"))?;
+        let blob = blob_from_row(row)?;
+        transaction.commit().await?;
+        Ok(GatewayArtifactDeletionTarget { artifact, blob })
+    }
+
     pub async fn begin_artifact_transaction(
         &self,
     ) -> Result<PgArtifactTransaction, RepositoryError> {
@@ -4939,6 +5244,29 @@ async fn load_artifact_record(
     .await?
     .ok_or(RepositoryError::NotFound("Artifact"))?;
     artifact_from_row(row)
+}
+
+fn artifact_ref_from_gateway_rows(
+    artifact: &ArtifactRecord,
+    blob: &PgRow,
+) -> Result<ArtifactRef, RepositoryError> {
+    let content_digest = blob
+        .try_get::<Option<String>, _>("content_digest")?
+        .ok_or_else(|| RepositoryError::CorruptRow("Ready Blob has no digest".to_owned()))?;
+    let size_bytes = blob
+        .try_get::<Option<i64>, _>("size_bytes")?
+        .ok_or_else(|| RepositoryError::CorruptRow("Ready Blob has no size".to_owned()))?;
+    ArtifactRef::new(
+        artifact.artifact_id.clone(),
+        parse_digest(content_digest, "Artifact content digest")?,
+        parse_u64(size_bytes, "Artifact content size")?,
+        artifact.verified_media_type.clone().ok_or_else(|| {
+            RepositoryError::CorruptRow("Ready Artifact has no media type".to_owned())
+        })?,
+        artifact.classification,
+        artifact.metadata.display_name.clone(),
+    )
+    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
 }
 
 async fn require_artifact_link_capacity(

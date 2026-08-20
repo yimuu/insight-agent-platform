@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use insight_platform_contracts::{ArtifactRef, ResourceId, ResourceKind, Sha256Digest};
+use chrono::{DateTime, Utc};
+use insight_platform_contracts::{
+    ArtifactRef, PrincipalKind, ResourceId, ResourceKind, Sha256Digest,
+};
 use std::fmt;
 
 pub const MAX_ARTIFACT_OBJECT_REFERENCE_BYTES: usize = 16_384;
@@ -115,6 +118,38 @@ pub trait ArtifactObjectReadAuthority<R>: Send + Sync {
         &self,
         request: &R,
     ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError>;
+}
+
+/// Closed public-Gateway request for one exact, bounded Artifact generation.
+///
+/// Authentication is terminated before the Gateway constructs this value. The database still
+/// revalidates the current tenant binding, `artifact.read` permission, Ready state and an active
+/// durable reference before every physical read, including the post-I/O authorization pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayArtifactReadRequest {
+    pub tenant_id: ResourceId,
+    pub principal_id: ResourceId,
+    pub principal_kind: PrincipalKind,
+    pub artifact: ArtifactRef,
+    pub request_digest: Sha256Digest,
+    pub maximum_bytes: usize,
+    pub deadline: DateTime<Utc>,
+}
+
+impl GatewayArtifactReadRequest {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ArtifactObjectReadAuthorityError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.principal_id.kind() != ResourceKind::Principal
+            || self.artifact.validate().is_err()
+            || self.maximum_bytes == 0
+            || u64::try_from(self.maximum_bytes)
+                .map_or(true, |maximum| maximum < self.artifact.byte_length())
+            || self.deadline <= now
+        {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        Ok(())
+    }
 }
 
 /// Exact pre-verification object authority used only by the Artifact Data Worker scanner.
@@ -309,5 +344,42 @@ mod tests {
         assert!(!diagnostic.contains("kms-key-canary"));
         assert!(!diagnostic.contains("ciphertext-canary"));
         assert!(!diagnostic.contains("version-canary"));
+    }
+
+    #[test]
+    fn gateway_read_request_is_exact_bounded_and_time_limited() {
+        let now = Utc::now();
+        let artifact = ArtifactRef::new(
+            id(ResourceKind::Artifact, 3),
+            digest('a'),
+            7,
+            "application/json".to_owned(),
+            DataClassification::Internal,
+            None,
+        )
+        .unwrap();
+        let request = GatewayArtifactReadRequest {
+            tenant_id: id(ResourceKind::Tenant, 1),
+            principal_id: id(ResourceKind::Principal, 2),
+            principal_kind: PrincipalKind::TenantAdmin,
+            artifact,
+            request_digest: digest('b'),
+            maximum_bytes: 7,
+            deadline: now + chrono::Duration::seconds(1),
+        };
+        request.validate_at(now).unwrap();
+
+        let mut too_small = request.clone();
+        too_small.maximum_bytes = 6;
+        assert_eq!(
+            too_small.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+        let mut expired = request;
+        expired.deadline = now;
+        assert_eq!(
+            expired.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
     }
 }
