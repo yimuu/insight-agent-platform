@@ -1,0 +1,29 @@
+{{- if lt (int .Values.replicas) 2 }}
+{{- fail "replicas must be at least 2" }}
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+{{- fail "networkPolicy.enabled must remain true" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must be an immutable lowercase sha256 digest" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) }}
+{{- fail "config.digest must be a lowercase sha256 digest" }}
+{{- end }}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.config.fileKey) }}
+{{- fail "immutable Gateway config reference is required" }}
+{{- end }}
+{{- if empty .Values.database.existingSecret }}
+{{- fail "Gateway database Secret is required" }}
+{{- end }}
+{{- if empty .Values.networkPolicy.postgresCidrs }}
+{{- fail "networkPolicy.postgresCidrs is required" }}
+{{- end }}
+{{- if and .Values.ingress.enabled (or (empty .Values.ingress.host) (empty .Values.ingress.tlsSecret)) }}
+{{- fail "enabled Gateway Ingress requires exact host and TLS Secret" }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+{{- if or (lt (int .Values.autoscaling.minReplicas) 2) (lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas)) }}
+{{- fail "autoscaling bounds are invalid" }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,43 @@
+image:
+  repository: insight-agent-platform
+  digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+namespace: platform-public
+replicas: 2
+port: 8080
+
+config:
+  existingConfigMap: insight-platform-gateway-candidate
+  fileKey: gateway.json
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+database:
+  existingSecret: insight-platform-gateway-database
+  urlKey: database-url
+
+ingress:
+  enabled: true
+  className: nginx
+  host: api.example.invalid
+  tlsSecret: insight-platform-gateway-public-tls
+  namespaceSelector: {insight.platform/ingress-namespace: "true"}
+  podSelector: {app.kubernetes.io/component: ingress-controller}
+
+networkPolicy:
+  enabled: true
+  postgresCidrs: [10.10.0.0/24]
+
+resources:
+  requests: {cpu: 200m, memory: 256Mi}
+  limits: {cpu: "2", memory: 1Gi}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCpuUtilizationPercentage: 70
