@@ -7324,9 +7324,7 @@ async fn seed_authorities(repository: &PgRepository, pool: &PgPool) {
             .create_tenant(NewTenant {
                 tenant_id: tenant_id.to_owned(),
                 state: "active".to_owned(),
-                config: TenantConfig {
-                    scheduling_policy: None,
-                },
+                config: TenantConfig::default(),
             })
             .await
             .unwrap();

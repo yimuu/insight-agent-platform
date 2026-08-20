@@ -77,9 +77,7 @@ async fn phase1_bootstrap_membership_and_secret_contract() {
         .create_tenant(NewTenant {
             tenant_id: TENANT_ID.to_owned(),
             state: "active".to_owned(),
-            config: TenantConfig {
-                scheduling_policy: None,
-            },
+            config: TenantConfig::default(),
         })
         .await
         .unwrap();
@@ -87,9 +85,7 @@ async fn phase1_bootstrap_membership_and_secret_contract() {
         .create_tenant(NewTenant {
             tenant_id: TENANT_B_ID.to_owned(),
             state: "active".to_owned(),
-            config: TenantConfig {
-                scheduling_policy: None,
-            },
+            config: TenantConfig::default(),
         })
         .await
         .unwrap();

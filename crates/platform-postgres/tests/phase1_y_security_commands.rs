@@ -132,9 +132,7 @@ async fn security_commands_are_fenced_atomic_and_secret_safe() {
             .create_tenant(NewTenant {
                 tenant_id: tenant_id.to_owned(),
                 state: "active".to_owned(),
-                config: TenantConfig {
-                    scheduling_policy: None,
-                },
+                config: TenantConfig::default(),
             })
             .await
             .unwrap();

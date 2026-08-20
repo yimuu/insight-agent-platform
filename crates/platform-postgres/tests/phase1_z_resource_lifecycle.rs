@@ -480,9 +480,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             .create_tenant(NewTenant {
                 tenant_id: tenant_id.to_owned(),
                 state: "active".to_owned(),
-                config: TenantConfig {
-                    scheduling_policy: None,
-                },
+                config: TenantConfig::default(),
             })
             .await
             .unwrap();

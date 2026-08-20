@@ -52,6 +52,21 @@ Event/Outbox同事务。
 审批、有效期和不可变运维审计；如需调用tenant API，必须获得显式short-lived tenant binding，不使用
 impersonation header。
 
+tenant级默认policy选择由tenant current aggregate中的closed `TenantConfigV1`拥有：
+
+```rust
+struct TenantConfigV1 {
+    scheduling_policy: Option<ExactPolicyRevisionRef>,
+    artifact_retention_policy: Option<ExactPolicyRevisionRef>,
+    artifact_io_policy: Option<ExactPolicyRevisionRef>,
+}
+```
+
+三个slot彼此独立且只能指向该tenant内enabled、active Resource所发布的exact immutable Policy Revision；绑定command使用Tenant strong
+version CAS、Receipt、Event与Outbox原子更新，只改变对应slot而保留其他slot。Artifact public prepare要求后两个slot均存在并分别验证
+`PolicyKind::Retention`与`PolicyKind::ArtifactIo`，缺失、错kind、digest不符或同revision复用均fail closed。不得扫描多个active Policy后任取一条，
+也不以进程config、请求body或排序约定替代tenant current authority。
+
 ## 3. Authorization
 
 permission是closed registry，例如：

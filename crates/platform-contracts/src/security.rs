@@ -6,21 +6,35 @@ use chrono::{DateTime, Utc};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::{collections::BTreeSet, error::Error, fmt, str::FromStr};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenantConfig {
     pub scheduling_policy: Option<ExactVersionRef>,
+    pub artifact_retention_policy: Option<ExactVersionRef>,
+    pub artifact_io_policy: Option<ExactVersionRef>,
 }
 
 impl TenantConfig {
     pub fn validate(&self) -> Result<(), SecurityContractError> {
-        if let Some(policy) = &self.scheduling_policy {
+        for policy in [
+            &self.scheduling_policy,
+            &self.artifact_retention_policy,
+            &self.artifact_io_policy,
+        ]
+        .into_iter()
+        .flatten()
+        {
             policy
                 .validate()
                 .map_err(|_| SecurityContractError::InvalidTenantConfig)?;
             if policy.resource_kind != ResourceKind::PolicyRevision {
                 return Err(SecurityContractError::InvalidTenantConfig);
             }
+        }
+        if self.artifact_retention_policy == self.artifact_io_policy
+            && self.artifact_retention_policy.is_some()
+        {
+            return Err(SecurityContractError::InvalidTenantConfig);
         }
         Ok(())
     }
@@ -640,6 +654,61 @@ mod tests {
             binding_generation: 1,
             expires_at: Utc::now() + Duration::from_secs(60),
         }
+    }
+
+    fn exact_policy(suffix: &str, marker: char) -> ExactVersionRef {
+        ExactVersionRef::new(
+            format!("prev_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")
+                .parse()
+                .unwrap(),
+            format!("sha256:{}", marker.to_string().repeat(64))
+                .parse()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn tenant_config_owns_distinct_exact_artifact_policy_bindings() {
+        let retention = exact_policy("7b81", 'a');
+        let artifact_io = exact_policy("7b82", 'b');
+        let config = TenantConfig {
+            scheduling_policy: None,
+            artifact_retention_policy: Some(retention.clone()),
+            artifact_io_policy: Some(artifact_io.clone()),
+        };
+        config.validate().unwrap();
+
+        let wire = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            wire["artifact_retention_policy"]["revision_id"],
+            retention.revision_id.to_string()
+        );
+        assert_eq!(
+            wire["artifact_io_policy"]["semantic_digest"],
+            artifact_io.semantic_digest.to_string()
+        );
+        assert!(serde_json::from_value::<TenantConfig>(serde_json::json!({
+            "scheduling_policy": null,
+            "artifact_retention_policy": retention,
+            "artifact_io_policy": artifact_io,
+            "fallback_to_any_active_policy": true
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn tenant_config_rejects_one_revision_in_both_artifact_policy_slots() {
+        let policy = exact_policy("7b83", 'c');
+        assert_eq!(
+            TenantConfig {
+                scheduling_policy: None,
+                artifact_retention_policy: Some(policy.clone()),
+                artifact_io_policy: Some(policy),
+            }
+            .validate(),
+            Err(SecurityContractError::InvalidTenantConfig)
+        );
     }
 
     #[test]

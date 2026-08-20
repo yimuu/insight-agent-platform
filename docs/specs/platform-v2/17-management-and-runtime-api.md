@@ -236,6 +236,9 @@ struct ArtifactMutationAcceptedV1 {
 grant token、scan revision、retry参数或audit identity。complete中的opaque proof只引用服务端已冻结的grant/generation，Artifact Gateway仍须从provider
 重新观察并验证generation/checksum/length；调用方不能用proof声明成功。
 
+这里的policy/config选择不是模糊查找：retention与Artifact I/O/scan exact revision只读04 `TenantConfigV1`的两个current slot，quota按tenant
+scope/work-class/metric唯一关系解析；缺失、重复、错kind、digest不符或disabled authority返回稳定拒绝，不采用“第一条active policy”。
+
 `prepare-upload`返回`201`；`complete-upload`和`delete`返回`202`与`Location: /v1/operations/{job_id}`，其响应使用
 `ArtifactMutationAcceptedV1`。`GET .../content`只在Ready且current authorization成立时返回bounded attachment stream；metadata、mutation和content
 全部`no-store`。upload target/proof按15的Secret-bearing例外处理，不进入problem/Event/log/trace或明文Receipt result。

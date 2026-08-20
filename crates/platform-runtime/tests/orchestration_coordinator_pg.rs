@@ -421,9 +421,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         .create_tenant(NewTenant {
             tenant_id: TENANT_ID.to_owned(),
             state: "active".to_owned(),
-            config: TenantConfig {
-                scheduling_policy: None,
-            },
+            config: TenantConfig::default(),
         })
         .await
         .unwrap();
@@ -1143,9 +1141,7 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
         .create_tenant(NewTenant {
             tenant_id: tenant_id.to_string(),
             state: "active".to_owned(),
-            config: TenantConfig {
-                scheduling_policy: None,
-            },
+            config: TenantConfig::default(),
         })
         .await
         .unwrap();

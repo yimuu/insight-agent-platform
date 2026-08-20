@@ -46,6 +46,280 @@ x-insight-contract-status: implementing-not-current
 servers:
   - url: /v1
 paths:
+  /runs:
+    post:
+      operationId: createRun
+      summary: Admit a root Run from one enabled Agent binding
+      tags: [Runs]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: agent.run
+      x-insight-idempotency: tenant_principal_agent_collection_receipt
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateRunRequestV1"}
+      responses:
+        "201":
+          description: The root Run and its initial Node, Job, Receipt, Event, and Outbox committed atomically.
+          headers:
+            Location: {schema: {type: string, pattern: "^/v1/runs/run_"}}
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RunViewV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}:
+    get:
+      operationId: getRun
+      summary: Read the current safe Run projection
+      tags: [Runs]
+      x-insight-permission: runtime.read
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Current Run projection with a strong version ETag.
+          headers:
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RunViewV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/result:
+    get:
+      operationId: getRunResult
+      summary: Read the typed output of a terminal Run
+      tags: [Runs]
+      x-insight-permission: runtime.read
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Inline output or an exact Ready Artifact reference.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RunResultViewV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/events:
+    get:
+      operationId: streamRunEvents
+      summary: Read the next bounded page of durable public Run events as SSE
+      description: >-
+        Returns at most 128 ordered durable events and then closes the stream. Reconnect with the
+        last received opaque SSE id in Last-Event-ID. The signed cursor is scoped to the current
+        principal binding and Run, expires after 15 minutes, and is never an event authority.
+      tags: [Runs]
+      x-insight-permission: runtime.read
+      x-insight-idempotency: read_only
+      x-insight-event-authority: postgres
+      x-insight-maximum-events-per-response: 128
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Opaque signed cursor emitted as the id of the last accepted SSE event.
+          schema: {$ref: "#/components/schemas/OpaqueRunEventCursor"}
+      responses:
+        "200":
+          description: A finite ordered SSE page containing only closed public event projections.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              x-insight-json-event-data:
+                envelope: PublicRunEvent
+                durable-payload-projection:
+                  $ref: "#/components/schemas/DurablePublicRunEventPayload"
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}:pause:
+    post:
+      operationId: pauseRun
+      summary: Durably request Run pause
+      tags: [Runs]
+      x-insight-permission: agent.run
+      x-insight-idempotency: run_scoped_receipt
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/RunControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}:resume:
+    post:
+      operationId: resumeRun
+      summary: Durably clear a Run pause request
+      tags: [Runs]
+      x-insight-permission: agent.run
+      x-insight-idempotency: run_scoped_receipt
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/RunControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}:cancel:
+    post:
+      operationId: cancelRun
+      summary: Durably request Run cancellation
+      tags: [Runs]
+      x-insight-permission: agent.run
+      x-insight-idempotency: run_scoped_receipt
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/RunControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:
+    get:
+      operationId: getTask
+      summary: Read a safe authorized Task projection
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: Safe Task prompt metadata and owner link.
+          headers:
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaskViewV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:submit-input:
+    post:
+      operationId: submitTaskInput
+      summary: Submit a typed Task response and atomically wake its owner
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SubmitTaskInputV1"}
+      responses:
+        "200": {$ref: "#/components/responses/TaskControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:approve:
+    post:
+      operationId: approveTask
+      summary: Approve an exact pending approval Task
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/TaskControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:reject:
+    post:
+      operationId: rejectTask
+      summary: Reject or decline an exact pending Task
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/TaskControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}:cancel:
+    post:
+      operationId: cancelTask
+      summary: Cancel an interaction Task through its owner adapter
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/TaskControlResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+  /artifacts/{artifact_id}:
+    get:
+      operationId: getArtifact
+      summary: Read safe Artifact metadata and an exact Ready content reference
+      tags: [Artifacts]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: artifact.read
+      x-insight-idempotency: read_only
+      x-insight-rate-class: control_read
+      x-insight-audit: access_log_only
+      parameters:
+        - $ref: "#/components/parameters/ArtifactId"
+      responses:
+        "200":
+          description: Current Artifact projection; content is present only while the Artifact is Ready.
+          headers:
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ArtifactViewV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /operations/{operation_id}:
     get:
       operationId: getOperation
@@ -219,6 +493,32 @@ paths:
                 enum:
                   - The MCP authorization service is temporarily unavailable.
 components:
+  parameters:
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/RunId"}
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/TaskId"}
+    ArtifactId:
+      name: artifact_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/ArtifactId"}
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 255, pattern: "^[ -~]+$"}
   responses:
     ApiProblem:
       description: A bounded, stable public problem response.
@@ -229,16 +529,176 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ApiProblem"
+    RunControlResponse:
+      description: The durable control intent winner and current Run projection.
+      headers:
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/RunViewV1"}
+    TaskControlResponse:
+      description: The durable Task first-winner projection.
+      headers:
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/TaskViewV1"}
   headers:
     NoStore:
       schema:
         type: string
         const: no-store
+    PrivateNoStore:
+      schema:
+        type: string
+        const: no-store, private, max-age=0
     NoReferrer:
       schema:
         type: string
         const: no-referrer
   schemas:
+    RunId:
+      type: string
+      pattern: "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    RunValueId:
+      type: string
+      pattern: "^val_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    AgentId:
+      type: string
+      pattern: "^agt_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    AgentDeploymentId:
+      type: string
+      pattern: "^adep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    TaskId:
+      type: string
+      pattern: "^(int|apv)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ArtifactId:
+      type: string
+      pattern: "^art_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    DataClassification:
+      type: string
+      enum: [public, internal, confidential, restricted]
+    ValueRef:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, value]
+          properties:
+            kind: {const: inline}
+            value: {}
+        - type: object
+          additionalProperties: false
+          required: [kind, artifact]
+          properties:
+            kind: {const: artifact}
+            artifact: {$ref: "#/components/schemas/ArtifactRef"}
+    CreateRunRequestV1:
+      type: object
+      additionalProperties: false
+      required: [agent_id, input, deadline]
+      properties:
+        agent_id: {$ref: "#/components/schemas/AgentId"}
+        input:
+          type: object
+          additionalProperties: false
+          required: [classification, schema_digest, value]
+          properties:
+            classification: {$ref: "#/components/schemas/DataClassification"}
+            schema_digest: {$ref: "#/components/schemas/Digest"}
+            value: {$ref: "#/components/schemas/ValueRef"}
+        deadline: {$ref: "#/components/schemas/UtcTimestamp"}
+    RunViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, run_id, agent_deployment_id, state, version, input_value_id, output_value_id, pause_generation, cancel_generation, deadline, started_at, terminal_at, created_at, updated_at, etag]
+      properties:
+        schema_version: {const: 1}
+        run_id: {$ref: "#/components/schemas/RunId"}
+        agent_deployment_id: {$ref: "#/components/schemas/AgentDeploymentId"}
+        state: {type: string, enum: [queued, running, waiting, cancelling, succeeded, failed, cancelled, timed_out]}
+        version: {type: integer, minimum: 1}
+        input_value_id: {$ref: "#/components/schemas/RunValueId"}
+        output_value_id:
+          oneOf:
+            - {$ref: "#/components/schemas/RunValueId"}
+            - {type: "null"}
+        pause_generation: {type: integer, minimum: 0}
+        cancel_generation: {type: integer, minimum: 0}
+        deadline: {$ref: "#/components/schemas/UtcTimestamp"}
+        started_at: {oneOf: [{$ref: "#/components/schemas/UtcTimestamp"}, {type: "null"}]}
+        terminal_at: {oneOf: [{$ref: "#/components/schemas/UtcTimestamp"}, {type: "null"}]}
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    RunResultViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, run_id, value_id, classification, schema_digest, content_digest, value]
+      properties:
+        schema_version: {const: 1}
+        run_id: {$ref: "#/components/schemas/RunId"}
+        value_id: {$ref: "#/components/schemas/RunValueId"}
+        classification: {$ref: "#/components/schemas/DataClassification"}
+        schema_digest: {$ref: "#/components/schemas/Digest"}
+        content_digest: {$ref: "#/components/schemas/Digest"}
+        value: {$ref: "#/components/schemas/ValueRef"}
+    SubmitTaskInputV1:
+      type: object
+      additionalProperties: false
+      required: [classification, schema_digest, value]
+      properties:
+        classification: {$ref: "#/components/schemas/DataClassification"}
+        schema_digest: {$ref: "#/components/schemas/Digest"}
+        value: {$ref: "#/components/schemas/ValueRef"}
+    TaskViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, task_id, task_kind, state, generation, version, safe_prompt_key, response_schema_digest, owner, deadline, responded_at, created_at, updated_at, etag]
+      properties:
+        schema_version: {const: 1}
+        task_id: {$ref: "#/components/schemas/TaskId"}
+        task_kind: {type: string, enum: [approval, interaction_form, interaction_url_consent, interaction_business_input, external_authorization, human_work]}
+        state: {type: string, enum: [pending, responded, declined, approved, rejected, cancelled, expired]}
+        generation: {type: integer, minimum: 1}
+        version: {type: integer, minimum: 1}
+        safe_prompt_key: {type: string, minLength: 1, maxLength: 128, pattern: "^[a-z][a-z0-9_.-]*$"}
+        response_schema_digest: {oneOf: [{$ref: "#/components/schemas/Digest"}, {type: "null"}]}
+        owner:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [kind, run_id]
+              properties: {kind: {const: run}, run_id: {$ref: "#/components/schemas/RunId"}}
+            - type: object
+              additionalProperties: false
+              required: [kind, invocation_id]
+              properties: {kind: {const: invocation}, invocation_id: {$ref: "#/components/schemas/PlatformResourceId"}}
+        deadline: {$ref: "#/components/schemas/UtcTimestamp"}
+        responded_at: {oneOf: [{$ref: "#/components/schemas/UtcTimestamp"}, {type: "null"}]}
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    ArtifactViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, artifact_id, purpose, classification, state, version, expected_size_bytes, declared_media_type, verified_media_type, content, retain_until, created_at, updated_at, etag]
+      properties:
+        schema_version: {const: 1}
+        artifact_id: {$ref: "#/components/schemas/ArtifactId"}
+        purpose: {type: string, enum: [authoring_document, interface_contract, typed_plan, package, sbom, backend_binding, model_generation_defaults, run_input, run_output, capability_input, capability_output, context_source, context_derived, mcp_resource, sandbox_input, sandbox_output, diagnostic, export]}
+        classification: {$ref: "#/components/schemas/DataClassification"}
+        state: {type: string, enum: [staging, uploaded, verifying, verified, ready, quarantined, rejected, deleting, deleted, corrupt]}
+        version: {type: integer, minimum: 1}
+        expected_size_bytes: {type: integer, minimum: 1}
+        declared_media_type: {oneOf: [{type: string, minLength: 1, maxLength: 255}, {type: "null"}]}
+        verified_media_type: {oneOf: [{type: string, minLength: 1, maxLength: 255}, {type: "null"}]}
+        content: {oneOf: [{$ref: "#/components/schemas/ArtifactRef"}, {type: "null"}]}
+        retain_until: {$ref: "#/components/schemas/UtcTimestamp"}
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        etag: {type: string, minLength: 1, maxLength: 128}
     JobId:
       type: string
       pattern: "^job_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

@@ -33,6 +33,7 @@ use insight_platform_postgres::{
     },
     verify_schema,
 };
+use insight_platform_security::BindTenantArtifactPolicies;
 use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskResolution, TaskState};
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -1087,9 +1088,7 @@ async fn artifact_upload_lifecycle_fixture() {
             .create_tenant(NewTenant {
                 tenant_id: tenant_id.to_string(),
                 state: "active".to_owned(),
-                config: TenantConfig {
-                    scheduling_policy: None,
-                },
+                config: TenantConfig::default(),
             })
             .await
             .unwrap();
@@ -1120,6 +1119,7 @@ async fn artifact_upload_lifecycle_fixture() {
                         Permission::ArtifactRead,
                         Permission::ArtifactWrite,
                         Permission::ArtifactHold,
+                        Permission::TenantManage,
                     ])
                     .unwrap(),
                 },
@@ -1148,8 +1148,29 @@ async fn artifact_upload_lifecycle_fixture() {
         0x0210,
     )
     .await;
+    let retention_policy = exact_policy_ref(&pool, &tenant_a, &retention_a).await;
     let scan_policy_a = exact_policy_ref(&pool, &tenant_a, &artifact_io_policy).await;
     let wrong_scan_policy = exact_policy_ref(&pool, &tenant_a, &retention_a).await;
+    let mut security = repository.begin_security_transaction().await.unwrap();
+    let bound = security
+        .bind_tenant_artifact_policies(BindTenantArtifactPolicies {
+            audit: audit(&tenant_a, &allowed_principal, 0x0220, '5', '6'),
+            expected_tenant_version: 1,
+            retention_policy: retention_policy.clone(),
+            artifact_io_policy: scan_policy_a.clone(),
+        })
+        .await
+        .unwrap();
+    let CommandOutcome::Applied(bound) = bound else {
+        panic!("first Artifact policy binding unexpectedly replayed");
+    };
+    assert_eq!(bound.version, 2);
+    assert_eq!(
+        bound.config.artifact_retention_policy,
+        Some(retention_policy)
+    );
+    assert_eq!(bound.config.artifact_io_policy, Some(scan_policy_a.clone()));
+    security.commit().await.unwrap();
     let quota_a = id(ResourceKind::QuotaAccount, 0x0300);
     let quota_b = id(ResourceKind::QuotaAccount, 0x0301);
     for (tenant_id, quota_id) in [(&tenant_a, &quota_a), (&tenant_b, &quota_b)] {

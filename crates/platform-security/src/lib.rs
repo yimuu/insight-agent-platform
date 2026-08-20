@@ -260,6 +260,34 @@ pub struct BindTenantSchedulingPolicy {
     pub policy: ExactVersionRef,
 }
 
+#[derive(Debug, Clone)]
+pub struct BindTenantArtifactPolicies {
+    pub audit: CommandAudit,
+    pub expected_tenant_version: i64,
+    pub retention_policy: ExactVersionRef,
+    pub artifact_io_policy: ExactVersionRef,
+}
+
+impl BindTenantArtifactPolicies {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), SecurityCommandError> {
+        validate_audit(&self.audit, now)?;
+        for policy in [&self.retention_policy, &self.artifact_io_policy] {
+            policy
+                .validate()
+                .map_err(|failure| SecurityCommandError::Contract(failure.to_string()))?;
+            if policy.resource_kind != ResourceKind::PolicyRevision {
+                return Err(SecurityCommandError::InvalidTenantPolicy);
+            }
+        }
+        if self.expected_tenant_version <= 0
+            || self.retention_policy.revision_id == self.artifact_io_policy.revision_id
+        {
+            return Err(SecurityCommandError::InvalidTenantPolicy);
+        }
+        Ok(())
+    }
+}
+
 impl BindTenantSchedulingPolicy {
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), SecurityCommandError> {
         validate_audit(&self.audit, now)?;
@@ -379,6 +407,10 @@ pub trait SecurityTransaction {
         &mut self,
         command: BindTenantSchedulingPolicy,
     ) -> Result<CommandOutcome<Self::TenantRecord>, Self::Error>;
+    async fn bind_tenant_artifact_policies(
+        &mut self,
+        command: BindTenantArtifactPolicies,
+    ) -> Result<CommandOutcome<Self::TenantRecord>, Self::Error>;
     async fn create_secret_binding(
         &mut self,
         command: CreateSecretBinding,
@@ -471,6 +503,37 @@ fn validate_fence(generation: i64, version: i64) -> Result<(), SecurityCommandEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
+
+    fn digest(marker: char) -> Sha256Digest {
+        format!("sha256:{}", marker.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    fn exact_policy(suffix: &str, marker: char) -> ExactVersionRef {
+        ExactVersionRef::new(
+            format!("prev_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")
+                .parse()
+                .unwrap(),
+            digest(marker),
+        )
+        .unwrap()
+    }
+
+    fn audit() -> CommandAudit {
+        CommandAudit {
+            tenant_id: "ten_0198f1c3-8f49-7c3e-b1f3-773c28367b80".parse().unwrap(),
+            principal_id: "prn_0198f1c3-8f49-7c3e-b1f3-773c28367b81".parse().unwrap(),
+            principal_kind: PrincipalKind::TenantAdmin,
+            receipt_id: "rcp_0198f1c3-8f49-7c3e-b1f3-773c28367b82".parse().unwrap(),
+            event_id: "evt_0198f1c3-8f49-7c3e-b1f3-773c28367b83".parse().unwrap(),
+            outbox_id: "obx_0198f1c3-8f49-7c3e-b1f3-773c28367b84".parse().unwrap(),
+            idempotency_key_digest: digest('d'),
+            request_digest: digest('e'),
+            receipt_expires_at: Utc::now() + Duration::minutes(5),
+        }
+    }
 
     #[test]
     fn opaque_reference_debug_is_redacted() {
@@ -478,5 +541,30 @@ mod tests {
         let rendered = format!("{reference:?}");
         assert!(!rendered.contains("secret-canary"));
         assert!(rendered.contains("byte_length"));
+    }
+
+    #[test]
+    fn artifact_policy_binding_requires_two_distinct_exact_policy_revisions() {
+        let retention = exact_policy("7b85", 'a');
+        let artifact_io = exact_policy("7b86", 'b');
+        BindTenantArtifactPolicies {
+            audit: audit(),
+            expected_tenant_version: 1,
+            retention_policy: retention.clone(),
+            artifact_io_policy: artifact_io,
+        }
+        .validate_at(Utc::now())
+        .unwrap();
+
+        assert_eq!(
+            BindTenantArtifactPolicies {
+                audit: audit(),
+                expected_tenant_version: 1,
+                retention_policy: retention.clone(),
+                artifact_io_policy: retention,
+            }
+            .validate_at(Utc::now()),
+            Err(SecurityCommandError::InvalidTenantPolicy)
+        );
     }
 }

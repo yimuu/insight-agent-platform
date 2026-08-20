@@ -527,9 +527,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         .create_tenant(NewTenant {
             tenant_id: tenant_id.to_string(),
             state: "active".to_owned(),
-            config: TenantConfig {
-                scheduling_policy: None,
-            },
+            config: TenantConfig::default(),
         })
         .await
         .unwrap();

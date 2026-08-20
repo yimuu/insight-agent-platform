@@ -79,9 +79,7 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
         .create_tenant(NewTenant {
             tenant_id: TENANT_ID.to_owned(),
             state: "active".to_owned(),
-            config: TenantConfig {
-                scheduling_policy: None,
-            },
+            config: TenantConfig::default(),
         })
         .await
         .unwrap();

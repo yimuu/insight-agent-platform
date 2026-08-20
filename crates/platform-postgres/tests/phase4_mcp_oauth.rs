@@ -496,9 +496,7 @@ async fn seed(pool: &PgPool, repository: &PgRepository, fixture: &Fixture) {
         .create_tenant(NewTenant {
             tenant_id: fixture.tenant_id.to_string(),
             state: "active".to_owned(),
-            config: TenantConfig {
-                scheduling_policy: None,
-            },
+            config: TenantConfig::default(),
         })
         .await
         .unwrap();
@@ -759,9 +757,7 @@ async fn phase4_mcp_oauth_cleanup_outbox_claim_is_reclaimable_and_exactly_fenced
         .create_tenant(NewTenant {
             tenant_id: tenant_id.to_string(),
             state: "active".to_owned(),
-            config: TenantConfig {
-                scheduling_policy: None,
-            },
+            config: TenantConfig::default(),
         })
         .await
         .unwrap();

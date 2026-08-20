@@ -56,7 +56,7 @@ use insight_platform_scheduler::{
     SchedulerStateSnapshot, TenantSchedulingPolicyBinding, TenantWindow,
 };
 use insight_platform_security::{
-    BindTenantPrincipal, BindTenantSchedulingPolicy,
+    BindTenantArtifactPolicies, BindTenantPrincipal, BindTenantSchedulingPolicy,
     CreateSecretBinding as CreateSecretBindingCommand, EncryptedOpaqueReference,
     PreparedSecretBindingAuthority, PreparedSecretBindingRegistrationDisposition,
     PreparedSecretBindingRegistrationError, PreparedSecretBindingRegistrationOutcome,
@@ -3582,9 +3582,8 @@ impl PgSecurityTransaction {
             ));
         }
 
-        let config = TenantConfig {
-            scheduling_policy: Some(command.policy.clone()),
-        };
+        let mut config = current.config.clone();
+        config.scheduling_policy = Some(command.policy.clone());
         config
             .validate()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
@@ -3620,6 +3619,123 @@ impl PgSecurityTransaction {
                 &serde_json::json!({
                     "policy_version_id": command.policy.revision_id,
                     "policy_version_digest": command.policy.semantic_digest,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(&mut transaction, &command.audit, &record.tenant_id, "bound")
+            .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn bind_tenant_artifact_policies(
+        &mut self,
+        command: BindTenantArtifactPolicies,
+    ) -> Result<CommandOutcome<TenantRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "tenant",
+            &command.audit.tenant_id.to_string(),
+            "security.tenant.bind_artifact_policies",
+        )
+        .await?
+        {
+            let record = load_tenant(&mut transaction, &command.audit.tenant_id).await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        require_tenant_permission(&mut transaction, &command.audit, Permission::TenantManage)
+            .await?;
+        let current = load_tenant_for_update(&mut transaction, &command.audit.tenant_id).await?;
+        if current.state != "active" || current.version != command.expected_tenant_version {
+            return Err(RepositoryError::Conflict("tenant"));
+        }
+        for (exact, expected_kind) in [
+            (&command.retention_policy, PolicyKind::Retention),
+            (&command.artifact_io_policy, PolicyKind::ArtifactIo),
+        ] {
+            let row = sqlx::query(
+                r#"
+                SELECT version.payload_schema_version, version.payload, version.payload_digest
+                FROM insight_platform.resource_versions AS version
+                JOIN insight_platform.resources AS resource
+                  ON resource.tenant_id = version.tenant_id
+                 AND resource.resource_id = version.resource_id
+                WHERE version.tenant_id = $1 AND version.resource_version_id = $2
+                  AND version.resource_version_kind = 'policy_revision'
+                  AND version.content_digest = $3
+                  AND resource.resource_kind = 'policy'
+                  AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+                FOR SHARE OF version, resource
+                "#,
+            )
+            .bind(command.audit.tenant_id.to_string())
+            .bind(exact.revision_id.to_string())
+            .bind(exact.semantic_digest.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepositoryError::NotFound("Artifact policy version"))?;
+            let payload =
+                payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+            let published = decode_published_version_payload(&payload)?;
+            published
+                .validate_for(RegistryResourceKind::Policy, &exact.revision_id)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            let ResourceDocument::Policy(policy) = published.document else {
+                return Err(RepositoryError::CorruptRow(
+                    "Artifact policy version contains the wrong document".to_owned(),
+                ));
+            };
+            if policy.policy_kind != expected_kind {
+                return Err(RepositoryError::InvalidInput(
+                    "tenant Artifact policy binding has the wrong PolicyKind".to_owned(),
+                ));
+            }
+        }
+        let mut config = current.config.clone();
+        config.artifact_retention_policy = Some(command.retention_policy.clone());
+        config.artifact_io_policy = Some(command.artifact_io_policy.clone());
+        config
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let config = TypedPayload::with_limit(1, &config, 65_536)?;
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.tenants
+            SET config_schema_version = $3, config = $4, config_digest = $5,
+                version = version + 1, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND version = $2 AND state = 'active'
+            RETURNING tenant_id, state, version, config_schema_version, config,
+                      config_digest, created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.expected_tenant_version)
+        .bind(config.schema_version)
+        .bind(&config.value)
+        .bind(&config.digest)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("tenant"))?;
+        let record = tenant_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "tenant",
+            &record.tenant_id,
+            record.version,
+            "security.tenant_artifact_policies_bound",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "artifact_io_policy_revision_id": command.artifact_io_policy.revision_id,
+                    "artifact_io_policy_digest": command.artifact_io_policy.semantic_digest,
+                    "retention_policy_revision_id": command.retention_policy.revision_id,
+                    "retention_policy_digest": command.retention_policy.semantic_digest,
                 }),
             )?,
         )
@@ -3904,6 +4020,13 @@ impl SecurityTransaction for PgSecurityTransaction {
         command: BindTenantSchedulingPolicy,
     ) -> Result<CommandOutcome<Self::TenantRecord>, Self::Error> {
         PgSecurityTransaction::bind_tenant_scheduling_policy(self, command).await
+    }
+
+    async fn bind_tenant_artifact_policies(
+        &mut self,
+        command: BindTenantArtifactPolicies,
+    ) -> Result<CommandOutcome<Self::TenantRecord>, Self::Error> {
+        PgSecurityTransaction::bind_tenant_artifact_policies(self, command).await
     }
 
     async fn create_secret_binding(

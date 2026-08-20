@@ -97,6 +97,9 @@ shared Job，并返回short-lived upload target。公开Operation ID就是JobId�
 public request只携带业务意图：`schema_version=1`、`purpose`、`classification`、`expected_size_bytes`、可选
 `expected_digest`、可选`declared_media_type`和可选`display_name`。tenant/principal、Artifact/Blob/Grant/Job/Receipt/Event/Outbox ID、
 storage binding、retention policy revision、scan policy、deadline上限和quota account全部由服务端current authority选择并冻结，客户端不得提交。
+retention与scan/Artifact I/O policy必须分别来自04 `TenantConfigV1`的exact `artifact_retention_policy`与`artifact_io_policy` slot；
+staging quota account由唯一`(tenant, tenant scope, artifact work class, artifact.staging_bytes metric)`关系解析。slot缺失或错kind不允许fallback到
+任意active Policy、安装默认或调用方选择。
 public request中的`purpose`仍需通过principal permission与owner policy的closed allowlist，不能用它取得内部package/evidence权限。
 
 成功响应只公开`schema_version=1`、`artifact_id`、`operation_id`、`upload_grant_id`、Artifact ETag、`upload_target`和
