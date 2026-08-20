@@ -580,6 +580,8 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(INTERFACE_ID), digest('b')).unwrap(),
         plan: ExactVersionRef::new(id(PLAN_ID), digest('c')).unwrap(),
+        entry_node_id: "start".to_owned(),
+        entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
         policies: vec![policy.clone()],
         execution_profile: policy.clone(),
@@ -1303,6 +1305,8 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(interface_id, digest('b')).unwrap(),
         plan: ExactVersionRef::new(plan_id.clone(), digest('c')).unwrap(),
+        entry_node_id: "start".to_owned(),
+        entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
         policies: vec![policy.clone()],
         execution_profile: policy.clone(),

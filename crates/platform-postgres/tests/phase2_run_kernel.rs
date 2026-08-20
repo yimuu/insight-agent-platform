@@ -7460,6 +7460,8 @@ async fn seed_agent_registry(pool: &PgPool) -> RunBindingsSnapshot {
     let child_closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(CHILD_AGENT_INTERFACE_ID), digest('8')).unwrap(),
         plan: ExactVersionRef::new(id(CHILD_AGENT_PLAN_ID), digest('9')).unwrap(),
+        entry_node_id: "start".to_owned(),
+        entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
         policies: vec![policy.clone()],
         execution_profile: policy.clone(),
@@ -7493,6 +7495,8 @@ async fn seed_agent_registry(pool: &PgPool) -> RunBindingsSnapshot {
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(AGENT_INTERFACE_ID), digest('6')).unwrap(),
         plan: ExactVersionRef::new(id(AGENT_PLAN_ID), digest('7')).unwrap(),
+        entry_node_id: "start".to_owned(),
+        entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![FrozenSlotBinding {
             slot_id: "child_worker".to_owned(),
             requirement_digest: digest('b'),

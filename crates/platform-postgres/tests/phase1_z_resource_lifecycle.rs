@@ -1193,6 +1193,8 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     let closure = AgentDeploymentClosure {
         interface: interface_ref.clone(),
         plan: plan_ref.clone(),
+        entry_node_id: "start".to_owned(),
+        entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
         policies: vec![policy_ref.clone()],
         execution_profile: policy_ref.clone(),

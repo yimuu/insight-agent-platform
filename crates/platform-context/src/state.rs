@@ -1383,6 +1383,8 @@ mod tests {
         let agent_closure = AgentDeploymentClosure {
             interface: version(ResourceKind::AgentInterfaceRevision, 40),
             plan: version(ResourceKind::AgentPlanRevision, 41),
+            entry_node_id: "start".to_owned(),
+            entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
             slots: vec![FrozenSlotBinding {
                 slot_id: "catalog".to_owned(),
                 requirement_digest: named_digest("slot-requirement"),

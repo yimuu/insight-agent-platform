@@ -13,7 +13,7 @@ use crate::{
     ContextPaginationContract, ContextRankingContract, ContextWindowContract, DataRegion, Effect,
     InstalledModelAdapter, McpAuthPolicyDocument, McpProtocolPolicyDocument, McpServerLimits,
     McpTransportBinding, McpTransportKind, ModelCatalogEvidence, ModelLimits, ModelModalities,
-    ModelToolContract, ModelUsageContract, PolicyKind, PrincipalSnapshot,
+    ModelToolContract, ModelUsageContract, PlanNodeKind, PolicyKind, PrincipalSnapshot,
     ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits, ResourceId,
     ResourceKind, SandboxAbiVersion, SandboxCleanupPolicy, SandboxEntrypointKind,
     SandboxIsolationClass, SandboxRuntimeFamily, SecretPurpose, Sha256Digest,
@@ -1440,6 +1440,8 @@ impl DeploymentClosure {
 pub struct AgentDeploymentClosure {
     pub interface: ExactVersionRef,
     pub plan: ExactVersionRef,
+    pub entry_node_id: String,
+    pub entry_node_kind: PlanNodeKind,
     pub slots: Vec<FrozenSlotBinding>,
     pub policies: Vec<ExactVersionRef>,
     pub execution_profile: ExactVersionRef,
@@ -1452,6 +1454,9 @@ impl AgentDeploymentClosure {
             ResourceKind::AgentInterfaceRevision,
         )?;
         require_kind(&self.plan.revision_id, ResourceKind::AgentPlanRevision)?;
+        if !is_code(&self.entry_node_id) {
+            return Err(ResourceContractError::UnboundedValue);
+        }
         validate_policy_versions(&self.policies)?;
         require_kind(
             &self.execution_profile.revision_id,
@@ -2225,6 +2230,8 @@ mod tests {
                 digest('c'),
             )
             .unwrap(),
+            entry_node_id: "start".to_owned(),
+            entry_node_kind: PlanNodeKind::Start,
             slots: vec![],
             policies: vec![],
             execution_profile: ExactVersionRef::new(
@@ -2296,6 +2303,8 @@ mod tests {
                 digest('5'),
             )
             .unwrap(),
+            entry_node_id: "start".to_owned(),
+            entry_node_kind: PlanNodeKind::Start,
             slots: vec![FrozenSlotBinding {
                 slot_id: "catalog".to_owned(),
                 requirement_digest: digest('6'),

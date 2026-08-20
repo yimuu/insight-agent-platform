@@ -270,6 +270,8 @@ fn fixture() -> Fixture {
     let agent_closure = AgentDeploymentClosure {
         interface: version(ResourceKind::AgentInterfaceRevision, 50, 'e'),
         plan: version(ResourceKind::AgentPlanRevision, 51, 'f'),
+        entry_node_id: "start".to_owned(),
+        entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![FrozenSlotBinding {
             slot_id: "primary_model".to_owned(),
             requirement_digest: sha('1'),

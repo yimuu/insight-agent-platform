@@ -1011,6 +1011,8 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let agent_closure = AgentDeploymentClosure {
         interface: agent_interface,
         plan: agent_plan.clone(),
+        entry_node_id: "start".to_owned(),
+        entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![
             FrozenSlotBinding {
                 slot_id: "primary_model".to_owned(),

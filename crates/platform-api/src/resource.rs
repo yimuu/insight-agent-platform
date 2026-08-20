@@ -1595,6 +1595,8 @@ mod tests {
                     fixed_digest('2'),
                 )
                 .unwrap(),
+                entry_node_id: "start".to_owned(),
+                entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
                 slots: Vec::new(),
                 policies: Vec::new(),
                 execution_profile: ExactVersionRef::new(
@@ -2032,6 +2034,8 @@ mod tests {
                     fixed_digest('2'),
                 )
                 .unwrap(),
+                entry_node_id: "start".to_owned(),
+                entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
                 slots: Vec::new(),
                 policies: Vec::new(),
                 execution_profile: ExactVersionRef::new(
