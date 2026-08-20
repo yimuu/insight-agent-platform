@@ -209,10 +209,9 @@ fn fixture_with_limits(
     }
 }
 
-fn locator(binding: &Sha256Digest, generation: &str) -> Vec<u8> {
+fn locator(binding: &Sha256Digest, _generation: &str) -> Vec<u8> {
     serde_jcs::to_vec(&serde_json::json!({
         "backend": "s3",
-        "object_generation": generation,
         "object_key": "opaque/object-1",
         "schema_version": 1,
         "storage_binding_digest": binding,
@@ -275,19 +274,8 @@ async fn audience_permit_is_held_until_the_response_lease_is_dropped() {
 }
 
 #[tokio::test]
-async fn locator_generation_and_post_io_authority_drift_fail_closed() {
+async fn authoritative_generation_and_post_io_authority_drift_fail_closed() {
     let bytes = b"wasm-module";
-    let wrong_locator = fixture(
-        bytes,
-        locator(&digest('b'), "version-2"),
-        false,
-        "version-1",
-    );
-    assert_eq!(
-        WasiArtifactBroker::read_exact(&wrong_locator.broker, wrong_locator.request).await,
-        Err(WasiArtifactBrokerError::Integrity)
-    );
-
     let wrong_generation = fixture(
         bytes,
         locator(&digest('b'), "version-1"),
@@ -312,7 +300,7 @@ async fn noncanonical_locator_and_content_digest_mismatch_fail_closed() {
     let noncanonical = fixture(
         bytes,
         format!(
-            "{{ \"backend\":\"s3\",\"object_generation\":\"version-1\",\"object_key\":\"opaque/object-1\",\"schema_version\":1,\"storage_binding_digest\":\"{}\"}}",
+            "{{ \"backend\":\"s3\",\"object_key\":\"opaque/object-1\",\"schema_version\":1,\"storage_binding_digest\":\"{}\"}}",
             digest('b')
         )
         .into_bytes(),

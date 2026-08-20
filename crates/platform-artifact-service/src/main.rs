@@ -34,13 +34,13 @@ use std::{
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
-const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_BROKER_CONFIG";
-const CONFIG_DIGEST_ENV: &str = "PLATFORM_ARTIFACT_BROKER_CONFIG_DIGEST";
-const AUDIENCE_ENV: &str = "PLATFORM_ARTIFACT_BROKER_AUDIENCE";
-const DATABASE_URL_ENV: &str = "PLATFORM_ARTIFACT_BROKER_DATABASE_URL";
-const CLIENT_CA_PATH_ENV: &str = "PLATFORM_ARTIFACT_BROKER_CLIENT_CA_PATH";
-const CERT_PATH_ENV: &str = "PLATFORM_ARTIFACT_BROKER_CERT_PATH";
-const KEY_PATH_ENV: &str = "PLATFORM_ARTIFACT_BROKER_KEY_PATH";
+const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_DATA_WORKER_CONFIG";
+const CONFIG_DIGEST_ENV: &str = "PLATFORM_ARTIFACT_DATA_WORKER_CONFIG_DIGEST";
+const AUDIENCE_ENV: &str = "PLATFORM_ARTIFACT_DATA_WORKER_AUDIENCE";
+const DATABASE_URL_ENV: &str = "PLATFORM_ARTIFACT_DATA_WORKER_DATABASE_URL";
+const CLIENT_CA_PATH_ENV: &str = "PLATFORM_ARTIFACT_DATA_WORKER_CLIENT_CA_PATH";
+const CERT_PATH_ENV: &str = "PLATFORM_ARTIFACT_DATA_WORKER_CERT_PATH";
+const KEY_PATH_ENV: &str = "PLATFORM_ARTIFACT_DATA_WORKER_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
 
@@ -484,6 +484,7 @@ mod tests {
             "database_acquire_timeout_milliseconds": 5000,
             "artifact_provider_catalog": {
                 "schema_version": 1,
+                "write_storage_binding_digest": "sha256:b5d4ea2254a7770284738b6ca76a8e7833899ebbe796d61a113f57bd5609b630",
                 "s3_storage_bindings": [{
                     "schema_version": 1,
                     "storage_binding_digest": "sha256:b5d4ea2254a7770284738b6ca76a8e7833899ebbe796d61a113f57bd5609b630",

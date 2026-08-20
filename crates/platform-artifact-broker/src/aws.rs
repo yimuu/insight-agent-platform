@@ -13,9 +13,10 @@ use super::{
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_kms::{primitives::Blob, types::EncryptionAlgorithmSpec, Client as KmsClient};
+use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::Client as S3Client;
 use insight_platform_artifacts::{AuthorizedArtifactObjectRead, MAX_ARTIFACT_KMS_KEY_ID_BYTES};
-use insight_platform_contracts::{canonical_digest, Sha256Digest};
+use insight_platform_contracts::{canonical_digest, ResourceId, ResourceKind, Sha256Digest};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -131,6 +132,7 @@ impl AwsKmsKeyBindingConfig {
 #[serde(deny_unknown_fields)]
 pub struct AwsArtifactProviderCatalogConfig {
     pub schema_version: u32,
+    pub write_storage_binding_digest: Sha256Digest,
     pub s3_storage_bindings: Vec<AwsS3StorageBindingConfig>,
     pub kms_key_bindings: Vec<AwsKmsKeyBindingConfig>,
 }
@@ -142,6 +144,10 @@ impl AwsArtifactProviderCatalogConfig {
             || self.kms_key_bindings.is_empty()
             || self.s3_storage_bindings.len() > MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS
             || self.kms_key_bindings.len() > MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS
+            || !self
+                .s3_storage_bindings
+                .iter()
+                .any(|binding| binding.storage_binding_digest == self.write_storage_binding_digest)
         {
             return Err(AwsArtifactProviderConfigError::InvalidCatalog);
         }
@@ -189,6 +195,7 @@ pub struct AwsArtifactProviderCatalog {
     stores: InstalledArtifactObjectStoreCatalog,
     unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
     readiness: Vec<AwsArtifactProviderReadiness>,
+    upload: AwsArtifactUploadProvider,
 }
 
 impl fmt::Debug for AwsArtifactProviderCatalog {
@@ -234,9 +241,11 @@ impl AwsArtifactProviderCatalog {
             );
         }
 
+        let write_digest = config.write_storage_binding_digest.clone();
         let mut stores: Vec<Arc<dyn InstalledArtifactObjectStore>> = Vec::new();
         let mut kms_by_storage_digest = BTreeMap::new();
         let mut readiness = Vec::new();
+        let mut upload = None;
         for binding in config.s3_storage_bindings {
             let kms = kms_by_digest
                 .get(&binding.kms_binding_digest)
@@ -267,7 +276,16 @@ impl AwsArtifactProviderCatalog {
                 bucket: Arc::clone(&bucket),
                 kms: Arc::clone(&kms),
             });
-            kms_by_storage_digest.insert(binding.storage_binding_digest.clone(), kms);
+            kms_by_storage_digest.insert(binding.storage_binding_digest.clone(), Arc::clone(&kms));
+            if binding.storage_binding_digest == write_digest {
+                upload = Some(AwsArtifactUploadProvider {
+                    s3: client.clone(),
+                    bucket: Arc::clone(&bucket),
+                    storage_binding_digest: binding.storage_binding_digest.clone(),
+                    maximum_object_bytes: binding.maximum_object_bytes,
+                    kms: Arc::clone(&kms),
+                });
+            }
             stores.push(Arc::new(AwsS3ObjectStore {
                 client,
                 bucket,
@@ -284,6 +302,7 @@ impl AwsArtifactProviderCatalog {
                 bindings: kms_by_storage_digest,
             }),
             readiness,
+            upload: upload.ok_or(AwsArtifactProviderConfigError::InvalidCatalog)?,
         })
     }
 
@@ -296,11 +315,220 @@ impl AwsArtifactProviderCatalog {
         (self.unsealer, self.stores)
     }
 
+    pub fn into_gateway_provider(self) -> AwsArtifactUploadProvider {
+        self.upload
+    }
+
     pub async fn check_readiness(&self) -> Result<(), AwsArtifactProviderReadinessError> {
         for readiness in &self.readiness {
             readiness.check().await?;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedAwsArtifactUpload {
+    pub upload_url: String,
+    pub storage_backend: String,
+    pub storage_binding_digest: Sha256Digest,
+    pub object_reference_ciphertext: Vec<u8>,
+    pub key_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedAwsArtifactUploadEvidence {
+    pub object_generation: String,
+    pub observed_size_bytes: u64,
+    pub backend_evidence_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AwsArtifactUploadError {
+    InvalidRequest,
+    TooLarge,
+    StorageUnavailable,
+    KmsUnavailable,
+    InvalidEvidence,
+}
+
+#[derive(Clone)]
+pub struct AwsArtifactUploadProvider {
+    s3: S3Client,
+    bucket: Arc<str>,
+    storage_binding_digest: Sha256Digest,
+    maximum_object_bytes: u64,
+    kms: Arc<AwsKmsKeyBinding>,
+}
+
+impl fmt::Debug for AwsArtifactUploadProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AwsArtifactUploadProvider")
+            .field("storage_binding_digest", &self.storage_binding_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AwsArtifactUploadProvider {
+    pub async fn prepare_upload(
+        &self,
+        tenant_id: &ResourceId,
+        artifact_id: &ResourceId,
+        blob_id: &ResourceId,
+        encryption_domain_id: &ResourceId,
+        expected_size_bytes: u64,
+        declared_media_type: Option<&str>,
+        expires_in: Duration,
+    ) -> Result<PreparedAwsArtifactUpload, AwsArtifactUploadError> {
+        if tenant_id.kind() != ResourceKind::Tenant
+            || artifact_id.kind() != ResourceKind::Artifact
+            || blob_id.kind() != ResourceKind::InternalBlob
+            || encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || expected_size_bytes == 0
+            || expected_size_bytes > self.maximum_object_bytes
+            || expires_in.is_zero()
+            || expires_in > Duration::from_secs(3_600)
+            || declared_media_type.is_some_and(|value| {
+                value.is_empty()
+                    || value.len() > 255
+                    || !value.is_ascii()
+                    || value.chars().any(char::is_control)
+            })
+        {
+            return Err(AwsArtifactUploadError::InvalidRequest);
+        }
+        let object_key = format!("v1/{tenant_id}/{artifact_id}/{blob_id}");
+        if !valid_opaque_object_key(&object_key) {
+            return Err(AwsArtifactUploadError::InvalidRequest);
+        }
+        let plaintext = serde_jcs::to_vec(&serde_json::json!({
+            "backend": "s3",
+            "object_key": object_key,
+            "schema_version": 1,
+            "storage_binding_digest": self.storage_binding_digest,
+        }))
+        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
+        let encryption_context = object_encryption_context(
+            tenant_id,
+            blob_id,
+            &self.storage_binding_digest,
+            encryption_domain_id,
+            &self.kms.key_id,
+        );
+        let encrypted = self
+            .kms
+            .client
+            .encrypt()
+            .key_id(&*self.kms.key_id)
+            .plaintext(Blob::new(plaintext))
+            .set_encryption_context(Some(encryption_context))
+            .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
+            .send()
+            .await
+            .map_err(|_| AwsArtifactUploadError::KmsUnavailable)?;
+        if encrypted.key_id() != Some(&*self.kms.key_id)
+            || encrypted.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
+        {
+            return Err(AwsArtifactUploadError::InvalidEvidence);
+        }
+        let ciphertext = encrypted
+            .ciphertext_blob
+            .ok_or(AwsArtifactUploadError::InvalidEvidence)?
+            .into_inner();
+        let content_length =
+            i64::try_from(expected_size_bytes).map_err(|_| AwsArtifactUploadError::TooLarge)?;
+        let mut request = self
+            .s3
+            .put_object()
+            .bucket(&*self.bucket)
+            .key(&object_key)
+            .content_length(content_length);
+        if let Some(media_type) = declared_media_type {
+            request = request.content_type(media_type);
+        }
+        let presigned = request
+            .presigned(
+                PresigningConfig::expires_in(expires_in)
+                    .map_err(|_| AwsArtifactUploadError::InvalidRequest)?,
+            )
+            .await
+            .map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
+        let upload_url = presigned.uri().to_string();
+        if !upload_url.starts_with("https://") || upload_url.len() > 16_384 {
+            return Err(AwsArtifactUploadError::InvalidEvidence);
+        }
+        Ok(PreparedAwsArtifactUpload {
+            upload_url,
+            storage_backend: "s3".to_owned(),
+            storage_binding_digest: self.storage_binding_digest.clone(),
+            object_reference_ciphertext: ciphertext,
+            key_id: self.kms.key_id.to_string(),
+        })
+    }
+
+    pub async fn complete_upload(
+        &self,
+        tenant_id: &ResourceId,
+        artifact_id: &ResourceId,
+        blob_id: &ResourceId,
+        object_generation: &str,
+        expected_size_bytes: u64,
+    ) -> Result<CompletedAwsArtifactUploadEvidence, AwsArtifactUploadError> {
+        if tenant_id.kind() != ResourceKind::Tenant
+            || artifact_id.kind() != ResourceKind::Artifact
+            || blob_id.kind() != ResourceKind::InternalBlob
+            || !valid_object_generation(object_generation)
+            || expected_size_bytes > self.maximum_object_bytes
+        {
+            return Err(AwsArtifactUploadError::InvalidRequest);
+        }
+        let object_key = format!("v1/{tenant_id}/{artifact_id}/{blob_id}");
+        let output = self
+            .s3
+            .head_object()
+            .bucket(&*self.bucket)
+            .key(&object_key)
+            .version_id(object_generation)
+            .send()
+            .await
+            .map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
+        let metadata = metadata_from_s3(
+            output.version_id(),
+            output.content_length(),
+            object_generation,
+            self.maximum_object_bytes,
+        )
+        .map_err(|error| match error {
+            ArtifactObjectStoreError::TooLarge => AwsArtifactUploadError::TooLarge,
+            ArtifactObjectStoreError::Unavailable | ArtifactObjectStoreError::NotFound => {
+                AwsArtifactUploadError::StorageUnavailable
+            }
+            ArtifactObjectStoreError::Rejected | ArtifactObjectStoreError::InvalidEvidence => {
+                AwsArtifactUploadError::InvalidEvidence
+            }
+        })?;
+        if metadata.byte_length != expected_size_bytes {
+            return Err(AwsArtifactUploadError::InvalidEvidence);
+        }
+        let backend_evidence_digest = canonical_digest(&serde_json::json!({
+            "artifact_id": artifact_id,
+            "blob_id": blob_id,
+            "kind": "s3_upload_observed",
+            "object_generation": object_generation,
+            "schema_version": 1,
+            "size_bytes": metadata.byte_length,
+            "storage_binding_digest": self.storage_binding_digest,
+            "tenant_id": tenant_id,
+        }))
+        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?
+        .parse()
+        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
+        Ok(CompletedAwsArtifactUploadEvidence {
+            object_generation: object_generation.to_owned(),
+            observed_size_bytes: metadata.byte_length,
+            backend_evidence_digest,
+        })
     }
 }
 
@@ -513,19 +741,13 @@ impl ArtifactObjectReferenceUnsealer for AwsKmsArtifactObjectReferenceUnsealer {
         if binding.key_id.as_ref() != authorized.key_id {
             return Err(ArtifactObjectReferenceUnsealError::Rejected);
         }
-        let mut encryption_context = HashMap::with_capacity(6);
-        encryption_context.insert("schema_version".to_owned(), "1".to_owned());
-        encryption_context.insert("tenant_id".to_owned(), authorized.tenant_id.to_string());
-        encryption_context.insert("blob_id".to_owned(), authorized.blob_id.to_string());
-        encryption_context.insert(
-            "storage_binding_digest".to_owned(),
-            authorized.storage_binding_digest.to_string(),
+        let encryption_context = object_encryption_context(
+            &authorized.tenant_id,
+            &authorized.blob_id,
+            &authorized.storage_binding_digest,
+            &authorized.encryption_domain_id,
+            &authorized.key_id,
         );
-        encryption_context.insert(
-            "encryption_domain_id".to_owned(),
-            authorized.encryption_domain_id.to_string(),
-        );
-        encryption_context.insert("key_id".to_owned(), authorized.key_id.clone());
 
         let output = binding
             .client
@@ -566,6 +788,29 @@ impl ArtifactObjectReferenceUnsealer for AwsKmsArtifactObjectReferenceUnsealer {
             .into_inner();
         DecryptedArtifactObjectReference::new(plaintext)
     }
+}
+
+fn object_encryption_context(
+    tenant_id: &ResourceId,
+    blob_id: &ResourceId,
+    storage_binding_digest: &Sha256Digest,
+    encryption_domain_id: &ResourceId,
+    key_id: &str,
+) -> HashMap<String, String> {
+    HashMap::from([
+        ("schema_version".to_owned(), "1".to_owned()),
+        ("tenant_id".to_owned(), tenant_id.to_string()),
+        ("blob_id".to_owned(), blob_id.to_string()),
+        (
+            "storage_binding_digest".to_owned(),
+            storage_binding_digest.to_string(),
+        ),
+        (
+            "encryption_domain_id".to_owned(),
+            encryption_domain_id.to_string(),
+        ),
+        ("key_id".to_owned(), key_id.to_owned()),
+    ])
 }
 
 fn metadata_from_s3(
@@ -708,6 +953,7 @@ mod tests {
         let s3 = valid_s3(kms.kms_binding_digest.clone());
         let catalog = AwsArtifactProviderCatalogConfig {
             schema_version: 1,
+            write_storage_binding_digest: s3.storage_binding_digest.clone(),
             s3_storage_bindings: vec![s3.clone()],
             kms_key_bindings: vec![kms.clone()],
         };
@@ -724,6 +970,9 @@ mod tests {
         missing.s3_storage_bindings[0].kms_binding_digest = digest('f');
         missing.s3_storage_bindings[0].storage_binding_digest =
             missing.s3_storage_bindings[0].calculated_digest().unwrap();
+        missing.write_storage_binding_digest = missing.s3_storage_bindings[0]
+            .storage_binding_digest
+            .clone();
         assert_eq!(
             missing.validate(),
             Err(AwsArtifactProviderConfigError::KmsBindingClosureMismatch)

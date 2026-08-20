@@ -12,7 +12,7 @@ COPY database ./database
 RUN cargo build --locked --release --bin insight-agent-platform \
     && cargo build --locked --release -p insight-platform-callback-api --bin platform-callback-api \
     && cargo build --locked --release -p insight-platform-model-worker --bin platform-model-worker \
-    && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-broker \
+    && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-data-worker \
     && cargo build --locked --release -p insight-platform-egress-broker --bin platform-egress-broker \
     && cargo build --locked --release -p insight-platform-security-authority --bin platform-security-authority \
     && cargo build --locked --release -p insight-platform-sandbox-controller --bin platform-sandbox-controller \
@@ -35,7 +35,7 @@ FROM runtime-base AS runtime
 COPY --from=builder /workspace/target/release/insight-agent-platform /usr/local/bin/insight-agent-platform
 COPY --from=builder /workspace/target/release/platform-callback-api /usr/local/bin/platform-callback-api
 COPY --from=builder /workspace/target/release/platform-model-worker /usr/local/bin/platform-model-worker
-COPY --from=builder /workspace/target/release/platform-artifact-broker /usr/local/bin/platform-artifact-broker
+COPY --from=builder /workspace/target/release/platform-artifact-data-worker /usr/local/bin/platform-artifact-data-worker
 COPY --from=builder /workspace/target/release/platform-egress-broker /usr/local/bin/platform-egress-broker
 COPY --from=builder /workspace/target/release/platform-security-authority /usr/local/bin/platform-security-authority
 COPY --from=builder /workspace/target/release/platform-sandbox-controller /usr/local/bin/platform-sandbox-controller

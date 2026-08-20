@@ -22,7 +22,9 @@ mod aws;
 
 pub use aws::{
     AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig, AwsArtifactProviderConfigError,
-    AwsArtifactProviderReadinessError, AwsKmsKeyBindingConfig, AwsS3StorageBindingConfig,
+    AwsArtifactProviderReadinessError, AwsArtifactUploadError, AwsArtifactUploadProvider,
+    AwsKmsKeyBindingConfig, AwsS3StorageBindingConfig, CompletedAwsArtifactUploadEvidence,
+    PreparedAwsArtifactUpload,
 };
 
 pub const MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS: usize = 64;
@@ -125,7 +127,6 @@ struct ArtifactObjectLocator {
     backend: String,
     storage_binding_digest: Sha256Digest,
     object_key: String,
-    object_generation: String,
 }
 
 impl ArtifactObjectLocator {
@@ -134,7 +135,6 @@ impl ArtifactObjectLocator {
             && self.backend == "s3"
             && self.backend == authorized.backend
             && self.storage_binding_digest == authorized.storage_binding_digest
-            && self.object_generation == authorized.object_generation
             && valid_opaque_object_key(&self.object_key)
     }
 }
@@ -421,14 +421,14 @@ impl ArtifactBrokerCore {
             return Err(ArtifactBrokerReadError::Integrity);
         }
         let head = store
-            .head_exact(&locator.object_key, &locator.object_generation)
+            .head_exact(&locator.object_key, &authorized.object_generation)
             .await
             .map_err(map_store_error)?;
         require_object_metadata(&authorized, &head, maximum_bytes)?;
         let object = store
             .read_exact(
                 &locator.object_key,
-                &locator.object_generation,
+                &authorized.object_generation,
                 maximum_bytes,
             )
             .await
