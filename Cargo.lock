@@ -2665,9 +2665,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
  "insight-platform-api",
  "insight-platform-contracts",
  "insight-platform-postgres",
+ "insight-platform-registry",
  "serde",
  "serde_json",
  "sqlx",
@@ -2675,6 +2677,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -18,16 +18,21 @@ use insight_platform_api::{
         build_operation_router, OperationApplication, OperationApplicationError,
         OperationHttpState, SystemOperationClock,
     },
+    resource::{
+        build_resource_router, resource_etag, CreateResourceIntent, ResourceApplication,
+        ResourceApplicationError, ResourceHttpState, ResourceViewV1, SystemResourceClock,
+    },
 };
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, JsonLimits, OperationViewV1, PrincipalKind,
-    PrincipalSnapshot, ReadOperation, ResourceId, Sha256Digest,
+    canonical_digest, parse_strict_json, CommandAudit, JsonLimits, OperationViewV1, PrincipalKind,
+    PrincipalSnapshot, ReadOperation, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_postgres::{
     operation_repository::OperationReadError,
     repository::{PgRepository, RepositoryError},
     verify_schema,
 };
+use insight_platform_registry::CreateResourceDraft;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{
@@ -159,6 +164,97 @@ impl OperationApplication for PgOperations {
     }
 }
 
+#[derive(Clone)]
+struct PgResources(Arc<PgRepository>);
+
+#[async_trait]
+impl ResourceApplication for PgResources {
+    async fn create_resource(
+        &self,
+        intent: CreateResourceIntent,
+    ) -> Result<ResourceViewV1, ResourceApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let candidate_resource_id = new_id(intent.resource_kind.id_kind())?;
+        let audit = CommandAudit {
+            tenant_id: intent.principal.tenant_id,
+            principal_id: intent.principal.principal_id,
+            principal_kind: intent.principal.principal_kind,
+            receipt_id: new_id(ResourceKind::Receipt)?,
+            event_id: new_id(ResourceKind::Event)?,
+            outbox_id: new_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: intent.idempotency_key_digest,
+            request_digest: intent.request_digest,
+            receipt_expires_at: now + chrono::Duration::hours(24),
+        };
+        let draft = intent.draft;
+        let mut transaction = self
+            .0
+            .begin_registry_transaction()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let outcome = transaction
+            .create_resource_draft(CreateResourceDraft {
+                audit,
+                resource_id: candidate_resource_id,
+                draft: draft.clone(),
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let record = match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(record)
+            | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
+        };
+        let resource_id: ResourceId = record
+            .resource_id
+            .parse()
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        if resource_id.kind() != intent.resource_kind.id_kind() {
+            return Err(ResourceApplicationError::Internal);
+        }
+        Ok(ResourceViewV1 {
+            schema_version: 1,
+            resource_id: resource_id.clone(),
+            resource_kind: intent.resource_kind,
+            lifecycle_state: "active".to_owned(),
+            gate_state: "enabled".to_owned(),
+            draft_generation: 1,
+            version: 1,
+            draft,
+            etag: resource_etag(&resource_id, 1),
+        })
+    }
+}
+
+fn new_id(kind: ResourceKind) -> Result<ResourceId, ResourceApplicationError> {
+    ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7())
+        .map_err(|_| ResourceApplicationError::Internal)
+}
+
+fn map_resource_repository_error(error: RepositoryError) -> ResourceApplicationError {
+    match error {
+        RepositoryError::InvalidInput(_) => ResourceApplicationError::Invalid,
+        RepositoryError::NotFound(_) => ResourceApplicationError::NotFound,
+        RepositoryError::Conflict(_) | RepositoryError::StaleFence => {
+            ResourceApplicationError::Conflict
+        }
+        RepositoryError::PermissionDenied => ResourceApplicationError::Denied,
+        RepositoryError::IdempotencyConflict => ResourceApplicationError::IdempotencyConflict,
+        RepositoryError::Database(_) | RepositoryError::LeaseExpired => {
+            ResourceApplicationError::Unavailable
+        }
+        RepositoryError::QuotaExceeded | RepositoryError::CorruptRow(_) => {
+            ResourceApplicationError::Internal
+        }
+    }
+}
+
 fn build_router(
     repository: Arc<PgRepository>,
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
@@ -168,14 +264,20 @@ fn build_router(
         Arc::new(PgPrincipalBindings(repository.clone())),
         Arc::new(SystemAuthenticationClock),
     );
-    let protected = build_operation_router(OperationHttpState::new(
-        Arc::new(PgOperations(repository)),
+    let operation = build_operation_router(OperationHttpState::new(
+        Arc::new(PgOperations(repository.clone())),
         Arc::new(SystemOperationClock),
-    ))
-    .route_layer(middleware::from_fn_with_state(
-        authentication,
-        authenticate_public_request,
     ));
+    let resource = build_resource_router(ResourceHttpState::new(
+        Arc::new(PgResources(repository)),
+        Arc::new(SystemResourceClock),
+    ));
+    let protected = operation
+        .merge(resource)
+        .route_layer(middleware::from_fn_with_state(
+            authentication,
+            authenticate_public_request,
+        ));
     Router::new()
         .route("/livez", get(live))
         .route("/readyz", get(ready))

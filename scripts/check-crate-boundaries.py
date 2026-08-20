@@ -76,7 +76,7 @@ ALLOWED_INTERNAL = {
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "platform_postgres"},
     "contracts": set(),
     "context_domain": {"contracts", "invocations_domain", "jobs_domain"},
-    "public_gateway": {"contracts", "platform_api", "platform_postgres"},
+    "public_gateway": {"contracts", "platform_api", "platform_postgres", "registry_domain"},
     "egress_core": {"capability_adapters", "contracts", "jobs_domain", "mcp_host", "model_adapters", "sandbox_domain"},
     "egress_broker": {"contracts", "egress_core", "egress_rpc", "model_adapters", "secret_broker", "security_rpc"},
     "egress_rpc": {"capability_adapters", "contracts", "egress_core", "mcp_host", "model_adapters", "sandbox_domain"},
