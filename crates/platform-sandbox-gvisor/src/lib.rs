@@ -16,10 +16,6 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
-mod backend;
-
-pub use backend::*;
-
 pub const RUNSC_RUNTIME_NAME: &str = "runsc";
 pub const MAX_RUNSC_OUTPUT_BYTES: usize = 64 * 1024;
 pub const MAX_CONTAINER_ID_BYTES: usize = 128;

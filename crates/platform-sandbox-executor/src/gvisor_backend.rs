@@ -1,4 +1,3 @@
-use crate::{GvisorContainerIdentity, GvisorRuntimeError, GvisorRuntimePort, RunscCommandOutput};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
@@ -13,6 +12,9 @@ use insight_platform_sandbox::{
     SandboxExecutorBackend, SandboxIsolationBackendKind, SandboxLeaseRecoveryEvidence,
     SandboxNetworkMode, SandboxResourceUsage, SandboxTerminationEvidence, SandboxUncertainty,
     TerminateSandbox,
+};
+use insight_platform_sandbox_gvisor::{
+    GvisorContainerIdentity, GvisorRuntimeError, GvisorRuntimePort, RunscCommandOutput,
 };
 use serde::{Deserialize, Serialize};
 use std::{

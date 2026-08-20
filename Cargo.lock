@@ -2773,6 +2773,7 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-jobs",
  "insight-platform-sandbox",
+ "insight-platform-sandbox-gvisor",
  "insight-platform-sandbox-rpc",
  "insight-platform-sandbox-wasi",
  "insight-platform-worker",
@@ -2793,9 +2794,7 @@ name = "insight-platform-sandbox-gvisor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chrono",
  "insight-platform-contracts",
- "insight-platform-sandbox",
  "serde",
  "serde_json",
  "sha2 0.11.0",

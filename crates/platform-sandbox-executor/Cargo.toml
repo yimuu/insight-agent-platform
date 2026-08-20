@@ -16,6 +16,7 @@ chrono.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-jobs.workspace = true
 insight-platform-sandbox.workspace = true
+insight-platform-sandbox-gvisor.workspace = true
 insight-platform-sandbox-rpc.workspace = true
 insight-platform-sandbox-wasi.workspace = true
 insight-platform-worker.workspace = true

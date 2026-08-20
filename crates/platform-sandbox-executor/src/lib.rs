@@ -41,6 +41,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod gvisor_backend;
+
+pub use gvisor_backend::*;
+
 pub trait ExecutorIdentityFactory: Send + Sync {
     fn new_resource_id(&self, kind: ResourceKind) -> Result<ResourceId, ExecutorIdentityError>;
     fn new_lease_token_digest(&self) -> Result<Sha256Digest, ExecutorIdentityError>;
