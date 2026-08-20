@@ -68,7 +68,7 @@ use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask as DomainResolveTask, TaskDefinition,
     TaskError as DomainTaskError, TaskKind, TaskPayload, TaskProjection, TaskState,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgRow, Acquire, PgPool, Postgres, Row, Transaction};
@@ -921,12 +921,13 @@ impl PgRegistryTransaction {
         )
         .await?
         {
-            let record = load_resource(
+            let result = load_resource_update_receipt(
                 &mut transaction,
-                &command.audit.tenant_id,
+                &command.audit,
                 &command.resource_id,
             )
             .await?;
+            let record = result.into_record(&command.draft)?;
             transaction.commit().await?;
             return Ok(CommandOutcome::Replayed(record));
         }
@@ -980,13 +981,7 @@ impl PgRegistryTransaction {
             )?,
         )
         .await?;
-        terminalize_command_receipt(
-            &mut transaction,
-            &command.audit,
-            &record.resource_id,
-            "updated",
-        )
-        .await?;
+        terminalize_resource_update_receipt(&mut transaction, &command.audit, &record).await?;
         transaction.commit().await?;
         Ok(CommandOutcome::Applied(record))
     }
@@ -16652,6 +16647,72 @@ pub struct ResourceRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceUpdateReceiptResult {
+    schema_version: u32,
+    tenant_id: String,
+    resource_id: String,
+    resource_kind: String,
+    lifecycle_state: String,
+    gate_state: String,
+    draft_generation: i64,
+    active_version_id: Option<String>,
+    active_deployment_id: Option<String>,
+    version: i64,
+    payload_digest: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl ResourceUpdateReceiptResult {
+    fn from_record(record: &ResourceRecord) -> Self {
+        Self {
+            schema_version: 1,
+            tenant_id: record.tenant_id.clone(),
+            resource_id: record.resource_id.clone(),
+            resource_kind: record.resource_kind.clone(),
+            lifecycle_state: record.lifecycle_state.clone(),
+            gate_state: record.gate_state.clone(),
+            draft_generation: record.draft_generation,
+            active_version_id: record.active_version_id.clone(),
+            active_deployment_id: record.active_deployment_id.clone(),
+            version: record.version,
+            payload_digest: record.payload.digest.clone(),
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+
+    fn into_record(self, draft: &ResourceDraftPayload) -> Result<ResourceRecord, RepositoryError> {
+        if self.schema_version != 1 {
+            return Err(RepositoryError::CorruptRow(
+                "resource update Receipt schema is unsupported".to_owned(),
+            ));
+        }
+        let payload = TypedPayload::new(1, draft)?;
+        if payload.digest != self.payload_digest {
+            return Err(RepositoryError::CorruptRow(
+                "resource update Receipt payload digest differs from replay request".to_owned(),
+            ));
+        }
+        Ok(ResourceRecord {
+            tenant_id: self.tenant_id,
+            resource_id: self.resource_id,
+            resource_kind: self.resource_kind,
+            lifecycle_state: self.lifecycle_state,
+            gate_state: self.gate_state,
+            draft_generation: self.draft_generation,
+            active_version_id: self.active_version_id,
+            active_deployment_id: self.active_deployment_id,
+            version: self.version,
+            payload,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourceVersionRecord {
     pub tenant_id: String,
@@ -19545,6 +19606,69 @@ pub(crate) async fn terminalize_command_receipt(
     .bind(audit.request_digest.to_string())
     .bind(disposition)
     .bind(response_reference_id)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("command receipt"));
+    }
+    Ok(())
+}
+
+async fn load_resource_update_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    resource_id: &ResourceId,
+) -> Result<ResourceUpdateReceiptResult, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'resource' AND scope_id = $2 AND dedupe_owner_id = $3
+          AND operation = 'resource.update_draft' AND idempotency_key_digest = $4
+          AND request_digest = $5 AND state = 'succeeded'
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(resource_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or_else(|| {
+        RepositoryError::CorruptRow("resource update Receipt result is missing".to_owned())
+    })?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    decode_versioned_payload(&payload, "resource update Receipt result")
+}
+
+async fn terminalize_resource_update_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    record: &ResourceRecord,
+) -> Result<(), RepositoryError> {
+    let result = ResourceUpdateReceiptResult::from_record(record);
+    let payload = TypedPayload::from_versioned(1, &result, 262_144)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = 'updated', response_reference_id = $4,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND state = 'processing'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(&record.resource_id)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
     .execute(&mut **transaction)
     .await?
     .rows_affected();

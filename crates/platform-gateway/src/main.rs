@@ -21,7 +21,7 @@ use insight_platform_api::{
     resource::{
         build_resource_router, resource_etag, CreateResourceIntent, ReadResourceIntent,
         ResourceApplication, ResourceApplicationError, ResourceHttpState, ResourceViewV1,
-        SystemResourceClock,
+        SystemResourceClock, UpdateResourceDraftIntent,
     },
 };
 use insight_platform_contracts::{
@@ -34,7 +34,7 @@ use insight_platform_postgres::{
     repository::{PgRepository, RepositoryError},
     verify_schema,
 };
-use insight_platform_registry::CreateResourceDraft;
+use insight_platform_registry::{CreateResourceDraft, UpdateResourceDraft};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{
@@ -251,38 +251,93 @@ impl ResourceApplication for PgResources {
             )
             .await
             .map_err(map_resource_repository_error)?;
-        if record.payload.schema_version != 1 {
-            return Err(ResourceApplicationError::Internal);
-        }
-        let mut value = record.payload.value;
-        let object = value
-            .as_object_mut()
-            .ok_or(ResourceApplicationError::Internal)?;
-        object.remove("schema_version");
-        let draft =
-            serde_json::from_value(value).map_err(|_| ResourceApplicationError::Internal)?;
-        let version =
-            u64::try_from(record.version).map_err(|_| ResourceApplicationError::Internal)?;
-        let draft_generation = u64::try_from(record.draft_generation)
-            .map_err(|_| ResourceApplicationError::Internal)?;
-        Ok(ResourceViewV1 {
-            schema_version: 1,
-            resource_id: intent.resource_id.clone(),
-            resource_kind: intent.resource_kind,
-            lifecycle_state: record
-                .lifecycle_state
-                .parse()
-                .map_err(|_| ResourceApplicationError::Internal)?,
-            gate_state: record
-                .gate_state
-                .parse()
-                .map_err(|_| ResourceApplicationError::Internal)?,
-            draft_generation,
-            version,
-            draft,
-            etag: resource_etag(&intent.resource_id, version),
-        })
+        resource_view_from_record(record, intent.resource_kind, &intent.resource_id)
     }
+
+    async fn update_resource_draft(
+        &self,
+        intent: UpdateResourceDraftIntent,
+    ) -> Result<ResourceViewV1, ResourceApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let expected_resource_version = i64::try_from(intent.expected_resource_version)
+            .map_err(|_| ResourceApplicationError::Invalid)?;
+        let audit = CommandAudit {
+            tenant_id: intent.principal.tenant_id,
+            principal_id: intent.principal.principal_id,
+            principal_kind: intent.principal.principal_kind,
+            receipt_id: new_id(ResourceKind::Receipt)?,
+            event_id: new_id(ResourceKind::Event)?,
+            outbox_id: new_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: intent.idempotency_key_digest,
+            request_digest: intent.request_digest,
+            receipt_expires_at: now + chrono::Duration::hours(24),
+        };
+        let mut transaction = self
+            .0
+            .begin_registry_transaction()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let outcome = transaction
+            .update_resource_draft(UpdateResourceDraft {
+                audit,
+                resource_id: intent.resource_id.clone(),
+                expected_resource_version,
+                draft: intent.draft,
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let record = match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(record)
+            | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
+        };
+        resource_view_from_record(record, intent.resource_kind, &intent.resource_id)
+    }
+}
+
+fn resource_view_from_record(
+    record: insight_platform_postgres::repository::ResourceRecord,
+    resource_kind: insight_platform_contracts::RegistryResourceKind,
+    resource_id: &ResourceId,
+) -> Result<ResourceViewV1, ResourceApplicationError> {
+    if record.payload.schema_version != 1
+        || record.resource_id != resource_id.to_string()
+        || record.resource_kind != resource_kind.as_str()
+    {
+        return Err(ResourceApplicationError::Internal);
+    }
+    let mut value = record.payload.value;
+    let object = value
+        .as_object_mut()
+        .ok_or(ResourceApplicationError::Internal)?;
+    object.remove("schema_version");
+    let draft = serde_json::from_value(value).map_err(|_| ResourceApplicationError::Internal)?;
+    let version = u64::try_from(record.version).map_err(|_| ResourceApplicationError::Internal)?;
+    let draft_generation =
+        u64::try_from(record.draft_generation).map_err(|_| ResourceApplicationError::Internal)?;
+    Ok(ResourceViewV1 {
+        schema_version: 1,
+        resource_id: resource_id.clone(),
+        resource_kind,
+        lifecycle_state: record
+            .lifecycle_state
+            .parse()
+            .map_err(|_| ResourceApplicationError::Internal)?,
+        gate_state: record
+            .gate_state
+            .parse()
+            .map_err(|_| ResourceApplicationError::Internal)?,
+        draft_generation,
+        version,
+        draft,
+        etag: resource_etag(resource_id, version),
+    })
 }
 
 fn new_id(kind: ResourceKind) -> Result<ResourceId, ResourceApplicationError> {

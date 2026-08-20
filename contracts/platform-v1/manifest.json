@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:e0b8e849deaf2ab643d5c934563ca0093eb235559b4aa8247e30da1d9baae4fe",
+  "contract_digest": "sha256:83ff8b345565705c04860d0763024f0cb1ae3f869d3094aac236f387f5a68016",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -15,10 +15,10 @@
       "sha256": "62f24aec86d3739c9bad753096be1b16e0aed5ceba658796fc66a12f2353558c"
     },
     {
-      "bytes": 1912,
+      "bytes": 1949,
       "media_type": "application/json",
       "path": "contracts/platform-v1/errors.json",
-      "sha256": "1fec1854eee31bc3f6a36f11f0d1b89449685fe77065645db3dc49b6bf662c38"
+      "sha256": "e57965ffe2ac2b5163fe6d962835bdd1b8de6477a1ac0e3a162b2e9c37e73f74"
     },
     {
       "bytes": 8262,
@@ -54,7 +54,7 @@
       "bytes": 3466,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/nominal-types.json",
-      "sha256": "8f1394b1ddaf0e0faf1c9ff90006bfe322a9bb6ee8fd60cae5bab5d3b310cd09"
+      "sha256": "aa1a848b053ce4577ff19cd7fed0c1e0759bca7bd2b952dc63551a1ed364d9d0"
     },
     {
       "bytes": 16831,
@@ -87,10 +87,10 @@
       "sha256": "a43cee5a2db18f9ce23ce8c5880d8b3a982c7ad81a907f3aadc14d3730330007"
     },
     {
-      "bytes": 3303,
+      "bytes": 3342,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
-      "sha256": "fd48917094463c2415d088ea2e4213c7f8782b88bd37f08a876e0c86d6074292"
+      "sha256": "fd1113a54bfc56d95cdf19f78510a86f1b9fd3f4b2d61d6e147cfb14dbd68355"
     },
     {
       "bytes": 1477,

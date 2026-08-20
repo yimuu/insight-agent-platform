@@ -9,10 +9,10 @@
   "reference_form": "urn:insight:platform:v1:nominal:<name>@sha256:<canonical-schema-digest>",
   "schemas": [
     {
-      "canonical_digest": "sha256:b5a461072ff1eb324fc4bdf95ea3be01038133cd96271aacae012b375f0740b7",
+      "canonical_digest": "sha256:ce40a10ce88d70e57bb46d66d1e04dd43cfba3792e983e941126aa57d5d43171",
       "name": "ApiProblem",
       "path": "schemas/nominal/api-problem.schema.json",
-      "pinned_reference": "urn:insight:platform:v1:nominal:ApiProblem@sha256:b5a461072ff1eb324fc4bdf95ea3be01038133cd96271aacae012b375f0740b7"
+      "pinned_reference": "urn:insight:platform:v1:nominal:ApiProblem@sha256:ce40a10ce88d70e57bb46d66d1e04dd43cfba3792e983e941126aa57d5d43171"
     },
     {
       "canonical_digest": "sha256:8fbbadad731437b96cff228a523b256698e181b168c5f4467592260cc8580e14",

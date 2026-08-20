@@ -1215,4 +1215,61 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         activated_agent.active_deployment_id.as_deref(),
         Some(AGENT_DEPLOYMENT_ID)
     );
+
+    let first_update_audit = audit(TENANT_ID, PRINCIPAL_ID, "7ce0", '1', '2');
+    let mut first_updated_draft = draft.clone();
+    first_updated_draft.display_name = "First replay-stable draft".to_owned();
+    let first_update = applied(
+        registry_command!(
+            repository,
+            update_resource_draft,
+            insight_platform_registry::UpdateResourceDraft {
+                audit: first_update_audit.clone(),
+                resource_id: id(RESOURCE_ID),
+                expected_resource_version: 8,
+                draft: first_updated_draft.clone(),
+            }
+        )
+        .unwrap(),
+    );
+    assert_eq!(first_update.version, 9);
+    assert_eq!(first_update.draft_generation, 2);
+
+    let mut second_updated_draft = draft;
+    second_updated_draft.display_name = "Later current draft".to_owned();
+    let second_update = applied(
+        registry_command!(
+            repository,
+            update_resource_draft,
+            insight_platform_registry::UpdateResourceDraft {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "7ce1", '3', '4'),
+                resource_id: id(RESOURCE_ID),
+                expected_resource_version: 9,
+                draft: second_updated_draft,
+            }
+        )
+        .unwrap(),
+    );
+    assert_eq!(second_update.version, 10);
+
+    let replay = registry_command!(
+        repository,
+        update_resource_draft,
+        insight_platform_registry::UpdateResourceDraft {
+            audit: first_update_audit,
+            resource_id: id(RESOURCE_ID),
+            expected_resource_version: 8,
+            draft: first_updated_draft,
+        }
+    )
+    .unwrap();
+    let CommandOutcome::Replayed(replayed) = replay else {
+        panic!("expected exact historical draft update replay");
+    };
+    assert_eq!(replayed.version, 9);
+    assert_eq!(replayed.draft_generation, 2);
+    assert_eq!(
+        replayed.payload.value["display_name"],
+        "First replay-stable draft"
+    );
 }
