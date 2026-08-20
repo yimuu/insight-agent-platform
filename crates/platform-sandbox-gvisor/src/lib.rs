@@ -4,6 +4,7 @@
 //! argument vectors executed without a shell, with an empty environment and one immutable runtime
 //! binary. There is deliberately no OCI/runc fallback.
 
+use async_trait::async_trait;
 use insight_platform_contracts::{ResourceId, ResourceKind, Sha256Digest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -226,13 +227,23 @@ pub struct SystemRunscDriver {
     config: GvisorRuntimeConfig,
 }
 
+#[async_trait]
+pub trait RunscDriver: Send + Sync {
+    async fn verify_runtime(&self) -> Result<(), GvisorRuntimeError>;
+
+    async fn execute(
+        &self,
+        plan: RunscCommandPlan,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError>;
+}
+
 impl SystemRunscDriver {
     pub fn new(config: GvisorRuntimeConfig) -> Result<Self, GvisorRuntimeError> {
         config.validate()?;
         Ok(Self { config })
     }
 
-    pub async fn verify_runtime(&self) -> Result<(), GvisorRuntimeError> {
+    async fn verify_runtime_inner(&self) -> Result<(), GvisorRuntimeError> {
         let output = self
             .execute(RunscCommandPlan::version(&self.config)?)
             .await?;
@@ -251,7 +262,7 @@ impl SystemRunscDriver {
         Ok(())
     }
 
-    pub async fn execute(
+    async fn execute_inner(
         &self,
         plan: RunscCommandPlan,
     ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
@@ -284,6 +295,122 @@ impl SystemRunscDriver {
         timeout(self.config.timeout(), capture)
             .await
             .map_err(|_| GvisorRuntimeError::TimedOut)?
+    }
+}
+
+#[async_trait]
+impl RunscDriver for SystemRunscDriver {
+    async fn verify_runtime(&self) -> Result<(), GvisorRuntimeError> {
+        self.verify_runtime_inner().await
+    }
+
+    async fn execute(
+        &self,
+        plan: RunscCommandPlan,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        self.execute_inner(plan).await
+    }
+}
+
+/// Closed single-Job lifecycle over one pinned `runsc` runtime.
+///
+/// The lifecycle never discovers an alternate runtime. A failed create/start is followed by a
+/// bounded force-kill/delete attempt so that a partial container cannot become an untracked warm
+/// sandbox. Cleanup failure never converts the original operation into success.
+pub struct GvisorSingleJobRuntime<D> {
+    config: GvisorRuntimeConfig,
+    driver: D,
+}
+
+impl<D> GvisorSingleJobRuntime<D>
+where
+    D: RunscDriver,
+{
+    pub fn new(config: GvisorRuntimeConfig, driver: D) -> Result<Self, GvisorRuntimeError> {
+        config.validate()?;
+        Ok(Self { config, driver })
+    }
+
+    pub async fn verify(&self) -> Result<(), GvisorRuntimeError> {
+        self.driver.verify_runtime().await
+    }
+
+    pub async fn create(
+        &self,
+        identity: &GvisorContainerIdentity,
+        bundle: &Path,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        let result = self
+            .driver
+            .execute(RunscCommandPlan::create(&self.config, identity, bundle)?)
+            .await;
+        if result.is_err() {
+            self.best_effort_destroy(identity).await;
+        }
+        result
+    }
+
+    pub async fn start(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        let result = self
+            .driver
+            .execute(RunscCommandPlan::start(&self.config, identity)?)
+            .await;
+        if result.is_err() {
+            self.best_effort_terminate(identity).await;
+            self.best_effort_destroy(identity).await;
+        }
+        result
+    }
+
+    pub async fn wait(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        self.driver
+            .execute(RunscCommandPlan::wait(&self.config, identity)?)
+            .await
+    }
+
+    pub async fn terminate(
+        &self,
+        identity: &GvisorContainerIdentity,
+        force: bool,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        self.driver
+            .execute(RunscCommandPlan::kill(&self.config, identity, force)?)
+            .await
+    }
+
+    pub async fn destroy(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        self.driver
+            .execute(RunscCommandPlan::delete(&self.config, identity)?)
+            .await
+    }
+
+    pub async fn recover_orphan(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<(), GvisorRuntimeError> {
+        let termination = self.terminate(identity, true).await;
+        let destruction = self.destroy(identity).await;
+        match (termination, destruction) {
+            (_, Ok(_)) => Ok(()),
+            (Err(error), Err(_)) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    async fn best_effort_terminate(&self, identity: &GvisorContainerIdentity) {
+        let _ = self.terminate(identity, true).await;
+    }
+
+    async fn best_effort_destroy(&self, identity: &GvisorContainerIdentity) {
+        let _ = self.destroy(identity).await;
     }
 }
 
@@ -324,7 +451,34 @@ pub enum GvisorRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use uuid::Uuid;
+
+    struct RecordingDriver {
+        operations: Arc<Mutex<Vec<RunscOperation>>>,
+        fail_on: Option<RunscOperation>,
+    }
+
+    #[async_trait]
+    impl RunscDriver for RecordingDriver {
+        async fn verify_runtime(&self) -> Result<(), GvisorRuntimeError> {
+            Ok(())
+        }
+
+        async fn execute(
+            &self,
+            plan: RunscCommandPlan,
+        ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+            self.operations.lock().unwrap().push(plan.operation);
+            if self.fail_on == Some(plan.operation) {
+                return Err(GvisorRuntimeError::CommandFailed);
+            }
+            Ok(RunscCommandOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
 
     fn id(kind: ResourceKind, _byte: u8) -> ResourceId {
         ResourceId::from_uuid_v7(kind, Uuid::now_v7()).unwrap()
@@ -401,6 +555,72 @@ mod tests {
         assert_eq!(
             invalid_identity.container_id(),
             Err(GvisorRuntimeError::InvalidIdentity)
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_create_is_force_deleted_without_runtime_fallback() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let runtime = GvisorSingleJobRuntime::new(
+            config(),
+            RecordingDriver {
+                operations: Arc::clone(&operations),
+                fail_on: Some(RunscOperation::Create),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            runtime
+                .create(&identity(), Path::new("/var/lib/insight/bundles/job-1"))
+                .await,
+            Err(GvisorRuntimeError::CommandFailed)
+        );
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![RunscOperation::Create, RunscOperation::Delete]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_start_kills_and_deletes_the_exact_container() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let runtime = GvisorSingleJobRuntime::new(
+            config(),
+            RecordingDriver {
+                operations: Arc::clone(&operations),
+                fail_on: Some(RunscOperation::Start),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.start(&identity()).await,
+            Err(GvisorRuntimeError::CommandFailed)
+        );
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![
+                RunscOperation::Start,
+                RunscOperation::Kill,
+                RunscOperation::Delete
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_recovery_force_kills_before_delete() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let runtime = GvisorSingleJobRuntime::new(
+            config(),
+            RecordingDriver {
+                operations: Arc::clone(&operations),
+                fail_on: None,
+            },
+        )
+        .unwrap();
+        runtime.recover_orphan(&identity()).await.unwrap();
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec![RunscOperation::Kill, RunscOperation::Delete]
         );
     }
 }

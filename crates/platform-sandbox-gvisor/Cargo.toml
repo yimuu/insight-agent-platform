@@ -10,6 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+async-trait.workspace = true
 insight-platform-contracts.workspace = true
 serde.workspace = true
 sha2.workspace = true
