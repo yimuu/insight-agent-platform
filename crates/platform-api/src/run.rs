@@ -4,23 +4,31 @@ use axum::{
     body::Bytes,
     extract::{rejection::JsonRejection, DefaultBodyLimit, Extension, Path, State},
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{sse::Event, IntoResponse, Response, Sse},
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
+use futures::stream;
 use insight_platform_contracts::{
-    canonical_digest, ApiProblem, ApiProblemCode, DataClassification, ResourceId, ResourceKind,
-    RunState, Sha256Digest, UtcTimestamp, ValueRef, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
+    canonical_digest, ApiProblem, ApiProblemCode, DataClassification, DurablePublicRunEventData,
+    EventDurability, OpaqueRunEventCursor, PublicRunEvent, PublicRunEventSourceKind,
+    PublicRunEventType, ResourceId, ResourceKind, RunState, Sha256Digest, UtcTimestamp, ValueRef,
+    MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
+use ring::hmac;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
 const RUN_READ_DEADLINE_MILLISECONDS: i64 = 5_000;
 const RUN_COMMAND_DEADLINE_MILLISECONDS: i64 = 10_000;
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
 const MAX_RUN_REQUEST_BYTES: usize = 1_048_576;
 const IF_MATCH: &str = "if-match";
+const LAST_EVENT_ID: &str = "last-event-id";
+const RUN_EVENT_PAGE_LIMIT: u16 = 128;
+const RUN_EVENT_CURSOR_TTL_SECONDS: i64 = 900;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -108,6 +116,153 @@ pub struct ReadRunIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunEventProjectionV1 {
+    pub event_id: ResourceId,
+    pub sequence: u64,
+    pub event_type: PublicRunEventType,
+    pub source_kind: PublicRunEventSourceKind,
+    pub source_id: ResourceId,
+    pub source_projection_version: u64,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReadRunEventsIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub run_id: ResourceId,
+    pub after_sequence: u64,
+    pub limit: u16,
+    pub deadline: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunEventCursorError {
+    Invalid,
+    Expired,
+}
+
+pub trait RunEventCursorCodec: Send + Sync {
+    fn encode(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        run_id: &ResourceId,
+        sequence: u64,
+        expires_at: DateTime<Utc>,
+    ) -> Result<OpaqueRunEventCursor, RunEventCursorError>;
+
+    fn decode(
+        &self,
+        cursor: &str,
+        principal: &AuthenticatedPrincipal,
+        run_id: &ResourceId,
+        now: DateTime<Utc>,
+    ) -> Result<u64, RunEventCursorError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct HmacRunEventCursorCodec {
+    key: hmac::Key,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunEventCursorClaims {
+    schema_version: u32,
+    scope_digest: Sha256Digest,
+    run_id: ResourceId,
+    sequence: u64,
+    expires_at_epoch_seconds: i64,
+}
+
+impl HmacRunEventCursorCodec {
+    pub fn install(key: &[u8]) -> Result<Self, RunEventCursorError> {
+        if !(32..=64).contains(&key.len()) {
+            return Err(RunEventCursorError::Invalid);
+        }
+        Ok(Self {
+            key: hmac::Key::new(hmac::HMAC_SHA256, key),
+        })
+    }
+}
+
+impl RunEventCursorCodec for HmacRunEventCursorCodec {
+    fn encode(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        run_id: &ResourceId,
+        sequence: u64,
+        expires_at: DateTime<Utc>,
+    ) -> Result<OpaqueRunEventCursor, RunEventCursorError> {
+        let claims = RunEventCursorClaims {
+            schema_version: 1,
+            scope_digest: run_event_scope_digest(principal)?,
+            run_id: run_id.clone(),
+            sequence,
+            expires_at_epoch_seconds: expires_at.timestamp(),
+        };
+        let payload = serde_jcs::to_vec(&claims).map_err(|_| RunEventCursorError::Invalid)?;
+        let signature = hmac::sign(&self.key, &payload);
+        OpaqueRunEventCursor::new(format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(payload),
+            URL_SAFE_NO_PAD.encode(signature.as_ref())
+        ))
+        .map_err(|_| RunEventCursorError::Invalid)
+    }
+
+    fn decode(
+        &self,
+        cursor: &str,
+        principal: &AuthenticatedPrincipal,
+        run_id: &ResourceId,
+        now: DateTime<Utc>,
+    ) -> Result<u64, RunEventCursorError> {
+        let (payload, signature) = cursor.split_once('.').ok_or(RunEventCursorError::Invalid)?;
+        if signature.contains('.') {
+            return Err(RunEventCursorError::Invalid);
+        }
+        let payload = URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|_| RunEventCursorError::Invalid)?;
+        let signature = URL_SAFE_NO_PAD
+            .decode(signature)
+            .map_err(|_| RunEventCursorError::Invalid)?;
+        hmac::verify(&self.key, &payload, &signature).map_err(|_| RunEventCursorError::Invalid)?;
+        let claims: RunEventCursorClaims =
+            serde_json::from_slice(&payload).map_err(|_| RunEventCursorError::Invalid)?;
+        if claims.schema_version != 1
+            || claims.run_id != *run_id
+            || claims.scope_digest != run_event_scope_digest(principal)?
+            || claims.sequence == 0
+        {
+            return Err(RunEventCursorError::Invalid);
+        }
+        if claims.expires_at_epoch_seconds <= now.timestamp() {
+            return Err(RunEventCursorError::Expired);
+        }
+        Ok(claims.sequence)
+    }
+}
+
+fn run_event_scope_digest(
+    principal: &AuthenticatedPrincipal,
+) -> Result<Sha256Digest, RunEventCursorError> {
+    canonical_digest(&serde_json::json!({
+        "binding_generation": principal.binding_generation,
+        "binding_version": principal.binding_version,
+        "permissions": principal.permissions,
+        "principal_id": principal.principal_id,
+        "principal_kind": principal.principal_kind,
+        "principal_version": principal.principal_version,
+        "schema_version": 1,
+        "tenant_id": principal.tenant_id,
+    }))
+    .map_err(|_| RunEventCursorError::Invalid)?
+    .parse()
+    .map_err(|_| RunEventCursorError::Invalid)
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateRunIntent {
     pub principal: AuthenticatedPrincipal,
@@ -136,6 +291,8 @@ pub enum RunApplicationError {
     Conflict,
     IdempotencyConflict,
     NotTerminal,
+    CursorInvalid,
+    CursorExpired,
     Unavailable,
     Internal,
 }
@@ -166,6 +323,12 @@ pub trait RunApplication: Send + Sync {
     ) -> Result<RunResultViewV1, RunApplicationError> {
         Err(RunApplicationError::Internal)
     }
+    async fn read_run_events(
+        &self,
+        _intent: ReadRunEventsIntent,
+    ) -> Result<Vec<RunEventProjectionV1>, RunApplicationError> {
+        Err(RunApplicationError::Internal)
+    }
     async fn read_run(&self, intent: ReadRunIntent) -> Result<RunViewV1, RunApplicationError>;
 }
 
@@ -186,11 +349,21 @@ impl RunClock for SystemRunClock {
 pub struct RunHttpState {
     application: Arc<dyn RunApplication>,
     clock: Arc<dyn RunClock>,
+    event_cursor_codec: Option<Arc<dyn RunEventCursorCodec>>,
 }
 
 impl RunHttpState {
     pub fn new(application: Arc<dyn RunApplication>, clock: Arc<dyn RunClock>) -> Self {
-        Self { application, clock }
+        Self {
+            application,
+            clock,
+            event_cursor_codec: None,
+        }
+    }
+
+    pub fn with_event_cursor_codec(mut self, codec: Arc<dyn RunEventCursorCodec>) -> Self {
+        self.event_cursor_codec = Some(codec);
+        self
     }
 }
 
@@ -202,8 +375,116 @@ pub fn build_run_router(state: RunHttpState) -> Router {
             get(read_run).post(control_run_action),
         )
         .route("/v1/runs/{run_id}/result", get(read_run_result))
+        .route("/v1/runs/{run_id}/events", get(read_run_events))
         .layer(DefaultBodyLimit::max(MAX_RUN_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn read_run_events(
+    State(state): State<RunHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(RunApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(RunApplicationError::Unauthenticated);
+    }
+    let run_id = match run_id.parse::<ResourceId>() {
+        Ok(id) if id.kind() == ResourceKind::Run => id,
+        _ => return problem(RunApplicationError::NotFound),
+    };
+    let Some(codec) = state.event_cursor_codec.as_ref() else {
+        return problem(RunApplicationError::Unavailable);
+    };
+    let now = state.clock.now();
+    let after_sequence = match single_header(&headers, LAST_EVENT_ID) {
+        Ok(None) => 0,
+        Ok(Some(cursor)) => match codec.decode(cursor, &principal, &run_id, now) {
+            Ok(sequence) => sequence,
+            Err(RunEventCursorError::Invalid) => {
+                return problem(RunApplicationError::CursorInvalid)
+            }
+            Err(RunEventCursorError::Expired) => {
+                return problem(RunApplicationError::CursorExpired)
+            }
+        },
+        Err(()) => return problem(RunApplicationError::CursorInvalid),
+    };
+    let projections = match state
+        .application
+        .read_run_events(ReadRunEventsIntent {
+            principal: principal.clone(),
+            run_id: run_id.clone(),
+            after_sequence,
+            limit: RUN_EVENT_PAGE_LIMIT,
+            deadline: now + Duration::milliseconds(RUN_READ_DEADLINE_MILLISECONDS),
+        })
+        .await
+    {
+        Ok(events) => events,
+        Err(error) => return problem(error),
+    };
+    let expires_at = now + Duration::seconds(RUN_EVENT_CURSOR_TTL_SECONDS);
+    let mut encoded = Vec::with_capacity(projections.len());
+    for projection in projections {
+        let cursor = match codec.encode(&principal, &run_id, projection.sequence, expires_at) {
+            Ok(cursor) => cursor,
+            Err(_) => return problem(RunApplicationError::Internal),
+        };
+        let data = DurablePublicRunEventData {
+            source_kind: projection.source_kind,
+            source_id: projection.source_id,
+            source_projection_version: projection.source_projection_version,
+            safe_summary: None,
+        };
+        let event = PublicRunEvent {
+            event_id: Some(projection.event_id),
+            run_id: run_id.clone(),
+            cursor: Some(cursor.clone()),
+            sequence: Some(projection.sequence),
+            schema_version: 1,
+            event_type: projection.event_type,
+            durability: EventDurability::Durable,
+            occurred_at: UtcTimestamp::from_datetime(projection.occurred_at),
+            data: match serde_json::to_value(data) {
+                Ok(data) => data,
+                Err(_) => return problem(RunApplicationError::Internal),
+            },
+        };
+        if event.validate().is_err() {
+            return problem(RunApplicationError::Internal);
+        }
+        let frame = match Event::default()
+            .id(cursor.as_str())
+            .event(event.event_type.as_str())
+            .json_data(event)
+        {
+            Ok(frame) => frame,
+            Err(_) => return problem(RunApplicationError::Internal),
+        };
+        encoded.push(Ok::<_, Infallible>(frame));
+    }
+    let mut response = Sse::new(stream::iter(encoded)).into_response();
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private, max-age=0"),
+    );
+    response
+}
+
+fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, ()> {
+    let mut values = headers.get_all(name).iter();
+    let first = match values.next() {
+        Some(value) => value.to_str().map_err(|_| ())?,
+        None => return Ok(None),
+    };
+    if values.next().is_some() || first.is_empty() || first.len() > 4_096 {
+        return Err(());
+    }
+    Ok(Some(first))
 }
 
 async fn read_run_result(
@@ -570,6 +851,18 @@ fn problem(error: RunApplicationError) -> Response {
             "The Run is not terminal.",
             false,
         ),
+        RunApplicationError::CursorInvalid => (
+            StatusCode::BAD_REQUEST,
+            ApiProblemCode::CursorInvalid,
+            "The Run event cursor is invalid.",
+            false,
+        ),
+        RunApplicationError::CursorExpired => (
+            StatusCode::BAD_REQUEST,
+            ApiProblemCode::CursorExpired,
+            "The Run event cursor has expired.",
+            false,
+        ),
         RunApplicationError::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             ApiProblemCode::TemporarilyUnavailable,
@@ -610,7 +903,10 @@ fn problem(error: RunApplicationError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
     use insight_platform_contracts::{
         AuthnStrength, Permission, PermissionSet, PrincipalKind, Sha256Digest,
     };
@@ -744,6 +1040,105 @@ mod tests {
                 },
             })
         }
+
+        async fn read_run_events(
+            &self,
+            intent: ReadRunEventsIntent,
+        ) -> Result<Vec<RunEventProjectionV1>, RunApplicationError> {
+            Ok((intent.after_sequence < 1)
+                .then(|| RunEventProjectionV1 {
+                    event_id: id(ResourceKind::Event, 41),
+                    sequence: 1,
+                    event_type: PublicRunEventType::RunQueued,
+                    source_kind: PublicRunEventSourceKind::Run,
+                    source_id: intent.run_id,
+                    source_projection_version: 1,
+                    occurred_at: Utc::now(),
+                })
+                .into_iter()
+                .collect())
+        }
+    }
+
+    #[test]
+    fn run_event_cursor_is_scoped_signed_and_expiring() {
+        let now = Utc::now();
+        let codec = HmacRunEventCursorCodec::install(&[7_u8; 32]).unwrap();
+        let run_id = id(ResourceKind::Run, 3);
+        let authorized = principal(now);
+        let cursor = codec
+            .encode(&authorized, &run_id, 7, now + Duration::minutes(5))
+            .unwrap();
+        assert_eq!(
+            codec.decode(cursor.as_str(), &authorized, &run_id, now),
+            Ok(7)
+        );
+
+        let mut other_principal = authorized.clone();
+        other_principal.principal_id = id(ResourceKind::Principal, 9);
+        assert_eq!(
+            codec.decode(cursor.as_str(), &other_principal, &run_id, now),
+            Err(RunEventCursorError::Invalid)
+        );
+        assert_eq!(
+            codec.decode(
+                cursor.as_str(),
+                &authorized,
+                &run_id,
+                now + Duration::minutes(6)
+            ),
+            Err(RunEventCursorError::Expired)
+        );
+        let mut tampered = cursor.as_str().as_bytes().to_vec();
+        tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+        assert_eq!(
+            codec.decode(
+                std::str::from_utf8(&tampered).unwrap(),
+                &authorized,
+                &run_id,
+                now
+            ),
+            Err(RunEventCursorError::Invalid)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_events_emit_only_valid_durable_sse_projections() {
+        let now = Utc::now();
+        let codec: Arc<dyn RunEventCursorCodec> =
+            Arc::new(HmacRunEventCursorCodec::install(&[7_u8; 32]).unwrap());
+        let router = build_run_router(
+            RunHttpState::new(Arc::new(FixtureApplication), Arc::new(FixedClock(now)))
+                .with_event_cursor_codec(codec),
+        );
+        let run_id = id(ResourceKind::Run, 3);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/runs/{run_id}/events"))
+                    .extension(principal(now))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
+        assert!(response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream"));
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("event: run.queued"));
+        assert!(body.contains(&format!("\"run_id\":\"{run_id}\"")));
+        assert!(body.contains("\"source_kind\":\"run\""));
+        assert!(!body.contains("payload"));
+        assert!(!body.contains("principal"));
+        assert!(body.lines().any(|line| line.starts_with("id: ")));
     }
 
     #[tokio::test]

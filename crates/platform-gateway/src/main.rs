@@ -33,8 +33,9 @@ use insight_platform_api::{
         UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
     run::{
-        build_run_router, run_etag, ControlRunIntent, CreateRunIntent, ReadRunIntent,
-        RunApplication, RunApplicationError, RunHttpState, RunResultViewV1, RunViewV1,
+        build_run_router, run_etag, ControlRunIntent, CreateRunIntent, HmacRunEventCursorCodec,
+        ReadRunEventsIntent, ReadRunIntent, RunApplication, RunApplicationError,
+        RunEventCursorCodec, RunEventProjectionV1, RunHttpState, RunResultViewV1, RunViewV1,
         SystemRunClock,
     },
     task::{
@@ -70,6 +71,7 @@ use insight_platform_registry::{
 };
 use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskState};
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use std::{
     error::Error,
@@ -85,7 +87,10 @@ use std::{
 const CONFIG_PATH_ENV: &str = "PLATFORM_GATEWAY_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_GATEWAY_CONFIG_DIGEST";
 const DATABASE_URL_ENV: &str = "PLATFORM_GATEWAY_DATABASE_URL";
+const RUN_EVENT_CURSOR_KEY_PATH_ENV: &str = "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH";
+const RUN_EVENT_CURSOR_KEY_DIGEST_ENV: &str = "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
+const MAX_RUN_EVENT_CURSOR_KEY_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -715,6 +720,43 @@ impl RunApplication for PgRuns {
             content_digest: result.content_digest,
             value: result.value,
         })
+    }
+
+    async fn read_run_events(
+        &self,
+        intent: ReadRunEventsIntent,
+    ) -> Result<Vec<RunEventProjectionV1>, RunApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(RunApplicationError::Unavailable);
+        }
+        self.0
+            .read_public_run_events_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.run_id,
+                intent.after_sequence,
+                intent.limit,
+            )
+            .await
+            .map_err(map_run_repository_error)?
+            .into_iter()
+            .map(|event| {
+                let source_kind = event
+                    .event_type
+                    .durable_source_kind()
+                    .ok_or(RunApplicationError::Internal)?;
+                Ok(RunEventProjectionV1 {
+                    event_id: event.event_id,
+                    sequence: event.sequence,
+                    event_type: event.event_type,
+                    source_kind,
+                    source_id: event.source_id,
+                    source_projection_version: event.source_projection_version,
+                    occurred_at: event.occurred_at,
+                })
+            })
+            .collect()
     }
 }
 
@@ -1647,6 +1689,7 @@ fn build_router(
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
     validator_digest: Sha256Digest,
     validation_profile_digest: Sha256Digest,
+    run_event_cursor_codec: Arc<dyn RunEventCursorCodec>,
 ) -> Router {
     let authentication = PublicAuthenticationState::new(
         Arc::new(verifier),
@@ -1665,10 +1708,13 @@ fn build_router(
         }),
         Arc::new(SystemResourceClock),
     ));
-    let run = build_run_router(RunHttpState::new(
-        Arc::new(PgRuns(repository.clone())),
-        Arc::new(SystemRunClock),
-    ));
+    let run = build_run_router(
+        RunHttpState::new(
+            Arc::new(PgRuns(repository.clone())),
+            Arc::new(SystemRunClock),
+        )
+        .with_event_cursor_codec(run_event_cursor_codec),
+    );
     let task = build_task_router(TaskHttpState::new(
         Arc::new(PgTasks(repository.clone())),
         Arc::new(SystemTaskClock),
@@ -1767,6 +1813,35 @@ fn read_bounded_file(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>, Proce
     Ok(bytes)
 }
 
+fn load_run_event_cursor_codec() -> Result<Arc<dyn RunEventCursorCodec>, ProcessError> {
+    let path = required_absolute_path(RUN_EVENT_CURSOR_KEY_PATH_ENV)?;
+    let key = read_bounded_file(&path, MAX_RUN_EVENT_CURSOR_KEY_BYTES)?;
+    let expected: Sha256Digest = required(RUN_EVENT_CURSOR_KEY_DIGEST_ENV)?
+        .parse()
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    install_run_event_cursor_codec(&key, &expected)
+}
+
+fn install_run_event_cursor_codec(
+    key: &[u8],
+    expected: &Sha256Digest,
+) -> Result<Arc<dyn RunEventCursorCodec>, ProcessError> {
+    let actual = Sha256::digest(key);
+    let hexadecimal = actual
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let actual: Sha256Digest = format!("sha256:{hexadecimal}")
+        .parse()
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    if &actual != expected {
+        return Err(ProcessError::InvalidConfiguration);
+    }
+    HmacRunEventCursorCodec::install(key)
+        .map(|codec| Arc::new(codec) as Arc<dyn RunEventCursorCodec>)
+        .map_err(|_| ProcessError::InvalidConfiguration)
+}
+
 async fn shutdown_signal(grace: Duration) {
     let _ = tokio::signal::ctrl_c().await;
     tokio::time::sleep(grace.min(Duration::from_secs(1))).await;
@@ -1783,6 +1858,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .install()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let run_event_cursor_codec = load_run_event_cursor_codec()?;
     let database_url = required(DATABASE_URL_ENV)?;
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
@@ -1802,6 +1878,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             verifier,
             config.registry_validator_digest,
             config.registry_validation_profile_digest,
+            run_event_cursor_codec,
         ),
     )
     .with_graceful_shutdown(shutdown_signal(Duration::from_millis(
@@ -1837,6 +1914,10 @@ mod tests {
         }
     }
 
+    fn test_run_event_cursor_codec() -> Arc<dyn RunEventCursorCodec> {
+        Arc::new(HmacRunEventCursorCodec::install(&[7_u8; 32]).unwrap())
+    }
+
     #[test]
     fn process_config_rejects_unbounded_or_ambiguous_values() {
         let mut config = ProcessConfig {
@@ -1857,6 +1938,31 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn run_event_cursor_key_requires_exact_digest_and_bounded_entropy() {
+        let key = [7_u8; 32];
+        let hexadecimal = Sha256::digest(key)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let expected: Sha256Digest = format!("sha256:{hexadecimal}").parse().unwrap();
+        assert!(install_run_event_cursor_codec(&key, &expected).is_ok());
+        assert!(matches!(
+            install_run_event_cursor_codec(&key, &fixed_digest('0')),
+            Err(ProcessError::InvalidConfiguration)
+        ));
+        let short_key = [7_u8; 31];
+        let hexadecimal = Sha256::digest(short_key)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let short_digest: Sha256Digest = format!("sha256:{hexadecimal}").parse().unwrap();
+        assert!(matches!(
+            install_run_event_cursor_codec(&short_key, &short_digest),
+            Err(ProcessError::InvalidConfiguration)
+        ));
+    }
+
     #[tokio::test]
     async fn health_is_public_but_operation_routes_require_verified_authentication() {
         let pool = PgPoolOptions::new()
@@ -1867,6 +1973,7 @@ mod tests {
             oidc_config().install().unwrap(),
             fixed_digest('1'),
             fixed_digest('2'),
+            test_run_event_cursor_codec(),
         );
         let live = router
             .clone()

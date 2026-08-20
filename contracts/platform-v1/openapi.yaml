@@ -82,6 +82,44 @@ paths:
         "404": {$ref: "#/components/responses/ApiProblem"}
         "409": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/events:
+    get:
+      operationId: streamRunEvents
+      summary: Read the next bounded page of durable public Run events as SSE
+      description: >-
+        Returns at most 128 ordered durable events and then closes the stream. Reconnect with the
+        last received opaque SSE id in Last-Event-ID. The signed cursor is scoped to the current
+        principal binding and Run, expires after 15 minutes, and is never an event authority.
+      tags: [Runs]
+      x-insight-permission: runtime.read
+      x-insight-idempotency: read_only
+      x-insight-event-authority: postgres
+      x-insight-maximum-events-per-response: 128
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Opaque signed cursor emitted as the id of the last accepted SSE event.
+          schema: {$ref: "#/components/schemas/OpaqueRunEventCursor"}
+      responses:
+        "200":
+          description: A finite ordered SSE page containing only closed public event projections.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              x-insight-json-event-data:
+                envelope: PublicRunEvent
+                durable-payload-projection:
+                  $ref: "#/components/schemas/DurablePublicRunEventPayload"
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /runs/{run_id}:pause:
     post:
       operationId: pauseRun
