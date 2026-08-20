@@ -1,15 +1,15 @@
-# Platform v2 00～18 Cross-review（CR-166）
+# Platform v2 00～18 Cross-review（CR-167）
 
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation Authorized |
 | 日期 | 2026-08-21 |
 | 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md |
-| 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复和fixture闭包 |
+| 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft authority和fixture闭包 |
 
 ## 1. 结论
 
-CR-166取代CR-165的过度设计。全量审查确认首版目标收敛为：
+CR-167继承CR-166的简化结论，并消解实施反馈发现的Draft/ResourceVersion双重current authority歧义。全量审查确认首版目标收敛为：
 
 - Sandbox = restricted WASI + single-Job gVisor；microVM/Firecracker/KVM推迟；
 - MCP = remote Streamable HTTP；Managed stdio和persistent Sandbox session推迟；
@@ -20,19 +20,22 @@ CR-166取代CR-165的过度设计。全量审查确认首版目标收敛为：
 - storage/KMS = deployment-time static binding；无tenant self-service dynamic binding API；
 - public protocol = `insight.platform/v1` + `/v1`；clean cut，无`/v2`或兼容层；
 - target persistence = schema contract v7、23张总表/22张业务表，不增表；
+- editable Draft = Resource aggregate的唯一current snapshot；publication才创建immutable ResourceVersion；
 - implementation plan = 四阶段，证据按层级归属，不复制proof。
 
-本次没有P0/P1规范冲突。2026-08-20 owner已授权按本计划执行全部spec00～18，受影响规范已作为同一合同批次
-推进为Accepted。Accepted仍不表示target已经成为current behavior；只有通过实现与资格门禁后才能推进状态。
+本次实施反馈发现并消解一个P1合同歧义：02曾把Draft描述为mutable ResourceVersion，而17同时要求Version identity路由；这会与
+Resource current payload形成第二current authority。02先修订为Resource-owned Draft，17随后改为`/draft`命令；02～18在复核期间
+退回Architecture Revision，并在本次00～18全量复核无新增P0/P1后作为同一批次重新推进为Accepted。Accepted仍不表示target已经成为
+current behavior；只有通过实现与资格门禁后才能推进状态。
 
 ## 2. 文档状态与依赖
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / Implementation Authorized | CR-166已写回并获统一acceptance |
+| 00 | Accepted / Implementation Authorized | CR-167已写回并获统一acceptance |
 | 01～10 | Accepted | 依赖顺序与owner边界已统一 |
 | 11 Skill | Accepted / Implementation In Progress | 未改变Skill“方法包、非运行时”语义；脚本仍必须发布为Sandbox Capability |
-| 12～18 | Accepted | 已按CR-166重写/修订并获统一acceptance |
+| 12～18 | Accepted | 已按CR-167复核/修订并获统一acceptance |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | Accepted / Implementing | 从Accepted合同生成；仍不表示current behavior |
@@ -44,7 +47,7 @@ CR-166取代CR-165的过度设计。全量审查确认首版目标收敛为：
 
 | 业务事实 | 唯一current-state authority | 历史/调度映射 |
 |---|---|---|
-| Resource definition/head | Resource/ResourceVersion/Deployment | Event/Outbox |
+| Resource Draft/definition/head | Resource current Draft / immutable ResourceVersion / Deployment | Event/Outbox |
 | Run/Node control | Run/NodeExecution | Job/Event/Outbox |
 | Capability business call | CapabilityInvocation | Job/Event/Receipt |
 | Child agent | child Run + typed parent link | Job/Event/Receipt |
@@ -84,7 +87,11 @@ JSONB统一要求：`schema_version`、closed validation、nominal IDs、hard si
 canonical serialization、digest和immutable-after-publication。低频evidence/detail进JSONB，tenant、owner、state、version、lease、
 scheduling time与hot predicate保留typed relational columns。
 
-schema contract从当前v6到目标v7的变化只是clean-cut ID/owner/snapshot收敛，不新增表。
+Draft只存在于Resource current payload并由Resource projection version + draft generation CAS；validation evidence绑定exact generation与
+document digest。publication在同一事务创建immutable ResourceVersion batch并推进Resource projection。`resource_versions`不保存mutable
+Draft row，Event也不成为Draft current projection。
+
+checked-in schema contract v7只承载clean-cut ID/owner/snapshot收敛，不新增表，也不为Draft增加第二authority。
 
 ## 6. 错误与结果
 
@@ -211,7 +218,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 14. 本次冲突消解
 
-| 原冲突 | CR-166 resolution |
+| 原冲突 | CR-167 resolution |
 |---|---|
 | `SandboxJobId`/同UUID alias与shared Job冲突 | 只保留JobId，RunValueId独立；无Sandbox child aggregate |
 | ArtifactLink stored owner fence会随owner正常推进而失效 | stored version只是create-time CAS evidence；read不与current version比较；release另携current expected version |
@@ -221,10 +228,11 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 | Artifact八role权限与容量矩阵过度分裂 | 收敛为Gateway/Data Worker/Maintenance三role，内部用closed caller capability区分 |
 | microVM/Managed stdio在首版引入Provider/session/child Job恢复 | Sandbox只WASI+gVisor，MCP只remote HTTP，全部推迟 |
 | direct runsc嵌套Pod同时要求无host/cgroup/runtime权限，拓扑不可启动 | ADR-0002：受限Launcher创建admission-locked `RuntimeClass=runsc` single-Job Pod；guest无Kubernetes API，Job仍是唯一physical-work authority |
+| 02把Draft写成mutable ResourceVersion、17又要求Version validate/publish route | Draft由Resource aggregate唯一拥有；17使用`/draft` update/validate/publish，publication后才有immutable Version GET identity |
 
 ## 15. Acceptance 记录
 
-CR-166及2026-08-21实现反馈cross-review的以下门禁已用于把00～10、12～18、ADR-0001、ADR-0002和implementation plan作为同一合同批次accept：
+CR-167及2026-08-21实现反馈cross-review的以下门禁已用于把00～18、ADR-0001、ADR-0002和implementation plan作为同一合同批次accept：
 
 1. `rg` stale-contract scan确认microVM、Managed stdio、Installation Release、ManagementOperation、
    Model Artifact Producer和八role只出现在历史/否定/明确推迟语境，不再是首版正向requirement；
@@ -235,6 +243,8 @@ CR-166及2026-08-21实现反馈cross-review的以下门禁已用于把00～10、
 6. gVisor topology复核确认Launcher Kubernetes权限不传播给Controller/WASI/guest，admission与RBAC是结构性双闸，Pod status不成为第二Job authority。
    Launcher process generation由同Pod非特权attestor经shared PID namespace与Pod-local UDS封装；只有Launcher container持有
    scoped projected Kubernetes token，attestor/guest均无API或host authority。
+7. 逐份复核03～16对ResourceVersion的引用只指published immutable revision；05与11已有“current Draft + validation + atomic publish”语义，
+   12的Dataset Generation仍由owner Job原子创建immutable version，均不需要mutable Version row或新表。
 
 ## 16. 未决项
 

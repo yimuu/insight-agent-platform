@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation Authorized |
-| 日期 | 2026-08-20 |
+| 日期 | 2026-08-21 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -16,7 +16,8 @@
 > deferred trigger，已经停止继续实施。共享 Resource/Job/Task/Event/Receipt 模型的首轮cross-review曾完成；2026-08-15因
 > CR-165曾把Installation Release、Model Artifact Producer和八类Artifact角色引入首版；2026-08-20的CR-166确认该闭包过度设计，
 > 改由GitOps发布、Inline-only Model、三类Artifact角色、WASI+gVisor和remote-only MCP收敛首版。CR-166已完成全量cross-review，
-> 相关规范已完成Acceptance并进入实施授权。旧候选不得作为新实现兼容基线。
+> 2026-08-21的CR-167进一步确认editable Draft只由Resource aggregate拥有，publication才创建immutable ResourceVersion，并完成
+> 00～18全量复核。相关规范已完成Acceptance并进入实施授权。旧候选不得作为新实现兼容基线。
 
 ## 1. 决策摘要
 
@@ -170,7 +171,7 @@ Draft
 9. MCP Tool、Resource、Prompt 与 Task 分别保持各自语义，不通过通用 JSON 丢失安全元数据；
 10. 版本、状态机、事件和公开错误码均通过 machine-readable conformance suite。
 
-## 8. CR-166 简化结论与下一步
+## 8. CR-166/CR-167 简化结论与下一步
 
 2026-08-20的CR-166撤销CR-165中超出首版需要的最终形态设计，并已完成受影响规范的全量cross-review：
 
@@ -187,18 +188,21 @@ Draft
 - 首版公共`/v1`只包含Agent/Skill/Capability管理、Run、Task、Artifact、MCP HTTP binding和Run SSE；
 - qualification按开发门禁与发布门禁分层，A～G不持久化为运行时GateResult/ReleaseManifest。
 
+2026-08-21的CR-167在上述闭包内消解Draft authority歧义：Resource拥有唯一current editable Draft及validation fence，
+publication才创建immutable ResourceVersion；public management API因此使用`/draft` update/validate/publish，不公开mutable Version identity。
+
 上述决策减少目标服务、状态机、Schema和资格组合，但不降低PostgreSQL durable Job、Receipt幂等、Event/Outbox原子性、Run冻结binding、
 tenant/permission/quota、lease fence、Artifact content integrity及Sandbox物理隔离。
 
 ### 8.1 当前证据边界（非规范性）
 
-当前checked-in persistence baseline仍是23张总表/22张业务表、schema contract v6和单一`0001_platform_baseline.sql`。仓库有
-CR-166之前候选架构的多类functional fixture，但未按CR-166四阶段重新对照和qualification，不能据此标记任一新phase完成。
+当前checked-in persistence baseline是23张总表/22张业务表、schema contract v7和单一`0001_platform_baseline.sql`。仓库有
+CR-167之前候选架构的多类functional fixture；只有已按CR-167重新对照且通过适用门禁的批次可计为实现证据，尚不能据此宣称全部phase完成。
 
 仓库中已有的microVM/Firecracker、Managed stdio session和Model Artifact Producer候选代码不再构成首版目标证据；后续实现批次应先从
 registry、runtime manifest、RPC、Helm和测试入口中删除或隔离这些非目标路径，再补齐gVisor、三角色Artifact和最小`/v1`。切除旧候选不得
 恢复host execution、plain runc或第二持久状态权威。
 
-精确实施顺序只以[implementation-plan.md](implementation-plan.md)为准。所有本次受影响规范已Reviewed但未Accepted/Implemented，
-不能声明新的API、schema v7、部署拓扑、容量数字或qualification结果是当前行为。cutover前当前行为继续以
+精确实施顺序只以[implementation-plan.md](implementation-plan.md)为准。本次受影响规范已经CR-167复核并Accepted，但Accepted
+本身不声明新的API、部署拓扑、容量数字或qualification结果是当前行为。cutover前当前行为继续以
 [docs/current](../../current/README.md)为准。

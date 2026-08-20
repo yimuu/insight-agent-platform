@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted |
-| 日期 | 2026-08-20 |
+| 日期 | 2026-08-21 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
 
@@ -61,6 +61,9 @@ struct Resource {
     tenant_id: TenantId,
     kind: ResourceKind,
     name: ResourceName,
+    draft_generation: u64,
+    draft: TypedDraftPayload,
+    validation: Option<ValidationSummary>,
     active_version_id: Option<ResourceVersionId>,
     lifecycle_state: ResourceLifecycleState,
     projection_version: u64,
@@ -70,8 +73,10 @@ struct Resource {
 ResourceKind是closed registry，至少包含Agent、Skill、CapabilityInterface、CapabilityImplementation、ContextSource、ContextDataset、
 ModelProvider、ModelProfile、McpServer、Policy、SandboxRuntime和SandboxProfile。shared table不消除domain payload的nominal type。
 
-Resource拥有name/current head/lifecycle。ResourceVersion拥有immutable definition，不复制active state。并发head mutation使用
-expected projection version，tenant + kind + normalized name唯一。
+Resource拥有name、唯一current editable Draft、validation fence、current head和lifecycle；Draft不是一条尚未发布的
+ResourceVersion，也不在`resource_versions`中创建mutable row。ResourceVersion只拥有publication产生的immutable definition，
+不复制active state。Draft update/validation/publication与head mutation使用expected Resource projection version，validation还绑定
+exact draft generation + document digest；tenant + kind + normalized name唯一。
 
 ## 5. ResourceVersion
 
@@ -82,17 +87,18 @@ struct ResourceVersion {
     tenant_id: TenantId,
     kind: ResourceKind,
     ordinal: u64,
-    state: VersionState,
     payload: TypedVersionPayload,
     schema_version: u16,
     payload_digest: Digest,
     created_at: Timestamp,
-    published_at: Option<Timestamp>,
+    published_at: Timestamp,
 }
 ```
 
-Draft可以通过创建新version继续编辑，Published/Retired version immutable。publication必须验证closed payload、引用图、
-schema/digest、policy/security/hard limits、Artifact/Secret requirements和domain-specific validator。不修改已发布row来“修补”历史。
+Draft通过Resource上的generation继续编辑；每次更新使旧validation失效。只有publication才创建ResourceVersion，所有
+ResourceVersion从出生起immutable。publication必须以Resource projection version + draft generation + document digest CAS，验证closed
+payload、引用图、schema/digest、policy/security/hard limits、Artifact/Secret requirements和domain-specific validator，并可为Agent等
+owner原子创建一个bounded typed revision batch。不修改已发布row来“修补”历史，也不为Draft建立第二current-state投影。
 
 payload是有size limit的typed JSONB，带`schema_version`、closed validation、canonical serialization和digest。每个kind的Rust
 nominal payload是语义authority，boundary schema从它生成或做conformance对照。
@@ -173,7 +179,7 @@ Resource/Deployment API或业务current state。启动时通过18的startup mani
 
 ## 10. 事务、Event 与Receipt
 
-- create/version/publish/deploy/activate/suspend全部tenant-scoped；
+- create/draft-update/validate/publish/deploy/activate/suspend全部tenant-scoped；
 - mutation使用Receipt + expected projection version；
 - aggregate mutation、Event、Outbox和Receipt result同事务；
 - active switch与Run admission并发时，Run只能冻结完整旧或完整新closure，不得混合；

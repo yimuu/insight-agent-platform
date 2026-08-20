@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted |
-| 日期 | 2026-08-20 |
+| 日期 | 2026-08-21 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
 
@@ -76,18 +76,20 @@ output_too_large | internal`。domain terminal failure通过resource view/Event�
 ```text
 POST   /v1/{agents|skills|capabilities|contexts|models|mcp-servers|policies|sandboxes}
 GET    /v1/{kind}/{resource_id}
-POST   /v1/{kind}/{resource_id}/versions
+PUT    /v1/{kind}/{resource_id}/draft
+POST   /v1/{kind}/{resource_id}/draft:validate
+POST   /v1/{kind}/{resource_id}/draft:publish
 GET    /v1/{kind}/{resource_id}/versions/{version_id}
-POST   /v1/{kind}/{resource_id}/versions/{version_id}:validate
-POST   /v1/{kind}/{resource_id}/versions/{version_id}:publish
 POST   /v1/{kind}/{resource_id}/deployments
 GET    /v1/{kind}/{resource_id}/deployments/{deployment_id}
 POST   /v1/{kind}/{resource_id}/deployments/{deployment_id}:activate
 POST   /v1/{kind}/{resource_id}/deployments/{deployment_id}:suspend
 ```
 
-create/version/publish/deploy/activate语义由02拥有。Draft可编辑，Published Version和Deployment immutable。activate只影响未来
-Run；已存Run使用冻结binding。validate/discovery/build返回Job Operation，不建业务Operation aggregate。
+create/draft-update/validate/publish/deploy/activate语义由02拥有。Resource拥有唯一current editable Draft；Draft update使用
+`If-Match`并推进generation、使旧validation失效。publish以Resource ETag + draft generation + digest为fence并创建immutable Version；
+Published Version和Deployment immutable。activate只影响未来Run；已存Run使用冻结binding。validate/discovery/build返回Job
+Operation，不建业务Operation aggregate。首版不暴露mutable Draft Version identity，也不提供尚未发布Version的GET route。
 
 首版不提供Installation release/promote/rollback、Candidate、GateResult、ReleaseManifest、dynamic storage/KMS binding、
 arbitrary runtime installer或generic plugin execution API。发布/回滚由GitOps/Kubernetes负责。
