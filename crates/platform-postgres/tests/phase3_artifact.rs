@@ -19,8 +19,8 @@ use insight_platform_contracts::{
     BlobIntegrityState, CommandAudit, CommandOutcome, DataClassification, Effect, ExactVersionRef,
     JobState, Permission, PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
     PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, ResourceDocument,
-    ResourceDraftPayload, ResourceId, ResourceKind, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary,
+    ResourceDraftPayload, ResourceId, ResourceKind, SandboxArtifactIoPolicyDocument, Sha256Digest,
+    TenantConfig, TenantPrincipalPayload, ValidationSummary,
 };
 use insight_platform_jobs::JobFence as DomainJobFence;
 use insight_platform_postgres::{
@@ -916,6 +916,21 @@ async fn seed_artifact_io_policy(
         Some("built-in-artifact-io-policy.json".to_owned()),
     )
     .unwrap();
+    let artifact_io = SandboxArtifactIoPolicyDocument {
+        schema_version: 1,
+        allowed_input_media_types: vec!["application/json".to_owned()],
+        allowed_output_media_types: vec![],
+        maximum_input_artifacts: 1,
+        maximum_output_artifacts: 0,
+        deny_symlink: true,
+        deny_hardlink: true,
+        deny_device: true,
+        deny_fifo: true,
+        deny_socket: true,
+        deny_sparse_file: true,
+        archive_expansion_disabled: true,
+    };
+    let rules_digest = artifact_io.canonical_digest().unwrap();
     let document = ResourceDocument::Policy(PolicyResourceSpec {
         authoring_package: insight_platform_contracts::AuthoringPackage {
             artifact: artifact_ref,
@@ -925,7 +940,7 @@ async fn seed_artifact_io_policy(
         dependency_versions: vec![],
         policy_versions: vec![],
         policy_kind: PolicyKind::ArtifactIo,
-        rules_digest: digest('c'),
+        rules_digest,
         scheduling: None,
         retention: None,
         mcp_protocol: None,
@@ -933,7 +948,7 @@ async fn seed_artifact_io_policy(
         sandbox_isolation: None,
         sandbox_resource: None,
         sandbox_network: None,
-        sandbox_artifact_io: None,
+        sandbox_artifact_io: Some(artifact_io),
         sandbox_secret_resolution: None,
     });
     let resource_payload = TypedPayload::new(
@@ -1184,7 +1199,7 @@ async fn artifact_upload_lifecycle_fixture() {
         SELECT
           (SELECT count(*) FROM insight_platform.artifacts WHERE tenant_id = $1 AND artifact_id = $2),
           (SELECT count(*) FROM insight_platform.artifact_blobs WHERE tenant_id = $1 AND blob_id = $3),
-          (SELECT count(*) FROM insight_platform.invocations WHERE tenant_id = $1 AND invocation_id = $4),
+          (SELECT count(*) FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $4),
           (SELECT count(*) FROM insight_platform.artifact_links WHERE tenant_id = $1 AND artifact_link_id = $5),
           (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND scope_id = $2 AND operation = 'artifact.prepare'),
           (SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND aggregate_id = $2 AND event_type = 'artifact.prepared'),
@@ -2069,7 +2084,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let rescan_command = ScheduleArtifactRescan {
         audit: audit(&tenant_a, &allowed_principal, 0x1940, 'd', 'e'),
         rescan_operation_id: id(ResourceKind::Job, 0x1943),
-        rescan_job_id: id(ResourceKind::Job, 0x1943),
+        rescan_job_id: id(ResourceKind::Job, 0x1944),
         artifact_id: prepared_command.artifact_id.clone(),
         blob_id: prepared_command.blob_id.clone(),
         expected_artifact_version: 5,
@@ -2130,7 +2145,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let corruption_rescan_command = ScheduleArtifactRescan {
         audit: audit(&tenant_a, &allowed_principal, 0x1970, '1', '2'),
         rescan_operation_id: id(ResourceKind::Job, 0x1973),
-        rescan_job_id: id(ResourceKind::Job, 0x1973),
+        rescan_job_id: id(ResourceKind::Job, 0x1974),
         artifact_id: prepared_command.artifact_id.clone(),
         blob_id: prepared_command.blob_id.clone(),
         expected_artifact_version: 7,
@@ -2213,7 +2228,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let mark_shared = MarkArtifactDeletion {
         audit: audit(&tenant_a, &allowed_principal, 0x1a20, '1', '2'),
         deletion_operation_id: id(ResourceKind::Job, 0x1a23),
-        deletion_job_id: id(ResourceKind::Job, 0x1a23),
+        deletion_job_id: id(ResourceKind::Job, 0x1a24),
         artifact_id: concurrent_a.artifact_id.clone(),
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 5,
@@ -2383,7 +2398,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let mark_physical = MarkArtifactDeletion {
         audit: audit(&tenant_a, &allowed_principal, 0x1a40, 'b', 'c'),
         deletion_operation_id: id(ResourceKind::Job, 0x1a43),
-        deletion_job_id: id(ResourceKind::Job, 0x1a43),
+        deletion_job_id: id(ResourceKind::Job, 0x1a44),
         artifact_id: concurrent_b.artifact_id.clone(),
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 5,
@@ -2507,8 +2522,8 @@ async fn artifact_upload_lifecycle_fixture() {
               blob.state, blob.version, blob.deleted_at IS NOT NULL,
               (SELECT count(*) FROM insight_platform.jobs
                WHERE tenant_id = $1 AND job_id IN ($5, $6) AND state = 'succeeded'),
-              (SELECT count(*) FROM insight_platform.invocations
-               WHERE tenant_id = $1 AND invocation_id IN ($7, $8) AND state = 'succeeded'),
+              (SELECT count(*) FROM insight_platform.jobs
+               WHERE tenant_id = $1 AND job_id IN ($7, $8) AND state = 'succeeded'),
               (SELECT count(*) FROM insight_platform.events AS event
                JOIN insight_platform.outbox_events AS outbox
                  ON outbox.tenant_id = event.tenant_id AND outbox.event_id = event.event_id
@@ -2637,8 +2652,8 @@ async fn artifact_upload_lifecycle_fixture() {
         FROM insight_platform.jobs AS job
         JOIN insight_platform.artifacts AS artifact
           ON artifact.tenant_id = job.tenant_id AND artifact.artifact_id = $3
-        JOIN insight_platform.invocations AS operation
-          ON operation.tenant_id = job.tenant_id AND operation.invocation_id = $4
+        JOIN insight_platform.jobs AS operation
+          ON operation.tenant_id = job.tenant_id AND operation.job_id = $4
         WHERE job.tenant_id = $1 AND job.job_id = $2
         "#,
     )
@@ -2758,7 +2773,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let recovery_mark = MarkArtifactDeletion {
         audit: audit(&tenant_a, &allowed_principal, 0x1b60, 'a', 'b'),
         deletion_operation_id: id(ResourceKind::Job, 0x1b63),
-        deletion_job_id: id(ResourceKind::Job, 0x1b63),
+        deletion_job_id: id(ResourceKind::Job, 0x1b64),
         artifact_id: recovery_artifact.artifact_id.clone(),
         blob_id: recovery_artifact.blob_id.clone(),
         expected_artifact_version: 5,
@@ -2847,8 +2862,8 @@ async fn artifact_upload_lifecycle_fixture() {
         FROM insight_platform.artifacts AS artifact
         JOIN insight_platform.artifact_blobs AS blob
           ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
-        JOIN insight_platform.invocations AS operation
-          ON operation.tenant_id = artifact.tenant_id AND operation.invocation_id = $3
+        JOIN insight_platform.jobs AS operation
+          ON operation.tenant_id = artifact.tenant_id AND operation.job_id = $3
         WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
         "#,
     )
