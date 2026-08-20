@@ -30,6 +30,53 @@ pub struct CreateResourceRequestV1 {
     pub document: ResourceDocument,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PublishResourceDraftRequestV1 {
+    Single {
+        revision_no: u64,
+        content_digest: Sha256Digest,
+        artifact_id: Option<ResourceId>,
+    },
+    Agent {
+        revision_no: u64,
+        interface_content_digest: Sha256Digest,
+        plan_content_digest: Sha256Digest,
+        artifact_id: Option<ResourceId>,
+    },
+}
+
+impl PublishResourceDraftRequestV1 {
+    fn validate_for(&self, resource_kind: RegistryResourceKind) -> bool {
+        let (revision_no, artifact_id, correct_shape) = match self {
+            Self::Single {
+                revision_no,
+                artifact_id,
+                ..
+            } => (
+                *revision_no,
+                artifact_id,
+                resource_kind != RegistryResourceKind::Agent,
+            ),
+            Self::Agent {
+                revision_no,
+                artifact_id,
+                ..
+            } => (
+                *revision_no,
+                artifact_id,
+                resource_kind == RegistryResourceKind::Agent,
+            ),
+        };
+        correct_shape
+            && revision_no > 0
+            && i64::try_from(revision_no).is_ok()
+            && artifact_id
+                .as_ref()
+                .is_none_or(|artifact_id| artifact_id.kind() == ResourceKind::Artifact)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceViewV1 {
@@ -76,6 +123,65 @@ impl ResourceVersionViewV1 {
                 .validate_for(self.resource_kind, &self.resource_version_id)
                 .is_err()
             || self.etag != resource_version_etag(&self.resource_version_id, &self.content_digest)
+        {
+            return Err(ResourceApplicationError::Internal);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishedResourceVersionSummaryV1 {
+    pub resource_version_id: ResourceId,
+    pub revision_no: u64,
+    pub content_digest: Sha256Digest,
+    pub artifact_id: Option<ResourceId>,
+    pub etag: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishResourceDraftResponseV1 {
+    pub schema_version: u32,
+    pub resource_id: ResourceId,
+    pub resource_kind: RegistryResourceKind,
+    pub draft_generation: u64,
+    pub version: u64,
+    pub published_versions: Vec<PublishedResourceVersionSummaryV1>,
+    pub etag: String,
+}
+
+impl PublishResourceDraftResponseV1 {
+    pub fn validate(&self) -> Result<(), ResourceApplicationError> {
+        let mut kinds = std::collections::BTreeSet::new();
+        let valid_versions = self.published_versions.iter().all(|version| {
+            version.revision_no > 0
+                && self
+                    .resource_kind
+                    .allows_version_kind(version.resource_version_id.kind())
+                && kinds.insert(version.resource_version_id.kind())
+                && version
+                    .artifact_id
+                    .as_ref()
+                    .is_none_or(|artifact_id| artifact_id.kind() == ResourceKind::Artifact)
+                && version.etag
+                    == resource_version_etag(&version.resource_version_id, &version.content_digest)
+        });
+        let valid_count = if self.resource_kind == RegistryResourceKind::Agent {
+            self.published_versions.len() == 2
+                && kinds.contains(&ResourceKind::AgentInterfaceRevision)
+                && kinds.contains(&ResourceKind::AgentPlanRevision)
+        } else {
+            self.published_versions.len() == 1
+        };
+        if self.schema_version != 1
+            || self.resource_id.kind() != self.resource_kind.id_kind()
+            || self.draft_generation == 0
+            || self.version == 0
+            || !valid_versions
+            || !valid_count
+            || self.etag != resource_etag(&self.resource_id, self.version)
         {
             return Err(ResourceApplicationError::Internal);
         }
@@ -149,6 +255,18 @@ pub struct ReadResourceVersionIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PublishResourceDraftIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub resource_kind: RegistryResourceKind,
+    pub resource_id: ResourceId,
+    pub expected_resource_version: u64,
+    pub request: PublishResourceDraftRequestV1,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceApplicationError {
     Invalid,
@@ -188,6 +306,11 @@ pub trait ResourceApplication: Send + Sync {
         &self,
         intent: ReadResourceVersionIntent,
     ) -> Result<ResourceVersionViewV1, ResourceApplicationError>;
+
+    async fn publish_resource_draft(
+        &self,
+        intent: PublishResourceDraftIntent,
+    ) -> Result<PublishResourceDraftResponseV1, ResourceApplicationError>;
 }
 
 pub trait ResourceClock: Send + Sync {
@@ -228,11 +351,85 @@ pub fn build_resource_router(state: ResourceHttpState) -> Router {
             post(validate_resource_draft),
         )
         .route(
+            "/v1/{resource_noun}/{resource_id}/draft:publish",
+            post(publish_resource_draft),
+        )
+        .route(
             "/v1/{resource_noun}/{resource_id}/versions/{resource_version_id}",
             get(read_resource_version),
         )
         .layer(DefaultBodyLimit::max(MAX_RESOURCE_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn publish_resource_draft(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path((resource_noun, resource_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<PublishResourceDraftRequestV1>, JsonRejection>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    let Some(resource_kind) = resource_kind_for_noun(&resource_noun) else {
+        return problem(ResourceApplicationError::NotFound);
+    };
+    let resource_id = match resource_id.parse::<ResourceId>() {
+        Ok(resource_id) if resource_id.kind() == resource_kind.id_kind() => resource_id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let Json(request) = match body {
+        Ok(body) if body.0.validate_for(resource_kind) => body,
+        _ => return problem(ResourceApplicationError::Invalid),
+    };
+    let expected_resource_version = match expected_resource_version(&headers, &resource_id) {
+        Ok(version) => version,
+        Err(error) => return problem(error),
+    };
+    let idempotency_key_digest = match idempotency_key_digest_for_operation(
+        &headers,
+        &principal,
+        resource_kind,
+        "resource.publish_draft",
+        Some(&resource_id),
+    ) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let request_digest = match digest(&serde_json::json!({
+        "expected_resource_version": expected_resource_version,
+        "idempotency_key_digest": idempotency_key_digest,
+        "operation": "resource.publish_draft",
+        "principal_id": principal.principal_id,
+        "request": request,
+        "resource_id": resource_id,
+        "resource_kind": resource_kind,
+        "schema_version": 1,
+        "tenant_id": principal.tenant_id,
+    })) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let intent = PublishResourceDraftIntent {
+        principal,
+        resource_kind,
+        resource_id,
+        expected_resource_version,
+        request,
+        idempotency_key_digest,
+        request_digest,
+        deadline: state.clock.now()
+            + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS),
+    };
+    match state.application.publish_resource_draft(intent).await {
+        Ok(view) if view.validate().is_ok() => publish_resource_response(view),
+        Ok(_) => problem(ResourceApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 async fn read_resource_version(
@@ -535,6 +732,16 @@ fn read_resource_response(view: ResourceViewV1) -> Response {
 }
 
 fn read_resource_version_response(view: ResourceVersionViewV1) -> Response {
+    let etag = match HeaderValue::from_str(&view.etag) {
+        Ok(etag) => etag,
+        Err(_) => return problem(ResourceApplicationError::Internal),
+    };
+    let mut response = (StatusCode::OK, Json(view)).into_response();
+    response.headers_mut().insert("etag", etag);
+    no_store(response)
+}
+
+fn publish_resource_response(view: PublishResourceDraftResponseV1) -> Response {
     let etag = match HeaderValue::from_str(&view.etag) {
         Ok(etag) => etag,
         Err(_) => return problem(ResourceApplicationError::Internal),
@@ -975,6 +1182,38 @@ mod tests {
                 etag: resource_version_etag(&intent.resource_version_id, &content_digest),
             })
         }
+
+        async fn publish_resource_draft(
+            &self,
+            intent: PublishResourceDraftIntent,
+        ) -> Result<PublishResourceDraftResponseV1, ResourceApplicationError> {
+            let (revision_no, content_digest, artifact_id) = match intent.request {
+                PublishResourceDraftRequestV1::Single {
+                    revision_no,
+                    content_digest,
+                    artifact_id,
+                } => (revision_no, content_digest, artifact_id),
+                PublishResourceDraftRequestV1::Agent { .. } => {
+                    return Err(ResourceApplicationError::Invalid)
+                }
+            };
+            let resource_version_id = id(ResourceKind::PolicyRevision, 11);
+            Ok(PublishResourceDraftResponseV1 {
+                schema_version: 1,
+                resource_id: intent.resource_id.clone(),
+                resource_kind: intent.resource_kind,
+                draft_generation: 1,
+                version: intent.expected_resource_version + 1,
+                published_versions: vec![PublishedResourceVersionSummaryV1 {
+                    resource_version_id: resource_version_id.clone(),
+                    revision_no,
+                    content_digest: content_digest.clone(),
+                    artifact_id,
+                    etag: resource_version_etag(&resource_version_id, &content_digest),
+                }],
+                etag: resource_etag(&intent.resource_id, intent.expected_resource_version + 1),
+            })
+        }
     }
 
     #[tokio::test]
@@ -1244,5 +1483,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrong_version_kind.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn draft_publish_is_closed_fenced_and_returns_version_summaries() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application,
+            Arc::new(FixedClock(now)),
+        ));
+        let resource_id = id(ResourceKind::Policy, 4);
+        let request = PublishResourceDraftRequestV1::Single {
+            revision_no: 2,
+            content_digest: fixed_digest('9'),
+            artifact_id: None,
+        };
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/policies/{resource_id}/draft:publish"))
+                    .header("content-type", "application/json")
+                    .header(IDEMPOTENCY_KEY, "publish-policy-1")
+                    .header(IF_MATCH, resource_etag(&resource_id, 3))
+                    .extension(principal(now))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["etag"], resource_etag(&resource_id, 4));
+
+        let wrong_shape = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/policies/{resource_id}/draft:publish"))
+                    .header("content-type", "application/json")
+                    .header(IDEMPOTENCY_KEY, "publish-policy-2")
+                    .header(IF_MATCH, resource_etag(&resource_id, 3))
+                    .extension(principal(now))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&PublishResourceDraftRequestV1::Agent {
+                            revision_no: 2,
+                            interface_content_digest: fixed_digest('8'),
+                            plan_content_digest: fixed_digest('9'),
+                            artifact_id: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_shape.status(), StatusCode::BAD_REQUEST);
     }
 }

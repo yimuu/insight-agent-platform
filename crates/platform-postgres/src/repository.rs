@@ -857,6 +857,100 @@ impl PgRepository {
         Ok(record)
     }
 
+    pub async fn read_resource_for_writer(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        expected_kind: RegistryResourceKind,
+        resource_id: &ResourceId,
+    ) -> Result<ResourceRecord, RepositoryError> {
+        if resource_id.kind() != expected_kind.id_kind() {
+            return Err(RepositoryError::NotFound("resource"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal
+            .permissions
+            .contains(write_permission(expected_kind))
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let resource = load_resource(&mut transaction, tenant_id, resource_id).await?;
+        if resource.resource_kind != expected_kind.as_str() {
+            return Err(RepositoryError::NotFound("resource"));
+        }
+        transaction.commit().await?;
+        Ok(resource)
+    }
+
+    pub async fn prepare_resource_publish(
+        &self,
+        audit: &CommandAudit,
+        expected_kind: RegistryResourceKind,
+        resource_id: &ResourceId,
+    ) -> Result<ResourcePublishPreparation, RepositoryError> {
+        if resource_id.kind() != expected_kind.id_kind() {
+            return Err(RepositoryError::NotFound("resource"));
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *transaction)
+            .await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            &audit.tenant_id,
+            &audit.principal_id,
+            audit.principal_kind,
+        )
+        .await?;
+        if !principal
+            .permissions
+            .contains(publish_permission(expected_kind))
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let receipt = sqlx::query(
+            r#"
+            SELECT request_digest, state
+            FROM insight_platform.receipts
+            WHERE tenant_id = $1 AND receipt_kind = 'command'
+              AND scope_kind = 'resource' AND scope_id = $2 AND dedupe_owner_id = $3
+              AND operation = 'resource.publish' AND idempotency_key_digest = $4
+            "#,
+        )
+        .bind(audit.tenant_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(audit.principal_id.to_string())
+        .bind(audit.idempotency_key_digest.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(receipt) = receipt {
+            if receipt.try_get::<String, _>("request_digest")? != audit.request_digest.to_string() {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            if receipt.try_get::<String, _>("state")? != "succeeded" {
+                return Err(RepositoryError::Conflict("command receipt"));
+            }
+            let published =
+                load_resource_publish_receipt(&mut transaction, audit, resource_id).await?;
+            transaction.commit().await?;
+            return Ok(ResourcePublishPreparation::Replayed(published));
+        }
+        let resource = load_resource(&mut transaction, &audit.tenant_id, resource_id).await?;
+        if resource.resource_kind != expected_kind.as_str() {
+            return Err(RepositoryError::NotFound("resource"));
+        }
+        transaction.commit().await?;
+        Ok(ResourcePublishPreparation::Current(resource))
+    }
+
     pub async fn begin_security_transaction(
         &self,
     ) -> Result<PgSecurityTransaction, RepositoryError> {
@@ -1260,11 +1354,10 @@ impl PgRegistryTransaction {
         )
         .await?
         {
-            let published = load_published_resource(
+            let published = load_resource_publish_receipt(
                 &mut transaction,
-                &command.audit.tenant_id,
+                &command.audit,
                 &command.resource_id,
-                &command.versions,
             )
             .await?;
             transaction.commit().await?;
@@ -1408,18 +1501,19 @@ impl PgRegistryTransaction {
             )?,
         )
         .await?;
-        terminalize_command_receipt(
+        let published = PublishedResource {
+            resource,
+            versions: records,
+        };
+        terminalize_resource_publish_receipt(
             &mut transaction,
             &command.audit,
-            &resource.resource_id,
-            "published",
+            &published,
+            &draft.display_name,
         )
         .await?;
         transaction.commit().await?;
-        Ok(CommandOutcome::Applied(PublishedResource {
-            resource,
-            versions: records,
-        }))
+        Ok(CommandOutcome::Applied(published))
     }
 
     pub async fn create_deployment(
@@ -16802,6 +16896,32 @@ pub struct PublishedResource {
     pub versions: Vec<ResourceVersionRecord>,
 }
 
+#[derive(Debug, Clone)]
+pub enum ResourcePublishPreparation {
+    Current(ResourceRecord),
+    Replayed(PublishedResource),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourcePublishReceiptResult {
+    schema_version: u32,
+    tenant_id: String,
+    resource_id: String,
+    resource_kind: String,
+    lifecycle_state: String,
+    gate_state: String,
+    draft_generation: i64,
+    active_version_id: Option<String>,
+    active_deployment_id: Option<String>,
+    version: i64,
+    resource_payload_digest: String,
+    display_name: String,
+    resource_version_ids: Vec<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeploymentRecord {
     pub tenant_id: String,
@@ -19849,6 +19969,166 @@ async fn terminalize_registry_validation_receipt(
     Ok(())
 }
 
+async fn load_resource_publish_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    resource_id: &ResourceId,
+) -> Result<PublishedResource, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'resource' AND scope_id = $2 AND dedupe_owner_id = $3
+          AND operation = 'resource.publish' AND idempotency_key_digest = $4
+          AND request_digest = $5 AND state = 'succeeded'
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(resource_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or_else(|| {
+        RepositoryError::CorruptRow("resource publish Receipt result is missing".to_owned())
+    })?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let result: ResourcePublishReceiptResult =
+        decode_versioned_payload(&payload, "resource publish Receipt result")?;
+    if result.schema_version != 1
+        || result.tenant_id != audit.tenant_id.to_string()
+        || result.resource_id != resource_id.to_string()
+        || result.resource_version_ids.is_empty()
+        || result.resource_version_ids.len() > 2
+    {
+        return Err(RepositoryError::CorruptRow(
+            "resource publish Receipt result is inconsistent".to_owned(),
+        ));
+    }
+    let mut versions = Vec::with_capacity(result.resource_version_ids.len());
+    for version_id in &result.resource_version_ids {
+        let row = sqlx::query(
+            r#"
+            SELECT tenant_id, resource_version_id, resource_id, resource_version_kind,
+                   revision_no, content_digest, artifact_id, payload_schema_version,
+                   payload, payload_digest, created_by, created_at
+            FROM insight_platform.resource_versions
+            WHERE tenant_id = $1 AND resource_id = $2 AND resource_version_id = $3
+            "#,
+        )
+        .bind(&result.tenant_id)
+        .bind(&result.resource_id)
+        .bind(version_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or_else(|| {
+            RepositoryError::CorruptRow(
+                "resource publish Receipt immutable version is missing".to_owned(),
+            )
+        })?;
+        versions.push(resource_version_from_row(row)?);
+    }
+    let first_payload: PublishedVersionPayload =
+        decode_typed_payload(&versions[0].payload, "published ResourceVersion")?;
+    for version in versions.iter().skip(1) {
+        let payload: PublishedVersionPayload =
+            decode_typed_payload(&version.payload, "published ResourceVersion")?;
+        if payload != first_payload {
+            return Err(RepositoryError::CorruptRow(
+                "resource publish Receipt version batch payloads differ".to_owned(),
+            ));
+        }
+    }
+    let draft = ResourceDraftPayload {
+        display_name: result.display_name,
+        document: first_payload.document,
+        validation: Some(first_payload.validation),
+    };
+    draft
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let resource_payload = TypedPayload::new(1, &draft)?;
+    if resource_payload.digest != result.resource_payload_digest {
+        return Err(RepositoryError::CorruptRow(
+            "resource publish Receipt resource payload digest differs".to_owned(),
+        ));
+    }
+    Ok(PublishedResource {
+        resource: ResourceRecord {
+            tenant_id: result.tenant_id,
+            resource_id: result.resource_id,
+            resource_kind: result.resource_kind,
+            lifecycle_state: result.lifecycle_state,
+            gate_state: result.gate_state,
+            draft_generation: result.draft_generation,
+            active_version_id: result.active_version_id,
+            active_deployment_id: result.active_deployment_id,
+            version: result.version,
+            payload: resource_payload,
+            created_at: result.created_at,
+            updated_at: result.updated_at,
+        },
+        versions,
+    })
+}
+
+async fn terminalize_resource_publish_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    published: &PublishedResource,
+    display_name: &str,
+) -> Result<(), RepositoryError> {
+    let result = ResourcePublishReceiptResult {
+        schema_version: 1,
+        tenant_id: published.resource.tenant_id.clone(),
+        resource_id: published.resource.resource_id.clone(),
+        resource_kind: published.resource.resource_kind.clone(),
+        lifecycle_state: published.resource.lifecycle_state.clone(),
+        gate_state: published.resource.gate_state.clone(),
+        draft_generation: published.resource.draft_generation,
+        active_version_id: published.resource.active_version_id.clone(),
+        active_deployment_id: published.resource.active_deployment_id.clone(),
+        version: published.resource.version,
+        resource_payload_digest: published.resource.payload.digest.clone(),
+        display_name: display_name.to_owned(),
+        resource_version_ids: published
+            .versions
+            .iter()
+            .map(|version| version.resource_version_id.clone())
+            .collect(),
+        created_at: published.resource.created_at,
+        updated_at: published.resource.updated_at,
+    };
+    let payload = TypedPayload::from_versioned(1, &result, 262_144)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = 'published', response_reference_id = $4,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND state = 'processing'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(&published.resource.resource_id)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("command receipt"));
+    }
+    Ok(())
+}
+
 pub(crate) async fn append_command_event(
     transaction: &mut Transaction<'_, Postgres>,
     audit: &CommandAudit,
@@ -20967,35 +21247,6 @@ fn domain_job_fence(fence: &JobFence) -> Result<DomainJobFence, RepositoryError>
         })?,
         token_digest: fence.lease_token_digest.clone(),
     })
-}
-
-async fn load_published_resource(
-    transaction: &mut Transaction<'_, Postgres>,
-    tenant_id: &ResourceId,
-    resource_id: &ResourceId,
-    expected: &[NewPublishedVersion],
-) -> Result<PublishedResource, RepositoryError> {
-    let resource = load_resource(transaction, tenant_id, resource_id).await?;
-    let mut versions = Vec::with_capacity(expected.len());
-    for version in expected {
-        let row = sqlx::query(
-            r#"
-            SELECT tenant_id, resource_version_id, resource_id, resource_version_kind,
-                   revision_no, content_digest, artifact_id, payload_schema_version,
-                   payload, payload_digest, created_by, created_at
-            FROM insight_platform.resource_versions
-            WHERE tenant_id = $1 AND resource_id = $2 AND resource_version_id = $3
-            "#,
-        )
-        .bind(tenant_id.to_string())
-        .bind(resource_id.to_string())
-        .bind(version.resource_version_id.to_string())
-        .fetch_optional(&mut **transaction)
-        .await?
-        .ok_or(RepositoryError::NotFound("resource version"))?;
-        versions.push(resource_version_from_row(row)?);
-    }
-    Ok(PublishedResource { resource, versions })
 }
 
 fn validate_publish_batch(

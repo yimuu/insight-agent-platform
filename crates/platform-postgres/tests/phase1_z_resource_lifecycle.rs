@@ -919,29 +919,26 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         Err(RepositoryError::PermissionDenied)
     ));
 
-    let published = applied(
-        registry_command!(
-            repository,
-            publish_resource_versions,
-            PublishResourceVersions {
-                audit: audit(TENANT_ID, PRINCIPAL_ID, "7c50", '7', '8'),
-                resource_id: id(RESOURCE_ID),
-                expected_resource_version: 2,
-                expected_draft_digest: draft_digest,
-                versions: vec![NewPublishedVersion {
-                    resource_version_id: id(VERSION_ID),
-                    revision_no: 1,
-                    content_digest: digest('6'),
-                    artifact_id: None,
-                    payload: PublishedVersionPayload {
-                        document,
-                        validation,
-                    },
-                }],
-            }
-        )
-        .unwrap(),
-    );
+    let publish_audit = audit(TENANT_ID, PRINCIPAL_ID, "7c50", '7', '8');
+    let published_payload = PublishedVersionPayload {
+        document,
+        validation,
+    };
+    let publish_command = PublishResourceVersions {
+        audit: publish_audit.clone(),
+        resource_id: id(RESOURCE_ID),
+        expected_resource_version: 2,
+        expected_draft_digest: draft_digest,
+        versions: vec![NewPublishedVersion {
+            resource_version_id: id(VERSION_ID),
+            revision_no: 1,
+            content_digest: digest('6'),
+            artifact_id: None,
+            payload: published_payload.clone(),
+        }],
+    };
+    let published =
+        applied(registry_command!(repository, publish_resource_versions, publish_command).unwrap());
     assert_eq!(published.resource.version, 3);
     assert!(published.resource.active_version_id.is_none());
     assert!(published.resource.active_deployment_id.is_none());
@@ -1328,4 +1325,47 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         replayed.payload.value["display_name"],
         "First replay-stable draft"
     );
+
+    let prepared_replay = repository
+        .prepare_resource_publish(
+            &publish_audit,
+            insight_platform_contracts::RegistryResourceKind::Policy,
+            &id(RESOURCE_ID),
+        )
+        .await
+        .unwrap();
+    let insight_platform_postgres::repository::ResourcePublishPreparation::Replayed(
+        prepared_replay,
+    ) = prepared_replay
+    else {
+        panic!("expected publication preparation to resolve the stored Receipt");
+    };
+    assert_eq!(prepared_replay.resource.version, 3);
+    assert_eq!(prepared_replay.versions[0].resource_version_id, VERSION_ID);
+
+    let publish_replay = registry_command!(
+        repository,
+        publish_resource_versions,
+        PublishResourceVersions {
+            audit: publish_audit,
+            resource_id: id(RESOURCE_ID),
+            expected_resource_version: 2,
+            expected_draft_digest: published_payload.validation.validated_draft_digest.clone(),
+            versions: vec![NewPublishedVersion {
+                resource_version_id: sandbox_id(ResourceKind::PolicyRevision, 0x9a),
+                revision_no: 1,
+                content_digest: digest('6'),
+                artifact_id: None,
+                payload: published_payload,
+            }],
+        }
+    )
+    .unwrap();
+    let CommandOutcome::Replayed(publish_replay) = publish_replay else {
+        panic!("expected exact historical publication replay");
+    };
+    assert_eq!(publish_replay.resource.version, 3);
+    assert_eq!(publish_replay.resource.draft_generation, 1);
+    assert!(publish_replay.resource.active_version_id.is_none());
+    assert_eq!(publish_replay.versions[0].resource_version_id, VERSION_ID);
 }

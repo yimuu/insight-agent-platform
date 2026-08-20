@@ -20,9 +20,11 @@ use insight_platform_api::{
     },
     resource::{
         build_resource_router, resource_etag, resource_version_etag, CreateResourceIntent,
-        ReadResourceIntent, ReadResourceVersionIntent, ResourceApplication,
-        ResourceApplicationError, ResourceHttpState, ResourceVersionViewV1, ResourceViewV1,
-        SystemResourceClock, UpdateResourceDraftIntent, ValidateResourceDraftIntent,
+        PublishResourceDraftIntent, PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
+        PublishedResourceVersionSummaryV1, ReadResourceIntent, ReadResourceVersionIntent,
+        ResourceApplication, ResourceApplicationError, ResourceHttpState, ResourceVersionViewV1,
+        ResourceViewV1, SystemResourceClock, UpdateResourceDraftIntent,
+        ValidateResourceDraftIntent,
     },
 };
 use insight_platform_contracts::{
@@ -36,7 +38,8 @@ use insight_platform_postgres::{
     verify_schema,
 };
 use insight_platform_registry::{
-    CreateResourceDraft, RequestResourceValidation, UpdateResourceDraft,
+    CreateResourceDraft, NewPublishedVersion, PublishResourceVersions, RequestResourceValidation,
+    UpdateResourceDraft,
 };
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -424,6 +427,210 @@ impl ResourceApplication for PgResources {
             etag: resource_version_etag(&intent.resource_version_id, &content_digest),
         })
     }
+
+    async fn publish_resource_draft(
+        &self,
+        intent: PublishResourceDraftIntent,
+    ) -> Result<PublishResourceDraftResponseV1, ResourceApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let expected_resource_version = i64::try_from(intent.expected_resource_version)
+            .map_err(|_| ResourceApplicationError::Invalid)?;
+        let audit = CommandAudit {
+            tenant_id: intent.principal.tenant_id,
+            principal_id: intent.principal.principal_id,
+            principal_kind: intent.principal.principal_kind,
+            receipt_id: new_id(ResourceKind::Receipt)?,
+            event_id: new_id(ResourceKind::Event)?,
+            outbox_id: new_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: intent.idempotency_key_digest,
+            request_digest: intent.request_digest,
+            receipt_expires_at: now + chrono::Duration::hours(24),
+        };
+        let preparation = self
+            .repository
+            .prepare_resource_publish(&audit, intent.resource_kind, &intent.resource_id)
+            .await
+            .map_err(map_resource_repository_error)?;
+        let current = match preparation {
+            insight_platform_postgres::repository::ResourcePublishPreparation::Current(current) => {
+                current
+            }
+            insight_platform_postgres::repository::ResourcePublishPreparation::Replayed(
+                published,
+            ) => return published_resource_response(published, intent.resource_kind),
+        };
+        if current.payload.schema_version != 1 {
+            return Err(ResourceApplicationError::Internal);
+        }
+        let mut value = current.payload.value;
+        value
+            .as_object_mut()
+            .ok_or(ResourceApplicationError::Internal)?
+            .remove("schema_version");
+        let draft: insight_platform_contracts::ResourceDraftPayload =
+            serde_json::from_value(value).map_err(|_| ResourceApplicationError::Internal)?;
+        let validation = draft
+            .validation
+            .clone()
+            .ok_or(ResourceApplicationError::Conflict)?;
+        let expected_draft_digest = draft
+            .document_digest()
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let payload = insight_platform_contracts::PublishedVersionPayload {
+            document: draft.document,
+            validation,
+        };
+        let (revision_no, artifact_id, materials) = match intent.request {
+            PublishResourceDraftRequestV1::Single {
+                revision_no,
+                content_digest,
+                artifact_id,
+            } => (
+                revision_no,
+                artifact_id,
+                vec![(
+                    public_single_version_kind(intent.resource_kind)?,
+                    content_digest,
+                )],
+            ),
+            PublishResourceDraftRequestV1::Agent {
+                revision_no,
+                interface_content_digest,
+                plan_content_digest,
+                artifact_id,
+            } => (
+                revision_no,
+                artifact_id,
+                vec![
+                    (
+                        ResourceKind::AgentInterfaceRevision,
+                        interface_content_digest,
+                    ),
+                    (ResourceKind::AgentPlanRevision, plan_content_digest),
+                ],
+            ),
+        };
+        let revision_no =
+            i64::try_from(revision_no).map_err(|_| ResourceApplicationError::Invalid)?;
+        let versions = materials
+            .into_iter()
+            .map(|(kind, content_digest)| {
+                Ok(NewPublishedVersion {
+                    resource_version_id: new_id(kind)?,
+                    revision_no,
+                    content_digest,
+                    artifact_id: artifact_id.clone(),
+                    payload: payload.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, ResourceApplicationError>>()?;
+        let mut transaction = self
+            .repository
+            .begin_registry_transaction()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let outcome = transaction
+            .publish_resource_versions(PublishResourceVersions {
+                audit,
+                resource_id: intent.resource_id,
+                expected_resource_version,
+                expected_draft_digest,
+                versions,
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let published = match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(published)
+            | insight_platform_contracts::CommandOutcome::Replayed(published) => published,
+        };
+        published_resource_response(published, intent.resource_kind)
+    }
+}
+
+fn public_single_version_kind(
+    kind: insight_platform_contracts::RegistryResourceKind,
+) -> Result<ResourceKind, ResourceApplicationError> {
+    use insight_platform_contracts::RegistryResourceKind as Kind;
+    match kind {
+        Kind::Skill => Ok(ResourceKind::SkillRevision),
+        Kind::CapabilityInterface => Ok(ResourceKind::CapabilityInterfaceRevision),
+        Kind::ContextSourceInterface => Ok(ResourceKind::ContextSourceInterfaceRevision),
+        Kind::McpServer => Ok(ResourceKind::McpServerRevision),
+        Kind::ModelProfile => Ok(ResourceKind::ModelProfileRevision),
+        Kind::Policy => Ok(ResourceKind::PolicyRevision),
+        Kind::SandboxProfile => Ok(ResourceKind::SandboxProfileRevision),
+        Kind::Agent
+        | Kind::CapabilityImplementation
+        | Kind::ContextSourceImplementation
+        | Kind::ContextDataset
+        | Kind::ModelProvider
+        | Kind::SandboxRuntime
+        | Kind::SandboxPackage => Err(ResourceApplicationError::Invalid),
+    }
+}
+
+fn published_resource_response(
+    published: insight_platform_postgres::repository::PublishedResource,
+    resource_kind: insight_platform_contracts::RegistryResourceKind,
+) -> Result<PublishResourceDraftResponseV1, ResourceApplicationError> {
+    let resource_id: ResourceId = published
+        .resource
+        .resource_id
+        .parse()
+        .map_err(|_| ResourceApplicationError::Internal)?;
+    if resource_id.kind() != resource_kind.id_kind()
+        || published.resource.resource_kind != resource_kind.as_str()
+    {
+        return Err(ResourceApplicationError::Internal);
+    }
+    let version = u64::try_from(published.resource.version)
+        .map_err(|_| ResourceApplicationError::Internal)?;
+    let draft_generation = u64::try_from(published.resource.draft_generation)
+        .map_err(|_| ResourceApplicationError::Internal)?;
+    let published_versions = published
+        .versions
+        .into_iter()
+        .map(|record| {
+            let resource_version_id: ResourceId = record
+                .resource_version_id
+                .parse()
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            let revision_no = u64::try_from(record.revision_no)
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            let content_digest: Sha256Digest = record
+                .content_digest
+                .parse()
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            let artifact_id = record
+                .artifact_id
+                .map(|artifact_id| artifact_id.parse())
+                .transpose()
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            Ok(PublishedResourceVersionSummaryV1 {
+                resource_version_id: resource_version_id.clone(),
+                revision_no,
+                content_digest: content_digest.clone(),
+                artifact_id,
+                etag: resource_version_etag(&resource_version_id, &content_digest),
+            })
+        })
+        .collect::<Result<Vec<_>, ResourceApplicationError>>()?;
+    Ok(PublishResourceDraftResponseV1 {
+        schema_version: 1,
+        resource_id: resource_id.clone(),
+        resource_kind,
+        draft_generation,
+        version,
+        published_versions,
+        etag: resource_etag(&resource_id, version),
+    })
 }
 
 fn resource_view_from_record(
