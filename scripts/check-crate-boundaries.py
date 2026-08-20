@@ -44,7 +44,6 @@ INTERNAL_ROLES = {
     "insight-platform-sandbox-controller": "sandbox_controller",
     "insight-platform-sandbox-executor": "sandbox_executor",
     "insight-platform-sandbox-rpc": "sandbox_rpc",
-    "insight-platform-sandbox-microvm": "sandbox_microvm_provider",
     "insight-platform-sandbox-wasi": "sandbox_wasi_executor",
     "insight-platform-scheduler": "scheduler_domain",
     "insight-platform-secret-broker": "secret_broker",
@@ -99,7 +98,6 @@ ALLOWED_INTERNAL = {
     "sandbox_controller": {"artifact_rpc", "contracts", "platform_postgres", "sandbox_domain", "sandbox_rpc"},
     "sandbox_executor": {"contracts", "jobs_domain", "sandbox_domain", "sandbox_rpc", "sandbox_wasi_executor", "platform_worker"},
     "sandbox_rpc": {"contracts", "jobs_domain", "sandbox_domain"},
-    "sandbox_microvm_provider": {"capability_adapters", "contracts", "egress_core", "egress_rpc", "invocations_domain", "jobs_domain", "mcp_host", "sandbox_domain", "sandbox_rpc"},
     "sandbox_wasi_executor": {"contracts", "sandbox_domain"},
     "platform_worker": {"contracts"},
 }
@@ -159,7 +157,6 @@ FORBIDDEN_DIRECT = {
     "sandbox_controller": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
     "sandbox_executor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "sandbox_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_microvm_provider": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "sandbox_wasi_executor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "platform_worker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
 }

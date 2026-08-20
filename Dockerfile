@@ -18,8 +18,7 @@ RUN cargo build --locked --release --bin insight-agent-platform \
     && cargo build --locked --release -p insight-platform-security-authority --bin platform-security-authority \
     && cargo build --locked --release -p insight-platform-sandbox-controller --bin platform-sandbox-controller \
     && cargo build --locked --release -p insight-platform-sandbox-attestor --bin platform-sandbox-attestor \
-    && cargo build --locked --release -p insight-platform-sandbox-executor --bin platform-sandbox-executor \
-    && cargo build --locked --release -p insight-platform-sandbox-microvm --bin platform-sandbox-microvm-provider
+    && cargo build --locked --release -p insight-platform-sandbox-executor --bin platform-sandbox-executor
 
 FROM debian:bullseye-slim@sha256:f313b4bd62667092a59b3a664d7d3ab8b5e65f41675f48e81455a15dc5abe792 AS runtime-base
 
@@ -30,25 +29,6 @@ RUN apt-get update \
     && useradd --uid 10001 --gid insight --create-home --home-dir /app insight
 
 WORKDIR /app
-
-FROM runtime-base AS sandbox-microvm-executor-runtime
-
-COPY --from=builder /workspace/target/release/platform-sandbox-executor /usr/local/bin/platform-sandbox-executor
-
-USER 10001:10001
-
-ENTRYPOINT ["/usr/local/bin/platform-sandbox-executor"]
-
-FROM runtime-base AS sandbox-microvm-provider-runtime
-
-COPY --from=builder /workspace/target/release/platform-sandbox-microvm-provider /usr/local/bin/platform-sandbox-microvm-provider
-
-# The Provider is the sole root process in the microVM Pod. Firecracker, jailer, kernel and
-# rootfs bytes are supplied by the root-owned, read-only node runtime-asset mount and are verified
-# against the closed Provider config before the Unix listener becomes ready.
-USER 0:10001
-
-ENTRYPOINT ["/usr/local/bin/platform-sandbox-microvm-provider"]
 
 FROM runtime-base AS runtime
 
