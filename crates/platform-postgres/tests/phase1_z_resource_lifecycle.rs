@@ -4,9 +4,10 @@ use insight_platform_contracts::{
     ArtifactRetentionPolicy, AuthoringPackage, CodeTrustClass, DataClassification,
     DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExactVersionRef, Permission,
     PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind,
-    PrincipalSnapshot, PublishedVersionPayload, ResourceDocument, ResourceDraftPayload, ResourceId,
-    ResourceKind, RunBindingsSnapshot, SandboxEntrypointKind, SandboxPackageResourceSpec,
-    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
+    PrincipalSnapshot, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
+    ResourceDraftPayload, ResourceId, ResourceKind, RunBindingsSnapshot, SandboxEntrypointKind,
+    SandboxPackageResourceSpec, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary,
 };
 use insight_platform_postgres::{
     repository::{
@@ -507,6 +508,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
                     Permission::PolicyWrite,
                     Permission::PolicyPublish,
                     Permission::PolicyActivate,
+                    Permission::AgentRead,
                     Permission::AgentWrite,
                     Permission::AgentPublish,
                     Permission::AgentDeploy,
@@ -1218,6 +1220,58 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     .await
     .unwrap();
     assert!(active_after_deploy.is_none());
+
+    let read_deployment = repository
+        .read_deployment_for_principal(
+            &id(TENANT_ID),
+            &id(PRINCIPAL_ID),
+            PrincipalKind::TenantAdmin,
+            RegistryResourceKind::Agent,
+            &id(AGENT_ID),
+            &id(AGENT_DEPLOYMENT_ID),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read_deployment, deployment);
+    assert!(matches!(
+        repository
+            .read_deployment_for_principal(
+                &id(TENANT_ID),
+                &id(DENIED_PRINCIPAL_ID),
+                PrincipalKind::TenantAdmin,
+                RegistryResourceKind::Agent,
+                &id(AGENT_ID),
+                &id(AGENT_DEPLOYMENT_ID),
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    assert!(matches!(
+        repository
+            .read_deployment_for_principal(
+                &id(TENANT_B_ID),
+                &id(PRINCIPAL_ID),
+                PrincipalKind::TenantAdmin,
+                RegistryResourceKind::Agent,
+                &id(AGENT_ID),
+                &id(AGENT_DEPLOYMENT_ID),
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    assert!(matches!(
+        repository
+            .read_deployment_for_principal(
+                &id(TENANT_ID),
+                &id(PRINCIPAL_ID),
+                PrincipalKind::TenantAdmin,
+                RegistryResourceKind::Agent,
+                &id(RESOURCE_ID),
+                &id(AGENT_DEPLOYMENT_ID),
+            )
+            .await,
+        Err(RepositoryError::NotFound("deployment"))
+    ));
 
     let deployment_digest: Sha256Digest = deployment.bindings.digest.parse().unwrap();
     let run_bindings = RunBindingsSnapshot::build(

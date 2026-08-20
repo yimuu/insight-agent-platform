@@ -857,6 +857,76 @@ impl PgRepository {
         Ok(record)
     }
 
+    pub async fn read_deployment_for_principal(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        expected_kind: RegistryResourceKind,
+        resource_id: &ResourceId,
+        deployment_id: &ResourceId,
+    ) -> Result<DeploymentRecord, RepositoryError> {
+        if resource_id.kind() != expected_kind.id_kind()
+            || expected_kind.deployment_kind() != Some(deployment_id.kind())
+        {
+            return Err(RepositoryError::NotFound("deployment"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal
+            .permissions
+            .contains(read_permission(expected_kind))
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT deployment.tenant_id, deployment.deployment_id, deployment.resource_id,
+                   deployment.resource_version_id, deployment.environment,
+                   deployment.bindings_digest, deployment.payload_schema_version,
+                   deployment.bindings, deployment.created_by, deployment.created_at,
+                   resource.resource_kind AS parent_resource_kind
+            FROM insight_platform.deployments AS deployment
+            JOIN insight_platform.resources AS resource
+              ON resource.tenant_id = deployment.tenant_id
+             AND resource.resource_id = deployment.resource_id
+            WHERE deployment.tenant_id = $1 AND deployment.resource_id = $2
+              AND deployment.deployment_id = $3
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(deployment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("deployment"))?;
+        if row.try_get::<String, _>("parent_resource_kind")? != expected_kind.as_str() {
+            return Err(RepositoryError::NotFound("deployment"));
+        }
+        let record = deployment_from_row(row)?;
+        if record.deployment_id != deployment_id.to_string()
+            || record.resource_id != resource_id.to_string()
+        {
+            return Err(RepositoryError::CorruptRow(
+                "deployment identity differs from its nominal path".to_owned(),
+            ));
+        }
+        let closure = decode_deployment_closure(&record.bindings)?;
+        if closure.resource_kind() != expected_kind {
+            return Err(RepositoryError::CorruptRow(
+                "deployment closure kind differs from its parent resource".to_owned(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(record)
+    }
+
     pub async fn read_resource_for_writer(
         &self,
         tenant_id: &ResourceId,

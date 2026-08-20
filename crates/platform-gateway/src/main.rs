@@ -19,18 +19,19 @@ use insight_platform_api::{
         OperationHttpState, SystemOperationClock,
     },
     resource::{
-        build_resource_router, resource_etag, resource_version_etag, CreateResourceIntent,
-        PublishResourceDraftIntent, PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
-        PublishedResourceVersionSummaryV1, ReadResourceIntent, ReadResourceVersionIntent,
-        ResourceApplication, ResourceApplicationError, ResourceHttpState, ResourceVersionViewV1,
-        ResourceViewV1, SystemResourceClock, UpdateResourceDraftIntent,
-        ValidateResourceDraftIntent,
+        build_resource_router, deployment_etag, resource_etag, resource_version_etag,
+        CreateResourceIntent, DeploymentViewV1, PublishResourceDraftIntent,
+        PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
+        PublishedResourceVersionSummaryV1, ReadDeploymentIntent, ReadResourceIntent,
+        ReadResourceVersionIntent, ResourceApplication, ResourceApplicationError,
+        ResourceHttpState, ResourceVersionViewV1, ResourceViewV1, SystemResourceClock,
+        UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
 };
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, AdministrativeGate, CommandAudit, EntityLifecycle,
-    JsonLimits, OperationViewV1, PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId,
-    ResourceKind, Sha256Digest,
+    canonical_digest, parse_strict_json, AdministrativeGate, CommandAudit, DeploymentClosure,
+    EntityLifecycle, JsonLimits, OperationViewV1, PrincipalKind, PrincipalSnapshot, ReadOperation,
+    ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_postgres::{
     operation_repository::{project_registry_validation_operation, OperationReadError},
@@ -425,6 +426,61 @@ impl ResourceApplication for PgResources {
             payload,
             created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
             etag: resource_version_etag(&intent.resource_version_id, &content_digest),
+        })
+    }
+
+    async fn read_deployment(
+        &self,
+        intent: ReadDeploymentIntent,
+    ) -> Result<DeploymentViewV1, ResourceApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let record = self
+            .repository
+            .read_deployment_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                intent.resource_kind,
+                &intent.resource_id,
+                &intent.deployment_id,
+            )
+            .await
+            .map_err(map_resource_repository_error)?;
+        if record.bindings.schema_version != 1
+            || record.resource_id != intent.resource_id.to_string()
+            || record.deployment_id != intent.deployment_id.to_string()
+        {
+            return Err(ResourceApplicationError::Internal);
+        }
+        let closure_digest: Sha256Digest = record
+            .bindings
+            .digest
+            .parse()
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let mut value = record.bindings.value;
+        value
+            .as_object_mut()
+            .ok_or(ResourceApplicationError::Internal)?
+            .remove("schema_version");
+        let closure: DeploymentClosure =
+            serde_json::from_value(value).map_err(|_| ResourceApplicationError::Internal)?;
+        let resource_version_id: ResourceId = record
+            .resource_version_id
+            .parse()
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        Ok(DeploymentViewV1 {
+            schema_version: 1,
+            deployment_id: intent.deployment_id.clone(),
+            resource_id: intent.resource_id,
+            resource_kind: intent.resource_kind,
+            resource_version_id,
+            environment: record.environment,
+            closure_digest: closure_digest.clone(),
+            closure,
+            created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
+            etag: deployment_etag(&intent.deployment_id, &closure_digest),
         })
     }
 
