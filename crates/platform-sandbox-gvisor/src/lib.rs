@@ -16,6 +16,10 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
+mod backend;
+
+pub use backend::*;
+
 pub const RUNSC_RUNTIME_NAME: &str = "runsc";
 pub const MAX_RUNSC_OUTPUT_BYTES: usize = 64 * 1024;
 pub const MAX_CONTAINER_ID_BYTES: usize = 128;
@@ -322,6 +326,37 @@ pub struct GvisorSingleJobRuntime<D> {
     driver: D,
 }
 
+#[async_trait]
+pub trait GvisorRuntimePort: Send + Sync {
+    async fn verify(&self) -> Result<(), GvisorRuntimeError>;
+    async fn create(
+        &self,
+        identity: &GvisorContainerIdentity,
+        bundle: &Path,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError>;
+    async fn start(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError>;
+    async fn wait(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError>;
+    async fn terminate(
+        &self,
+        identity: &GvisorContainerIdentity,
+        force: bool,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError>;
+    async fn destroy(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError>;
+    async fn recover_orphan(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<(), GvisorRuntimeError>;
+}
+
 impl<D> GvisorSingleJobRuntime<D>
 where
     D: RunscDriver,
@@ -411,6 +446,60 @@ where
 
     async fn best_effort_destroy(&self, identity: &GvisorContainerIdentity) {
         let _ = self.destroy(identity).await;
+    }
+}
+
+#[async_trait]
+impl<D> GvisorRuntimePort for GvisorSingleJobRuntime<D>
+where
+    D: RunscDriver,
+{
+    async fn verify(&self) -> Result<(), GvisorRuntimeError> {
+        GvisorSingleJobRuntime::verify(self).await
+    }
+
+    async fn create(
+        &self,
+        identity: &GvisorContainerIdentity,
+        bundle: &Path,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        GvisorSingleJobRuntime::create(self, identity, bundle).await
+    }
+
+    async fn start(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        GvisorSingleJobRuntime::start(self, identity).await
+    }
+
+    async fn wait(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        GvisorSingleJobRuntime::wait(self, identity).await
+    }
+
+    async fn terminate(
+        &self,
+        identity: &GvisorContainerIdentity,
+        force: bool,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        GvisorSingleJobRuntime::terminate(self, identity, force).await
+    }
+
+    async fn destroy(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        GvisorSingleJobRuntime::destroy(self, identity).await
+    }
+
+    async fn recover_orphan(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<(), GvisorRuntimeError> {
+        GvisorSingleJobRuntime::recover_orphan(self, identity).await
     }
 }
 

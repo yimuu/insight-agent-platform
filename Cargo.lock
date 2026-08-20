@@ -2793,8 +2793,11 @@ name = "insight-platform-sandbox-gvisor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "insight-platform-contracts",
+ "insight-platform-sandbox",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "tokio",
