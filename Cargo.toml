@@ -27,7 +27,6 @@ members = [
     "crates/platform-model-worker",
     "crates/platform-models",
     "crates/platform-mcp-host",
-    "crates/platform-mcp-cleanup-worker",
     "crates/platform-postgres",
     "crates/platform-orchestrator",
     "crates/platform-registry",
@@ -46,7 +45,10 @@ members = [
     "crates/platform-tasks",
     "crates/platform-worker",
 ]
-exclude = ["crates/platform-sandbox-microvm"]
+exclude = [
+    "crates/platform-mcp-cleanup-worker",
+    "crates/platform-sandbox-microvm",
+]
 default-members = ["."]
 resolver = "2"
 
@@ -136,7 +138,6 @@ insight-platform-model-adapters = { path = "crates/platform-model-adapters" }
 insight-platform-model-worker = { path = "crates/platform-model-worker" }
 insight-platform-models = { path = "crates/platform-models" }
 insight-platform-mcp-host = { path = "crates/platform-mcp-host" }
-insight-platform-mcp-cleanup-worker = { path = "crates/platform-mcp-cleanup-worker" }
 insight-platform-postgres = { path = "crates/platform-postgres" }
 insight-platform-orchestrator = { path = "crates/platform-orchestrator" }
 insight-platform-registry = { path = "crates/platform-registry" }

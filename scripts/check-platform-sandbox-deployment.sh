@@ -20,7 +20,7 @@ if rg -n 'platform-sandbox-microvm' "$root/Dockerfile"; then
   echo "sandbox deployment: deferred backend is present in the release build" >&2
   exit 1
 fi
-if ! rg -q '^exclude = \["crates/platform-sandbox-microvm"\]$' "$root/Cargo.toml"; then
+if ! rg -q '^    "crates/platform-sandbox-microvm",$' "$root/Cargo.toml"; then
   echo "sandbox deployment: deferred backend is not explicitly outside the release workspace" >&2
   exit 1
 fi

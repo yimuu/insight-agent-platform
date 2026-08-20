@@ -46,8 +46,6 @@ jobs:
         run: bash scripts/check-platform-sandbox-deployment.sh
       - name: Check Security Authority and Egress deployment boundary
         run: bash scripts/check-platform-security-deployment.sh
-      - name: Check MCP OAuth cleanup deployment boundary
-        run: bash scripts/check-platform-mcp-cleanup-deployment.sh
       - name: Check Model Worker deployment boundary
         run: bash scripts/check-platform-model-worker-deployment.sh
       - name: Check Artifact Broker deployment boundary
