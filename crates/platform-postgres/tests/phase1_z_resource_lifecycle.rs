@@ -33,7 +33,6 @@ const RETENTION_REVISION_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ca3";
 const ENCRYPTION_DOMAIN_ID: &str = "enc_0198f1c3-8f49-7c3e-b1f3-773c28367ca4";
 const RESOURCE_ID: &str = "pol_0198f1c3-8f49-7c3e-b1f3-773c28367c05";
 const VERSION_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367c06";
-const OPERATION_ID: &str = "job_0198f1c3-8f49-7c3e-b1f3-773c28367c07";
 const JOB_ID: &str = "job_0198f1c3-8f49-7c3e-b1f3-773c28367c08";
 const ROLLBACK_RESOURCE_ID: &str = "pol_0198f1c3-8f49-7c3e-b1f3-773c28367cb0";
 const AGENT_ID: &str = "agt_0198f1c3-8f49-7c3e-b1f3-773c28367cd0";
@@ -213,7 +212,6 @@ async fn prove_sandbox_package_runtime_bundle_publication(
             resource_id: package_resource_id.clone(),
             expected_resource_version: 1,
             expected_draft_digest: draft_digest.clone(),
-            operation_id: sandbox_id(ResourceKind::Job, 7),
             job_id: sandbox_id(ResourceKind::Job, 8),
             validator_digest: validator_digest.clone(),
             validation_profile_digest: digest('8'),
@@ -781,7 +779,6 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
                 resource_id: id(RESOURCE_ID),
                 expected_resource_version: 1,
                 expected_draft_digest: draft_digest.clone(),
-                operation_id: id(OPERATION_ID),
                 job_id: id(JOB_ID),
                 validator_digest: digest('e'),
                 validation_profile_digest: digest('f'),

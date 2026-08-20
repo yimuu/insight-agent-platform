@@ -1119,7 +1119,7 @@ impl PgRegistryTransaction {
         )
         .bind(command.audit.tenant_id.to_string())
         .bind(command.job_id.to_string())
-        .bind(command.operation_id.to_string())
+        .bind(command.job_id.to_string())
         .bind(command.attempt_limit)
         .bind(command.scheduled_at)
         .bind(command.deadline)
@@ -1134,7 +1134,7 @@ impl PgRegistryTransaction {
             &mut transaction,
             &command.audit,
             "job",
-            &command.operation_id.to_string(),
+            &command.job_id.to_string(),
             1,
             "resource.validation_requested",
             &TypedPayload::new(
@@ -1150,7 +1150,7 @@ impl PgRegistryTransaction {
         terminalize_command_receipt(
             &mut transaction,
             &command.audit,
-            &command.operation_id.to_string(),
+            &command.job_id.to_string(),
             "accepted",
         )
         .await?;

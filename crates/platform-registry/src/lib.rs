@@ -68,7 +68,6 @@ pub struct RequestResourceValidation {
     pub resource_id: ResourceId,
     pub expected_resource_version: i64,
     pub expected_draft_digest: Sha256Digest,
-    pub operation_id: ResourceId,
     pub job_id: ResourceId,
     pub validator_digest: Sha256Digest,
     pub validation_profile_digest: Sha256Digest,
@@ -81,7 +80,6 @@ impl RequestResourceValidation {
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), RegistryCommandError> {
         validate_audit(&self.audit, now)?;
         if self.expected_resource_version <= 0
-            || self.operation_id.kind() != ResourceKind::Job
             || self.job_id.kind() != ResourceKind::Job
             || self.attempt_limit <= 0
             || self.attempt_limit > 32
@@ -97,7 +95,7 @@ impl RequestResourceValidation {
 #[serde(deny_unknown_fields)]
 pub struct RegistryValidationJobPayload {
     pub schema_version: u32,
-    pub operation_id: ResourceId,
+    pub job_id: ResourceId,
     pub resource_id: ResourceId,
     pub resource_kind: RegistryResourceKind,
     pub expected_resource_version: u64,
@@ -115,7 +113,7 @@ impl RegistryValidationJobPayload {
             .map_err(|_| RegistryCommandError::InvalidValidationJob)?;
         let payload = Self {
             schema_version: 1,
-            operation_id: command.operation_id.clone(),
+            job_id: command.job_id.clone(),
             resource_id: command.resource_id.clone(),
             resource_kind,
             expected_resource_version,
@@ -123,14 +121,14 @@ impl RegistryValidationJobPayload {
             validator_digest: command.validator_digest.clone(),
             validation_profile_digest: command.validation_profile_digest.clone(),
         };
-        payload.validate_for_owner(&command.operation_id)?;
+        payload.validate_for_owner(&command.job_id)?;
         Ok(payload)
     }
 
     pub fn validate_for_owner(&self, owner_id: &ResourceId) -> Result<(), RegistryCommandError> {
         if self.schema_version != 1
-            || self.operation_id.kind() != ResourceKind::Job
-            || &self.operation_id != owner_id
+            || self.job_id.kind() != ResourceKind::Job
+            || &self.job_id != owner_id
             || self.resource_id.kind() != self.resource_kind.id_kind()
             || self.expected_resource_version == 0
         {
