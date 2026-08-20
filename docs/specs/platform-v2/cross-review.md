@@ -1,4 +1,4 @@
-# Platform v2 00～18 Cross-review（CR-169）
+# Platform v2 00～18 Cross-review（CR-170）
 
 | 属性 | 值 |
 |---|---|
@@ -9,7 +9,7 @@
 
 ## 1. 结论
 
-CR-169继承CR-168的简化结论，并消解实施反馈发现的public Run选择与Plan entry authority缺口。全量审查确认首版目标收敛为：
+CR-170继承CR-169的简化与Run admission结论，并消解实施反馈发现的public Artifact DTO与可信服务交接缺口。全量审查确认首版目标收敛为：
 
 - Sandbox = restricted WASI + single-Job gVisor；microVM/Firecracker/KVM推迟；
 - MCP = remote Streamable HTTP；Managed stdio和persistent Sandbox session推迟；
@@ -32,14 +32,20 @@ closure，06明确root admission从所选`agent_id`的enabled active binding解�
 00～18在复核期间退回Architecture Revision，并在本次00～18全量复核无新增P0/P1后作为同一批次重新推进为Accepted。Accepted仍不表示target已经成为
 current behavior；只有通过实现与资格门禁后才能推进状态。
 
+后续Artifact public API审计又发现一个P1合同缺口：candidate Artifact Gateway把Blob/Job/Receipt/Event/Outbox、policy/fence和grant token
+作为所谓public request字段，并仅以自由principal header承接Public Gateway身份；15/17虽然禁止公开内部authority，却未冻结可替代的public DTO与
+内部hop认证。CR-170先在15冻结业务意图、Secret-bearing upload target例外、server-owned identity/policy与mTLS + current principal rebinding，
+再在17冻结exact public DTO、header/status/Location/ETag语义。01～14、16、18经00～18全量影响复核无需语义变更；该修订不新增aggregate、表、
+Artifact role或第二current authority。
+
 ## 2. 文档状态与依赖
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / Implementation Authorized | CR-169已写回并获统一acceptance |
-| 01～10 | Accepted | 依赖顺序与owner边界已按CR-169统一；05/06的Plan entry与root admission已闭合 |
+| 00 | Accepted / Implementation Authorized | CR-170已写回并获统一acceptance |
+| 01～10 | Accepted | 依赖顺序与owner边界已按CR-169统一；CR-170影响复核无语义变化 |
 | 11 Skill | Accepted / Implementation In Progress | 未改变Skill“方法包、非运行时”语义；脚本仍必须发布为Sandbox Capability |
-| 12～18 | Accepted | 已按CR-169复核/修订并获统一acceptance |
+| 12～18 | Accepted | 15/17已按CR-170闭合Artifact public DTO与可信hop，其余影响复核无语义变化 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | Accepted / Implementing | 从Accepted合同生成；仍不表示current behavior |
@@ -222,7 +228,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 14. 本次冲突消解
 
-| 原冲突 | CR-169 resolution |
+| 原冲突 | CR-170 current resolution |
 |---|---|
 | `SandboxJobId`/同UUID alias与shared Job冲突 | 只保留JobId，RunValueId独立；无Sandbox child aggregate |
 | ArtifactLink stored owner fence会随owner正常推进而失效 | stored version只是create-time CAS evidence；read不与current version比较；release另携current expected version |
@@ -235,10 +241,11 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 | 02把Draft写成mutable ResourceVersion、17又要求Version validate/publish route | Draft由Resource aggregate唯一拥有；17使用`/draft` update/validate/publish，publication后才有immutable Version GET identity |
 | 02给Deployment可变state/version却又要求immutable，17的`suspend`未指定authority | Deployment是immutable closure；activate/suspend以Resource ETag做CAS，只改Resource active binding/gate |
 | public Run未选择Agent且admission entry无durable authority | request显式携带`agent_id`；Agent Deployment冻结validated entry ID/kind，admission不接受内部入口或临时读Artifact |
+| Artifact candidate把内部ID/policy/grant token当作public request并只信自由principal header | public DTO只含业务意图与opaque completion proof；服务端生成内部identity/closure；Public Gateway到Artifact Gateway使用exact audience mTLS并在DB重绑定current principal |
 
 ## 15. Acceptance 记录
 
-CR-169及2026-08-21实现反馈cross-review的以下门禁已用于把00～18、ADR-0001、ADR-0002和implementation plan作为同一合同批次accept：
+CR-170及2026-08-21实现反馈cross-review的以下门禁已用于把00～18、ADR-0001、ADR-0002和implementation plan作为同一合同批次accept：
 
 1. `rg` stale-contract scan确认microVM、Managed stdio、Installation Release、ManagementOperation、
    Model Artifact Producer和八role只出现在历史/否定/明确推迟语境，不再是首版正向requirement；
@@ -255,6 +262,10 @@ CR-169及2026-08-21实现反馈cross-review的以下门禁已用于把00～18、
    mutable Deployment state/projection；23表baseline不新增Deployment transition或current-head副本。
 9. 逐份复核05/06/08/17的root/child admission：root只从request `agent_id`解析enabled active Deployment及其entry，child继续继承
    parent允许的exact closure；公共请求不暴露Deployment/Node/Job identity，且无需新增表或Plan Artifact事务外读取。
+10. 逐份复核00～18的Artifact边界：只有15/17拥有public DTO字段；03/04的Receipt/permission、07的隔舱、10的Effect恢复、12/13/14/16的
+    Artifact port以及18的三role/mTLS资格均与server-owned identity、exact generation和current principal rebinding一致，不需新增表、role或队列。
+11. stale surface scan确认public Artifact request不再把Blob/Job/Task/Receipt/Event/Outbox、tenant/principal、storage/object locator、policy revision、
+    retry或audit identity作为调用方字段；upload target/proof是唯一显式Secret-bearing响应例外，并被no-store/redaction/非明文Receipt约束。
 
 ## 16. 未决项
 

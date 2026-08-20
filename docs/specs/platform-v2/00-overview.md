@@ -18,7 +18,8 @@
 > 改由GitOps发布、Inline-only Model、三类Artifact角色、WASI+gVisor和remote-only MCP收敛首版。CR-166已完成全量cross-review，
 > 2026-08-21的CR-169进一步确认editable Draft只由Resource aggregate拥有，publication才创建immutable ResourceVersion；
 > Deployment是immutable exact closure，Resource active binding + gate是未来Run admission的唯一current authority，并完成
-> 00～18全量复核。相关规范已完成Acceptance并进入实施授权。旧候选不得作为新实现兼容基线。
+> Run admission闭包。CR-170在此基础上冻结public Artifact DTO、服务端identity/policy ownership与Public Gateway到Artifact Gateway的
+> mTLS/current-principal rebinding，并完成00～18全量复核。相关规范已完成Acceptance并进入实施授权。旧候选不得作为新实现兼容基线。
 
 ## 1. 决策摘要
 
@@ -172,7 +173,7 @@ Draft
 9. MCP Tool、Resource、Prompt 与 Task 分别保持各自语义，不通过通用 JSON 丢失安全元数据；
 10. 版本、状态机、事件和公开错误码均通过 machine-readable conformance suite。
 
-## 8. CR-166/CR-167/CR-168/CR-169 简化结论与下一步
+## 8. CR-166～CR-170 简化结论与下一步
 
 2026-08-20的CR-166撤销CR-165中超出首版需要的最终形态设计，并已完成受影响规范的全量cross-review：
 
@@ -204,12 +205,16 @@ tenant/permission/quota、lease fence、Artifact content integrity及Sandbox物�
 ### 8.1 当前证据边界（非规范性）
 
 当前checked-in persistence baseline是23张总表/22张业务表、schema contract v7和单一`0001_platform_baseline.sql`。仓库有
-CR-169之前候选架构的多类functional fixture；只有已按CR-169重新对照且通过适用门禁的批次可计为实现证据，尚不能据此宣称全部phase完成。
+CR-170之前候选架构的多类functional fixture；只有已按CR-170重新对照且通过适用门禁的批次可计为实现证据，尚不能据此宣称全部phase完成。
+
+CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
+storage与audit closure全部由服务端拥有；upload target是唯一显式Secret-bearing响应例外。Public Gateway不取得storage authority，Artifact Gateway
+不信任自由principal header，两者以exact audience mTLS连接并由Artifact Gateway从PostgreSQL重绑定current principal。
 
 仓库中已有的microVM/Firecracker、Managed stdio session和Model Artifact Producer候选代码不再构成首版目标证据；后续实现批次应先从
 registry、runtime manifest、RPC、Helm和测试入口中删除或隔离这些非目标路径，再补齐gVisor、三角色Artifact和最小`/v1`。切除旧候选不得
 恢复host execution、plain runc或第二持久状态权威。
 
-精确实施顺序只以[implementation-plan.md](implementation-plan.md)为准。本次受影响规范已经CR-169复核并Accepted，但Accepted
+精确实施顺序只以[implementation-plan.md](implementation-plan.md)为准。本次受影响规范已经CR-170复核并Accepted，但Accepted
 本身不声明新的API、部署拓扑、容量数字或qualification结果是当前行为。cutover前当前行为继续以
 [docs/current](../../current/README.md)为准。

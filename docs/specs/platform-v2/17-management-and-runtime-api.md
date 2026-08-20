@@ -28,7 +28,8 @@ Receipt result和OpenAPI component必须从owner type/registry生成或由confor
 - 有界list/string/bytes/depth和total request/response size；
 - canonical serialization与digest；
 - 稳定problem code和字段级error detail；
-- Secret、token、内部定位和敏感正文不进public DTO。
+- Secret、token、内部定位和敏感正文不进public DTO；唯一例外是15明确规定、只在prepare-upload成功响应出现的短期
+  `upload_target` bearer capability，它必须no-store/redact且不以明文进入Receipt/Event/log/trace。
 
 ## 3. Authentication、tenant 与通用请求
 
@@ -188,6 +189,61 @@ POST /v1/artifacts/{artifact_id}:delete
 prepare返回Staging Artifact、short-lived upload grant和verify Job Operation。complete与object-store callback幂等，不直推Ready。
 download经Gateway重新验证Artifact/Link/Grant/tenant/classification并有界stream。delete创建owner-specific maintenance Job。
 
+closed public DTO冻结为：
+
+```rust
+struct PrepareArtifactUploadRequestV1 {
+    schema_version: ConstU16<1>,
+    purpose: ArtifactPurpose,
+    classification: DataClassification,
+    expected_size_bytes: BoundedU64,
+    expected_digest: Option<Digest>,
+    declared_media_type: Option<BoundedMediaType>,
+    display_name: Option<BoundedSafeText>,
+}
+
+struct PrepareArtifactUploadResponseV1 {
+    schema_version: ConstU16<1>,
+    artifact_id: ArtifactId,
+    operation_id: JobId,
+    upload_grant_id: ArtifactLinkId,
+    artifact_etag: StrongEtag,
+    upload_target: SecretBearingUploadTargetV1,
+    upload_expires_at: UtcTimestamp,
+}
+
+struct SecretBearingUploadTargetV1 {
+    url: BoundedHttpsUrl,
+    completion_proof: OpaqueUploadCompletionProof,
+}
+
+struct CompleteArtifactUploadRequestV1 {
+    schema_version: ConstU16<1>,
+    completion_proof: OpaqueUploadCompletionProof,
+}
+
+struct ArtifactMutationAcceptedV1 {
+    schema_version: ConstU16<1>,
+    artifact_id: ArtifactId,
+    artifact_etag: StrongEtag,
+    operation_id: JobId,
+}
+```
+
+`prepare-upload`要求`Idempotency-Key`；`complete-upload`要求`Idempotency-Key`和prepare返回的current Artifact `If-Match`；
+`delete`要求`Idempotency-Key`、current Artifact `If-Match`和空closed body。服务端生成Artifact之外的Blob/Grant/Job/Task/Receipt/Event/Outbox ID，
+并从published policy/config选择retention、storage、scan、quota与deadline closure。public body不得接受这些内部ID、tenant/principal、object locator、
+grant token、scan revision、retry参数或audit identity。complete中的opaque proof只引用服务端已冻结的grant/generation，Artifact Gateway仍须从provider
+重新观察并验证generation/checksum/length；调用方不能用proof声明成功。
+
+`prepare-upload`返回`201`；`complete-upload`和`delete`返回`202`与`Location: /v1/operations/{job_id}`，其响应使用
+`ArtifactMutationAcceptedV1`。`GET .../content`只在Ready且current authorization成立时返回bounded attachment stream；metadata、mutation和content
+全部`no-store`。upload target/proof按15的Secret-bearing例外处理，不进入problem/Event/log/trace或明文Receipt result。
+
+外部OIDC终止在Public Gateway；Artifact业务与storage I/O留在独立Artifact Gateway。内部hop使用mTLS exact workload audience并携带closed DTO、
+通用header摘要及verified principal assertion，Artifact Gateway再从PostgreSQL重绑定current principal/permissions。不得把Public Gateway变成Artifact
+状态机/storage client，不得以自由`x-platform-*` header、plain HTTP或NetworkPolicy来源代替服务身份认证。
+
 不公开internal stage/read/verify/Ready、object key、bucket/KMS identity、generic grant、Model Artifact、dynamic storage binding或
 Maintenance admin route。
 
@@ -209,7 +265,7 @@ SSE只投影已提交Event，NATS只唤醒。`Last-Event-ID`是opaque tenant/run
 public envelope包含event ID、type/version、tenant-safe resource IDs、sequence、occurred/committed time、trace ID和bounded typed data。
 Secret、prompt/response、tool arguments、Artifact URL/path、credential和内部diagnostic不进Event。
 
-## 13. Internal gRPC
+## 13. Internal service protocols
 
 internal service只有跨物理信任边界时才存在，不为每个domain trait自动生成network service。首版至少包含：
 
@@ -218,12 +274,13 @@ internal service只有跨物理信任边界时才存在，不为每个domain tra
 | EgressBroker | catalog-bound HTTP/provider/MCP egress与last-hop Secret resolution | 不接受自由URL/header/Secret |
 | SandboxController | Submit/Cancel/Observe fenced Job | Executor无DB直连 |
 | SandboxExecutor | WASI/gVisor physical execution | 不改写业务state |
-| ArtifactGateway | public upload/download stream | principal-only boundary |
+| ArtifactGateway | 经Public Gateway转发的public upload/download HTTP语义 | exact public-gateway mTLS audience + current principal rebinding |
 | ArtifactDataWorker | internal stage/read/verify/derive | exact workload capability + owner/Job fence |
 | ArtifactMaintenance | delete/GC/quarantine/reconcile | closed maintenance transition |
 
 没有Model Artifact Producer、Model/Sandbox专用Artifact Broker、microVM RPC、Managed stdio runner或Installation release service。
-所有RPC使用mTLS workload identity、exact audience、tenant/owner/fence重绑定、bounded deadline/message/stream和stable status mapping。
+Artifact public hop保持同一个OpenAPI HTTP请求/响应语义，不生成一份字段对等protobuf；其余internal RPC使用protobuf。所有跨进程调用使用
+mTLS workload identity、exact audience、tenant/owner/fence重绑定、bounded deadline/message/stream和stable status mapping。
 
 ## 14. Rate limit、quota 与backpressure
 

@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-169）
+# Platform v2 四阶段实现计划（CR-170）
 
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementing |
 | 日期 | 2026-08-21 |
-| 合同输入 | 00～18、cross-review CR-169/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-170/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则
@@ -29,12 +29,12 @@ Phase 4 public /v1、部署、资格与clean cut
 ## 2. 当前证据边界
 
 当前仓库有模块化Rust workspace、shared Job/Run/Artifact/MCP/Sandbox等候选实现、一个23表schema contract v7 baseline与大量
-开发fixture；部分代码源自CR-169之前的candidate，曾包含已推迟的microVM、
+开发fixture；部分代码源自CR-170之前的candidate，曾包含已推迟的microVM、
 Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 因此：
 
-- 可复用的领域与仓储代码必须通过CR-169对照审计后才计入phase evidence；
+- 可复用的领域与仓储代码必须通过CR-170对照审计后才计入phase evidence；
 - 仅存在crate、test、Helm manifest或migration object不等于目标功能完成；
 - 已推迟代码需从default build、runtime composition、deployment和公开contract移除，可在后续独立研究分支保留；
 - 本批规范修订不改代码，不改变current runtime behavior。
@@ -240,7 +240,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 ## 8. 总体完成标准
 
-Platform v2只在Phase 1～4全部exit gate通过、CR-169影响规范推进为Accepted、schema v7与migration实际发布、
+Platform v2只在Phase 1～4全部exit gate通过、CR-170影响规范推进为Accepted、schema v7与migration实际发布、
 production CapacityProfile经L4～L6证明、GitOps clean cut完成后，才能宣称完成。
 
 本计划本身不完成任何phase；它只是Reviewed合同的执行顺序。

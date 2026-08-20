@@ -94,8 +94,26 @@ Add/Rebind/Revoke API，不引入Installation Release、compatibility generation
 `PrepareUpload`事务使用Receipt创建Staging Artifact、预分配Blob generation、UploadGrant和`ArtifactVerify`
 shared Job，并返回short-lived upload target。公开Operation ID就是JobId；`GET /v1/operations/{job_id}`只是safe Job projection。
 
+public request只携带业务意图：`schema_version=1`、`purpose`、`classification`、`expected_size_bytes`、可选
+`expected_digest`、可选`declared_media_type`和可选`display_name`。tenant/principal、Artifact/Blob/Grant/Job/Receipt/Event/Outbox ID、
+storage binding、retention policy revision、scan policy、deadline上限和quota account全部由服务端current authority选择并冻结，客户端不得提交。
+public request中的`purpose`仍需通过principal permission与owner policy的closed allowlist，不能用它取得内部package/evidence权限。
+
+成功响应只公开`schema_version=1`、`artifact_id`、`operation_id`、`upload_grant_id`、Artifact ETag、`upload_target`和
+`upload_expires_at`。`upload_target`是一次短期、exact generation、method/length/media约束的bearer capability，可包含完成上传所需的
+opaque completion proof；它是这个响应唯一允许出现的Secret-bearing字段，必须`no-store`、禁止日志/trace/Event记录且不得在Receipt result中
+持久化明文。Receipt只保存可重放的非Secret结果与加密/摘要化的grant binding；同key重放若原target仍有效可重新签发绑定同一generation的
+新target，不能创建第二Artifact/Blob/Job。
+
 client只能向exact object generation上传指定media/length/digest上限内的bytes。`CompleteUpload`通过Receipt验证
-object generation、ETag/checksum、length、digest和expiry，然后推进`Staging -> Uploaded`并唤醒verify Job。
+由prepare响应获得的opaque completion proof、current Artifact ETag与provider completion evidence；公开request不接受Artifact以外的
+内部ID、object key、bucket、KMS identity、scan policy或owner-generated audit ID。Artifact Gateway从exact provider binding重新观察
+object generation、ETag/checksum与length，验证digest和expiry，然后推进`Staging -> Uploaded`并唤醒原verify Job。
+
+Public Gateway只做外部credential验证、通用request limits和rate admission；Artifact Gateway才拥有upload/download业务处理与storage client。
+两者之间必须使用mTLS认证exact `public-gateway -> artifact-gateway` workload audience，转发closed public DTO、Idempotency-Key/If-Match摘要和
+verified principal identity。Artifact Gateway必须从PostgreSQL重新绑定current principal/permission，不能仅信任自由`x-platform-*` header；
+plain HTTP、仅NetworkPolicy来源或调用方提供的tenant/principal/body ID均不是认证边界。
 
 ### 5.2 Internal workload stage
 
@@ -243,6 +261,10 @@ size limit、canonical serialization和digest。
 - delete request；
 - safe Job Operation query；
 - Run/Event SSE中的Artifact lifecycle observation。
+
+public delete request是空closed body，使用`Idempotency-Key`与Artifact strong `If-Match`；服务端生成delete Job/Receipt/Event/Outbox identity，
+并按policy创建或复用必要Approval Task。public content read不接受object locator或通用grant，响应只从current Ready Artifact + active typed Link +
+current principal authorization重新派生，强制bounded stream、`Content-Length`、verified media type、digest ETag、attachment disposition与`no-store`。
 
 不公开object key、storage binding/KMS细节、generic grant mint、internal stage/read/verify/Ready、dynamic storage management或
 Maintenance API。Event记录stable IDs/state/reason/evidence digest，不记录bytes、URL、path、Secret或对象定位。
