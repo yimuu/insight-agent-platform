@@ -16,12 +16,13 @@ use insight_platform_artifacts::{
     ScheduleInitialArtifactScan,
 };
 use insight_platform_contracts::{
-    ArtifactPurpose, ArtifactRef, ArtifactReferenceKind, ArtifactRetentionPolicy, ArtifactState,
-    BlobIntegrityState, CommandAudit, CommandOutcome, DataClassification, Effect, ExactVersionRef,
-    JobState, Permission, PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
-    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, ResourceDocument,
-    ResourceDraftPayload, ResourceId, ResourceKind, SandboxArtifactIoPolicyDocument, Sha256Digest,
-    TenantConfig, TenantPrincipalPayload, ValidationSummary,
+    canonical_digest, ArtifactPurpose, ArtifactRef, ArtifactReferenceKind, ArtifactRetentionPolicy,
+    ArtifactState, BlobIntegrityState, CommandAudit, CommandOutcome, DataClassification, Effect,
+    ExactVersionRef, JobState, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
+    SandboxArtifactIoPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary,
 };
 use insight_platform_jobs::JobFence as DomainJobFence;
 use insight_platform_postgres::{
@@ -149,7 +150,10 @@ fn command(
             receipt_id: id(ResourceKind::Receipt, base),
             event_id: id(ResourceKind::Event, base + 1),
             outbox_id: id(ResourceKind::OutboxEvent, base + 2),
-            idempotency_key_digest: digest('a'),
+            idempotency_key_digest: canonical_digest(&json!({"artifact_prepare": base}))
+                .unwrap()
+                .parse()
+                .unwrap(),
             request_digest,
             receipt_expires_at: now + Duration::hours(2),
         },
@@ -1203,9 +1207,18 @@ async fn artifact_upload_lifecycle_fixture() {
     .await;
     assert!(ready_without_media.is_err());
 
-    let replay = execute_prepare(&repository, prepared_command.clone())
-        .await
-        .unwrap();
+    let mut replay_command = command(
+        tenant_a.clone(),
+        allowed_principal.clone(),
+        retention_a.clone(),
+        quota_a.clone(),
+        0x1010,
+        1_024,
+        prepared_command.audit.request_digest.clone(),
+    );
+    replay_command.audit.idempotency_key_digest =
+        prepared_command.audit.idempotency_key_digest.clone();
+    let replay = execute_prepare(&repository, replay_command).await.unwrap();
     let CommandOutcome::Replayed(replayed) = replay else {
         panic!("exact prepare retry must replay");
     };
@@ -1217,7 +1230,7 @@ async fn artifact_upload_lifecycle_fixture() {
           (SELECT count(*) FROM insight_platform.artifact_blobs WHERE tenant_id = $1 AND blob_id = $3),
           (SELECT count(*) FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $4),
           (SELECT count(*) FROM insight_platform.artifact_links WHERE tenant_id = $1 AND artifact_link_id = $5),
-          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND scope_id = $2 AND operation = 'artifact.prepare'),
+          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND scope_kind = 'artifact_collection' AND scope_id = $1 AND response_reference_id = $2 AND operation = 'artifact.prepare'),
           (SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND aggregate_id = $2 AND event_type = 'artifact.prepared'),
           (SELECT count(*) FROM insight_platform.outbox_events AS outbox JOIN insight_platform.events AS event ON event.event_id = outbox.event_id WHERE outbox.tenant_id = $1 AND event.aggregate_id = $2),
           (SELECT count(*) FROM insight_platform.quota_ledger WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'reserve')
@@ -1312,7 +1325,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let completion_counts: (i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
-          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND scope_id = $2),
+          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND (scope_id = $2 OR response_reference_id = $2)),
           (SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND aggregate_id = $2),
           (SELECT count(*) FROM insight_platform.outbox_events AS outbox JOIN insight_platform.events AS event ON event.event_id = outbox.event_id WHERE outbox.tenant_id = $1 AND event.aggregate_id = $2)
         "#,
@@ -1468,7 +1481,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let verification_counts: (i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
-          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND scope_id = $2),
+          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND (scope_id = $2 OR response_reference_id = $2)),
           (SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND aggregate_id = $2),
           (SELECT count(*) FROM insight_platform.outbox_events AS outbox JOIN insight_platform.events AS event ON event.event_id = outbox.event_id WHERE outbox.tenant_id = $1 AND event.aggregate_id = $2)
         "#,
@@ -1478,7 +1491,7 @@ async fn artifact_upload_lifecycle_fixture() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(verification_counts, (3, 4, 4));
+    assert_eq!(verification_counts, (4, 4, 4));
 
     let finalized_command = finalize_command(
         &prepared_command,
@@ -1578,7 +1591,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let final_counts: (i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
-          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND scope_id = $2),
+          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND (scope_id = $2 OR response_reference_id = $2)),
           (SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND aggregate_id = $2),
           (SELECT count(*) FROM insight_platform.outbox_events AS outbox JOIN insight_platform.events AS event ON event.event_id = outbox.event_id WHERE outbox.tenant_id = $1 AND event.aggregate_id = $2),
           (SELECT count(*) FROM insight_platform.artifact_links WHERE tenant_id = $1 AND target_artifact_id = $2 AND link_kind = 'reference')
@@ -1589,7 +1602,7 @@ async fn artifact_upload_lifecycle_fixture() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(final_counts, (4, 5, 5, 1));
+    assert_eq!(final_counts, (5, 5, 5, 1));
 
     let mut duplicate_command = command(
         tenant_a.clone(),

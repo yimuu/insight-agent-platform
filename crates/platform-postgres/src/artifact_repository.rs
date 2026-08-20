@@ -41,7 +41,7 @@ use insight_platform_contracts::{
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskState};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::{collections::BTreeSet, str::FromStr};
 
@@ -50,6 +50,144 @@ use crate::repository::ArtifactWorkerRole;
 pub struct PgArtifactTransaction {
     transaction: Transaction<'static, Postgres>,
     limits: ArtifactCommandLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactPrepareReceiptResult {
+    schema_version: u32,
+    artifact_id: ResourceId,
+    blob_id: ResourceId,
+    upload_grant_id: ResourceId,
+    operation_id: ResourceId,
+}
+
+async fn claim_artifact_prepare_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &insight_platform_contracts::CommandAudit,
+) -> Result<Option<ArtifactPrepareReceiptResult>, RepositoryError> {
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "operation": "artifact.prepare",
+            "principal_id": audit.principal_id,
+            "scope_id": audit.tenant_id,
+            "scope_kind": "artifact_collection",
+        }),
+        65_536,
+    )?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest,
+            state, payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'command', 'artifact_collection', $1, $3,
+                  'artifact.prepare', $4, $5, 'processing', $6, $7, $8, $9)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(audit.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(None);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state, payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'artifact_collection' AND scope_id = $1
+          AND dedupe_owner_id = $2 AND operation = 'artifact.prepare'
+          AND idempotency_key_digest = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != audit.request_digest.to_string() {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if row.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("Artifact prepare receipt"));
+    }
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let result: ArtifactPrepareReceiptResult =
+        decode_versioned_payload(&payload, "Artifact prepare Receipt result")?;
+    validate_artifact_prepare_receipt_result(&result)?;
+    Ok(Some(result))
+}
+
+fn validate_artifact_prepare_receipt_result(
+    result: &ArtifactPrepareReceiptResult,
+) -> Result<(), RepositoryError> {
+    if result.schema_version != 1
+        || result.artifact_id.kind() != ResourceKind::Artifact
+        || result.blob_id.kind() != ResourceKind::InternalBlob
+        || result.upload_grant_id.kind() != ResourceKind::ArtifactGrant
+        || result.operation_id.kind() != ResourceKind::Job
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Artifact prepare Receipt result is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn terminalize_artifact_prepare_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &insight_platform_contracts::CommandAudit,
+    prepared: &PreparedArtifact,
+) -> Result<(), RepositoryError> {
+    let result = ArtifactPrepareReceiptResult {
+        schema_version: 1,
+        artifact_id: prepared.artifact.artifact_id.clone(),
+        blob_id: prepared.blob.blob_id.clone(),
+        upload_grant_id: prepared.grant.upload_grant_id.clone(),
+        operation_id: prepared.operation.operation_id.clone(),
+    };
+    validate_artifact_prepare_receipt_result(&result)?;
+    let payload = TypedPayload::from_versioned(1, &result, 65_536)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = 'prepared', response_reference_id = $4,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND state = 'processing'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(prepared.artifact.artifact_id.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("Artifact prepare receipt"));
+    }
+    Ok(())
 }
 
 /// Safe database projection consumed by the public Artifact Gateway.
@@ -1705,22 +1843,16 @@ impl ArtifactTransaction for PgArtifactTransaction {
             .await?;
         command.validate_at(database_now, self.limits)?;
 
-        if claim_command_receipt(
-            &mut transaction,
-            &command.audit,
-            "artifact",
-            &command.artifact_id.to_string(),
-            "artifact.prepare",
-        )
-        .await?
+        if let Some(result) =
+            claim_artifact_prepare_receipt(&mut transaction, &command.audit).await?
         {
             let prepared = load_artifact_bundle(
                 &mut transaction,
                 &command.audit.tenant_id,
-                &command.artifact_id,
-                &command.blob_id,
-                &command.upload_grant_id,
-                &command.operation_id,
+                &result.artifact_id,
+                &result.blob_id,
+                &result.upload_grant_id,
+                &result.operation_id,
             )
             .await?;
             transaction.commit().await?;
@@ -1861,14 +1993,6 @@ impl ArtifactTransaction for PgArtifactTransaction {
             )?,
         )
         .await?;
-        terminalize_command_receipt(
-            &mut transaction,
-            &command.audit,
-            &command.artifact_id.to_string(),
-            "prepared",
-        )
-        .await?;
-
         let prepared = load_artifact_bundle(
             &mut transaction,
             &command.audit.tenant_id,
@@ -1878,6 +2002,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
             &command.operation_id,
         )
         .await?;
+        terminalize_artifact_prepare_receipt(&mut transaction, &command.audit, &prepared).await?;
         transaction.commit().await?;
         Ok(CommandOutcome::Applied(prepared))
     }
