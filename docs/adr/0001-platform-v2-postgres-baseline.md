@@ -11,7 +11,7 @@
 ## 1. 决策
 
 Platform v2的clean-cut目标直接重写当前未发布的单一`0001`，并只对fresh target安装23张表，其中包括1张migration ledger；业务schema为22张表。
-当前checked-in实现也是23张总表/22张业务表、schema contract v6；目标约束和ID合同落地后schema contract升级为v7，但不增加表。
+当前checked-in实现也是23张总表/22张业务表、schema contract v7；clean-cut ID、owner与structural约束已经落地，未增加表。
 
 应用Release、promotion和rollback由Kubernetes/GitOps负责，不进入业务数据库。Candidate与qualification报告是CI/CD中按内容寻址的签名产物，
 不是current aggregate、Resource或业务API对象。Run admission在tenant事务内冻结当次解析出的exact ResourceVersion/Deployment binding；后续部署
