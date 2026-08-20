@@ -651,6 +651,7 @@ fn validate_request(request: &SandboxExecutionRequest) -> Result<(), SandboxBack
     if request.isolation_class != SandboxIsolationClass::SandboxedContainer
         || !runtime_ok
         || !entrypoint_ok
+        || request.network_mode != SandboxNetworkMode::None
         || request.resources.wasm_fuel.is_some()
         || request.resources.wasm_memory_pages.is_some()
     {

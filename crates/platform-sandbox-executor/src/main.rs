@@ -11,9 +11,12 @@ use insight_platform_sandbox::{
     WasiExecutorProcessRegistrar, WasiGrantRevoker, WasiValueValidator,
 };
 use insight_platform_sandbox_executor::{
-    RegisteredSandboxJobExecutor, SandboxExecutorBinding, SandboxExecutorDriver,
-    SandboxExecutorDriverConfig, SandboxExecutorDriverTiming, UuidExecutorIdentityFactory,
+    GrpcGvisorWorkloadBroker, GrpcGvisorWorkloadBrokerConfig, GvisorExecutorBackendConfig,
+    RegisteredSandboxJobExecutor, RunscSandboxExecutorBackend, SandboxExecutorBinding,
+    SandboxExecutorDriver, SandboxExecutorDriverConfig, SandboxExecutorDriverTiming,
+    SystemGvisorExecutorClock, UuidExecutorIdentityFactory,
 };
+use insight_platform_sandbox_gvisor::{GvisorRuntimeConfig, SystemGvisorRuntime};
 use insight_platform_sandbox_rpc::{
     NatsSandboxControlListener, NatsSandboxControlTransportConfig, SandboxAuthorityGrpcClient,
     SandboxBrokerGrpcClient, SandboxExecutorProcessRegistrationGrpcClient,
@@ -68,7 +71,13 @@ struct ExecutorProcessConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ExecutorBackendProcessConfig {
-    Wasi { runtime_version: String },
+    Wasi {
+        runtime_version: String,
+    },
+    Gvisor {
+        runtime: GvisorRuntimeConfig,
+        bundle_root: PathBuf,
+    },
 }
 
 impl ExecutorBackendProcessConfig {
@@ -77,10 +86,16 @@ impl ExecutorBackendProcessConfig {
         worker_manifest_digest: Sha256Digest,
         backend_contract_digest: Sha256Digest,
     ) -> InstalledSandboxBackendDescriptor {
-        let (backend_kind, isolation_class) = (
-            SandboxIsolationBackendKind::Wasi,
-            SandboxIsolationClass::Wasm,
-        );
+        let (backend_kind, isolation_class) = match self {
+            Self::Wasi { .. } => (
+                SandboxIsolationBackendKind::Wasi,
+                SandboxIsolationClass::Wasm,
+            ),
+            Self::Gvisor { .. } => (
+                SandboxIsolationBackendKind::Gvisor,
+                SandboxIsolationClass::SandboxedContainer,
+            ),
+        };
         InstalledSandboxBackendDescriptor {
             backend_kind,
             isolation_class,
@@ -90,12 +105,26 @@ impl ExecutorBackendProcessConfig {
     }
 
     fn worker_role(&self) -> &'static str {
-        "sandbox-executor.wasi"
+        match self {
+            Self::Wasi { .. } => "sandbox-executor.wasi",
+            Self::Gvisor { .. } => "sandbox-executor.gvisor",
+        }
     }
 
     fn validate(&self) -> bool {
         match self {
             Self::Wasi { runtime_version } => runtime_version == WASI_ABI_V1_RUNTIME_VERSION,
+            Self::Gvisor {
+                runtime,
+                bundle_root,
+            } => {
+                runtime.validate().is_ok()
+                    && bundle_root.is_absolute()
+                    && bundle_root != &PathBuf::from("/")
+                    && !bundle_root
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir))
+            }
         }
     }
 }
@@ -210,25 +239,76 @@ async fn run() -> Result<(), ProcessError> {
         config.backend_contract_digest.clone(),
     );
     let broker = Arc::new(SandboxBrokerGrpcClient::new(channel, rpc_limits));
-    let artifacts: Arc<dyn WasiArtifactBroker> = broker.clone();
-    let value_validator: Arc<dyn WasiValueValidator> = broker.clone();
-    let grant_revoker: Arc<dyn WasiGrantRevoker> = broker.clone();
-    let process_isolation: Arc<dyn SandboxProcessGenerationIsolation> = broker;
-    let mut backend_config =
-        WasiExecutorBackendConfig::production(descriptor, process_generation_id.clone());
-    backend_config.maximum_concurrent_executions =
-        usize::from(config.worker_manifest.max_concurrency);
-    let backend: Arc<dyn SandboxExecutorBackend> = Arc::new(
-        WasmtimeSandboxExecutorBackend::new(
-            backend_config,
-            artifacts,
-            value_validator,
-            grant_revoker,
-            process_isolation,
-            Arc::new(SystemWasiExecutorClock),
-        )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
-    );
+    let process_isolation: Arc<dyn SandboxProcessGenerationIsolation> = broker.clone();
+    let backend: Arc<dyn SandboxExecutorBackend> = match &config.backend {
+        ExecutorBackendProcessConfig::Wasi { .. } => {
+            let artifacts: Arc<dyn WasiArtifactBroker> = broker.clone();
+            let value_validator: Arc<dyn WasiValueValidator> = broker.clone();
+            let grant_revoker: Arc<dyn WasiGrantRevoker> = broker.clone();
+            let mut backend_config =
+                WasiExecutorBackendConfig::production(descriptor, process_generation_id.clone());
+            backend_config.maximum_concurrent_executions =
+                usize::from(config.worker_manifest.max_concurrency);
+            Arc::new(
+                WasmtimeSandboxExecutorBackend::new(
+                    backend_config,
+                    artifacts,
+                    value_validator,
+                    grant_revoker,
+                    process_isolation,
+                    Arc::new(SystemWasiExecutorClock),
+                )
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+            )
+        }
+        ExecutorBackendProcessConfig::Gvisor {
+            runtime,
+            bundle_root,
+        } => {
+            let artifacts: Arc<dyn WasiArtifactBroker> = broker.clone();
+            let value_validator: Arc<dyn WasiValueValidator> = broker.clone();
+            let grant_revoker: Arc<dyn WasiGrantRevoker> = broker.clone();
+            let maximum_bundle_bytes =
+                usize::try_from(profile.capability_sandbox.runtime_bundle_bytes.hard_max)
+                    .map_err(|_| ProcessError::InvalidConfiguration)?;
+            let maximum_result_bytes =
+                usize::try_from(profile.capability_sandbox.output_bytes.hard_max)
+                    .map_err(|_| ProcessError::InvalidConfiguration)?;
+            let workload_broker = Arc::new(
+                GrpcGvisorWorkloadBroker::new(
+                    GrpcGvisorWorkloadBrokerConfig {
+                        bundle_root: bundle_root.clone(),
+                        maximum_bundle_bytes,
+                        maximum_result_bytes,
+                    },
+                    artifacts,
+                    value_validator,
+                    grant_revoker,
+                )
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+            );
+            let runtime = Arc::new(
+                SystemGvisorRuntime::new(runtime.clone())
+                    .map_err(|_| ProcessError::InvalidConfiguration)?,
+            );
+            Arc::new(
+                RunscSandboxExecutorBackend::new(
+                    GvisorExecutorBackendConfig {
+                        descriptor,
+                        worker_process_generation_id: process_generation_id.clone(),
+                        maximum_concurrent_executions: usize::from(
+                            config.worker_manifest.max_concurrency,
+                        ),
+                    },
+                    runtime,
+                    workload_broker,
+                    Arc::new(SystemGvisorExecutorClock),
+                )
+                .await
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+            )
+        }
+    };
     let mut registry = InstalledSandboxBackendRegistry::default();
     registry
         .install(backend)
@@ -660,6 +740,33 @@ mod tests {
     #[test]
     fn process_config_accepts_only_exact_role_runtime_and_closed_endpoints() {
         config().validate().unwrap();
+
+        let mut gvisor = config();
+        gvisor.worker_manifest.worker_role = "sandbox-executor.gvisor".to_owned();
+        gvisor.backend = ExecutorBackendProcessConfig::Gvisor {
+            runtime: GvisorRuntimeConfig {
+                runsc_path: PathBuf::from("/opt/insight/bin/runsc"),
+                runsc_version: "runsc version release-20260820.0".to_owned(),
+                runsc_binary_digest: digest('d'),
+                runtime_root: PathBuf::from("/run/insight-platform/runsc"),
+                command_timeout_milliseconds: 30_000,
+            },
+            bundle_root: PathBuf::from("/run/insight-platform/bundles"),
+        };
+        gvisor.validate().unwrap();
+
+        let mut invalid_gvisor = gvisor.clone();
+        invalid_gvisor.backend = ExecutorBackendProcessConfig::Gvisor {
+            runtime: GvisorRuntimeConfig {
+                runsc_path: PathBuf::from("runsc"),
+                runsc_version: "runsc version release-20260820.0".to_owned(),
+                runsc_binary_digest: digest('d'),
+                runtime_root: PathBuf::from("/run/insight-platform/runsc"),
+                command_timeout_milliseconds: 30_000,
+            },
+            bundle_root: PathBuf::from("/run/insight-platform/bundles"),
+        };
+        assert!(invalid_gvisor.validate().is_err());
 
         for endpoint in [
             "http://sandbox-controller.platform.svc:7443",
