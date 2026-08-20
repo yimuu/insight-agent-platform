@@ -40,6 +40,7 @@ const AGENT_ID: &str = "agt_0198f1c3-8f49-7c3e-b1f3-773c28367cd0";
 const AGENT_INTERFACE_ID: &str = "aif_0198f1c3-8f49-7c3e-b1f3-773c28367cd1";
 const AGENT_PLAN_ID: &str = "arev_0198f1c3-8f49-7c3e-b1f3-773c28367cd2";
 const AGENT_DEPLOYMENT_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd3";
+const AGENT_DEPLOYMENT_REPLAY_CANDIDATE_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd4";
 
 fn id(value: &str) -> ResourceId {
     value.parse().unwrap()
@@ -1195,12 +1196,13 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         policies: vec![policy_ref.clone()],
         execution_profile: policy_ref.clone(),
     };
+    let deployment_audit = audit(TENANT_ID, PRINCIPAL_ID, "7cd7", 'c', 'd');
     let deployment = applied(
         registry_command!(
             repository,
             create_deployment,
             CreateDeployment {
-                audit: audit(TENANT_ID, PRINCIPAL_ID, "7cd7", 'c', 'd'),
+                audit: deployment_audit.clone(),
                 deployment_id: id(AGENT_DEPLOYMENT_ID),
                 resource_id: id(AGENT_ID),
                 resource_version_id: id(AGENT_PLAN_ID),
@@ -1220,6 +1222,34 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     .await
     .unwrap();
     assert!(active_after_deploy.is_none());
+
+    let deployment_replay = registry_command!(
+        repository,
+        create_deployment,
+        CreateDeployment {
+            audit: deployment_audit,
+            deployment_id: id(AGENT_DEPLOYMENT_REPLAY_CANDIDATE_ID),
+            resource_id: id(AGENT_ID),
+            resource_version_id: id(AGENT_PLAN_ID),
+            environment: "test".to_owned(),
+            closure: DeploymentClosure::Agent(closure.clone()),
+            expected_resource_version: 3,
+        }
+    )
+    .unwrap();
+    assert!(matches!(
+        deployment_replay,
+        CommandOutcome::Replayed(ref replayed) if replayed == &deployment
+    ));
+    let replay_candidate_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM insight_platform.deployments WHERE tenant_id = $1 AND deployment_id = $2)",
+    )
+    .bind(TENANT_ID)
+    .bind(AGENT_DEPLOYMENT_REPLAY_CANDIDATE_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!replay_candidate_exists);
 
     let read_deployment = repository
         .read_deployment_for_principal(

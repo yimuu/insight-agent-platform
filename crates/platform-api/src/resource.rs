@@ -31,6 +31,29 @@ pub struct CreateResourceRequestV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateDeploymentRequestV1 {
+    pub resource_version_id: ResourceId,
+    pub environment: String,
+    pub closure: DeploymentClosure,
+}
+
+impl CreateDeploymentRequestV1 {
+    fn validate_for(&self, resource_kind: RegistryResourceKind) -> bool {
+        resource_kind.deployment_kind().is_some()
+            && resource_kind.allows_version_kind(self.resource_version_id.kind())
+            && self.closure.resource_kind() == resource_kind
+            && self.closure.validate().is_ok()
+            && !self.environment.is_empty()
+            && self.environment.len() <= 128
+            && self
+                .environment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PublishResourceDraftRequestV1 {
     Single {
@@ -300,6 +323,18 @@ pub struct ReadDeploymentIntent {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateDeploymentIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub resource_kind: RegistryResourceKind,
+    pub resource_id: ResourceId,
+    pub expected_resource_version: u64,
+    pub request: CreateDeploymentRequestV1,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PublishResourceDraftIntent {
     pub principal: AuthenticatedPrincipal,
     pub resource_kind: RegistryResourceKind,
@@ -354,6 +389,11 @@ pub trait ResourceApplication: Send + Sync {
     async fn read_deployment(
         &self,
         intent: ReadDeploymentIntent,
+    ) -> Result<DeploymentViewV1, ResourceApplicationError>;
+
+    async fn create_deployment(
+        &self,
+        intent: CreateDeploymentIntent,
     ) -> Result<DeploymentViewV1, ResourceApplicationError>;
 
     async fn publish_resource_draft(
@@ -411,8 +451,82 @@ pub fn build_resource_router(state: ResourceHttpState) -> Router {
             "/v1/{resource_noun}/{resource_id}/deployments/{deployment_id}",
             get(read_deployment),
         )
+        .route(
+            "/v1/{resource_noun}/{resource_id}/deployments",
+            post(create_deployment),
+        )
         .layer(DefaultBodyLimit::max(MAX_RESOURCE_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn create_deployment(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path((resource_noun, resource_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<CreateDeploymentRequestV1>, JsonRejection>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    let Some(resource_kind) = resource_kind_for_noun(&resource_noun) else {
+        return problem(ResourceApplicationError::NotFound);
+    };
+    let resource_id = match resource_id.parse::<ResourceId>() {
+        Ok(resource_id) if resource_id.kind() == resource_kind.id_kind() => resource_id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let Json(request) = match body {
+        Ok(body) if body.0.validate_for(resource_kind) => body,
+        _ => return problem(ResourceApplicationError::Invalid),
+    };
+    let expected_resource_version = match expected_resource_version(&headers, &resource_id) {
+        Ok(version) => version,
+        Err(error) => return problem(error),
+    };
+    let idempotency_key_digest = match idempotency_key_digest_for_operation(
+        &headers,
+        &principal,
+        resource_kind,
+        "resource.create_deployment",
+        Some(&resource_id),
+    ) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let request_digest = match digest(&serde_json::json!({
+        "expected_resource_version": expected_resource_version,
+        "idempotency_key_digest": idempotency_key_digest,
+        "operation": "resource.create_deployment",
+        "principal_id": principal.principal_id,
+        "request": request,
+        "resource_id": resource_id,
+        "resource_kind": resource_kind,
+        "schema_version": 1,
+        "tenant_id": principal.tenant_id,
+    })) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let intent = CreateDeploymentIntent {
+        principal,
+        resource_kind,
+        resource_id,
+        expected_resource_version,
+        request,
+        idempotency_key_digest,
+        request_digest,
+        deadline: state.clock.now()
+            + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS),
+    };
+    match state.application.create_deployment(intent).await {
+        Ok(view) if view.validate().is_ok() => create_deployment_response(resource_noun, view),
+        Ok(_) => problem(ResourceApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 async fn read_deployment(
@@ -840,6 +954,24 @@ fn read_deployment_response(view: DeploymentViewV1) -> Response {
     };
     let mut response = (StatusCode::OK, Json(view)).into_response();
     response.headers_mut().insert("etag", etag);
+    no_store(response)
+}
+
+fn create_deployment_response(resource_noun: String, view: DeploymentViewV1) -> Response {
+    let etag = match HeaderValue::from_str(&view.etag) {
+        Ok(etag) => etag,
+        Err(_) => return problem(ResourceApplicationError::Internal),
+    };
+    let location = match HeaderValue::from_str(&format!(
+        "/v1/{resource_noun}/{}/deployments/{}",
+        view.resource_id, view.deployment_id
+    )) {
+        Ok(location) => location,
+        Err(_) => return problem(ResourceApplicationError::Internal),
+    };
+    let mut response = (StatusCode::CREATED, Json(view)).into_response();
+    response.headers_mut().insert("etag", etag);
+    response.headers_mut().insert("location", location);
     no_store(response)
 }
 
@@ -1350,6 +1482,26 @@ mod tests {
             })
         }
 
+        async fn create_deployment(
+            &self,
+            intent: CreateDeploymentIntent,
+        ) -> Result<DeploymentViewV1, ResourceApplicationError> {
+            let deployment_id = id(ResourceKind::AgentDeployment, 24);
+            let closure_digest = deployment_closure_digest(&intent.request.closure)?;
+            Ok(DeploymentViewV1 {
+                schema_version: 1,
+                deployment_id: deployment_id.clone(),
+                resource_id: intent.resource_id,
+                resource_kind: intent.resource_kind,
+                resource_version_id: intent.request.resource_version_id,
+                environment: intent.request.environment,
+                closure_digest: closure_digest.clone(),
+                closure: intent.request.closure,
+                created_at: UtcTimestamp::from_datetime(Utc::now()),
+                etag: deployment_etag(&deployment_id, &closure_digest),
+            })
+        }
+
         async fn publish_resource_draft(
             &self,
             intent: PublishResourceDraftIntent,
@@ -1703,6 +1855,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrong_deployment_kind.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn deployment_create_is_closed_fenced_and_returns_immutable_location() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application,
+            Arc::new(FixedClock(now)),
+        ));
+        let resource_id = id(ResourceKind::Agent, 20);
+        let request = CreateDeploymentRequestV1 {
+            resource_version_id: id(ResourceKind::AgentPlanRevision, 22),
+            environment: "test".to_owned(),
+            closure: DeploymentClosure::Agent(AgentDeploymentClosure {
+                interface: ExactVersionRef::new(
+                    id(ResourceKind::AgentInterfaceRevision, 21),
+                    fixed_digest('1'),
+                )
+                .unwrap(),
+                plan: ExactVersionRef::new(
+                    id(ResourceKind::AgentPlanRevision, 22),
+                    fixed_digest('2'),
+                )
+                .unwrap(),
+                slots: Vec::new(),
+                policies: Vec::new(),
+                execution_profile: ExactVersionRef::new(
+                    id(ResourceKind::PolicyRevision, 23),
+                    fixed_digest('3'),
+                )
+                .unwrap(),
+            }),
+        };
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/agents/{resource_id}/deployments"))
+                    .header("content-type", "application/json")
+                    .header(IDEMPOTENCY_KEY, "deploy-agent-1")
+                    .header(IF_MATCH, resource_etag(&resource_id, 3))
+                    .extension(principal(now))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response.headers()["location"],
+            format!(
+                "/v1/agents/{resource_id}/deployments/{}",
+                id(ResourceKind::AgentDeployment, 24)
+            )
+        );
+
+        let missing_fence = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/agents/{resource_id}/deployments"))
+                    .header("content-type", "application/json")
+                    .header(IDEMPOTENCY_KEY, "deploy-agent-2")
+                    .extension(principal(now))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_fence.status(), StatusCode::PRECONDITION_REQUIRED);
     }
 
     #[tokio::test]

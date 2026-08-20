@@ -20,7 +20,7 @@ use insight_platform_api::{
     },
     resource::{
         build_resource_router, deployment_etag, resource_etag, resource_version_etag,
-        CreateResourceIntent, DeploymentViewV1, PublishResourceDraftIntent,
+        CreateDeploymentIntent, CreateResourceIntent, DeploymentViewV1, PublishResourceDraftIntent,
         PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
         PublishedResourceVersionSummaryV1, ReadDeploymentIntent, ReadResourceIntent,
         ReadResourceVersionIntent, ResourceApplication, ResourceApplicationError,
@@ -39,8 +39,8 @@ use insight_platform_postgres::{
     verify_schema,
 };
 use insight_platform_registry::{
-    CreateResourceDraft, NewPublishedVersion, PublishResourceVersions, RequestResourceValidation,
-    UpdateResourceDraft,
+    CreateDeployment, CreateResourceDraft, NewPublishedVersion, PublishResourceVersions,
+    RequestResourceValidation, UpdateResourceDraft,
 };
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -448,40 +448,61 @@ impl ResourceApplication for PgResources {
             )
             .await
             .map_err(map_resource_repository_error)?;
-        if record.bindings.schema_version != 1
-            || record.resource_id != intent.resource_id.to_string()
-            || record.deployment_id != intent.deployment_id.to_string()
-        {
-            return Err(ResourceApplicationError::Internal);
+        deployment_view_from_record(record, intent.resource_kind, &intent.resource_id)
+    }
+
+    async fn create_deployment(
+        &self,
+        intent: CreateDeploymentIntent,
+    ) -> Result<DeploymentViewV1, ResourceApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(ResourceApplicationError::Unavailable);
         }
-        let closure_digest: Sha256Digest = record
-            .bindings
-            .digest
-            .parse()
-            .map_err(|_| ResourceApplicationError::Internal)?;
-        let mut value = record.bindings.value;
-        value
-            .as_object_mut()
-            .ok_or(ResourceApplicationError::Internal)?
-            .remove("schema_version");
-        let closure: DeploymentClosure =
-            serde_json::from_value(value).map_err(|_| ResourceApplicationError::Internal)?;
-        let resource_version_id: ResourceId = record
-            .resource_version_id
-            .parse()
-            .map_err(|_| ResourceApplicationError::Internal)?;
-        Ok(DeploymentViewV1 {
-            schema_version: 1,
-            deployment_id: intent.deployment_id.clone(),
-            resource_id: intent.resource_id,
-            resource_kind: intent.resource_kind,
-            resource_version_id,
-            environment: record.environment,
-            closure_digest: closure_digest.clone(),
-            closure,
-            created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
-            etag: deployment_etag(&intent.deployment_id, &closure_digest),
-        })
+        let expected_resource_version = i64::try_from(intent.expected_resource_version)
+            .map_err(|_| ResourceApplicationError::Invalid)?;
+        let audit = CommandAudit {
+            tenant_id: intent.principal.tenant_id,
+            principal_id: intent.principal.principal_id,
+            principal_kind: intent.principal.principal_kind,
+            receipt_id: new_id(ResourceKind::Receipt)?,
+            event_id: new_id(ResourceKind::Event)?,
+            outbox_id: new_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: intent.idempotency_key_digest,
+            request_digest: intent.request_digest,
+            receipt_expires_at: now + chrono::Duration::hours(24),
+        };
+        let mut transaction = self
+            .repository
+            .begin_registry_transaction()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let outcome = transaction
+            .create_deployment(CreateDeployment {
+                audit,
+                deployment_id: new_id(
+                    intent
+                        .resource_kind
+                        .deployment_kind()
+                        .ok_or(ResourceApplicationError::Invalid)?,
+                )?,
+                resource_id: intent.resource_id.clone(),
+                resource_version_id: intent.request.resource_version_id,
+                environment: intent.request.environment,
+                closure: intent.request.closure,
+                expected_resource_version,
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let record = match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(record)
+            | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
+        };
+        deployment_view_from_record(record, intent.resource_kind, &intent.resource_id)
     }
 
     async fn publish_resource_draft(
@@ -686,6 +707,51 @@ fn published_resource_response(
         version,
         published_versions,
         etag: resource_etag(&resource_id, version),
+    })
+}
+
+fn deployment_view_from_record(
+    record: insight_platform_postgres::repository::DeploymentRecord,
+    resource_kind: insight_platform_contracts::RegistryResourceKind,
+    resource_id: &ResourceId,
+) -> Result<DeploymentViewV1, ResourceApplicationError> {
+    if record.bindings.schema_version != 1 || record.resource_id != resource_id.to_string() {
+        return Err(ResourceApplicationError::Internal);
+    }
+    let deployment_id: ResourceId = record
+        .deployment_id
+        .parse()
+        .map_err(|_| ResourceApplicationError::Internal)?;
+    if resource_kind.deployment_kind() != Some(deployment_id.kind()) {
+        return Err(ResourceApplicationError::Internal);
+    }
+    let closure_digest: Sha256Digest = record
+        .bindings
+        .digest
+        .parse()
+        .map_err(|_| ResourceApplicationError::Internal)?;
+    let mut value = record.bindings.value;
+    value
+        .as_object_mut()
+        .ok_or(ResourceApplicationError::Internal)?
+        .remove("schema_version");
+    let closure: DeploymentClosure =
+        serde_json::from_value(value).map_err(|_| ResourceApplicationError::Internal)?;
+    let resource_version_id: ResourceId = record
+        .resource_version_id
+        .parse()
+        .map_err(|_| ResourceApplicationError::Internal)?;
+    Ok(DeploymentViewV1 {
+        schema_version: 1,
+        deployment_id: deployment_id.clone(),
+        resource_id: resource_id.clone(),
+        resource_kind,
+        resource_version_id,
+        environment: record.environment,
+        closure_digest: closure_digest.clone(),
+        closure,
+        created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
+        etag: deployment_etag(&deployment_id, &closure_digest),
     })
 }
 

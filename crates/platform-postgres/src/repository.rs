@@ -1601,12 +1601,32 @@ impl PgRegistryTransaction {
         )
         .await?
         {
-            let record = load_deployment(
+            let deployment_id = load_command_receipt_response_reference(
                 &mut transaction,
-                &command.audit.tenant_id,
-                &command.deployment_id,
+                &command.audit,
+                "resource",
+                &command.resource_id.to_string(),
+                "resource.deploy",
             )
-            .await?;
+            .await?
+            .parse::<ResourceId>()
+            .map_err(|_| {
+                RepositoryError::CorruptRow(
+                    "deployment Receipt response reference is invalid".to_owned(),
+                )
+            })?;
+            if deployment_id.kind() != command.deployment_id.kind() {
+                return Err(RepositoryError::CorruptRow(
+                    "deployment Receipt response kind is invalid".to_owned(),
+                ));
+            }
+            let record =
+                load_deployment(&mut transaction, &command.audit.tenant_id, &deployment_id).await?;
+            if record.resource_id != command.resource_id.to_string() {
+                return Err(RepositoryError::CorruptRow(
+                    "deployment Receipt response has the wrong parent".to_owned(),
+                ));
+            }
             transaction.commit().await?;
             return Ok(CommandOutcome::Replayed(record));
         }
@@ -19893,6 +19913,37 @@ pub(crate) async fn terminalize_command_receipt(
         return Err(RepositoryError::Conflict("command receipt"));
     }
     Ok(())
+}
+
+async fn load_command_receipt_response_reference(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    scope_kind: &str,
+    scope_id: &str,
+    operation: &str,
+) -> Result<String, RepositoryError> {
+    sqlx::query_scalar(
+        r#"
+        SELECT response_reference_id
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = $2 AND scope_id = $3 AND dedupe_owner_id = $4
+          AND operation = $5 AND idempotency_key_digest = $6
+          AND request_digest = $7 AND state = 'succeeded'
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(scope_kind)
+    .bind(scope_id)
+    .bind(audit.principal_id.to_string())
+    .bind(operation)
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .flatten()
+    .ok_or_else(|| RepositoryError::CorruptRow("command Receipt result is missing".to_owned()))
 }
 
 async fn load_resource_update_receipt(
