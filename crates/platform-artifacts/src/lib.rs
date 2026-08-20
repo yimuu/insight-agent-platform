@@ -1030,6 +1030,7 @@ impl MarkArtifactDeletion {
             .map_err(|_| ArtifactCommandError::InvalidAudit)?;
         if self.deletion_operation_id.kind() != ResourceKind::Job
             || self.deletion_job_id.kind() != ResourceKind::Job
+            || self.deletion_job_id != self.deletion_operation_id
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.expected_artifact_version == 0
@@ -1212,6 +1213,7 @@ impl CompleteArtifactDeletion {
             .map_err(|_| ArtifactCommandError::InvalidAudit)?;
         if self.deletion_operation_id.kind() != ResourceKind::Job
             || self.deletion_job_id.kind() != ResourceKind::Job
+            || self.deletion_job_id != self.deletion_operation_id
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.expected_artifact_version == 0
@@ -2350,7 +2352,7 @@ mod tests {
                 receipt_expires_at: now + ChronoDuration::hours(2),
             },
             deletion_operation_id: id(ResourceKind::Job, "1023"),
-            deletion_job_id: id(ResourceKind::Job, "1024"),
+            deletion_job_id: id(ResourceKind::Job, "1023"),
             artifact_id: target.artifact_id.clone(),
             blob_id: blob.blob_id.clone(),
             expected_artifact_version: 5,

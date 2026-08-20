@@ -2069,7 +2069,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let rescan_command = ScheduleArtifactRescan {
         audit: audit(&tenant_a, &allowed_principal, 0x1940, 'd', 'e'),
         rescan_operation_id: id(ResourceKind::Job, 0x1943),
-        rescan_job_id: id(ResourceKind::Job, 0x1944),
+        rescan_job_id: id(ResourceKind::Job, 0x1943),
         artifact_id: prepared_command.artifact_id.clone(),
         blob_id: prepared_command.blob_id.clone(),
         expected_artifact_version: 5,
@@ -2130,7 +2130,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let corruption_rescan_command = ScheduleArtifactRescan {
         audit: audit(&tenant_a, &allowed_principal, 0x1970, '1', '2'),
         rescan_operation_id: id(ResourceKind::Job, 0x1973),
-        rescan_job_id: id(ResourceKind::Job, 0x1974),
+        rescan_job_id: id(ResourceKind::Job, 0x1973),
         artifact_id: prepared_command.artifact_id.clone(),
         blob_id: prepared_command.blob_id.clone(),
         expected_artifact_version: 7,
@@ -2213,7 +2213,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let mark_shared = MarkArtifactDeletion {
         audit: audit(&tenant_a, &allowed_principal, 0x1a20, '1', '2'),
         deletion_operation_id: id(ResourceKind::Job, 0x1a23),
-        deletion_job_id: id(ResourceKind::Job, 0x1a24),
+        deletion_job_id: id(ResourceKind::Job, 0x1a23),
         artifact_id: concurrent_a.artifact_id.clone(),
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 5,
@@ -2383,7 +2383,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let mark_physical = MarkArtifactDeletion {
         audit: audit(&tenant_a, &allowed_principal, 0x1a40, 'b', 'c'),
         deletion_operation_id: id(ResourceKind::Job, 0x1a43),
-        deletion_job_id: id(ResourceKind::Job, 0x1a44),
+        deletion_job_id: id(ResourceKind::Job, 0x1a43),
         artifact_id: concurrent_b.artifact_id.clone(),
         blob_id: concurrent_shared_blob_id.clone(),
         expected_artifact_version: 5,
@@ -2758,7 +2758,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let recovery_mark = MarkArtifactDeletion {
         audit: audit(&tenant_a, &allowed_principal, 0x1b60, 'a', 'b'),
         deletion_operation_id: id(ResourceKind::Job, 0x1b63),
-        deletion_job_id: id(ResourceKind::Job, 0x1b64),
+        deletion_job_id: id(ResourceKind::Job, 0x1b63),
         artifact_id: recovery_artifact.artifact_id.clone(),
         blob_id: recovery_artifact.blob_id.clone(),
         expected_artifact_version: 5,

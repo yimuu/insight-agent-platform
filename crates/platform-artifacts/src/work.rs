@@ -1626,6 +1626,7 @@ fn validate_scan_schedule(
 ) -> Result<(), ArtifactWorkError> {
     if job_id.kind() != ResourceKind::Job
         || operation_id.kind() != ResourceKind::Job
+        || job_id != operation_id
         || artifact_id.kind() != ResourceKind::Artifact
         || blob_id.kind() != ResourceKind::InternalBlob
         || expected_artifact_version == 0
@@ -1851,7 +1852,7 @@ mod tests {
         let operation_id = id(ResourceKind::Job, 3);
         let artifact_id = id(ResourceKind::Artifact, 4);
         let blob_id = id(ResourceKind::InternalBlob, 5);
-        let scan_job_id = id(ResourceKind::Job, 6);
+        let scan_job_id = operation_id.clone();
         let artifact = ArtifactRecord {
             tenant_id: tenant_id.clone(),
             artifact_id: artifact_id.clone(),
@@ -2061,7 +2062,7 @@ mod tests {
         let deletion_job_id = id(ResourceKind::Job, 92);
         let deletion = ArtifactDeletionJobSnapshot {
             schema_version: 1,
-            operation_id: id(ResourceKind::Job, 93),
+            operation_id: deletion_job_id.clone(),
             artifact_id: id(ResourceKind::Artifact, 94),
             blob_id: id(ResourceKind::InternalBlob, 95),
             mode: mode.clone(),
