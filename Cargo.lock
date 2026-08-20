@@ -2418,9 +2418,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "insight-platform-contracts",
  "insight-platform-mcp-host",
+ "jsonwebtoken",
  "serde",
  "serde_json",
  "tokio",

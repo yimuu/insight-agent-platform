@@ -26,6 +26,7 @@ use insight_platform_mcp_host::{
 use std::sync::Arc;
 
 pub mod authentication;
+pub mod oidc;
 pub mod operation;
 
 pub const MCP_OAUTH_CALLBACK_PATH: &str = "/v1/mcp/oauth/callback";
