@@ -162,6 +162,7 @@ struct PrepareUploadResponse {
     artifact_version: u64,
     blob_version: u64,
     operation_version: u64,
+    operation_state: String,
     grant_version: u64,
     upload_url: String,
     upload_expires_at: DateTime<Utc>,
@@ -203,11 +204,10 @@ struct CompleteUploadResponse {
     schema_version: u32,
     artifact_id: ResourceId,
     operation_id: ResourceId,
-    scan_job_id: ResourceId,
     artifact_state: String,
     artifact_version: u64,
-    scan_job_state: String,
-    scan_job_version: u64,
+    operation_state: String,
+    operation_version: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -450,6 +450,7 @@ async fn prepare_upload_inner(
         artifact_version: prepared.artifact.version,
         blob_version: prepared.blob.version,
         operation_version: prepared.operation.version,
+        operation_state: prepared.operation.state.to_string(),
         grant_version: prepared.grant.version,
         upload_url: upload.upload_url,
         upload_expires_at: now
@@ -561,11 +562,10 @@ async fn complete_upload_inner(
         schema_version: 1,
         artifact_id: scan.artifact.artifact_id,
         operation_id: scan.operation.operation_id,
-        scan_job_id: scan.scan_job_id,
         artifact_state: scan.artifact.state.to_string(),
         artifact_version: scan.artifact.version,
-        scan_job_state: scan.scan_job_state.to_string(),
-        scan_job_version: scan.scan_job_version,
+        operation_state: scan.operation.state.to_string(),
+        operation_version: scan.operation.version,
     })
 }
 
