@@ -32,7 +32,7 @@ use insight_platform_runtime::{
 use insight_platform_security::BindTenantSchedulingPolicy;
 use insight_platform_worker::{ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPools};
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{pool::PoolConnection, postgres::PgPoolOptions, Postgres, Row};
 use std::{
     collections::BTreeSet,
     process::{Command, Stdio},
@@ -189,6 +189,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
             eprintln!("PLATFORM_TEST_DATABASE_URL is unset; real PostgreSQL fixture skipped");
             return;
         };
+        let _fixture_lock = acquire_phase2_fixture_lock(&database_url).await;
         let mut profile = checked_in_hard_limit_profile();
         profile.run_scheduler.heartbeat_milliseconds.q1_default = 100;
         profile.run_scheduler.lease_milliseconds.q1_default = 500;
@@ -702,6 +703,23 @@ const PHASE2_RUNS_PER_TENANT: usize = 10;
 const PHASE2_CHILD_COUNT: usize = 4;
 const PHASE2_BARRIER_CLASS: i32 = 24_002;
 const PHASE2_BARRIER_OBJECT: i32 = 50;
+const PHASE2_FIXTURE_LOCK_OBJECT: i32 = 51;
+
+async fn acquire_phase2_fixture_lock(database_url: &str) -> PoolConnection<Postgres> {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1, $2)")
+        .bind(PHASE2_BARRIER_CLASS)
+        .bind(PHASE2_FIXTURE_LOCK_OBJECT)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    connection
+}
 
 struct RecordingClaimExecutor {
     claimed: AtomicU64,
@@ -855,6 +873,7 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
         if std::env::var("PLATFORM_PHASE2_CLAIM_CHILD").as_deref() == Ok("1") {
             return;
         }
+        let _fixture_lock = acquire_phase2_fixture_lock(&database_url).await;
 
         let profile = checked_in_hard_limit_profile();
         let bulkheads = PostgresConnectionBulkheads::connect(
@@ -885,9 +904,11 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
         }
 
         let total_runs = i64::try_from(PHASE2_TENANT_COUNT * PHASE2_RUNS_PER_TENANT).unwrap();
+        let tenant_ids = tenants.iter().cloned().collect::<Vec<_>>();
         let ready_before: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM insight_platform.jobs WHERE work_class = 'orchestration' AND state = 'ready'",
+            "SELECT count(*) FROM insight_platform.jobs WHERE work_class = 'orchestration' AND state = 'ready' AND tenant_id = ANY($1)",
         )
+        .bind(&tenant_ids)
         .fetch_one(bulkheads.business_pool())
         .await
         .unwrap();
@@ -982,14 +1003,16 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
         }
 
         let leased: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM insight_platform.jobs WHERE work_class = 'orchestration' AND state = 'leased'",
+            "SELECT count(*) FROM insight_platform.jobs WHERE work_class = 'orchestration' AND state = 'leased' AND tenant_id = ANY($1)",
         )
+        .bind(&tenant_ids)
         .fetch_one(bulkheads.business_pool())
         .await
         .unwrap();
         let distinct_workers: i64 = sqlx::query_scalar(
-            "SELECT count(DISTINCT worker_id) FROM insight_platform.jobs WHERE work_class = 'orchestration' AND state = 'leased'",
+            "SELECT count(DISTINCT worker_id) FROM insight_platform.jobs WHERE work_class = 'orchestration' AND state = 'leased' AND tenant_id = ANY($1)",
         )
+        .bind(&tenant_ids)
         .fetch_one(bulkheads.business_pool())
         .await
         .unwrap();
@@ -997,14 +1020,16 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
         assert!(distinct_workers >= 2, "one process monopolized every claim");
 
         let active_work: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(sum(active_work_count), 0)::bigint FROM insight_platform.runs",
+            "SELECT COALESCE(sum(active_work_count), 0)::bigint FROM insight_platform.runs WHERE tenant_id = ANY($1)",
         )
+        .bind(&tenant_ids)
         .fetch_one(bulkheads.business_pool())
         .await
         .unwrap();
         let reserved: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(sum(reserved_value), 0)::bigint FROM insight_platform.quota_accounts WHERE work_class = 'orchestration'",
+            "SELECT COALESCE(sum(reserved_value), 0)::bigint FROM insight_platform.quota_accounts WHERE work_class = 'orchestration' AND tenant_id = ANY($1)",
         )
+        .bind(&tenant_ids)
         .fetch_one(bulkheads.business_pool())
         .await
         .unwrap();
@@ -1017,9 +1042,18 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
         .fetch_one(bulkheads.business_pool())
         .await
         .unwrap();
-        let tenant_states = scheduler_payload["tenants"].as_array().unwrap();
+        let tenant_states = scheduler_payload["tenants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tenant| {
+                tenant["tenant_id"]
+                    .as_str()
+                    .is_some_and(|tenant_id| tenants.contains(tenant_id))
+            })
+            .collect::<Vec<_>>();
         assert_eq!(tenant_states.len(), PHASE2_TENANT_COUNT);
-        assert!(tenant_states.iter().all(|tenant| {
+        assert!(tenant_states.into_iter().all(|tenant| {
             tenant["successful_claims"].as_u64()
                 == Some(u64::try_from(PHASE2_RUNS_PER_TENANT).unwrap())
         }));
