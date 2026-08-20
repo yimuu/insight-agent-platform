@@ -233,6 +233,8 @@ CR-166及2026-08-21实现反馈cross-review的以下门禁已用于把00～10、
 4. implementation-plan的每个phase都只从Reviewed合同引用可观测行为和分层证据；
 5. 批准前不对外声明target API、topology、capacity、schema v7或runtime已经上线。
 6. gVisor topology复核确认Launcher Kubernetes权限不传播给Controller/WASI/guest，admission与RBAC是结构性双闸，Pod status不成为第二Job authority。
+   Launcher process generation由同Pod非特权attestor经shared PID namespace与Pod-local UDS封装；只有Launcher container持有
+   scoped projected Kubernetes token，attestor/guest均无API或host authority。
 
 ## 16. 未决项
 

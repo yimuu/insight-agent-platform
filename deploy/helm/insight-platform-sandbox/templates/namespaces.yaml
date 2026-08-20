@@ -15,3 +15,12 @@ metadata:
     insight.platform/sandbox-executor-namespace: "true"
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespaces.guest }}
+  labels:
+    insight.platform/sandbox-guest-namespace: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

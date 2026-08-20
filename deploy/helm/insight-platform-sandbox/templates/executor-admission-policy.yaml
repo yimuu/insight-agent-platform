@@ -93,3 +93,8 @@ spec:
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: {{ .Values.namespaces.executor }}
+    objectSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/component
+          operator: In
+          values: [attestor, executor-wasi]

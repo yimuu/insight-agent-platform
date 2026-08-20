@@ -36,7 +36,12 @@ for mutation in \
   '--set networkPolicy.enabled=false' \
   '--set-string executor.nodeSelector.kubernetes\.io/os=windows' \
   '--set-string executor.nodeSelector.insight\.platform\.node-restriction\.kubernetes\.io/sandbox-wasi=' \
-  '--set tls.attestorSecret=insight-platform-sandbox-executor-wasi-tls'; do
+  '--set tls.attestorSecret=insight-platform-sandbox-executor-wasi-tls' \
+  '--set gvisor.runtimeClassName=runc' \
+  '--set namespaces.guest=platform-sandbox-exec' \
+  '--set tls.gvisorExecutorSecret=insight-platform-sandbox-executor-wasi-tls' \
+  '--set-string gvisor.nodeSelector.insight\.platform\.node-restriction\.kubernetes\.io/sandbox-gvisor=' \
+  '--set-json networkPolicy.kubernetesApiCidrs=[]'; do
   # shellcheck disable=SC2086
   if helm template sandbox "$chart" $mutation >/dev/null 2>&1; then
     echo "sandbox deployment: invalid values were accepted: $mutation" >&2
@@ -54,7 +59,7 @@ failures = []
 
 workloads = docs.select { |doc| %w[Deployment DaemonSet].include?(doc["kind"]) }
 components = workloads.map { |doc| doc.dig("spec", "template", "metadata", "labels", "app.kubernetes.io/component") }.compact.sort
-expected_components = %w[attestor controller executor-wasi]
+expected_components = %w[attestor controller executor-gvisor executor-wasi]
 failures << "workload composition drifted: #{components.inspect}" unless components == expected_components
 
 workloads.each do |workload|
@@ -72,6 +77,7 @@ workloads.each do |workload|
 end
 
 executor = workloads.find { |doc| doc.dig("spec", "template", "metadata", "labels", "app.kubernetes.io/component") == "executor-wasi" }
+gvisor = workloads.find { |doc| doc.dig("spec", "template", "metadata", "labels", "app.kubernetes.io/component") == "executor-gvisor" }
 attestor = workloads.find { |doc| doc.dig("spec", "template", "metadata", "labels", "app.kubernetes.io/component") == "attestor" }
 executor_paths = executor.dig("spec", "template", "spec", "volumes").map { |v| v.dig("hostPath", "path") }.compact
 attestor_paths = attestor.dig("spec", "template", "spec", "volumes").map { |v| v.dig("hostPath", "path") }.compact.sort
@@ -79,20 +85,43 @@ failures << "WASI Executor host authority drifted" unless executor_paths == ["/v
 expected_attestor_paths = ["/proc", "/var/lib/insight-sandbox-attestor", "/var/lib/insight/node-uid", "/var/run/insight-sandbox-attestor"].sort
 failures << "attestor host authority drifted" unless attestor_paths == expected_attestor_paths
 failures << "only the attestor may use hostPID" unless workloads.count { |w| w.dig("spec", "template", "spec", "hostPID") == true } == 1 && attestor.dig("spec", "template", "spec", "hostPID") == true
+gvisor_spec = gvisor.dig("spec", "template", "spec") || {}
+gvisor_paths = gvisor_spec.fetch("volumes", []).map { |v| v.dig("hostPath", "path") }.compact
+failures << "gVisor Launcher received host authority" unless gvisor_paths.empty?
+failures << "gVisor Launcher process identity is not Pod-local" unless gvisor_spec["shareProcessNamespace"] == true && gvisor_spec.fetch("containers", []).map { |c| c["name"] }.sort == %w[launcher process-attestor]
+failures << "gVisor Launcher is not a two-replica Deployment" unless gvisor["kind"] == "Deployment" && gvisor.dig("spec", "replicas").to_i >= 2
 
 policies = docs.select { |doc| doc["kind"] == "NetworkPolicy" }
 policy_names = policies.map { |doc| [doc.dig("metadata", "namespace"), doc.dig("metadata", "name")] }
 expected_policy_names = [
   ["platform-sandbox", "default-deny"], ["platform-sandbox", "controller"],
   ["platform-sandbox-exec", "default-deny"], ["platform-sandbox-exec", "executor-wasi"],
-  ["platform-sandbox-exec", "attestor"]
+  ["platform-sandbox-exec", "attestor"], ["platform-sandbox-exec", "executor-gvisor"],
+  ["platform-sandbox-guests", "default-deny"], ["platform-sandbox-guests", "gvisor-single-job"]
 ]
 failures << "NetworkPolicy closure drifted" unless policy_names.sort == expected_policy_names.sort
 
-admission = docs.find { |doc| doc["kind"] == "ValidatingAdmissionPolicy" }
-binding = docs.find { |doc| doc["kind"] == "ValidatingAdmissionPolicyBinding" }
-failures << "fail-closed execution admission policy is missing" unless admission&.dig("spec", "failurePolicy") == "Fail"
-failures << "execution admission binding does not deny" unless binding&.dig("spec", "validationActions") == ["Deny"]
+admissions = docs.select { |doc| doc["kind"] == "ValidatingAdmissionPolicy" }
+bindings = docs.select { |doc| doc["kind"] == "ValidatingAdmissionPolicyBinding" }
+expected_admissions = %w[executor-pods executor-role-closure gvisor-launcher gvisor-guests]
+expected_admissions.each do |suffix|
+  policy = admissions.find { |doc| doc.dig("metadata", "name")&.end_with?(suffix) }
+  binding = bindings.find { |doc| doc.dig("metadata", "name")&.end_with?(suffix) }
+  failures << "fail-closed #{suffix} admission policy is missing" unless policy&.dig("spec", "failurePolicy") == "Fail"
+  failures << "#{suffix} admission binding does not deny" unless binding&.dig("spec", "validationActions") == ["Deny"]
+end
+
+runtime_class = docs.find { |doc| doc["kind"] == "RuntimeClass" }
+failures << "runsc RuntimeClass is absent or drifted" unless runtime_class&.dig("metadata", "name") == "runsc" && runtime_class["handler"] == "runsc"
+launcher_role = docs.find { |doc| doc["kind"] == "Role" && doc.dig("metadata", "namespace") == "platform-sandbox-guests" }
+expected_rules = [
+  {"apiGroups" => [""], "resources" => ["pods"], "verbs" => %w[create get watch patch delete]},
+  {"apiGroups" => [""], "resources" => ["pods/status"], "verbs" => ["get"]}
+]
+failures << "gVisor Launcher RBAC drifted" unless launcher_role&.dig("rules") == expected_rules
+
+guest_account = docs.find { |doc| doc["kind"] == "ServiceAccount" && doc.dig("metadata", "namespace") == "platform-sandbox-guests" }
+failures << "guest ServiceAccount is missing or receives an API token" unless guest_account&.dig("automountServiceAccountToken") == false
 
 unless failures.empty?
   warn failures.join("\n")
@@ -100,4 +129,4 @@ unless failures.empty?
 end
 RUBY
 
-echo "Sandbox Phase 1 deployment contract passed (controller, restricted WASI Executor, attestor)."
+echo "Sandbox deployment contract passed (controller, WASI, gVisor Launcher/guest, and process attestors)."

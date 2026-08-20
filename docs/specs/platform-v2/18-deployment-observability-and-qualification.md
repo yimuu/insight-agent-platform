@@ -64,9 +64,13 @@ Draft规范和未通过资格的代码不是current behavior。CI报告只表示
 
 gVisor node/runtime必须显式标记并且只允许`runsc`，不允许runc fallback。guest Pod不允许privileged、hostPath、device、
 host PID/network、metadata、Kubernetes API或runtime socket。Launcher使用独立ServiceAccount，只允许execution namespace中的
-`create/get/watch/delete pods`和`get pods/status`；禁止Pod log、Secret、ConfigMap、ServiceAccount、RBAC、Node、RuntimeClass、
+`create/get/watch/patch/delete pods`和`get pods/status`（`patch`只释放UID/resourceVersion fenced scheduling gate）；禁止Pod log、Secret、ConfigMap、ServiceAccount、RBAC、Node、RuntimeClass、
 exec、attach和port-forward，并由fail-closed admission锁定可创建Pod的完整安全closure。WASI与gVisor使用不同pool与identity，
 都不与API/Scheduler Pod共享进程或service account。
+
+gVisor Launcher Pod必须启用shared process namespace并包含一个非特权process-attestor sidecar。二者只通过`emptyDir` UDS通信；
+sidecar以Pod UID与`SO_PEERCRED`封装process-generation evidence，通过Pod IP向Controller提供验证/缺席证明，且不得挂载
+hostPath、hostPID或Kubernetes token。只有Launcher container可挂载短期、显式projected API token。
 
 ## 5. Network 与依赖拓扑
 

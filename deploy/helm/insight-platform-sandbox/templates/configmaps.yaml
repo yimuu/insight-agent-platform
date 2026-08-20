@@ -24,3 +24,14 @@ metadata:
   namespace: {{ .Values.namespaces.executor }}
 data:
   executor.json: {{ $executorConfig | quote }}
+---
+{{- $gvisorConfig := include "insight-platform-sandbox.gvisorConfig" . }}
+{{- $gvisorAttestorConfig := include "insight-platform-sandbox.gvisorAttestorConfig" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "insight-platform-sandbox.gvisorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+data:
+  executor.json: {{ $gvisorConfig | quote }}
+  attestor.json: {{ $gvisorAttestorConfig | quote }}

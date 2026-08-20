@@ -44,6 +44,10 @@ Invocation或Job。
 
 只有gVisor Pod Launcher可通过专用ServiceAccount访问单一execution namespace的闭集Pod API；它不得读取Secret/ConfigMap、
 修改RBAC/ServiceAccount/Node/RuntimeClass或使用exec/attach/port-forward。Controller、WASI Executor与guest Pod不获得该权限。
+Launcher与同Pod的非特权process-attestor共享PID namespace和Pod-local UDS；attestor以`SO_PEERCRED`绑定Launcher process
+generation并通过Pod IP提供旧代缺席证明，但不获得Kubernetes token、hostPID或hostPath。Launcher的显式projected token
+只允许guest namespace内`create/get/watch/patch/delete pods`与`get pods/status`，其中`patch`仅用于在durable start提交后
+按UID与resourceVersion移除唯一scheduling gate。
 
 ## 3. Runtime Catalog 与发布
 

@@ -32,7 +32,10 @@ device、host PID/network、runtime socket、metadata 和通用 Kubernetes API�
   外部evidence，不成为业务current-state authority。
 
 WASI Executor继续使用node-local process attestation且不获得Kubernetes API。gVisor Launcher使用独立mTLS workload identity、
-ServiceAccount、queue、permit、NetworkPolicy和process generation；它的Kubernetes权限不能被其他Executor复用。
+ServiceAccount、queue、permit、NetworkPolicy和process generation；它的Kubernetes权限不能被其他Executor复用。Launcher Pod
+内的非特权process-attestor sidecar通过`shareProcessNamespace`与Pod-local `emptyDir` UDS绑定`SO_PEERCRED`，以Pod UID作为
+该隔舱的location authority并通过Pod IP向Controller提供旧代缺席证明；它不使用hostPID、hostPath、node runtime socket或
+Kubernetes token。只有Launcher container挂载专用、短期、显式projected Kubernetes API token。
 
 ## 否决方案
 

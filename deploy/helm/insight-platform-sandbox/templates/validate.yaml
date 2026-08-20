@@ -1,6 +1,9 @@
 {{- if eq .Values.namespaces.controller .Values.namespaces.executor }}
 {{- fail "controller and executor namespaces must be different" }}
 {{- end }}
+{{- if or (eq .Values.namespaces.guest .Values.namespaces.controller) (eq .Values.namespaces.guest .Values.namespaces.executor) }}
+{{- fail "gVisor guest namespace must be isolated from Controller and Executor namespaces" }}
+{{- end }}
 {{- if lt (int .Values.controller.replicas) 2 }}
 {{- fail "controller.replicas must be at least 2" }}
 {{- end }}
@@ -12,6 +15,9 @@
 {{- end }}
 {{- if or (empty .Values.admission.daemonSetControllerUsername) (eq .Values.admission.daemonSetControllerUsername "system:anonymous") (eq .Values.admission.daemonSetControllerUsername .Values.admission.schedulerUsername) }}
 {{- fail "admission requires a distinct exact authenticated DaemonSet controller username" }}
+{{- end }}
+{{- if or (empty .Values.admission.replicaSetControllerUsername) (eq .Values.admission.replicaSetControllerUsername "system:anonymous") (has .Values.admission.replicaSetControllerUsername (list .Values.admission.schedulerUsername .Values.admission.daemonSetControllerUsername)) }}
+{{- fail "admission requires a distinct exact authenticated ReplicaSet controller username" }}
 {{- end }}
 {{- if or (empty .Values.executor.nodeSelector) (empty .Values.attestor.nodeSelector) }}
 {{- fail "WASI Executor and attestor require exact node selectors" }}
@@ -26,9 +32,22 @@
 {{- if or (not (empty .Values.executor.tolerations)) (not (empty .Values.attestor.tolerations)) }}
 {{- fail "first-release WASI and attestor workloads must not declare broad tolerations" }}
 {{- end }}
-{{- $roleSecrets := list .Values.tls.controllerSecret .Values.tls.wasiExecutorSecret .Values.tls.attestorSecret .Values.natsTls.existingSecret }}
+{{- if or (lt (int .Values.gvisor.replicas) 2) (not (empty .Values.gvisor.tolerations)) (ne .Values.gvisor.runtimeClassName "runsc") (ne .Values.gvisor.runtimeHandler "runsc") }}
+{{- fail "gVisor requires two Launchers, no broad tolerations, and the exact runsc RuntimeClass" }}
+{{- end }}
+{{- $gvisorArch := get .Values.gvisor.nodeSelector "kubernetes.io/arch" }}
+{{- if or (ne (len .Values.gvisor.nodeSelector) 3) (ne (get .Values.gvisor.nodeSelector "insight.platform.node-restriction.kubernetes.io/sandbox-gvisor") "true") (ne (get .Values.gvisor.nodeSelector "kubernetes.io/os") "linux") (not (has $gvisorArch (list "amd64" "arm64"))) }}
+{{- fail "gVisor requires an exact NodeRestriction-protected Linux node architecture" }}
+{{- end }}
+{{- if or (empty .Values.gvisor.guestServiceAccount) (empty .Values.gvisor.guestImageRepository) (contains "@" .Values.gvisor.guestImageRepository) (contains ":latest" .Values.gvisor.guestImageRepository) (ne .Values.gvisor.guestCommand "/usr/local/bin/platform-sandbox-guest") }}
+{{- fail "gVisor guest identity, immutable image repository, and entrypoint are required" }}
+{{- end }}
+{{- if or (lt (int .Values.gvisor.bootstrapTokenExpirationSeconds) 60) (gt (int .Values.gvisor.bootstrapTokenExpirationSeconds) 3600) (lt (int .Values.gvisor.observationPollMilliseconds) 10) (gt (int .Values.gvisor.observationPollMilliseconds) 10000) }}
+{{- fail "gVisor bootstrap token and observation bounds are invalid" }}
+{{- end }}
+{{- $roleSecrets := list .Values.tls.controllerSecret .Values.tls.wasiExecutorSecret .Values.tls.gvisorExecutorSecret .Values.tls.attestorSecret .Values.natsTls.existingSecret }}
 {{- if ne (len (uniq $roleSecrets)) (len $roleSecrets) }}
-{{- fail "Controller, WASI Executor, attestor, and NATS roles require distinct Secret names" }}
+{{- fail "Controller, WASI Executor, gVisor Launcher, attestor, and NATS roles require distinct Secret names" }}
 {{- end }}
 {{- if or (lt (int .Values.attestor.controllerPort) 1) (gt (int .Values.attestor.controllerPort) 65535) (lt (int .Values.attestor.absentRetentionSeconds) 3900) }}
 {{- fail "attestor port and absence retention are outside the reviewed bounds" }}
@@ -37,8 +56,14 @@
 {{- if not (deepEqual .Values.attestor.hostPaths $attestorHostPaths) }}
 {{- fail "attestor host paths differ from the reviewed authority" }}
 {{- end }}
-{{- if or (empty .Values.controller.attestor.allowedNodeCidrs) (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.natsCidrs) }}
-{{- fail "controller attestor, PostgreSQL, and NATS CIDR closures are required" }}
+{{- if or (empty .Values.controller.attestor.allowedNodeCidrs) (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.natsCidrs) (empty .Values.networkPolicy.kubernetesApiCidrs) }}
+{{- fail "controller attestor, PostgreSQL, NATS, and Kubernetes API CIDR closures are required" }}
+{{- end }}
+{{- if or (not (deepEqual .Values.networkPolicy.artifactDataWorkerNamespaceSelector (dict "insight.platform/artifact-namespace" "true"))) (not (deepEqual .Values.networkPolicy.artifactDataWorkerPodSelector (dict "insight.platform/workload-role" "artifact-data-worker"))) }}
+{{- fail "gVisor guests must target only the isolated Artifact Data Worker" }}
+{{- end }}
+{{- if or (lt (int .Values.networkPolicy.kubernetesApiPort) 1) (gt (int .Values.networkPolicy.kubernetesApiPort) 65535) (lt (int .Values.networkPolicy.artifactDataWorkerPort) 1) (gt (int .Values.networkPolicy.artifactDataWorkerPort) 65535) }}
+{{- fail "Kubernetes API and Artifact Data Worker ports must be fixed valid ports" }}
 {{- end }}
 {{- if or (not (deepEqual .Values.networkPolicy.artifactBrokerNamespaceSelector (dict "insight.platform/artifact-namespace" "true"))) (not (deepEqual .Values.networkPolicy.artifactBrokerPodSelector (dict "insight.platform/workload-role" "artifact-broker-sandbox"))) }}
 {{- fail "Controller must target only the isolated Sandbox Artifact Broker" }}
@@ -64,4 +89,7 @@
 {{- end }}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
 {{- fail "image.digest must be an immutable lowercase sha256 digest" }}
+{{- end }}
+{{- if or (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.gvisor.backendContractDigest)) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.gvisor.workerManifest.adapter_runtime_digest)) }}
+{{- fail "gVisor backend and worker manifest digests must be immutable lowercase sha256 values" }}
 {{- end }}

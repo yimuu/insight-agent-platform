@@ -1,0 +1,196 @@
+{{- $executorConfig := include "insight-platform-sandbox.gvisorConfig" . -}}
+{{- $attestorConfig := include "insight-platform-sandbox.gvisorAttestorConfig" . -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-executor-role-closure
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+        scope: Namespaced
+  validations:
+    - expression: >-
+        has(object.metadata.labels) && 'app.kubernetes.io/component' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/component'] in ['attestor', 'executor-wasi', 'executor-gvisor']
+      message: only the three closed Sandbox execution-plane Pod roles are allowed
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-executor-role-closure
+spec:
+  policyName: {{ include "insight-platform-sandbox.name" . }}-executor-role-closure
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.namespaces.executor }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-gvisor-launcher
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+        scope: Namespaced
+  validations:
+    - expression: >-
+        has(object.metadata.labels) && object.metadata.labels.size() == 4 &&
+        object.metadata.labels['app.kubernetes.io/name'] == {{ .Chart.Name | quote }} &&
+        object.metadata.labels['app.kubernetes.io/instance'] == {{ .Release.Name | quote }} &&
+        object.metadata.labels['app.kubernetes.io/component'] == 'executor-gvisor' &&
+        object.metadata.labels['pod-template-hash'].matches('^[0-9a-z]+$')
+      message: gVisor Launcher labels are closed
+    - expression: >-
+        has(object.metadata.annotations) &&
+        object.metadata.annotations['checksum/executor-config'] == {{ $executorConfig | sha256sum | quote }} &&
+        object.metadata.annotations['checksum/attestor-config'] == {{ $attestorConfig | sha256sum | quote }} &&
+        object.metadata.annotations.all(k, v, k in ['checksum/executor-config', 'checksum/attestor-config'])
+      message: gVisor Launcher requires both immutable configuration digests
+    - expression: >-
+        ((request.operation == 'CREATE' && request.userInfo.username == {{ .Values.admission.replicaSetControllerUsername | quote }}) ||
+         (request.operation == 'UPDATE' && object.metadata.ownerReferences == oldObject.metadata.ownerReferences)) &&
+        has(object.metadata.ownerReferences) && object.metadata.ownerReferences.size() == 1 &&
+        object.metadata.ownerReferences.exists_one(r,
+          r.apiVersion == 'apps/v1' && r.kind == 'ReplicaSet' &&
+          r.name.startsWith({{ printf "%s-" (include "insight-platform-sandbox.gvisorName" .) | quote }}) &&
+          r.uid != '' && has(r.controller) && r.controller &&
+          has(r.blockOwnerDeletion) && r.blockOwnerDeletion)
+      message: gVisor Launcher requires its exact ReplicaSet controller
+    - expression: >-
+        object.spec.serviceAccountName == {{ include "insight-platform-sandbox.gvisorName" . | quote }} &&
+        object.spec.automountServiceAccountToken == false && object.spec.shareProcessNamespace &&
+        !object.spec.hostNetwork && !object.spec.hostPID && !object.spec.hostIPC &&
+        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName == '') &&
+        object.spec.nodeSelector == {{ .Values.gvisor.nodeSelector | toJson }} &&
+        object.spec.containers.size() == 2 &&
+        object.spec.containers.map(c, c.name).all(n, n in ['launcher', 'process-attestor']) &&
+        (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0)
+      message: gVisor Launcher identity, node and container topology are closed
+    - expression: >-
+        object.spec.containers.all(c,
+          c.securityContext.allowPrivilegeEscalation == false &&
+          c.securityContext.readOnlyRootFilesystem &&
+          (!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+          c.securityContext.capabilities.drop == ['ALL'] &&
+          (!has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.size() == 0) &&
+          (!has(c.volumeDevices) || c.volumeDevices.size() == 0) &&
+          (!has(c.envFrom) || c.envFrom.size() == 0) && !has(c.lifecycle)) &&
+        object.spec.volumes.all(v,
+          has(v.configMap) || has(v.secret) || has(v.emptyDir) || has(v.projected) || has(v.downwardAPI))
+      message: gVisor Launcher has no host authority or privilege escalation
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-gvisor-launcher
+spec:
+  policyName: {{ include "insight-platform-sandbox.name" . }}-gvisor-launcher
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.namespaces.executor }}
+    objectSelector:
+      matchLabels:
+        app.kubernetes.io/component: executor-gvisor
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-gvisor-guests
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+        scope: Namespaced
+  validations:
+    - expression: >-
+        request.userInfo.username == {{ printf "system:serviceaccount:%s:%s" .Values.namespaces.executor (include "insight-platform-sandbox.gvisorName" .) | quote }} &&
+        object.metadata.name.matches('^insight-gv-[0-9a-f]{32}$') &&
+        (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences.size() == 0) &&
+        object.metadata.labels == {
+          'app.kubernetes.io/name': 'insight-platform-sandbox-guest',
+          'app.kubernetes.io/component': 'gvisor-single-job',
+          'app.kubernetes.io/managed-by': 'insight-platform-gvisor-launcher'}
+      message: only the dedicated Launcher may own exact single-Job guest Pods
+    - expression: >-
+        has(object.metadata.annotations) && object.metadata.annotations.size() == 7 &&
+        object.metadata.annotations.all(k, v, k in [
+          'insight.platform/request-digest', 'insight.platform/job-id',
+          'insight.platform/worker-process-generation-id', 'insight.platform/runtime-digest',
+          'insight.platform/package-digest', 'insight.platform/attempt-no',
+          'insight.platform/lease-generation']) &&
+        object.metadata.annotations['insight.platform/request-digest'].matches('^sha256:[0-9a-f]{64}$') &&
+        object.metadata.annotations['insight.platform/runtime-digest'].matches('^sha256:[0-9a-f]{64}$') &&
+        object.metadata.annotations['insight.platform/package-digest'].matches('^sha256:[0-9a-f]{64}$')
+      message: guest fence annotations are closed and digest-shaped
+    - expression: >-
+        object.spec.runtimeClassName == {{ .Values.gvisor.runtimeClassName | quote }} &&
+        object.spec.serviceAccountName == {{ .Values.gvisor.guestServiceAccount | quote }} &&
+        object.spec.automountServiceAccountToken == false &&
+        object.spec.restartPolicy == 'Never' && object.spec.enableServiceLinks == false &&
+        !object.spec.hostNetwork && !object.spec.hostPID && !object.spec.hostIPC &&
+        object.spec.nodeSelector == {{ .Values.gvisor.nodeSelector | toJson }} &&
+        (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
+        (!has(object.spec.initContainers) || object.spec.initContainers.size() == 0) &&
+        object.spec.containers.size() == 1
+      message: guest runtime, identity and namespace isolation are exact
+    - expression: >-
+        object.spec.containers[0].name == 'sandbox-guest' &&
+        object.spec.containers[0].image.matches({{ printf "^%s@sha256:[0-9a-f]{64}$" .Values.gvisor.guestImageRepository | quote }}) &&
+        object.spec.containers[0].command == [{{ .Values.gvisor.guestCommand | quote }}] &&
+        object.spec.containers[0].args == ['run'] &&
+        object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+        object.spec.containers[0].securityContext.privileged == false &&
+        object.spec.containers[0].securityContext.readOnlyRootFilesystem &&
+        object.spec.containers[0].securityContext.runAsNonRoot &&
+        object.spec.containers[0].securityContext.capabilities.drop == ['ALL'] &&
+        object.spec.containers[0].resources.requests == object.spec.containers[0].resources.limits &&
+        object.spec.containers[0].resources.requests.all(k, v, k in ['cpu', 'memory', 'ephemeral-storage'])
+      message: guest image, entrypoint, privilege and resource envelope are closed
+    - expression: >-
+        object.spec.volumes.size() == 2 &&
+        object.spec.volumes.exists_one(v,
+          v.name == 'bootstrap-token' && has(v.projected) && v.projected.sources.size() == 1 &&
+          has(v.projected.sources[0].serviceAccountToken) &&
+          v.projected.sources[0].serviceAccountToken.audience == {{ .Values.gvisor.bootstrapTokenAudience | quote }} &&
+          v.projected.sources[0].serviceAccountToken.expirationSeconds == {{ int .Values.gvisor.bootstrapTokenExpirationSeconds }}) &&
+        object.spec.volumes.exists_one(v,
+          v.name == 'scratch' && has(v.emptyDir) && v.emptyDir.medium == 'Memory')
+      message: guest volumes are limited to one audience token and bounded tmpfs scratch
+    - expression: >-
+        request.operation == 'CREATE' ||
+        (object.metadata.uid == oldObject.metadata.uid &&
+         object.metadata.labels == oldObject.metadata.labels &&
+         object.metadata.annotations == oldObject.metadata.annotations &&
+         oldObject.spec.schedulingGates == [{'name': 'insight.platform/await-fenced-start'}] &&
+         (!has(object.spec.schedulingGates) || object.spec.schedulingGates.size() == 0))
+      message: guest update may only release the exact fenced-start scheduling gate
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "insight-platform-sandbox.name" . }}-gvisor-guests
+spec:
+  policyName: {{ include "insight-platform-sandbox.name" . }}-gvisor-guests
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.namespaces.guest }}

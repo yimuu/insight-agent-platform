@@ -7,11 +7,13 @@ imagePullSecrets: []
 namespaces:
   controller: platform-sandbox
   executor: platform-sandbox-exec
+  guest: platform-sandbox-guests
 
 admission:
   schedulerName: default-scheduler
   schedulerUsername: system:kube-scheduler
   daemonSetControllerUsername: system:serviceaccount:kube-system:daemon-set-controller
+  replicaSetControllerUsername: system:serviceaccount:kube-system:replicaset-controller
 
 controller:
   replicas: 2
@@ -69,6 +71,52 @@ executor:
     requests: {cpu: "1", memory: 512Mi}
     limits: {cpu: "4", memory: 2Gi}
 
+gvisor:
+  replicas: 2
+  serviceAccount:
+    annotations: {}
+  guestServiceAccount: sandbox-guest
+  runtimeClassName: runsc
+  runtimeHandler: runsc
+  nodeSelector:
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+    insight.platform.node-restriction.kubernetes.io/sandbox-gvisor: "true"
+  tolerations: []
+  workerManifest:
+    manifest_version: 1
+    worker_role: sandbox-executor.gvisor
+    work_class: sandbox
+    adapter_runtime_digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    protocol_version: 1
+    max_concurrency: 4
+    critical_control_reserved_slots: 1
+  backendContractDigest: sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  guestImageRepository: insight-sandbox-guest
+  guestCommand: /usr/local/bin/platform-sandbox-guest
+  bootstrapEndpoint: https://insight-platform-artifact-data-worker.platform-artifacts.svc:9444
+  bootstrapTokenAudience: insight.platform/sandbox-guest
+  bootstrapTokenExpirationSeconds: 600
+  observationPollMilliseconds: 100
+  receiptTtlSeconds: 7200
+  claimScanMilliseconds: 100
+  claimFailureBackoffMilliseconds: 25
+  drainGraceMilliseconds: 30000
+  controlRequestTimeoutMilliseconds: 5000
+  connectTimeoutMilliseconds: 5000
+  requestTimeoutMilliseconds: 30000
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  attestor:
+    maximumRegistrations: 10000
+    absentRetentionSeconds: 3900
+    tlsHandshakeTimeoutMilliseconds: 5000
+    shutdownGraceMilliseconds: 30000
+    resources:
+      requests: {cpu: 25m, memory: 32Mi}
+      limits: {cpu: 200m, memory: 128Mi}
+
 attestor:
   nodeSelector:
     kubernetes.io/os: linux
@@ -93,6 +141,7 @@ tls:
   controllerSecret: insight-platform-sandbox-controller-tls
   wasiExecutorSecret: insight-platform-sandbox-executor-wasi-tls
   attestorSecret: insight-platform-sandbox-attestor-tls
+  gvisorExecutorSecret: insight-platform-sandbox-executor-gvisor-tls
   keys:
     controllerServerCa: controller-server-ca.pem
     executorClientCa: executor-client-ca.pem
@@ -131,3 +180,8 @@ networkPolicy:
   artifactBrokerPodSelector: {insight.platform/workload-role: artifact-broker-sandbox}
   artifactBrokerPort: 9443
   natsPort: 4222
+  kubernetesApiCidrs: [10.30.0.0/24]
+  kubernetesApiPort: 443
+  artifactDataWorkerNamespaceSelector: {insight.platform/artifact-namespace: "true"}
+  artifactDataWorkerPodSelector: {insight.platform/workload-role: artifact-data-worker}
+  artifactDataWorkerPort: 9444

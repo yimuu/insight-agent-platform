@@ -1,0 +1,111 @@
+{{- $executorConfig := include "insight-platform-sandbox.gvisorConfig" . -}}
+{{- $attestorConfig := include "insight-platform-sandbox.gvisorAttestorConfig" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "insight-platform-sandbox.gvisorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+spec:
+  replicas: {{ int .Values.gvisor.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: executor-gvisor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: executor-gvisor
+      annotations:
+        checksum/executor-config: {{ $executorConfig | sha256sum }}
+        checksum/attestor-config: {{ $attestorConfig | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "insight-platform-sandbox.gvisorName" . }}
+      automountServiceAccountToken: false
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 40
+      schedulerName: {{ .Values.admission.schedulerName }}
+      nodeSelector: {{ toYaml .Values.gvisor.nodeSelector | nindent 8 }}
+      tolerations: {{ toYaml .Values.gvisor.tolerations | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}, appArmorProfile: {type: RuntimeDefault}}
+      containers:
+        - name: launcher
+          image: {{ include "insight-platform-sandbox.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-sandbox-executor"]
+          securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+          env:
+            - {name: PLATFORM_SANDBOX_EXECUTOR_CONFIG, value: /etc/insight/config/executor.json}
+            - {name: PLATFORM_SANDBOX_EXECUTOR_CONFIG_DIGEST, value: {{ printf "sha256:%s" ($executorConfig | sha256sum) | quote }}}
+            - {name: PLATFORM_SANDBOX_GRPC_CA_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.controllerServerCa }}}
+            - {name: PLATFORM_SANDBOX_GRPC_CERT_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.executorClientCertificate }}}
+            - {name: PLATFORM_SANDBOX_GRPC_KEY_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.executorClientPrivateKey }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_CA_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.attestorServerCa }}}
+            - {name: PLATFORM_SANDBOX_NATS_CA_PATH, value: /etc/insight/nats-tls/{{ .Values.natsTls.rootCertificateKey }}}
+            - {name: PLATFORM_SANDBOX_NATS_CERT_PATH, value: /etc/insight/nats-tls/{{ .Values.natsTls.clientCertificateKey }}}
+            - {name: PLATFORM_SANDBOX_NATS_KEY_PATH, value: /etc/insight/nats-tls/{{ .Values.natsTls.clientPrivateKeyKey }}}
+          startupProbe: {exec: {command: ["sh", "-ec", "kill -0 1 && test -S /run/insight-sandbox-attestor/registration.sock"]}, failureThreshold: 30, periodSeconds: 2}
+          readinessProbe: {exec: {command: ["sh", "-ec", "kill -0 1 && test -S /run/insight-sandbox-attestor/registration.sock"]}, periodSeconds: 5, timeoutSeconds: 2}
+          livenessProbe: {exec: {command: ["sh", "-ec", "kill -0 1"]}, periodSeconds: 10, timeoutSeconds: 2}
+          resources: {{ toYaml .Values.gvisor.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: tls, mountPath: /etc/insight/tls, readOnly: true}
+            - {name: nats-tls, mountPath: /etc/insight/nats-tls, readOnly: true}
+            - {name: registration, mountPath: /run/insight-sandbox-attestor}
+            - {name: kubernetes-api, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+        - name: process-attestor
+          image: {{ include "insight-platform-sandbox.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-sandbox-attestor"]
+          securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+          env:
+            - {name: PLATFORM_SANDBOX_ATTESTOR_CONFIG, value: /etc/insight/config/attestor.json}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_CONFIG_DIGEST, value: {{ printf "sha256:%s" ($attestorConfig | sha256sum) | quote }}}
+            - name: POD_IP
+              valueFrom: {fieldRef: {apiVersion: v1, fieldPath: status.podIP}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_ADVERTISED_IP, value: $(POD_IP)}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_EXECUTOR_CA_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.executorClientCa }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_REGISTRATION_CERT_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.attestorServerCertificate }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_REGISTRATION_KEY_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.attestorServerPrivateKey }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_CA_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.controllerClientCa }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_CERT_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.attestorServerCertificate }}}
+            - {name: PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_KEY_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.attestorServerPrivateKey }}}
+          ports: [{name: attest, containerPort: {{ int .Values.attestor.controllerPort }}, protocol: TCP}]
+          startupProbe: {tcpSocket: {port: attest}, failureThreshold: 30, periodSeconds: 2}
+          readinessProbe: {tcpSocket: {port: attest}, periodSeconds: 5, timeoutSeconds: 2}
+          livenessProbe: {tcpSocket: {port: attest}, periodSeconds: 10, timeoutSeconds: 2}
+          resources: {{ toYaml .Values.gvisor.attestor.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: tls, mountPath: /etc/insight/tls, readOnly: true}
+            - {name: registration, mountPath: /run/insight-sandbox-attestor}
+            - {name: registry, mountPath: /var/lib/insight-sandbox-attestor}
+            - {name: podinfo, mountPath: /etc/insight/podinfo, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: {{ include "insight-platform-sandbox.gvisorName" . }}}}
+        - {name: tls, secret: {secretName: {{ .Values.tls.gvisorExecutorSecret }}, defaultMode: 0440}}
+        - {name: nats-tls, secret: {secretName: {{ .Values.natsTls.existingSecret }}, defaultMode: 0440}}
+        - {name: registration, emptyDir: {sizeLimit: 1Mi}}
+        - {name: registry, emptyDir: {sizeLimit: 8Mi}}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+        - name: podinfo
+          downwardAPI:
+            items:
+              - {path: uid, fieldRef: {apiVersion: v1, fieldPath: metadata.uid}}
+        - name: kubernetes-api
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken: {path: token, audience: "https://kubernetes.default.svc", expirationSeconds: 600}
+              - configMap: {name: kube-root-ca.crt, items: [{key: ca.crt, path: ca.crt}]}
+              - downwardAPI: {items: [{path: namespace, fieldRef: {apiVersion: v1, fieldPath: metadata.namespace}}]}
