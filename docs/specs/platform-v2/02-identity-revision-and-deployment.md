@@ -122,6 +122,8 @@ struct Deployment {
 Deployment是一经创建就不可变的exact runnable closure：它不复制Version definition，只冻结环境相关backend、
 credential reference、region（若该typed closure需要）、runtime/protocol和exact dependency。Deployment不拥有可变state、
 projection version或另一个current head；可绑定性由它引用的immutable closure与Secret/policy安全门禁共同决定。
+Agent Deployment还必须冻结由exact Plan Revision验证得到的entry node ID/kind；该入口进入closure digest，root Run admission
+不得从untrusted请求接收内部node kind，也不得在事务中临时读取Artifact来猜入口。
 
 Resource是未来Run绑定的唯一current authority：`active_deployment_id`指向当前exact Deployment，`AdministrativeGate`
 决定该绑定是否接受新admission。同一tenant/resource只有一个active binding。activate事务锁定Resource与目标
@@ -139,7 +141,7 @@ public Operation只是Job projection。
 
 ## 8. RunBindingsSnapshot
 
-root Run admission从tenant active Agent Deployment出发，解析完整exact closure并一次性保存：
+root Run admission从request所选Agent Resource的tenant-scoped enabled active Deployment出发，解析完整exact closure并一次性保存：
 
 ```rust
 struct RunBindingsSnapshotV2 {

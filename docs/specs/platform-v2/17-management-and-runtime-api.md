@@ -149,8 +149,14 @@ POST /v1/runs/{run_id}:resume
 GET  /v1/runs/{run_id}/events
 ```
 
-Run admission在一个事务中解析tenant active Agent Deployment、冻结02的RunBindingsSnapshot、验证input/policy/quota/deadline、
+Run admission在一个事务中解析所选Agent Resource的tenant-scoped active Deployment、冻结02的RunBindingsSnapshot、验证input/policy/quota/deadline、
 创建Run/initial Node/Job、Receipt/Event/Outbox。只有整个快照成功才返回`201 Created`。
+
+`POST /v1/runs`使用closed `CreateRunRequestV1 { agent_id, input, deadline }`。`agent_id`选择该tenant内一个Agent Resource，
+事务只接受其`Enabled` active Deployment；调用方不提交Deployment ID、Plan entry node、binding closure或Job/Node ID。`input`为
+`{ classification, schema_digest, value: Inline | ArtifactRef }`，RunValue ID由服务端生成；Inline content digest由canonical JSON
+计算，Artifact使用exact ArtifactRef digest并在事务内重验Ready/tenant/classification。deadline必须在HardLimitProfile允许窗口内。
+Idempotency-Key按tenant/principal/agent collection scope绑定，重放返回第一次生成的Run及其原始投影。
 
 control command使用If-Match和Receipt写durable intent，不直推任意leaf为terminal。cancel返回command accepted/current Run view，
 真实terminal由06/07的收敛过程决定。result只在Run terminal且授权时返回typed RunValue/ArtifactRef。

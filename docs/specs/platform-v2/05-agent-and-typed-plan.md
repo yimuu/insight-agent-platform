@@ -218,6 +218,8 @@ struct AgentDeployment {
     agent_id: AgentId,
     interface_revision_id: ResourceVersionId,
     plan_revision_id: ResourceVersionId,
+    entry_node_id: PlanNodeId,
+    entry_node_kind: PlanNodeKind,
     resolved_slots: Vec<FrozenSlotBinding>,
     policy_revision_ids: Vec<ResourceVersionId>,
     execution_profile_revision_id: ResourceVersionId,
@@ -230,7 +232,8 @@ struct AgentDeployment {
 
 每个candidate ID必须通过slot variant对应的resource kind/prefix验证：Model只接受`mdep`，Capability只接受`cdep`，
 ChildAgent只接受`adep`，Skill只接受`srev`；Context slot必须内嵌带`xcb` identity/canonical digest且引用exact `xdep`的
-ContextBindingSnapshot。candidate集合规范排序、非空（除明确
+ContextBindingSnapshot。`entry_node_id`/`entry_node_kind`必须与exact Plan Revision内已验证Typed Plan的入口一致，并进入
+Deployment closure digest；Run admission不得重新读取Artifact或接受调用方提供的内部入口。candidate集合规范排序、非空（除明确
 optional slot）且有硬上限。Deployment validation计算完整dependency closure、Interface兼容、Effect/Policy、Secret
 purpose coverage、data region/classification、循环、预算、worker/runtime availability与conformance evidence。
 
@@ -239,9 +242,12 @@ purpose coverage、data region/classification、循环、预算、worker/runtime
 ```text
 Agent Entity -> Agent Draft -> Validation
  -> atomic Interface Revision + Plan Revision
- -> Deployment Draft/Resolution -> Deployment Validation Evidence
- -> Agent Deployment -> Active Head / Suspension
+ -> bounded Deployment resolution/validation command
+ -> immutable Agent Deployment -> Resource active binding / administrative gate
 ```
+
+resolution/validation是创建immutable Deployment前的命令内工作或shared Job，不建立mutable Deployment state/evidence aggregate。
+Active Head与Suspension由02的Resource active binding/gate唯一拥有。
 
 publish、deploy与activate是三个独立command；active head只指向Agent Deployment。Revision/Deployment均不可变，Run
 admission只复制exact Deployment与binding closure，不重新编译Plan或解析slot。

@@ -1,15 +1,15 @@
-# Platform v2 00～18 Cross-review（CR-168）
+# Platform v2 00～18 Cross-review（CR-169）
 
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation Authorized |
 | 日期 | 2026-08-21 |
 | 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md |
-| 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft/Deployment authority和fixture闭包 |
+| 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft/Deployment/Run admission authority和fixture闭包 |
 
 ## 1. 结论
 
-CR-168继承CR-167的简化结论，并消解实施反馈发现的Deployment/Resource双重current authority歧义。全量审查确认首版目标收敛为：
+CR-169继承CR-168的简化结论，并消解实施反馈发现的public Run选择与Plan entry authority缺口。全量审查确认首版目标收敛为：
 
 - Sandbox = restricted WASI + single-Job gVisor；microVM/Firecracker/KVM推迟；
 - MCP = remote Streamable HTTP；Managed stdio和persistent Sandbox session推迟；
@@ -22,11 +22,13 @@ CR-168继承CR-167的简化结论，并消解实施反馈发现的Deployment/Res
 - target persistence = schema contract v7、23张总表/22张业务表，不增表；
 - editable Draft = Resource aggregate的唯一current snapshot；publication才创建immutable ResourceVersion；
 - Deployment = immutable exact closure；Resource active binding + AdministrativeGate是未来Run admission的唯一current authority；
+- root Run request显式选择Agent Resource；immutable Agent Deployment冻结validated Plan entry，admission不接受内部entry/binding或读取Artifact猜测；
 - implementation plan = 四阶段，证据按层级归属，不复制proof。
 
-本次实施反馈发现并消解一个P1合同歧义：02的伪代码曾给Deployment可变state/region/projection version，但同一规范又要求
-Deployment immutable，并由Resource active binding冻结未来Run；17的`suspend`路由也未说明authority。若按伪代码实现会建立第二
-current head。02先修订为immutable Deployment closure + Resource active binding/gate，17随后锁定activate/suspend的Resource CAS语义；
+本次实施反馈发现并消解一个P1合同缺口：17只写“tenant active Agent Deployment”，无法在多Agent tenant中确定目标；05的Typed Plan
+拥有entry node，但02的Agent Deployment closure未冻结入口，而durable admission命令又需要entry ID/kind。若让调用方提交内部入口或让
+Gateway在事务外读取Plan Artifact，都会破坏exact closure与单事务admission。05先把validated entry纳入immutable Agent Deployment
+closure，06明确root admission从所选`agent_id`的enabled active binding解析入口，17随后固定closed public request并禁止内部ID/closure；
 00～18在复核期间退回Architecture Revision，并在本次00～18全量复核无新增P0/P1后作为同一批次重新推进为Accepted。Accepted仍不表示target已经成为
 current behavior；只有通过实现与资格门禁后才能推进状态。
 
@@ -34,10 +36,10 @@ current behavior；只有通过实现与资格门禁后才能推进状态。
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / Implementation Authorized | CR-168已写回并获统一acceptance |
-| 01～10 | Accepted | 依赖顺序与owner边界已统一 |
+| 00 | Accepted / Implementation Authorized | CR-169已写回并获统一acceptance |
+| 01～10 | Accepted | 依赖顺序与owner边界已按CR-169统一；05/06的Plan entry与root admission已闭合 |
 | 11 Skill | Accepted / Implementation In Progress | 未改变Skill“方法包、非运行时”语义；脚本仍必须发布为Sandbox Capability |
-| 12～18 | Accepted | 已按CR-168复核/修订并获统一acceptance |
+| 12～18 | Accepted | 已按CR-169复核/修订并获统一acceptance |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | Accepted / Implementing | 从Accepted合同生成；仍不表示current behavior |
@@ -220,7 +222,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 14. 本次冲突消解
 
-| 原冲突 | CR-168 resolution |
+| 原冲突 | CR-169 resolution |
 |---|---|
 | `SandboxJobId`/同UUID alias与shared Job冲突 | 只保留JobId，RunValueId独立；无Sandbox child aggregate |
 | ArtifactLink stored owner fence会随owner正常推进而失效 | stored version只是create-time CAS evidence；read不与current version比较；release另携current expected version |
@@ -232,10 +234,11 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 | direct runsc嵌套Pod同时要求无host/cgroup/runtime权限，拓扑不可启动 | ADR-0002：受限Launcher创建admission-locked `RuntimeClass=runsc` single-Job Pod；guest无Kubernetes API，Job仍是唯一physical-work authority |
 | 02把Draft写成mutable ResourceVersion、17又要求Version validate/publish route | Draft由Resource aggregate唯一拥有；17使用`/draft` update/validate/publish，publication后才有immutable Version GET identity |
 | 02给Deployment可变state/version却又要求immutable，17的`suspend`未指定authority | Deployment是immutable closure；activate/suspend以Resource ETag做CAS，只改Resource active binding/gate |
+| public Run未选择Agent且admission entry无durable authority | request显式携带`agent_id`；Agent Deployment冻结validated entry ID/kind，admission不接受内部入口或临时读Artifact |
 
 ## 15. Acceptance 记录
 
-CR-168及2026-08-21实现反馈cross-review的以下门禁已用于把00～18、ADR-0001、ADR-0002和implementation plan作为同一合同批次accept：
+CR-169及2026-08-21实现反馈cross-review的以下门禁已用于把00～18、ADR-0001、ADR-0002和implementation plan作为同一合同批次accept：
 
 1. `rg` stale-contract scan确认microVM、Managed stdio、Installation Release、ManagementOperation、
    Model Artifact Producer和八role只出现在历史/否定/明确推迟语境，不再是首版正向requirement；
@@ -250,6 +253,8 @@ CR-168及2026-08-21实现反馈cross-review的以下门禁已用于把00～18、
    12的Dataset Generation仍由owner Job原子创建immutable version，均不需要mutable Version row或新表。
 8. 逐份复核03～16的Run admission和exact deployment reference只读immutable closure + Resource current binding/gate，无下游需要
    mutable Deployment state/projection；23表baseline不新增Deployment transition或current-head副本。
+9. 逐份复核05/06/08/17的root/child admission：root只从request `agent_id`解析enabled active Deployment及其entry，child继续继承
+   parent允许的exact closure；公共请求不暴露Deployment/Node/Job identity，且无需新增表或Plan Artifact事务外读取。
 
 ## 16. 未决项
 

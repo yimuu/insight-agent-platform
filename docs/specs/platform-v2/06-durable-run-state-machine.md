@@ -13,7 +13,8 @@
 
 ## 1. 决策摘要
 
-每次Agent调用创建一个固定Deployment/RunBindings的durable Run。root Run冻结admission时tenant-scoped active bindings；child Run继承
+每次Agent调用创建一个固定Deployment/RunBindings的durable Run。root Run请求显式选择tenant-scoped `agent_id`，admission事务从该
+Resource的enabled active Agent Deployment解析完整bindings及已验证entry node；child Run继承
 parent相同的exact bindings，因此后续Resource active target或GitOps rollout不能把同一durable执行链切成两套实现。Scheduler只根据Typed Plan和已提交事实推进状态；
 NodeExecution 表示逻辑执行，03 的 Job 表示一个可租约、重试和恢复的逻辑 work 及其唯一 current
 generation。本文保留“Attempt”作为 Job generation 的历史观测术语，不代表独立 ID、current aggregate
