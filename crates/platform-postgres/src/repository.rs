@@ -15673,8 +15673,10 @@ async fn load_resolved_orchestration_task(
     resume_job_id: &str,
 ) -> Result<ResolvedOrchestrationTask, RepositoryError> {
     let task = load_task_by_text(transaction, tenant_id, task_id).await?;
-    if !matches!(task.state, TaskState::Responded | TaskState::Declined)
-        || task.responded_at.is_none()
+    if !matches!(
+        task.state,
+        TaskState::Responded | TaskState::Declined | TaskState::Cancelled
+    ) || task.responded_at.is_none()
     {
         return Err(RepositoryError::Conflict("Task response replay"));
     }
@@ -19218,8 +19220,10 @@ impl ResolveOrchestrationTask {
             .validate_at(Utc::now())
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         self.mutations.validate()?;
-        if !matches!(self.target, TaskState::Responded | TaskState::Declined)
-            || self.task_id.kind() != ResourceKind::Interaction
+        if !matches!(
+            self.target,
+            TaskState::Responded | TaskState::Declined | TaskState::Cancelled
+        ) || self.task_id.kind() != ResourceKind::Interaction
             || self.expected_generation == 0
             || self.expected_task_version == 0
             || self.resume_job_id.kind() != ResourceKind::Job

@@ -33,8 +33,9 @@ use insight_platform_api::{
         SystemRunClock,
     },
     task::{
-        build_task_router, task_etag, ReadTaskIntent, SystemTaskClock, TaskApplication,
-        TaskApplicationError, TaskHttpState, TaskOwnerLinkV1, TaskViewV1,
+        build_task_router, task_etag, ReadTaskIntent, ResolveTaskIntent, SystemTaskClock,
+        TaskActionV1, TaskApplication, TaskApplicationError, TaskHttpState, TaskOwnerLinkV1,
+        TaskViewV1,
     },
 };
 use insight_platform_contracts::{
@@ -43,12 +44,18 @@ use insight_platform_contracts::{
     PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId, ResourceKind, RunBindingsSnapshot,
     Sha256Digest, ValueRef,
 };
+use insight_platform_invocations::{
+    CapabilityApprovalDecision, InvocationTransaction, ResolveCapabilityApproval,
+};
 use insight_platform_orchestrator::{
     AdmitRun, PlanNodeKey, RequestRunCancel, RunInputValue, SetRunPause,
 };
 use insight_platform_postgres::{
     operation_repository::{project_registry_validation_operation, OperationReadError},
-    repository::{PgRepository, RepositoryError},
+    repository::{
+        PgRepository, RepositoryError, ResolveOrchestrationTask,
+        ResolveOrchestrationTaskMutationIds,
+    },
     verify_schema,
 };
 use insight_platform_registry::{
@@ -56,7 +63,7 @@ use insight_platform_registry::{
     PublishResourceVersions, RequestResourceValidation, SuspendResourceDeployment,
     UpdateResourceDraft,
 };
-use insight_platform_tasks::{TaskDefinition, TaskPayload};
+use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskState};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{
@@ -212,72 +219,259 @@ impl TaskApplication for PgTasks {
             )
             .await
             .map_err(map_task_repository_error)?;
-        let mut payload = record.payload.value;
-        payload
-            .as_object_mut()
-            .ok_or(TaskApplicationError::Internal)?
-            .remove("schema_version");
-        let payload: TaskPayload =
-            serde_json::from_value(payload).map_err(|_| TaskApplicationError::Internal)?;
-        let safe_prompt_key = match payload.definition {
-            TaskDefinition::Approval {
-                safe_prompt_key, ..
-            }
-            | TaskDefinition::Interaction {
-                safe_prompt_key, ..
-            }
-            | TaskDefinition::CapabilityInput {
-                safe_prompt_key, ..
-            }
-            | TaskDefinition::McpOAuthAuthorization {
-                safe_prompt_key, ..
-            }
-            | TaskDefinition::HumanWork {
-                safe_prompt_key, ..
-            } => safe_prompt_key,
-        };
-        let task_id: ResourceId = record
-            .task_id
-            .parse()
-            .map_err(|_| TaskApplicationError::Internal)?;
-        let owner = if let Some(invocation_id) = record.invocation_id {
-            TaskOwnerLinkV1::Invocation {
-                invocation_id: invocation_id
-                    .parse()
+        task_view_from_record(record)
+    }
+
+    async fn resolve_task(
+        &self,
+        intent: ResolveTaskIntent,
+    ) -> Result<TaskViewV1, TaskApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(TaskApplicationError::Unavailable);
+        }
+        let current = self
+            .0
+            .read_task_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.task_id,
+            )
+            .await
+            .map_err(map_task_repository_error)?;
+        if intent.task_id.kind() == ResourceKind::ApprovalTask {
+            let decision = match intent.action {
+                TaskActionV1::Approve => CapabilityApprovalDecision::Approve,
+                TaskActionV1::Reject => CapabilityApprovalDecision::Reject,
+                TaskActionV1::SubmitInput | TaskActionV1::Cancel => {
+                    return Err(TaskApplicationError::Invalid);
+                }
+            };
+            let payload = decode_task_payload(&current)?;
+            let (expected_invocation_version, eligible_principal_rule_digest) =
+                match payload.definition {
+                    TaskDefinition::Approval {
+                        owner_version,
+                        approver_rule_digest,
+                        ..
+                    } => (owner_version, approver_rule_digest),
+                    _ => return Err(TaskApplicationError::Internal),
+                };
+            let invocation_id: ResourceId = current
+                .invocation_id
+                .as_deref()
+                .ok_or(TaskApplicationError::Internal)?
+                .parse()
+                .map_err(|_| TaskApplicationError::Internal)?;
+            let principal = intent.principal.clone();
+            let task_id = intent.task_id.clone();
+            let command = ResolveCapabilityApproval {
+                audit: task_command_audit(&intent)?,
+                invocation_id,
+                approval_task_id: intent.task_id,
+                expected_invocation_version,
+                expected_task_generation: u64::try_from(current.generation)
                     .map_err(|_| TaskApplicationError::Internal)?,
-            }
-        } else if let Some(run_id) = record.run_id {
-            TaskOwnerLinkV1::Run {
-                run_id: run_id.parse().map_err(|_| TaskApplicationError::Internal)?,
-            }
-        } else {
-            return Err(TaskApplicationError::Internal);
+                expected_task_version: intent.expected_task_version,
+                eligible_principal_rule_digest,
+                decision,
+            };
+            let mut transaction = self
+                .0
+                .begin_invocation_transaction()
+                .await
+                .map_err(map_task_repository_error)?;
+            transaction
+                .resolve_capability_approval(command)
+                .await
+                .map_err(map_task_repository_error)?;
+            transaction
+                .commit()
+                .await
+                .map_err(map_task_repository_error)?;
+            let record = self
+                .0
+                .read_task_for_principal(
+                    &principal.tenant_id,
+                    &principal.principal_id,
+                    principal.principal_kind,
+                    &task_id,
+                )
+                .await
+                .map_err(map_task_repository_error)?;
+            return task_view_from_record(record);
+        }
+        if intent.task_id.kind() != ResourceKind::Interaction
+            || matches!(intent.action, TaskActionV1::Approve)
+        {
+            return Err(TaskApplicationError::Invalid);
+        }
+        let target = match intent.action {
+            TaskActionV1::SubmitInput => TaskState::Responded,
+            TaskActionV1::Reject => TaskState::Declined,
+            TaskActionV1::Cancel => TaskState::Cancelled,
+            TaskActionV1::Approve => return Err(TaskApplicationError::Invalid),
         };
-        let version = u64::try_from(record.version).map_err(|_| TaskApplicationError::Internal)?;
-        Ok(TaskViewV1 {
-            schema_version: 1,
-            task_id: task_id.clone(),
-            task_kind: record.task_kind,
-            state: record.state,
-            generation: u64::try_from(record.generation)
+        let audit = task_command_audit(&intent)?;
+        let response = intent
+            .input
+            .map(|input| -> Result<RunInputValue, TaskApplicationError> {
+                let content_digest = match &input.value {
+                    ValueRef::Inline { value } => canonical_digest(value)
+                        .map_err(|_| TaskApplicationError::Invalid)?
+                        .parse()
+                        .map_err(|_| TaskApplicationError::Internal)?,
+                    ValueRef::Artifact { artifact }
+                        if artifact.classification() == input.classification =>
+                    {
+                        artifact.content_digest().clone()
+                    }
+                    ValueRef::Artifact { .. } => return Err(TaskApplicationError::Invalid),
+                };
+                Ok(RunInputValue {
+                    value_id: new_task_id(ResourceKind::RunValue)?,
+                    classification: input.classification,
+                    schema_digest: input.schema_digest,
+                    content_digest,
+                    value: input.value,
+                })
+            })
+            .transpose()?;
+        let command = ResolveOrchestrationTask {
+            audit,
+            task_id: intent.task_id,
+            expected_generation: u64::try_from(current.generation)
                 .map_err(|_| TaskApplicationError::Internal)?,
-            version,
-            safe_prompt_key,
-            response_schema_digest: record
-                .response_schema_digest
-                .map(|value| value.parse())
-                .transpose()
-                .map_err(|_| TaskApplicationError::Internal)?,
-            owner,
-            deadline: insight_platform_contracts::UtcTimestamp::from_datetime(record.deadline),
-            responded_at: record
-                .responded_at
-                .map(insight_platform_contracts::UtcTimestamp::from_datetime),
-            created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
-            updated_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.updated_at),
-            etag: task_etag(&task_id, version),
+            expected_task_version: intent.expected_task_version,
+            target,
+            response,
+            resume_job_id: new_task_id(ResourceKind::Job)?,
+            resume_request_digest: intent.request_digest,
+            mutations: ResolveOrchestrationTaskMutationIds {
+                run_event_id: new_task_id(ResourceKind::Event)?,
+                run_outbox_id: new_task_id(ResourceKind::OutboxEvent)?,
+                node_event_id: new_task_id(ResourceKind::Event)?,
+                node_outbox_id: new_task_id(ResourceKind::OutboxEvent)?,
+                job_event_id: new_task_id(ResourceKind::Event)?,
+                job_outbox_id: new_task_id(ResourceKind::OutboxEvent)?,
+            },
+        };
+        let mut transaction = self
+            .0
+            .begin_scheduler_transaction()
+            .await
+            .map_err(map_task_repository_error)?;
+        let outcome = transaction
+            .resolve_orchestration_task(command)
+            .await
+            .map_err(map_task_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_task_repository_error)?;
+        task_view_from_record(match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(resolved)
+            | insight_platform_contracts::CommandOutcome::Replayed(resolved) => resolved.task,
         })
     }
+}
+
+fn new_task_id(kind: ResourceKind) -> Result<ResourceId, TaskApplicationError> {
+    ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7()).map_err(|_| TaskApplicationError::Internal)
+}
+
+fn task_command_audit(intent: &ResolveTaskIntent) -> Result<CommandAudit, TaskApplicationError> {
+    Ok(CommandAudit {
+        tenant_id: intent.principal.tenant_id.clone(),
+        principal_id: intent.principal.principal_id.clone(),
+        principal_kind: intent.principal.principal_kind,
+        receipt_id: new_task_id(ResourceKind::Receipt)?,
+        event_id: new_task_id(ResourceKind::Event)?,
+        outbox_id: new_task_id(ResourceKind::OutboxEvent)?,
+        idempotency_key_digest: intent.idempotency_key_digest.clone(),
+        request_digest: intent.request_digest.clone(),
+        receipt_expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+    })
+}
+
+fn task_view_from_record(
+    record: insight_platform_postgres::repository::TaskRecord,
+) -> Result<TaskViewV1, TaskApplicationError> {
+    let mut payload = record.payload.value;
+    payload
+        .as_object_mut()
+        .ok_or(TaskApplicationError::Internal)?
+        .remove("schema_version");
+    let payload: TaskPayload =
+        serde_json::from_value(payload).map_err(|_| TaskApplicationError::Internal)?;
+    let safe_prompt_key = match payload.definition {
+        TaskDefinition::Approval {
+            safe_prompt_key, ..
+        }
+        | TaskDefinition::Interaction {
+            safe_prompt_key, ..
+        }
+        | TaskDefinition::CapabilityInput {
+            safe_prompt_key, ..
+        }
+        | TaskDefinition::McpOAuthAuthorization {
+            safe_prompt_key, ..
+        }
+        | TaskDefinition::HumanWork {
+            safe_prompt_key, ..
+        } => safe_prompt_key,
+    };
+    let task_id: ResourceId = record
+        .task_id
+        .parse()
+        .map_err(|_| TaskApplicationError::Internal)?;
+    let owner = if let Some(invocation_id) = record.invocation_id {
+        TaskOwnerLinkV1::Invocation {
+            invocation_id: invocation_id
+                .parse()
+                .map_err(|_| TaskApplicationError::Internal)?,
+        }
+    } else if let Some(run_id) = record.run_id {
+        TaskOwnerLinkV1::Run {
+            run_id: run_id.parse().map_err(|_| TaskApplicationError::Internal)?,
+        }
+    } else {
+        return Err(TaskApplicationError::Internal);
+    };
+    let version = u64::try_from(record.version).map_err(|_| TaskApplicationError::Internal)?;
+    Ok(TaskViewV1 {
+        schema_version: 1,
+        task_id: task_id.clone(),
+        task_kind: record.task_kind,
+        state: record.state,
+        generation: u64::try_from(record.generation).map_err(|_| TaskApplicationError::Internal)?,
+        version,
+        safe_prompt_key,
+        response_schema_digest: record
+            .response_schema_digest
+            .map(|value| value.parse())
+            .transpose()
+            .map_err(|_| TaskApplicationError::Internal)?,
+        owner,
+        deadline: insight_platform_contracts::UtcTimestamp::from_datetime(record.deadline),
+        responded_at: record
+            .responded_at
+            .map(insight_platform_contracts::UtcTimestamp::from_datetime),
+        created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
+        updated_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.updated_at),
+        etag: task_etag(&task_id, version),
+    })
+}
+
+fn decode_task_payload(
+    record: &insight_platform_postgres::repository::TaskRecord,
+) -> Result<TaskPayload, TaskApplicationError> {
+    let mut payload = record.payload.value.clone();
+    payload
+        .as_object_mut()
+        .ok_or(TaskApplicationError::Internal)?
+        .remove("schema_version");
+    serde_json::from_value(payload).map_err(|_| TaskApplicationError::Internal)
 }
 
 #[async_trait]
@@ -1384,17 +1578,19 @@ fn map_run_repository_error(error: RepositoryError) -> RunApplicationError {
 
 fn map_task_repository_error(error: RepositoryError) -> TaskApplicationError {
     match error {
+        RepositoryError::InvalidInput(_) => TaskApplicationError::Invalid,
         RepositoryError::PermissionDenied => TaskApplicationError::Denied,
         RepositoryError::NotFound(_) => TaskApplicationError::NotFound,
+        RepositoryError::Conflict(_) | RepositoryError::StaleFence => {
+            TaskApplicationError::Conflict
+        }
+        RepositoryError::IdempotencyConflict => TaskApplicationError::IdempotencyConflict,
         RepositoryError::Database(_) | RepositoryError::LeaseExpired => {
             TaskApplicationError::Unavailable
         }
-        RepositoryError::InvalidInput(_)
-        | RepositoryError::Conflict(_)
-        | RepositoryError::IdempotencyConflict
-        | RepositoryError::QuotaExceeded
-        | RepositoryError::CorruptRow(_)
-        | RepositoryError::StaleFence => TaskApplicationError::Internal,
+        RepositoryError::QuotaExceeded | RepositoryError::CorruptRow(_) => {
+            TaskApplicationError::Internal
+        }
     }
 }
 

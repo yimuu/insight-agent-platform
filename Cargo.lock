@@ -2669,6 +2669,7 @@ dependencies = [
  "chrono",
  "insight-platform-api",
  "insight-platform-contracts",
+ "insight-platform-invocations",
  "insight-platform-orchestrator",
  "insight-platform-postgres",
  "insight-platform-registry",
