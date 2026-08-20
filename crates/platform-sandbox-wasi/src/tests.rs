@@ -267,7 +267,7 @@ fn request(now: DateTime<Utc>, module: &[u8]) -> SandboxExecutionRequest {
         semantic_digest: sha('3'),
     };
     let tenant_id = id(ResourceKind::Tenant, 20);
-    let sandbox_job_id = id(ResourceKind::SandboxJob, 23);
+    let sandbox_job_id = id(ResourceKind::Job, 23);
     let invocation_id = id(ResourceKind::CapabilityInvocation, 22);
     let deadline = now + ChronoDuration::minutes(1);
     let callback = ScopedSandboxCallback {

@@ -2265,8 +2265,7 @@ where
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
     ) -> Result<(), Status> {
-        if request.identity.sandbox_job_id.kind()
-            != insight_platform_contracts::ResourceKind::SandboxJob
+        if request.identity.sandbox_job_id.kind() != insight_platform_contracts::ResourceKind::Job
             || fence.expected_version == 0
             || fence.worker_process_generation_id.kind()
                 != insight_platform_contracts::ResourceKind::WorkerProcessGeneration
@@ -2828,7 +2827,7 @@ where
         if request.worker_process_generation_id.kind()
             != insight_platform_contracts::ResourceKind::WorkerProcessGeneration
             || request.tenant_id.kind() != insight_platform_contracts::ResourceKind::Tenant
-            || request.sandbox_job_id.kind() != insight_platform_contracts::ResourceKind::SandboxJob
+            || request.sandbox_job_id.kind() != insight_platform_contracts::ResourceKind::Job
             || request.lease_generation == 0
             || request.maximum_bytes == 0
             || request.maximum_bytes > self.limits.maximum_message_bytes
@@ -4014,11 +4013,8 @@ mod tests {
             workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
             tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
                 .unwrap(),
-            sandbox_job_id: ResourceId::from_uuid_v7(
-                ResourceKind::SandboxJob,
-                uuid::Uuid::now_v7(),
-            )
-            .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(ResourceKind::Job, uuid::Uuid::now_v7())
+                .unwrap(),
             request_digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
             executor_worker_process_generation_id: ResourceId::from_uuid_v7(
                 ResourceKind::WorkerProcessGeneration,
@@ -4047,7 +4043,7 @@ mod tests {
         let tenant_id =
             ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7()).unwrap();
         let sandbox_job_id =
-            ResourceId::from_uuid_v7(ResourceKind::SandboxJob, uuid::Uuid::now_v7()).unwrap();
+            ResourceId::from_uuid_v7(ResourceKind::Job, uuid::Uuid::now_v7()).unwrap();
         let artifact = ArtifactRef::new(
             ResourceId::from_uuid_v7(ResourceKind::Artifact, uuid::Uuid::now_v7()).unwrap(),
             bytes_digest(value).unwrap(),
@@ -4671,11 +4667,8 @@ mod tests {
         let absence_request = ProveSandboxProcessGenerationAbsent {
             tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
                 .unwrap(),
-            sandbox_job_id: ResourceId::from_uuid_v7(
-                ResourceKind::SandboxJob,
-                uuid::Uuid::now_v7(),
-            )
-            .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(ResourceKind::Job, uuid::Uuid::now_v7())
+                .unwrap(),
             request_digest: format!("sha256:{}", "f".repeat(64)).parse().unwrap(),
             previous_worker_process_generation_id: ResourceId::from_uuid_v7(
                 ResourceKind::WorkerProcessGeneration,
@@ -4694,11 +4687,8 @@ mod tests {
         let heartbeat = HeartbeatSandboxExecution {
             tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
                 .unwrap(),
-            sandbox_job_id: ResourceId::from_uuid_v7(
-                ResourceKind::SandboxJob,
-                uuid::Uuid::now_v7(),
-            )
-            .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(ResourceKind::Job, uuid::Uuid::now_v7())
+                .unwrap(),
             job_id: ResourceId::from_uuid_v7(ResourceKind::Job, uuid::Uuid::now_v7()).unwrap(),
             fence: JobFence {
                 expected_version: 1,
@@ -4807,11 +4797,8 @@ mod tests {
         let command = DestroySandbox {
             tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
                 .unwrap(),
-            sandbox_job_id: ResourceId::from_uuid_v7(
-                ResourceKind::SandboxJob,
-                uuid::Uuid::now_v7(),
-            )
-            .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(ResourceKind::Job, uuid::Uuid::now_v7())
+                .unwrap(),
             request_digest: format!("sha256:{}", "c".repeat(64)).parse().unwrap(),
             sandbox_identity_digest: format!("sha256:{}", "d".repeat(64)).parse().unwrap(),
             attempt_no: 1,
@@ -5344,11 +5331,8 @@ mod tests {
             workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
             tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
                 .unwrap(),
-            sandbox_job_id: ResourceId::from_uuid_v7(
-                ResourceKind::SandboxJob,
-                uuid::Uuid::now_v7(),
-            )
-            .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(ResourceKind::Job, uuid::Uuid::now_v7())
+                .unwrap(),
             request_digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
             executor_worker_process_generation_id: ResourceId::from_uuid_v7(
                 ResourceKind::WorkerProcessGeneration,
@@ -5641,11 +5625,8 @@ mod tests {
         let request = ProveSandboxProcessGenerationAbsent {
             tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7())
                 .unwrap(),
-            sandbox_job_id: ResourceId::from_uuid_v7(
-                ResourceKind::SandboxJob,
-                uuid::Uuid::now_v7(),
-            )
-            .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(ResourceKind::Job, uuid::Uuid::now_v7())
+                .unwrap(),
             request_digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
             previous_worker_process_generation_id: ResourceId::from_uuid_v7(
                 ResourceKind::WorkerProcessGeneration,

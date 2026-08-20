@@ -2085,7 +2085,7 @@ mod tests {
                 .unwrap();
         let command = PrepareChildRun {
             parent_run_id: parent_run_id.clone(),
-            parent_node_execution_id: id("nex_0198f1c5-0787-75e1-a9e8-d95ca0f37104"),
+            parent_node_execution_id: id("nod_0198f1c5-0787-75e1-a9e8-d95ca0f37104"),
             child_link_id: id("crun_0198f1c5-0787-75e1-a9e8-d95ca0f37105"),
             child_run_id: id("run_0198f1c5-0787-75e1-a9e8-d95ca0f37106"),
             child_agent_deployment: child_deployment.clone(),
@@ -2165,7 +2165,7 @@ mod tests {
             tenant_id: id("ten_0198f1c5-0787-75e1-a9e8-d95ca0f37201"),
             child_link_id: id("crun_0198f1c5-0787-75e1-a9e8-d95ca0f37202"),
             parent_run_id: id("run_0198f1c5-0787-75e1-a9e8-d95ca0f37203"),
-            parent_node_execution_id: id("nex_0198f1c5-0787-75e1-a9e8-d95ca0f37204"),
+            parent_node_execution_id: id("nod_0198f1c5-0787-75e1-a9e8-d95ca0f37204"),
             child_run_id: id("run_0198f1c5-0787-75e1-a9e8-d95ca0f37205"),
             state: ChildLinkState::Running,
             generation: 1,

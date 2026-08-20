@@ -386,7 +386,7 @@ fn validate_wasi_read_request(
         WasiArtifactReadPurpose::InputValue => request.read_grant.is_some(),
     };
     if request.tenant_id.kind() != ResourceKind::Tenant
-        || request.sandbox_job_id.kind() != ResourceKind::SandboxJob
+        || request.sandbox_job_id.kind() != ResourceKind::Job
         || request.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
         || request.lease_generation == 0
         || request.maximum_bytes == 0
@@ -955,7 +955,7 @@ mod tests {
     fn wasi_request(bytes: &[u8]) -> WasiArtifactReadRequest {
         WasiArtifactReadRequest {
             tenant_id: id(ResourceKind::Tenant),
-            sandbox_job_id: id(ResourceKind::SandboxJob),
+            sandbox_job_id: id(ResourceKind::Job),
             request_digest: digest('d'),
             worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
             lease_generation: 2,
@@ -971,7 +971,7 @@ mod tests {
         MicroVmArtifactReadRequest {
             workload_kind: MicroVmSandboxWorkloadKind::CapabilityExecution,
             tenant_id: id(ResourceKind::Tenant),
-            sandbox_job_id: id(ResourceKind::SandboxJob),
+            sandbox_job_id: id(ResourceKind::Job),
             request_digest: digest('e'),
             executor_worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
             provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration),

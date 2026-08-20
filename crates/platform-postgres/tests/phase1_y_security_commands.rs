@@ -52,7 +52,7 @@ fn audit(
         principal_kind: PrincipalKind::TenantAdmin,
         receipt_id: id(&format!("rcp_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
         event_id: id(&format!("evt_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
-        outbox_id: id(&format!("out_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
+        outbox_id: id(&format!("obx_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
         idempotency_key_digest: digest(idempotency),
         request_digest: digest(request),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -316,7 +316,7 @@ async fn security_commands_are_fenced_atomic_and_secret_safe() {
             principal_kind: PrincipalKind::ServiceIdentity,
             receipt_id: id("rcp_0198f1c3-8f49-7c3e-b1f3-773c28367d0a"),
             event_id: id("evt_0198f1c3-8f49-7c3e-b1f3-773c28367d0a"),
-            outbox_id: id("out_0198f1c3-8f49-7c3e-b1f3-773c28367d0a"),
+            outbox_id: id("obx_0198f1c3-8f49-7c3e-b1f3-773c28367d0a"),
             idempotency_key_digest: preparation_digest.clone(),
             request_digest: digest('0'),
             receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -398,7 +398,7 @@ async fn security_commands_are_fenced_atomic_and_secret_safe() {
         restricted_prepared.secret_binding_id = id(RESTRICTED_PREPARED_SECRET_ID);
         restricted_prepared.audit.receipt_id = id("rcp_0198f1c3-8f49-7c3e-b1f3-773c28367d0b");
         restricted_prepared.audit.event_id = id("evt_0198f1c3-8f49-7c3e-b1f3-773c28367d0b");
-        restricted_prepared.audit.outbox_id = id("out_0198f1c3-8f49-7c3e-b1f3-773c28367d0b");
+        restricted_prepared.audit.outbox_id = id("obx_0198f1c3-8f49-7c3e-b1f3-773c28367d0b");
         restricted_prepared.audit.idempotency_key_digest = digest('b');
         restricted_prepared.preparation_digest = digest('b');
         restricted_prepared.encrypted_reference =

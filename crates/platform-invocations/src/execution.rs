@@ -510,7 +510,7 @@ pub fn decide_defer_to_sandbox(
         && previous.is_some_and(|previous| {
             previous.attempt_no.checked_add(1) == Some(attempt_no)
                 && previous.job.work_class == WorkClass::Sandbox
-                && previous.job.owner.owner_kind == ResourceKind::SandboxJob
+                && previous.job.owner.owner_kind == ResourceKind::Job
                 && previous.job.owner.owner_id.uuid() == previous.job.job_id.uuid()
                 && current.payload.current_job_id.as_ref() == Some(&previous.job.job_id)
                 && previous.job.lease.is_none()
@@ -528,7 +528,7 @@ pub fn decide_defer_to_sandbox(
         && previous.is_some_and(|previous| {
             previous.attempt_no.checked_add(1) == Some(attempt_no)
                 && previous.job.work_class == WorkClass::Sandbox
-                && previous.job.owner.owner_kind == ResourceKind::SandboxJob
+                && previous.job.owner.owner_kind == ResourceKind::Job
                 && previous.job.owner.owner_id.uuid() == previous.job.job_id.uuid()
                 && current.payload.current_job_id.as_ref() == Some(&previous.job.job_id)
                 && previous.job.lease.is_none()
@@ -705,7 +705,7 @@ pub fn decide_detached_job_outcome(
         || terminal_job.tenant_id != current.tenant_id
         || logical_attempt_no == 0
         || terminal_job.work_class != WorkClass::Sandbox
-        || terminal_job.owner.owner_kind != ResourceKind::SandboxJob
+        || terminal_job.owner.owner_kind != ResourceKind::Job
         || terminal_job.owner.owner_id.uuid() != terminal_job.job_id.uuid()
         || !job_state_matches
         || terminal_job.lease.is_some()
@@ -903,7 +903,7 @@ pub fn decide_detached_input_response(
         || current.payload.current_job_id.as_ref() != Some(&terminal_job.job_id)
         || current.payload.input_task_id.as_ref() != Some(&request.input_task_id)
         || terminal_job.work_class != WorkClass::Sandbox
-        || terminal_job.owner.owner_kind != ResourceKind::SandboxJob
+        || terminal_job.owner.owner_kind != ResourceKind::Job
         || terminal_job.owner.owner_id.uuid() != terminal_job.job_id.uuid()
         || terminal_job.state != JobState::Succeeded
         || terminal_job.lease.is_some()
@@ -1946,7 +1946,7 @@ pub fn decide_detached_job_control(
         || current.payload.current_job_id.as_ref() != Some(&terminal_or_active_job.job_id)
         || terminal_or_active_job.tenant_id != current.tenant_id
         || terminal_or_active_job.work_class != WorkClass::Sandbox
-        || terminal_or_active_job.owner.owner_kind != ResourceKind::SandboxJob
+        || terminal_or_active_job.owner.owner_kind != ResourceKind::Job
         || terminal_or_active_job.owner.owner_id.uuid() != terminal_or_active_job.job_id.uuid()
         || matches!(
             current.state,
@@ -2421,7 +2421,7 @@ mod tests {
         let tenant_id = id("ten_0198f1c8-32e4-75e1-a9e8-d95ca0f40001");
         let principal_id = id("prn_0198f1c8-32e4-75e1-a9e8-d95ca0f40002");
         let run_id = id("run_0198f1c8-32e4-75e1-a9e8-d95ca0f40003");
-        let node_id = id("nex_0198f1c8-32e4-75e1-a9e8-d95ca0f40004");
+        let node_id = id("nod_0198f1c8-32e4-75e1-a9e8-d95ca0f40004");
         let invocation_id = id("inv_0198f1c8-32e4-75e1-a9e8-d95ca0f40005");
         let deployment =
             ExactDeploymentRef::new(id("cdep_0198f1c8-32e4-75e1-a9e8-d95ca0f40006"), hash('a'))
@@ -2438,7 +2438,7 @@ mod tests {
         .unwrap();
         let input = ExactInvocationValueRef {
             schema_version: 1,
-            value_id: id("rval_0198f1c8-32e4-75e1-a9e8-d95ca0f40008"),
+            value_id: id("val_0198f1c8-32e4-75e1-a9e8-d95ca0f40008"),
             run_id: run_id.clone(),
             producing_node_id: None,
             value_kind: "run_input".to_owned(),
@@ -2600,7 +2600,7 @@ mod tests {
             principal_kind: PrincipalKind::AgentRunner,
             receipt_id: id("rcp_0198f1c8-32e4-75e1-a9e8-d95ca0f4000b"),
             event_id: id("evt_0198f1c8-32e4-75e1-a9e8-d95ca0f4000c"),
-            outbox_id: id("out_0198f1c8-32e4-75e1-a9e8-d95ca0f4000d"),
+            outbox_id: id("obx_0198f1c8-32e4-75e1-a9e8-d95ca0f4000d"),
             idempotency_key_digest: hash('c'),
             request_digest: hash('d'),
             receipt_expires_at: now + Duration::hours(1),
@@ -2659,15 +2659,14 @@ mod tests {
         assert_eq!(deferred.payload.current_job_id.as_ref(), Some(&job_id));
         assert_eq!(deferred.version, 2);
 
-        let sandbox_owner =
-            ResourceId::from_uuid_v7(ResourceKind::SandboxJob, job_id.uuid()).unwrap();
+        let sandbox_owner = ResourceId::from_uuid_v7(ResourceKind::Job, job_id.uuid()).unwrap();
         let terminal_job = JobProjection {
             tenant_id: deferred.tenant_id.clone(),
             job_id: job_id.clone(),
             work_class: WorkClass::Sandbox,
             owner: JobOwnerRef {
                 owner_id: sandbox_owner,
-                owner_kind: ResourceKind::SandboxJob,
+                owner_kind: ResourceKind::Job,
             },
             state: JobState::Succeeded,
             version: 7,
@@ -2731,15 +2730,14 @@ mod tests {
             now,
         )
         .unwrap();
-        let first_owner =
-            ResourceId::from_uuid_v7(ResourceKind::SandboxJob, first_job_id.uuid()).unwrap();
+        let first_owner = ResourceId::from_uuid_v7(ResourceKind::Job, first_job_id.uuid()).unwrap();
         let first_terminal = JobProjection {
             tenant_id: deferred.tenant_id.clone(),
             job_id: first_job_id.clone(),
             work_class: WorkClass::Sandbox,
             owner: JobOwnerRef {
                 owner_id: first_owner,
-                owner_kind: ResourceKind::SandboxJob,
+                owner_kind: ResourceKind::Job,
             },
             state: JobState::Failed,
             version: 5,
@@ -2833,15 +2831,14 @@ mod tests {
             now,
         )
         .unwrap();
-        let sandbox_owner =
-            ResourceId::from_uuid_v7(ResourceKind::SandboxJob, job_id.uuid()).unwrap();
+        let sandbox_owner = ResourceId::from_uuid_v7(ResourceKind::Job, job_id.uuid()).unwrap();
         let active_job = JobProjection {
             tenant_id: deferred.tenant_id.clone(),
             job_id,
             work_class: WorkClass::Sandbox,
             owner: JobOwnerRef {
                 owner_id: sandbox_owner,
-                owner_kind: ResourceKind::SandboxJob,
+                owner_kind: ResourceKind::Job,
             },
             state: JobState::Ready,
             version: 1,
@@ -2903,15 +2900,14 @@ mod tests {
             now,
         )
         .unwrap();
-        let sandbox_owner =
-            ResourceId::from_uuid_v7(ResourceKind::SandboxJob, job_id.uuid()).unwrap();
+        let sandbox_owner = ResourceId::from_uuid_v7(ResourceKind::Job, job_id.uuid()).unwrap();
         let active_job = JobProjection {
             tenant_id: deferred.tenant_id.clone(),
             job_id,
             work_class: WorkClass::Sandbox,
             owner: JobOwnerRef {
                 owner_id: sandbox_owner,
-                owner_kind: ResourceKind::SandboxJob,
+                owner_kind: ResourceKind::Job,
             },
             state: JobState::Ready,
             version: 1,
@@ -2967,9 +2963,8 @@ mod tests {
             job_id: first_job_id.clone(),
             work_class: WorkClass::Sandbox,
             owner: JobOwnerRef {
-                owner_id: ResourceId::from_uuid_v7(ResourceKind::SandboxJob, first_job_id.uuid())
-                    .unwrap(),
-                owner_kind: ResourceKind::SandboxJob,
+                owner_id: ResourceId::from_uuid_v7(ResourceKind::Job, first_job_id.uuid()).unwrap(),
+                owner_kind: ResourceKind::Job,
             },
             state: JobState::Succeeded,
             version: 7,
@@ -3119,7 +3114,7 @@ mod tests {
             prepared_and_started(now, Effect::ReadOnly, CapabilityIdempotencyKind::Intrinsic);
         let (value, content_digest) = inline_value(serde_json::json!({"answer": 42}));
         let outcome = DispatchOutcome::Completed(CapabilityOutputValue {
-            value_id: id("rval_0198f1c8-32e4-75e1-a9e8-d95ca0f40010"),
+            value_id: id("val_0198f1c8-32e4-75e1-a9e8-d95ca0f40010"),
             classification: DataClassification::Internal,
             schema_digest: invocation.payload.admission.output_schema_digest.clone(),
             content_digest,
@@ -3316,7 +3311,7 @@ mod tests {
                 expected_generation: input_required.job.lease_generation,
                 action: CapabilityInputAction::Accept,
                 response: Some(&CapabilityInputResponse {
-                    value_id: id("rval_0198f1c8-32e4-75e1-a9e8-d95ca0f40013"),
+                    value_id: id("val_0198f1c8-32e4-75e1-a9e8-d95ca0f40013"),
                     classification: DataClassification::Internal,
                     schema_digest: input_schema,
                     content_digest,
@@ -3425,7 +3420,7 @@ mod tests {
         .unwrap();
         let (invalid_value, invalid_digest) = inline_value(serde_json::json!({"region": "eu"}));
         let invalid = CapabilityInputResponse {
-            value_id: id("rval_0198f1c8-32e4-75e1-a9e8-d95ca0f40021"),
+            value_id: id("val_0198f1c8-32e4-75e1-a9e8-d95ca0f40021"),
             classification: DataClassification::Internal,
             schema_digest: input_required
                 .job_payload

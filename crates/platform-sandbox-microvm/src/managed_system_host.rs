@@ -94,7 +94,7 @@ impl ManagedMcpMicroVmSessionKey {
 
     fn validate(&self) -> Result<(), MicroVmProviderFailure> {
         if self.tenant_id.kind() != ResourceKind::Tenant
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.executor_worker_process_generation_id.kind()
                 != ResourceKind::WorkerProcessGeneration
             || self.lease_generation == 0
@@ -1968,7 +1968,7 @@ mod tests {
     fn key() -> ManagedMcpMicroVmSessionKey {
         ManagedMcpMicroVmSessionKey {
             tenant_id: id(ResourceKind::Tenant, 1),
-            sandbox_job_id: id(ResourceKind::SandboxJob, 2),
+            sandbox_job_id: id(ResourceKind::Job, 2),
             session_identity_digest: sha('a'),
             request_digest: sha('b'),
             executor_worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 3),

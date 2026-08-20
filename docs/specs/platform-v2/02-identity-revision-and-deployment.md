@@ -22,7 +22,8 @@ ResourceVersion表示可重现的逻辑定义，Deployment表示可运行的exac
 
 ## 2. Nominal ID registry
 
-每个ID是UUIDv7-backed nominal type，wire使用stable prefix。只有owner registry可创建/解析ID，不通过裸UUID、
+每个ID是UUIDv7-backed nominal type，wire使用stable prefix；完整closed machine registry由
+`contracts/platform-v1/registries.json`拥有。只有owner registry可创建/解析ID，不通过裸UUID、
 字符串前缀或同UUID alias推断类型。
 
 | 对象 | 示例prefix | 约束 |

@@ -203,7 +203,7 @@ impl MicroVmGuestCommandEnvelope {
         };
         if self.protocol_version != MICROVM_GUEST_PROTOCOL_VERSION
             || self.sequence == 0
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.attempt_no == 0
             || self.lease_generation == 0
             || !command_matches

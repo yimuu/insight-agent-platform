@@ -811,7 +811,7 @@ impl SandboxExecutionRequest {
         if self.schema_version != 1
             || self.protocol_version != SANDBOX_PROTOCOL_VERSION
             || self.tenant_id.kind() != ResourceKind::Tenant
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.invocation_id.kind() != ResourceKind::CapabilityInvocation
             || self.job_id.kind() != ResourceKind::Job
             || self.expected_invocation_version == 0

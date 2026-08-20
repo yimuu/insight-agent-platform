@@ -5668,11 +5668,8 @@ mod tests {
             admitted_subscription_version: 1,
             admitted_logical_job_version: 2,
             session_generation: 3,
-            sandbox_job_id: ResourceId::from_uuid_v7(
-                ResourceKind::SandboxJob,
-                physical_job_id.uuid(),
-            )
-            .unwrap(),
+            sandbox_job_id: ResourceId::from_uuid_v7(ResourceKind::Job, physical_job_id.uuid())
+                .unwrap(),
             physical_job_id,
             subscription_binding_digest: digest('a'),
             canonical_digest: digest('0'),

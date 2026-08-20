@@ -485,7 +485,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
         bindings.digest.parse().unwrap(),
     )
     .unwrap();
-    let sandbox_job_id = id(ResourceKind::SandboxJob, 42);
+    let sandbox_job_id = id(ResourceKind::Job, 42);
     let invocation_id = id(ResourceKind::CapabilityInvocation, 41);
     let deadline = now + Duration::minutes(1);
     let input_value = serde_json::json!({"question": "life"});
@@ -1512,7 +1512,7 @@ async fn prove_micro_vm_artifact_read_binding(
     )
     .unwrap();
     let mut request = fixture.command.request.clone();
-    request.sandbox_job_id = id(ResourceKind::SandboxJob, 360);
+    request.sandbox_job_id = id(ResourceKind::Job, 360);
     request.job_id = id(ResourceKind::Job, 360);
     request.output_value_id = id(ResourceKind::RunValue, 360);
     request.callback.sandbox_job_id = request.sandbox_job_id.clone();
@@ -2519,7 +2519,7 @@ async fn sandbox_fixture() {
     assert_eq!(rejected_side_effects, (0, 0, 0));
 
     let mut prestart_request = fixture.command.request.clone();
-    prestart_request.sandbox_job_id = id(ResourceKind::SandboxJob, 202);
+    prestart_request.sandbox_job_id = id(ResourceKind::Job, 202);
     prestart_request.invocation_id = id(ResourceKind::CapabilityInvocation, 201);
     prestart_request.job_id = id(ResourceKind::Job, 202);
     prestart_request.output_value_id = id(ResourceKind::RunValue, 202);
@@ -2663,7 +2663,7 @@ async fn sandbox_fixture() {
     assert_eq!(prestart_reserved, 0);
 
     let mut recovery_request = fixture.command.request.clone();
-    recovery_request.sandbox_job_id = id(ResourceKind::SandboxJob, 242);
+    recovery_request.sandbox_job_id = id(ResourceKind::Job, 242);
     recovery_request.invocation_id = id(ResourceKind::CapabilityInvocation, 241);
     recovery_request.job_id = id(ResourceKind::Job, 242);
     recovery_request.output_value_id = id(ResourceKind::RunValue, 242);

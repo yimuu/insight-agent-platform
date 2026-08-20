@@ -661,6 +661,12 @@ string_enum! {
     pub enum PolicyKind, "policy kind" {
         Authorization => "authorization",
         Approval => "approval",
+        DataHandling => "data_handling",
+        NetworkEgress => "network_egress",
+        SecretAccess => "secret_access",
+        SandboxIsolation => "sandbox_isolation",
+        ModelSafety => "model_safety",
+        Logging => "logging",
         DataFlow => "data_flow",
         Declassification => "declassification",
         Network => "network",

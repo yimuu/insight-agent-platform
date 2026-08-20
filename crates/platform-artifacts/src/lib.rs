@@ -1834,7 +1834,7 @@ fn is_producer_kind(kind: ResourceKind) -> bool {
         ResourceKind::CapabilityInvocation
             | ResourceKind::ModelTurn
             | ResourceKind::ContextQuery
-            | ResourceKind::SandboxJob
+            | ResourceKind::Job
             | ResourceKind::ManagementOperation
     )
 }

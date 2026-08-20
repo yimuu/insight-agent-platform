@@ -260,7 +260,7 @@ fn audit(
         principal_kind: PrincipalKind::AgentRunner,
         receipt_id: id(&format!("rcp_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")),
         event_id: id(&format!("evt_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")),
-        outbox_id: id(&format!("out_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")),
+        outbox_id: id(&format!("obx_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")),
         idempotency_key_digest: digest(idempotency),
         request_digest: digest(request),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -345,9 +345,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367010",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367011",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367012",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367012",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367013",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367014",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367014",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7015", '0', '1'),
         bindings.clone(),
@@ -422,9 +422,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367600",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367601",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367602",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367602",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367603",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367604",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367604",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7605", '6', '7'),
         bindings.clone(),
@@ -434,9 +434,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367700",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367701",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367702",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367702",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367703",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367704",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367704",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7705", '8', '9'),
         bindings.clone(),
@@ -499,9 +499,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367a00",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367a01",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367a02",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367a02",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367a03",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367a04",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367a04",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7a05", '5', '6'),
         bindings.clone(),
@@ -546,11 +546,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a12"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a12"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a12"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a13"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a13"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a13"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a14"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a14"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a14"),
         }],
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -664,9 +664,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('2'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a1e"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a1e"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a1e"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a1f"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a1f"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a1f"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let running_for_recovery = match scheduler
@@ -689,11 +689,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a24"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a24"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a24"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a25"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a25"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a25"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a26"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a26"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a26"),
         }],
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -712,9 +712,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         limit: 1,
         slots: vec![DueOrchestrationRetrySlot {
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a27"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a27"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a27"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367a28"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367a28"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367a28"),
         }],
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -749,9 +749,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367800",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367801",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367802",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367802",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367803",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367804",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367804",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7805", 'a', 'b'),
         bindings.clone(),
@@ -790,9 +790,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('e'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367811"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367811"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367811"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367812"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367812"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367812"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
@@ -858,7 +858,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         result_digest: result_payload.digest.parse().unwrap(),
         result_payload,
         output: Some(RunInputValue {
-            value_id: id("rval_0198f1c3-9a00-7c3e-b1f3-773c28367820"),
+            value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367820"),
             classification: DataClassification::Internal,
             schema_digest: digest('f'),
             content_digest: output_digest,
@@ -873,15 +873,15 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367826"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367826"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367826"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367827"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367827"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367827"),
             scope_closing_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367828"),
-            scope_closing_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367828"),
+            scope_closing_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367828"),
             scope_terminal_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367829"),
-            scope_terminal_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367829"),
+            scope_terminal_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367829"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836782a"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836782a"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836782a"),
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -950,9 +950,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367900",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367901",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367902",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367902",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367903",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367904",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367904",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7905", '3', '4'),
         bindings.clone(),
@@ -990,9 +990,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('6'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367911"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367911"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367911"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367934"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367934"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367934"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let wait_started = match scheduler
@@ -1033,11 +1033,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367917"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367917"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367917"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367918"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367918"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367918"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367919"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367919"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367919"),
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -1107,9 +1107,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         mutations: OrchestrationWakeMutationIds {
             receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c2836791a"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836791b"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836791b"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836791b"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836791c"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836791c"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836791c"),
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -1170,9 +1170,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('f'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367926"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367926"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367926"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367935"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367935"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367935"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let retry_started = match scheduler
@@ -1201,11 +1201,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836792c"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836792c"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836792c"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836792d"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836792d"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836792d"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836792e"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836792e"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836792e"),
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -1226,9 +1226,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         limit: 1,
         slots: vec![DueOrchestrationRetrySlot {
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367931"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367931"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367931"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367932"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367932"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367932"),
         }],
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -1291,9 +1291,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367100",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367101",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367102",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367102",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367103",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367104",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367104",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7105", '1', '2'),
         bindings.clone(),
@@ -1332,9 +1332,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367200",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367201",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367202",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367202",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367203",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367204",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367204",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7205", '3', '4'),
         bindings.clone(),
@@ -1385,9 +1385,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367300",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367301",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367302",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367302",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367303",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367304",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367304",
         },
         audit(TENANT_ID, DENIED_PRINCIPAL_ID, "7305", '6', '7'),
         bindings.clone(),
@@ -1508,9 +1508,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367500",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367501",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367502",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367502",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367503",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367504",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367504",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7505", '2', '3'),
         bindings.clone(),
@@ -1601,9 +1601,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('5'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367b1b"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367b1b"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367b1b"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367b1c"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367b1c"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367b1c"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let active_cancel_started = match scheduler
@@ -1672,15 +1672,15 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367b23"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367b23"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367b23"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367b24"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367b24"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367b24"),
             scope_closing_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367b25"),
-            scope_closing_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367b25"),
+            scope_closing_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367b25"),
             scope_terminal_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367b26"),
-            scope_terminal_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367b26"),
+            scope_terminal_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367b26"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367b27"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367b27"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367b27"),
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -1711,9 +1711,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367110",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367111",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28367112",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28367112",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28367113",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28367114",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28367114",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7c00", 'a', 'b'),
         wait_command.bindings.clone(),
@@ -1754,9 +1754,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('e'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367c0a"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367c0a"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367c0a"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367c0b"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367c0b"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367c0b"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let exhausted_started = match scheduler
@@ -1844,9 +1844,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('4'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d0f"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d0f"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d0f"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d10"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d10"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d10"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let task_started = match scheduler
@@ -1883,13 +1883,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d17"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d17"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d17"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d18"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d18"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d18"),
             task_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d19"),
-            task_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d19"),
+            task_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d19"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d1a"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d1a"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d1a"),
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -1961,7 +1961,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
 
     let response_value: Value = json!({"answer": "approved"});
     let response = RunInputValue {
-        value_id: id("rval_0198f1c3-9a00-7c3e-b1f3-773c28367d1c"),
+        value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367d1c"),
         classification: DataClassification::Internal,
         schema_digest: response_schema_digest.clone(),
         content_digest: canonical_digest(&response_value).unwrap().parse().unwrap(),
@@ -1980,11 +1980,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         resume_request_digest: digest('b'),
         mutations: ResolveOrchestrationTaskMutationIds {
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d1e"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d1e"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d1e"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d1f"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d1f"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d1f"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d20"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d20"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d20"),
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -2048,11 +2048,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         resume_request_digest: digest('e'),
         mutations: ResolveOrchestrationTaskMutationIds {
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d23"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d23"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d23"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d24"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d24"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d24"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d25"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d25"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d25"),
         },
     };
     let losing_receipt_id = losing_task_response.audit.receipt_id.to_string();
@@ -2108,9 +2108,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('1'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d2f"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d2f"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d2f"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d30"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d30"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d30"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let expiry_started = match scheduler
@@ -2145,13 +2145,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d37"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d37"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d37"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d38"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d38"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d38"),
             task_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d39"),
-            task_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d39"),
+            task_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d39"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d3a"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d3a"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d3a"),
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -2219,11 +2219,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         resume_request_digest: digest('b'),
         mutations: ResolveOrchestrationTaskMutationIds {
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d47"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d47"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d47"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d48"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d48"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d48"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367d49"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367d49"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367d49"),
         },
     };
     let late_expiry_receipt_id = late_expiry_response.audit.receipt_id.to_string();
@@ -2292,9 +2292,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('c'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367e39"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367e39"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367e39"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367e3a"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367e3a"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367e3a"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let child_started = match scheduler
@@ -2367,12 +2367,12 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         child_link_id: id("crun_0198f1c3-9a00-7c3e-b1f3-773c28367e01"),
         child_run_id: id("run_0198f1c3-9a00-7c3e-b1f3-773c28367e02"),
         child_root_scope_id: id("scp_0198f1c3-9a00-7c3e-b1f3-773c28367e03"),
-        child_entry_node_execution_id: id("nex_0198f1c3-9a00-7c3e-b1f3-773c28367e04"),
+        child_entry_node_execution_id: id("nod_0198f1c3-9a00-7c3e-b1f3-773c28367e04"),
         child_orchestration_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c28367e05"),
         child_entry_plan_node_key: PlanNodeKey::new("entry".to_owned()).unwrap(),
         child_entry_node_kind: PlanNodeKind::Start,
         input: RunInputValue {
-            value_id: id("rval_0198f1c3-9a00-7c3e-b1f3-773c28367e06"),
+            value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367e06"),
             classification: DataClassification::Internal,
             schema_digest: digest('a'),
             content_digest: child_input_digest,
@@ -2554,10 +2554,10 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     logical_replay.child_run_id = id("run_0198f1c3-9a00-7c3e-b1f3-773c28367e54");
     logical_replay.child_root_scope_id = id("scp_0198f1c3-9a00-7c3e-b1f3-773c28367e55");
     logical_replay.child_entry_node_execution_id =
-        id("nex_0198f1c3-9a00-7c3e-b1f3-773c28367e56");
+        id("nod_0198f1c3-9a00-7c3e-b1f3-773c28367e56");
     logical_replay.child_orchestration_job_id =
         id("job_0198f1c3-9a00-7c3e-b1f3-773c28367e57");
-    logical_replay.input.value_id = id("rval_0198f1c3-9a00-7c3e-b1f3-773c28367e58");
+    logical_replay.input.value_id = id("val_0198f1c3-9a00-7c3e-b1f3-773c28367e58");
     logical_replay.idempotency_key_digest = digest('1');
     logical_replay.request_digest = digest('2');
     logical_replay.mutations = mutation_ids(
@@ -2619,9 +2619,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('7'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f09"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f09"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f09"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f0a"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f0a"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f0a"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let child_job_started = match scheduler
@@ -2647,7 +2647,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         result_digest: child_result_payload.digest.parse().unwrap(),
         result_payload: child_result_payload,
         output: Some(RunInputValue {
-            value_id: id("rval_0198f1c3-9a00-7c3e-b1f3-773c28367f0b"),
+            value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367f0b"),
             classification: DataClassification::Internal,
             schema_digest: digest('a'),
             content_digest: child_output_digest,
@@ -2664,15 +2664,15 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f11"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f11"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f11"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f12"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f12"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f12"),
             scope_closing_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f13"),
-            scope_closing_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f13"),
+            scope_closing_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f13"),
             scope_terminal_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f14"),
-            scope_terminal_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f14"),
+            scope_terminal_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f14"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f15"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f15"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f15"),
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -2691,13 +2691,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         resume_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c28367f16"),
         resume_request_digest: digest('b'),
         child_link_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f17"),
-        child_link_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f17"),
+        child_link_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f17"),
         parent_run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f18"),
-        parent_run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f18"),
+        parent_run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f18"),
         parent_node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f19"),
-        parent_node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f19"),
+        parent_node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f19"),
         resume_job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f1a"),
-        resume_job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f1a"),
+        resume_job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f1a"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let terminal_child = scheduler
@@ -2733,13 +2733,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 resume_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c28367f1b"),
                 resume_request_digest: digest('c'),
                 child_link_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f1c"),
-                child_link_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f1c"),
+                child_link_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f1c"),
                 parent_run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f1d"),
-                parent_run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f1d"),
+                parent_run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f1d"),
                 parent_node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f1e"),
-                parent_node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f1e"),
+                parent_node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f1e"),
                 resume_job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f1f"),
-                resume_job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28367f1f"),
+                resume_job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f1f"),
             }],
         })
         .await
@@ -2778,9 +2778,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('f'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368009"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28368009"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368009"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836800a"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836800a"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836800a"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let cancel_parent_started = match scheduler
@@ -2802,10 +2802,10 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     cancel_child.child_run_id = id("run_0198f1c3-9a00-7c3e-b1f3-773c2836800c");
     cancel_child.child_root_scope_id = id("scp_0198f1c3-9a00-7c3e-b1f3-773c2836800d");
     cancel_child.child_entry_node_execution_id =
-        id("nex_0198f1c3-9a00-7c3e-b1f3-773c2836800e");
+        id("nod_0198f1c3-9a00-7c3e-b1f3-773c2836800e");
     cancel_child.child_orchestration_job_id =
         id("job_0198f1c3-9a00-7c3e-b1f3-773c2836800f");
-    cancel_child.input.value_id = id("rval_0198f1c3-9a00-7c3e-b1f3-773c28368010");
+    cancel_child.input.value_id = id("val_0198f1c3-9a00-7c3e-b1f3-773c28368010");
     cancel_child.budget.deadline = Utc::now() + Duration::seconds(30);
     cancel_child.logical_key = "child:cancel-path:attempt-1".to_owned();
     cancel_child.idempotency_key_digest = digest('0');
@@ -2851,9 +2851,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             limit: 1,
             slots: vec![ChildRunCancellationSlot {
                 child_link_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368021"),
-                child_link_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28368021"),
+                child_link_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368021"),
                 child_run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368022"),
-                child_run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28368022"),
+                child_run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368022"),
             }],
         })
         .await
@@ -2870,9 +2870,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             limit: 1,
             slots: vec![ChildRunCancellationSlot {
                 child_link_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368023"),
-                child_link_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28368023"),
+                child_link_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368023"),
                 child_run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368024"),
-                child_run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28368024"),
+                child_run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368024"),
             }],
         })
         .await
@@ -2904,13 +2904,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 resume_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c2836802f"),
                 resume_request_digest: digest('4'),
                 child_link_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368030"),
-                child_link_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28368030"),
+                child_link_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368030"),
                 parent_run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368031"),
-                parent_run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28368031"),
+                parent_run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368031"),
                 parent_node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368032"),
-                parent_node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28368032"),
+                parent_node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368032"),
                 resume_job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368033"),
-                resume_job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28368033"),
+                resume_job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368033"),
             }],
         })
         .await
@@ -2949,9 +2949,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369000",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28369001",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28369002",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28369002",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28369003",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28369004",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28369004",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "9005", '5', '6'),
         bindings.clone(),
@@ -2994,9 +2994,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('9'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369019"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369019"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369019"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836901a"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836901a"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836901a"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let controller_started = match scheduler
@@ -3019,19 +3019,19 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             })
             .to_vec(),
         run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369025"),
-        run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369025"),
+        run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369025"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369026"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369026"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369026"),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369027"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369027"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369027"),
         activations: vec![ControllerActivationSlot {
-            node_execution_id: id("nex_0198f1c3-9a00-7c3e-b1f3-773c28369028"),
+            node_execution_id: id("nod_0198f1c3-9a00-7c3e-b1f3-773c28369028"),
             orchestration_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c28369029"),
             scope: None,
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836902a"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836902a"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836902a"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836902b"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836902b"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836902b"),
         }],
         pending_nodes: vec![],
         structural_exit: None,
@@ -3205,9 +3205,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369100",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28369101",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28369102",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28369102",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28369103",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28369104",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28369104",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "9105", 'e', 'f'),
         bindings.clone(),
@@ -3247,9 +3247,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('3'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369119"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369119"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369119"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836911a"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836911a"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836911a"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let fork_started = match scheduler
@@ -3282,15 +3282,15 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 })
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369125"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369125"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369125"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369126"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369126"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369126"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369127"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369127"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369127"),
             activations: vec![
                 ControllerActivationSlot {
                     node_execution_id: id(
-                        "nex_0198f1c3-9a00-7c3e-b1f3-773c28369130",
+                        "nod_0198f1c3-9a00-7c3e-b1f3-773c28369130",
                     ),
                     orchestration_job_id: id(
                         "job_0198f1c3-9a00-7c3e-b1f3-773c28369131",
@@ -3303,17 +3303,17 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                             "evt_0198f1c3-9a00-7c3e-b1f3-773c28369135",
                         ),
                         scope_outbox_id: id(
-                            "out_0198f1c3-9a00-7c3e-b1f3-773c28369135",
+                            "obx_0198f1c3-9a00-7c3e-b1f3-773c28369135",
                         ),
                     }),
                     node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369133"),
-                    node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369133"),
+                    node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369133"),
                     job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369134"),
-                    job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369134"),
+                    job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369134"),
                 },
                 ControllerActivationSlot {
                     node_execution_id: id(
-                        "nex_0198f1c3-9a00-7c3e-b1f3-773c28369140",
+                        "nod_0198f1c3-9a00-7c3e-b1f3-773c28369140",
                     ),
                     orchestration_job_id: id(
                         "job_0198f1c3-9a00-7c3e-b1f3-773c28369141",
@@ -3326,19 +3326,19 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                             "evt_0198f1c3-9a00-7c3e-b1f3-773c28369145",
                         ),
                         scope_outbox_id: id(
-                            "out_0198f1c3-9a00-7c3e-b1f3-773c28369145",
+                            "obx_0198f1c3-9a00-7c3e-b1f3-773c28369145",
                         ),
                     }),
                     node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369143"),
-                    node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369143"),
+                    node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369143"),
                     job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369144"),
-                    job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369144"),
+                    job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369144"),
                 },
             ],
             pending_nodes: vec![ControllerPendingNodeSlot {
-                node_execution_id: id("nex_0198f1c3-9a00-7c3e-b1f3-773c28369150"),
+                node_execution_id: id("nod_0198f1c3-9a00-7c3e-b1f3-773c28369150"),
                 node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369151"),
-                node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369151"),
+                node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369151"),
             }],
             structural_exit: None,
             pending_wake: None,
@@ -3474,9 +3474,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('4'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369169"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369169"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369169"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836916a"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836916a"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836916a"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let left_started = match scheduler
@@ -3508,11 +3508,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 })
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369170"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369170"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369170"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369171"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369171"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369171"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369172"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369172"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369172"),
             activations: Vec::new(),
             pending_nodes: Vec::new(),
             structural_exit: Some(ControllerStructuralExitSlot {
@@ -3520,13 +3520,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                     "evt_0198f1c3-9a00-7c3e-b1f3-773c28369173",
                 ),
                 scope_closing_outbox_id: id(
-                    "out_0198f1c3-9a00-7c3e-b1f3-773c28369173",
+                    "obx_0198f1c3-9a00-7c3e-b1f3-773c28369173",
                 ),
                 scope_terminal_event_id: id(
                     "evt_0198f1c3-9a00-7c3e-b1f3-773c28369174",
                 ),
                 scope_terminal_outbox_id: id(
-                    "out_0198f1c3-9a00-7c3e-b1f3-773c28369174",
+                    "obx_0198f1c3-9a00-7c3e-b1f3-773c28369174",
                 ),
             }),
             pending_wake: Some(ControllerPendingWakeSlot {
@@ -3535,9 +3535,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 ),
                 request_digest: digest('7'),
                 node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369176"),
-                node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369176"),
+                node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369176"),
                 job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369177"),
-                job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369177"),
+                job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369177"),
             }),
             remainder_cancellations: Vec::new(),
         },
@@ -3627,9 +3627,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('a'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369189"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369189"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369189"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836918a"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c2836918a"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836918a"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let right_started = match scheduler
@@ -3661,11 +3661,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 })
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369190"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369190"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369190"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369191"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369191"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369191"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369192"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369192"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369192"),
             activations: Vec::new(),
             pending_nodes: Vec::new(),
             structural_exit: Some(ControllerStructuralExitSlot {
@@ -3673,13 +3673,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                     "evt_0198f1c3-9a00-7c3e-b1f3-773c28369193",
                 ),
                 scope_closing_outbox_id: id(
-                    "out_0198f1c3-9a00-7c3e-b1f3-773c28369193",
+                    "obx_0198f1c3-9a00-7c3e-b1f3-773c28369193",
                 ),
                 scope_terminal_event_id: id(
                     "evt_0198f1c3-9a00-7c3e-b1f3-773c28369194",
                 ),
                 scope_terminal_outbox_id: id(
-                    "out_0198f1c3-9a00-7c3e-b1f3-773c28369194",
+                    "obx_0198f1c3-9a00-7c3e-b1f3-773c28369194",
                 ),
             }),
             pending_wake: Some(ControllerPendingWakeSlot {
@@ -3688,9 +3688,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 ),
                 request_digest: digest('d'),
                 node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369196"),
-                node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369196"),
+                node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369196"),
                 job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28369197"),
-                job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c28369197"),
+                job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28369197"),
             }),
             remainder_cancellations: Vec::new(),
         },
@@ -3780,9 +3780,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         request_digest: digest('0'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
         job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c283691a9"),
-        job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c283691a9"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c283691a9"),
         node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c283691aa"),
-        node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c283691aa"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c283691aa"),
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let join_started = match scheduler
@@ -3816,21 +3816,21 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 })
                 .to_vec(),
             run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c283691b0"),
-            run_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c283691b0"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c283691b0"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c283691b1"),
-            node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c283691b1"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c283691b1"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c283691b2"),
-            job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c283691b2"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c283691b2"),
             activations: vec![ControllerActivationSlot {
-                node_execution_id: id("nex_0198f1c3-9a00-7c3e-b1f3-773c283691b3"),
+                node_execution_id: id("nod_0198f1c3-9a00-7c3e-b1f3-773c283691b3"),
                 orchestration_job_id: id(
                     "job_0198f1c3-9a00-7c3e-b1f3-773c283691b4",
                 ),
                 scope: None,
                 node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c283691b5"),
-                node_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c283691b5"),
+                node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c283691b5"),
                 job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c283691b6"),
-                job_outbox_id: id("out_0198f1c3-9a00-7c3e-b1f3-773c283691b6"),
+                job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c283691b6"),
             }],
             pending_nodes: Vec::new(),
             structural_exit: None,
@@ -3990,9 +3990,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369200",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28369201",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28369202",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28369202",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28369203",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28369204",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28369204",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "9205", '5', '6'),
         bindings.clone(),
@@ -4336,9 +4336,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369400",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28369401",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28369402",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28369402",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28369403",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28369404",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28369404",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "9405", '5', '6'),
         bindings.clone(),
@@ -4713,9 +4713,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369500",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28369501",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28369502",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28369502",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28369503",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28369504",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28369504",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "9505", '5', '6'),
         bindings.clone(),
@@ -5087,9 +5087,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369600",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28369601",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28369602",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28369602",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28369603",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28369604",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28369604",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "9605", 'a', 'b'),
         bindings.clone(),
@@ -5421,9 +5421,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369700",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28369701",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28369702",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28369702",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28369703",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28369704",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28369704",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "9705", 'b', 'c'),
         bindings.clone(),
@@ -5752,9 +5752,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369800",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28369801",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28369802",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28369802",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28369803",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28369804",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28369804",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "9805", '7', '8'),
         bindings.clone(),
@@ -6312,9 +6312,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369900",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28369901",
-            node: "nex_0198f1c3-9a00-7c3e-b1f3-773c28369902",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28369902",
             job: "job_0198f1c3-9a00-7c3e-b1f3-773c28369903",
-            value: "rval_0198f1c3-9a00-7c3e-b1f3-773c28369904",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28369904",
         },
         audit(TENANT_ID, PRINCIPAL_ID, "9905", '4', '5'),
         bindings.clone(),

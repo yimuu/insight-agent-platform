@@ -55,9 +55,9 @@ const WORKER_ID: &str = "wrk_0198f1c5-0787-75e1-a9e8-d95ca0f36009";
 const QUOTA_ACCOUNT_ID: &str = "qac_0198f1c5-0787-75e1-a9e8-d95ca0f3600a";
 const RUN_ID: &str = "run_0198f1c5-0787-75e1-a9e8-d95ca0f3600b";
 const SCOPE_ID: &str = "scp_0198f1c5-0787-75e1-a9e8-d95ca0f3600c";
-const NODE_ID: &str = "nex_0198f1c5-0787-75e1-a9e8-d95ca0f3600d";
+const NODE_ID: &str = "nod_0198f1c5-0787-75e1-a9e8-d95ca0f3600d";
 const JOB_ID: &str = "job_0198f1c5-0787-75e1-a9e8-d95ca0f3600e";
-const VALUE_ID: &str = "rval_0198f1c5-0787-75e1-a9e8-d95ca0f3600f";
+const VALUE_ID: &str = "val_0198f1c5-0787-75e1-a9e8-d95ca0f3600f";
 
 fn id(value: &str) -> ResourceId {
     value.parse().unwrap()
@@ -76,7 +76,7 @@ fn audit(suffix: &str) -> CommandAudit {
         principal_kind: PrincipalKind::AgentRunner,
         receipt_id: id(&format!("rcp_0198f1c5-0787-75e1-a9e8-d95ca0f3{suffix}")),
         event_id: id(&format!("evt_0198f1c5-0787-75e1-a9e8-d95ca0f3{suffix}")),
-        outbox_id: id(&format!("out_0198f1c5-0787-75e1-a9e8-d95ca0f3{suffix}")),
+        outbox_id: id(&format!("obx_0198f1c5-0787-75e1-a9e8-d95ca0f3{suffix}")),
         idempotency_key_digest: digest('a'),
         request_digest: digest('b'),
         receipt_expires_at: Utc::now() + ChronoDuration::hours(1),

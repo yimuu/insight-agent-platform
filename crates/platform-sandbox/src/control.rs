@@ -106,7 +106,7 @@ impl StopUnclaimedSandboxJob {
 
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), SandboxControlError> {
         self.audit.validate_at(now)?;
-        if self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+        if self.sandbox_job_id.kind() != ResourceKind::Job
             || self.invocation_id.kind() != ResourceKind::CapabilityInvocation
             || self.job_id.kind() != ResourceKind::Job
             || self.quota_entry_ids.len() != SANDBOX_QUOTA_LINES
@@ -212,7 +212,7 @@ impl PendingSandboxCapabilityOutcome {
         if self.tenant_id.kind() != ResourceKind::Tenant
             || self.source_event_id.kind() != ResourceKind::Event
             || self.source_job_version == 0
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.invocation_id.kind() != ResourceKind::CapabilityInvocation
             || self.job_id.kind() != ResourceKind::Job
             || self.sandbox_job_id.uuid() != self.job_id.uuid()
@@ -256,7 +256,7 @@ impl MergeSandboxCapabilityOutcome {
 
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), SandboxControlError> {
         self.audit.validate_at(now)?;
-        if self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+        if self.sandbox_job_id.kind() != ResourceKind::Job
             || self.invocation_id.kind() != ResourceKind::CapabilityInvocation
             || self.job_id.kind() != ResourceKind::Job
             || self.sandbox_job_id.uuid() != self.job_id.uuid()
@@ -303,7 +303,7 @@ impl SandboxStopSignal {
     pub fn validate(&self) -> Result<(), SandboxControlError> {
         if self.schema_version != 1
             || self.tenant_id.kind() != ResourceKind::Tenant
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.invocation_id.kind() != ResourceKind::CapabilityInvocation
             || self.job_id.kind() != ResourceKind::Job
             || self.sandbox_job_id.uuid() != self.job_id.uuid()
@@ -728,7 +728,7 @@ impl SandboxExecutionControlRouter {
         worker_process_generation_id: &ResourceId,
     ) -> Result<SandboxExecutionRegistration, SandboxControlError> {
         if request.tenant_id.kind() != ResourceKind::Tenant
-            || request.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || request.sandbox_job_id.kind() != ResourceKind::Job
             || request.invocation_id.kind() != ResourceKind::CapabilityInvocation
             || request.job_id.kind() != ResourceKind::Job
             || request.attempt_no == 0

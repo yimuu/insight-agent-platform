@@ -31,7 +31,7 @@ fn signal(worker_process_generation_id: ResourceId) -> SandboxStopSignal {
     SandboxStopSignal {
         schema_version: 1,
         tenant_id: id(ResourceKind::Tenant, "3001"),
-        sandbox_job_id: id(ResourceKind::SandboxJob, "3002"),
+        sandbox_job_id: id(ResourceKind::Job, "3002"),
         invocation_id: id(ResourceKind::CapabilityInvocation, "3003"),
         job_id: id(ResourceKind::Job, "3004"),
         request_digest: digest('a'),

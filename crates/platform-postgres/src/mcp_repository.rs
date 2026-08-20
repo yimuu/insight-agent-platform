@@ -7486,7 +7486,7 @@ fn require_managed_mcp_sandbox_session_replay(
         || physical_job.tenant_id != identity.tenant_id
         || physical_job.job_id != identity.physical_job_id
         || physical_job.owner.owner_id != identity.sandbox_job_id
-        || physical_job.owner.owner_kind != ResourceKind::SandboxJob
+        || physical_job.owner.owner_kind != ResourceKind::Job
         || physical_payload.request.as_ref() != &command.request
         || usage_reservation_id != &command.usage_reservation_id
     {

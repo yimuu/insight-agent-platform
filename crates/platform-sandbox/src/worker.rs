@@ -188,7 +188,7 @@ impl CommitSandboxPhase {
 
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), SandboxWorkerContractError> {
         self.audit.validate_at(now)?;
-        if self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+        if self.sandbox_job_id.kind() != ResourceKind::Job
             || self.job_id.kind() != ResourceKind::Job
             || self.fence.expected_version == 0
             || self.fence.lease_generation == 0
@@ -248,7 +248,7 @@ impl CommitSandboxOutcome {
 
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), SandboxWorkerContractError> {
         self.audit.validate_at(now)?;
-        if self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+        if self.sandbox_job_id.kind() != ResourceKind::Job
             || self.job_id.kind() != ResourceKind::Job
             || self.fence.expected_version == 0
             || self.fence.lease_generation == 0
@@ -306,7 +306,7 @@ impl HeartbeatSandboxExecution {
         maximum_lease_milliseconds: u64,
     ) -> Result<(), SandboxWorkerContractError> {
         if self.tenant_id.kind() != ResourceKind::Tenant
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.job_id.kind() != ResourceKind::Job
             || self.fence.expected_version == 0
             || self.fence.worker_process_generation_id.kind()
@@ -591,7 +591,7 @@ impl RecoverExpiredSandboxLease {
             self.action,
             SandboxLeaseRecoveryAction::RequeueUnstarted { .. }
         );
-        if self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+        if self.sandbox_job_id.kind() != ResourceKind::Job
             || self.invocation_id.kind() != ResourceKind::CapabilityInvocation
             || self.job_id.kind() != ResourceKind::Job
             || self.observed_job_version == 0

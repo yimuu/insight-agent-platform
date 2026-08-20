@@ -682,7 +682,7 @@ mod tests {
             principal_kind: PrincipalKind::AgentRunner,
             receipt_id: id("rcp_0198f1c3-8f49-7c3e-b1f3-773c28367ba4"),
             event_id: id("evt_0198f1c3-8f49-7c3e-b1f3-773c28367ba5"),
-            outbox_id: id("out_0198f1c3-8f49-7c3e-b1f3-773c28367ba6"),
+            outbox_id: id("obx_0198f1c3-8f49-7c3e-b1f3-773c28367ba6"),
             idempotency_key_digest: sha('i'),
             request_digest: sha('r'),
             receipt_expires_at: now + Duration::minutes(20),

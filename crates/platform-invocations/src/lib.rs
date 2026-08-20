@@ -1715,7 +1715,7 @@ mod tests {
         let tenant = id("ten_0198f1c3-8f49-7c3e-b1f3-773c28367b90");
         let principal_id = id("prn_0198f1c3-8f49-7c3e-b1f3-773c28367b91");
         let invocation_id = id("inv_0198f1c3-8f49-7c3e-b1f3-773c28367b92");
-        let node_id = id("nex_0198f1c3-8f49-7c3e-b1f3-773c28367b93");
+        let node_id = id("nod_0198f1c3-8f49-7c3e-b1f3-773c28367b93");
         let run_id = id("run_0198f1c3-8f49-7c3e-b1f3-773c28367b94");
         let task_id = id("apr_0198f1c3-8f49-7c3e-b1f3-773c28367b95");
         let policy = exact_version("prev_0198f1c3-8f49-7c3e-b1f3-773c28367b96", 'a');
@@ -1734,7 +1734,7 @@ mod tests {
         .unwrap();
         let input = ExactInvocationValueRef {
             schema_version: 1,
-            value_id: id("rval_0198f1c3-8f49-7c3e-b1f3-773c28367b97"),
+            value_id: id("val_0198f1c3-8f49-7c3e-b1f3-773c28367b97"),
             run_id: run_id.clone(),
             producing_node_id: None,
             value_kind: "run_input".to_owned(),
@@ -1860,7 +1860,7 @@ mod tests {
             principal_kind: PrincipalKind::AgentRunner,
             receipt_id: id("rcp_0198f1c3-8f49-7c3e-b1f3-773c28367b9c"),
             event_id: id("evt_0198f1c3-8f49-7c3e-b1f3-773c28367b9d"),
-            outbox_id: id("out_0198f1c3-8f49-7c3e-b1f3-773c28367b9e"),
+            outbox_id: id("obx_0198f1c3-8f49-7c3e-b1f3-773c28367b9e"),
             idempotency_key_digest: digest_value('d'),
             request_digest: digest_value('e'),
             receipt_expires_at: now + Duration::hours(1),

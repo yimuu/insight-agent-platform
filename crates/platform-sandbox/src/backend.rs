@@ -217,7 +217,7 @@ fn validate_backend_lifecycle_identity(
     lease_generation: u64,
 ) -> Result<(), SandboxBackendHostError> {
     if tenant_id.kind() != insight_platform_contracts::ResourceKind::Tenant
-        || sandbox_job_id.kind() != insight_platform_contracts::ResourceKind::SandboxJob
+        || sandbox_job_id.kind() != insight_platform_contracts::ResourceKind::Job
         || attempt_no == 0
         || lease_generation == 0
     {

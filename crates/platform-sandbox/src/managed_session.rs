@@ -366,7 +366,7 @@ impl ManagedMcpSandboxSessionJobPayload {
             || job.owner
                 != (JobOwnerRef {
                     owner_id: self.request.identity.sandbox_job_id.clone(),
-                    owner_kind: ResourceKind::SandboxJob,
+                    owner_kind: ResourceKind::Job,
                 })
             || job.work_class != WorkClass::Sandbox
             || job.deadline != self.request.deadline
@@ -1856,7 +1856,7 @@ impl ManagedMcpSandboxOpaqueSessionClaims {
             || self.identity.tenant_id.kind() != ResourceKind::Tenant
             || self.identity.subscription_id.kind() != ResourceKind::McpOperation
             || self.identity.logical_job_id.kind() != ResourceKind::Job
-            || self.identity.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.identity.sandbox_job_id.kind() != ResourceKind::Job
             || self.identity.physical_job_id.kind() != ResourceKind::Job
             || self.identity.sandbox_job_id.uuid() != self.identity.physical_job_id.uuid()
             || self.identity.admitted_subscription_version == 0
@@ -3141,7 +3141,7 @@ pub fn decide_accept_managed_mcp_sandbox_session(
         work_class: WorkClass::Sandbox,
         owner: JobOwnerRef {
             owner_id: identity.sandbox_job_id.clone(),
-            owner_kind: ResourceKind::SandboxJob,
+            owner_kind: ResourceKind::Job,
         },
         state: JobState::Ready,
         version: 1,

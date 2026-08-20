@@ -564,7 +564,7 @@ impl SandboxExecutionJobPayload {
             || job.owner
                 != (JobOwnerRef {
                     owner_id: self.request.sandbox_job_id.clone(),
-                    owner_kind: ResourceKind::SandboxJob,
+                    owner_kind: ResourceKind::Job,
                 })
             || job.work_class != WorkClass::Sandbox
             || job.deadline != self.request.deadline
@@ -807,7 +807,7 @@ pub fn decide_accept(
         work_class: WorkClass::Sandbox,
         owner: JobOwnerRef {
             owner_id: command.request.sandbox_job_id.clone(),
-            owner_kind: ResourceKind::SandboxJob,
+            owner_kind: ResourceKind::Job,
         },
         state: JobState::Ready,
         version: 1,

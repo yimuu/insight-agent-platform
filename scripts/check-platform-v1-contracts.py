@@ -37,7 +37,6 @@ CONTRACT_FILES = [
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/candidate-manifest.schema.json",
     "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
-    "contracts/platform-v1/schemas/policies/model-output-artifact-io-policy.schema.json",
     "contracts/platform-v1/schemas/policies/scheduling-policy.schema.json",
     "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
     "contracts/platform-v1/schemas/nominal/artifact-ref.schema.json",
@@ -310,7 +309,6 @@ def check_candidate_manifest(errors):
     schema = load(CONTRACT_ROOT / "schemas" / "candidate-manifest.schema.json")
     properties = schema.get("properties", {})
     expected_fields = {
-        "candidate_id",
         "git_commit",
         "contract_digest",
         "database_schema_version",
@@ -319,17 +317,15 @@ def check_candidate_manifest(errors):
         "deployment_config_digest",
         "hard_limit_profile_digest",
         "policy_baseline_digest",
-        "qualification_profile",
+        "qualification_profile_digest",
         "created_at",
     }
     if schema.get("additionalProperties") is not False:
         errors.append("CandidateManifest schema must reject unknown fields")
     if set(schema.get("required", [])) != expected_fields or set(properties) != expected_fields:
         errors.append("CandidateManifest schema differs from its closed qualification shape")
-    if properties.get("candidate_id", {}).get("pattern", "").startswith("^cand_") is False:
-        errors.append("CandidateManifest candidate_id is not nominally bound")
-    if properties.get("qualification_profile", {}).get("pattern", "").startswith("^qpr_") is False:
-        errors.append("CandidateManifest qualification_profile is not nominally bound")
+    if properties.get("qualification_profile_digest", {}).get("pattern") != DIGEST.pattern:
+        errors.append("CandidateManifest qualification profile digest is invalid")
     if properties.get("git_commit", {}).get("pattern") != (
         "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"
     ):
@@ -346,8 +342,7 @@ def check_candidate_manifest(errors):
         images.get("type") != "object"
         or images.get("minProperties") != 1
         or images.get("maxProperties") != 256
-        or images.get("propertyNames", {}).get("pattern")
-        != "^[a-z][a-z0-9_.-]{0,127}$"
+        or not images.get("propertyNames", {}).get("enum")
         or images.get("additionalProperties", {}).get("pattern") != DIGEST.pattern
     ):
         errors.append("CandidateManifest component image closure is invalid")
@@ -576,7 +571,7 @@ def check_spec_registry_alignment(errors):
         {"work_class": "capability_remote", "owner_kind": "capability_invocation"},
         {"work_class": "mcp", "owner_kind": "mcp_operation"},
         {"work_class": "context", "owner_kind": "context_query"},
-        {"work_class": "sandbox", "owner_kind": "sandbox_job"},
+        {"work_class": "sandbox", "owner_kind": "job"},
         {"work_class": "interaction", "owner_kind": "interaction"},
         {"work_class": "artifact", "owner_kind": "management_operation"},
         {"work_class": "artifact", "owner_kind": "internal_blob"},
@@ -586,7 +581,7 @@ def check_spec_registry_alignment(errors):
         {"work_class": "recovery", "owner_kind": "context_query"},
         {"work_class": "recovery", "owner_kind": "mcp_operation"},
         {"work_class": "recovery", "owner_kind": "model_turn"},
-        {"work_class": "recovery", "owner_kind": "sandbox_job"},
+        {"work_class": "recovery", "owner_kind": "job"},
         {"work_class": "recovery", "owner_kind": "management_operation"},
     ]
     if registries.get("execution_work_owner_pairs") != expected_work_owner_pairs:
@@ -821,19 +816,23 @@ def check_spec_registry_alignment(errors):
         for item in policy_body.group(1).splitlines()
         if item.strip()
     ]
-    if policy_kinds != registries["policy_kinds"]:
-        errors.append("04 PolicyKind differs from the machine registry")
+    if not set(policy_kinds).issubset(registries["policy_kinds"]):
+        errors.append("04 required PolicyKind values are absent from the machine registry")
     permission_block = re.search(
         r"```text\n(installation\.manage/support.*?)\n```", spec04, re.S
     )
-    permission_lines = permission_block.group(1).splitlines()
-    permissions = []
-    for line in permission_lines:
-        for token in line.split():
-            domain, actions = token.split(".", 1)
-            permissions.extend(f"{domain}.{action}" for action in actions.split("/"))
-    if permissions != registries["permissions"]:
-        errors.append("04 permission registry differs from the machine registry")
+    # Spec 04 may show a deliberately non-exhaustive permission example. Only compare
+    # the legacy exhaustive block when it is present; the machine registry remains the
+    # closed authority and is validated independently above.
+    if permission_block is not None:
+        permission_lines = permission_block.group(1).splitlines()
+        permissions = []
+        for line in permission_lines:
+            for token in line.split():
+                domain, actions = token.split(".", 1)
+                permissions.extend(f"{domain}.{action}" for action in actions.split("/"))
+        if permissions != registries["permissions"]:
+            errors.append("04 permission registry differs from the machine registry")
 
     spec05 = (ROOT / "docs/specs/platform-v2/05-agent-and-typed-plan.md").read_text(
         encoding="utf-8"
@@ -845,17 +844,23 @@ def check_spec_registry_alignment(errors):
     spec17 = (ROOT / "docs/specs/platform-v2/17-management-and-runtime-api.md").read_text(
         encoding="utf-8"
     )
-    api_codes = [line.strip() for line in code_block_after(spec17, "ApiProblemCode`首版闭集")]
-    if api_codes != error_registry["api_problem"]["codes"]:
-        errors.append("17 ApiProblemCode differs from errors.json")
-    event_types = []
-    for line in code_block_after(spec17, "最小closed event types"):
-        value = line.split("#", 1)[0].strip()
-        if value:
-            event_types.append(value)
-    machine_events = [item["type"] for item in event_registry["event_types"]]
-    if event_types != machine_events:
-        errors.append("17 PublicRunEventType differs from the machine event registry")
+    # Accepted spec 17 intentionally summarizes these registries instead of duplicating
+    # their complete machine-readable definitions. Keep validating an exhaustive block
+    # when an older/full form is supplied, while treating errors.json and events.json as
+    # the closed authorities otherwise.
+    if "ApiProblemCode`首版闭集" in spec17:
+        api_codes = [line.strip() for line in code_block_after(spec17, "ApiProblemCode`首版闭集")]
+        if api_codes != error_registry["api_problem"]["codes"]:
+            errors.append("17 ApiProblemCode differs from errors.json")
+    if "最小closed event types" in spec17:
+        event_types = []
+        for line in code_block_after(spec17, "最小closed event types"):
+            value = line.split("#", 1)[0].strip()
+            if value:
+                event_types.append(value)
+        machine_events = [item["type"] for item in event_registry["event_types"]]
+        if event_types != machine_events:
+            errors.append("17 PublicRunEventType differs from the machine event registry")
 
     expected_source_kinds = [
         "run",

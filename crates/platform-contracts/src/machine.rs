@@ -226,7 +226,7 @@ pub const EXECUTION_WORK_OWNER_PAIRS: &[(WorkClass, ResourceKind)] = &[
     ),
     (WorkClass::Mcp, ResourceKind::McpOperation),
     (WorkClass::Context, ResourceKind::ContextQuery),
-    (WorkClass::Sandbox, ResourceKind::SandboxJob),
+    (WorkClass::Sandbox, ResourceKind::Job),
     (WorkClass::Interaction, ResourceKind::Interaction),
     (WorkClass::Artifact, ResourceKind::ManagementOperation),
     (WorkClass::Artifact, ResourceKind::InternalBlob),
@@ -236,7 +236,7 @@ pub const EXECUTION_WORK_OWNER_PAIRS: &[(WorkClass, ResourceKind)] = &[
     (WorkClass::Recovery, ResourceKind::ContextQuery),
     (WorkClass::Recovery, ResourceKind::McpOperation),
     (WorkClass::Recovery, ResourceKind::ModelTurn),
-    (WorkClass::Recovery, ResourceKind::SandboxJob),
+    (WorkClass::Recovery, ResourceKind::Job),
     (WorkClass::Recovery, ResourceKind::ManagementOperation),
 ];
 

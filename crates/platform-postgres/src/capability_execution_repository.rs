@@ -389,7 +389,7 @@ fn classify_capability_owner_job(
             payload
                 .validate_for(&projection, sandbox_limits)
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-            if job.owner_kind != ResourceKind::SandboxJob.descriptor().name
+            if job.owner_kind != ResourceKind::Job.descriptor().name
                 || job.owner_id != payload.request.sandbox_job_id.to_string()
                 || payload.request.invocation_id != invocation.invocation_id
                 || payload.request.job_id != projection.job_id

@@ -246,7 +246,7 @@ pub struct RevokeMicroVmSandboxGrants {
 impl RevokeMicroVmSandboxGrants {
     pub fn validate(&self) -> Result<(), MicroVmGrantRevocationError> {
         if self.tenant_id.kind() != ResourceKind::Tenant
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.executor_worker_process_generation_id.kind()
                 != ResourceKind::WorkerProcessGeneration
             || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
@@ -328,7 +328,7 @@ impl MicroVmArtifactReadRequest {
             ) => false,
         };
         if self.tenant_id.kind() != ResourceKind::Tenant
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.executor_worker_process_generation_id.kind()
                 != ResourceKind::WorkerProcessGeneration
             || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
@@ -548,7 +548,7 @@ pub struct ProveSandboxProcessGenerationAbsent {
 impl ProveSandboxProcessGenerationAbsent {
     pub fn validate(&self) -> Result<(), SandboxProcessGenerationIsolationError> {
         if self.tenant_id.kind() != ResourceKind::Tenant
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.previous_worker_process_generation_id.kind()
                 != ResourceKind::WorkerProcessGeneration
         {

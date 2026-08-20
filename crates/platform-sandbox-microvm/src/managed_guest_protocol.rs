@@ -62,7 +62,7 @@ impl ManagedMcpGuestSessionFence {
             || self.sandbox_identity_digest != prepared.sandbox_identity_digest
             || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.lease_generation == 0
         {
             return Err(MicroVmGuestProtocolError::InvalidEnvelope);
@@ -72,7 +72,7 @@ impl ManagedMcpGuestSessionFence {
 
     fn validate_shape(&self) -> Result<(), MicroVmGuestProtocolError> {
         if self.schema_version != 1
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.provider_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.lease_generation == 0
@@ -637,7 +637,7 @@ mod tests {
             fence: ManagedMcpGuestSessionFence {
                 schema_version: 1,
                 session_identity_digest: sha('a'),
-                sandbox_job_id: id(ResourceKind::SandboxJob, 1),
+                sandbox_job_id: id(ResourceKind::Job, 1),
                 request_digest: sha('b'),
                 worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 2),
                 provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 3),

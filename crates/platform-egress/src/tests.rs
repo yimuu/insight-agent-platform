@@ -193,7 +193,7 @@ impl ManagedMcpSandboxSecretDeliveryAuthority for FixtureSandboxSecretAuthority 
 fn managed_mcp_sandbox_secret_delivery() -> ManagedMcpSandboxSecretDeliveryRequest {
     let physical_job_id = id(ResourceKind::Job, 903);
     let sandbox_job_id =
-        ResourceId::from_uuid_v7(ResourceKind::SandboxJob, physical_job_id.uuid()).unwrap();
+        ResourceId::from_uuid_v7(ResourceKind::Job, physical_job_id.uuid()).unwrap();
     let tenant_id = id(ResourceKind::Tenant, 900);
     let identity = ManagedMcpSandboxSessionIdentity {
         schema_version: 1,

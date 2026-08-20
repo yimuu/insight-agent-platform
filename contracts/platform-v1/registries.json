@@ -330,7 +330,7 @@
       "work_class": "context"
     },
     {
-      "owner_kind": "sandbox_job",
+      "owner_kind": "job",
       "work_class": "sandbox"
     },
     {
@@ -370,7 +370,7 @@
       "work_class": "recovery"
     },
     {
-      "owner_kind": "sandbox_job",
+      "owner_kind": "job",
       "work_class": "recovery"
     },
     {
@@ -548,6 +548,12 @@
   "policy_kinds": [
     "authorization",
     "approval",
+    "data_handling",
+    "network_egress",
+    "secret_access",
+    "sandbox_isolation",
+    "model_safety",
+    "logging",
     "data_flow",
     "declassification",
     "network",
@@ -1098,11 +1104,6 @@
       "exposure": "public",
       "name": "sandbox_profile_revision",
       "prefix": "sxrev"
-    },
-    {
-      "exposure": "public",
-      "name": "sandbox_job",
-      "prefix": "sjob"
     },
     {
       "exposure": "public",

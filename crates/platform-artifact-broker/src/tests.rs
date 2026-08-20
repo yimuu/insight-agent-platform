@@ -210,7 +210,7 @@ fn fixture_with_limits(
         broker,
         request: WasiArtifactReadRequest {
             tenant_id,
-            sandbox_job_id: id(ResourceKind::SandboxJob),
+            sandbox_job_id: id(ResourceKind::Job),
             request_digest: digest('d'),
             worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
             lease_generation: 1,

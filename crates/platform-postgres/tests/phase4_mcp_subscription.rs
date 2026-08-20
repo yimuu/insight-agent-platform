@@ -1840,7 +1840,7 @@ fn managed_session_command(
 ) -> AcceptManagedMcpSandboxSession {
     let physical_job_id = id(ResourceKind::Job, base);
     let sandbox_job_id =
-        ResourceId::from_uuid_v7(ResourceKind::SandboxJob, physical_job_id.uuid()).unwrap();
+        ResourceId::from_uuid_v7(ResourceKind::Job, physical_job_id.uuid()).unwrap();
     let identity = ManagedMcpSandboxSessionIdentity::build(
         &record.payload.binding,
         record.version,
@@ -2713,10 +2713,7 @@ async fn managed_mcp_sandbox_session_admission_fixture(
         physical.try_get::<String, _>("work_class").unwrap(),
         "sandbox"
     );
-    assert_eq!(
-        physical.try_get::<String, _>("owner_kind").unwrap(),
-        "sandbox_job"
-    );
+    assert_eq!(physical.try_get::<String, _>("owner_kind").unwrap(), "job");
     assert_eq!(
         physical.try_get::<String, _>("owner_id").unwrap(),
         winner.request.identity.sandbox_job_id.to_string()

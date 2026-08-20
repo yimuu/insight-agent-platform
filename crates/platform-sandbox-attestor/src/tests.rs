@@ -174,7 +174,7 @@ async fn pid_reuse_is_absence_but_never_a_live_registration() {
     };
     let absence_request = ProveSandboxProcessGenerationAbsent {
         tenant_id: id(ResourceKind::Tenant, 10),
-        sandbox_job_id: id(ResourceKind::SandboxJob, 11),
+        sandbox_job_id: id(ResourceKind::Job, 11),
         request_digest: digest('d'),
         previous_worker_process_generation_id: registration_request.worker_process_generation_id,
         executor_identity_digest: registered.executor_identity_digest,

@@ -93,7 +93,7 @@ impl ManagedMcpSandboxSessionIdentity {
             || self.admitted_subscription_version == 0
             || self.admitted_logical_job_version == 0
             || self.session_generation == 0
-            || self.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || self.sandbox_job_id.kind() != ResourceKind::Job
             || self.physical_job_id.kind() != ResourceKind::Job
             || self.sandbox_job_id.uuid() != self.physical_job_id.uuid()
             || self.subscription_binding_digest != binding.canonical_digest

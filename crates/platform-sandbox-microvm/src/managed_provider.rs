@@ -139,7 +139,7 @@ where
         request: &ManagedMcpSandboxSessionRequest,
         fence: &JobFence,
     ) -> Result<(), MicroVmProviderFailure> {
-        if request.identity.sandbox_job_id.kind() != ResourceKind::SandboxJob
+        if request.identity.sandbox_job_id.kind() != ResourceKind::Job
             || fence.expected_version == 0
             || fence.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || fence.lease_generation == 0

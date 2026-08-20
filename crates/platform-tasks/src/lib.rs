@@ -618,7 +618,7 @@ mod tests {
                 expected_version: 1,
                 target: TaskState::Responded,
                 principal: Some(principal()),
-                response_value_id: Some(id("rval_0198f1c5-0787-75e1-a9e8-d95ca0f39004")),
+                response_value_id: Some(id("val_0198f1c5-0787-75e1-a9e8-d95ca0f39004")),
                 response_schema_digest: Some(digest('a')),
             },
             now + Duration::seconds(1),

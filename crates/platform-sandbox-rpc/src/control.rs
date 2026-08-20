@@ -256,7 +256,7 @@ mod tests {
         SandboxStopSignal {
             schema_version: 1,
             tenant_id: id(ResourceKind::Tenant, "1001"),
-            sandbox_job_id: id(ResourceKind::SandboxJob, "1002"),
+            sandbox_job_id: id(ResourceKind::Job, "1002"),
             invocation_id: id(ResourceKind::CapabilityInvocation, "1003"),
             job_id: id(ResourceKind::Job, "1002"),
             request_digest: digest('a'),

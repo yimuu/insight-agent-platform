@@ -309,7 +309,7 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
         request: &WasiArtifactReadRequest,
     ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
         if request.tenant_id.kind() != ResourceKind::Tenant
-            || request.sandbox_job_id.kind() != ResourceKind::SandboxJob
+            || request.sandbox_job_id.kind() != ResourceKind::Job
             || request.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || request.lease_generation == 0
             || request.maximum_bytes == 0
@@ -372,7 +372,7 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
             .map_err(classify_artifact_read_repository_error)?;
         let projection = ArtifactObjectReadProjection {
             tenant_id: &request.tenant_id,
-            owner_kind: "sandbox_job",
+            owner_kind: "job",
             owner_id: &request.sandbox_job_id,
             request_digest: &request.request_digest,
             worker_process_generation_id: &request.worker_process_generation_id,
@@ -498,7 +498,7 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
                 &mut transaction,
                 ArtifactObjectReadProjection {
                     tenant_id: &request.tenant_id,
-                    owner_kind: "sandbox_job",
+                    owner_kind: "job",
                     owner_id: &request.sandbox_job_id,
                     request_digest: &request.request_digest,
                     worker_process_generation_id: &request.executor_worker_process_generation_id,
@@ -593,7 +593,7 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
             &mut transaction,
             ArtifactObjectReadProjection {
                 tenant_id: &request.tenant_id,
-                owner_kind: "sandbox_job",
+                owner_kind: "job",
                 owner_id: &request.sandbox_job_id,
                 request_digest: &request.request_digest,
                 worker_process_generation_id: &request.executor_worker_process_generation_id,
@@ -2816,7 +2816,7 @@ fn sandbox_stop_signal_from_row(
 
     let record = job_from_row(row)?;
     if record.work_class != "sandbox"
-        || record.owner_kind != "sandbox_job"
+        || record.owner_kind != "job"
         || record.terminal_at.is_some()
         || record.worker_id.is_none()
         || record.lease_epoch <= 0
@@ -2961,7 +2961,7 @@ impl SandboxGatewayAuthority for PgRepository {
         if claim_command_receipt(
             &mut transaction,
             &command.audit,
-            "sandbox_job",
+            "job",
             &command.request.sandbox_job_id.to_string(),
             "sandbox.execute",
         )
@@ -3482,7 +3482,7 @@ fn sandbox_capability_outcome_candidate(
 
     let record = job_from_row(row)?;
     if record.work_class != WorkClass::Sandbox.as_str()
-        || record.owner_kind != ResourceKind::SandboxJob.descriptor().name
+        || record.owner_kind != ResourceKind::Job.descriptor().name
         || record.worker_id.is_some()
         || record.version
             != i64::try_from(source_job_version).map_err(|_| {

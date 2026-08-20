@@ -298,7 +298,7 @@ fn request_at(now: DateTime<Utc>) -> SandboxExecutionRequest {
         semantic_digest: sha('3'),
     };
     let tenant_id = id(ResourceKind::Tenant, 20);
-    let sandbox_job_id = id(ResourceKind::SandboxJob, 23);
+    let sandbox_job_id = id(ResourceKind::Job, 23);
     let invocation_id = id(ResourceKind::CapabilityInvocation, 22);
     let deadline = now + ChronoDuration::minutes(1);
     let callback = ScopedSandboxCallback {
@@ -2201,7 +2201,7 @@ fn managed_mcp_session_fixture(
     };
     let physical_job_id = id(ResourceKind::Job, 73);
     let sandbox_job_id =
-        ResourceId::from_uuid_v7(ResourceKind::SandboxJob, physical_job_id.uuid()).unwrap();
+        ResourceId::from_uuid_v7(ResourceKind::Job, physical_job_id.uuid()).unwrap();
     let identity = ManagedMcpSandboxSessionIdentity::build(
         &binding,
         record.version,
@@ -4382,7 +4382,7 @@ fn process_generation_absence_evidence_is_exactly_bound_and_tamper_evident() {
     let observed_at = Utc::now();
     let request = ProveSandboxProcessGenerationAbsent {
         tenant_id: id(ResourceKind::Tenant, 401),
-        sandbox_job_id: id(ResourceKind::SandboxJob, 402),
+        sandbox_job_id: id(ResourceKind::Job, 402),
         request_digest: sha('1'),
         previous_worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 403),
         executor_identity_digest: sha('2'),

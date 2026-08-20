@@ -714,7 +714,7 @@ mod tests {
             source_job_version: 7,
             source_event_payload_digest: digest('b'),
             source_event_occurred_at: Utc.with_ymd_and_hms(2026, 8, 13, 1, 0, 0).unwrap(),
-            sandbox_job_id: id(ResourceKind::SandboxJob, shared_uuid_suffix),
+            sandbox_job_id: id(ResourceKind::Job, shared_uuid_suffix),
             invocation_id: id(ResourceKind::CapabilityInvocation, "0035"),
             job_id: id(ResourceKind::Job, shared_uuid_suffix),
             sandbox_request_digest: digest('c'),

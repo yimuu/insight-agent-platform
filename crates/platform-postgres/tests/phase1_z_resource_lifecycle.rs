@@ -64,7 +64,7 @@ fn audit(
         principal_kind: PrincipalKind::TenantAdmin,
         receipt_id: id(&format!("rcp_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
         event_id: id(&format!("evt_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
-        outbox_id: id(&format!("out_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
+        outbox_id: id(&format!("obx_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
         idempotency_key_digest: digest(idempotency),
         request_digest: digest(request),
         receipt_expires_at: Utc::now() + Duration::hours(1),
