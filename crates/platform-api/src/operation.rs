@@ -14,30 +14,10 @@ use insight_platform_contracts::{
 use serde::Serialize;
 use std::sync::Arc;
 
+pub use crate::authentication::AuthenticatedPrincipal;
+
 pub const OPERATION_PATH: &str = "/v1/operations/{operation_id}";
 const OPERATION_READ_DEADLINE_MILLISECONDS: i64 = 5_000;
-
-/// Authentication middleware installs this extension only after credential verification.
-/// Handlers never accept tenant or principal identity from request headers, path or body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthenticatedPrincipal {
-    pub tenant_id: ResourceId,
-    pub principal_id: ResourceId,
-    pub principal_kind: PrincipalKind,
-    pub credential_digest: Sha256Digest,
-}
-
-impl AuthenticatedPrincipal {
-    pub fn validate(&self) -> Result<(), OperationApplicationError> {
-        if self.tenant_id.kind() != ResourceKind::Tenant
-            || self.principal_id.kind() != ResourceKind::Principal
-            || self.principal_kind == PrincipalKind::InstallationOperator
-        {
-            return Err(OperationApplicationError::Unauthenticated);
-        }
-        Ok(())
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationApplicationError {
@@ -238,7 +218,8 @@ mod tests {
     use super::*;
     use axum::{body::to_bytes, http::Request};
     use insight_platform_contracts::{
-        operation_etag, PublicJobKind, PublicJobState, PublicJobTarget, UtcTimestamp,
+        operation_etag, AuthnStrength, Permission, PermissionSet, PublicJobKind, PublicJobState,
+        PublicJobTarget, UtcTimestamp,
     };
     use std::sync::Mutex;
     use tower::ServiceExt;
@@ -317,7 +298,13 @@ mod tests {
             tenant_id: id(ResourceKind::Tenant, 1),
             principal_id: id(ResourceKind::Principal, 2),
             principal_kind: PrincipalKind::TenantAdmin,
+            permissions: PermissionSet::new(vec![Permission::OperationRead]).unwrap(),
+            authn_strength: AuthnStrength::MultiFactor,
+            principal_version: 1,
+            binding_generation: 1,
+            binding_version: 1,
             credential_digest: digest('a'),
+            credential_expires_at: now + Duration::hours(1),
         };
         (router, application, principal, operation_id)
     }

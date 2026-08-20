@@ -122,6 +122,33 @@ async fn phase1_bootstrap_membership_and_secret_contract() {
         .unwrap();
     assert_eq!(runner.principal_kind, "agent_runner");
 
+    let authenticated = repository
+        .resolve_external_principal(
+            id(TENANT_ID),
+            digest('e'),
+            digest('f'),
+            PrincipalKind::AgentRunner,
+        )
+        .await
+        .unwrap();
+    assert_eq!(authenticated.principal_id, id(PRINCIPAL_ID));
+    assert_eq!(authenticated.tenant_id, id(TENANT_ID));
+    assert!(authenticated
+        .permissions
+        .contains(insight_platform_contracts::Permission::AgentRun));
+    assert_eq!(authenticated.binding_generation, 1);
+    assert!(matches!(
+        repository
+            .resolve_external_principal(
+                id(TENANT_B_ID),
+                digest('e'),
+                digest('f'),
+                PrincipalKind::AgentRunner,
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+
     repository
         .bind_tenant_principal(NewTenantPrincipal {
             tenant_id: id(TENANT_ID),
