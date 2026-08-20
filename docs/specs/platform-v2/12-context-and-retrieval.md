@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision |
-| 日期 | 2026-08-15 |
+| 状态 | Reviewed / Awaiting Acceptance |
+| 日期 | 2026-08-20 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
 
@@ -181,7 +181,7 @@ digest、remote revision/watermark（若有）、观察时间和 bounded normali
 `PinnedGeneration`只能保存exact `dataset_generation` ID+digest并通过typed source projection证明。Dataset使用共享
 `resources`中的`ContextDataset` root；每个Dataset Generation是该root下不可变的共享`resource_versions` row，版本ID使用
 `dgen`，active data head使用该Dataset root唯一的`active_version_id`。它不与Context Interface/Implementation争用active head，
-也不增加dataset专用表。Generation必须与真实ManagementOperation、Ready manifest Artifact和validation evidence同事务创建；
+也不增加dataset专用表。Generation必须与真实build Job、Ready manifest Artifact和validation Event同事务创建；
 任何没有typed Dataset root、exact generation digest和source projection的Binding都拒绝，不允许暂存裸`dgen`文本。
 
 RunBindings 固定 ContextBinding，不表示底层数据永远不变。一致性模式与本次 observed generation/token 必须
@@ -220,7 +220,7 @@ Context Deployment，不为Implementation创建第二个head。
 
 ```text
 Context Deployment
-  -> Dataset Build ManagementOperation
+  -> Dataset Build Job
   -> Fetching
   -> Scanning
   -> Parsing
@@ -243,14 +243,14 @@ struct DatasetGeneration {
     ranking_profile_revision_id: ResourceVersionId,
     index_manifest_artifact_id: ArtifactId,
     validation_evidence_id: EvidenceId,
-    created_by_operation_id: OperationId,
+    created_by_job_id: JobId,
     generation_digest: Digest,
     created_at: DateTime<Utc>,
 }
 ```
 
-构建阶段是03/17 ManagementOperation的bounded progress，不是第二个Dataset状态机；构建detail只进入shared
-ManagementOperation typed payload/Artifact。Operation成功事务在ContextDataset root下创建完整DatasetGeneration
+构建阶段是shared Job的bounded progress，不是第二个Dataset状态机；构建detail只进入Job typed
+payload或Artifact。Job成功事务在ContextDataset root下创建完整DatasetGeneration
 ResourceVersion并CAS active data head，失败/取消/超时不创建半成品Generation。
 
 - 每个 Dataset Generation 不可变，包含 source manifest digest、parser/chunker/embedding/ranking profiles；
@@ -569,8 +569,8 @@ Deferred/wake同attempt恢复、worker fence、stale signal、quota、citation d
 Text2SQL `ReadOnlySqlPlan`同时冻结catalog Query/Observation/projection、database identity/dialect及exact Capability
 Interface/Deployment/Effect；generic Invocation admission在同一事务锁定这些事实，只接受规范名精确为`database.query.readonly`且Effect为
 ReadOnly的已绑定Capability。成功/replay、错误名称/Effect、foreign Run/citation与Observation drift fixture均通过，拒绝路径不留下
-Invocation或Receipt。该证据关闭Phase 3 Context/Text2SQL functional exit，不替代生产Context backend、SQL adapter、public `/v1`或
-Phase 6 qualification。
+Invocation或Receipt。该证据只是Context/Text2SQL的L1～L2候选实施证据，不替代生产Context backend、SQL adapter、
+public `/v1`或18的L4～L6资格。
 
 ## 24. 明确推迟的工作
 
@@ -584,6 +584,6 @@ Phase 6 qualification。
 
 ## 25. 未决问题
 
-CR-165的CanonicalRegion common schema与跨Context binding exact-match合同仍需与02/07/09/15/16/18共同完成cross-review；关闭前本规范保持
-Draft且不得作为实现输入。具体索引引擎、embedding provider与reranker可以替换，但不得改变本规范的逐条授权、dataset view、observation、
-citation和只读边界。
+CR-166已将CanonicalRegion和Context binding exact-match统一到02/12，Dataset build直接使用shared Job。本规范已
+Reviewed、等待Acceptance；Context backend、SQL adapter、Artifact与public API的分层fixture仍待实现。具体索引引擎、embedding provider
+与reranker可以替换，但不得改变逐条授权、dataset view、observation、citation和只读边界。

@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision |
-| 日期 | 2026-08-15 |
+| 状态 | Reviewed / Awaiting Acceptance |
+| 日期 | 2026-08-20 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 10、11、13、14、15、17、18 |
 
@@ -97,7 +97,7 @@ Artifact direction machine wire固定为`input | output`。port按`(direction,na
 64个严格排序唯一的lowercase media pattern，只允许exact `type/subtype`或`type/*`，不能包含parameter。count、single/total
 bytes均为正，`single <= total <= single * count`；所有port count之和必须精确等于Interface limits的
 `maximum_artifacts`，避免两个容量authority。Interface input/output分别不超过16/64 MiB，execution不超过1小时，且仍受18
-CandidateManifest HardLimitProfile进一步收紧。
+deployment HardLimitProfile进一步收紧。
 
 `allowed_regions`只使用02 `CanonicalRegion`，非空、按canonical bytes严格排序唯一且最多32个；旧的32-byte且允许下划线的
 `DataRegion` validator在clean-cut目标中删除。实际input不能高于input ceiling；实际output不能高于output ceiling，也不能
@@ -312,10 +312,10 @@ Capability Entity
   -> Interface Revision
 
 Implementation Entity
-  -> Implementation Draft/Discovery Candidate
+  -> Implementation Draft/Discovery Snapshot
   -> Schema + Semantic Validation
   -> Implementation Revision
-  -> Deployment Candidate/Resolution
+  -> Deployment Draft/Resolution
   -> Connectivity + Conformance Validation
   -> Capability Deployment
   -> Active Head / Suspension
@@ -454,9 +454,9 @@ unsafe write retry降级、attempt exhaustion、stale Worker identity、terminal
 Egress另有29项unit，其中8项覆盖Capability HTTP/gRPC exact catalog、DNS public-IP/connection pinning、late Secret、bounded framing/response、
 Effect/idempotency failure与stale exact cancel；不增加表或migration。
 
-该证据证明当前Native执行/取消组合及HTTP/gRPC生产Egress代码边界，不证明所有backend已完成真实进程conformance。真实远端服务、
-Secret Manager/TLS/mTLS composition、callback、Sandbox实现和Phase 6 qualification尚未完成；这只是当前实施证据边界。本规范因CR-165保持
-Draft / Architecture Revision，不能用“Implementation In Progress”替代规范状态或绕过Reviewed/Accepted门禁。
+该证据证明当前Native执行/取消组合及HTTP/gRPC Egress候选代码边界，不证明所有backend已完成真实进程conformance。
+真实远端服务、Secret Manager/TLS/mTLS composition、callback、Sandbox组合和18的L4～L6资格尚未完成。
+这只是当前实施证据边界；本规范已Reviewed、等待Acceptance，不能用候选代码或fixture绕过Accepted门禁。
 
 ## 22. 明确推迟的工作
 
@@ -469,5 +469,6 @@ Draft / Architecture Revision，不能用“Implementation In Progress”替代�
 
 ## 23. 未决问题
 
-CR-165的CanonicalRegion与Model candidate installation compatibility仍需与02/07/12/16/18共同完成cross-review；关闭前本规范保持Draft且不得
-作为实现输入。具体HTTP/gRPC wire envelope与Sandbox protocol分别由10、14冻结，但必须实现本规范的统一Interface和安全合同。
+CR-166已将region nominal统一到02，并删除Model/release installation compatibility合同。本规范已Reviewed、等待Acceptance；
+Capability registry、backend resolution和publication fixture仍待实现。具体HTTP/gRPC wire envelope与Sandbox protocol
+分别由10、14冻结，但必须实现本规范的统一Interface和安全合同。

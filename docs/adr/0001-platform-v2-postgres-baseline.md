@@ -2,16 +2,20 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision |
-| 日期 | 2026-08-15 |
+| 状态 | Reviewed / Awaiting Acceptance |
+| 日期 | 2026-08-20 |
 | 决策范围 | clean-cut `/v1` 的 PostgreSQL 物理模型 |
 | 规范输入 | `docs/specs/platform-v2/00-overview.md`～`18-deployment-observability-and-qualification.md` |
 | 被替代设计 | migration 1～35、177 表 catalog/schema contract |
 
 ## 1. 决策
 
-Platform v2的clean-cut目标直接重写当前未发布的单一`0001`，并只对fresh target安装24张表，其中包括1张migration ledger；业务schema为23张表。
-当前checked-in实现仍是schema contract v6、23张总表/22张业务表，不能在目标migration/verifier/fixture落地前把24张或v7声明为当前行为。
+Platform v2的clean-cut目标直接重写当前未发布的单一`0001`，并只对fresh target安装23张表，其中包括1张migration ledger；业务schema为22张表。
+当前checked-in实现也是23张总表/22张业务表、schema contract v6；目标约束和ID合同落地后schema contract升级为v7，但不增加表。
+
+应用Release、promotion和rollback由Kubernetes/GitOps负责，不进入业务数据库。Candidate与qualification报告是CI/CD中按内容寻址的签名产物，
+不是current aggregate、Resource或业务API对象。Run admission在tenant事务内冻结当次解析出的exact ResourceVersion/Deployment binding；后续部署
+切换不修改既有Run，也不需要installation singleton、compatibility generation或全Model catalog CAS。
 
 `0001`只能由部署期独立provisioning Job/运维流程对fresh target执行；API、Scheduler、Worker及其他运行时
 进程不持有DDL权限，也不提供apply/migrate入口。运行时只做read-only schema verification。重复provision不是
@@ -29,43 +33,39 @@ remote task、retry generation 或 ResourceKind 时，默认扩展 closed Rust t
 | 3 | `principals` | 外部principal identity、authentication binding与version；不含Release current pointer |
 | 4 | `tenant_principals` | principal 在 tenant 中按 kind 隔离的 binding、permission snapshot source 与 version |
 | 5 | `secret_bindings` | opaque Secret reference、purpose、generation 与 revoke state |
-| 6 | `installation_release_state` | installation唯一current Release/Candidate pointer、active Model count与compatibility generation |
-| 7 | `resources` | 所有 registry object 的 Draft/lifecycle/gate/active target 当前事实 |
-| 8 | `resource_versions` | 所有 immutable revision、validation snapshot 与 ArtifactRefs |
-| 9 | `deployments` | environment-bound immutable exact binding closure |
-| 10 | `runs` | Run 当前状态、bindings snapshot、control、budget、public sequence |
-| 11 | `run_nodes` | Scope/Node/current control relation 与执行状态 |
-| 12 | `run_values` | bounded typed Plan value 或 ArtifactRef |
-| 13 | `invocations` | Capability/Model/Context/MCP/Sandbox/Management logical call 当前状态 |
-| 14 | `jobs` | 所有物理工作、attempt generation、lease、wake、retry 与 terminal winner |
-| 15 | `tasks` | Approval/HumanInput/Elicitation 等人机 first-winner |
-| 16 | `events` | transition、outcome、audit、安全 projection 的 append-only 历史 |
-| 17 | `receipts` | Command/Callback/JobCommit 幂等和稳定 disposition |
-| 18 | `outbox_events` | Event 的可靠外发状态，不复制 event payload |
-| 19 | `artifacts` | Artifact 当前 lifecycle、prepare admission、verified media/current tagged evidence、retention 与 primary Blob reference |
-| 20 | `artifact_blobs` | object generation、encryption/storage binding 与 verified digest/size 的唯一物理事实 |
-| 21 | `artifact_links` | reference/grant/hold/provenance/operation-target closed relation |
-| 22 | `quota_accounts` | scope/work-class 当前额度、reserved/used 与 CAS version |
-| 23 | `quota_ledger` | reserve/settle/release/adjust 的 append-only accounting entries |
-| 24 | `scheduler_state` | 每 WorkClass 公平 round/cursor 与 bounded tenant deficit state |
+| 6 | `resources` | 所有 registry object 的 Draft/lifecycle/gate/active target 当前事实 |
+| 7 | `resource_versions` | 所有 immutable revision、validation snapshot 与 ArtifactRefs |
+| 8 | `deployments` | environment-bound immutable exact binding closure |
+| 9 | `runs` | Run 当前状态、bindings snapshot、control、budget、public sequence |
+| 10 | `run_nodes` | Scope/Node/current control relation 与执行状态 |
+| 11 | `run_values` | bounded typed Plan value 或 ArtifactRef |
+| 12 | `invocations` | Capability/Model/Context/MCP logical call 当前状态 |
+| 13 | `jobs` | 所有物理工作、attempt generation、lease、wake、retry 与 terminal winner；公共Operation是其safe projection |
+| 14 | `tasks` | Approval/HumanInput/Elicitation 等人机 first-winner |
+| 15 | `events` | transition、outcome、audit、安全 projection 的 append-only 历史 |
+| 16 | `receipts` | Command/Callback/JobCommit 幂等和稳定 disposition |
+| 17 | `outbox_events` | Event 的可靠外发状态，不复制 event payload |
+| 18 | `artifacts` | Artifact 当前 lifecycle、prepare admission、verified media/current tagged evidence、retention 与 primary Blob reference |
+| 19 | `artifact_blobs` | object generation、encryption/storage binding 与 verified digest/size 的唯一物理事实 |
+| 20 | `artifact_links` | reference/grant/hold/provenance closed relation |
+| 21 | `quota_accounts` | scope/work-class 当前额度、reserved/used 与 CAS version |
+| 22 | `quota_ledger` | reserve/settle/release/adjust 的 append-only accounting entries |
+| 23 | `scheduler_state` | 每 WorkClass 公平 round/cursor 与 bounded tenant deficit state |
 
-这个数量是设计约束，不是 KPI。任何超过24张总表/23张业务表的变更必须通过新的ADR，并同时说明为何不能合并、为何
+这个数量是设计约束，不是 KPI。任何超过23张总表/22张业务表的变更必须通过新的ADR，并同时说明为何不能合并、为何
 JSONB不合适、读写路径和删除候选。
 
-### 2.1 新增的第24张总表之consolidation analysis
+### 2.1 Release 与 Operation consolidation analysis
 
-`installation_release_state`不是“每个Release一张表”，而是每个installation恰好一行的mutable current aggregate。历史Candidate/
-Release仍是immutable signed manifest，scan进度不建表，审计/幂等/投递继续复用Event/Receipt/Outbox。该current fact拥有独立的
-promotion/rollback并发、active Model集合generation和root Run admission fence，因此符合独立生命周期与独立并发标准。
+Release不拥有平台内独立生命周期：镜像、配置、migration和qualification由同一个GitOps revision发布，回滚由部署系统恢复旧revision。
+因此数据库不保存Installation Release current pointer，也不为CI/CD证据建立表。Run所需稳定性由自身immutable bindings snapshot提供。
 
-已审查并拒绝以下合并位置：`schema_migrations`只证明DDL版本；`principals`只拥有身份；`resources/deployments`是tenant-scoped registry
-lifecycle；`events`与`receipts`是history/idempotency而非current pointer；`jobs`是物理工作；`scheduler_state`只拥有公平调度；Kubernetes
-ConfigMap/Helm/进程cache不能与tenant Model activation和Run创建做PostgreSQL CAS。fake tenant会破坏tenant隔离与安装权限。把该状态塞进任一
-位置都会复制authority或扩大错误owner，因此一个typed singleton是保持完整语义的最小物理模型。
+公共Operation同样不拥有第二状态机。异步管理命令创建shared Job，`GET /v1/operations/{job_id}`只返回该Job的安全投影；Event/Receipt保留
+历史与幂等。只有未来证明一个公共Operation必须跨多个相互独立Job继续存在时，才允许通过新ADR引入独立aggregate。
 
 ## 3. 共享列规则
 
-除`schema_migrations`与installation-scoped singleton外，tenant-owned表都包含`tenant_id`。不得为installation建立fake tenant。
+除`schema_migrations`外，tenant-owned表都包含`tenant_id`。不得为发布流程建立fake tenant。
 当前状态聚合统一包含：
 
 ```text
@@ -103,17 +103,11 @@ ID 使用 `<prefix>_<canonical UUIDv7>`。数据库验证通用 canonical shape�
 
 ## 5. 关键表结构
 
-### 5.1 Installation Release State
+### 5.1 Deployment release boundary
 
-`installation_release_state`使用`installation_id`单列主键，且provisioning配置只允许一个exact configured `InstallationId`
-（`ins_<UUIDv7>`）。热字段固定为
-`status`、`compatibility_generation`、`active_model_deployment_count`、active Release/Candidate exact ID与manifest digest、
-`state_digest`、`created_at/updated_at`；不保存Candidate runtime projection、scan cursor、Event history或任意mutable config JSON。
-
-`Uninitialized`要求四个active ID/digest全空且count=0；`Active`要求四者全非空。generation从1开始并在promotion/rollback以及所有改变
-Model bindable active set的mutation中严格加一；count范围0～4096。state digest对应18 closed canonical
-`InstallationReleaseStateV1`。Release/Candidate ID kind、all-or-none、正数generation、count和digest shape由结构CHECK保护，完整manifest
-签名/digest/cross-field及actual active set相等性由Rust command/fixture验证。该表只有PK，无speculative secondary index。
+数据库没有Installation Release aggregate。部署revision、Candidate digest和qualification结论由GitOps/CI持有；Platform进程只在启动时
+验证自身checked-in contract/schema/runtime manifest，并在Run admission时读取tenant-scoped active Resource/Deployment，将exact ID、revision和
+digest写入RunBindingsSnapshot。滚动发布、promotion和rollback不得修改既有Run，也不得向tenant业务表写入fake release current state。
 
 ### 5.2 Resource
 
@@ -138,7 +132,7 @@ generation、version、enqueue round、deadline与optional exact `current_job_id
 
 ### 5.4 Invocation、Job 与 Task
 
-`invocations` 以 `invocation_kind` 区分 Capability/Model/Context/MCP/Sandbox/Management。热字段包含 owner Run/Node、
+`invocations` 以 `invocation_kind` 区分 Capability/Model/Context/MCP。热字段包含 owner Run/Node、
 exact resource/deployment、state、version、deadline、input/output value/artifact reference、effect key与exact `current_job_id`。该pointer是当前
 关系的唯一authority，不复制Job state；`jobs.owner_kind/owner_id`只是immutable back-reference。Job创建、替换或归并时pointer与back-reference在
 同一事务逐值校验，terminal Job可在owner归并前继续被pointer引用。
@@ -146,7 +140,7 @@ exact resource/deployment、state、version、deadline、input/output value/arti
 `jobs` 是唯一物理执行权威。热字段包含：
 
 ```text
-job_id / work_class / owner_kind / owner_id / current_child_job_id
+job_id / work_class / owner_kind / owner_id
 state / version / attempt_count / attempt_limit / lease_generation
 worker_role / worker_process_generation_id / lease_expires_at / heartbeat_at
 scheduled_at / retry_at / deadline / priority
@@ -158,31 +152,27 @@ quota_reservation_id / started_at / terminal_at
 一个 logical owner 最多一个 nonterminal Job；一个 Job 同时最多一个 live lease。物理start递增`attempt_count`，每次claim递增`lease_generation`，
 历史 attempt 写 Event/Receipt。等待时清空 worker/lease 并保存 WakeContract，不占 worker slot。Job的owner back-reference不决定current；
 03 closed mapping要求`run -> runs`、`node_execution -> run_nodes`、`interaction -> tasks`、`internal_blob -> artifact_blobs`；
-Management/Model/Capability/Context/MCP owner映射到对应`invocations` row。普通Sandbox Job直接由Capability Invocation拥有；Managed MCP
-subscription的唯一Sandbox session child由父MCP Job的`current_child_job_id`拥有，深度exact为1。每个owner row或parent Job只持有一个optional
-current pointer；create/switch/merge与Job mutation在同一事务逐值回绑，terminal不自动清pointer，live-owner unique只作防御约束；不建立
-SandboxJob aggregate/ID/表或Job同UUID alias。
+Model/Capability/Context/MCP owner映射到对应`invocations` row；Registry validation、Artifact verify/scan/delete和Sandbox执行使用closed
+owner variant直接回绑其Resource、Artifact、Blob或Invocation。每个owner row只持有一个optional current pointer；create/switch/merge与Job mutation
+在同一事务逐值回绑，terminal不自动清pointer，live-owner unique只作防御约束。首版没有Managed stdio session child、SandboxJob aggregate/ID/
+表、ManagementOperation aggregate或Job同UUID alias。
 
 `tasks` 以closed `task_kind`区分`approval | interaction_form | interaction_url_consent | interaction_business_input |
-external_authorization | human_work`。Approval的`task_id`必须是public `apr_`，其他variant必须是public `int_`；clean-cut目标不接受无owner的
-internal `tsk_`。owner、generation、variant-specific state、deadline、schema digest、principal snapshot、closed typed payload与safe prompt是
+external_authorization | human_work`。所有variant共用nominal `TaskId`/`tsk_`，kind只由row与typed payload证明，不通过ID prefix
+分裂生命周期。owner、generation、variant-specific state、deadline、schema digest、principal snapshot、closed typed payload与safe prompt是
 first-winner所需事实；需要Interaction物理work时同一typed payload还保存exact `current_job_id`，Approval不得伪造该pointer。response大值进入RunValue/Artifact。
 
 ### 5.5 Event、Receipt 与 Outbox
 
 `events` 保存 `aggregate_kind/id/version`、可选 `run_id/public_sequence`、`event_type`、visibility、payload/digest 与时间。
-同 Run 的 non-null public sequence 唯一。tenant discriminator只可在aggregate kind为exact `installation`、aggregate ID为configured
-`InstallationId`且
-run/public sequence全空时为空；旧`installation_service/svc`删除。
+同Run的non-null public sequence唯一。所有业务Event都必须tenant-scoped；部署/qualification日志属于CI/CD审计系统，不伪造tenant或installation Event。
 
 `receipts` 保存 `receipt_kind`、scope kind/id、idempotency key digest、request digest、state、disposition、response reference/
-payload digest 与时间。Receipt ID改为全局PK；tenant scope保留tenant composite unique/index，只有Command + exact installation release
-operation + configured `InstallationId` scope可以没有tenant。幂等唯一键使用`NULLS NOT DISTINCT`或等价closed discriminator，使installation NULL不能绕过
-唯一性。Callback/JobCommit仍强制tenant。相同 key 不同 request digest 是稳定 conflict。
+payload digest与时间。Receipt ID为全局PK；所有业务Command、Callback与JobCommit都强制tenant scope并保留tenant composite unique/index。
+相同key不同request digest是稳定conflict。
 
 `outbox_events`以全局`outbox_id`为PK，只保存unique `event_id`、closed scope、publish state/attempt/next time/claim lease与failure code。
-tenant discriminator只可在引用上述installation Event时为空，且scope必须逐字段相同；FK直接使用全局Event ID，不能让NULL composite FK
-跳过关联。Event在业务事务写入，Outbox在同一事务创建；publisher不重新生成payload。
+scope必须与引用Event逐字段相同；FK直接使用全局Event ID。Event在业务事务写入，Outbox在同一事务创建；publisher不重新生成payload。
 
 ### 5.6 Artifact
 
@@ -199,14 +189,14 @@ ArtifactRef 时在同一 tenant 下 join exact Blob。verified content dedupe �
 domain + security-domain digest 内生效，不能跨 tenant、classification、retention 或 encryption 安全域。需要cleanup work时Blob typed payload
 保存唯一optional `current_job_id`并按03 owner mapping与`InternalBlob` Job back-reference同事务回绑。
 
-`artifact_links` 以 closed `link_kind` 表达 owner reference、grant、hold、provenance、derived-from 与 operation target；
+`artifact_links` 以 closed `link_kind` 表达 owner reference、grant、hold、provenance与derived-from；
 unique key 由 link kind 的 typed payload 派生。专用 upload session 只有在 multipart 真正进入范围且不能由 Link/Job 表达时再审查。
 
 Artifact 必须引用 exact Retention Policy Revision。该 Revision 的 `PolicyResourceSpec` 在 `PolicyKind::Retention` 时内嵌 closed
 `ArtifactRetentionPolicy`，且 `rules_digest` 必须等于 policy document 的 canonical digest。首个 tenant retention revision 与其
 自持有的 authoring Artifact 构成有意的 bootstrap 闭环，因此只有 `artifacts_retention_policy_fk` 是
 `DEFERRABLE INITIALLY DEFERRED`；onboarding 必须在同一事务内同时建立并在 commit 时满足两端 FK，不允许 nullable policy、
-sentinel revision 或提交后补边。Blob安全域修正同样不增加表；本次installation revision后的目标schema contract version为7。
+sentinel revision 或提交后补边。Blob安全域和clean-cut ID/owner约束修正不增加表；目标schema contract version为7。
 
 ### 5.7 Quota 与 Scheduler
 
@@ -224,7 +214,6 @@ PostgreSQL 必须强制：
 - primary key、同 tenant composite foreign key、unique key 与 non-null；
 - version/generation/ordinal 非负及时间列基本 shape；
 - receipt/idempotency、public sequence、logical owner Job 唯一；
-- installation singleton、active Release all-or-none、active Model count/generation及installation Receipt/Event/Outbox closed scope；
 - lease claim/heartbeat/terminal 的 compare-and-swap；
 - quota account update + ledger、aggregate + Event + Outbox 的事务原子性；
 - Ready Artifact 才能由新业务引用的 repository transaction check；
@@ -260,15 +249,14 @@ Rust 语义。绕过 repository 的直接业务写入不属于支持的接口；
 重写后的单一`0001`必须通过：
 
 1. 静态解析与 `git diff --check`；
-2. fresh PostgreSQL 16 apply，表数量精确为24且schema contract version精确为7；
+2. fresh PostgreSQL 16 apply，表数量精确为23且schema contract version精确为7；
 3. 所有表/列/index 与本 ADR 的 machine schema contract 一致；
 4. tenant/FK/unique/payload-size negative fixture；
 5. Job claim/heartbeat/stale fence/retry/wake/terminal concurrency fixture；
 6. Receipt exact replay/conflict、Event/public sequence/Outbox 原子 fixture；
 7. quota reserve/settle/release 与 concurrent oversubscription fixture；
 8. Artifact prepare允许optional expected digest且不伪造verified content，并覆盖Ready/link/delete closure；
-9. InstallationReleaseState provisioning、04 first-operator bootstrap audit、promote/rollback、active Model count/generation、bounded scan/final
-   CAS、Run admission并发，以及无fake tenant的promote/rollback Command Receipt与installation Event/Outbox scope fixture；
+9. Run admission与active Deployment切换并发，证明既有Run binding不变；Operation GET只投影shared Job且无ManagementOperation current state；
 10. repository all-target test、strict Clippy 与 workspace consumer compile。
 
 完成前不得把 00～18 推进为 Implemented 或把新 schema 声明为当前生产行为。

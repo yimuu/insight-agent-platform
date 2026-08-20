@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
-| 日期 | 2026-08-15 |
+| 状态 | Reviewed / Awaiting Acceptance |
+| 日期 | 2026-08-20 |
 | 依赖 | [`00-overview.md`](00-overview.md) |
 | 直接下游 | 02、03、04、05、18 |
 
@@ -154,8 +154,9 @@ Execution Plane 分为以下 bulkhead：
 | MCP Host | MCP session、OAuth、remote Task、subscription | 是 |
 | Sandbox Executor | Python、Node、WASM、受信任 Shell | 是且必须物理分离 |
 | Context Worker | 检索、重排、citation assembly | 是 |
-| Artifact Read Broker | exact-audience Artifact读取与完整性复验 | 是且按Model/Sandbox audience物理分离 |
-| Model Artifact Producer | exact Model Attempt输出的Staging→Verified物理写入 | 是且与两个read Broker物理分离 |
+| Artifact Gateway | public upload/download、授权与流控 | 是 |
+| Artifact Data Worker | Context、MCP、Capability与Sandbox的受信读写、验证与派生 | 是 |
+| Artifact Maintenance | scan、retention、quarantine与GC | 是 |
 
 一个隔舱饱和时必须通过有界队列和 durable backpressure 停留在自己的工作类别，不能获取其他隔舱的
 permit，也不能使 API readiness 失败。
@@ -181,18 +182,19 @@ permit，也不能使 API readiness 失败。
 | `context-worker` | Context Query、授权过滤、检索与 citation assembly | Capability 副作用与 Agent Plan |
 | `mcp-host` | MCP 协议与连接状态 | Agent Plan |
 | `sandbox-executor` | 代码运行、资源和网络隔离 | Run state authority |
-| `model-artifact-broker` | Artifact-backed Model request的exact只读物化 | object write、Model/Run current state |
-| `sandbox-artifact-broker` | WASI/microVM exact只读物化 | Model RPC、object write、Sandbox/Run current state |
-| `model-artifact-producer` | exact Model Attempt输出的bounded stage、object integrity与Verified receipt | Artifact Ready、RunValue、Model/Job terminal、通用object API |
+| `artifact-gateway` | public upload/download、grant与边界限流 | 业务owner状态推进、内部Worker凭据 |
+| `artifact-data-worker` | exact owner绑定的stage/read/verify/derive | public API、Run/Invocation current state |
+| `artifact-maintenance` | scan、retention、quarantine、delete和GC | 新业务引用、public upload/download |
 | `egress-broker` | exact endpoint catalog、DNS pinning、SSRF/TLS/redirect、late Secret resolution、bounded HTTP | Run/Invocation/Job current state、Secret 持久化、Provider adapter 语义 |
-| `secret-broker`（Egress内部可信组件） | current SecretBinding gate、opaque reference解封、CandidateManifest安装的Provider选择、exact version evidence校验 | Secret value/reference持久化、公共API、业务current state、任意Provider加载 |
+| `secret-broker`（Egress内部可信组件） | current SecretBinding gate、opaque reference解封、startup manifest安装的Provider选择、exact version evidence校验 | Secret value/reference持久化、公共API、业务current state、任意Provider加载 |
 | `storage-postgres` | repository、CAS、lease、outbox | 领域决策 |
 | `artifact-store` | blob I/O、integrity、GC | Run 状态机 |
 
 物理部署可以复用同一个 Rust workspace，但不同 Worker role 必须使用独立 Deployment、连接池、并发
 配置和 readiness。Sandbox Executor 可以采用独立仓库或语言实现，只能通过版本化机器协议接入。
-Model Artifact Broker、Sandbox Artifact Broker与Model Artifact Producer必须使用三个独立进程、ServiceAccount、数据库credential/pool、
-storage identity和permit；共享Rust library不等于共享运行时或权限。
+Artifact 首版只有Gateway、Data Worker和Maintenance三个物理role，分别使用独立
+Deployment、ServiceAccount、数据库连接池、storage identity与permit。业务owner通过同一事务形成Ready引用，
+Artifact进程不直接改写Run、Invocation或Job。Model输入输出首版都是Inline-only，因而不建设Model专用Broker或Producer。
 `egress-broker`是独立基础设施角色，使用专用workload identity、连接池、并发/字节预算和NetworkPolicy；它只接收
 credential-free closed request，并只返回sanitized metadata与bounded byte stream。它不得保存业务current state、把Secret
 返回给Worker，或接受调用方提供的URL、header、proxy和redirect target。

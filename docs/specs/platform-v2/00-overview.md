@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Cross-review Reopened |
-| 日期 | 2026-08-15 |
+| 状态 | Reviewed / Awaiting Acceptance |
+| 日期 | 2026-08-20 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -14,8 +14,9 @@
 
 > 2026-08-09 persistence reset：此前 migration 1～35 及 177 表候选把行为不变量过度绑定为专用表、evidence 表和
 > deferred trigger，已经停止继续实施。共享 Resource/Job/Task/Event/Receipt 模型的首轮cross-review曾完成；2026-08-15因
-> CR-165发现Installation Release current authority及其Run/Model/Artifact闭包未完整定义，相关上游和下游规范已重新退回Draft。
-> 旧候选不得作为新实现兼容基线，当前修订在全量cross-review关闭前也不得作为实现输入。
+> CR-165曾把Installation Release、Model Artifact Producer和八类Artifact角色引入首版；2026-08-20的CR-166确认该闭包过度设计，
+> 改由GitOps发布、Inline-only Model、三类Artifact角色、WASI+gVisor和remote-only MCP收敛首版。CR-166已完成全量cross-review，
+> 相关规范已推进到Reviewed、等待Acceptance。旧候选不得作为新实现兼容基线。
 
 ## 1. 决策摘要
 
@@ -34,6 +35,8 @@ Platform v2 采用以下不可逆的架构决定：
 10. 管理面可以动态变化，但每个 Run 必须固定 Agent、Skill、Capability、Model 和 Context 的精确版本；
 11. 安全、配额、审批、取消、Artifact 和审计是平台合同，不交给模型或 Skill 自行实现。
 12. 新架构完成资格验收后原位替换旧 `/v1`；不提供双栈、旧 wire 兼容、数据兼容或运行时 fallback。
+13. 应用发布由Kubernetes/GitOps拥有；业务数据库不实现Installation Release状态机。
+14. 首版Model输出只允许Inline；文件和大输出由Capability/Sandbox经共享Artifact Data Worker产生。
 
 ## 2. 文档集合
 
@@ -41,25 +44,25 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Draft / Cross-review Reopened | 总体路线、规范模板、依赖和完成定义 |
-| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / In Progress | 系统架构、领域对象和所有权边界 |
-| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Draft / Architecture Revision | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Draft / Architecture Revision | PostgreSQL、事务、Outbox、Lease、恢复 |
-| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Draft / Architecture Revision | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Draft / Architecture Revision | Agent Interface、Typed Plan、Model Loop |
-| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Draft / Architecture Revision | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Draft / Architecture Revision | Scheduler、Worker、Lease、背压和隔舱并发 |
-| 08 | [`08-subagent.md`](08-subagent.md) | Draft / Architecture Revision | Child Run、父子通信、取消传播和循环限制 |
-| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Draft / Architecture Revision | Capability Interface、Implementation、Registry |
-| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Draft / Architecture Revision | 调用协议、幂等、同步快路径、异步恢复 |
-| 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / In Progress | Skill Package、发现、选择、绑定和依赖 |
-| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Draft / Architecture Revision | ContextSource、检索、引用和数据权限 |
-| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / In Progress | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Draft / Architecture Revision | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
-| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Draft / Architecture Revision | S3、内容寻址、上传、生命周期和内容安全 |
-| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Draft / Architecture Revision | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Draft / Architecture Revision | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Draft / Architecture Revision | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 00 | `00-overview.md` | Reviewed / Awaiting Acceptance | 总体路线、规范模板、依赖和完成定义 |
+| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Reviewed / Awaiting Acceptance | 系统架构、领域对象和所有权边界 |
+| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Reviewed / Awaiting Acceptance | ID、Resource、Version、Deployment、Binding |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Reviewed / Awaiting Acceptance | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Reviewed / Awaiting Acceptance | 多租户、授权、Secret、Effect、Quota、Approval |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Reviewed / Awaiting Acceptance | Agent Interface、Typed Plan、Model Loop |
+| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Reviewed / Awaiting Acceptance | Run、NodeExecution、暂停、重试、取消 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Reviewed / Awaiting Acceptance | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 08 | [`08-subagent.md`](08-subagent.md) | Reviewed / Awaiting Acceptance | Child Run、父子通信、取消传播和循环限制 |
+| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Reviewed / Awaiting Acceptance | Capability Interface、Implementation、Registry |
+| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Reviewed / Awaiting Acceptance | 调用协议、幂等、同步快路径、异步恢复 |
+| 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / Implementation In Progress | Skill Package、发现、选择、绑定和依赖 |
+| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Reviewed / Awaiting Acceptance | ContextSource、检索、引用和数据权限 |
+| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Reviewed / Awaiting Acceptance | MCP Transport、OAuth、投影、Task 和 Subscription |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Reviewed / Awaiting Acceptance | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
+| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Reviewed / Awaiting Acceptance | S3、内容寻址、上传、生命周期和内容安全 |
+| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Reviewed / Awaiting Acceptance | Provider、Model Profile、ModelTurn、流式响应和预算 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Reviewed / Awaiting Acceptance | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Reviewed / Awaiting Acceptance | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得
@@ -76,15 +79,15 @@ cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accept
 05 + 06 + 07 + 10 -> 08
 02 + 04 + 05 + 09 -> 11
 02 + 04 + 05 + 07 + 11 -> 12
-03 + 04 + 06 + 09 + 12 -> 15
+04 + 09 + 10 + 12 -> 13
+03 + 04 + 06 + 09 + 12 + 13 -> 15
 02 + 04 + 05 + 06 + 07 + 10 + 15 -> 16
-04 + 09 + 10 + 12 + 16 -> 13
 04 + 07 + 09 + 10 + 13 + 15 -> 14
-02～16 all domain contracts -> 18 deployment/release contract -> 17 API/Events -> 18 qualification gates
+02～16 all domain contracts -> 17 API/Events -> 18 deployment/qualification
 ```
 
-这是按合同章节而不是文件编号排序的有向无环依赖。18的deployment/release、Candidate和installation-authority章节是17的上游；18的
-qualification章节才消费17的API/Event合同。下游可以实现上游port，但上游domain不能为了某个下游adapter反向依赖。例如Artifact Scanner
+这是按合同章节而不是文件编号排序的有向无环依赖。GitOps发布输入不属于业务API；18只消费领域与17的API/Event合同定义部署和qualification。
+下游可以实现上游port，但上游domain不能为了某个下游adapter反向依赖。例如Artifact Scanner
 可以用Sandbox实现，Artifact contract仍不依赖Sandbox；MCP Sampling可以调用Model port，Model domain不依赖MCP。
 
 后续规范可以收紧上游合同，但不能隐式改变已经 Accepted 的上游不变量。需要改变时必须先更新上游
@@ -142,7 +145,7 @@ Draft
 
 一份规范进入 Verified 必须同时满足：
 
-- 公开 Rust API、JSON Schema/OpenAPI、数据库约束和文档语义一致；
+- 每个真实边界的权威机器合同、生成投影、数据库约束和文档语义一致；不要求未跨边界对象重复拥有Rust/protobuf/JSON Schema；
 - PostgreSQL real-process integration tests 覆盖正常、重复、乱序、超时、取消和崩溃恢复；
 - 未知字段、重复 JSON key、越界集合、非法 ID 和跨租户引用被拒绝；
 - 所有外部写操作具有明确 Effect、idempotency 和 approval 语义；
@@ -156,7 +159,7 @@ Draft
 
 全部 v2 工作完成时至少需要以下端到端证据：
 
-1. 50 个并发 active Run 下，Sandbox 饱和不降低 API 和 Model Worker 的准入能力；
+1. 在已资格CapacityProfile的混合并发负载下，Sandbox饱和不降低API、Model Worker和critical-control的准入能力；
 2. Runtime、MCP Host、Sandbox Executor 任一进程被终止后，已提交状态可恢复且无越权重放；
 3. 丢失或重复全部 wake hint 时，安全扫描最终收敛；
 4. Agent、Skill、Capability 或 Provider active head 在 Run 中途切换，不改变该 Run 的绑定；
@@ -167,56 +170,35 @@ Draft
 9. MCP Tool、Resource、Prompt 与 Task 分别保持各自语义，不通过通用 JSON 丢失安全元数据；
 10. 版本、状态机、事件和公开错误码均通过 machine-readable conformance suite。
 
-## 8. 本批次结论与下一步
+## 8. CR-166 简化结论与下一步
 
-CR-165已重新打开全量cross-review。修订范围不是非持久合同：它新增一个installation-scoped current Release/Candidate authority，并使
-02、03、04、05、06、07、08、09、10、12、14、15、16、17、18及ADR-0001回到Draft。目标新增`InstallationId`、统一
-`CanonicalRegion`、RunBindings v2、WorkerManifest v2、Storage binding owner、Model installation compatibility port、
-Candidate/startup/runtime-capacity closure、closed content/semantic evidence及其response-contract equality、current encryption read fence、
-Gateway-only proxied download、closed ArtifactGrant capability/state、三个隔离read Broker、ordinary-output Workload Producer、Maintenance Authority、
-Model Producer及物理拆分的public Upload/Download Gateway八个Artifact role、typed encryption-domain Approval API、
-content-addressed qualification/approval supply-chain resolver和
-Receipt-first capture→resolver/scan→final有界Release切换；10同时把Invocation的Approval/Input引用收紧为03 shared Task authority的
-`ApprovalTaskId(apr_)`/`InteractionId(int_)` closed state合同，并只允许owner JobCommit first-winner事务分配Input `int_`。
-修订关闭前这些文件不得作为新代码实施输入。
+2026-08-20的CR-166撤销CR-165中超出首版需要的最终形态设计，并已完成受影响规范的全量cross-review：
 
-旧的专用表族、migration 1～35、177表catalog、checksum和资格结论仍全部退出活动基线。当前已实现的物理基线仍是23张总表、
-22张业务表、schema contract v6及单一`0001_platform_baseline.sql`；[`ADR-0001`](../../adr/0001-platform-v2-postgres-baseline.md)
-的clean-cut目标修订为24张总表、23张业务表和schema contract v7；ADR把逻辑`InstallationReleaseState`映射为恰好一个新增singleton，
-具体物理名称、列和约束只由ADR-0001拥有。目标migration/verifier/fixture落地前，
-24张表与v7都不是当前行为。
+- 发布、promotion和rollback由Kubernetes/GitOps拥有；Candidate和qualification报告是CI/CD内容寻址产物，不是数据库或公共API状态；
+- 数据库不新增`InstallationReleaseState`，目标仍为23张总表/22张业务表；clean-cut ID/owner约束完成后schema contract从当前v6升级为v7；
+- root Run在tenant事务中解析并冻结exact ResourceVersion/Deployment binding；后续部署变化不修改既有Run；
+- 首版Sandbox backend闭集为restricted WASI与single-Job gVisor；microVM、Firecracker、KVM和plain runc不在目标闭集；
+- 首版MCP只支持远程Streamable HTTP；Managed stdio及其持久Sandbox session、parent/child Job例外和Provider recovery全部推迟；
+- Model output保持Inline-only；文件和大输出由Capability/Sandbox调用共享Artifact Data Worker生成，不建设Model Artifact Producer；
+- Artifact物理角色收敛为Gateway、Data Worker、Maintenance三类；不同调用方使用closed method、identity和capacity lane，但共享一套staging、
+  verification、dedupe、quota和cleanup权威；
+- 公共Operation只是shared Job的safe projection，不建立ManagementOperation aggregate、状态机或表；
+- public HTTP、internal protobuf、persisted Rust JSONB各自只在真实边界拥有机器合同；registry/schema从owner type生成，禁止无边界的三份手写复制；
+- 首版公共`/v1`只包含Agent/Skill/Capability管理、Run、Task、Artifact、MCP HTTP binding和Run SSE；
+- qualification按开发门禁与发布门禁分层，A～G不持久化为运行时GateResult/ReleaseManifest。
 
-这只表示 persistence foundation 已实现，不表示 00～18 的全部 API、Worker、Sandbox、MCP、SLO 或部署拓扑已经实现。
-后续按新的[实施计划](implementation-plan.md)继续 domain service、execution integration、public `/v1` 和 qualification。
+上述决策减少目标服务、状态机、Schema和资格组合，但不降低PostgreSQL durable Job、Receipt幂等、Event/Outbox原子性、Run冻结binding、
+tenant/permission/quota、lease fence、Artifact content integrity及Sandbox物理隔离。
 
-### 8.1 当前实施与证据边界（非规范性）
+### 8.1 当前证据边界（非规范性）
 
-旧 migration 1～35、177 表 catalog、专用表族及其 checksum、fixture 和资格结论已经全部撤销；详细演变只保留在
-Git 历史，不再复制到活动规范。它们不能证明当前 schema、API、Worker、部署或容量行为。
+当前checked-in persistence baseline仍是23张总表/22张业务表、schema contract v6和单一`0001_platform_baseline.sql`。仓库有
+CR-166之前候选架构的多类functional fixture，但未按CR-166四阶段重新对照和qualification，不能据此标记任一新phase完成。
 
-当前 persistence baseline 只有23张总表、22张业务表、schema contract v6和单一 `0001_platform_baseline.sql`。Phase 1、Phase 2 与 Phase 3
-functional exit 已关闭；Phase 3 的 Artifact transaction/worker、generic Invocation、Capability execution、ModelTurn、Context 与
-Text2SQL domain/repository 已在 fresh PostgreSQL 16 上作为同一全量 fixture suite 实际执行。Text2SQL admission 还在同一事务锁定
-committed SqlCatalog Observation 与 exact `database.query.readonly` Capability Interface/Deployment/ReadOnly Effect，不建立专用表。
-当前Invocation实现仍以generic `ResourceId`承载Approval/Input引用、允许normalized backend request携带Input ID并做runtime kind检查；目标
-nominal `ApprovalTaskId`/`InteractionId`字段、owner-side Input ID allocation/replay、禁止internal `tsk_`的machine schema及逐状态
-跨aggregate fixture尚未交付，既有Phase 3证据不能把10的本次修订声明为当前行为。
-CR-165 的Model Artifact-backed output架构方向仍是独立Model Artifact Producer，
-与只读Model Artifact Broker分离，且只有Model terminal PostgreSQL事务能够把Verified Artifact原子推进为Ready并提交Output Link、
-RunValue、usage/quota、Event与Outbox；pre-header transport timeout与storage write-quiescence barrier分别阻断slowloris容量占用和
-absence后迟到PUT。Candidate显式enablement、digest集合边界、pool/semaphore alias closure、installation state与4096-byte RPC overhead
-已经形成Draft修订，
-仍须通过当前cross-review后才能成为Accepted目标合同；对应domain/schema/protobuf、Producer进程与权限、部署及
-real-process/故障/容量资格仍全部Open。当前Model output materializer仍为Inline-only，超过Inline能力时仍走开发期
-`model_output_artifact_required`防护；不得据此关闭Phase 4～6、任一Qualification Gate，或把Artifact-backed output声明为当前行为。
-实现已从04的closed Model-output ArtifactIo Policy Rust/JSON合同与pure checked retention timing helper开始；它尚未连接v5 limits、
-Candidate storage binding、Model Deployment或任何写路径，因此不改变上述当前行为边界。
-普通Registry/Capability/Context/MCP/Sandbox Artifact output的Draft目标同样不是generic Worker直写：五个exact client-stream method统一进入独立
-Artifact Workload Producer，使用每physical-attempt的新Artifact/Blob/Grant/ArtifactVerify Operation/scan Job/Receipt identity，并在Uploaded winner
-事务创建唯一scan Job与`artifact.uploaded` Event/Outbox；它与三个read Broker、Maintenance、Model Producer及两个public Gateway物理隔离。
-当前代码、protobuf、runtime manifest、restricted DB/storage role、Helm与资格fixture均未交付，不能把既有generic producer或Sandbox Broker证据视为该目标。
-精确完成度和下一门禁只以 [`implementation-plan.md`](implementation-plan.md) 为准。Phase 4～6 尚未完成，Phase 7 还要求
-用户对 clean replacement 单独明确授权。
+仓库中已有的microVM/Firecracker、Managed stdio session和Model Artifact Producer候选代码不再构成首版目标证据；后续实现批次应先从
+registry、runtime manifest、RPC、Helm和测试入口中删除或隔离这些非目标路径，再补齐gVisor、三角色Artifact和最小`/v1`。切除旧候选不得
+恢复host execution、plain runc或第二持久状态权威。
 
-Accepted 只表示目标合同可作为实施输入，不表示任一新 API、数据库结构、部署拓扑、SLO 或容量数字已经成为当前行为。
-cutover 前当前行为继续以 [`docs/current`](../../current/README.md) 为准。
+精确实施顺序只以[implementation-plan.md](implementation-plan.md)为准。所有本次受影响规范已Reviewed但未Accepted/Implemented，
+不能声明新的API、schema v7、部署拓扑、容量数字或qualification结果是当前行为。cutover前当前行为继续以
+[docs/current](../../current/README.md)为准。

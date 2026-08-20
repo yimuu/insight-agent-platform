@@ -41,7 +41,8 @@ specification and cross-review first, then continue from the reviewed contract.
   it appears in a Skill package.
 - MCP is an independent protocol host, not an alias for Action or Capability. Preserve Tool,
   Resource, Prompt, Task, transport, authorization, and subscription semantics when projecting MCP
-  objects into platform contracts.
+  objects into platform contracts. The first release supports remote Streamable HTTP only; managed
+  stdio servers and persistent sandbox sessions are deferred.
 - A Subagent is a durable child Run with exact bindings, its own state and quota, and a typed parent
   link. Do not implement agent-to-agent work as an in-memory function call, unbounded recursion, or
   an opaque tool JSON exchange.
@@ -54,22 +55,26 @@ specification and cross-review first, then continue from the reviewed contract.
 
 ## Code execution
 
-- Python, Node.js, WASM, trusted Shell, and managed MCP stdio processes run only in the independent
-  Sandbox Execution Plane. API, Scheduler, Model Worker, Capability Worker, and MCP Host processes
-  must not spawn them.
+- Python, Node.js, WASM, and trusted Shell run only in the independent Sandbox Execution Plane.
+  API, Scheduler, Model Worker, Capability Worker, and MCP Host processes must not spawn them. If
+  managed MCP stdio is introduced after the first release, it must obey the same boundary.
 - Sandbox submission is an authenticated service operation backed by a durable shared Job. The
   executor may report a fenced physical outcome; it cannot directly mutate Run, NodeExecution, or
   Invocation authority.
 - Isolate Sandbox queue, permits, connection pools, pods, and where required node pools from the
   control plane. Sandbox exhaustion or failure must not consume API, Scheduler, Model, native
   Capability, or MCP admission capacity.
-- Select WASM, sandboxed container, or microVM from published trust, Effect, Secret, network, and
-  isolation policy. No isolation technology is the universal default for every workload.
+- The first release has exactly two code backends: restricted WASI and per-Job gVisor sandboxed
+  containers. Plain runc/OCI and host execution are forbidden. microVM, Firecracker, KVM, managed
+  stdio sessions, and hardware-virtualized backends are outside the first-release contract.
 - Runtime dependencies are resolved, scanned, and frozen during publication. Do not run package
   managers, mutable image tags, string-built shell commands, or arbitrary installers at execution
   time.
 - The Sandbox is for bounded platform code execution, not heavy compute. Route long-running or
   resource-intensive workloads to an independently deployed, quota-controlled remote Capability.
+- Model responses are Inline-only in the first release. Files and large generated outputs are
+  produced through the shared Artifact data service by Capability or Sandbox work, not by a
+  dedicated Model Artifact Producer.
 
 ## Persistence
 
@@ -95,11 +100,29 @@ specification and cross-review first, then continue from the reviewed contract.
 - Agent, Skill, Capability, Context, MCP, Model, Policy, and Sandbox definitions reuse one resource
   lifecycle. Domain meaning remains typed even when persistence is shared.
 - Attempt, remote work, polling, recovery, and background operations reuse `Job`.
+- A public asynchronous Operation is a safe projection of its shared `Job`; it is not a separate
+  aggregate, state machine, or table.
 - Approval, interaction, and human work reuse `Task`.
 - Command and callback idempotency reuse `Receipt`.
 - Transitions, outcomes, rejection evidence, and audit records reuse `Event`.
 - Artifact metadata and blobs may stay domain-specific because they have independent storage and
   security lifecycles; their references, grants, and holds should share one typed link model.
+- Artifact deployment has three first-release roles: Gateway, Data Worker, and Maintenance. Logical
+  client methods and capacity lanes may be distinct, but do not introduce ordinary or model-specific
+  producer infrastructures that duplicate staging, verification, quota, or cleanup state machines.
+
+## Release and schema authority
+
+- Application promotion and rollback are owned by Kubernetes/GitOps. Candidate and qualification
+  reports are content-addressed CI/CD artifacts, not database aggregates or public management API
+  resources.
+- A Run freezes exact tenant-scoped ResourceVersion and Deployment bindings at admission. There is
+  no `InstallationReleaseState`, compatibility generation, release singleton, or installation
+  promotion/rollback transaction in the business database.
+- Public HTTP contracts use OpenAPI/JSON Schema, internal RPC contracts use protobuf, and persisted
+  JSONB uses Rust nominal types. Do not hand-maintain all three representations for an object that
+  does not cross those boundaries; generate registries and schemas from the owning type where
+  possible.
 
 ## Migrations
 
@@ -122,6 +145,9 @@ specification and cross-review first, then continue from the reviewed contract.
 - Cross-review must cover state ownership, IDs, JSON schemas, errors, transactions, events,
   permissions, capacity, failure recovery, and test fixtures without prescribing redundant storage.
 - Only Reviewed/Accepted contracts may generate an implementation plan or baseline schema.
+- Qualification is layered: contract/unit, PostgreSQL transaction/concurrency, RPC identity and
+  backpressure, critical end-to-end, then release-only security/chaos/capacity/soak/restore. Do not
+  repeat every field permutation at every layer or persist qualification gates as runtime state.
 
 ## Implementation quality
 

@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision |
-| 日期 | 2026-08-15 |
+| 状态 | Reviewed / Awaiting Acceptance |
+| 日期 | 2026-08-20 |
 | 依赖 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`10-capability-invocation.md`](10-capability-invocation.md) |
 | 直接下游 | 17、18 |
 
@@ -95,16 +95,15 @@ ChildAgentCall drive 在一个 PostgreSQL transaction 中：
 1. 验证父 Run/Node、tenant、binding、depth、quota、deadline 和 policy；
 2. 从父 typed values 构造 child input 并通过 child Interface schema；
 3. 创建稳定 ChildRunLink；
-4. 从parent RunBindings逐字段继承同一`InstallationReleaseBindingV1`，再创建 child Run 与其余exact RunBindings；
+4. 从parent RunBindings逐字段继承同一exact ResourceVersion/Deployment closure，再创建child Run；
 5. 写 parent NodeExecution Waiting continuation；
 6. 写 parent/child transitions 和 outbox。
 
 同一 parent node/attempt/logical child key 并发重放只返回同一个 child Run。不得先创建 child 再异步补 link，
 也不得让 parent 在 link 未提交时等待进程内 future。
 
-child不得读取18 current release或把parent binding替换成更新Candidate。admission必须用parent冻结Candidate验证child的全部Model候选，
-重验04 current security fences，并确认18要求的exact resolver与历史runtime/adapter仍处于保留期；失败时整个child/link/parent-wait事务
-回滚，不能降级到current Candidate或删减候选。
+child不得读取current active head或把parent binding替换成更新Deployment。admission必须使用parent冻结closure验证child的全部Model候选，
+并重验04 current security fences；失败时整个child/link/parent-wait事务回滚，不能fallback或删减候选。
 
 ## 6. 输入与数据隔离
 
@@ -274,10 +273,9 @@ span 中。
 
 - parent/link/child 创建在任一故障窗口重放时只有一个逻辑 child；
 - parent runtime kill 后可从 Link 恢复，不重复创建 child；
-- child active head与current installation Release/Candidate切换都不影响运行中绑定；child不读取current release、不得fallback或逐字段混合，
-  只继承parent完整historical binding；
-- child全部Model candidates针对inherited historical Candidate验证并重验current security fence；historical manifest resolver、runtime或adapter
-  retention缺失时整个child/link创建事务回滚，不留下partial child、quota、Event/Outbox或成功Receipt；
+- child active head或GitOps rollout不影响运行中绑定；child不读取current head、不得fallback或逐字段混合，只继承parent完整historical binding；
+- child全部Model candidates针对inherited exact Deployment验证并重验current security fence；historical ResourceVersion/Deployment缺失时整个
+  child/link创建事务回滚，不留下partial child、quota、Event/Outbox或成功Receipt；
 - 静态 cycle、候选 cycle、runtime depth/descendant overflow 全部被拒绝；
 - child 无法读取未显式传递的父 value、Artifact、Conversation、Secret 或 Capability；
 - parent cancel 与 child terminal 竞态只有一个 Link outcome；
@@ -290,7 +288,7 @@ span 中。
 ## 19. 明确推迟的工作
 
 - 跨 tenant delegation；
-- 跨 installation Agent federation；
+- 跨平台/跨信任域 Agent federation；
 - detached background Agent 的完整产品合同；
 - Agent-to-Agent discovery protocol；
 - shared long-term memory；
@@ -298,5 +296,6 @@ span 中。
 
 ## 20. 未决问题
 
-CR-165的child historical installation binding、全candidate validation与retention合同仍需与02/05/06/16/17/18共同完成cross-review；关闭前本规范
-保持Draft且不得作为实现输入。Detached background Agent尚未进入本合同，也没有隐藏发布开关。
+CR-166已确认child Run只继承parent允许的exact Deployment/ResourceVersion closure，不读取installation或release candidate。
+本规范已Reviewed、等待Acceptance；parent/child transaction、quota、cancel/recovery和schema fixture仍待实现。Detached background Agent
+尚未进入本合同，也没有隐藏发布开关。

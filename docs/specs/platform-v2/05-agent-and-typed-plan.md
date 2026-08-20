@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision |
-| 日期 | 2026-08-15 |
+| 状态 | Reviewed / Awaiting Acceptance |
+| 日期 | 2026-08-20 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
 
@@ -77,7 +77,7 @@ uniqueItems/minLength/maxLength/minimum/maximum/exclusiveMinimum/exclusiveMaximu
 - `$ref`只允许同一document的acyclic `$defs`或固定digest的platform nominal schema；禁止递归、remote ref和运行时fetch；
 - `default`、coercion、`pattern`、开放`format`、`anyOf/allOf/not`、conditionals、unevaluated和unknown keyword全部拒绝；
 - `ArtifactRef`、`Message`、`Citation`、`Failure`、UTC timestamp、UUIDv7 ID和DecimalMoney只能引用platform nominal schema；
-- parser在schema校验前拒绝duplicate key、invalid UTF-8、NaN/Infinity、越界number和超过CandidateManifest硬限制的
+- parser在schema校验前拒绝duplicate key、invalid UTF-8、NaN/Infinity、越界number和超过HardLimitProfile硬限制的
   depth/property/item/byte count；
 - schema按02 canonicalization计算digest；05、09、12、16、17不得定义第二套“近似closed”profile。
 
@@ -239,7 +239,7 @@ purpose coverage、data region/classification、循环、预算、worker/runtime
 ```text
 Agent Entity -> Agent Draft -> Validation
  -> atomic Interface Revision + Plan Revision
- -> Deployment Candidate/Resolution -> Deployment Validation Evidence
+ -> Deployment Draft/Resolution -> Deployment Validation Evidence
  -> Agent Deployment -> Active Head / Suspension
 ```
 
@@ -467,8 +467,8 @@ diagnostic 保存为 immutable Artifact，ResourceVersion 只保存 bounded type
 Run admission 把完整 binding closure 复制成 02 的 `RunBindingsSnapshot`。数据库只需保证 tenant/FK/版本不可变与 CAS；
 对Context的`PinAtRunAdmission`，RunBindings还必须保存按`context_binding_id`规范排序的exact dataset-view；该view由Run admission
 在同一事务从ContextDataset active version解析并进入RunBindings canonical digest，后续ContextQuery不得重新追随active head。
-root Run还必须冻结当前02 `InstallationReleaseBindingV1`；同一snapshot内所有Model slot的全部候选都在admission时通过16的同一
-Candidate compatibility port，runtime Selection Policy只能在已经完整验证的集合内选择。slot 连续性、kind/schema/digest 匹配、
+root Run在tenant事务中冻结当前active Agent及所有slot的exact ResourceVersion/Deployment；同一snapshot内所有Model slot候选都必须为
+Ready且与其Model Profile/Provider binding兼容，runtime Selection Policy只能在已经完整验证的集合内选择。slot连续性、kind/schema/digest匹配、
 validation completeness、全Run候选上限和bindability由Rust closed types在同一事务校验。
 
 ## 17. 错误合同
@@ -563,8 +563,8 @@ live observation 丢失不改变结果。
 - v2 code path 不包含 terminal-only/volatile wait 分支；
 - fuzz/property tests 覆盖 schema、expression、scope、graph cycle 和 verifier；
 - PlanNodeKind exhaustive match 由编译器与 architecture test 强制。
-- root Run admission fixture从18 current InstallationReleaseState冻结完整02 installation binding，并对Plan closure中的全部Model candidates使用
-  同一16 port验证；任一非首选candidate不兼容时整个admission回滚且没有Run/Receipt成功结果；
+- root Run admission fixture在Receipt→Tenant→Resource锁序中冻结完整02 binding；active target并发切换只影响未来Run，任一候选不兼容时
+  整个admission回滚且没有Run/Receipt成功结果；
 
 ## 20. 明确推迟的工作
 
@@ -577,6 +577,6 @@ live observation 丢失不改变结果。
 
 ## 21. 未决问题
 
-CR-165的root current installation binding与全Model-candidate admission仍需与02/06/08/16/17/18共同完成cross-review；关闭前本规范保持
-Draft且不得作为实现输入。05冻结Plan语义，Model Provider/ModelTurn由16冻结；具体authoring表面只能在不改变Plan节点代数、类型和恢复语义的
-前提下单独演进。
+CR-166已确认root Run只冻结tenant active exact Deployment closure，Model为Inline-only，无installation/candidate binding。
+本规范已Reviewed、等待Acceptance；相关API、持久化和分层证据仍待实现。05冻结Plan语义，
+Model Provider/ModelTurn由16冻结；具体authoring表面只能在不改变Plan节点代数、类型和恢复语义的前提下单独演进。

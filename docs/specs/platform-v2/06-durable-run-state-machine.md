@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision |
-| 日期 | 2026-08-15 |
+| 状态 | Reviewed / Awaiting Acceptance |
+| 日期 | 2026-08-20 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
 
@@ -13,8 +13,8 @@
 
 ## 1. 决策摘要
 
-每次 Agent 调用创建一个固定 Deployment/RunBindings 的 durable Run。root Run冻结admission时current installation Release；child Run继承
-parent相同的02 `InstallationReleaseBindingV1`，因此release切换不能把同一durable执行链切成两个Candidate。Scheduler 只根据 Typed Plan 和已提交事实推进状态；
+每次Agent调用创建一个固定Deployment/RunBindings的durable Run。root Run冻结admission时tenant-scoped active bindings；child Run继承
+parent相同的exact bindings，因此后续Resource active target或GitOps rollout不能把同一durable执行链切成两套实现。Scheduler只根据Typed Plan和已提交事实推进状态；
 NodeExecution 表示逻辑执行，03 的 Job 表示一个可租约、重试和恢复的逻辑 work 及其唯一 current
 generation。本文保留“Attempt”作为 Job generation 的历史观测术语，不代表独立 ID、current aggregate
 或持久化表。Run、NodeExecution 和 Job 均使用闭合状态机与数据库 first-winner CAS。
@@ -449,11 +449,9 @@ TimedOut压成failed。Run级事件由17冻结，并从本状态机的committed 
 - leaf logical calls 在 `invocations`，物理执行与 WakeContract 在 `jobs`，human/approval 在 `tasks`；
 - transition/outcome/audit 在 `events`，command/callback/commit 去重在 `receipts`，外发在 `outbox_events`。
 
-数据库保证tenant/FK/unique/CAS/lease/transaction/outbox；Rust保证状态机、binding closure、schema、policy、retry、cancel 与
-reconcile。Run admission 在同一事务冻结完整 RunBindingsSnapshot，不在执行时读取 dynamic head。root admission最终复验18 current
-installation generation/digest。对installation current authority而言，child admission只复验parent冻结Candidate的immutable resolver与历史
-runtime/adapter retention，不追随current release；它仍须重验current security fences，并对child全部Model candidates使用该inherited Candidate
-执行16 compatibility validation。
+数据库保证tenant/FK/unique/CAS/lease/transaction/outbox；Rust保证状态机、binding closure、schema、policy、retry、cancel与
+reconcile。Run admission在同一事务冻结完整RunBindingsSnapshot，不在执行时读取dynamic head。child admission只继承parent冻结的exact
+ResourceVersion/Deployment并重验current tenant security fence，不追随active head或GitOps rollout。
 
 ## 19. 可观测性
 
@@ -486,10 +484,10 @@ Run/node ID 不进入 metric label。Trace span 可以携带 opaque IDs，但不
 - terminal output schema failure 不能提交 Succeeded；
 - Artifact output fixture证明Staging/Verified candidate与stage Receipt永远不满足ValueRef；只有owner terminal可以原子产生
   Ready Artifact、ready retention、唯一Output Reference和RunValue，crash/stale/cancel/timeout任一窗口都不存在这些事实的部分可见组合；
-- root admission只读取并锁定18 current InstallationReleaseState，冻结完整02 binding并验证全部Model candidates；任一candidate失败时Run、
-  bindings、quota、Event/Outbox及terminal成功Receipt整事务回滚；
-- child admission逐字段继承parent historical Release/Candidate binding，完全不读current release；它对child全部Model candidates使用inherited
-  Candidate，重验current security fence与historical manifest resolver/runtime/adapter retention，缺失任一项都fail closed；
+- root admission按Receipt→Tenant→Resource锁序冻结完整02 binding并验证全部exact Model bindings；任一binding失败时Run、bindings、quota、
+  Event/Outbox及terminal成功Receipt整事务回滚；
+- child admission逐字段继承parent historical bindings，完全不读current active head；它重验current security fence，缺失任一exact历史
+  ResourceVersion/Deployment时fail closed；
 - 所有 v2 Run 都能在不同 runtime 实例恢复，不存在 volatile 分支。
 
 ## 21. 明确推迟的工作
@@ -503,5 +501,6 @@ Run/node ID 不进入 metric label。Trace span 可以携带 opaque IDs，但不
 
 ## 22. 未决问题
 
-CR-165的root/current与child/inherited historical binding合同仍需与02/05/08/16/17/18共同完成cross-review；关闭前本规范保持Draft且不得作为
-实现输入。public status的精简映射与SSE schema由17定义，不能改变这里的durable first-winner状态机。
+CR-166已统一root current与child inherited exact binding合同，无installation/release中间层。本规范已Reviewed、
+等待Acceptance；durable state、崩溃恢复与parent/child fixture仍待实现。public status的精简映射与SSE schema由17定义，
+不能改变这里的durable first-winner状态机。
