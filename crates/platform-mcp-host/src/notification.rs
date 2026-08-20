@@ -834,7 +834,7 @@ mod tests {
                 tenant_id: id("ten", "1"),
                 receipt_id: id("rcp", "2"),
                 event_id: id("evt", "3"),
-                outbox_id: id("out", "4"),
+                outbox_id: id("obx", "4"),
                 receipt_expires_at: now + Duration::minutes(5),
             },
             tenant_id: id("ten", "1"),

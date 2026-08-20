@@ -1675,7 +1675,7 @@ mod tests {
                 tenant_id: id("ten", "90"),
                 receipt_id: id("rcp", suffix),
                 event_id: id("evt", suffix),
-                outbox_id: id("out", suffix),
+                outbox_id: id("obx", suffix),
                 receipt_expires_at: now + Duration::minutes(5),
             },
             tenant_id: id("ten", "90"),
@@ -1828,7 +1828,7 @@ mod tests {
             7,
             11,
             1,
-            id("sjob", "a0"),
+            id("job", "a0"),
             id("job", "a0"),
         )
         .unwrap();
@@ -1896,7 +1896,7 @@ mod tests {
             7,
             11,
             1,
-            id("sjob", "a1"),
+            id("job", "a1"),
             id("job", "a2"),
         );
         assert!(wrong_job.is_err());
@@ -1945,7 +1945,7 @@ mod tests {
                 worker_process_generation_id: id("wrk", "ab"),
                 receipt_id: id("rcp", "ac"),
                 event_id: id("evt", "ad"),
-                outbox_id: id("out", "ae"),
+                outbox_id: id("obx", "ae"),
                 idempotency_key_digest: sha('a'),
                 request_digest: sha('b'),
                 receipt_expires_at: now + Duration::minutes(5),
@@ -2098,7 +2098,7 @@ mod tests {
                 tenant_id: id("ten", "90"),
                 receipt_id: id("rcp", &format!("a{event_generation}")),
                 event_id: id("evt", &format!("a{event_generation}")),
-                outbox_id: id("out", &format!("a{event_generation}")),
+                outbox_id: id("obx", &format!("a{event_generation}")),
                 receipt_expires_at: now + Duration::minutes(5),
             },
             tenant_id: id("ten", "90"),
