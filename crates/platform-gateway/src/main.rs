@@ -9,6 +9,11 @@ use axum::{
     Router,
 };
 use insight_platform_api::{
+    artifact::{
+        build_artifact_router, view_from_record as artifact_view_from_record, ArtifactApplication,
+        ArtifactApplicationError, ArtifactHttpState, ArtifactViewV1, ReadArtifactIntent,
+        SystemArtifactClock,
+    },
     authentication::{
         authenticate_public_request, AuthenticationError, ExternalPrincipalBindingAuthority,
         PublicAuthenticationState, SystemAuthenticationClock,
@@ -199,6 +204,34 @@ impl OperationApplication for PgOperations {
 
 #[derive(Clone)]
 struct PgRuns(Arc<PgRepository>);
+
+#[derive(Clone)]
+struct PgArtifacts(Arc<PgRepository>);
+
+#[async_trait]
+impl ArtifactApplication for PgArtifacts {
+    async fn read_artifact(
+        &self,
+        intent: ReadArtifactIntent,
+    ) -> Result<ArtifactViewV1, ArtifactApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ArtifactApplicationError::Unavailable);
+        }
+        let snapshot = self
+            .0
+            .load_gateway_artifact(
+                intent.principal.tenant_id,
+                intent.principal.principal_id,
+                intent.principal.principal_kind,
+                intent.artifact_id,
+            )
+            .await
+            .map_err(map_artifact_repository_error)?;
+        let view = artifact_view_from_record(snapshot.artifact, snapshot.content);
+        view.validate()?;
+        Ok(view)
+    }
+}
 
 #[derive(Clone)]
 struct PgTasks(Arc<PgRepository>);
@@ -1594,6 +1627,22 @@ fn map_task_repository_error(error: RepositoryError) -> TaskApplicationError {
     }
 }
 
+fn map_artifact_repository_error(error: RepositoryError) -> ArtifactApplicationError {
+    match error {
+        RepositoryError::PermissionDenied => ArtifactApplicationError::Denied,
+        RepositoryError::NotFound(_) => ArtifactApplicationError::NotFound,
+        RepositoryError::Database(_) | RepositoryError::LeaseExpired => {
+            ArtifactApplicationError::Unavailable
+        }
+        RepositoryError::InvalidInput(_)
+        | RepositoryError::Conflict(_)
+        | RepositoryError::IdempotencyConflict
+        | RepositoryError::QuotaExceeded
+        | RepositoryError::CorruptRow(_)
+        | RepositoryError::StaleFence => ArtifactApplicationError::Internal,
+    }
+}
+
 fn build_router(
     repository: Arc<PgRepository>,
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
@@ -1625,10 +1674,15 @@ fn build_router(
         Arc::new(PgTasks(repository.clone())),
         Arc::new(SystemTaskClock),
     ));
+    let artifact = build_artifact_router(ArtifactHttpState::new(
+        Arc::new(PgArtifacts(repository.clone())),
+        Arc::new(SystemArtifactClock),
+    ));
     let protected = operation
         .merge(resource)
         .merge(run)
         .merge(task)
+        .merge(artifact)
         .route_layer(middleware::from_fn_with_state(
             authentication,
             authenticate_public_request,

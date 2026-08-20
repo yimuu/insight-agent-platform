@@ -2420,6 +2420,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "insight-platform-artifacts",
  "insight-platform-contracts",
  "insight-platform-mcp-host",
  "insight-platform-tasks",

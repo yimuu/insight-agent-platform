@@ -25,6 +25,7 @@ use insight_platform_mcp_host::{
 };
 use std::sync::Arc;
 
+pub mod artifact;
 pub mod authentication;
 pub mod oidc;
 pub mod operation;
