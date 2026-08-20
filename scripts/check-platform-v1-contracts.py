@@ -306,6 +306,15 @@ def check_foundation_surfaces(errors):
     ]
     if any(fragment not in openapi for fragment in task_contract):
         errors.append("public Task OpenAPI contract is incomplete")
+    artifact_contract = [
+        "  /artifacts/{artifact_id}:",
+        "      operationId: getArtifact",
+        "      x-insight-permission: artifact.read",
+        "    ArtifactId:",
+        "    ArtifactViewV1:",
+    ]
+    if any(fragment not in openapi for fragment in artifact_contract):
+        errors.append("public Artifact OpenAPI contract is incomplete")
     path_lines = [
         line for line in openapi.splitlines()
         if line.startswith("  /") and line.endswith(":")
@@ -322,6 +331,7 @@ def check_foundation_surfaces(errors):
         "  /tasks/{task_id}:approve:",
         "  /tasks/{task_id}:reject:",
         "  /tasks/{task_id}:cancel:",
+        "  /artifacts/{artifact_id}:",
         "  /operations/{operation_id}:",
         "  /mcp/oauth/callback:",
     ]:

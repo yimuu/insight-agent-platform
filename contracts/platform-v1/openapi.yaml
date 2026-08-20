@@ -220,6 +220,31 @@ paths:
         "401": {$ref: "#/components/responses/ApiProblem"}
         "403": {$ref: "#/components/responses/ApiProblem"}
         "409": {$ref: "#/components/responses/ApiProblem"}
+  /artifacts/{artifact_id}:
+    get:
+      operationId: getArtifact
+      summary: Read safe Artifact metadata and an exact Ready content reference
+      tags: [Artifacts]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: artifact.read
+      x-insight-idempotency: read_only
+      x-insight-rate-class: control_read
+      x-insight-audit: access_log_only
+      parameters:
+        - $ref: "#/components/parameters/ArtifactId"
+      responses:
+        "200":
+          description: Current Artifact projection; content is present only while the Artifact is Ready.
+          headers:
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ArtifactViewV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /operations/{operation_id}:
     get:
       operationId: getOperation
@@ -404,6 +429,11 @@ components:
       in: path
       required: true
       schema: {$ref: "#/components/schemas/TaskId"}
+    ArtifactId:
+      name: artifact_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/ArtifactId"}
     IfMatch:
       name: If-Match
       in: header
@@ -469,6 +499,9 @@ components:
     TaskId:
       type: string
       pattern: "^(int|apv)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ArtifactId:
+      type: string
+      pattern: "^art_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     DataClassification:
       type: string
       enum: [public, internal, confidential, restricted]
@@ -569,6 +602,25 @@ components:
               properties: {kind: {const: invocation}, invocation_id: {$ref: "#/components/schemas/PlatformResourceId"}}
         deadline: {$ref: "#/components/schemas/UtcTimestamp"}
         responded_at: {oneOf: [{$ref: "#/components/schemas/UtcTimestamp"}, {type: "null"}]}
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    ArtifactViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, artifact_id, purpose, classification, state, version, expected_size_bytes, declared_media_type, verified_media_type, content, retain_until, created_at, updated_at, etag]
+      properties:
+        schema_version: {const: 1}
+        artifact_id: {$ref: "#/components/schemas/ArtifactId"}
+        purpose: {type: string, enum: [authoring_document, interface_contract, typed_plan, package, sbom, backend_binding, model_generation_defaults, run_input, run_output, capability_input, capability_output, context_source, context_derived, mcp_resource, sandbox_input, sandbox_output, diagnostic, export]}
+        classification: {$ref: "#/components/schemas/DataClassification"}
+        state: {type: string, enum: [staging, uploaded, verifying, verified, ready, quarantined, rejected, deleting, deleted, corrupt]}
+        version: {type: integer, minimum: 1}
+        expected_size_bytes: {type: integer, minimum: 1}
+        declared_media_type: {oneOf: [{type: string, minLength: 1, maxLength: 255}, {type: "null"}]}
+        verified_media_type: {oneOf: [{type: string, minLength: 1, maxLength: 255}, {type: "null"}]}
+        content: {oneOf: [{$ref: "#/components/schemas/ArtifactRef"}, {type: "null"}]}
+        retain_until: {$ref: "#/components/schemas/UtcTimestamp"}
         created_at: {$ref: "#/components/schemas/UtcTimestamp"}
         updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
         etag: {type: string, minLength: 1, maxLength: 128}
