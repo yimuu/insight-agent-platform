@@ -3019,12 +3019,6 @@ async fn sandbox_fixture() {
                         WasiArtifactReadRequest,
                     >,
                 >,
-            Arc::clone(&artifact_read_authority)
-                as Arc<
-                    dyn insight_platform_artifacts::ArtifactObjectReadAuthority<
-                        insight_platform_sandbox::MicroVmArtifactReadRequest,
-                    >,
-                >,
             Arc::new(FixtureArtifactUnsealer),
             InstalledArtifactObjectStoreCatalog::new(vec![store]).unwrap(),
             ArtifactBrokerLimits::default(),
