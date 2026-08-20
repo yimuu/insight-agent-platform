@@ -585,11 +585,7 @@ fn discovery_transport_features_allowed(contract: &McpDiscoveryExecutionContract
     let features = &contract.protocol_profile.transport_features;
     match contract.server.transport {
         McpTransportKind::StreamableHttp => {
-            !features.managed_stdio
-                && (features.streamable_http_get || features.streamable_http_sse)
-        }
-        McpTransportKind::ManagedStdio => {
-            features.managed_stdio && !features.streamable_http_get && !features.streamable_http_sse
+            features.streamable_http_get || features.streamable_http_sse
         }
     }
 }

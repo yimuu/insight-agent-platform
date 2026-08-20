@@ -422,8 +422,7 @@
     "client_secret_basic"
   ],
   "mcp_transport_kinds": [
-    "streamable_http",
-    "managed_stdio"
+    "streamable_http"
   ],
   "model_identity_stabilities": [
     "pinned",
@@ -1230,8 +1229,7 @@
     "python_module",
     "node_module",
     "wasm_export",
-    "reviewed_executable",
-    "managed_mcp_server"
+    "reviewed_executable"
   ],
   "sandbox_isolation_classes": [
     {
@@ -1241,18 +1239,13 @@
     {
       "name": "sandboxed_container",
       "security_rank": 2
-    },
-    {
-      "name": "micro_vm",
-      "security_rank": 3
     }
   ],
   "sandbox_runtime_families": [
     "python",
     "node_js",
     "wasm_wasi",
-    "reviewed_shell",
-    "managed_mcp_server"
+    "reviewed_shell"
   ],
   "scheduler_priorities": [
     "low",

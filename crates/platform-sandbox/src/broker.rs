@@ -222,6 +222,7 @@ pub trait WasiGrantRevoker: Send + Sync {
 /// Provider-side revocation command for one exact microVM physical attempt. The Executor
 /// generation is the PostgreSQL lease owner; the Provider generation and sandbox identity bind
 /// the independently deployed VMM process and jail that performed cleanup.
+#[cfg(any())]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MicroVmSandboxWorkloadKind {
@@ -229,6 +230,7 @@ pub enum MicroVmSandboxWorkloadKind {
     ManagedMcpSubscriptionSession,
 }
 
+#[cfg(any())]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RevokeMicroVmSandboxGrants {
@@ -243,6 +245,7 @@ pub struct RevokeMicroVmSandboxGrants {
     pub lease_generation: u64,
 }
 
+#[cfg(any())]
 impl RevokeMicroVmSandboxGrants {
     pub fn validate(&self) -> Result<(), MicroVmGrantRevocationError> {
         if self.tenant_id.kind() != ResourceKind::Tenant
@@ -259,18 +262,21 @@ impl RevokeMicroVmSandboxGrants {
     }
 }
 
+#[cfg(any())]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MicroVmGrantRevocationEvidence {
     pub evidence_digest: Sha256Digest,
 }
 
+#[cfg(any())]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicroVmGrantRevocationError {
     Unavailable,
     Rejected,
 }
 
+#[cfg(any())]
 #[async_trait]
 pub trait MicroVmGrantRevoker: Send + Sync {
     /// Repeated calls for the exact physical attempt are idempotent. The authority must revalidate
@@ -282,6 +288,7 @@ pub trait MicroVmGrantRevoker: Send + Sync {
     ) -> Result<MicroVmGrantRevocationEvidence, MicroVmGrantRevocationError>;
 }
 
+#[cfg(any())]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MicroVmArtifactReadPurpose {
@@ -289,6 +296,7 @@ pub enum MicroVmArtifactReadPurpose {
     InputValue,
 }
 
+#[cfg(any())]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MicroVmArtifactReadRequest {
@@ -307,6 +315,7 @@ pub struct MicroVmArtifactReadRequest {
     pub deadline: DateTime<Utc>,
 }
 
+#[cfg(any())]
 impl MicroVmArtifactReadRequest {
     pub fn validate(&self) -> Result<(), MicroVmArtifactBrokerError> {
         let grant_shape_valid = match (self.workload_kind, self.purpose) {
@@ -345,6 +354,7 @@ impl MicroVmArtifactReadRequest {
     }
 }
 
+#[cfg(any())]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicroVmArtifactBrokerError {
     Unavailable,
@@ -354,6 +364,7 @@ pub enum MicroVmArtifactBrokerError {
     TooLarge,
 }
 
+#[cfg(any())]
 #[async_trait]
 pub trait MicroVmArtifactBroker: Send + Sync {
     /// Returns bytes for one exact published package or active input grant. Implementations may

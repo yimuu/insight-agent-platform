@@ -702,8 +702,6 @@ authoring_spec!(SandboxRuntimeResourceSpec {
     runtime_family: SandboxRuntimeFamily,
     runtime_version: String,
     image_or_module_digest: Sha256Digest,
-    guest_kernel_digest: Option<Sha256Digest>,
-    guest_agent_digest: Sha256Digest,
     supported_isolation: Vec<SandboxIsolationClass>,
     abi: SandboxAbiVersion,
     builtin_modules_manifest_digest: Sha256Digest,
@@ -937,10 +935,6 @@ impl ResourceDocument {
                         .supported_isolation
                         .windows(2)
                         .all(|pair| pair[0].as_str() < pair[1].as_str())
-                    || spec
-                        .supported_isolation
-                        .contains(&SandboxIsolationClass::MicroVm)
-                        != spec.guest_kernel_digest.is_some()
                 {
                     return Err(ResourceContractError::InvalidSandboxContract);
                 }
@@ -969,11 +963,6 @@ impl ResourceDocument {
                 if !is_relative_path(&spec.entrypoint)
                     || (spec.entrypoint_kind == SandboxEntrypointKind::ReviewedExecutable
                         && spec.trust_class != CodeTrustClass::ReviewedPublished)
-                    || (spec.entrypoint_kind == SandboxEntrypointKind::ManagedMcpServer
-                        && !matches!(
-                            spec.trust_class,
-                            CodeTrustClass::BuiltIn | CodeTrustClass::ReviewedPublished
-                        ))
                 {
                     return Err(ResourceContractError::InvalidSandboxContract);
                 }

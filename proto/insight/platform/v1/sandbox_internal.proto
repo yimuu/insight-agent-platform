@@ -11,20 +11,6 @@ service SandboxExecutorAuthorityService {
   rpc HeartbeatSandboxExecution(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
-// Managed MCP subscription sessions have a distinct logical lifecycle and claim discriminator.
-// Keeping their authority on a separate service prevents an ordinary Sandbox Executor from
-// decoding or committing long-lived session payloads while both roles still share work_class.
-service SandboxManagedMcpSessionAuthorityService {
-  rpc ClaimManagedMcpSandboxSessions(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc CommitManagedMcpSandboxSessionPhase(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc CommitManagedMcpSandboxSessionReady(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc HeartbeatManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc CommitManagedMcpSandboxSessionLost(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc ScanExpiredManagedMcpSandboxSessionLeases(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc ProveManagedMcpSandboxSessionProcessAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc RecoverExpiredManagedMcpSandboxSessionLease(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-}
-
 service SandboxExecutorBrokerService {
   rpc ReadExactArtifact(ClosedSandboxEnvelope) returns (stream SandboxArtifactChunkEnvelope);
   rpc ValidateWasiValue(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
@@ -32,58 +18,10 @@ service SandboxExecutorBrokerService {
   rpc ProveSandboxProcessGenerationAbsent(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
-// Provider-only broker authority. It is a separate service so the privileged microVM Provider
-// cannot call Executor value-validation or process-isolation methods, and the Executor cannot
-// revoke grants while impersonating a physical VMM cleanup.
-service SandboxMicroVmBrokerService {
-  rpc ReadExactMicroVmArtifact(ClosedSandboxEnvelope) returns (stream SandboxArtifactChunkEnvelope);
-  rpc RevokeMicroVmGrants(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-}
-
-// Egress-only durable authorization for one-time Managed MCP Secret delivery. Secret material
-// never crosses this service: reserve and commit carry only exact Job/grant fences and
-// credential-free evidence.
-service SandboxSecretDeliveryAuthorityService {
-  rpc ReserveManagedMcpSandboxSecretDelivery(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc CommitManagedMcpSandboxSecretDelivery(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-}
-
-// Node-local/sidecar isolation-provider boundary. The Executor owns the durable Job lease and
-// phase commits; this service owns only the concrete microVM lifecycle. All calls for one sandbox
-// identity must be routed to the same provider instance rather than a load-balanced ClusterIP.
-service SandboxIsolationProviderService {
-  rpc PrepareSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc StartSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc CollectSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc TerminateSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc DestroySandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc AbortSandbox(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc RecoverExpiredSandboxLease(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-}
-
-// Long-lived Managed MCP sessions use a distinct provider lifecycle. They cannot be represented
-// as one-shot Sandbox executions because initialization must remain notification-disabled until
-// the Controller has durably committed Ready. Calls are routed to the same node-local Provider
-// instance and authorized only for the dedicated microVM Executor workload.
-service SandboxManagedMcpSessionProviderService {
-  rpc PrepareManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc InitializeManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc ActivateManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc ObserveExactManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc DestroyExactManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-  rpc RecoverExpiredManagedMcpSandboxSession(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-}
-
 // Executor-only registration endpoint. The attestor observes node/runtime identity on behalf of
 // the Executor; the Executor never talks to Kubernetes or the container runtime directly.
 service SandboxExecutorProcessRegistrationService {
   rpc RegisterWasiExecutorProcessGeneration(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
-}
-
-// Separate service name preserves exact method-level mTLS authorization for the microVM Executor
-// while reusing the same node-local attestation authority and closed registration payload.
-service SandboxMicroVmExecutorProcessRegistrationService {
-  rpc RegisterMicroVmExecutorProcessGeneration(ClosedSandboxEnvelope) returns (ClosedSandboxEnvelope);
 }
 
 // Controller-only verification/recovery endpoint on the independently deployed attestor.

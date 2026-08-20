@@ -2,7 +2,7 @@ use crate::{
     canonical_digest, validate_capability_credential_requirements, ArtifactRef,
     CanonicalHttpEndpoint, CapabilityEndpointScheme, ExactDeploymentRef, ExactSecretBindingRef,
     ExactVersionRef, McpOAuthClientAuthenticationKind, McpTransportKind, ResourceId, ResourceKind,
-    SandboxIsolationClass, SecretPurpose, SecretResolutionPolicy, Sha256Digest,
+    SecretPurpose, SecretResolutionPolicy, Sha256Digest,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -213,7 +213,6 @@ pub struct McpTransportFeatures {
     pub streamable_http_sse: bool,
     pub resumable_stream: bool,
     pub session_affinity: bool,
-    pub managed_stdio: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,7 +433,7 @@ pub fn validate_mcp_server_contract(
     }
     limits.validate()?;
     match transport {
-        McpTransportKind::StreamableHttp | McpTransportKind::ManagedStdio => Ok(()),
+        McpTransportKind::StreamableHttp => Ok(()),
     }
 }
 
@@ -521,22 +520,12 @@ pub enum McpTransportBinding {
         network_policy: ExactVersionRef,
         tls_policy: ExactVersionRef,
     },
-    ManagedStdio {
-        package: ExactVersionRef,
-        runtime: ExactVersionRef,
-        profile: ExactVersionRef,
-        isolation: SandboxIsolationClass,
-        isolation_policy: ExactVersionRef,
-        resource_policy: ExactVersionRef,
-        artifact_io_policy: ExactVersionRef,
-    },
 }
 
 impl McpTransportBinding {
     pub const fn kind(&self) -> McpTransportKind {
         match self {
             Self::StreamableHttp { .. } => McpTransportKind::StreamableHttp,
-            Self::ManagedStdio { .. } => McpTransportKind::ManagedStdio,
         }
     }
 
@@ -563,32 +552,6 @@ impl McpTransportBinding {
                 }
                 Ok(())
             }
-            Self::ManagedStdio {
-                package,
-                runtime,
-                profile,
-                isolation,
-                isolation_policy,
-                resource_policy,
-                artifact_io_policy,
-            } => {
-                validate_exact(package, ResourceKind::SandboxPackageRevision)?;
-                validate_exact(runtime, ResourceKind::SandboxRuntimeRevision)?;
-                validate_exact(profile, ResourceKind::SandboxProfileRevision)?;
-                if *isolation == SandboxIsolationClass::Wasm {
-                    return Err(McpContractError::InvalidTransport);
-                }
-                for policy in [isolation_policy, resource_policy, artifact_io_policy] {
-                    validate_policy(policy)?;
-                }
-                if isolation_policy == resource_policy
-                    || isolation_policy == artifact_io_policy
-                    || resource_policy == artifact_io_policy
-                {
-                    return Err(McpContractError::InvalidTransport);
-                }
-                Ok(())
-            }
         }
     }
 
@@ -599,22 +562,6 @@ impl McpTransportBinding {
                 tls_policy,
                 ..
             } => vec![network_policy, tls_policy],
-            Self::ManagedStdio {
-                package,
-                runtime,
-                profile,
-                isolation_policy,
-                resource_policy,
-                artifact_io_policy,
-                ..
-            } => vec![
-                package,
-                runtime,
-                profile,
-                isolation_policy,
-                resource_policy,
-                artifact_io_policy,
-            ],
         }
     }
 }
@@ -840,7 +787,6 @@ mod tests {
                 streamable_http_sse: true,
                 resumable_stream: false,
                 session_affinity: true,
-                managed_stdio: false,
             },
             client_capabilities: McpClientCapabilities {
                 elicitation_form: true,

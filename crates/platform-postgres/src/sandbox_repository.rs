@@ -8,7 +8,7 @@ use crate::{
         load_capability_invocation, load_enabled_exact_published_version,
         load_exact_capability_interface_spec, validate_capability_value_against_schema,
     },
-    mcp_repository::{load_managed_mcp_sandbox_session_job, resolve_mcp_execution_contract},
+    mcp_repository::resolve_mcp_execution_contract,
     repository::{
         append_command_event, append_scheduler_event, begin_read_only_repeatable,
         claim_command_receipt, decode_deployment_closure, decode_versioned_payload, job_from_row,
@@ -48,16 +48,10 @@ use insight_platform_mcp_host::{
 use insight_platform_sandbox::{
     decide_accept, decide_advance_phase, decide_begin_execution, decide_execution_outcome,
     decide_expired_lease_recovery, decide_prestart_control, AcceptSandboxExecution,
-    AuthorizedManagedMcpSandboxSecretDelivery, ClaimSandboxJobs, ClaimedSandboxJob,
-    CommitSandboxOutcome, CommitSandboxPhase, ExpiredSandboxLease, HeartbeatSandboxExecution,
-    ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryAuthority,
-    ManagedMcpSandboxSecretDeliveryError, ManagedMcpSandboxSecretDeliveryEvidence,
-    ManagedMcpSandboxSecretDeliveryRequest, ManagedMcpSandboxSecretReservationOutcome,
-    ManagedMcpSandboxSessionRequest, MergeSandboxCapabilityOutcome, MicroVmArtifactReadPurpose,
-    MicroVmArtifactReadRequest, MicroVmGrantRevocationError, MicroVmGrantRevocationEvidence,
-    MicroVmGrantRevoker, MicroVmSandboxWorkloadKind, PendingSandboxCapabilityOutcome,
-    RecoverExpiredSandboxLease, RecoverSandboxControlSignals, ResolveSandboxControlEvent,
-    RevokeMicroVmSandboxGrants, RevokeWasiSandboxGrants, SandboxClaimAuthority,
+    ClaimSandboxJobs, ClaimedSandboxJob, CommitSandboxOutcome, CommitSandboxPhase,
+    ExpiredSandboxLease, HeartbeatSandboxExecution, MergeSandboxCapabilityOutcome,
+    PendingSandboxCapabilityOutcome, RecoverExpiredSandboxLease, RecoverSandboxControlSignals,
+    ResolveSandboxControlEvent, RevokeWasiSandboxGrants, SandboxClaimAuthority,
     SandboxClaimFailure, SandboxCommandLimits, SandboxControlAuthority, SandboxControlScanCursor,
     SandboxControlSignalPage, SandboxControlSignalSource, SandboxExecutionAuthority,
     SandboxExecutionJobPayload, SandboxExecutionOutcome, SandboxExecutionPolicyClosure,
@@ -80,10 +74,12 @@ fn detached_sandbox_source_kind(source: &SandboxExecutionSource) -> DetachedSand
         SandboxExecutionSource::SandboxCapability { .. } => {
             DetachedSandboxSourceKind::SandboxCapability
         }
+        #[cfg(any())]
         SandboxExecutionSource::ManagedMcp { .. } => DetachedSandboxSourceKind::ManagedMcp,
     }
 }
 
+#[cfg(any())]
 async fn verify_managed_mcp_detached_continuation(
     transaction: &mut Transaction<'_, Postgres>,
     request: &SandboxExecutionRequest,
@@ -216,6 +212,7 @@ async fn verify_managed_mcp_detached_continuation(
     Ok(())
 }
 
+#[cfg(any())]
 fn same_managed_mcp_operation_lineage(
     previous: &McpLogicalOperationRequest,
     next: &McpLogicalOperationRequest,
@@ -228,6 +225,7 @@ fn same_managed_mcp_operation_lineage(
     normalized == *next
 }
 
+#[cfg(any())]
 fn same_encrypted_mcp_state(
     stored: &insight_platform_invocations::EncryptedRemoteState,
     protocol: &insight_platform_mcp_host::EncryptedMcpState,
@@ -241,6 +239,7 @@ fn same_encrypted_mcp_state(
             .is_ok_and(|ciphertext| ciphertext == protocol.ciphertext)
 }
 
+#[cfg(any())]
 async fn managed_mcp_elicitation_response(
     transaction: &mut Transaction<'_, Postgres>,
     invocation: &CapabilityInvocationRecord,
@@ -401,6 +400,7 @@ impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for PgRepository {
 }
 
 #[async_trait::async_trait]
+#[cfg(any())]
 impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
     async fn authorize_object_read(
         &self,
@@ -616,6 +616,7 @@ impl ArtifactObjectReadAuthority<MicroVmArtifactReadRequest> for PgRepository {
 }
 
 #[async_trait::async_trait]
+#[cfg(any())]
 impl ManagedMcpSandboxSecretDeliveryAuthority for PgRepository {
     async fn reserve_managed_mcp_sandbox_secret_delivery(
         &self,
@@ -930,6 +931,7 @@ impl ManagedMcpSandboxSecretDeliveryAuthority for PgRepository {
     }
 }
 
+#[cfg(any())]
 async fn authorize_managed_mcp_secret_delivery(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ManagedMcpSandboxSecretDeliveryRequest,
@@ -979,6 +981,7 @@ async fn authorize_managed_mcp_secret_delivery(
     .await
 }
 
+#[cfg(any())]
 async fn load_managed_mcp_secret_delivery_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ManagedMcpSandboxSecretDeliveryRequest,
@@ -1019,6 +1022,7 @@ async fn load_managed_mcp_secret_delivery_receipt(
     .transpose()
 }
 
+#[cfg(any())]
 fn classify_managed_mcp_secret_delivery_repository_error(
     error: RepositoryError,
 ) -> ManagedMcpSandboxSecretDeliveryError {
@@ -1496,6 +1500,7 @@ impl WasiGrantRevoker for PgRepository {
 }
 
 #[async_trait::async_trait]
+#[cfg(any())]
 impl MicroVmGrantRevoker for PgRepository {
     async fn revoke_exact(
         &self,
@@ -1586,6 +1591,7 @@ impl MicroVmGrantRevoker for PgRepository {
     }
 }
 
+#[cfg(any())]
 async fn revoke_managed_mcp_session_grants(
     repository: &PgRepository,
     request: RevokeMicroVmSandboxGrants,
@@ -1688,6 +1694,7 @@ fn classify_wasi_grant_repository_error(error: RepositoryError) -> WasiGrantRevo
     }
 }
 
+#[cfg(any())]
 fn classify_micro_vm_grant_repository_error(error: RepositoryError) -> MicroVmGrantRevocationError {
     match error {
         RepositoryError::Database(_) => MicroVmGrantRevocationError::Unavailable,
@@ -2446,27 +2453,14 @@ impl PgRepository {
             self.invocation_limits(),
         )?;
         if let Some(output) = decision.output.as_ref() {
-            if matches!(
-                source.payload.outcome,
-                Some(SandboxExecutionOutcome::ManagedMcp(_))
-            ) {
-                insert_capability_value_and_reference(
-                    &mut transaction,
-                    &decision.invocation,
-                    output,
-                    database_now,
-                )
-                .await?;
-            } else {
-                insert_sandbox_capability_value(
-                    &mut transaction,
-                    &decision.invocation,
-                    output,
-                    &source.payload,
-                    database_now,
-                )
-                .await?;
-            }
+            insert_sandbox_capability_value(
+                &mut transaction,
+                &decision.invocation,
+                output,
+                &source.payload,
+                database_now,
+            )
+            .await?;
         }
         if let Some(input) = decision.input_request.as_ref() {
             insert_capability_input_task(
@@ -2998,13 +2992,6 @@ impl SandboxGatewayAuthority for PgRepository {
             ),
             None => None,
         };
-        verify_managed_mcp_detached_continuation(
-            &mut transaction,
-            &command.request,
-            &invocation,
-            previous_sandbox.as_ref(),
-        )
-        .await?;
         lock_and_persist_artifact_grants(&mut transaction, &command, database_now).await?;
         lock_secret_grants(&mut transaction, &command).await?;
         reserve_sandbox_quota(&mut transaction, &command, database_now).await?;
@@ -3781,6 +3768,7 @@ fn normalize_sandbox_capability_outcome(
                 },
             ))
         }
+        #[cfg(any())]
         Some(SandboxExecutionOutcome::ManagedMcp(output)) => match &output.outcome {
             DispatchOutcome::Completed(completed) => {
                 Ok(DetachedCapabilityJobOutcome::Completed(completed.clone()))
@@ -4134,7 +4122,8 @@ async fn verify_sandbox_exact_bindings(
             "Sandbox exact Capability Deployment closure",
         ));
     }
-    let mut expected_secret_bindings = closure.secret_bindings.iter().collect::<Vec<_>>();
+    let expected_secret_bindings = closure.secret_bindings.iter().collect::<Vec<_>>();
+    #[cfg(any())]
     if let SandboxExecutionSource::ManagedMcp {
         capability_interface_revision,
         capability_interface,
@@ -4260,6 +4249,7 @@ async fn verify_sandbox_exact_bindings(
     .await
 }
 
+#[cfg(any())]
 pub(crate) async fn verify_managed_mcp_session_sandbox_bindings(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ManagedMcpSandboxSessionRequest,
@@ -4411,6 +4401,7 @@ async fn lock_and_persist_artifact_grants(
     .await
 }
 
+#[cfg(any())]
 pub(crate) async fn lock_and_persist_managed_mcp_session_artifact_grants(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ManagedMcpSandboxSessionRequest,
@@ -4564,6 +4555,7 @@ async fn lock_secret_grants(
     .await
 }
 
+#[cfg(any())]
 pub(crate) async fn lock_managed_mcp_session_secret_grants(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ManagedMcpSandboxSessionRequest,
@@ -4627,6 +4619,7 @@ async fn reserve_sandbox_quota(
     .await
 }
 
+#[cfg(any())]
 pub(crate) async fn reserve_managed_mcp_session_quota(
     transaction: &mut Transaction<'_, Postgres>,
     request: &ManagedMcpSandboxSessionRequest,
@@ -5546,6 +5539,7 @@ async fn settle_sandbox_quota(
         })?;
     let usage = match outcome {
         Some(SandboxExecutionOutcome::Completed(output)) => Some(&output.usage),
+        #[cfg(any())]
         Some(SandboxExecutionOutcome::ManagedMcp(output)) => Some(&output.usage),
         Some(
             SandboxExecutionOutcome::Failed(_)
@@ -5567,6 +5561,7 @@ async fn settle_sandbox_quota(
     .await
 }
 
+#[cfg(any())]
 pub(crate) async fn settle_managed_mcp_session_quota(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
@@ -5591,6 +5586,7 @@ pub(crate) async fn settle_managed_mcp_session_quota(
     .await
 }
 
+#[cfg(any())]
 pub(crate) async fn settle_unstarted_managed_mcp_session_quota(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,

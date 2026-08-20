@@ -253,6 +253,7 @@ fn streamable_http_request(
 
 /// Broker request for managed stdio. It contains exact immutable package/runtime/policy identities
 /// and protocol data only; there is no executable path, shell string, PID, namespace or host path.
+#[cfg(any())]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpManagedRunnerRequest {
@@ -297,6 +298,7 @@ pub struct McpManagedRunnerRequest {
     pub request_timeout_milliseconds: u64,
 }
 
+#[cfg(any())]
 impl McpManagedRunnerRequest {
     /// Builds the exact post-claim Runner request. The logical operation is frozen at Sandbox
     /// admission; WorkerProcessGeneration and lease generation come only from the Sandbox claim.
@@ -380,6 +382,7 @@ impl McpManagedRunnerRequest {
     }
 }
 
+#[cfg(any())]
 #[async_trait]
 pub trait ManagedMcpRunnerBroker: Send + Sync {
     async fn execute(
@@ -388,16 +391,19 @@ pub trait ManagedMcpRunnerBroker: Send + Sync {
     ) -> Result<McpOperationOutcome, McpTransportFailure>;
 }
 
+#[cfg(any())]
 pub struct ManagedStdioMcpTransport {
     broker: Arc<dyn ManagedMcpRunnerBroker>,
 }
 
+#[cfg(any())]
 impl ManagedStdioMcpTransport {
     pub fn new(broker: Arc<dyn ManagedMcpRunnerBroker>) -> Self {
         Self { broker }
     }
 }
 
+#[cfg(any())]
 #[async_trait]
 impl McpHostTransport for ManagedStdioMcpTransport {
     fn kind(&self) -> McpTransportKind {

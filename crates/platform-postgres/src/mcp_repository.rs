@@ -7,13 +7,6 @@ use crate::repository::{
     validate_exact_secret_bindings_at_creation, PgRegistryTransaction, PgRepository,
     RepositoryError, ResourceRecord, TaskRecord, TypedPayload, MAX_JOB_LEASE_MILLISECONDS,
 };
-use crate::sandbox_repository::{
-    claim_sandbox_worker_receipt, lock_and_persist_managed_mcp_session_artifact_grants,
-    lock_managed_mcp_session_secret_grants, release_and_confirm_sandbox_artifact_grants,
-    reserve_managed_mcp_session_quota, settle_managed_mcp_session_quota,
-    settle_unstarted_managed_mcp_session_quota, terminalize_sandbox_worker_receipt,
-    verify_managed_mcp_session_sandbox_bindings,
-};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_artifacts::ArtifactReferenceSnapshot;
@@ -65,23 +58,6 @@ use insight_platform_mcp_host::{
     ResolveMcpDiscoveryAttempt, ResolvedMcpDiscoveryExecution, ResolvedMcpOAuthAuthorizationStart,
     ResolvedMcpSubscriptionExecution, SaveMcpSubscriptionSession,
     TransitionMcpAuthorizationBinding, WakeMcpSubscriptionReconcile, MCP_OAUTH_PKCE_SECRET_PURPOSE,
-};
-use insight_platform_sandbox::{
-    decide_accept_managed_mcp_sandbox_session, decide_expired_managed_mcp_sandbox_session_lease,
-    decide_managed_mcp_sandbox_session_heartbeat, decide_managed_mcp_sandbox_session_lost,
-    decide_managed_mcp_sandbox_session_phase, decide_managed_mcp_sandbox_session_ready,
-    AcceptManagedMcpSandboxSession, AcceptedManagedMcpSandboxSession, ClaimSandboxJobs,
-    ClaimedManagedMcpSandboxSession, CommitManagedMcpSandboxSessionLost,
-    CommitManagedMcpSandboxSessionPhase, CommitManagedMcpSandboxSessionReady,
-    ExpiredManagedMcpSandboxSessionLease, ExpiredManagedMcpSandboxSessionLeasePage,
-    HeartbeatSandboxExecution, ManagedMcpSandboxSessionClaimAuthority,
-    ManagedMcpSandboxSessionExecutionAuthority, ManagedMcpSandboxSessionGatewayAuthority,
-    ManagedMcpSandboxSessionJobPayload, ManagedMcpSandboxSessionLeaseRecoveryAction,
-    ManagedMcpSandboxSessionLeaseRecoveryDisposition, ManagedMcpSandboxSessionLeaseRecoveryResult,
-    ManagedMcpSandboxSessionPhaseDecision, ManagedMcpSandboxSessionRecoveryAuthority,
-    ManagedMcpSandboxSessionRecoveryCursor, ManagedMcpSandboxSessionRecoveryFailure,
-    RecoverExpiredManagedMcpSandboxSessionLease, SandboxClaimFailure, SandboxCommandLimits,
-    SandboxJobPayload,
 };
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
@@ -1983,6 +1959,7 @@ impl McpSubscriptionTransportTerminationAuthority for PgRepository {
 }
 
 #[async_trait]
+#[cfg(any())]
 impl ManagedMcpSandboxSessionGatewayAuthority for PgRepository {
     type Error = RepositoryError;
 
@@ -1995,6 +1972,7 @@ impl ManagedMcpSandboxSessionGatewayAuthority for PgRepository {
 }
 
 #[async_trait]
+#[cfg(any())]
 impl ManagedMcpSandboxSessionClaimAuthority for PgRepository {
     async fn claim_managed_mcp_sandbox_sessions(
         &self,
@@ -2007,6 +1985,7 @@ impl ManagedMcpSandboxSessionClaimAuthority for PgRepository {
 }
 
 #[async_trait]
+#[cfg(any())]
 impl ManagedMcpSandboxSessionExecutionAuthority for PgRepository {
     type Error = RepositoryError;
 
@@ -2040,6 +2019,7 @@ impl ManagedMcpSandboxSessionExecutionAuthority for PgRepository {
 }
 
 #[async_trait]
+#[cfg(any())]
 impl ManagedMcpSandboxSessionRecoveryAuthority for PgRepository {
     async fn scan_expired_managed_mcp_sandbox_session_leases(
         &self,
@@ -2064,6 +2044,7 @@ impl ManagedMcpSandboxSessionRecoveryAuthority for PgRepository {
     }
 }
 
+#[cfg(any())]
 fn map_managed_mcp_sandbox_claim_failure(failure: RepositoryError) -> SandboxClaimFailure {
     match failure {
         RepositoryError::Database(_) => SandboxClaimFailure::Unavailable,
@@ -2079,6 +2060,7 @@ fn map_managed_mcp_sandbox_claim_failure(failure: RepositoryError) -> SandboxCla
     }
 }
 
+#[cfg(any())]
 fn map_managed_mcp_sandbox_recovery_failure(
     failure: RepositoryError,
 ) -> ManagedMcpSandboxSessionRecoveryFailure {
@@ -4515,6 +4497,7 @@ impl PgRegistryTransaction {
 impl PgRepository {
     /// Atomically parks one logical MCP subscription Job and admits its exact-generation
     /// physical Sandbox Job. No executor request is emitted before this transaction commits.
+    #[cfg(any())]
     pub async fn accept_managed_mcp_sandbox_session(
         &self,
         command: AcceptManagedMcpSandboxSession,
@@ -4728,6 +4711,7 @@ impl PgRepository {
     /// Claims only the physical Jobs created by Managed MCP subscription admission. The logical
     /// subscription and its parked MCP Job are locked first, so a worker can never lease an
     /// orphaned or superseded session generation.
+    #[cfg(any())]
     pub async fn scan_expired_managed_mcp_sandbox_session_leases(
         &self,
         command: insight_platform_sandbox::ScanExpiredManagedMcpSandboxSessionLeases,
@@ -4888,6 +4872,7 @@ impl PgRepository {
         })
     }
 
+    #[cfg(any())]
     pub async fn claim_managed_mcp_sandbox_sessions(
         &self,
         command: ClaimSandboxJobs,
@@ -5046,6 +5031,7 @@ impl PgRepository {
         Ok(claimed)
     }
 
+    #[cfg(any())]
     pub async fn commit_managed_mcp_sandbox_session_phase(
         &self,
         command: CommitManagedMcpSandboxSessionPhase,
@@ -5145,6 +5131,7 @@ impl PgRepository {
     /// Commits the credential-free prepared session handle together with the logical Ready state
     /// and physical Running state. The caller may activate notification delivery only after this
     /// transaction returns successfully.
+    #[cfg(any())]
     pub async fn commit_managed_mcp_sandbox_session_ready(
         &self,
         command: CommitManagedMcpSandboxSessionReady,
@@ -5235,6 +5222,7 @@ impl PgRepository {
     /// Renews the exact physical Managed-session Job without creating an audit event. The logical
     /// subscription is locked first so a concurrent terminal/session-loss transition remains the
     /// single first winner across both lifecycles.
+    #[cfg(any())]
     pub async fn heartbeat_managed_mcp_sandbox_session(
         &self,
         command: HeartbeatSandboxExecution,
@@ -5298,6 +5286,7 @@ impl PgRepository {
         Ok(decision)
     }
 
+    #[cfg(any())]
     pub async fn commit_managed_mcp_sandbox_session_lost(
         &self,
         command: CommitManagedMcpSandboxSessionLost,
@@ -5447,6 +5436,7 @@ impl PgRepository {
         Ok(CommandOutcome::Applied(decision))
     }
 
+    #[cfg(any())]
     pub async fn recover_expired_managed_mcp_sandbox_session_lease(
         &self,
         command: RecoverExpiredManagedMcpSandboxSessionLease,
@@ -6896,6 +6886,7 @@ async fn load_mcp_subscription_job(
     })
 }
 
+#[cfg(any())]
 pub(crate) async fn load_managed_mcp_sandbox_session_job(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
@@ -6965,6 +6956,7 @@ pub(crate) async fn load_managed_mcp_sandbox_session_job(
     Ok((job, *payload, usage_reservation_id))
 }
 
+#[cfg(any())]
 async fn load_managed_mcp_sandbox_session_decision(
     transaction: &mut Transaction<'_, Postgres>,
     identity: &insight_platform_mcp_host::ManagedMcpSandboxSessionIdentity,
@@ -7017,6 +7009,7 @@ async fn load_managed_mcp_sandbox_session_decision(
     })
 }
 
+#[cfg(any())]
 async fn persist_managed_mcp_sandbox_claim(
     transaction: &mut Transaction<'_, Postgres>,
     current: &JobProjection,
@@ -7063,6 +7056,7 @@ async fn persist_managed_mcp_sandbox_claim(
     Ok(())
 }
 
+#[cfg(any())]
 async fn update_managed_mcp_sandbox_session_job(
     transaction: &mut Transaction<'_, Postgres>,
     current: &JobProjection,
@@ -7128,6 +7122,7 @@ async fn update_managed_mcp_sandbox_session_job(
     Ok(())
 }
 
+#[cfg(any())]
 async fn update_requeued_managed_mcp_sandbox_session_job(
     transaction: &mut Transaction<'_, Postgres>,
     current: &JobProjection,
@@ -7179,6 +7174,7 @@ async fn update_requeued_managed_mcp_sandbox_session_job(
     Ok(())
 }
 
+#[cfg(any())]
 async fn update_terminal_managed_mcp_sandbox_session_job(
     transaction: &mut Transaction<'_, Postgres>,
     current: &JobProjection,
@@ -7236,6 +7232,7 @@ async fn update_terminal_managed_mcp_sandbox_session_job(
     Ok(())
 }
 
+#[cfg(any())]
 async fn append_managed_mcp_sandbox_session_event(
     transaction: &mut Transaction<'_, Postgres>,
     audit: &insight_platform_sandbox::SandboxWorkerAudit,
@@ -7275,6 +7272,7 @@ async fn append_managed_mcp_sandbox_session_event(
     .await
 }
 
+#[cfg(any())]
 fn managed_mcp_sandbox_recovery_result(
     command: &RecoverExpiredManagedMcpSandboxSessionLease,
 ) -> ManagedMcpSandboxSessionLeaseRecoveryResult {
@@ -7298,6 +7296,7 @@ fn managed_mcp_sandbox_recovery_result(
     }
 }
 
+#[cfg(any())]
 async fn claim_managed_mcp_sandbox_recovery_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     command: &RecoverExpiredManagedMcpSandboxSessionLease,
@@ -7383,6 +7382,7 @@ async fn claim_managed_mcp_sandbox_recovery_receipt(
     Ok(true)
 }
 
+#[cfg(any())]
 async fn terminalize_managed_mcp_sandbox_recovery_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     command: &RecoverExpiredManagedMcpSandboxSessionLease,
@@ -7417,6 +7417,7 @@ async fn terminalize_managed_mcp_sandbox_recovery_receipt(
     Ok(())
 }
 
+#[cfg(any())]
 async fn append_managed_mcp_sandbox_recovery_event(
     transaction: &mut Transaction<'_, Postgres>,
     command: &RecoverExpiredManagedMcpSandboxSessionLease,
@@ -7465,6 +7466,7 @@ async fn append_managed_mcp_sandbox_recovery_event(
     .await
 }
 
+#[cfg(any())]
 fn require_managed_mcp_sandbox_session_replay(
     current: &McpSubscriptionRecord,
     physical_job: &JobProjection,
@@ -7495,6 +7497,7 @@ fn require_managed_mcp_sandbox_session_replay(
     Ok(())
 }
 
+#[cfg(any())]
 fn require_managed_mcp_sandbox_session_phase_replay(
     decision: &ManagedMcpSandboxSessionPhaseDecision,
     command: &CommitManagedMcpSandboxSessionPhase,
@@ -7534,6 +7537,7 @@ fn require_managed_mcp_sandbox_session_phase_replay(
     Ok(())
 }
 
+#[cfg(any())]
 fn require_managed_mcp_sandbox_session_ready_replay(
     decision: &ManagedMcpSandboxSessionPhaseDecision,
     command: &CommitManagedMcpSandboxSessionReady,
@@ -7566,6 +7570,7 @@ fn require_managed_mcp_sandbox_session_ready_replay(
     Ok(())
 }
 
+#[cfg(any())]
 fn require_managed_mcp_sandbox_session_lost_replay(
     decision: &ManagedMcpSandboxSessionPhaseDecision,
     usage_reservation_id: &ResourceId,
@@ -8109,6 +8114,7 @@ fn mcp_subscription_session_receipt_payload(
     )
 }
 
+#[cfg(any())]
 fn managed_mcp_sandbox_session_receipt_payload(
     command: &AcceptManagedMcpSandboxSession,
 ) -> Result<TypedPayload, RepositoryError> {

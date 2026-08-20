@@ -26,6 +26,7 @@ const MAX_MCP_NOTIFICATION_CLOCK_SKEW_SECONDS: i64 = 60;
 /// The logical subscription payload and the Sandbox Job payload both retain this exact document.
 /// The physical Job ID and typed Sandbox owner ID share one UUID, while `logical_job_id` remains
 /// the distinct `work_class=mcp` recovery/notification authority.
+#[cfg(any())]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedMcpSandboxSessionIdentity {
@@ -42,6 +43,7 @@ pub struct ManagedMcpSandboxSessionIdentity {
     pub canonical_digest: Sha256Digest,
 }
 
+#[cfg(any())]
 impl ManagedMcpSandboxSessionIdentity {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
@@ -107,6 +109,7 @@ impl ManagedMcpSandboxSessionIdentity {
 /// Logical-side pointer to the immutable physical request. The request digest is intentionally
 /// outside `ManagedMcpSandboxSessionIdentity`: the physical request embeds the identity, so
 /// including its own digest there would create a circular canonicalization dependency.
+#[cfg(any())]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedMcpSandboxSessionLink {
@@ -116,6 +119,7 @@ pub struct ManagedMcpSandboxSessionLink {
     pub canonical_digest: Sha256Digest,
 }
 
+#[cfg(any())]
 impl ManagedMcpSandboxSessionLink {
     pub fn build(
         identity: ManagedMcpSandboxSessionIdentity,
@@ -462,6 +466,7 @@ pub struct McpSubscriptionPayload {
     pub schema_version: u32,
     pub binding: McpResourceSubscriptionBinding,
     pub session: McpSessionRecord,
+    #[cfg(any())]
     pub managed_sandbox_session: Option<ManagedMcpSandboxSessionLink>,
     pub last_notification_session_generation: u64,
     pub last_notification_event_generation: u64,
@@ -503,6 +508,7 @@ impl McpSubscriptionPayload {
             schema_version: 1,
             binding,
             session,
+            #[cfg(any())]
             managed_sandbox_session: None,
             last_notification_session_generation: 0,
             last_notification_event_generation: 0,
@@ -541,27 +547,6 @@ impl McpSubscriptionPayload {
                 ))
         {
             return Err(McpHostError::InvalidSubscription);
-        }
-        match self.binding.transport_kind {
-            McpTransportKind::StreamableHttp if self.managed_sandbox_session.is_some() => {
-                return Err(McpHostError::InvalidSubscription);
-            }
-            McpTransportKind::ManagedStdio
-                if self.session.state == McpSessionState::Disconnected
-                    && self.managed_sandbox_session.is_some() =>
-            {
-                return Err(McpHostError::InvalidSubscription);
-            }
-            McpTransportKind::ManagedStdio
-                if self.session.state != McpSessionState::Disconnected
-                    && self.managed_sandbox_session.as_ref().is_none_or(|link| {
-                        link.validate_canonical_for(&self.binding).is_err()
-                            || link.identity.session_generation != self.session.generation
-                    }) =>
-            {
-                return Err(McpHostError::InvalidSubscription);
-            }
-            McpTransportKind::StreamableHttp | McpTransportKind::ManagedStdio => {}
         }
         if let Some(invalidation) = &self.pending_invalidation {
             invalidation.validate_for(&self.binding, &self.session, now)?;
@@ -615,6 +600,7 @@ impl McpSubscriptionPayload {
             schema_version: 1,
             binding: self.binding.clone(),
             session,
+            #[cfg(any())]
             managed_sandbox_session: None,
             last_notification_session_generation: if generation_changed {
                 0
@@ -652,6 +638,7 @@ impl McpSubscriptionPayload {
     /// Atomically binds the next Managed stdio session generation to its sole physical Sandbox
     /// Job. The caller must persist this payload in the same transaction that creates that Job and
     /// parks/releases the logical MCP Job lease.
+    #[cfg(any())]
     pub fn schedule_managed_sandbox_session(
         &self,
         expected_session_version: u64,
@@ -698,6 +685,7 @@ impl McpSubscriptionPayload {
     /// Advances a Managed stdio session only when the physical Sandbox identity remains exact.
     /// Sandbox lifecycle code uses this for `Connecting -> Initializing -> Ready` and subsequent
     /// degradation/terminal observations; the generic MCP transport path cannot call it.
+    #[cfg(any())]
     pub fn transition_managed_sandbox_session(
         &self,
         expected_session_version: u64,
@@ -784,6 +772,7 @@ impl McpSubscriptionPayload {
             schema_version: 1,
             binding: self.binding.clone(),
             session: self.session.clone(),
+            #[cfg(any())]
             managed_sandbox_session: self.managed_sandbox_session.clone(),
             last_notification_session_generation: notification.session_generation,
             last_notification_event_generation: notification.event_generation,
@@ -846,6 +835,7 @@ impl McpSubscriptionPayload {
             schema_version: 1,
             binding: self.binding.clone(),
             session,
+            #[cfg(any())]
             managed_sandbox_session: None,
             last_notification_session_generation: 0,
             last_notification_event_generation: 0,
@@ -861,6 +851,7 @@ impl McpSubscriptionPayload {
     /// Clears the sole physical Managed stdio generation after that exact Sandbox Job has been
     /// durably terminalized. The next admission must create a new physical identity and complete
     /// a full reconcile before the subscription may return to its steady waiting state.
+    #[cfg(any())]
     pub fn rebuild_managed_sandbox_session_after_loss(
         &self,
         expected_session_version: u64,
@@ -885,6 +876,7 @@ impl McpSubscriptionPayload {
             schema_version: 1,
             binding: self.binding.clone(),
             session,
+            #[cfg(any())]
             managed_sandbox_session: None,
             last_notification_session_generation: 0,
             last_notification_event_generation: 0,
@@ -1815,6 +1807,7 @@ mod tests {
             .is_err());
     }
 
+    #[cfg(any())]
     #[test]
     fn managed_subscription_generation_has_one_exact_physical_sandbox_job() {
         let now = Utc::now();
@@ -2073,6 +2066,7 @@ mod tests {
         (payload, uri_digest)
     }
 
+    #[cfg(any())]
     fn managed_payload_fixture(now: DateTime<Utc>) -> McpSubscriptionPayload {
         let (payload, _) = payload_fixture(now);
         let mut binding = payload.binding;

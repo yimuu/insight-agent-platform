@@ -10,7 +10,6 @@ use insight_platform_contracts::{
     SandboxResourcePolicyDocument, SandboxRuntimeFamily, SandboxRuntimeResourceSpec,
     SandboxSecretResolutionPolicyDocument, Sha256Digest, ValueRef,
 };
-use insight_platform_mcp_host::{McpHostExecutionContract, McpLogicalOperationRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeSet, error::Error, fmt};
@@ -23,10 +22,6 @@ pub const MAX_SANDBOX_SAFE_CODE_BYTES: usize = 128;
 pub const MAX_SANDBOX_SAFE_MESSAGE_BYTES: usize = 512;
 
 /// Closed logical source for one physical Sandbox attempt.
-///
-/// A Managed MCP stdio implementation remains logically `Mcp`, but it must enter the Sandbox
-/// work class directly. Keeping the exact MCP closure in this tagged source prevents a generic
-/// Capability worker from becoming a second physical Job owner.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -38,14 +33,15 @@ pub enum SandboxExecutionSource {
     SandboxCapability {
         capability_deployment_closure: Box<CapabilityDeploymentClosure>,
     },
+    #[cfg(any())]
     ManagedMcp {
         capability_deployment_closure: Box<CapabilityDeploymentClosure>,
         capability_interface_revision: ExactVersionRef,
         capability_interface: Box<CapabilityInterfaceResourceSpec>,
         capability_implementation_revision: ExactVersionRef,
         capability_implementation: Box<CapabilityImplementationResourceSpec>,
-        mcp_contract: Box<McpHostExecutionContract>,
-        operation: Box<McpLogicalOperationRequest>,
+        mcp_contract: Box<insight_platform_mcp_host::McpHostExecutionContract>,
+        operation: Box<insight_platform_mcp_host::McpLogicalOperationRequest>,
     },
 }
 
@@ -54,10 +50,6 @@ impl SandboxExecutionSource {
         match self {
             Self::SandboxCapability {
                 capability_deployment_closure,
-            }
-            | Self::ManagedMcp {
-                capability_deployment_closure,
-                ..
             } => capability_deployment_closure,
         }
     }
@@ -691,6 +683,7 @@ impl SandboxExecutionRequest {
                     secret_policy,
                 )
             }
+            #[cfg(any())]
             SandboxExecutionSource::ManagedMcp {
                 capability_deployment_closure,
                 capability_interface_revision,
@@ -907,6 +900,7 @@ impl SandboxExecutionRequest {
             .secret_bindings
             .iter()
             .collect::<Vec<_>>();
+        #[cfg(any())]
         if let SandboxExecutionSource::ManagedMcp { mcp_contract, .. } = &self.execution_source {
             required_secret_bindings.extend(mcp_contract.deployment_closure.secret_bindings.iter());
             required_secret_bindings.push(&mcp_contract.authorization.token_secret_binding);
@@ -981,15 +975,13 @@ pub fn required_isolation(
     if matches!(
         trust_class,
         CodeTrustClass::TenantPublished | CodeTrustClass::ModelGenerated
-    ) || matches!(
-        runtime_family,
-        SandboxRuntimeFamily::ReviewedShell | SandboxRuntimeFamily::ManagedMcpServer
-    ) || has_secret
+    ) || runtime_family == SandboxRuntimeFamily::ReviewedShell
+        || has_secret
         || network_mode == SandboxNetworkMode::BrokeredEgress
         || effect.risk_rank() >= Effect::IdempotentWrite.risk_rank()
         || classification == DataClassification::Restricted
     {
-        SandboxIsolationClass::MicroVm
+        SandboxIsolationClass::SandboxedContainer
     } else if runtime_family == SandboxRuntimeFamily::WasmWasi {
         SandboxIsolationClass::Wasm
     } else {
@@ -1015,9 +1007,6 @@ fn entrypoint_matches_runtime(
         ) | (
             SandboxRuntimeFamily::ReviewedShell,
             insight_platform_contracts::SandboxEntrypointKind::ReviewedExecutable
-        ) | (
-            SandboxRuntimeFamily::ManagedMcpServer,
-            insight_platform_contracts::SandboxEntrypointKind::ManagedMcpServer
         )
     )
 }

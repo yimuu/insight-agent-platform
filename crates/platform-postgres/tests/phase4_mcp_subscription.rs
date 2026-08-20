@@ -134,7 +134,6 @@ fn protocol_document() -> McpProtocolPolicyDocument {
             streamable_http_sse: true,
             resumable_stream: true,
             session_affinity: true,
-            managed_stdio: false,
         },
         client_capabilities: McpClientCapabilities {
             elicitation_form: false,
@@ -171,11 +170,8 @@ fn sandbox_policy_closure(token_purpose: SecretPurpose) -> SandboxExecutionPolic
             minimum_isolation: SandboxIsolationClass::SandboxedContainer,
             allowed_runtime_families: vec![SandboxRuntimeFamily::Python],
             allowed_trust_classes: vec![CodeTrustClass::BuiltIn],
-            require_hardware_virtualization_for_microvm: false,
+            deny_runtime_fallback: true,
             fresh_jail_per_job: true,
-            fresh_guest_kernel_per_job: true,
-            single_tenant_guest: true,
-            single_use_guest: true,
             deny_host_devices: true,
         },
         resource: SandboxResourcePolicyDocument {

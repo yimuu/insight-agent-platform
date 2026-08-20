@@ -2,7 +2,9 @@ use super::*;
 use futures::StreamExt;
 use insight_platform_contracts::{SecretPurpose, SecretResolutionPolicy};
 use insight_platform_jobs::JobFence;
+#[cfg(any())]
 use insight_platform_mcp_host::ManagedMcpSandboxSessionIdentity;
+#[cfg(any())]
 use insight_platform_sandbox::{
     AuthorizedManagedMcpSandboxSecretDelivery, ManagedMcpSandboxSecretCommitOutcome,
     ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryError,
@@ -127,11 +129,13 @@ struct FixtureSecretResolver {
     calls: AtomicUsize,
 }
 
+#[cfg(any())]
 struct FixtureSandboxSecretAuthority {
     delivered: AtomicBool,
     commits: AtomicUsize,
 }
 
+#[cfg(any())]
 #[async_trait]
 impl ManagedMcpSandboxSecretDeliveryAuthority for FixtureSandboxSecretAuthority {
     async fn reserve_managed_mcp_sandbox_secret_delivery(
@@ -190,6 +194,7 @@ impl ManagedMcpSandboxSecretDeliveryAuthority for FixtureSandboxSecretAuthority 
     }
 }
 
+#[cfg(any())]
 fn managed_mcp_sandbox_secret_delivery() -> ManagedMcpSandboxSecretDeliveryRequest {
     let physical_job_id = id(ResourceKind::Job, 903);
     let sandbox_job_id =
@@ -291,6 +296,7 @@ impl SecretMaterialResolver for FixtureSecretResolver {
     }
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn managed_mcp_sandbox_secret_is_released_only_after_fresh_commit() {
     let request = managed_mcp_sandbox_secret_delivery();

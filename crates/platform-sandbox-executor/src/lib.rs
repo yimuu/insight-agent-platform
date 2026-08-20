@@ -11,23 +11,11 @@ use insight_platform_contracts::{
     SandboxJobState, Sha256Digest, WorkClass,
 };
 use insight_platform_sandbox::{
-    ClaimSandboxJobs, ClaimedManagedMcpSandboxSession, ClaimedSandboxJob,
-    CommitManagedMcpSandboxSessionLost, ExecuteManagedMcpSandboxSession, ExecuteSandboxJob,
-    ExpiredManagedMcpSandboxSessionLease, ExpiredManagedMcpSandboxSessionLeasePage,
-    HeartbeatSandboxExecution, ManagedMcpSandboxSessionClaimAuthority,
-    ManagedMcpSandboxSessionCleanupOutcome, ManagedMcpSandboxSessionExecutionAuthority,
-    ManagedMcpSandboxSessionExpiredLeaseEvidence, ManagedMcpSandboxSessionLeaseRecoveryAction,
-    ManagedMcpSandboxSessionLeaseRecoveryDisposition, ManagedMcpSandboxSessionLiveness,
-    ManagedMcpSandboxSessionLivenessEvidence, ManagedMcpSandboxSessionProvider,
-    ManagedMcpSandboxSessionRecoveryAudit, ManagedMcpSandboxSessionRecoveryAuthority,
-    ManagedMcpSandboxSessionRecoveryCursor, ManagedMcpSandboxSessionRecoveryExecutor,
-    ManagedMcpSandboxSessionRecoveryFailure, ManagedMcpSandboxSessionRecoveryShard,
-    ManagedMcpSandboxSessionWorker, ManagedMcpSandboxSessionWorkerAudits,
-    RecoverExpiredManagedMcpSandboxSessionLease, SandboxClaimAuthority, SandboxClaimFailure,
-    SandboxCommandLimits, SandboxExecutionAuthority, SandboxExecutionControlRouter,
-    SandboxExecutorWorker, SandboxHeartbeatConfig, SandboxProcessGenerationIsolation,
-    SandboxProcessGenerationIsolationDisposition, SandboxWorkerAudit, SandboxWorkerAuditBundle,
-    SandboxWorkerCommitIdentity, ScanExpiredManagedMcpSandboxSessionLeases, SANDBOX_QUOTA_LINES,
+    ClaimSandboxJobs, ClaimedSandboxJob, ExecuteSandboxJob, HeartbeatSandboxExecution,
+    SandboxClaimAuthority, SandboxClaimFailure, SandboxCommandLimits, SandboxExecutionAuthority,
+    SandboxExecutionControlRouter, SandboxExecutorWorker, SandboxHeartbeatConfig,
+    SandboxProcessGenerationIsolation, SandboxProcessGenerationIsolationDisposition,
+    SandboxWorkerAudit, SandboxWorkerAuditBundle, SandboxWorkerCommitIdentity, SANDBOX_QUOTA_LINES,
 };
 use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
@@ -159,6 +147,7 @@ pub struct SandboxExecutorDriverConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any())]
 pub struct ManagedMcpSandboxSessionRecoveryTiming {
     pub scan_interval: Duration,
     pub scan_jitter: Duration,
@@ -166,6 +155,7 @@ pub struct ManagedMcpSandboxSessionRecoveryTiming {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any())]
 pub struct ManagedMcpSandboxSessionRecoveryConfig {
     shard: ManagedMcpSandboxSessionRecoveryShard,
     batch_size: u16,
@@ -176,6 +166,7 @@ pub struct ManagedMcpSandboxSessionRecoveryConfig {
     timing: ManagedMcpSandboxSessionRecoveryTiming,
 }
 
+#[cfg(any())]
 impl ManagedMcpSandboxSessionRecoveryConfig {
     pub fn from_profile(
         profile: &HardLimitProfile,
@@ -546,6 +537,7 @@ where
 /// activated session owns physical resources; the driver retains the shared Sandbox permit until
 /// this future reports a durable terminal/recovery disposition.
 #[async_trait]
+#[cfg(any())]
 pub trait ManagedMcpSandboxSessionCommandExecutor: Send + Sync + 'static {
     async fn execute(
         &self,
@@ -557,6 +549,7 @@ pub trait ManagedMcpSandboxSessionCommandExecutor: Send + Sync + 'static {
 /// Production long-lived session supervisor. A transient Provider observation error never becomes
 /// an `Exited` fact: the supervisor first destroys the exact prepared instance and only then asks
 /// the durable authority to rebuild the logical generation.
+#[cfg(any())]
 pub struct RegisteredManagedMcpSandboxSessionExecutor<A, P, I> {
     worker: ManagedMcpSandboxSessionWorker<A, P>,
     authority: Arc<A>,
@@ -567,6 +560,7 @@ pub struct RegisteredManagedMcpSandboxSessionExecutor<A, P, I> {
     receipt_ttl: Duration,
 }
 
+#[cfg(any())]
 impl<A, P, I> RegisteredManagedMcpSandboxSessionExecutor<A, P, I>
 where
     A: ManagedMcpSandboxSessionExecutionAuthority,
@@ -841,6 +835,7 @@ where
 }
 
 #[async_trait]
+#[cfg(any())]
 impl<A, P, I> ManagedMcpSandboxSessionCommandExecutor
     for RegisteredManagedMcpSandboxSessionExecutor<A, P, I>
 where
@@ -863,6 +858,7 @@ where
 /// Dedicated claim loop for Managed MCP subscription sessions. It shares `LocalWorkerPools` with
 /// finite Sandbox execution, but uses the closed Managed-session claim authority so neither lane
 /// can decode the other's payload shape.
+#[cfg(any())]
 pub struct ManagedMcpSandboxSessionExecutorDriver<S, E, I> {
     claim_authority: Arc<S>,
     executor: Arc<E>,
@@ -872,6 +868,7 @@ pub struct ManagedMcpSandboxSessionExecutorDriver<S, E, I> {
     config: SandboxExecutorDriverConfig,
 }
 
+#[cfg(any())]
 impl<S, E, I> ManagedMcpSandboxSessionExecutorDriver<S, E, I>
 where
     S: ManagedMcpSandboxSessionClaimAuthority,
@@ -1075,6 +1072,7 @@ where
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg(any())]
 pub struct ManagedMcpSandboxSessionRecoveryCycleReport {
     pub candidates: u64,
     pub requeued: u64,
@@ -1089,6 +1087,7 @@ pub struct ManagedMcpSandboxSessionRecoveryCycleReport {
 /// Sandbox worker's reserved critical-control capacity; long-lived business permits are never
 /// required to prove an old process absent, destroy its exact Provider instance, or close its
 /// durable lease.
+#[cfg(any())]
 pub struct ManagedMcpSandboxSessionRecoveryDriver<A, P, I> {
     authority: Arc<A>,
     provider: Arc<P>,
@@ -1098,6 +1097,7 @@ pub struct ManagedMcpSandboxSessionRecoveryDriver<A, P, I> {
     config: ManagedMcpSandboxSessionRecoveryConfig,
 }
 
+#[cfg(any())]
 impl<A, P, I> ManagedMcpSandboxSessionRecoveryDriver<A, P, I>
 where
     A: ManagedMcpSandboxSessionRecoveryAuthority + SandboxProcessGenerationIsolation,
@@ -1396,6 +1396,7 @@ where
     }
 }
 
+#[cfg(any())]
 fn stable_unstarted_recovery_evidence_digest(
     expired: &ExpiredManagedMcpSandboxSessionLease,
 ) -> Result<Sha256Digest, SandboxExecutorDriverError> {
@@ -1413,6 +1414,7 @@ fn stable_unstarted_recovery_evidence_digest(
     .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)
 }
 
+#[cfg(any())]
 fn deterministic_recovery_jitter(worker_id: &ResourceId, maximum: Duration) -> Duration {
     if maximum.is_zero() {
         return Duration::ZERO;
@@ -1423,12 +1425,14 @@ fn deterministic_recovery_jitter(worker_id: &ResourceId, maximum: Duration) -> D
     Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
+#[cfg(any())]
 fn placeholder_digest() -> Sha256Digest {
     "sha256:0000000000000000000000000000000000000000000000000000000000000000"
         .parse()
         .expect("static SHA-256 placeholder is valid")
 }
 
+#[cfg(any())]
 fn validate_managed_mcp_session_claims(
     claimed: &[ClaimedManagedMcpSandboxSession],
     pool: &insight_platform_worker::LocalWorkerPoolSnapshot,
@@ -1530,7 +1534,6 @@ pub enum SandboxExecutorDriverError {
     Identity(ExecutorIdentityError),
     LocalPool(LocalWorkerPoolError),
     Claim(SandboxClaimFailure),
-    Recovery(ManagedMcpSandboxSessionRecoveryFailure),
 }
 
 impl fmt::Display for SandboxExecutorDriverError {
@@ -1552,7 +1555,6 @@ impl fmt::Display for SandboxExecutorDriverError {
             Self::Identity(_) => "Sandbox Executor identity generation failed",
             Self::LocalPool(_) => "Sandbox Executor local pool failed",
             Self::Claim(_) => "Sandbox claim authority failed",
-            Self::Recovery(_) => "Managed MCP recovery authority failed",
         })
     }
 }
@@ -1594,11 +1596,13 @@ mod tests {
     }
 
     #[derive(Default)]
+    #[cfg(any())]
     struct EmptyManagedSessionAuthority {
         claim: Mutex<Option<ClaimSandboxJobs>>,
     }
 
     #[async_trait]
+    #[cfg(any())]
     impl ManagedMcpSandboxSessionClaimAuthority for EmptyManagedSessionAuthority {
         async fn claim_managed_mcp_sandbox_sessions(
             &self,
@@ -1609,9 +1613,11 @@ mod tests {
         }
     }
 
+    #[cfg(any())]
     struct UnusedManagedSessionExecutor;
 
     #[async_trait]
+    #[cfg(any())]
     impl ManagedMcpSandboxSessionCommandExecutor for UnusedManagedSessionExecutor {
         async fn execute(
             &self,
@@ -1623,11 +1629,13 @@ mod tests {
     }
 
     #[derive(Default)]
+    #[cfg(any())]
     struct EmptyManagedRecoveryAuthority {
         scan: Mutex<Option<ScanExpiredManagedMcpSandboxSessionLeases>>,
     }
 
     #[async_trait]
+    #[cfg(any())]
     impl ManagedMcpSandboxSessionRecoveryAuthority for EmptyManagedRecoveryAuthority {
         async fn scan_expired_managed_mcp_sandbox_session_leases(
             &self,
@@ -1654,6 +1662,7 @@ mod tests {
     }
 
     #[async_trait]
+    #[cfg(any())]
     impl SandboxProcessGenerationIsolation for EmptyManagedRecoveryAuthority {
         async fn prove_absent(
             &self,
@@ -1666,9 +1675,11 @@ mod tests {
         }
     }
 
+    #[cfg(any())]
     struct UnusedManagedRecoveryProvider;
 
     #[async_trait]
+    #[cfg(any())]
     impl ManagedMcpSandboxSessionProvider for UnusedManagedRecoveryProvider {
         type Error = std::convert::Infallible;
 
@@ -1752,6 +1763,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(any())]
     fn micro_vm_pools() -> LocalWorkerPools {
         LocalWorkerPools::new(
             WorkerManifest {
@@ -1812,6 +1824,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(any())]
     async fn managed_session_claim_uses_the_same_bounded_sandbox_pool_and_closed_lane() {
         let authority = Arc::new(EmptyManagedSessionAuthority::default());
         let local_pools = micro_vm_pools();
@@ -1858,6 +1871,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(any())]
     async fn managed_recovery_uses_reserved_control_capacity_when_business_is_saturated() {
         let authority = Arc::new(EmptyManagedRecoveryAuthority::default());
         let local_pools = micro_vm_pools();

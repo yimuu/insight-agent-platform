@@ -693,10 +693,7 @@ def check_spec_registry_alignment(errors):
         "permanent_failure",
     ]:
         errors.append("12 Context backend outcome registry is not closed")
-    if registries.get("mcp_transport_kinds") != [
-        "streamable_http",
-        "managed_stdio",
-    ]:
+    if registries.get("mcp_transport_kinds") != ["streamable_http"]:
         errors.append("13 MCP transport kind registry is not closed")
     if registries.get("mcp_authorization_principal_kinds") != [
         "per_user",
@@ -725,13 +722,11 @@ def check_spec_registry_alignment(errors):
         "node_js",
         "wasm_wasi",
         "reviewed_shell",
-        "managed_mcp_server",
     ]:
         errors.append("14 Sandbox runtime family registry is not closed")
     if registries.get("sandbox_isolation_classes") != [
         {"name": "wasm", "security_rank": 1},
         {"name": "sandboxed_container", "security_rank": 2},
-        {"name": "micro_vm", "security_rank": 3},
     ]:
         errors.append("14 Sandbox isolation class registry is not rank-closed")
     if registries.get("sandbox_abi_versions") != ["v1"]:
@@ -743,7 +738,6 @@ def check_spec_registry_alignment(errors):
         "node_module",
         "wasm_export",
         "reviewed_executable",
-        "managed_mcp_server",
     ]:
         errors.append("14 Sandbox entrypoint kind registry is not closed")
     slot_schema = load(CONTRACT_ROOT / "schemas" / "frozen-slot-binding.schema.json")

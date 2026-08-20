@@ -202,6 +202,7 @@ impl SandboxCompletedOutput {
 /// digest-selected declarative Capability codec before constructing this value. The physical
 /// Sandbox Job may therefore succeed while the logical Capability remains deferred or awaits
 /// input. Raw MCP frames, session identifiers and Secret material are never persisted here.
+#[cfg(any())]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxManagedMcpOutput {
@@ -213,6 +214,7 @@ pub struct SandboxManagedMcpOutput {
     pub usage: SandboxResourceUsage,
 }
 
+#[cfg(any())]
 impl SandboxManagedMcpOutput {
     fn validate_for(
         &self,
@@ -289,6 +291,7 @@ impl SandboxManagedMcpOutput {
     }
 }
 
+#[cfg(any())]
 fn validate_managed_mcp_completed(
     output: &CapabilityOutputValue,
     request: &SandboxExecutionRequest,
@@ -331,6 +334,7 @@ fn validate_managed_mcp_completed(
     Ok(())
 }
 
+#[cfg(any())]
 fn validate_managed_mcp_wait(
     wait: &RemoteWait,
     poll_count: u32,
@@ -356,6 +360,7 @@ fn validate_managed_mcp_wait(
     Ok(())
 }
 
+#[cfg(any())]
 fn validate_managed_mcp_input(
     input: &BackendInputRequest,
     observed_at: DateTime<Utc>,
@@ -479,6 +484,7 @@ impl SandboxUncertainty {
 )]
 pub enum SandboxExecutionOutcome {
     Completed(Box<SandboxCompletedOutput>),
+    #[cfg(any())]
     ManagedMcp(Box<SandboxManagedMcpOutput>),
     Failed(SafeSandboxFailure),
     Cancelled(SandboxTerminationEvidence),
@@ -489,7 +495,7 @@ pub enum SandboxExecutionOutcome {
 impl SandboxExecutionOutcome {
     pub(crate) fn physical_state(&self) -> SandboxJobState {
         match self {
-            Self::Completed(_) | Self::ManagedMcp(_) => SandboxJobState::Succeeded,
+            Self::Completed(_) => SandboxJobState::Succeeded,
             Self::Failed(_) => SandboxJobState::Failed,
             Self::Cancelled(_) => SandboxJobState::Cancelled,
             Self::TimedOut(_) => SandboxJobState::TimedOut,
@@ -511,6 +517,7 @@ impl SandboxExecutionOutcome {
             {
                 output.validate_for(request, limits)
             }
+            #[cfg(any())]
             Self::ManagedMcp(output)
                 if matches!(
                     &request.execution_source,
@@ -519,7 +526,7 @@ impl SandboxExecutionOutcome {
             {
                 output.validate_for(request, limits)
             }
-            Self::Completed(_) | Self::ManagedMcp(_) => Err(SandboxContractError::InvalidOutcome),
+            Self::Completed(_) => Err(SandboxContractError::InvalidOutcome),
             Self::Failed(failure) => failure.validate_for(request),
             Self::Cancelled(evidence) | Self::TimedOut(evidence) => evidence.validate_for(request),
             Self::Uncertain(uncertainty) => uncertainty.validate_for(request),
@@ -706,6 +713,7 @@ pub struct SandboxJobPayload {
 #[serde(tag = "workload_kind", content = "workload", rename_all = "snake_case")]
 pub enum SandboxJobWorkload {
     CapabilityExecution(Box<SandboxExecutionJobPayload>),
+    #[cfg(any())]
     ManagedMcpSubscriptionSession(Box<crate::ManagedMcpSandboxSessionJobPayload>),
 }
 
@@ -717,6 +725,7 @@ impl SandboxJobPayload {
         }
     }
 
+    #[cfg(any())]
     pub fn managed_mcp_subscription_session(
         payload: crate::ManagedMcpSandboxSessionJobPayload,
     ) -> Self {
@@ -736,6 +745,7 @@ impl SandboxJobPayload {
         }
         match &self.workload {
             SandboxJobWorkload::CapabilityExecution(payload) => payload.validate_for(job, limits),
+            #[cfg(any())]
             SandboxJobWorkload::ManagedMcpSubscriptionSession(payload) => {
                 payload.validate_for(job, limits)
             }
@@ -747,6 +757,7 @@ impl SandboxJobPayload {
     ) -> Result<SandboxExecutionJobPayload, SandboxContractError> {
         match self.workload {
             SandboxJobWorkload::CapabilityExecution(payload) => Ok(*payload),
+            #[cfg(any())]
             SandboxJobWorkload::ManagedMcpSubscriptionSession(_) => {
                 Err(SandboxContractError::InvalidJob)
             }

@@ -448,8 +448,7 @@ string_enum! {
 
 string_enum! {
     pub enum McpTransportKind, "mcp transport kind" {
-        StreamableHttp => "streamable_http",
-        ManagedStdio => "managed_stdio"
+        StreamableHttp => "streamable_http"
     }
 }
 
@@ -488,16 +487,14 @@ string_enum! {
         Python => "python",
         NodeJs => "node_js",
         WasmWasi => "wasm_wasi",
-        ReviewedShell => "reviewed_shell",
-        ManagedMcpServer => "managed_mcp_server"
+        ReviewedShell => "reviewed_shell"
     }
 }
 
 string_enum! {
     pub enum SandboxIsolationClass, "sandbox isolation class" {
         Wasm => "wasm",
-        SandboxedContainer => "sandboxed_container",
-        MicroVm => "micro_vm"
+        SandboxedContainer => "sandboxed_container"
     }
 }
 
@@ -506,7 +503,6 @@ impl SandboxIsolationClass {
         match self {
             Self::Wasm => 1,
             Self::SandboxedContainer => 2,
-            Self::MicroVm => 3,
         }
     }
 }
@@ -528,8 +524,7 @@ string_enum! {
         PythonModule => "python_module",
         NodeModule => "node_module",
         WasmExport => "wasm_export",
-        ReviewedExecutable => "reviewed_executable",
-        ManagedMcpServer => "managed_mcp_server"
+        ReviewedExecutable => "reviewed_executable"
     }
 }
 
@@ -1248,10 +1243,6 @@ mod tests {
         assert!(
             SandboxIsolationClass::Wasm.security_rank()
                 < SandboxIsolationClass::SandboxedContainer.security_rank()
-        );
-        assert!(
-            SandboxIsolationClass::SandboxedContainer.security_rank()
-                < SandboxIsolationClass::MicroVm.security_rank()
         );
     }
 

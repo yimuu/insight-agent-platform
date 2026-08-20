@@ -128,7 +128,6 @@ fn protocol_document() -> McpProtocolPolicyDocument {
             streamable_http_sse: true,
             resumable_stream: true,
             session_affinity: true,
-            managed_stdio: false,
         },
         client_capabilities: McpClientCapabilities {
             elicitation_form: true,

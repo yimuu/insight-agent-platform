@@ -16,11 +16,8 @@ pub struct SandboxIsolationPolicyDocument {
     pub minimum_isolation: SandboxIsolationClass,
     pub allowed_runtime_families: Vec<SandboxRuntimeFamily>,
     pub allowed_trust_classes: Vec<CodeTrustClass>,
-    pub require_hardware_virtualization_for_microvm: bool,
     pub fresh_jail_per_job: bool,
-    pub fresh_guest_kernel_per_job: bool,
-    pub single_tenant_guest: bool,
-    pub single_use_guest: bool,
+    pub deny_runtime_fallback: bool,
     pub deny_host_devices: bool,
 }
 
@@ -34,12 +31,8 @@ impl SandboxIsolationPolicyDocument {
             || !strictly_sorted_unique(&self.allowed_runtime_families)
             || !strictly_sorted_unique(&self.allowed_trust_classes)
             || !self.fresh_jail_per_job
-            || !self.fresh_guest_kernel_per_job
-            || !self.single_tenant_guest
-            || !self.single_use_guest
+            || !self.deny_runtime_fallback
             || !self.deny_host_devices
-            || (self.minimum_isolation == SandboxIsolationClass::MicroVm
-                && !self.require_hardware_virtualization_for_microvm)
         {
             return Err(ResourceContractError::InvalidPolicyDocument);
         }

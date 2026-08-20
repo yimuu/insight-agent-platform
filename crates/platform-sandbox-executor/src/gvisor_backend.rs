@@ -649,7 +649,6 @@ fn validate_request(request: &SandboxExecutionRequest) -> Result<(), SandboxBack
         )
     );
     if request.isolation_class != SandboxIsolationClass::SandboxedContainer
-        || request.runtime.guest_kernel_digest.is_some()
         || !runtime_ok
         || !entrypoint_ok
         || request.resources.wasm_fuel.is_some()

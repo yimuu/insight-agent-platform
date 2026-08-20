@@ -412,6 +412,7 @@ fn classify_capability_owner_job(
                     }
                     DetachedSandboxSourceKind::SandboxCapability
                 }
+                #[cfg(any())]
                 SandboxExecutionSource::ManagedMcp {
                     mcp_contract,
                     operation,

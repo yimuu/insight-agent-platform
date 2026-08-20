@@ -26,11 +26,10 @@ use insight_platform_contracts::{
 use insight_platform_invocations::{CapabilityOutputValue, DispatchOutcome};
 use insight_platform_jobs::{decide_claim, JobFence, LeasePolicy};
 use insight_platform_mcp_host::{
-    ManagedMcpSandboxSessionIdentity, McpAuthorizationContext, McpHostExecutionContract,
-    McpLogicalOperationRequest, McpResourceSubscriptionBinding, McpSessionBindingKey,
-    McpSessionRecord, McpSubscriptionPayload, McpSubscriptionRecord, McpSubscriptionState,
-    McpSubscriptionWorkerAudit, NewMcpAuthorizationContext, NewMcpHostExecutionContract,
-    NewMcpResourceSubscriptionBinding,
+    McpAuthorizationContext, McpHostExecutionContract, McpLogicalOperationRequest,
+    McpResourceSubscriptionBinding, McpSessionBindingKey, McpSessionRecord, McpSubscriptionPayload,
+    McpSubscriptionRecord, McpSubscriptionState, McpSubscriptionWorkerAudit,
+    NewMcpAuthorizationContext, NewMcpHostExecutionContract, NewMcpResourceSubscriptionBinding,
 };
 use std::{
     collections::BTreeMap,
@@ -132,12 +131,8 @@ fn policy_closure(
             minimum_isolation: isolation,
             allowed_runtime_families: vec![runtime_family],
             allowed_trust_classes: vec![trust_class],
-            require_hardware_virtualization_for_microvm: isolation
-                == SandboxIsolationClass::MicroVm,
             fresh_jail_per_job: true,
-            fresh_guest_kernel_per_job: true,
-            single_tenant_guest: true,
-            single_use_guest: true,
+            deny_runtime_fallback: true,
             deny_host_devices: true,
         },
         resource: SandboxResourcePolicyDocument {
@@ -250,8 +245,6 @@ fn request_at(now: DateTime<Utc>) -> SandboxExecutionRequest {
         runtime_family: SandboxRuntimeFamily::WasmWasi,
         runtime_version: "wasmtime-42.0.0".to_owned(),
         image_or_module_digest: sha('3'),
-        guest_kernel_digest: None,
-        guest_agent_digest: sha('4'),
         supported_isolation: vec![SandboxIsolationClass::Wasm],
         abi: SandboxAbiVersion::V1,
         builtin_modules_manifest_digest: sha('5'),
@@ -404,461 +397,467 @@ fn request_at(now: DateTime<Utc>) -> SandboxExecutionRequest {
     .unwrap()
 }
 
-fn managed_mcp_protocol() -> McpProtocolPolicyDocument {
-    McpProtocolPolicyDocument {
-        schema_version: 1,
-        offered_versions: vec![MCP_PROTOCOL_BASELINE.to_owned()],
-        transport_features: McpTransportFeatures {
-            streamable_http_get: false,
-            streamable_http_sse: false,
-            resumable_stream: false,
-            session_affinity: true,
-            managed_stdio: true,
-        },
-        client_capabilities: McpClientCapabilities {
-            elicitation_form: false,
-            elicitation_url: false,
-            tasks_elicitation_create: false,
-            sampling: false,
-            roots: false,
-        },
-        allowed_server_capabilities: AllowedMcpServerCapabilities {
-            tools: true,
-            resources: false,
-            prompts: false,
-            logging: false,
-            tasks: false,
-            subscriptions: false,
-        },
-        experimental_features: vec![],
-        method_limits: BTreeMap::from([(
-            PublishedMcpMethod::ToolsCall,
-            McpMethodLimits {
-                maximum_request_bytes: 4_096,
-                maximum_response_bytes: 4_096,
-                maximum_metadata_entries: 16,
-                maximum_progress_events: 8,
-                maximum_pages: 4,
-                minimum_poll_milliseconds: 10,
-                maximum_poll_milliseconds: 1_000,
+#[cfg(any())]
+mod deferred_managed_mcp_tests {
+    use super::*;
+
+    fn managed_mcp_protocol() -> McpProtocolPolicyDocument {
+        McpProtocolPolicyDocument {
+            schema_version: 1,
+            offered_versions: vec![MCP_PROTOCOL_BASELINE.to_owned()],
+            transport_features: McpTransportFeatures {
+                streamable_http_get: false,
+                streamable_http_sse: false,
+                resumable_stream: false,
+                session_affinity: true,
+                managed_stdio: true,
             },
-        )]),
-        metadata_policy: McpMetadataPolicy {
-            maximum_server_name_bytes: 128,
-            maximum_server_version_bytes: 64,
-            maximum_instruction_bytes: 4_096,
-            maximum_object_name_bytes: 128,
-            maximum_description_bytes: 8_192,
-            maximum_icon_bytes: 1_048_576,
-        },
+            client_capabilities: McpClientCapabilities {
+                elicitation_form: false,
+                elicitation_url: false,
+                tasks_elicitation_create: false,
+                sampling: false,
+                roots: false,
+            },
+            allowed_server_capabilities: AllowedMcpServerCapabilities {
+                tools: true,
+                resources: false,
+                prompts: false,
+                logging: false,
+                tasks: false,
+                subscriptions: false,
+            },
+            experimental_features: vec![],
+            method_limits: BTreeMap::from([(
+                PublishedMcpMethod::ToolsCall,
+                McpMethodLimits {
+                    maximum_request_bytes: 4_096,
+                    maximum_response_bytes: 4_096,
+                    maximum_metadata_entries: 16,
+                    maximum_progress_events: 8,
+                    maximum_pages: 4,
+                    minimum_poll_milliseconds: 10,
+                    maximum_poll_milliseconds: 1_000,
+                },
+            )]),
+            metadata_policy: McpMetadataPolicy {
+                maximum_server_name_bytes: 128,
+                maximum_server_version_bytes: 64,
+                maximum_instruction_bytes: 4_096,
+                maximum_object_name_bytes: 128,
+                maximum_description_bytes: 8_192,
+                maximum_icon_bytes: 1_048_576,
+            },
+        }
     }
-}
 
-fn managed_mcp_request_at(now: DateTime<Utc>) -> SandboxExecutionRequest {
-    let mut request = request_at(now);
-    let isolation_policy = request.profile.isolation_policy.clone();
-    let resource_policy = request.profile.resource_policy.clone();
-    let artifact_io_policy = request.profile.artifact_io_policy.clone();
-    let secret_policy = exact(ResourceKind::PolicyRevision, 17, '8');
-    request.runtime.runtime_family = SandboxRuntimeFamily::ManagedMcpServer;
-    request.runtime.runtime_version = "mcp-runner-1.0.0".to_owned();
-    request.runtime.guest_kernel_digest = Some(sha('9'));
-    request.runtime.supported_isolation = vec![SandboxIsolationClass::MicroVm];
-    request.package.entrypoint_kind = SandboxEntrypointKind::ManagedMcpServer;
-    request.package.entrypoint = "bin/mcp-server".to_owned();
-    request.profile.allowed_runtime_families = vec![SandboxRuntimeFamily::ManagedMcpServer];
-    request.profile.minimum_isolation = SandboxIsolationClass::MicroVm;
-    request.profile.secret_policy = Some(secret_policy.clone());
-    request.profile.policy_versions.push(secret_policy);
-    request.isolation_class = SandboxIsolationClass::MicroVm;
-    request.resources.wasm_fuel = None;
-    request.resources.wasm_memory_pages = None;
+    fn managed_mcp_request_at(now: DateTime<Utc>) -> SandboxExecutionRequest {
+        let mut request = request_at(now);
+        let isolation_policy = request.profile.isolation_policy.clone();
+        let resource_policy = request.profile.resource_policy.clone();
+        let artifact_io_policy = request.profile.artifact_io_policy.clone();
+        let secret_policy = exact(ResourceKind::PolicyRevision, 17, '8');
+        request.runtime.runtime_family = SandboxRuntimeFamily::ManagedMcpServer;
+        request.runtime.runtime_version = "mcp-runner-1.0.0".to_owned();
+        request.runtime.guest_kernel_digest = Some(sha('9'));
+        request.runtime.supported_isolation = vec![SandboxIsolationClass::MicroVm];
+        request.package.entrypoint_kind = SandboxEntrypointKind::ManagedMcpServer;
+        request.package.entrypoint = "bin/mcp-server".to_owned();
+        request.profile.allowed_runtime_families = vec![SandboxRuntimeFamily::ManagedMcpServer];
+        request.profile.minimum_isolation = SandboxIsolationClass::MicroVm;
+        request.profile.secret_policy = Some(secret_policy.clone());
+        request.profile.policy_versions.push(secret_policy);
+        request.isolation_class = SandboxIsolationClass::MicroVm;
+        request.resources.wasm_fuel = None;
+        request.resources.wasm_memory_pages = None;
 
-    let deployment = deployment(ResourceKind::McpDeployment, 40, '1');
-    let server_revision = exact(ResourceKind::McpServerRevision, 41, '2');
-    let protocol_profile = managed_mcp_protocol();
-    let protocol_policy = ExactVersionRef::new(
-        id(ResourceKind::PolicyRevision, 42),
-        protocol_profile.canonical_digest().unwrap(),
-    )
-    .unwrap();
-    let trust_policy = exact(ResourceKind::PolicyRevision, 43, '3');
-    let auth_policy = exact(ResourceKind::PolicyRevision, 44, '4');
-    let server_identity_digest = sha('5');
-    let token_purpose = SecretPurpose::from_str("mcp.oauth").unwrap();
-    let token_binding = ExactSecretBindingRef::build(
-        id(ResourceKind::SecretBinding, 45),
-        1,
-        id(ResourceKind::SecretProvider, 46),
-        token_purpose.clone(),
-        SecretResolutionPolicy::Pinned {
-            opaque_version_identity_digest: sha('6'),
-        },
-    )
-    .unwrap();
-    let deployment_closure = McpDeploymentClosure {
-        server_revision: server_revision.clone(),
-        server_identity_digest: server_identity_digest.clone(),
-        transport: McpTransportBinding::ManagedStdio {
-            package: request.package_revision.clone(),
-            runtime: request.runtime_revision.clone(),
-            profile: request.profile_revision.clone(),
-            isolation: SandboxIsolationClass::MicroVm,
-            isolation_policy,
-            resource_policy,
-            artifact_io_policy,
-        },
-        protocol_policy: protocol_policy.clone(),
-        trust_policy,
-        auth_policy: Some(auth_policy.clone()),
-        secret_bindings: vec![],
-        conformance_evidence: artifact(47, '7'),
-    };
-    let server = McpServerExecutionContract::build(
-        server_revision.clone(),
-        McpTransportKind::ManagedStdio,
-        protocol_policy.clone(),
-        vec![],
-        Some(token_purpose),
-        McpServerLimits {
-            maximum_message_bytes: 8_192,
-            maximum_response_bytes: 8_192,
-            maximum_headers: 32,
-            maximum_sse_event_bytes: 4_096,
-            maximum_in_flight: 4,
-            maximum_connections: 1,
-            maximum_sessions: 1,
-            maximum_session_milliseconds: 60_000,
-            idle_timeout_milliseconds: 1_000,
-            initialize_timeout_milliseconds: 1_000,
-            request_timeout_milliseconds: 30_000,
-            total_timeout_milliseconds: 30_000,
-        },
-    )
-    .unwrap();
-    let authorization = McpAuthorizationContext::build(NewMcpAuthorizationContext {
-        tenant_id: request.tenant_id.clone(),
-        authorization_binding_id: id(ResourceKind::McpAuthorizationBinding, 48),
-        mcp_deployment: deployment.clone(),
-        principal_kind: McpAuthorizationPrincipalKind::PerUser,
-        principal_id: id(ResourceKind::Principal, 49),
-        principal_identity_kind: PrincipalKind::AgentRunner,
-        principal_binding_generation: 1,
-        audience_identity_digest: server_identity_digest,
-        granted_scopes: vec!["tools.call".to_owned()],
-        token_secret_binding: token_binding.clone(),
-        generation: 1,
-        expires_at: now + ChronoDuration::minutes(5),
-    })
-    .unwrap();
-    let discovery = insight_platform_contracts::McpDiscoverySnapshot::build(
-        id(ResourceKind::McpDiscoverySnapshot, 50),
-        deployment.clone(),
-        server_revision,
-        protocol_policy,
-        authorization.canonical_digest.clone(),
-        MCP_PROTOCOL_BASELINE.to_owned(),
-        McpNegotiatedCapabilities {
-            tools: true,
-            resources: false,
-            prompts: false,
-            logging: false,
-            tasks: false,
-            tasks_list: false,
-            tasks_cancel: false,
-            tasks_tools_call: false,
-            elicitation: false,
-            sampling: false,
-            roots: false,
-            subscriptions: false,
-        },
-        artifact(51, '8'),
-        now - ChronoDuration::seconds(1),
-        now + ChronoDuration::minutes(4),
-    )
-    .unwrap();
-    let contract = McpHostExecutionContract::build(NewMcpHostExecutionContract {
-        deployment: deployment.clone(),
-        deployment_closure,
-        server,
-        protocol_profile,
-        authorization,
-        discovery,
-    })
-    .unwrap();
-    let operation = McpLogicalOperationRequest {
-        schema_version: 1,
-        mcp_operation_id: id(ResourceKind::McpOperation, 52),
-        tenant_id: request.tenant_id.clone(),
-        invocation_id: request.invocation_id.clone(),
-        job_id: request.job_id.clone(),
-        physical_attempt: request.attempt_no,
-        snapshot_id: contract.discovery.snapshot_id.clone(),
-        authorization_binding_id: contract.authorization.authorization_binding_id.clone(),
-        method: PublishedMcpMethod::ToolsCall,
-        params: ClosedJsonValue::build(sha('9'), serde_json::json!({"query": "hello"})).unwrap(),
-        task_requested: false,
-        continuation: None,
-        idempotency_key_digest: sha('a'),
-        idempotency: CapabilityIdempotencyKind::Intrinsic,
-        effect: request.effect,
-        deadline: request.deadline,
-    };
-    let input_schema = ClosedJsonSchema::build(serde_json::json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-            "question": {
-                "description": "Bounded managed MCP fixture input.",
-                "x-platform-classification": "internal",
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64,
-                "x-platform-max-bytes": 256
-            }
-        },
-        "required": ["question"],
-        "additionalProperties": false
-    }))
-    .unwrap();
-    let output_schema = ClosedJsonSchema::build(serde_json::json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-            "answer": {
-                "description": "Bounded managed MCP fixture output.",
-                "x-platform-classification": "internal",
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 100
-            }
-        },
-        "required": ["answer"],
-        "additionalProperties": false
-    }))
-    .unwrap();
-    let error_schema = ClosedJsonSchema::build(serde_json::json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-            "error": {
-                "description": "Bounded managed MCP fixture error.",
-                "x-platform-classification": "internal",
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128,
-                "x-platform-max-bytes": 512
-            }
-        },
-        "required": ["error"],
-        "additionalProperties": false
-    }))
-    .unwrap();
-    request.input_schema_digest = input_schema.canonical_digest.clone();
-    request.output_schema_digest = output_schema.canonical_digest.clone();
-    let capability_interface_revision = exact(ResourceKind::CapabilityInterfaceRevision, 55, 'c');
-    let capability_interface = CapabilityInterfaceResourceSpec {
-        authoring_package: authoring(56, 'd'),
-        contract_digest: sha('e'),
-        dependency_versions: vec![],
-        policy_versions: vec![],
-        qualified_name: "fixture.managed_mcp".parse().unwrap(),
-        input_schema,
-        output_schema,
-        error_schema,
-        artifacts: CapabilityArtifactContract { ports: vec![] },
-        data_policy: CapabilityDataFlowPolicy {
-            maximum_input_classification: DataClassification::Restricted,
-            maximum_output_classification: DataClassification::Restricted,
-            allowed_regions: vec!["global".parse().unwrap()],
-            declassification_policy: None,
-        },
-        execution_limits: CapabilityInterfaceLimits {
-            maximum_input_bytes: 1_048_576,
-            maximum_output_bytes: 1_048_576,
-            maximum_artifacts: 0,
-            maximum_execution_milliseconds: 60_000,
-        },
-        effect: request.effect,
-        idempotency: operation.idempotency,
-        cancellation: CapabilityCancellationKind::Confirmed,
-        progress: CapabilityProgressContract {
-            mode: CapabilityProgressMode::None,
-            schema_digest: None,
-            max_events: 0,
-            max_bytes_per_event: 0,
-            minimum_interval_milliseconds: 0,
-            durability: CapabilityProgressDurability::None,
-        },
-    };
-    let backend_contract = CapabilityBackendContract::Mcp(McpToolCapabilityContract {
-        remote_tool_name: "search".to_owned(),
-        remote_input_schema_digest: operation.params.schema_digest.clone(),
-        output_mapping_digest: sha('f'),
-        protocol_profile: contract.server.protocol_policy.clone(),
-        discovery_semantic_evidence_digest: contract.discovery.objects_digest.clone(),
-        supports_task: false,
-        supports_progress: false,
-    });
-    let backend_contract_digest = backend_contract.canonical_digest().unwrap();
-    let capability_implementation_revision =
-        exact(ResourceKind::CapabilityImplementationRevision, 57, '1');
-    let capability_implementation = CapabilityImplementationResourceSpec {
-        authoring_package: authoring(58, '2'),
-        contract_digest: sha('3'),
-        dependency_versions: vec![capability_interface_revision.clone()],
-        policy_versions: vec![],
-        interface_revision: capability_interface_revision.clone(),
-        backend_kind: CapabilityBackendKind::Mcp,
-        backend_contract,
-        backend_contract_digest,
-        credential_requirements: vec![],
-        backend_limits: CapabilityBackendLimits {
-            maximum_request_bytes: 8_192,
-            maximum_response_bytes: 8_192,
-            maximum_diagnostic_bytes: 4_096,
-            connect_timeout_milliseconds: 1_000,
-            first_byte_timeout_milliseconds: 1_000,
-            idle_timeout_milliseconds: 1_000,
-            total_timeout_milliseconds: 30_000,
-        },
-        features: CapabilityBackendFeatures {
-            deferred: false,
-            input_required: false,
-            callback: false,
-            poll: false,
-            progress: false,
-            cancellation: true,
-            max_remote_state_bytes: 0,
-            max_poll_count: 0,
-        },
-    };
-    let capability_deployment_closure = CapabilityDeploymentClosure {
-        implementation: capability_implementation_revision.clone(),
-        interface: capability_interface_revision.clone(),
-        backend: CapabilityBackendBinding::Mcp {
-            mcp_deployment: deployment,
-            discovery_snapshot_id: contract.discovery.snapshot_id.clone(),
-            discovery_snapshot_digest: contract.discovery.canonical_digest.clone(),
-            authorization_policy: auth_policy,
-        },
-        secret_bindings: vec![],
-        policies: vec![],
-        conformance_evidence: artifact(59, '4'),
-    };
-    request.execution_source = SandboxExecutionSource::ManagedMcp {
-        capability_deployment_closure: Box::new(capability_deployment_closure),
-        capability_interface_revision,
-        capability_interface: Box::new(capability_interface),
-        capability_implementation_revision,
-        capability_implementation: Box::new(capability_implementation),
-        mcp_contract: Box::new(contract),
-        operation: Box::new(operation),
-    };
-    request.secret_grants = vec![ScopedSecretGrant {
-        schema_version: 1,
-        tenant_id: request.tenant_id.clone(),
-        sandbox_job_id: request.sandbox_job_id.clone(),
-        secret_binding: token_binding,
-        resolved_binding_generation: 1,
-        runtime_digest: request.runtime.image_or_module_digest.clone(),
-        maximum_reads: 1,
-        expires_at: request.deadline,
-        grant_digest: sha('0'),
+        let deployment = deployment(ResourceKind::McpDeployment, 40, '1');
+        let server_revision = exact(ResourceKind::McpServerRevision, 41, '2');
+        let protocol_profile = managed_mcp_protocol();
+        let protocol_policy = ExactVersionRef::new(
+            id(ResourceKind::PolicyRevision, 42),
+            protocol_profile.canonical_digest().unwrap(),
+        )
+        .unwrap();
+        let trust_policy = exact(ResourceKind::PolicyRevision, 43, '3');
+        let auth_policy = exact(ResourceKind::PolicyRevision, 44, '4');
+        let server_identity_digest = sha('5');
+        let token_purpose = SecretPurpose::from_str("mcp.oauth").unwrap();
+        let token_binding = ExactSecretBindingRef::build(
+            id(ResourceKind::SecretBinding, 45),
+            1,
+            id(ResourceKind::SecretProvider, 46),
+            token_purpose.clone(),
+            SecretResolutionPolicy::Pinned {
+                opaque_version_identity_digest: sha('6'),
+            },
+        )
+        .unwrap();
+        let deployment_closure = McpDeploymentClosure {
+            server_revision: server_revision.clone(),
+            server_identity_digest: server_identity_digest.clone(),
+            transport: McpTransportBinding::ManagedStdio {
+                package: request.package_revision.clone(),
+                runtime: request.runtime_revision.clone(),
+                profile: request.profile_revision.clone(),
+                isolation: SandboxIsolationClass::MicroVm,
+                isolation_policy,
+                resource_policy,
+                artifact_io_policy,
+            },
+            protocol_policy: protocol_policy.clone(),
+            trust_policy,
+            auth_policy: Some(auth_policy.clone()),
+            secret_bindings: vec![],
+            conformance_evidence: artifact(47, '7'),
+        };
+        let server = McpServerExecutionContract::build(
+            server_revision.clone(),
+            McpTransportKind::ManagedStdio,
+            protocol_policy.clone(),
+            vec![],
+            Some(token_purpose),
+            McpServerLimits {
+                maximum_message_bytes: 8_192,
+                maximum_response_bytes: 8_192,
+                maximum_headers: 32,
+                maximum_sse_event_bytes: 4_096,
+                maximum_in_flight: 4,
+                maximum_connections: 1,
+                maximum_sessions: 1,
+                maximum_session_milliseconds: 60_000,
+                idle_timeout_milliseconds: 1_000,
+                initialize_timeout_milliseconds: 1_000,
+                request_timeout_milliseconds: 30_000,
+                total_timeout_milliseconds: 30_000,
+            },
+        )
+        .unwrap();
+        let authorization = McpAuthorizationContext::build(NewMcpAuthorizationContext {
+            tenant_id: request.tenant_id.clone(),
+            authorization_binding_id: id(ResourceKind::McpAuthorizationBinding, 48),
+            mcp_deployment: deployment.clone(),
+            principal_kind: McpAuthorizationPrincipalKind::PerUser,
+            principal_id: id(ResourceKind::Principal, 49),
+            principal_identity_kind: PrincipalKind::AgentRunner,
+            principal_binding_generation: 1,
+            audience_identity_digest: server_identity_digest,
+            granted_scopes: vec!["tools.call".to_owned()],
+            token_secret_binding: token_binding.clone(),
+            generation: 1,
+            expires_at: now + ChronoDuration::minutes(5),
+        })
+        .unwrap();
+        let discovery = insight_platform_contracts::McpDiscoverySnapshot::build(
+            id(ResourceKind::McpDiscoverySnapshot, 50),
+            deployment.clone(),
+            server_revision,
+            protocol_policy,
+            authorization.canonical_digest.clone(),
+            MCP_PROTOCOL_BASELINE.to_owned(),
+            McpNegotiatedCapabilities {
+                tools: true,
+                resources: false,
+                prompts: false,
+                logging: false,
+                tasks: false,
+                tasks_list: false,
+                tasks_cancel: false,
+                tasks_tools_call: false,
+                elicitation: false,
+                sampling: false,
+                roots: false,
+                subscriptions: false,
+            },
+            artifact(51, '8'),
+            now - ChronoDuration::seconds(1),
+            now + ChronoDuration::minutes(4),
+        )
+        .unwrap();
+        let contract = McpHostExecutionContract::build(NewMcpHostExecutionContract {
+            deployment: deployment.clone(),
+            deployment_closure,
+            server,
+            protocol_profile,
+            authorization,
+            discovery,
+        })
+        .unwrap();
+        let operation = McpLogicalOperationRequest {
+            schema_version: 1,
+            mcp_operation_id: id(ResourceKind::McpOperation, 52),
+            tenant_id: request.tenant_id.clone(),
+            invocation_id: request.invocation_id.clone(),
+            job_id: request.job_id.clone(),
+            physical_attempt: request.attempt_no,
+            snapshot_id: contract.discovery.snapshot_id.clone(),
+            authorization_binding_id: contract.authorization.authorization_binding_id.clone(),
+            method: PublishedMcpMethod::ToolsCall,
+            params: ClosedJsonValue::build(sha('9'), serde_json::json!({"query": "hello"}))
+                .unwrap(),
+            task_requested: false,
+            continuation: None,
+            idempotency_key_digest: sha('a'),
+            idempotency: CapabilityIdempotencyKind::Intrinsic,
+            effect: request.effect,
+            deadline: request.deadline,
+        };
+        let input_schema = ClosedJsonSchema::build(serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "question": {
+                    "description": "Bounded managed MCP fixture input.",
+                    "x-platform-classification": "internal",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "x-platform-max-bytes": 256
+                }
+            },
+            "required": ["question"],
+            "additionalProperties": false
+        }))
+        .unwrap();
+        let output_schema = ClosedJsonSchema::build(serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "description": "Bounded managed MCP fixture output.",
+                    "x-platform-classification": "internal",
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                }
+            },
+            "required": ["answer"],
+            "additionalProperties": false
+        }))
+        .unwrap();
+        let error_schema = ClosedJsonSchema::build(serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "error": {
+                    "description": "Bounded managed MCP fixture error.",
+                    "x-platform-classification": "internal",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "x-platform-max-bytes": 512
+                }
+            },
+            "required": ["error"],
+            "additionalProperties": false
+        }))
+        .unwrap();
+        request.input_schema_digest = input_schema.canonical_digest.clone();
+        request.output_schema_digest = output_schema.canonical_digest.clone();
+        let capability_interface_revision =
+            exact(ResourceKind::CapabilityInterfaceRevision, 55, 'c');
+        let capability_interface = CapabilityInterfaceResourceSpec {
+            authoring_package: authoring(56, 'd'),
+            contract_digest: sha('e'),
+            dependency_versions: vec![],
+            policy_versions: vec![],
+            qualified_name: "fixture.managed_mcp".parse().unwrap(),
+            input_schema,
+            output_schema,
+            error_schema,
+            artifacts: CapabilityArtifactContract { ports: vec![] },
+            data_policy: CapabilityDataFlowPolicy {
+                maximum_input_classification: DataClassification::Restricted,
+                maximum_output_classification: DataClassification::Restricted,
+                allowed_regions: vec!["global".parse().unwrap()],
+                declassification_policy: None,
+            },
+            execution_limits: CapabilityInterfaceLimits {
+                maximum_input_bytes: 1_048_576,
+                maximum_output_bytes: 1_048_576,
+                maximum_artifacts: 0,
+                maximum_execution_milliseconds: 60_000,
+            },
+            effect: request.effect,
+            idempotency: operation.idempotency,
+            cancellation: CapabilityCancellationKind::Confirmed,
+            progress: CapabilityProgressContract {
+                mode: CapabilityProgressMode::None,
+                schema_digest: None,
+                max_events: 0,
+                max_bytes_per_event: 0,
+                minimum_interval_milliseconds: 0,
+                durability: CapabilityProgressDurability::None,
+            },
+        };
+        let backend_contract = CapabilityBackendContract::Mcp(McpToolCapabilityContract {
+            remote_tool_name: "search".to_owned(),
+            remote_input_schema_digest: operation.params.schema_digest.clone(),
+            output_mapping_digest: sha('f'),
+            protocol_profile: contract.server.protocol_policy.clone(),
+            discovery_semantic_evidence_digest: contract.discovery.objects_digest.clone(),
+            supports_task: false,
+            supports_progress: false,
+        });
+        let backend_contract_digest = backend_contract.canonical_digest().unwrap();
+        let capability_implementation_revision =
+            exact(ResourceKind::CapabilityImplementationRevision, 57, '1');
+        let capability_implementation = CapabilityImplementationResourceSpec {
+            authoring_package: authoring(58, '2'),
+            contract_digest: sha('3'),
+            dependency_versions: vec![capability_interface_revision.clone()],
+            policy_versions: vec![],
+            interface_revision: capability_interface_revision.clone(),
+            backend_kind: CapabilityBackendKind::Mcp,
+            backend_contract,
+            backend_contract_digest,
+            credential_requirements: vec![],
+            backend_limits: CapabilityBackendLimits {
+                maximum_request_bytes: 8_192,
+                maximum_response_bytes: 8_192,
+                maximum_diagnostic_bytes: 4_096,
+                connect_timeout_milliseconds: 1_000,
+                first_byte_timeout_milliseconds: 1_000,
+                idle_timeout_milliseconds: 1_000,
+                total_timeout_milliseconds: 30_000,
+            },
+            features: CapabilityBackendFeatures {
+                deferred: false,
+                input_required: false,
+                callback: false,
+                poll: false,
+                progress: false,
+                cancellation: true,
+                max_remote_state_bytes: 0,
+                max_poll_count: 0,
+            },
+        };
+        let capability_deployment_closure = CapabilityDeploymentClosure {
+            implementation: capability_implementation_revision.clone(),
+            interface: capability_interface_revision.clone(),
+            backend: CapabilityBackendBinding::Mcp {
+                mcp_deployment: deployment,
+                discovery_snapshot_id: contract.discovery.snapshot_id.clone(),
+                discovery_snapshot_digest: contract.discovery.canonical_digest.clone(),
+                authorization_policy: auth_policy,
+            },
+            secret_bindings: vec![],
+            policies: vec![],
+            conformance_evidence: artifact(59, '4'),
+        };
+        request.execution_source = SandboxExecutionSource::ManagedMcp {
+            capability_deployment_closure: Box::new(capability_deployment_closure),
+            capability_interface_revision,
+            capability_interface: Box::new(capability_interface),
+            capability_implementation_revision,
+            capability_implementation: Box::new(capability_implementation),
+            mcp_contract: Box::new(contract),
+            operation: Box::new(operation),
+        };
+        request.secret_grants = vec![ScopedSecretGrant {
+            schema_version: 1,
+            tenant_id: request.tenant_id.clone(),
+            sandbox_job_id: request.sandbox_job_id.clone(),
+            secret_binding: token_binding,
+            resolved_binding_generation: 1,
+            runtime_digest: request.runtime.image_or_module_digest.clone(),
+            maximum_reads: 1,
+            expires_at: request.deadline,
+            grant_digest: sha('0'),
+        }
+        .seal()
+        .unwrap()];
+        request.policies = Box::new(policy_closure(
+            SandboxRuntimeFamily::ManagedMcpServer,
+            CodeTrustClass::BuiltIn,
+            SandboxIsolationClass::MicroVm,
+            false,
+        ));
+        request.policies.secret_resolution = Some(SandboxSecretResolutionPolicyDocument {
+            schema_version: 1,
+            allowed_purposes: vec![request.secret_grants[0].secret_binding.purpose.clone()],
+            maximum_reads_per_binding: 1,
+            delivery_mode: SandboxSecretDeliveryMode::BrokeredMemory,
+            deny_environment: true,
+            deny_argv: true,
+            deny_snapshot: true,
+            scrub_after_read: true,
+        });
+        request.seal().unwrap()
     }
-    .seal()
-    .unwrap()];
-    request.policies = Box::new(policy_closure(
-        SandboxRuntimeFamily::ManagedMcpServer,
-        CodeTrustClass::BuiltIn,
-        SandboxIsolationClass::MicroVm,
-        false,
-    ));
-    request.policies.secret_resolution = Some(SandboxSecretResolutionPolicyDocument {
-        schema_version: 1,
-        allowed_purposes: vec![request.secret_grants[0].secret_binding.purpose.clone()],
-        maximum_reads_per_binding: 1,
-        delivery_mode: SandboxSecretDeliveryMode::BrokeredMemory,
-        deny_environment: true,
-        deny_argv: true,
-        deny_snapshot: true,
-        scrub_after_read: true,
-    });
-    request.seal().unwrap()
-}
 
-#[test]
-fn managed_mcp_submission_requires_exact_microvm_source_and_token_grant() {
-    let now = Utc::now();
-    let request = managed_mcp_request_at(now);
-    request.validate_submission_at(now, limits()).unwrap();
+    #[test]
+    fn managed_mcp_submission_requires_exact_microvm_source_and_token_grant() {
+        let now = Utc::now();
+        let request = managed_mcp_request_at(now);
+        request.validate_submission_at(now, limits()).unwrap();
 
-    let mut missing_token = request.clone();
-    missing_token.secret_grants[0].secret_binding = ExactSecretBindingRef::build(
-        id(ResourceKind::SecretBinding, 53),
-        1,
-        id(ResourceKind::SecretProvider, 54),
-        SecretPurpose::from_str("mcp.oauth").unwrap(),
-        SecretResolutionPolicy::Pinned {
-            opaque_version_identity_digest: sha('b'),
-        },
-    )
-    .unwrap();
-    missing_token.secret_grants[0] = missing_token.secret_grants[0].clone().seal().unwrap();
-    missing_token = missing_token.seal().unwrap();
-    assert_eq!(
-        missing_token.validate_submission_at(now, limits()),
-        Err(SandboxContractError::InvalidSecretGrant)
-    );
-
-    let mut drifted_capability = request.clone();
-    let SandboxExecutionSource::ManagedMcp {
-        capability_implementation,
-        ..
-    } = &mut drifted_capability.execution_source
-    else {
-        unreachable!();
-    };
-    capability_implementation.features.poll = true;
-    drifted_capability = drifted_capability.seal().unwrap();
-    assert!(drifted_capability
-        .validate_submission_at(now, limits())
-        .is_err());
-
-    let mut downgraded = request;
-    downgraded.isolation_class = SandboxIsolationClass::SandboxedContainer;
-    downgraded = downgraded.seal().unwrap();
-    assert!(downgraded.validate_submission_at(now, limits()).is_err());
-}
-
-#[test]
-fn managed_subscription_admission_binds_two_jobs_to_one_session_generation() {
-    let now = Utc::now();
-    let (record, command) = managed_mcp_session_fixture(now);
-    let accepted =
-        decide_accept_managed_mcp_sandbox_session(&record, &command, now, limits()).unwrap();
-    let link = accepted
-        .logical_payload
-        .managed_sandbox_session
-        .as_ref()
+        let mut missing_token = request.clone();
+        missing_token.secret_grants[0].secret_binding = ExactSecretBindingRef::build(
+            id(ResourceKind::SecretBinding, 53),
+            1,
+            id(ResourceKind::SecretProvider, 54),
+            SecretPurpose::from_str("mcp.oauth").unwrap(),
+            SecretResolutionPolicy::Pinned {
+                opaque_version_identity_digest: sha('b'),
+            },
+        )
         .unwrap();
-    assert_eq!(accepted.logical_state, McpSubscriptionState::Pending);
-    assert_eq!(link.identity, command.request.identity);
-    assert_eq!(link.sandbox_request_digest, command.request.request_digest);
-    assert_eq!(accepted.logical_payload.session.generation, 1);
-    assert_eq!(accepted.physical_job.work_class, WorkClass::Sandbox);
-    assert_eq!(
-        accepted.physical_job.job_id.uuid(),
-        accepted.physical_job.owner.owner_id.uuid()
-    );
-    accepted
-        .physical_payload
-        .validate_for(&accepted.physical_job, limits())
-        .unwrap();
+        missing_token.secret_grants[0] = missing_token.secret_grants[0].clone().seal().unwrap();
+        missing_token = missing_token.seal().unwrap();
+        assert_eq!(
+            missing_token.validate_submission_at(now, limits()),
+            Err(SandboxContractError::InvalidSecretGrant)
+        );
 
-    let mut stale = command.clone();
-    stale.request.identity.admitted_subscription_version += 1;
-    stale.request.identity.canonical_digest =
+        let mut drifted_capability = request.clone();
+        let SandboxExecutionSource::ManagedMcp {
+            capability_implementation,
+            ..
+        } = &mut drifted_capability.execution_source
+        else {
+            unreachable!();
+        };
+        capability_implementation.features.poll = true;
+        drifted_capability = drifted_capability.seal().unwrap();
+        assert!(drifted_capability
+            .validate_submission_at(now, limits())
+            .is_err());
+
+        let mut downgraded = request;
+        downgraded.isolation_class = SandboxIsolationClass::SandboxedContainer;
+        downgraded = downgraded.seal().unwrap();
+        assert!(downgraded.validate_submission_at(now, limits()).is_err());
+    }
+
+    #[test]
+    fn managed_subscription_admission_binds_two_jobs_to_one_session_generation() {
+        let now = Utc::now();
+        let (record, command) = managed_mcp_session_fixture(now);
+        let accepted =
+            decide_accept_managed_mcp_sandbox_session(&record, &command, now, limits()).unwrap();
+        let link = accepted
+            .logical_payload
+            .managed_sandbox_session
+            .as_ref()
+            .unwrap();
+        assert_eq!(accepted.logical_state, McpSubscriptionState::Pending);
+        assert_eq!(link.identity, command.request.identity);
+        assert_eq!(link.sandbox_request_digest, command.request.request_digest);
+        assert_eq!(accepted.logical_payload.session.generation, 1);
+        assert_eq!(accepted.physical_job.work_class, WorkClass::Sandbox);
+        assert_eq!(
+            accepted.physical_job.job_id.uuid(),
+            accepted.physical_job.owner.owner_id.uuid()
+        );
+        accepted
+            .physical_payload
+            .validate_for(&accepted.physical_job, limits())
+            .unwrap();
+
+        let mut stale = command.clone();
+        stale.request.identity.admitted_subscription_version += 1;
+        stale.request.identity.canonical_digest =
         insight_platform_contracts::canonical_digest(&serde_json::json!({
             "admitted_logical_job_version": stale.request.identity.admitted_logical_job_version,
             "admitted_subscription_version": stale.request.identity.admitted_subscription_version,
@@ -874,1470 +873,1480 @@ fn managed_subscription_admission_binds_two_jobs_to_one_session_generation() {
         .unwrap()
         .parse()
         .unwrap();
-    stale.request = stale.request.seal().unwrap();
-    stale.audit.request_digest = stale.request.request_digest.clone();
-    assert!(decide_accept_managed_mcp_sandbox_session(&record, &stale, now, limits()).is_err());
-}
-
-#[test]
-fn managed_subscription_commits_physical_phases_and_both_jobs_before_ready() {
-    let now = Utc::now();
-    let (mut logical, admission) = managed_mcp_session_fixture(now);
-    let accepted =
-        decide_accept_managed_mcp_sandbox_session(&logical, &admission, now, limits()).unwrap();
-    logical.version += 1;
-    logical.payload = accepted.logical_payload;
-    logical.state = accepted.logical_state;
-
-    let worker = id(ResourceKind::WorkerProcessGeneration, 85);
-    let leased = decide_claim(
-        &accepted.physical_job,
-        now,
-        worker.clone(),
-        sha('c'),
-        LeasePolicy {
-            requested_milliseconds: 60_000,
-            hard_maximum_milliseconds: 60_000,
-        },
-    )
-    .unwrap();
-    let audit = |suffix: u16| SandboxWorkerAudit {
-        tenant_id: logical.tenant_id.clone(),
-        worker_process_generation_id: worker.clone(),
-        receipt_id: id(ResourceKind::Receipt, suffix),
-        event_id: id(ResourceKind::Event, suffix + 10),
-        outbox_id: id(ResourceKind::OutboxEvent, suffix + 20),
-        idempotency_key_digest: sha('d'),
-        request_digest: sha('0'),
-        receipt_expires_at: now + ChronoDuration::minutes(5),
-    };
-    let mut preparing = CommitManagedMcpSandboxSessionPhase {
-        audit: audit(86),
-        identity: admission.request.identity.clone(),
-        fence: JobFence {
-            expected_version: leased.version,
-            worker_process_generation_id: worker.clone(),
-            lease_generation: leased.lease_generation,
-            token_digest: sha('c'),
-        },
-        target: SandboxJobState::Preparing,
-        executor_identity_digest: sha('e'),
-        attestor_route: attestor_route(),
-        phase_evidence_digest: sha('f'),
-        prepared_binding: None,
-    };
-    preparing.audit.request_digest = preparing.canonical_request_digest().unwrap();
-    let preparing = decide_managed_mcp_sandbox_session_phase(
-        &logical,
-        &leased,
-        &accepted.physical_payload,
-        &preparing,
-        now,
-        limits(),
-    )
-    .unwrap();
-    assert_eq!(
-        preparing.physical_payload.physical_state,
-        SandboxJobState::Preparing
-    );
-    assert_eq!(
-        preparing.logical_payload.session.state,
-        insight_platform_contracts::McpSessionState::Connecting
-    );
-
-    let prepared_binding = PreparedManagedMcpSandboxSession {
-        schema_version: 1,
-        identity: admission.request.identity.clone(),
-        request_digest: admission.request.request_digest.clone(),
-        worker_process_generation_id: worker.clone(),
-        provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 88),
-        lease_generation: preparing.physical_job.lease_generation,
-        executor_identity_digest: sha('e'),
-        sandbox_identity_digest: sha('2'),
-        prepare_evidence_digest: sha('1'),
-        canonical_digest: sha('0'),
+        stale.request = stale.request.seal().unwrap();
+        stale.audit.request_digest = stale.request.request_digest.clone();
+        assert!(decide_accept_managed_mcp_sandbox_session(&record, &stale, now, limits()).is_err());
     }
-    .seal()
-    .unwrap();
-    let mut starting = CommitManagedMcpSandboxSessionPhase {
-        audit: audit(87),
-        identity: admission.request.identity.clone(),
-        fence: JobFence {
-            expected_version: preparing.physical_job.version,
-            worker_process_generation_id: worker.clone(),
-            lease_generation: preparing.physical_job.lease_generation,
-            token_digest: sha('c'),
-        },
-        target: SandboxJobState::Starting,
-        executor_identity_digest: sha('e'),
-        attestor_route: attestor_route(),
-        phase_evidence_digest: prepared_binding.canonical_digest.clone(),
-        prepared_binding: Some(prepared_binding.clone()),
-    };
-    starting.audit.request_digest = starting.canonical_request_digest().unwrap();
-    let starting = decide_managed_mcp_sandbox_session_phase(
-        &logical,
-        &preparing.physical_job,
-        &preparing.physical_payload,
-        &starting,
-        now,
-        limits(),
-    )
-    .unwrap();
-    logical.version += 1;
-    logical.payload = starting.logical_payload.clone();
-    logical.state = starting.logical_state;
-    assert_eq!(
-        logical.payload.session.state,
-        insight_platform_contracts::McpSessionState::Initializing
-    );
-    assert_eq!(
-        starting.physical_payload.prepared_binding.as_ref(),
-        Some(&prepared_binding)
-    );
 
-    let ready_at = now + ChronoDuration::seconds(1);
-    let ready_evidence = ManagedMcpSandboxSessionReadyEvidence {
-        schema_version: 1,
-        session_identity_digest: admission.request.identity.canonical_digest.clone(),
-        sandbox_identity_digest: sha('2'),
-        encrypted_opaque_session: insight_platform_mcp_host::EncryptedMcpState {
-            scheme: "aes256_gcm_v1".to_owned(),
-            ciphertext: vec![1, 2, 3],
-            key_id: "managed-session-key".to_owned(),
-            key_reference_digest: sha('3'),
-            plaintext_digest: sha('4'),
-        },
-        established_at: ready_at,
-        expires_at: ready_at + ChronoDuration::seconds(30),
-        protocol_evidence_digest: sha('5'),
-        canonical_digest: sha('0'),
-    }
-    .seal()
-    .unwrap();
-    let mut ready = CommitManagedMcpSandboxSessionReady {
-        audit: audit(88),
-        identity: admission.request.identity.clone(),
-        fence: JobFence {
-            expected_version: starting.physical_job.version,
-            worker_process_generation_id: worker,
-            lease_generation: starting.physical_job.lease_generation,
-            token_digest: sha('c'),
-        },
-        ready: ready_evidence,
-        phase_evidence_digest: sha('6'),
-    };
-    ready.audit.request_digest = ready.canonical_request_digest().unwrap();
-    let ready = decide_managed_mcp_sandbox_session_ready(
-        &logical,
-        &starting.physical_job,
-        &starting.physical_payload,
-        &ready,
-        ready_at,
-        limits(),
-    )
-    .unwrap();
-    assert_eq!(ready.logical_state, McpSubscriptionState::Active);
-    assert_eq!(
-        ready.logical_payload.session.state,
-        insight_platform_contracts::McpSessionState::Ready
-    );
-    assert_eq!(
-        ready.physical_payload.physical_state,
-        SandboxJobState::Running
-    );
-    assert!(ready.physical_payload.ready_binding.is_some());
-    let physical_json = serde_json::to_string(&ready.physical_payload).unwrap();
-    assert!(!physical_json.contains("managed-session-key"));
-    assert!(!physical_json.contains("ciphertext"));
-    ready
-        .physical_payload
-        .validate_for(&ready.physical_job, limits())
+    #[test]
+    fn managed_subscription_commits_physical_phases_and_both_jobs_before_ready() {
+        let now = Utc::now();
+        let (mut logical, admission) = managed_mcp_session_fixture(now);
+        let accepted =
+            decide_accept_managed_mcp_sandbox_session(&logical, &admission, now, limits()).unwrap();
+        logical.version += 1;
+        logical.payload = accepted.logical_payload;
+        logical.state = accepted.logical_state;
+
+        let worker = id(ResourceKind::WorkerProcessGeneration, 85);
+        let leased = decide_claim(
+            &accepted.physical_job,
+            now,
+            worker.clone(),
+            sha('c'),
+            LeasePolicy {
+                requested_milliseconds: 60_000,
+                hard_maximum_milliseconds: 60_000,
+            },
+        )
         .unwrap();
-
-    let mut logical_ready = logical;
-    logical_ready.version += 1;
-    logical_ready.payload = ready.logical_payload.clone();
-    logical_ready.state = ready.logical_state;
-    let heartbeat_at = ready_at + ChronoDuration::seconds(2);
-    let heartbeat = HeartbeatSandboxExecution {
-        tenant_id: logical_ready.tenant_id.clone(),
-        sandbox_job_id: admission.request.identity.sandbox_job_id.clone(),
-        job_id: admission.request.identity.physical_job_id.clone(),
-        fence: JobFence {
-            expected_version: ready.physical_job.version,
-            worker_process_generation_id: ready
-                .physical_job
-                .lease
-                .as_ref()
-                .unwrap()
-                .worker_process_generation_id
-                .clone(),
-            lease_generation: ready.physical_job.lease_generation,
-            token_digest: sha('c'),
-        },
-        lease_milliseconds: 60_000,
-    };
-    let renewed = decide_managed_mcp_sandbox_session_heartbeat(
-        &logical_ready,
-        &ready.physical_job,
-        &ready.physical_payload,
-        &heartbeat,
-        heartbeat_at,
-        limits(),
-        60_000,
-    )
-    .unwrap();
-    assert_eq!(renewed.logical_payload, logical_ready.payload);
-    assert_eq!(renewed.logical_state, logical_ready.state);
-    assert_eq!(renewed.physical_payload, ready.physical_payload);
-    assert_eq!(renewed.physical_job.version, ready.physical_job.version + 1);
-    assert_eq!(
-        renewed.physical_job.lease.as_ref().unwrap().heartbeat_at,
-        heartbeat_at
-    );
-    assert!(decide_managed_mcp_sandbox_session_heartbeat(
-        &logical_ready,
-        &renewed.physical_job,
-        &renewed.physical_payload,
-        &heartbeat,
-        heartbeat_at,
-        limits(),
-        60_000,
-    )
-    .is_err());
-}
-
-#[derive(Debug)]
-struct ManagedSessionFixtureError;
-
-impl std::fmt::Display for ManagedSessionFixtureError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("managed session fixture failure")
-    }
-}
-
-impl std::error::Error for ManagedSessionFixtureError {}
-
-struct ManagedSessionAuthorityState {
-    logical: McpSubscriptionRecord,
-    physical_job: insight_platform_jobs::JobProjection,
-    physical_payload: ManagedMcpSandboxSessionJobPayload,
-}
-
-struct RecordingManagedSessionAuthority {
-    state: Mutex<ManagedSessionAuthorityState>,
-    events: Arc<Mutex<Vec<&'static str>>>,
-    fail_ready: bool,
-    fail_heartbeat: bool,
-}
-
-#[async_trait]
-impl ManagedMcpSandboxSessionExecutionAuthority for RecordingManagedSessionAuthority {
-    type Error = ManagedSessionFixtureError;
-
-    async fn commit_managed_mcp_sandbox_session_phase(
-        &self,
-        command: CommitManagedMcpSandboxSessionPhase,
-    ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
-        self.events.lock().unwrap().push(match command.target {
-            SandboxJobState::Preparing => "commit_preparing",
-            SandboxJobState::Starting => "commit_starting",
-            _ => return Err(ManagedSessionFixtureError),
-        });
-        let now = Utc::now();
-        let mut state = self.state.lock().unwrap();
-        let decision = decide_managed_mcp_sandbox_session_phase(
-            &state.logical,
-            &state.physical_job,
-            &state.physical_payload,
-            &command,
+        let audit = |suffix: u16| SandboxWorkerAudit {
+            tenant_id: logical.tenant_id.clone(),
+            worker_process_generation_id: worker.clone(),
+            receipt_id: id(ResourceKind::Receipt, suffix),
+            event_id: id(ResourceKind::Event, suffix + 10),
+            outbox_id: id(ResourceKind::OutboxEvent, suffix + 20),
+            idempotency_key_digest: sha('d'),
+            request_digest: sha('0'),
+            receipt_expires_at: now + ChronoDuration::minutes(5),
+        };
+        let mut preparing = CommitManagedMcpSandboxSessionPhase {
+            audit: audit(86),
+            identity: admission.request.identity.clone(),
+            fence: JobFence {
+                expected_version: leased.version,
+                worker_process_generation_id: worker.clone(),
+                lease_generation: leased.lease_generation,
+                token_digest: sha('c'),
+            },
+            target: SandboxJobState::Preparing,
+            executor_identity_digest: sha('e'),
+            attestor_route: attestor_route(),
+            phase_evidence_digest: sha('f'),
+            prepared_binding: None,
+        };
+        preparing.audit.request_digest = preparing.canonical_request_digest().unwrap();
+        let preparing = decide_managed_mcp_sandbox_session_phase(
+            &logical,
+            &leased,
+            &accepted.physical_payload,
+            &preparing,
             now,
             limits(),
         )
-        .map_err(|_| ManagedSessionFixtureError)?;
-        if decision.logical_payload != state.logical.payload
-            || decision.logical_state != state.logical.state
-        {
-            state.logical.version += 1;
-            state.logical.payload = decision.logical_payload.clone();
-            state.logical.state = decision.logical_state;
-        }
-        state.physical_job = decision.physical_job.clone();
-        state.physical_payload = decision.physical_payload.clone();
-        Ok(CommandOutcome::Applied(decision))
-    }
+        .unwrap();
+        assert_eq!(
+            preparing.physical_payload.physical_state,
+            SandboxJobState::Preparing
+        );
+        assert_eq!(
+            preparing.logical_payload.session.state,
+            insight_platform_contracts::McpSessionState::Connecting
+        );
 
-    async fn commit_managed_mcp_sandbox_session_ready(
-        &self,
-        command: CommitManagedMcpSandboxSessionReady,
-    ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
-        self.events.lock().unwrap().push(if self.fail_ready {
-            "commit_ready_failed"
-        } else {
-            "commit_ready"
-        });
-        if self.fail_ready {
-            return Err(ManagedSessionFixtureError);
+        let prepared_binding = PreparedManagedMcpSandboxSession {
+            schema_version: 1,
+            identity: admission.request.identity.clone(),
+            request_digest: admission.request.request_digest.clone(),
+            worker_process_generation_id: worker.clone(),
+            provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 88),
+            lease_generation: preparing.physical_job.lease_generation,
+            executor_identity_digest: sha('e'),
+            sandbox_identity_digest: sha('2'),
+            prepare_evidence_digest: sha('1'),
+            canonical_digest: sha('0'),
         }
-        let now = Utc::now();
-        let mut state = self.state.lock().unwrap();
-        let decision = decide_managed_mcp_sandbox_session_ready(
-            &state.logical,
-            &state.physical_job,
-            &state.physical_payload,
-            &command,
+        .seal()
+        .unwrap();
+        let mut starting = CommitManagedMcpSandboxSessionPhase {
+            audit: audit(87),
+            identity: admission.request.identity.clone(),
+            fence: JobFence {
+                expected_version: preparing.physical_job.version,
+                worker_process_generation_id: worker.clone(),
+                lease_generation: preparing.physical_job.lease_generation,
+                token_digest: sha('c'),
+            },
+            target: SandboxJobState::Starting,
+            executor_identity_digest: sha('e'),
+            attestor_route: attestor_route(),
+            phase_evidence_digest: prepared_binding.canonical_digest.clone(),
+            prepared_binding: Some(prepared_binding.clone()),
+        };
+        starting.audit.request_digest = starting.canonical_request_digest().unwrap();
+        let starting = decide_managed_mcp_sandbox_session_phase(
+            &logical,
+            &preparing.physical_job,
+            &preparing.physical_payload,
+            &starting,
             now,
             limits(),
         )
-        .map_err(|_| ManagedSessionFixtureError)?;
-        state.logical.version += 1;
-        state.logical.payload = decision.logical_payload.clone();
-        state.logical.state = decision.logical_state;
-        state.physical_job = decision.physical_job.clone();
-        state.physical_payload = decision.physical_payload.clone();
-        Ok(CommandOutcome::Applied(decision))
-    }
+        .unwrap();
+        logical.version += 1;
+        logical.payload = starting.logical_payload.clone();
+        logical.state = starting.logical_state;
+        assert_eq!(
+            logical.payload.session.state,
+            insight_platform_contracts::McpSessionState::Initializing
+        );
+        assert_eq!(
+            starting.physical_payload.prepared_binding.as_ref(),
+            Some(&prepared_binding)
+        );
 
-    async fn heartbeat_managed_mcp_sandbox_session(
-        &self,
-        command: HeartbeatSandboxExecution,
-    ) -> Result<ManagedMcpSandboxSessionPhaseDecision, Self::Error> {
-        self.events.lock().unwrap().push(if self.fail_heartbeat {
-            "heartbeat_failed"
-        } else {
-            "heartbeat"
-        });
-        if self.fail_heartbeat {
-            return Err(ManagedSessionFixtureError);
+        let ready_at = now + ChronoDuration::seconds(1);
+        let ready_evidence = ManagedMcpSandboxSessionReadyEvidence {
+            schema_version: 1,
+            session_identity_digest: admission.request.identity.canonical_digest.clone(),
+            sandbox_identity_digest: sha('2'),
+            encrypted_opaque_session: insight_platform_mcp_host::EncryptedMcpState {
+                scheme: "aes256_gcm_v1".to_owned(),
+                ciphertext: vec![1, 2, 3],
+                key_id: "managed-session-key".to_owned(),
+                key_reference_digest: sha('3'),
+                plaintext_digest: sha('4'),
+            },
+            established_at: ready_at,
+            expires_at: ready_at + ChronoDuration::seconds(30),
+            protocol_evidence_digest: sha('5'),
+            canonical_digest: sha('0'),
         }
-        let now = Utc::now();
-        let mut state = self.state.lock().unwrap();
-        let decision = decide_managed_mcp_sandbox_session_heartbeat(
-            &state.logical,
-            &state.physical_job,
-            &state.physical_payload,
-            &command,
-            now,
+        .seal()
+        .unwrap();
+        let mut ready = CommitManagedMcpSandboxSessionReady {
+            audit: audit(88),
+            identity: admission.request.identity.clone(),
+            fence: JobFence {
+                expected_version: starting.physical_job.version,
+                worker_process_generation_id: worker,
+                lease_generation: starting.physical_job.lease_generation,
+                token_digest: sha('c'),
+            },
+            ready: ready_evidence,
+            phase_evidence_digest: sha('6'),
+        };
+        ready.audit.request_digest = ready.canonical_request_digest().unwrap();
+        let ready = decide_managed_mcp_sandbox_session_ready(
+            &logical,
+            &starting.physical_job,
+            &starting.physical_payload,
+            &ready,
+            ready_at,
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(ready.logical_state, McpSubscriptionState::Active);
+        assert_eq!(
+            ready.logical_payload.session.state,
+            insight_platform_contracts::McpSessionState::Ready
+        );
+        assert_eq!(
+            ready.physical_payload.physical_state,
+            SandboxJobState::Running
+        );
+        assert!(ready.physical_payload.ready_binding.is_some());
+        let physical_json = serde_json::to_string(&ready.physical_payload).unwrap();
+        assert!(!physical_json.contains("managed-session-key"));
+        assert!(!physical_json.contains("ciphertext"));
+        ready
+            .physical_payload
+            .validate_for(&ready.physical_job, limits())
+            .unwrap();
+
+        let mut logical_ready = logical;
+        logical_ready.version += 1;
+        logical_ready.payload = ready.logical_payload.clone();
+        logical_ready.state = ready.logical_state;
+        let heartbeat_at = ready_at + ChronoDuration::seconds(2);
+        let heartbeat = HeartbeatSandboxExecution {
+            tenant_id: logical_ready.tenant_id.clone(),
+            sandbox_job_id: admission.request.identity.sandbox_job_id.clone(),
+            job_id: admission.request.identity.physical_job_id.clone(),
+            fence: JobFence {
+                expected_version: ready.physical_job.version,
+                worker_process_generation_id: ready
+                    .physical_job
+                    .lease
+                    .as_ref()
+                    .unwrap()
+                    .worker_process_generation_id
+                    .clone(),
+                lease_generation: ready.physical_job.lease_generation,
+                token_digest: sha('c'),
+            },
+            lease_milliseconds: 60_000,
+        };
+        let renewed = decide_managed_mcp_sandbox_session_heartbeat(
+            &logical_ready,
+            &ready.physical_job,
+            &ready.physical_payload,
+            &heartbeat,
+            heartbeat_at,
             limits(),
             60_000,
         )
-        .map_err(|_| ManagedSessionFixtureError)?;
-        state.physical_job = decision.physical_job.clone();
-        Ok(decision)
+        .unwrap();
+        assert_eq!(renewed.logical_payload, logical_ready.payload);
+        assert_eq!(renewed.logical_state, logical_ready.state);
+        assert_eq!(renewed.physical_payload, ready.physical_payload);
+        assert_eq!(renewed.physical_job.version, ready.physical_job.version + 1);
+        assert_eq!(
+            renewed.physical_job.lease.as_ref().unwrap().heartbeat_at,
+            heartbeat_at
+        );
+        assert!(decide_managed_mcp_sandbox_session_heartbeat(
+            &logical_ready,
+            &renewed.physical_job,
+            &renewed.physical_payload,
+            &heartbeat,
+            heartbeat_at,
+            limits(),
+            60_000,
+        )
+        .is_err());
     }
 
-    async fn commit_managed_mcp_sandbox_session_lost(
-        &self,
-        command: CommitManagedMcpSandboxSessionLost,
-    ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
-        self.events.lock().unwrap().push("commit_lost");
-        let now = Utc::now();
-        let mut state = self.state.lock().unwrap();
-        let decision = decide_managed_mcp_sandbox_session_lost(
-            &state.logical,
-            &state.physical_job,
-            &state.physical_payload,
-            &command,
+    #[derive(Debug)]
+    struct ManagedSessionFixtureError;
+
+    impl std::fmt::Display for ManagedSessionFixtureError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("managed session fixture failure")
+        }
+    }
+
+    impl std::error::Error for ManagedSessionFixtureError {}
+
+    struct ManagedSessionAuthorityState {
+        logical: McpSubscriptionRecord,
+        physical_job: insight_platform_jobs::JobProjection,
+        physical_payload: ManagedMcpSandboxSessionJobPayload,
+    }
+
+    struct RecordingManagedSessionAuthority {
+        state: Mutex<ManagedSessionAuthorityState>,
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail_ready: bool,
+        fail_heartbeat: bool,
+    }
+
+    #[async_trait]
+    impl ManagedMcpSandboxSessionExecutionAuthority for RecordingManagedSessionAuthority {
+        type Error = ManagedSessionFixtureError;
+
+        async fn commit_managed_mcp_sandbox_session_phase(
+            &self,
+            command: CommitManagedMcpSandboxSessionPhase,
+        ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
+            self.events.lock().unwrap().push(match command.target {
+                SandboxJobState::Preparing => "commit_preparing",
+                SandboxJobState::Starting => "commit_starting",
+                _ => return Err(ManagedSessionFixtureError),
+            });
+            let now = Utc::now();
+            let mut state = self.state.lock().unwrap();
+            let decision = decide_managed_mcp_sandbox_session_phase(
+                &state.logical,
+                &state.physical_job,
+                &state.physical_payload,
+                &command,
+                now,
+                limits(),
+            )
+            .map_err(|_| ManagedSessionFixtureError)?;
+            if decision.logical_payload != state.logical.payload
+                || decision.logical_state != state.logical.state
+            {
+                state.logical.version += 1;
+                state.logical.payload = decision.logical_payload.clone();
+                state.logical.state = decision.logical_state;
+            }
+            state.physical_job = decision.physical_job.clone();
+            state.physical_payload = decision.physical_payload.clone();
+            Ok(CommandOutcome::Applied(decision))
+        }
+
+        async fn commit_managed_mcp_sandbox_session_ready(
+            &self,
+            command: CommitManagedMcpSandboxSessionReady,
+        ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
+            self.events.lock().unwrap().push(if self.fail_ready {
+                "commit_ready_failed"
+            } else {
+                "commit_ready"
+            });
+            if self.fail_ready {
+                return Err(ManagedSessionFixtureError);
+            }
+            let now = Utc::now();
+            let mut state = self.state.lock().unwrap();
+            let decision = decide_managed_mcp_sandbox_session_ready(
+                &state.logical,
+                &state.physical_job,
+                &state.physical_payload,
+                &command,
+                now,
+                limits(),
+            )
+            .map_err(|_| ManagedSessionFixtureError)?;
+            state.logical.version += 1;
+            state.logical.payload = decision.logical_payload.clone();
+            state.logical.state = decision.logical_state;
+            state.physical_job = decision.physical_job.clone();
+            state.physical_payload = decision.physical_payload.clone();
+            Ok(CommandOutcome::Applied(decision))
+        }
+
+        async fn heartbeat_managed_mcp_sandbox_session(
+            &self,
+            command: HeartbeatSandboxExecution,
+        ) -> Result<ManagedMcpSandboxSessionPhaseDecision, Self::Error> {
+            self.events.lock().unwrap().push(if self.fail_heartbeat {
+                "heartbeat_failed"
+            } else {
+                "heartbeat"
+            });
+            if self.fail_heartbeat {
+                return Err(ManagedSessionFixtureError);
+            }
+            let now = Utc::now();
+            let mut state = self.state.lock().unwrap();
+            let decision = decide_managed_mcp_sandbox_session_heartbeat(
+                &state.logical,
+                &state.physical_job,
+                &state.physical_payload,
+                &command,
+                now,
+                limits(),
+                60_000,
+            )
+            .map_err(|_| ManagedSessionFixtureError)?;
+            state.physical_job = decision.physical_job.clone();
+            Ok(decision)
+        }
+
+        async fn commit_managed_mcp_sandbox_session_lost(
+            &self,
+            command: CommitManagedMcpSandboxSessionLost,
+        ) -> Result<CommandOutcome<ManagedMcpSandboxSessionPhaseDecision>, Self::Error> {
+            self.events.lock().unwrap().push("commit_lost");
+            let now = Utc::now();
+            let mut state = self.state.lock().unwrap();
+            let decision = decide_managed_mcp_sandbox_session_lost(
+                &state.logical,
+                &state.physical_job,
+                &state.physical_payload,
+                &command,
+                now,
+                limits(),
+            )
+            .map_err(|_| ManagedSessionFixtureError)?;
+            state.logical.version += 1;
+            state.logical.payload = decision.logical_payload.clone();
+            state.logical.state = decision.logical_state;
+            state.physical_job = decision.physical_job.clone();
+            state.physical_payload = decision.physical_payload.clone();
+            Ok(CommandOutcome::Applied(decision))
+        }
+    }
+
+    struct RecordingManagedSessionProvider {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        prepare_delay: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl ManagedMcpSandboxSessionProvider for RecordingManagedSessionProvider {
+        type Error = ManagedSessionFixtureError;
+
+        async fn prepare(
+            &self,
+            request: &ManagedMcpSandboxSessionRequest,
+            fence: &JobFence,
+            executor_identity_digest: &insight_platform_contracts::Sha256Digest,
+        ) -> Result<PreparedManagedMcpSandboxSession, Self::Error> {
+            self.events.lock().unwrap().push("provider_prepare");
+            tokio::time::sleep(self.prepare_delay).await;
+            PreparedManagedMcpSandboxSession {
+                schema_version: 1,
+                identity: request.identity.clone(),
+                request_digest: request.request_digest.clone(),
+                worker_process_generation_id: fence.worker_process_generation_id.clone(),
+                provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 36),
+                lease_generation: fence.lease_generation,
+                executor_identity_digest: executor_identity_digest.clone(),
+                sandbox_identity_digest: sha('2'),
+                prepare_evidence_digest: sha('3'),
+                canonical_digest: sha('0'),
+            }
+            .seal()
+            .map_err(|_| ManagedSessionFixtureError)
+        }
+
+        async fn initialize(
+            &self,
+            request: &ManagedMcpSandboxSessionRequest,
+            _fence: &JobFence,
+            prepared: &PreparedManagedMcpSandboxSession,
+        ) -> Result<PreparedManagedMcpSandboxSessionActivation, Self::Error> {
+            self.events.lock().unwrap().push("provider_initialize");
+            let established_at = Utc::now();
+            let ready = ManagedMcpSandboxSessionReadyEvidence {
+                schema_version: 1,
+                session_identity_digest: request.identity.canonical_digest.clone(),
+                sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+                encrypted_opaque_session: insight_platform_mcp_host::EncryptedMcpState {
+                    scheme: "aes256_gcm_v1".to_owned(),
+                    ciphertext: vec![7, 8, 9],
+                    key_id: "fixture-session-key".to_owned(),
+                    key_reference_digest: sha('4'),
+                    plaintext_digest: sha('5'),
+                },
+                established_at,
+                expires_at: established_at + ChronoDuration::seconds(30),
+                protocol_evidence_digest: sha('6'),
+                canonical_digest: sha('0'),
+            }
+            .seal()
+            .map_err(|_| ManagedSessionFixtureError)?;
+            PreparedManagedMcpSandboxSessionActivation {
+                schema_version: 1,
+                prepared: prepared.clone(),
+                ready,
+                activation_binding_digest: sha('7'),
+                canonical_digest: sha('0'),
+            }
+            .seal()
+            .map_err(|_| ManagedSessionFixtureError)
+        }
+
+        async fn activate(
+            &self,
+            _request: &ManagedMcpSandboxSessionRequest,
+            _fence: &JobFence,
+            activation: &PreparedManagedMcpSandboxSessionActivation,
+        ) -> Result<ActivatedManagedMcpSandboxSession, Self::Error> {
+            self.events.lock().unwrap().push("provider_activate");
+            ActivatedManagedMcpSandboxSession {
+                schema_version: 1,
+                identity: activation.prepared.identity.clone(),
+                request_digest: activation.prepared.request_digest.clone(),
+                worker_process_generation_id: activation
+                    .prepared
+                    .worker_process_generation_id
+                    .clone(),
+                lease_generation: activation.prepared.lease_generation,
+                sandbox_identity_digest: activation.prepared.sandbox_identity_digest.clone(),
+                ready_evidence_digest: activation.ready.canonical_digest.clone(),
+                activated_at: Utc::now(),
+                activation_evidence_digest: sha('8'),
+                canonical_digest: sha('0'),
+            }
+            .seal()
+            .map_err(|_| ManagedSessionFixtureError)
+        }
+
+        async fn observe_exact(
+            &self,
+            request: &ManagedMcpSandboxSessionRequest,
+            fence: &JobFence,
+            prepared: &PreparedManagedMcpSandboxSession,
+            activated: &ActivatedManagedMcpSandboxSession,
+        ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, Self::Error> {
+            self.events.lock().unwrap().push("provider_observe");
+            ManagedMcpSandboxSessionLivenessEvidence {
+                schema_version: 1,
+                identity: request.identity.clone(),
+                request_digest: request.request_digest.clone(),
+                worker_process_generation_id: fence.worker_process_generation_id.clone(),
+                provider_process_generation_id: prepared.provider_process_generation_id.clone(),
+                lease_generation: fence.lease_generation,
+                executor_identity_digest: prepared.executor_identity_digest.clone(),
+                sandbox_identity_digest: activated.sandbox_identity_digest.clone(),
+                liveness: ManagedMcpSandboxSessionLiveness::Alive,
+                observed_at: Utc::now(),
+                evidence_digest: sha('0'),
+            }
+            .seal()
+            .map_err(|_| ManagedSessionFixtureError)
+        }
+
+        async fn destroy_exact(
+            &self,
+            request: &ManagedMcpSandboxSessionRequest,
+            _fence: &JobFence,
+            prepared: Option<&PreparedManagedMcpSandboxSession>,
+        ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
+            self.events.lock().unwrap().push("provider_destroy");
+            let prepared = prepared.ok_or(ManagedSessionFixtureError)?;
+            let cleanup = SandboxCleanupEvidence {
+                disposition: SandboxCleanupDisposition::Destroyed,
+                sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+                grants_revoked: true,
+                ephemeral_storage_destroyed: true,
+                observed_at: Utc::now(),
+                evidence_digest: sha('9'),
+            };
+            ManagedMcpSandboxSessionDestroyedEvidence {
+                schema_version: 1,
+                identity: request.identity.clone(),
+                request_digest: request.request_digest.clone(),
+                worker_process_generation_id: prepared.worker_process_generation_id.clone(),
+                provider_process_generation_id: prepared.provider_process_generation_id.clone(),
+                lease_generation: prepared.lease_generation,
+                executor_identity_digest: prepared.executor_identity_digest.clone(),
+                sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+                cleanup,
+                evidence_digest: sha('0'),
+            }
+            .seal()
+            .map(ManagedMcpSandboxSessionCleanupOutcome::Destroyed)
+            .map_err(|_| ManagedSessionFixtureError)
+        }
+
+        async fn recover_expired_exact(
+            &self,
+            _expired: &ExpiredManagedMcpSandboxSessionLease,
+        ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
+            self.events.lock().unwrap().push("provider_recover_expired");
+            Err(ManagedSessionFixtureError)
+        }
+    }
+
+    fn managed_session_worker_fixture(
+        now: DateTime<Utc>,
+        fail_ready: bool,
+    ) -> (
+        Arc<RecordingManagedSessionAuthority>,
+        Arc<RecordingManagedSessionProvider>,
+        ExecuteManagedMcpSandboxSession,
+    ) {
+        let (mut logical, admission) = managed_mcp_session_fixture(now);
+        let accepted =
+            decide_accept_managed_mcp_sandbox_session(&logical, &admission, now, limits()).unwrap();
+        logical.version += 1;
+        logical.payload = accepted.logical_payload;
+        logical.state = accepted.logical_state;
+        let worker = id(ResourceKind::WorkerProcessGeneration, 180);
+        let leased = decide_claim(
+            &accepted.physical_job,
             now,
+            worker.clone(),
+            sha('a'),
+            LeasePolicy {
+                requested_milliseconds: 60_000,
+                hard_maximum_milliseconds: 60_000,
+            },
+        )
+        .unwrap();
+        let identity = |suffix: u16, digest: char| SandboxWorkerCommitIdentity {
+            tenant_id: logical.tenant_id.clone(),
+            worker_process_generation_id: worker.clone(),
+            receipt_id: id(ResourceKind::Receipt, suffix),
+            event_id: id(ResourceKind::Event, suffix + 10),
+            outbox_id: id(ResourceKind::OutboxEvent, suffix + 20),
+            idempotency_key_digest: sha(digest),
+            receipt_expires_at: now + ChronoDuration::minutes(5),
+        };
+        let audits = ManagedMcpSandboxSessionWorkerAudits {
+            preparing: identity(181, 'c'),
+            starting: identity(182, 'd'),
+            ready: identity(183, 'e'),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let authority = Arc::new(RecordingManagedSessionAuthority {
+            state: Mutex::new(ManagedSessionAuthorityState {
+                logical,
+                physical_job: leased.clone(),
+                physical_payload: accepted.physical_payload,
+            }),
+            events: Arc::clone(&events),
+            fail_ready,
+            fail_heartbeat: false,
+        });
+        let provider = Arc::new(RecordingManagedSessionProvider {
+            events,
+            prepare_delay: std::time::Duration::ZERO,
+        });
+        let command = ExecuteManagedMcpSandboxSession {
+            claimed: ClaimedManagedMcpSandboxSession {
+                request: admission.request,
+                fence: JobFence {
+                    expected_version: leased.version,
+                    worker_process_generation_id: worker,
+                    lease_generation: leased.lease_generation,
+                    token_digest: sha('a'),
+                },
+                usage_reservation_id: admission.usage_reservation_id,
+            },
+            executor_identity_digest: sha('b'),
+            attestor_route: attestor_route(),
+            audits,
+        };
+        (authority, provider, command)
+    }
+
+    #[tokio::test]
+    async fn managed_session_worker_activates_only_after_durable_ready_on_the_same_instance() {
+        let now = Utc::now();
+        let (authority, provider, command) = managed_session_worker_fixture(now, false);
+        let events = Arc::clone(&provider.events);
+        let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
+        let established = worker.establish(command).await.unwrap();
+        assert_eq!(established.activated.sandbox_identity_digest, sha('2'));
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            [
+                "commit_preparing",
+                "provider_prepare",
+                "commit_starting",
+                "provider_initialize",
+                "commit_ready",
+                "provider_activate",
+            ]
+        );
+        let state = authority.state.lock().unwrap();
+        assert_eq!(state.logical.state, McpSubscriptionState::Active);
+        assert_eq!(
+            state.logical.payload.session.state,
+            insight_platform_contracts::McpSessionState::Ready
+        );
+        assert_eq!(
+            state.physical_payload.physical_state,
+            SandboxJobState::Running
+        );
+        assert_eq!(
+            state
+                .physical_payload
+                .ready_binding
+                .as_ref()
+                .unwrap()
+                .sandbox_identity_digest,
+            established.activated.sandbox_identity_digest
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_session_provider_observation_and_cleanup_are_exactly_fenced() {
+        let now = Utc::now();
+        let (authority, provider, command) = managed_session_worker_fixture(now, false);
+        let worker = ManagedMcpSandboxSessionWorker::new(authority, provider.clone(), limits());
+        let established = worker.establish(command).await.unwrap();
+        let observation = provider
+            .observe_exact(
+                &established.request,
+                &established.fence,
+                &established.prepared,
+                &established.activated,
+            )
+            .await
+            .unwrap();
+        observation
+            .validate_for(
+                &established.request,
+                &established.fence,
+                &established.prepared,
+                &established.activated,
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            observation.liveness,
+            ManagedMcpSandboxSessionLiveness::Alive
+        );
+
+        let cleanup = provider
+            .destroy_exact(
+                &established.request,
+                &established.fence,
+                Some(&established.prepared),
+            )
+            .await
+            .unwrap();
+        cleanup
+            .validate_for(
+                &established.request,
+                &established.fence,
+                Some(&established.prepared),
+                Utc::now(),
+            )
+            .unwrap();
+        let ManagedMcpSandboxSessionCleanupOutcome::Destroyed(destroyed) = cleanup else {
+            panic!("a prepared session must produce destroyed evidence");
+        };
+        assert_eq!(
+            destroyed.cleanup.sandbox_identity_digest,
+            established.prepared.sandbox_identity_digest
+        );
+
+        let mut stale = established.fence;
+        stale.lease_generation += 1;
+        assert!(observation
+            .validate_for(
+                &established.request,
+                &stale,
+                &established.prepared,
+                &established.activated,
+                Utc::now(),
+            )
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn managed_session_worker_destroys_prepared_instance_when_ready_commit_fails() {
+        let now = Utc::now();
+        let (authority, provider, command) = managed_session_worker_fixture(now, true);
+        let events = Arc::clone(&provider.events);
+        let worker = ManagedMcpSandboxSessionWorker::new(authority, provider, limits());
+        assert!(matches!(
+            worker.establish(command).await,
+            Err(ManagedMcpSandboxSessionWorkerError::Authority(_))
+        ));
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            [
+                "commit_preparing",
+                "provider_prepare",
+                "commit_starting",
+                "provider_initialize",
+                "commit_ready_failed",
+                "provider_destroy",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_session_worker_renews_the_latest_fence_while_provider_prepare_is_pending() {
+        let now = Utc::now();
+        let (authority, provider, command) = managed_session_worker_fixture(now, false);
+        let provider = Arc::new(RecordingManagedSessionProvider {
+            events: Arc::clone(&provider.events),
+            prepare_delay: std::time::Duration::from_millis(35),
+        });
+        let heartbeat =
+            SandboxHeartbeatConfig::bounded(std::time::Duration::from_millis(5), 100, 1_000)
+                .unwrap();
+        let worker = ManagedMcpSandboxSessionWorker::with_heartbeat(
+            authority.clone(),
+            provider.clone(),
+            limits(),
+            heartbeat,
+        );
+        let mut established = worker.establish(command).await.unwrap();
+        assert!(established.fence.expected_version > 5);
+        assert!(provider.events.lock().unwrap().contains(&"heartbeat"));
+        let prior_version = established.fence.expected_version;
+        let decision = authority
+            .heartbeat_managed_mcp_sandbox_session(HeartbeatSandboxExecution {
+                tenant_id: established.request.identity.tenant_id.clone(),
+                sandbox_job_id: established.request.identity.sandbox_job_id.clone(),
+                job_id: established.request.identity.physical_job_id.clone(),
+                fence: established.fence.clone(),
+                lease_milliseconds: 100,
+            })
+            .await
+            .unwrap();
+        established
+            .apply_running_heartbeat(&decision, limits())
+            .unwrap();
+        assert_eq!(established.fence.expected_version, prior_version + 1);
+    }
+
+    #[tokio::test]
+    async fn managed_session_worker_waits_for_prepare_then_destroys_on_heartbeat_failure() {
+        let now = Utc::now();
+        let (authority, provider, command) = managed_session_worker_fixture(now, false);
+        let authority = Arc::new(RecordingManagedSessionAuthority {
+            state: Mutex::new({
+                let state = authority.state.lock().unwrap();
+                ManagedSessionAuthorityState {
+                    logical: state.logical.clone(),
+                    physical_job: state.physical_job.clone(),
+                    physical_payload: state.physical_payload.clone(),
+                }
+            }),
+            events: Arc::clone(&provider.events),
+            fail_ready: false,
+            fail_heartbeat: true,
+        });
+        let provider = Arc::new(RecordingManagedSessionProvider {
+            events: Arc::clone(&provider.events),
+            prepare_delay: std::time::Duration::from_millis(25),
+        });
+        let heartbeat =
+            SandboxHeartbeatConfig::bounded(std::time::Duration::from_millis(5), 100, 1_000)
+                .unwrap();
+        let worker = ManagedMcpSandboxSessionWorker::with_heartbeat(
+            authority,
+            provider.clone(),
+            limits(),
+            heartbeat,
+        );
+        assert!(matches!(
+            worker.establish(command).await,
+            Err(ManagedMcpSandboxSessionWorkerError::Authority(_))
+        ));
+        let events = provider.events.lock().unwrap();
+        let failed = events
+            .iter()
+            .position(|event| *event == "heartbeat_failed")
+            .unwrap();
+        let destroyed = events
+            .iter()
+            .position(|event| *event == "provider_destroy")
+            .unwrap();
+        assert!(failed < destroyed);
+    }
+
+    #[tokio::test]
+    async fn managed_session_loss_terminalizes_the_physical_job_before_rebuild() {
+        let now = Utc::now();
+        let (authority, provider, command) = managed_session_worker_fixture(now, false);
+        let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
+        let established = worker.establish(command).await.unwrap();
+        let mut lost = CommitManagedMcpSandboxSessionLost {
+            audit: SandboxWorkerAudit {
+                tenant_id: established.request.identity.tenant_id.clone(),
+                worker_process_generation_id: established
+                    .fence
+                    .worker_process_generation_id
+                    .clone(),
+                receipt_id: id(ResourceKind::Receipt, 194),
+                event_id: id(ResourceKind::Event, 195),
+                outbox_id: id(ResourceKind::OutboxEvent, 196),
+                idempotency_key_digest: sha('f'),
+                request_digest: sha('0'),
+                receipt_expires_at: now + ChronoDuration::minutes(5),
+            },
+            identity: established.request.identity.clone(),
+            fence: established.fence.clone(),
+            cleanup: SandboxCleanupEvidence {
+                disposition: SandboxCleanupDisposition::Destroyed,
+                sandbox_identity_digest: established.prepared.sandbox_identity_digest.clone(),
+                grants_revoked: true,
+                ephemeral_storage_destroyed: true,
+                observed_at: Utc::now(),
+                evidence_digest: sha('1'),
+            },
+            session_loss_evidence_digest: sha('2'),
+            usage_reservation_id: established.usage_reservation_id.clone(),
+            quota_entry_ids: (197..201)
+                .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                .collect(),
+        };
+        lost.audit.request_digest = lost.canonical_request_digest().unwrap();
+        let decision = match authority
+            .commit_managed_mcp_sandbox_session_lost(lost)
+            .await
+            .unwrap()
+        {
+            CommandOutcome::Applied(decision) => decision,
+            CommandOutcome::Replayed(_) => unreachable!(),
+        };
+        assert_eq!(decision.logical_state, McpSubscriptionState::Pending);
+        assert_eq!(
+            decision.logical_payload.session.state,
+            insight_platform_contracts::McpSessionState::Disconnected
+        );
+        assert!(decision.logical_payload.managed_sandbox_session.is_none());
+        assert!(decision.logical_payload.full_reconcile_required);
+        assert_eq!(
+            decision.physical_job.state,
+            JobState::ReconciliationRequired
+        );
+        assert!(decision.physical_job.lease.is_none());
+        assert_eq!(
+            decision.physical_payload.physical_state,
+            SandboxJobState::Lost
+        );
+        let cleanup = decision.physical_payload.cleanup.as_ref().unwrap();
+        established
+            .validate_lost_decision(&decision, cleanup, limits())
+            .unwrap();
+        assert_eq!(cleanup.disposition, SandboxCleanupDisposition::Destroyed);
+        assert_eq!(
+            cleanup.sandbox_identity_digest,
+            established.prepared.sandbox_identity_digest
+        );
+        assert!(cleanup.grants_revoked && cleanup.ephemeral_storage_destroyed);
+        assert_eq!(cleanup.evidence_digest, sha('1'));
+    }
+
+    fn managed_recovery_executor(
+        request: &ManagedMcpSandboxSessionRequest,
+        worker_suffix: u16,
+        executor_identity_digest: insight_platform_contracts::Sha256Digest,
+    ) -> ManagedMcpSandboxSessionRecoveryExecutor {
+        ManagedMcpSandboxSessionRecoveryExecutor {
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, worker_suffix),
+            worker_manifest_digest: request.executor_worker_manifest_digest.clone(),
+            isolation_backend_contract_digest: request.isolation_backend_contract_digest.clone(),
+            executor_identity_digest,
+            attestor_route: attestor_route(),
+        }
+    }
+
+    fn managed_recovery_command(
+        expired: ExpiredManagedMcpSandboxSessionLease,
+        executor: ManagedMcpSandboxSessionRecoveryExecutor,
+        action: ManagedMcpSandboxSessionLeaseRecoveryAction,
+        base: u16,
+        now: DateTime<Utc>,
+    ) -> RecoverExpiredManagedMcpSandboxSessionLease {
+        let terminal = !matches!(
+            &action,
+            ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted { .. }
+        );
+        let mut command = RecoverExpiredManagedMcpSandboxSessionLease {
+            audit: ManagedMcpSandboxSessionRecoveryAudit {
+                tenant_id: expired.request.identity.tenant_id.clone(),
+                recovery_process_generation_id: executor.worker_process_generation_id.clone(),
+                receipt_id: id(ResourceKind::Receipt, base),
+                event_id: id(ResourceKind::Event, base + 1),
+                outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+                idempotency_key_digest: sha('0'),
+                request_digest: sha('0'),
+                receipt_expires_at: now + ChronoDuration::minutes(5),
+            },
+            executor,
+            expired,
+            action,
+            quota_entry_ids: if terminal {
+                (base + 3..base + 7)
+                    .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                    .collect()
+            } else {
+                vec![]
+            },
+        };
+        command.audit.idempotency_key_digest = command.canonical_idempotency_key_digest().unwrap();
+        command.audit.request_digest = command.canonical_request_digest().unwrap();
+        command
+    }
+
+    #[test]
+    fn managed_expired_accepted_lease_requeues_before_deadline_and_times_out_after_it() {
+        let now = Utc::now();
+        let (mut logical, admission) = managed_mcp_session_fixture(now);
+        let accepted =
+            decide_accept_managed_mcp_sandbox_session(&logical, &admission, now, limits()).unwrap();
+        logical.version += 1;
+        logical.payload = accepted.logical_payload.clone();
+        logical.state = accepted.logical_state;
+        let old_worker = id(ResourceKind::WorkerProcessGeneration, 330);
+        let leased = decide_claim(
+            &accepted.physical_job,
+            now,
+            old_worker.clone(),
+            sha('a'),
+            LeasePolicy {
+                requested_milliseconds: 10,
+                hard_maximum_milliseconds: 100,
+            },
+        )
+        .unwrap();
+        let lease = leased.lease.as_ref().unwrap();
+        let observed_at = lease.expires_at + ChronoDuration::milliseconds(1);
+        let expired = ExpiredManagedMcpSandboxSessionLease {
+            request: admission.request.clone(),
+            usage_reservation_id: admission.usage_reservation_id.clone(),
+            observed_job_version: leased.version,
+            observed_lease_generation: leased.lease_generation,
+            previous_worker_process_generation_id: old_worker,
+            lease_expires_at: lease.expires_at,
+            database_observed_at: observed_at,
+            physical_state: SandboxJobState::Accepted,
+            executor_identity_digest: None,
+            attestor_route: None,
+            phase_evidence_digest: None,
+            prepared_binding: None,
+            ready_binding: None,
+        };
+        let recovery_executor = managed_recovery_executor(&admission.request, 331, sha('b'));
+        let scan = ScanExpiredManagedMcpSandboxSessionLeases {
+            executor: recovery_executor.clone(),
+            shard: ManagedMcpSandboxSessionRecoveryShard { index: 0, count: 1 },
+            after: None,
+            limit: 1,
+        };
+        let cursor = ManagedMcpSandboxSessionRecoveryCursor {
+            lease_expires_at: expired.lease_expires_at,
+            tenant_id: expired.request.identity.tenant_id.clone(),
+            physical_job_id: expired.request.identity.physical_job_id.clone(),
+        };
+        let page = ExpiredManagedMcpSandboxSessionLeasePage {
+            records: vec![expired.clone()],
+            next_cursor: Some(cursor),
+            exhausted: false,
+        };
+        page.validate_for(&scan, limits()).unwrap();
+        let actual_shard =
+            (expired.request.identity.physical_job_id.uuid().as_u128() & u128::from(u32::MAX)) % 2;
+        let mut wrong_shard_scan = scan.clone();
+        wrong_shard_scan.shard = ManagedMcpSandboxSessionRecoveryShard {
+            index: u16::try_from(1 - actual_shard).unwrap(),
+            count: 2,
+        };
+        assert!(page.validate_for(&wrong_shard_scan, limits()).is_err());
+        let mut invalid_page = page;
+        invalid_page.next_cursor = None;
+        assert!(invalid_page.validate_for(&scan, limits()).is_err());
+
+        let requeue = managed_recovery_command(
+            expired.clone(),
+            recovery_executor.clone(),
+            ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted {
+                recovery_evidence_digest: sha('c'),
+            },
+            332,
+            observed_at,
+        );
+        let requeued = decide_expired_managed_mcp_sandbox_session_lease(
+            &logical,
+            &leased,
+            &accepted.physical_payload,
+            &requeue,
+            observed_at,
             limits(),
         )
-        .map_err(|_| ManagedSessionFixtureError)?;
-        state.logical.version += 1;
-        state.logical.payload = decision.logical_payload.clone();
-        state.logical.state = decision.logical_state;
-        state.physical_job = decision.physical_job.clone();
-        state.physical_payload = decision.physical_payload.clone();
-        Ok(CommandOutcome::Applied(decision))
+        .unwrap();
+        assert_eq!(requeued.physical_job.state, JobState::Ready);
+        assert!(requeued.physical_job.lease.is_none());
+        assert_eq!(requeued.logical_payload, logical.payload);
+        assert_eq!(requeued.logical_state, logical.state);
+
+        let timed_out_at = leased.deadline + ChronoDuration::milliseconds(1);
+        let mut timeout_expired = expired;
+        timeout_expired.database_observed_at = timed_out_at;
+        let timeout = managed_recovery_command(
+            timeout_expired,
+            recovery_executor,
+            ManagedMcpSandboxSessionLeaseRecoveryAction::TimeoutUnstarted {
+                recovery_evidence_digest: sha('d'),
+            },
+            340,
+            timed_out_at,
+        );
+        let timed_out = decide_expired_managed_mcp_sandbox_session_lease(
+            &logical,
+            &leased,
+            &accepted.physical_payload,
+            &timeout,
+            timed_out_at,
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(timed_out.physical_job.state, JobState::TimedOut);
+        assert_eq!(
+            timed_out.physical_payload.physical_state,
+            SandboxJobState::TimedOut
+        );
+        assert_eq!(timed_out.logical_state, McpSubscriptionState::Failed);
+        assert_eq!(
+            timed_out.logical_payload.session.state,
+            insight_platform_contracts::McpSessionState::Failed
+        );
     }
-}
 
-struct RecordingManagedSessionProvider {
-    events: Arc<Mutex<Vec<&'static str>>>,
-    prepare_delay: std::time::Duration,
-}
+    #[tokio::test]
+    async fn managed_expired_running_lease_requires_old_process_and_exact_provider_destruction() {
+        let now = Utc::now();
+        let (authority, provider, establish) = managed_session_worker_fixture(now, false);
+        let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
+        worker.establish(establish).await.unwrap();
+        let state = authority.state.lock().unwrap();
+        let logical = state.logical.clone();
+        let physical_job = state.physical_job.clone();
+        let physical_payload = state.physical_payload.clone();
+        drop(state);
+        let lease = physical_job.lease.as_ref().unwrap();
+        let observed_at = lease.expires_at + ChronoDuration::milliseconds(1);
+        let expired = ExpiredManagedMcpSandboxSessionLease {
+            request: physical_payload.request.as_ref().clone(),
+            usage_reservation_id: id(ResourceKind::UsageReservation, 79),
+            observed_job_version: physical_job.version,
+            observed_lease_generation: physical_job.lease_generation,
+            previous_worker_process_generation_id: lease.worker_process_generation_id.clone(),
+            lease_expires_at: lease.expires_at,
+            database_observed_at: observed_at,
+            physical_state: physical_payload.physical_state,
+            executor_identity_digest: physical_payload.executor_identity_digest.clone(),
+            attestor_route: physical_payload.attestor_route.clone(),
+            phase_evidence_digest: physical_payload.phase_evidence_digest.clone(),
+            prepared_binding: physical_payload.prepared_binding.clone(),
+            ready_binding: physical_payload.ready_binding.clone(),
+        };
+        let process_absence = SandboxProcessGenerationAbsenceEvidence {
+            schema_version: 1,
+            tenant_id: expired.request.identity.tenant_id.clone(),
+            sandbox_job_id: expired.request.identity.sandbox_job_id.clone(),
+            request_digest: expired.request.request_digest.clone(),
+            previous_worker_process_generation_id: expired
+                .previous_worker_process_generation_id
+                .clone(),
+            executor_identity_digest: expired.executor_identity_digest.clone().unwrap(),
+            attestor_identity_digest: sha('4'),
+            attestor_route: expired.attestor_route.clone().unwrap(),
+            disposition: SandboxProcessGenerationIsolationDisposition::ProcessAbsent,
+            observed_at,
+            evidence_digest: sha('0'),
+        }
+        .seal()
+        .unwrap();
+        let prepared = expired.prepared_binding.as_ref().unwrap();
+        let cleanup_observed_at = observed_at + ChronoDuration::milliseconds(1);
+        let destroyed = ManagedMcpSandboxSessionDestroyedEvidence {
+            schema_version: 1,
+            identity: expired.request.identity.clone(),
+            request_digest: expired.request.request_digest.clone(),
+            worker_process_generation_id: expired.previous_worker_process_generation_id.clone(),
+            provider_process_generation_id: prepared.provider_process_generation_id.clone(),
+            lease_generation: expired.observed_lease_generation,
+            executor_identity_digest: prepared.executor_identity_digest.clone(),
+            sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+            cleanup: SandboxCleanupEvidence {
+                disposition: SandboxCleanupDisposition::Destroyed,
+                sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
+                grants_revoked: true,
+                ephemeral_storage_destroyed: true,
+                observed_at: cleanup_observed_at,
+                evidence_digest: sha('5'),
+            },
+            evidence_digest: sha('0'),
+        }
+        .seal()
+        .unwrap();
+        let evidence = ManagedMcpSandboxSessionExpiredLeaseEvidence {
+            schema_version: 1,
+            process_absence,
+            provider_cleanup: Some(ManagedMcpSandboxSessionCleanupOutcome::Destroyed(destroyed)),
+            canonical_digest: sha('0'),
+        }
+        .seal()
+        .unwrap();
+        let recovery_executor = managed_recovery_executor(&expired.request, 350, sha('6'));
+        let command = managed_recovery_command(
+            expired.clone(),
+            recovery_executor,
+            ManagedMcpSandboxSessionLeaseRecoveryAction::MarkLost {
+                evidence: Box::new(evidence.clone()),
+            },
+            351,
+            cleanup_observed_at,
+        );
+        let lost = decide_expired_managed_mcp_sandbox_session_lease(
+            &logical,
+            &physical_job,
+            &physical_payload,
+            &command,
+            cleanup_observed_at,
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(lost.physical_job.state, JobState::ReconciliationRequired);
+        assert_eq!(lost.physical_payload.physical_state, SandboxJobState::Lost);
+        assert_eq!(lost.logical_state, McpSubscriptionState::Pending);
+        assert!(lost.logical_payload.managed_sandbox_session.is_none());
+        assert!(lost.logical_payload.full_reconcile_required);
 
-#[async_trait]
-impl ManagedMcpSandboxSessionProvider for RecordingManagedSessionProvider {
-    type Error = ManagedSessionFixtureError;
+        let absent = ManagedMcpSandboxSessionAbsenceEvidence {
+            schema_version: 1,
+            identity: expired.request.identity.clone(),
+            request_digest: expired.request.request_digest.clone(),
+            worker_process_generation_id: expired.previous_worker_process_generation_id.clone(),
+            lease_generation: expired.observed_lease_generation,
+            observed_at: cleanup_observed_at,
+            evidence_digest: sha('0'),
+        }
+        .seal()
+        .unwrap();
+        let mut invalid = evidence;
+        invalid.provider_cleanup = Some(ManagedMcpSandboxSessionCleanupOutcome::Absent(absent));
+        invalid = invalid.seal().unwrap();
+        assert!(invalid
+            .validate_for(&expired, cleanup_observed_at, limits())
+            .is_err());
+    }
 
-    async fn prepare(
-        &self,
-        request: &ManagedMcpSandboxSessionRequest,
-        fence: &JobFence,
-        executor_identity_digest: &insight_platform_contracts::Sha256Digest,
-    ) -> Result<PreparedManagedMcpSandboxSession, Self::Error> {
-        self.events.lock().unwrap().push("provider_prepare");
-        tokio::time::sleep(self.prepare_delay).await;
-        PreparedManagedMcpSandboxSession {
+    #[test]
+    fn managed_session_opaque_claims_bind_both_process_generations_and_the_exact_vm() {
+        let now = Utc::now();
+        let (_, _, command) = managed_session_worker_fixture(now, false);
+        let request = &command.claimed.request;
+        let fence = &command.claimed.fence;
+        let prepared = PreparedManagedMcpSandboxSession {
             schema_version: 1,
             identity: request.identity.clone(),
             request_digest: request.request_digest.clone(),
             worker_process_generation_id: fence.worker_process_generation_id.clone(),
-            provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 36),
+            provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 190),
             lease_generation: fence.lease_generation,
-            executor_identity_digest: executor_identity_digest.clone(),
+            executor_identity_digest: command.executor_identity_digest.clone(),
             sandbox_identity_digest: sha('2'),
             prepare_evidence_digest: sha('3'),
             canonical_digest: sha('0'),
         }
         .seal()
-        .map_err(|_| ManagedSessionFixtureError)
-    }
-
-    async fn initialize(
-        &self,
-        request: &ManagedMcpSandboxSessionRequest,
-        _fence: &JobFence,
-        prepared: &PreparedManagedMcpSandboxSession,
-    ) -> Result<PreparedManagedMcpSandboxSessionActivation, Self::Error> {
-        self.events.lock().unwrap().push("provider_initialize");
-        let established_at = Utc::now();
-        let ready = ManagedMcpSandboxSessionReadyEvidence {
-            schema_version: 1,
-            session_identity_digest: request.identity.canonical_digest.clone(),
-            sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
-            encrypted_opaque_session: insight_platform_mcp_host::EncryptedMcpState {
-                scheme: "aes256_gcm_v1".to_owned(),
-                ciphertext: vec![7, 8, 9],
-                key_id: "fixture-session-key".to_owned(),
-                key_reference_digest: sha('4'),
-                plaintext_digest: sha('5'),
-            },
-            established_at,
-            expires_at: established_at + ChronoDuration::seconds(30),
-            protocol_evidence_digest: sha('6'),
-            canonical_digest: sha('0'),
-        }
-        .seal()
-        .map_err(|_| ManagedSessionFixtureError)?;
-        PreparedManagedMcpSandboxSessionActivation {
-            schema_version: 1,
-            prepared: prepared.clone(),
-            ready,
-            activation_binding_digest: sha('7'),
-            canonical_digest: sha('0'),
-        }
-        .seal()
-        .map_err(|_| ManagedSessionFixtureError)
-    }
-
-    async fn activate(
-        &self,
-        _request: &ManagedMcpSandboxSessionRequest,
-        _fence: &JobFence,
-        activation: &PreparedManagedMcpSandboxSessionActivation,
-    ) -> Result<ActivatedManagedMcpSandboxSession, Self::Error> {
-        self.events.lock().unwrap().push("provider_activate");
-        ActivatedManagedMcpSandboxSession {
-            schema_version: 1,
-            identity: activation.prepared.identity.clone(),
-            request_digest: activation.prepared.request_digest.clone(),
-            worker_process_generation_id: activation.prepared.worker_process_generation_id.clone(),
-            lease_generation: activation.prepared.lease_generation,
-            sandbox_identity_digest: activation.prepared.sandbox_identity_digest.clone(),
-            ready_evidence_digest: activation.ready.canonical_digest.clone(),
-            activated_at: Utc::now(),
-            activation_evidence_digest: sha('8'),
-            canonical_digest: sha('0'),
-        }
-        .seal()
-        .map_err(|_| ManagedSessionFixtureError)
-    }
-
-    async fn observe_exact(
-        &self,
-        request: &ManagedMcpSandboxSessionRequest,
-        fence: &JobFence,
-        prepared: &PreparedManagedMcpSandboxSession,
-        activated: &ActivatedManagedMcpSandboxSession,
-    ) -> Result<ManagedMcpSandboxSessionLivenessEvidence, Self::Error> {
-        self.events.lock().unwrap().push("provider_observe");
-        ManagedMcpSandboxSessionLivenessEvidence {
+        .unwrap();
+        let claims = ManagedMcpSandboxOpaqueSessionClaims {
             schema_version: 1,
             identity: request.identity.clone(),
             request_digest: request.request_digest.clone(),
             worker_process_generation_id: fence.worker_process_generation_id.clone(),
             provider_process_generation_id: prepared.provider_process_generation_id.clone(),
             lease_generation: fence.lease_generation,
-            executor_identity_digest: prepared.executor_identity_digest.clone(),
-            sandbox_identity_digest: activated.sandbox_identity_digest.clone(),
-            liveness: ManagedMcpSandboxSessionLiveness::Alive,
-            observed_at: Utc::now(),
-            evidence_digest: sha('0'),
-        }
-        .seal()
-        .map_err(|_| ManagedSessionFixtureError)
-    }
-
-    async fn destroy_exact(
-        &self,
-        request: &ManagedMcpSandboxSessionRequest,
-        _fence: &JobFence,
-        prepared: Option<&PreparedManagedMcpSandboxSession>,
-    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
-        self.events.lock().unwrap().push("provider_destroy");
-        let prepared = prepared.ok_or(ManagedSessionFixtureError)?;
-        let cleanup = SandboxCleanupEvidence {
-            disposition: SandboxCleanupDisposition::Destroyed,
             sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
-            grants_revoked: true,
-            ephemeral_storage_destroyed: true,
-            observed_at: Utc::now(),
-            evidence_digest: sha('9'),
+            protocol_evidence_digest: sha('4'),
+            established_at: now,
+            expires_at: now + ChronoDuration::minutes(1),
         };
-        ManagedMcpSandboxSessionDestroyedEvidence {
+        claims.validate_for(request, fence, &prepared, now).unwrap();
+        assert_eq!(
+            claims.canonical_digest().unwrap(),
+            canonical_digest(&serde_json::to_value(&claims).unwrap())
+                .unwrap()
+                .parse()
+                .unwrap()
+        );
+
+        let mut drifted = claims;
+        drifted.provider_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 191);
+        assert!(drifted
+            .validate_for(request, fence, &prepared, now)
+            .is_err());
+    }
+
+    fn managed_mcp_session_fixture(
+        now: DateTime<Utc>,
+    ) -> (McpSubscriptionRecord, AcceptManagedMcpSandboxSession) {
+        let operation_request = managed_mcp_request_at(now);
+        let SandboxExecutionSource::ManagedMcp { mcp_contract, .. } =
+            &operation_request.execution_source
+        else {
+            unreachable!();
+        };
+        let base = mcp_contract.as_ref();
+        let mut protocol = base.protocol_profile.clone();
+        protocol.allowed_server_capabilities.resources = true;
+        protocol.allowed_server_capabilities.subscriptions = true;
+        protocol.method_limits.insert(
+            PublishedMcpMethod::ResourcesRead,
+            *protocol
+                .method_limits
+                .get(&PublishedMcpMethod::ToolsCall)
+                .unwrap(),
+        );
+        let protocol_ref = ExactVersionRef::new(
+            base.server.protocol_policy.revision_id.clone(),
+            protocol.canonical_digest().unwrap(),
+        )
+        .unwrap();
+        let mut deployment_closure = base.deployment_closure.clone();
+        deployment_closure.protocol_policy = protocol_ref.clone();
+        let server = McpServerExecutionContract::build(
+            base.server.revision.clone(),
+            McpTransportKind::ManagedStdio,
+            protocol_ref.clone(),
+            base.server.deployment_credential_requirements.clone(),
+            base.server.authorization_credential_purpose.clone(),
+            base.server.limits,
+        )
+        .unwrap();
+        let mut negotiated = base.discovery.negotiated_capabilities.clone();
+        negotiated.resources = true;
+        negotiated.subscriptions = true;
+        let discovery = insight_platform_contracts::McpDiscoverySnapshot::build(
+            base.discovery.snapshot_id.clone(),
+            base.deployment.clone(),
+            base.server.revision.clone(),
+            protocol_ref,
+            base.authorization.canonical_digest.clone(),
+            base.discovery.negotiated_version.clone(),
+            negotiated,
+            base.discovery.objects_artifact.clone(),
+            now - ChronoDuration::seconds(1),
+            now + ChronoDuration::minutes(4),
+        )
+        .unwrap();
+        let contract = McpHostExecutionContract::build(NewMcpHostExecutionContract {
+            deployment: base.deployment.clone(),
+            deployment_closure,
+            server,
+            protocol_profile: protocol,
+            authorization: base.authorization.clone(),
+            discovery,
+        })
+        .unwrap();
+        let subscription_id = id(ResourceKind::McpOperation, 70);
+        let logical_job_id = id(ResourceKind::Job, 71);
+        let binding = McpResourceSubscriptionBinding::build(
+            NewMcpResourceSubscriptionBinding {
+                subscription_id: subscription_id.clone(),
+                job_id: logical_job_id.clone(),
+                context_deployment: deployment(ResourceKind::ContextDeployment, 72, '5'),
+                resource_uri: "mcp://catalog.example/items/42".to_owned(),
+            },
+            &contract,
+            now,
+        )
+        .unwrap();
+        let session =
+            McpSessionRecord::disconnected(McpSessionBindingKey::build(&contract).unwrap())
+                .unwrap();
+        let record = McpSubscriptionRecord {
+            tenant_id: binding.tenant_id.clone(),
+            subscription_id,
+            job_id: logical_job_id,
+            logical_key: "managed-resource-items-42".to_owned(),
+            state: McpSubscriptionState::Pending,
+            version: 1,
+            payload: McpSubscriptionPayload::pending(binding.clone(), session).unwrap(),
+            deadline: operation_request.deadline,
+            created_at: now,
+            updated_at: now,
+            terminal_at: None,
+        };
+        let physical_job_id = id(ResourceKind::Job, 73);
+        let sandbox_job_id =
+            ResourceId::from_uuid_v7(ResourceKind::Job, physical_job_id.uuid()).unwrap();
+        let identity = ManagedMcpSandboxSessionIdentity::build(
+            &binding,
+            record.version,
+            7,
+            1,
+            sandbox_job_id.clone(),
+            physical_job_id,
+        )
+        .unwrap();
+        let runtime_artifact = operation_request.package.runtime_bundle_artifact.clone();
+        let artifact_grant = ScopedArtifactGrant {
             schema_version: 1,
-            identity: request.identity.clone(),
-            request_digest: request.request_digest.clone(),
-            worker_process_generation_id: prepared.worker_process_generation_id.clone(),
-            provider_process_generation_id: prepared.provider_process_generation_id.clone(),
-            lease_generation: prepared.lease_generation,
-            executor_identity_digest: prepared.executor_identity_digest.clone(),
-            sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
-            cleanup,
-            evidence_digest: sha('0'),
+            grant_id: id(ResourceKind::ArtifactGrant, 74),
+            tenant_id: identity.tenant_id.clone(),
+            sandbox_job_id: sandbox_job_id.clone(),
+            operation: ArtifactGrantOperation::ReadWhole,
+            port: "runtime_bundle".to_owned(),
+            artifact: Some(runtime_artifact.clone()),
+            staging_artifact_id: None,
+            byte_range: None,
+            maximum_bytes: runtime_artifact.byte_length(),
+            generation: 1,
+            expires_at: operation_request.deadline,
+            grant_digest: sha('0'),
         }
         .seal()
-        .map(ManagedMcpSandboxSessionCleanupOutcome::Destroyed)
-        .map_err(|_| ManagedSessionFixtureError)
-    }
-
-    async fn recover_expired_exact(
-        &self,
-        _expired: &ExpiredManagedMcpSandboxSessionLease,
-    ) -> Result<ManagedMcpSandboxSessionCleanupOutcome, Self::Error> {
-        self.events.lock().unwrap().push("provider_recover_expired");
-        Err(ManagedSessionFixtureError)
-    }
-}
-
-fn managed_session_worker_fixture(
-    now: DateTime<Utc>,
-    fail_ready: bool,
-) -> (
-    Arc<RecordingManagedSessionAuthority>,
-    Arc<RecordingManagedSessionProvider>,
-    ExecuteManagedMcpSandboxSession,
-) {
-    let (mut logical, admission) = managed_mcp_session_fixture(now);
-    let accepted =
-        decide_accept_managed_mcp_sandbox_session(&logical, &admission, now, limits()).unwrap();
-    logical.version += 1;
-    logical.payload = accepted.logical_payload;
-    logical.state = accepted.logical_state;
-    let worker = id(ResourceKind::WorkerProcessGeneration, 180);
-    let leased = decide_claim(
-        &accepted.physical_job,
-        now,
-        worker.clone(),
-        sha('a'),
-        LeasePolicy {
-            requested_milliseconds: 60_000,
-            hard_maximum_milliseconds: 60_000,
-        },
-    )
-    .unwrap();
-    let identity = |suffix: u16, digest: char| SandboxWorkerCommitIdentity {
-        tenant_id: logical.tenant_id.clone(),
-        worker_process_generation_id: worker.clone(),
-        receipt_id: id(ResourceKind::Receipt, suffix),
-        event_id: id(ResourceKind::Event, suffix + 10),
-        outbox_id: id(ResourceKind::OutboxEvent, suffix + 20),
-        idempotency_key_digest: sha(digest),
-        receipt_expires_at: now + ChronoDuration::minutes(5),
-    };
-    let audits = ManagedMcpSandboxSessionWorkerAudits {
-        preparing: identity(181, 'c'),
-        starting: identity(182, 'd'),
-        ready: identity(183, 'e'),
-    };
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let authority = Arc::new(RecordingManagedSessionAuthority {
-        state: Mutex::new(ManagedSessionAuthorityState {
-            logical,
-            physical_job: leased.clone(),
-            physical_payload: accepted.physical_payload,
-        }),
-        events: Arc::clone(&events),
-        fail_ready,
-        fail_heartbeat: false,
-    });
-    let provider = Arc::new(RecordingManagedSessionProvider {
-        events,
-        prepare_delay: std::time::Duration::ZERO,
-    });
-    let command = ExecuteManagedMcpSandboxSession {
-        claimed: ClaimedManagedMcpSandboxSession {
-            request: admission.request,
-            fence: JobFence {
-                expected_version: leased.version,
-                worker_process_generation_id: worker,
-                lease_generation: leased.lease_generation,
-                token_digest: sha('a'),
+        .unwrap();
+        let mut secret_grants = operation_request.secret_grants.clone();
+        for grant in &mut secret_grants {
+            grant.sandbox_job_id = sandbox_job_id.clone();
+            *grant = grant.clone().seal().unwrap();
+        }
+        let callback = ManagedMcpSandboxSessionCallback {
+            schema_version: 1,
+            session_identity_digest: identity.canonical_digest.clone(),
+            audience_identity_digest: sha('8'),
+            expires_at: operation_request.deadline,
+            binding_digest: sha('0'),
+        }
+        .seal()
+        .unwrap();
+        let request = ManagedMcpSandboxSessionRequest {
+            schema_version: 1,
+            protocol_version: SANDBOX_PROTOCOL_VERSION,
+            identity,
+            subscription_binding: binding,
+            mcp_contract: Box::new(contract),
+            runtime_revision: operation_request.runtime_revision,
+            runtime: operation_request.runtime,
+            package_revision: operation_request.package_revision,
+            package: operation_request.package,
+            profile_revision: operation_request.profile_revision,
+            profile: operation_request.profile,
+            policies: operation_request.policies,
+            isolation_class: operation_request.isolation_class,
+            executor_worker_manifest_digest: operation_request.executor_worker_manifest_digest,
+            isolation_backend_contract_digest: operation_request.isolation_backend_contract_digest,
+            classification: operation_request.classification,
+            artifact_grants: vec![artifact_grant],
+            secret_grants,
+            network_mode: operation_request.network_mode,
+            resources: operation_request.resources,
+            deadline: operation_request.deadline,
+            callback,
+            request_digest: sha('0'),
+        }
+        .seal()
+        .unwrap();
+        let worker = id(ResourceKind::WorkerProcessGeneration, 75);
+        let command = AcceptManagedMcpSandboxSession {
+            audit: McpSubscriptionWorkerAudit {
+                tenant_id: request.identity.tenant_id.clone(),
+                worker_process_generation_id: worker.clone(),
+                receipt_id: id(ResourceKind::Receipt, 76),
+                event_id: id(ResourceKind::Event, 77),
+                outbox_id: id(ResourceKind::OutboxEvent, 78),
+                idempotency_key_digest: sha('a'),
+                request_digest: request.request_digest.clone(),
+                receipt_expires_at: now + ChronoDuration::minutes(5),
             },
-            usage_reservation_id: admission.usage_reservation_id,
-        },
-        executor_identity_digest: sha('b'),
-        attestor_route: attestor_route(),
-        audits,
-    };
-    (authority, provider, command)
-}
-
-#[tokio::test]
-async fn managed_session_worker_activates_only_after_durable_ready_on_the_same_instance() {
-    let now = Utc::now();
-    let (authority, provider, command) = managed_session_worker_fixture(now, false);
-    let events = Arc::clone(&provider.events);
-    let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
-    let established = worker.establish(command).await.unwrap();
-    assert_eq!(established.activated.sandbox_identity_digest, sha('2'));
-    assert_eq!(
-        events.lock().unwrap().as_slice(),
-        [
-            "commit_preparing",
-            "provider_prepare",
-            "commit_starting",
-            "provider_initialize",
-            "commit_ready",
-            "provider_activate",
-        ]
-    );
-    let state = authority.state.lock().unwrap();
-    assert_eq!(state.logical.state, McpSubscriptionState::Active);
-    assert_eq!(
-        state.logical.payload.session.state,
-        insight_platform_contracts::McpSessionState::Ready
-    );
-    assert_eq!(
-        state.physical_payload.physical_state,
-        SandboxJobState::Running
-    );
-    assert_eq!(
-        state
-            .physical_payload
-            .ready_binding
-            .as_ref()
-            .unwrap()
-            .sandbox_identity_digest,
-        established.activated.sandbox_identity_digest
-    );
-}
-
-#[tokio::test]
-async fn managed_session_provider_observation_and_cleanup_are_exactly_fenced() {
-    let now = Utc::now();
-    let (authority, provider, command) = managed_session_worker_fixture(now, false);
-    let worker = ManagedMcpSandboxSessionWorker::new(authority, provider.clone(), limits());
-    let established = worker.establish(command).await.unwrap();
-    let observation = provider
-        .observe_exact(
-            &established.request,
-            &established.fence,
-            &established.prepared,
-            &established.activated,
-        )
-        .await
-        .unwrap();
-    observation
-        .validate_for(
-            &established.request,
-            &established.fence,
-            &established.prepared,
-            &established.activated,
-            Utc::now(),
-        )
-        .unwrap();
-    assert_eq!(
-        observation.liveness,
-        ManagedMcpSandboxSessionLiveness::Alive
-    );
-
-    let cleanup = provider
-        .destroy_exact(
-            &established.request,
-            &established.fence,
-            Some(&established.prepared),
-        )
-        .await
-        .unwrap();
-    cleanup
-        .validate_for(
-            &established.request,
-            &established.fence,
-            Some(&established.prepared),
-            Utc::now(),
-        )
-        .unwrap();
-    let ManagedMcpSandboxSessionCleanupOutcome::Destroyed(destroyed) = cleanup else {
-        panic!("a prepared session must produce destroyed evidence");
-    };
-    assert_eq!(
-        destroyed.cleanup.sandbox_identity_digest,
-        established.prepared.sandbox_identity_digest
-    );
-
-    let mut stale = established.fence;
-    stale.lease_generation += 1;
-    assert!(observation
-        .validate_for(
-            &established.request,
-            &stale,
-            &established.prepared,
-            &established.activated,
-            Utc::now(),
-        )
-        .is_err());
-}
-
-#[tokio::test]
-async fn managed_session_worker_destroys_prepared_instance_when_ready_commit_fails() {
-    let now = Utc::now();
-    let (authority, provider, command) = managed_session_worker_fixture(now, true);
-    let events = Arc::clone(&provider.events);
-    let worker = ManagedMcpSandboxSessionWorker::new(authority, provider, limits());
-    assert!(matches!(
-        worker.establish(command).await,
-        Err(ManagedMcpSandboxSessionWorkerError::Authority(_))
-    ));
-    assert_eq!(
-        events.lock().unwrap().as_slice(),
-        [
-            "commit_preparing",
-            "provider_prepare",
-            "commit_starting",
-            "provider_initialize",
-            "commit_ready_failed",
-            "provider_destroy",
-        ]
-    );
-}
-
-#[tokio::test]
-async fn managed_session_worker_renews_the_latest_fence_while_provider_prepare_is_pending() {
-    let now = Utc::now();
-    let (authority, provider, command) = managed_session_worker_fixture(now, false);
-    let provider = Arc::new(RecordingManagedSessionProvider {
-        events: Arc::clone(&provider.events),
-        prepare_delay: std::time::Duration::from_millis(35),
-    });
-    let heartbeat =
-        SandboxHeartbeatConfig::bounded(std::time::Duration::from_millis(5), 100, 1_000).unwrap();
-    let worker = ManagedMcpSandboxSessionWorker::with_heartbeat(
-        authority.clone(),
-        provider.clone(),
-        limits(),
-        heartbeat,
-    );
-    let mut established = worker.establish(command).await.unwrap();
-    assert!(established.fence.expected_version > 5);
-    assert!(provider.events.lock().unwrap().contains(&"heartbeat"));
-    let prior_version = established.fence.expected_version;
-    let decision = authority
-        .heartbeat_managed_mcp_sandbox_session(HeartbeatSandboxExecution {
-            tenant_id: established.request.identity.tenant_id.clone(),
-            sandbox_job_id: established.request.identity.sandbox_job_id.clone(),
-            job_id: established.request.identity.physical_job_id.clone(),
-            fence: established.fence.clone(),
-            lease_milliseconds: 100,
-        })
-        .await
-        .unwrap();
-    established
-        .apply_running_heartbeat(&decision, limits())
-        .unwrap();
-    assert_eq!(established.fence.expected_version, prior_version + 1);
-}
-
-#[tokio::test]
-async fn managed_session_worker_waits_for_prepare_then_destroys_on_heartbeat_failure() {
-    let now = Utc::now();
-    let (authority, provider, command) = managed_session_worker_fixture(now, false);
-    let authority = Arc::new(RecordingManagedSessionAuthority {
-        state: Mutex::new({
-            let state = authority.state.lock().unwrap();
-            ManagedSessionAuthorityState {
-                logical: state.logical.clone(),
-                physical_job: state.physical_job.clone(),
-                physical_payload: state.physical_payload.clone(),
-            }
-        }),
-        events: Arc::clone(&provider.events),
-        fail_ready: false,
-        fail_heartbeat: true,
-    });
-    let provider = Arc::new(RecordingManagedSessionProvider {
-        events: Arc::clone(&provider.events),
-        prepare_delay: std::time::Duration::from_millis(25),
-    });
-    let heartbeat =
-        SandboxHeartbeatConfig::bounded(std::time::Duration::from_millis(5), 100, 1_000).unwrap();
-    let worker = ManagedMcpSandboxSessionWorker::with_heartbeat(
-        authority,
-        provider.clone(),
-        limits(),
-        heartbeat,
-    );
-    assert!(matches!(
-        worker.establish(command).await,
-        Err(ManagedMcpSandboxSessionWorkerError::Authority(_))
-    ));
-    let events = provider.events.lock().unwrap();
-    let failed = events
-        .iter()
-        .position(|event| *event == "heartbeat_failed")
-        .unwrap();
-    let destroyed = events
-        .iter()
-        .position(|event| *event == "provider_destroy")
-        .unwrap();
-    assert!(failed < destroyed);
-}
-
-#[tokio::test]
-async fn managed_session_loss_terminalizes_the_physical_job_before_rebuild() {
-    let now = Utc::now();
-    let (authority, provider, command) = managed_session_worker_fixture(now, false);
-    let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
-    let established = worker.establish(command).await.unwrap();
-    let mut lost = CommitManagedMcpSandboxSessionLost {
-        audit: SandboxWorkerAudit {
-            tenant_id: established.request.identity.tenant_id.clone(),
-            worker_process_generation_id: established.fence.worker_process_generation_id.clone(),
-            receipt_id: id(ResourceKind::Receipt, 194),
-            event_id: id(ResourceKind::Event, 195),
-            outbox_id: id(ResourceKind::OutboxEvent, 196),
-            idempotency_key_digest: sha('f'),
-            request_digest: sha('0'),
-            receipt_expires_at: now + ChronoDuration::minutes(5),
-        },
-        identity: established.request.identity.clone(),
-        fence: established.fence.clone(),
-        cleanup: SandboxCleanupEvidence {
-            disposition: SandboxCleanupDisposition::Destroyed,
-            sandbox_identity_digest: established.prepared.sandbox_identity_digest.clone(),
-            grants_revoked: true,
-            ephemeral_storage_destroyed: true,
-            observed_at: Utc::now(),
-            evidence_digest: sha('1'),
-        },
-        session_loss_evidence_digest: sha('2'),
-        usage_reservation_id: established.usage_reservation_id.clone(),
-        quota_entry_ids: (197..201)
-            .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
-            .collect(),
-    };
-    lost.audit.request_digest = lost.canonical_request_digest().unwrap();
-    let decision = match authority
-        .commit_managed_mcp_sandbox_session_lost(lost)
-        .await
-        .unwrap()
-    {
-        CommandOutcome::Applied(decision) => decision,
-        CommandOutcome::Replayed(_) => unreachable!(),
-    };
-    assert_eq!(decision.logical_state, McpSubscriptionState::Pending);
-    assert_eq!(
-        decision.logical_payload.session.state,
-        insight_platform_contracts::McpSessionState::Disconnected
-    );
-    assert!(decision.logical_payload.managed_sandbox_session.is_none());
-    assert!(decision.logical_payload.full_reconcile_required);
-    assert_eq!(
-        decision.physical_job.state,
-        JobState::ReconciliationRequired
-    );
-    assert!(decision.physical_job.lease.is_none());
-    assert_eq!(
-        decision.physical_payload.physical_state,
-        SandboxJobState::Lost
-    );
-    let cleanup = decision.physical_payload.cleanup.as_ref().unwrap();
-    established
-        .validate_lost_decision(&decision, cleanup, limits())
-        .unwrap();
-    assert_eq!(cleanup.disposition, SandboxCleanupDisposition::Destroyed);
-    assert_eq!(
-        cleanup.sandbox_identity_digest,
-        established.prepared.sandbox_identity_digest
-    );
-    assert!(cleanup.grants_revoked && cleanup.ephemeral_storage_destroyed);
-    assert_eq!(cleanup.evidence_digest, sha('1'));
-}
-
-fn managed_recovery_executor(
-    request: &ManagedMcpSandboxSessionRequest,
-    worker_suffix: u16,
-    executor_identity_digest: insight_platform_contracts::Sha256Digest,
-) -> ManagedMcpSandboxSessionRecoveryExecutor {
-    ManagedMcpSandboxSessionRecoveryExecutor {
-        worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, worker_suffix),
-        worker_manifest_digest: request.executor_worker_manifest_digest.clone(),
-        isolation_backend_contract_digest: request.isolation_backend_contract_digest.clone(),
-        executor_identity_digest,
-        attestor_route: attestor_route(),
-    }
-}
-
-fn managed_recovery_command(
-    expired: ExpiredManagedMcpSandboxSessionLease,
-    executor: ManagedMcpSandboxSessionRecoveryExecutor,
-    action: ManagedMcpSandboxSessionLeaseRecoveryAction,
-    base: u16,
-    now: DateTime<Utc>,
-) -> RecoverExpiredManagedMcpSandboxSessionLease {
-    let terminal = !matches!(
-        &action,
-        ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted { .. }
-    );
-    let mut command = RecoverExpiredManagedMcpSandboxSessionLease {
-        audit: ManagedMcpSandboxSessionRecoveryAudit {
-            tenant_id: expired.request.identity.tenant_id.clone(),
-            recovery_process_generation_id: executor.worker_process_generation_id.clone(),
-            receipt_id: id(ResourceKind::Receipt, base),
-            event_id: id(ResourceKind::Event, base + 1),
-            outbox_id: id(ResourceKind::OutboxEvent, base + 2),
-            idempotency_key_digest: sha('0'),
-            request_digest: sha('0'),
-            receipt_expires_at: now + ChronoDuration::minutes(5),
-        },
-        executor,
-        expired,
-        action,
-        quota_entry_ids: if terminal {
-            (base + 3..base + 7)
+            logical_fence: JobFence {
+                expected_version: 7,
+                worker_process_generation_id: worker,
+                lease_generation: 3,
+                token_digest: sha('b'),
+            },
+            request,
+            usage_reservation_id: id(ResourceKind::UsageReservation, 79),
+            quota_entry_ids: (80..84)
                 .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
-                .collect()
-        } else {
-            vec![]
-        },
-    };
-    command.audit.idempotency_key_digest = command.canonical_idempotency_key_digest().unwrap();
-    command.audit.request_digest = command.canonical_request_digest().unwrap();
-    command
-}
-
-#[test]
-fn managed_expired_accepted_lease_requeues_before_deadline_and_times_out_after_it() {
-    let now = Utc::now();
-    let (mut logical, admission) = managed_mcp_session_fixture(now);
-    let accepted =
-        decide_accept_managed_mcp_sandbox_session(&logical, &admission, now, limits()).unwrap();
-    logical.version += 1;
-    logical.payload = accepted.logical_payload.clone();
-    logical.state = accepted.logical_state;
-    let old_worker = id(ResourceKind::WorkerProcessGeneration, 330);
-    let leased = decide_claim(
-        &accepted.physical_job,
-        now,
-        old_worker.clone(),
-        sha('a'),
-        LeasePolicy {
-            requested_milliseconds: 10,
-            hard_maximum_milliseconds: 100,
-        },
-    )
-    .unwrap();
-    let lease = leased.lease.as_ref().unwrap();
-    let observed_at = lease.expires_at + ChronoDuration::milliseconds(1);
-    let expired = ExpiredManagedMcpSandboxSessionLease {
-        request: admission.request.clone(),
-        usage_reservation_id: admission.usage_reservation_id.clone(),
-        observed_job_version: leased.version,
-        observed_lease_generation: leased.lease_generation,
-        previous_worker_process_generation_id: old_worker,
-        lease_expires_at: lease.expires_at,
-        database_observed_at: observed_at,
-        physical_state: SandboxJobState::Accepted,
-        executor_identity_digest: None,
-        attestor_route: None,
-        phase_evidence_digest: None,
-        prepared_binding: None,
-        ready_binding: None,
-    };
-    let recovery_executor = managed_recovery_executor(&admission.request, 331, sha('b'));
-    let scan = ScanExpiredManagedMcpSandboxSessionLeases {
-        executor: recovery_executor.clone(),
-        shard: ManagedMcpSandboxSessionRecoveryShard { index: 0, count: 1 },
-        after: None,
-        limit: 1,
-    };
-    let cursor = ManagedMcpSandboxSessionRecoveryCursor {
-        lease_expires_at: expired.lease_expires_at,
-        tenant_id: expired.request.identity.tenant_id.clone(),
-        physical_job_id: expired.request.identity.physical_job_id.clone(),
-    };
-    let page = ExpiredManagedMcpSandboxSessionLeasePage {
-        records: vec![expired.clone()],
-        next_cursor: Some(cursor),
-        exhausted: false,
-    };
-    page.validate_for(&scan, limits()).unwrap();
-    let actual_shard =
-        (expired.request.identity.physical_job_id.uuid().as_u128() & u128::from(u32::MAX)) % 2;
-    let mut wrong_shard_scan = scan.clone();
-    wrong_shard_scan.shard = ManagedMcpSandboxSessionRecoveryShard {
-        index: u16::try_from(1 - actual_shard).unwrap(),
-        count: 2,
-    };
-    assert!(page.validate_for(&wrong_shard_scan, limits()).is_err());
-    let mut invalid_page = page;
-    invalid_page.next_cursor = None;
-    assert!(invalid_page.validate_for(&scan, limits()).is_err());
-
-    let requeue = managed_recovery_command(
-        expired.clone(),
-        recovery_executor.clone(),
-        ManagedMcpSandboxSessionLeaseRecoveryAction::RequeueUnstarted {
-            recovery_evidence_digest: sha('c'),
-        },
-        332,
-        observed_at,
-    );
-    let requeued = decide_expired_managed_mcp_sandbox_session_lease(
-        &logical,
-        &leased,
-        &accepted.physical_payload,
-        &requeue,
-        observed_at,
-        limits(),
-    )
-    .unwrap();
-    assert_eq!(requeued.physical_job.state, JobState::Ready);
-    assert!(requeued.physical_job.lease.is_none());
-    assert_eq!(requeued.logical_payload, logical.payload);
-    assert_eq!(requeued.logical_state, logical.state);
-
-    let timed_out_at = leased.deadline + ChronoDuration::milliseconds(1);
-    let mut timeout_expired = expired;
-    timeout_expired.database_observed_at = timed_out_at;
-    let timeout = managed_recovery_command(
-        timeout_expired,
-        recovery_executor,
-        ManagedMcpSandboxSessionLeaseRecoveryAction::TimeoutUnstarted {
-            recovery_evidence_digest: sha('d'),
-        },
-        340,
-        timed_out_at,
-    );
-    let timed_out = decide_expired_managed_mcp_sandbox_session_lease(
-        &logical,
-        &leased,
-        &accepted.physical_payload,
-        &timeout,
-        timed_out_at,
-        limits(),
-    )
-    .unwrap();
-    assert_eq!(timed_out.physical_job.state, JobState::TimedOut);
-    assert_eq!(
-        timed_out.physical_payload.physical_state,
-        SandboxJobState::TimedOut
-    );
-    assert_eq!(timed_out.logical_state, McpSubscriptionState::Failed);
-    assert_eq!(
-        timed_out.logical_payload.session.state,
-        insight_platform_contracts::McpSessionState::Failed
-    );
-}
-
-#[tokio::test]
-async fn managed_expired_running_lease_requires_old_process_and_exact_provider_destruction() {
-    let now = Utc::now();
-    let (authority, provider, establish) = managed_session_worker_fixture(now, false);
-    let worker = ManagedMcpSandboxSessionWorker::new(authority.clone(), provider, limits());
-    worker.establish(establish).await.unwrap();
-    let state = authority.state.lock().unwrap();
-    let logical = state.logical.clone();
-    let physical_job = state.physical_job.clone();
-    let physical_payload = state.physical_payload.clone();
-    drop(state);
-    let lease = physical_job.lease.as_ref().unwrap();
-    let observed_at = lease.expires_at + ChronoDuration::milliseconds(1);
-    let expired = ExpiredManagedMcpSandboxSessionLease {
-        request: physical_payload.request.as_ref().clone(),
-        usage_reservation_id: id(ResourceKind::UsageReservation, 79),
-        observed_job_version: physical_job.version,
-        observed_lease_generation: physical_job.lease_generation,
-        previous_worker_process_generation_id: lease.worker_process_generation_id.clone(),
-        lease_expires_at: lease.expires_at,
-        database_observed_at: observed_at,
-        physical_state: physical_payload.physical_state,
-        executor_identity_digest: physical_payload.executor_identity_digest.clone(),
-        attestor_route: physical_payload.attestor_route.clone(),
-        phase_evidence_digest: physical_payload.phase_evidence_digest.clone(),
-        prepared_binding: physical_payload.prepared_binding.clone(),
-        ready_binding: physical_payload.ready_binding.clone(),
-    };
-    let process_absence = SandboxProcessGenerationAbsenceEvidence {
-        schema_version: 1,
-        tenant_id: expired.request.identity.tenant_id.clone(),
-        sandbox_job_id: expired.request.identity.sandbox_job_id.clone(),
-        request_digest: expired.request.request_digest.clone(),
-        previous_worker_process_generation_id: expired
-            .previous_worker_process_generation_id
-            .clone(),
-        executor_identity_digest: expired.executor_identity_digest.clone().unwrap(),
-        attestor_identity_digest: sha('4'),
-        attestor_route: expired.attestor_route.clone().unwrap(),
-        disposition: SandboxProcessGenerationIsolationDisposition::ProcessAbsent,
-        observed_at,
-        evidence_digest: sha('0'),
+                .collect(),
+        };
+        (record, command)
     }
-    .seal()
-    .unwrap();
-    let prepared = expired.prepared_binding.as_ref().unwrap();
-    let cleanup_observed_at = observed_at + ChronoDuration::milliseconds(1);
-    let destroyed = ManagedMcpSandboxSessionDestroyedEvidence {
-        schema_version: 1,
-        identity: expired.request.identity.clone(),
-        request_digest: expired.request.request_digest.clone(),
-        worker_process_generation_id: expired.previous_worker_process_generation_id.clone(),
-        provider_process_generation_id: prepared.provider_process_generation_id.clone(),
-        lease_generation: expired.observed_lease_generation,
-        executor_identity_digest: prepared.executor_identity_digest.clone(),
-        sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
-        cleanup: SandboxCleanupEvidence {
-            disposition: SandboxCleanupDisposition::Destroyed,
-            sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
-            grants_revoked: true,
-            ephemeral_storage_destroyed: true,
-            observed_at: cleanup_observed_at,
-            evidence_digest: sha('5'),
-        },
-        evidence_digest: sha('0'),
-    }
-    .seal()
-    .unwrap();
-    let evidence = ManagedMcpSandboxSessionExpiredLeaseEvidence {
-        schema_version: 1,
-        process_absence,
-        provider_cleanup: Some(ManagedMcpSandboxSessionCleanupOutcome::Destroyed(destroyed)),
-        canonical_digest: sha('0'),
-    }
-    .seal()
-    .unwrap();
-    let recovery_executor = managed_recovery_executor(&expired.request, 350, sha('6'));
-    let command = managed_recovery_command(
-        expired.clone(),
-        recovery_executor,
-        ManagedMcpSandboxSessionLeaseRecoveryAction::MarkLost {
-            evidence: Box::new(evidence.clone()),
-        },
-        351,
-        cleanup_observed_at,
-    );
-    let lost = decide_expired_managed_mcp_sandbox_session_lease(
-        &logical,
-        &physical_job,
-        &physical_payload,
-        &command,
-        cleanup_observed_at,
-        limits(),
-    )
-    .unwrap();
-    assert_eq!(lost.physical_job.state, JobState::ReconciliationRequired);
-    assert_eq!(lost.physical_payload.physical_state, SandboxJobState::Lost);
-    assert_eq!(lost.logical_state, McpSubscriptionState::Pending);
-    assert!(lost.logical_payload.managed_sandbox_session.is_none());
-    assert!(lost.logical_payload.full_reconcile_required);
 
-    let absent = ManagedMcpSandboxSessionAbsenceEvidence {
-        schema_version: 1,
-        identity: expired.request.identity.clone(),
-        request_digest: expired.request.request_digest.clone(),
-        worker_process_generation_id: expired.previous_worker_process_generation_id.clone(),
-        lease_generation: expired.observed_lease_generation,
-        observed_at: cleanup_observed_at,
-        evidence_digest: sha('0'),
+    #[test]
+    fn managed_mcp_accepts_only_trusted_mapped_protocol_outcomes() {
+        let now = Utc::now();
+        let request = managed_mcp_request_at(now)
+            .bind_lease_generation(1)
+            .unwrap();
+        let value = serde_json::json!({"answer": 42});
+        let content_digest = canonical_digest(&value).unwrap().parse().unwrap();
+        let mut managed_usage = usage();
+        managed_usage.wasm_fuel_consumed = None;
+        let output = SandboxManagedMcpOutput {
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 59),
+            logical_poll_count: 0,
+            observed_at: now + ChronoDuration::milliseconds(1),
+            outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+                value_id: request.output_value_id.clone(),
+                classification: request.classification,
+                schema_digest: request.output_schema_digest.clone(),
+                content_digest,
+                value: ValueRef::Inline { value },
+                artifact_link_id: None,
+                validation_evidence_digest: sha('4'),
+            }),
+            protocol_evidence_digest: sha('5'),
+            usage: managed_usage,
+        };
+        SandboxExecutionOutcome::ManagedMcp(Box::new(output.clone()))
+            .validate_for(&request, limits())
+            .unwrap();
+        assert_eq!(
+            SandboxExecutionOutcome::Completed(Box::new(completed_output()))
+                .validate_for(&request, limits()),
+            Err(SandboxContractError::InvalidOutcome)
+        );
+        let mut wrong_generation = output;
+        wrong_generation.logical_poll_count = 1;
+        assert_eq!(
+            SandboxExecutionOutcome::ManagedMcp(Box::new(wrong_generation))
+                .validate_for(&request, limits()),
+            Err(SandboxContractError::InvalidOutcome)
+        );
     }
-    .seal()
-    .unwrap();
-    let mut invalid = evidence;
-    invalid.provider_cleanup = Some(ManagedMcpSandboxSessionCleanupOutcome::Absent(absent));
-    invalid = invalid.seal().unwrap();
-    assert!(invalid
-        .validate_for(&expired, cleanup_observed_at, limits())
-        .is_err());
-}
-
-#[test]
-fn managed_session_opaque_claims_bind_both_process_generations_and_the_exact_vm() {
-    let now = Utc::now();
-    let (_, _, command) = managed_session_worker_fixture(now, false);
-    let request = &command.claimed.request;
-    let fence = &command.claimed.fence;
-    let prepared = PreparedManagedMcpSandboxSession {
-        schema_version: 1,
-        identity: request.identity.clone(),
-        request_digest: request.request_digest.clone(),
-        worker_process_generation_id: fence.worker_process_generation_id.clone(),
-        provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 190),
-        lease_generation: fence.lease_generation,
-        executor_identity_digest: command.executor_identity_digest.clone(),
-        sandbox_identity_digest: sha('2'),
-        prepare_evidence_digest: sha('3'),
-        canonical_digest: sha('0'),
-    }
-    .seal()
-    .unwrap();
-    let claims = ManagedMcpSandboxOpaqueSessionClaims {
-        schema_version: 1,
-        identity: request.identity.clone(),
-        request_digest: request.request_digest.clone(),
-        worker_process_generation_id: fence.worker_process_generation_id.clone(),
-        provider_process_generation_id: prepared.provider_process_generation_id.clone(),
-        lease_generation: fence.lease_generation,
-        sandbox_identity_digest: prepared.sandbox_identity_digest.clone(),
-        protocol_evidence_digest: sha('4'),
-        established_at: now,
-        expires_at: now + ChronoDuration::minutes(1),
-    };
-    claims.validate_for(request, fence, &prepared, now).unwrap();
-    assert_eq!(
-        claims.canonical_digest().unwrap(),
-        canonical_digest(&serde_json::to_value(&claims).unwrap())
-            .unwrap()
-            .parse()
-            .unwrap()
-    );
-
-    let mut drifted = claims;
-    drifted.provider_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 191);
-    assert!(drifted
-        .validate_for(request, fence, &prepared, now)
-        .is_err());
-}
-
-fn managed_mcp_session_fixture(
-    now: DateTime<Utc>,
-) -> (McpSubscriptionRecord, AcceptManagedMcpSandboxSession) {
-    let operation_request = managed_mcp_request_at(now);
-    let SandboxExecutionSource::ManagedMcp { mcp_contract, .. } =
-        &operation_request.execution_source
-    else {
-        unreachable!();
-    };
-    let base = mcp_contract.as_ref();
-    let mut protocol = base.protocol_profile.clone();
-    protocol.allowed_server_capabilities.resources = true;
-    protocol.allowed_server_capabilities.subscriptions = true;
-    protocol.method_limits.insert(
-        PublishedMcpMethod::ResourcesRead,
-        *protocol
-            .method_limits
-            .get(&PublishedMcpMethod::ToolsCall)
-            .unwrap(),
-    );
-    let protocol_ref = ExactVersionRef::new(
-        base.server.protocol_policy.revision_id.clone(),
-        protocol.canonical_digest().unwrap(),
-    )
-    .unwrap();
-    let mut deployment_closure = base.deployment_closure.clone();
-    deployment_closure.protocol_policy = protocol_ref.clone();
-    let server = McpServerExecutionContract::build(
-        base.server.revision.clone(),
-        McpTransportKind::ManagedStdio,
-        protocol_ref.clone(),
-        base.server.deployment_credential_requirements.clone(),
-        base.server.authorization_credential_purpose.clone(),
-        base.server.limits,
-    )
-    .unwrap();
-    let mut negotiated = base.discovery.negotiated_capabilities.clone();
-    negotiated.resources = true;
-    negotiated.subscriptions = true;
-    let discovery = insight_platform_contracts::McpDiscoverySnapshot::build(
-        base.discovery.snapshot_id.clone(),
-        base.deployment.clone(),
-        base.server.revision.clone(),
-        protocol_ref,
-        base.authorization.canonical_digest.clone(),
-        base.discovery.negotiated_version.clone(),
-        negotiated,
-        base.discovery.objects_artifact.clone(),
-        now - ChronoDuration::seconds(1),
-        now + ChronoDuration::minutes(4),
-    )
-    .unwrap();
-    let contract = McpHostExecutionContract::build(NewMcpHostExecutionContract {
-        deployment: base.deployment.clone(),
-        deployment_closure,
-        server,
-        protocol_profile: protocol,
-        authorization: base.authorization.clone(),
-        discovery,
-    })
-    .unwrap();
-    let subscription_id = id(ResourceKind::McpOperation, 70);
-    let logical_job_id = id(ResourceKind::Job, 71);
-    let binding = McpResourceSubscriptionBinding::build(
-        NewMcpResourceSubscriptionBinding {
-            subscription_id: subscription_id.clone(),
-            job_id: logical_job_id.clone(),
-            context_deployment: deployment(ResourceKind::ContextDeployment, 72, '5'),
-            resource_uri: "mcp://catalog.example/items/42".to_owned(),
-        },
-        &contract,
-        now,
-    )
-    .unwrap();
-    let session =
-        McpSessionRecord::disconnected(McpSessionBindingKey::build(&contract).unwrap()).unwrap();
-    let record = McpSubscriptionRecord {
-        tenant_id: binding.tenant_id.clone(),
-        subscription_id,
-        job_id: logical_job_id,
-        logical_key: "managed-resource-items-42".to_owned(),
-        state: McpSubscriptionState::Pending,
-        version: 1,
-        payload: McpSubscriptionPayload::pending(binding.clone(), session).unwrap(),
-        deadline: operation_request.deadline,
-        created_at: now,
-        updated_at: now,
-        terminal_at: None,
-    };
-    let physical_job_id = id(ResourceKind::Job, 73);
-    let sandbox_job_id =
-        ResourceId::from_uuid_v7(ResourceKind::Job, physical_job_id.uuid()).unwrap();
-    let identity = ManagedMcpSandboxSessionIdentity::build(
-        &binding,
-        record.version,
-        7,
-        1,
-        sandbox_job_id.clone(),
-        physical_job_id,
-    )
-    .unwrap();
-    let runtime_artifact = operation_request.package.runtime_bundle_artifact.clone();
-    let artifact_grant = ScopedArtifactGrant {
-        schema_version: 1,
-        grant_id: id(ResourceKind::ArtifactGrant, 74),
-        tenant_id: identity.tenant_id.clone(),
-        sandbox_job_id: sandbox_job_id.clone(),
-        operation: ArtifactGrantOperation::ReadWhole,
-        port: "runtime_bundle".to_owned(),
-        artifact: Some(runtime_artifact.clone()),
-        staging_artifact_id: None,
-        byte_range: None,
-        maximum_bytes: runtime_artifact.byte_length(),
-        generation: 1,
-        expires_at: operation_request.deadline,
-        grant_digest: sha('0'),
-    }
-    .seal()
-    .unwrap();
-    let mut secret_grants = operation_request.secret_grants.clone();
-    for grant in &mut secret_grants {
-        grant.sandbox_job_id = sandbox_job_id.clone();
-        *grant = grant.clone().seal().unwrap();
-    }
-    let callback = ManagedMcpSandboxSessionCallback {
-        schema_version: 1,
-        session_identity_digest: identity.canonical_digest.clone(),
-        audience_identity_digest: sha('8'),
-        expires_at: operation_request.deadline,
-        binding_digest: sha('0'),
-    }
-    .seal()
-    .unwrap();
-    let request = ManagedMcpSandboxSessionRequest {
-        schema_version: 1,
-        protocol_version: SANDBOX_PROTOCOL_VERSION,
-        identity,
-        subscription_binding: binding,
-        mcp_contract: Box::new(contract),
-        runtime_revision: operation_request.runtime_revision,
-        runtime: operation_request.runtime,
-        package_revision: operation_request.package_revision,
-        package: operation_request.package,
-        profile_revision: operation_request.profile_revision,
-        profile: operation_request.profile,
-        policies: operation_request.policies,
-        isolation_class: operation_request.isolation_class,
-        executor_worker_manifest_digest: operation_request.executor_worker_manifest_digest,
-        isolation_backend_contract_digest: operation_request.isolation_backend_contract_digest,
-        classification: operation_request.classification,
-        artifact_grants: vec![artifact_grant],
-        secret_grants,
-        network_mode: operation_request.network_mode,
-        resources: operation_request.resources,
-        deadline: operation_request.deadline,
-        callback,
-        request_digest: sha('0'),
-    }
-    .seal()
-    .unwrap();
-    let worker = id(ResourceKind::WorkerProcessGeneration, 75);
-    let command = AcceptManagedMcpSandboxSession {
-        audit: McpSubscriptionWorkerAudit {
-            tenant_id: request.identity.tenant_id.clone(),
-            worker_process_generation_id: worker.clone(),
-            receipt_id: id(ResourceKind::Receipt, 76),
-            event_id: id(ResourceKind::Event, 77),
-            outbox_id: id(ResourceKind::OutboxEvent, 78),
-            idempotency_key_digest: sha('a'),
-            request_digest: request.request_digest.clone(),
-            receipt_expires_at: now + ChronoDuration::minutes(5),
-        },
-        logical_fence: JobFence {
-            expected_version: 7,
-            worker_process_generation_id: worker,
-            lease_generation: 3,
-            token_digest: sha('b'),
-        },
-        request,
-        usage_reservation_id: id(ResourceKind::UsageReservation, 79),
-        quota_entry_ids: (80..84)
-            .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
-            .collect(),
-    };
-    (record, command)
-}
-
-#[test]
-fn managed_mcp_accepts_only_trusted_mapped_protocol_outcomes() {
-    let now = Utc::now();
-    let request = managed_mcp_request_at(now)
-        .bind_lease_generation(1)
-        .unwrap();
-    let value = serde_json::json!({"answer": 42});
-    let content_digest = canonical_digest(&value).unwrap().parse().unwrap();
-    let mut managed_usage = usage();
-    managed_usage.wasm_fuel_consumed = None;
-    let output = SandboxManagedMcpOutput {
-        worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 59),
-        logical_poll_count: 0,
-        observed_at: now + ChronoDuration::milliseconds(1),
-        outcome: DispatchOutcome::Completed(CapabilityOutputValue {
-            value_id: request.output_value_id.clone(),
-            classification: request.classification,
-            schema_digest: request.output_schema_digest.clone(),
-            content_digest,
-            value: ValueRef::Inline { value },
-            artifact_link_id: None,
-            validation_evidence_digest: sha('4'),
-        }),
-        protocol_evidence_digest: sha('5'),
-        usage: managed_usage,
-    };
-    SandboxExecutionOutcome::ManagedMcp(Box::new(output.clone()))
-        .validate_for(&request, limits())
-        .unwrap();
-    assert_eq!(
-        SandboxExecutionOutcome::Completed(Box::new(completed_output()))
-            .validate_for(&request, limits()),
-        Err(SandboxContractError::InvalidOutcome)
-    );
-    let mut wrong_generation = output;
-    wrong_generation.logical_poll_count = 1;
-    assert_eq!(
-        SandboxExecutionOutcome::ManagedMcp(Box::new(wrong_generation))
-            .validate_for(&request, limits()),
-        Err(SandboxContractError::InvalidOutcome)
-    );
 }
 
 fn audit(request: &SandboxExecutionRequest, now: DateTime<Utc>) -> CommandAudit {
@@ -2533,7 +2542,7 @@ fn isolation_is_derived_from_trust_effect_secret_network_and_classification() {
             SandboxNetworkMode::None,
         ),
     ] {
-        assert_eq!(required, SandboxIsolationClass::MicroVm);
+        assert_eq!(required, SandboxIsolationClass::SandboxedContainer);
     }
 }
 

@@ -42,9 +42,6 @@ impl InstalledSandboxBackendDescriptor {
             ) | (
                 SandboxIsolationBackendKind::Gvisor,
                 SandboxIsolationClass::SandboxedContainer
-            ) | (
-                SandboxIsolationBackendKind::MicroVm,
-                SandboxIsolationClass::MicroVm
             )
         ) {
             return Err(SandboxBackendHostError::InvalidInstalledBackend);
@@ -58,13 +55,12 @@ impl InstalledSandboxBackendDescriptor {
 pub enum SandboxIsolationBackendKind {
     Wasi,
     Gvisor,
-    MicroVm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedSandbox {
-    /// Present only for a microVM prepared by one exact provider process generation.
+    /// Reserved for an executor-local provider generation; absent in first-release backends.
     pub provider_process_generation_id: Option<ResourceId>,
     pub sandbox_identity_digest: Sha256Digest,
     pub request_digest: Sha256Digest,
@@ -81,17 +77,7 @@ impl PreparedSandbox {
         if self.request_digest != request.request_digest
             || self.attempt_no != request.attempt_no
             || self.lease_generation != request.lease_generation
-            || match request.isolation_class {
-                SandboxIsolationClass::MicroVm => self
-                    .provider_process_generation_id
-                    .as_ref()
-                    .is_none_or(|generation| {
-                        generation.kind() != ResourceKind::WorkerProcessGeneration
-                    }),
-                SandboxIsolationClass::Wasm | SandboxIsolationClass::SandboxedContainer => {
-                    self.provider_process_generation_id.is_some()
-                }
-            }
+            || self.provider_process_generation_id.is_some()
         {
             return Err(SandboxBackendHostError::InvalidBackendEvidence);
         }
@@ -417,12 +403,14 @@ pub trait SandboxExecutorBackend: Send + Sync {
 /// Durable Executor lease owner carried across the node-local Executor -> microVM Provider
 /// boundary. The mTLS workload identity authenticates the Executor role; this value independently
 /// binds each physical lifecycle call to the exact PostgreSQL Job lease generation owner.
+#[cfg(any())]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MicroVmProviderExecutionFence {
     pub worker_process_generation_id: ResourceId,
 }
 
+#[cfg(any())]
 impl MicroVmProviderExecutionFence {
     pub fn validate(&self) -> Result<(), SandboxBackendHostError> {
         if self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration {
@@ -435,6 +423,7 @@ impl MicroVmProviderExecutionFence {
 /// Provider-side lifecycle port. Unlike `SandboxExecutorBackend`, every call carries the exact
 /// Executor process generation that owns the durable lease. A Provider must persist and compare
 /// this fence; transport identity or a provider-local process generation cannot replace it.
+#[cfg(any())]
 #[async_trait]
 pub trait MicroVmIsolationProviderBackend: Send + Sync {
     fn descriptor(&self) -> InstalledSandboxBackendDescriptor;
@@ -994,10 +983,6 @@ impl SandboxExecutorHost {
             && !matches!(
                 &collected.outcome,
                 SandboxExecutionOutcome::Completed(output) if output.usage != collected.usage
-            )
-            && !matches!(
-                &collected.outcome,
-                SandboxExecutionOutcome::ManagedMcp(output) if output.usage != collected.usage
             );
         if !evidence_valid {
             let termination = self

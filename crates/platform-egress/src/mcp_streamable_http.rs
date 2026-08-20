@@ -22,6 +22,7 @@ use insight_platform_mcp_host::{
     McpStreamableHttpSubscriptionTermination, McpSubscriptionActivation, McpTransportFailure,
     PreparedMcpSubscription, SafeMcpFailure, SensitiveMcpNotificationWire,
 };
+#[cfg(any())]
 use insight_platform_sandbox::{
     ManagedMcpSandboxOpaqueSessionClaims, ManagedMcpSandboxSessionStateSealError,
     ManagedMcpSandboxSessionStateSealer,
@@ -67,7 +68,9 @@ const MAX_MCP_REMOTE_TASK_ID_BYTES: usize = 1_024;
 const MAX_MCP_ELICITATION_MESSAGE_BYTES: usize = 4_096;
 const MCP_SUBSCRIPTION_STATE_SCHEME: &str = "aes256_gcm_v1";
 const MCP_SUBSCRIPTION_STATE_AAD: &[u8] = b"insight.platform/v1/mcp-subscription-session\0";
+#[cfg(any())]
 const MANAGED_MCP_SANDBOX_SESSION_STATE_SCHEME: &str = "aes256_gcm_v1";
+#[cfg(any())]
 const MANAGED_MCP_SANDBOX_SESSION_STATE_AAD: &[u8] =
     b"insight.platform/v1/managed-mcp-sandbox-session\0";
 const MCP_SUBSCRIPTION_STATE_KEY_BYTES: usize = 32;
@@ -257,6 +260,7 @@ impl AeadMcpSubscriptionStateCodec {
         Ok(state)
     }
 
+    #[cfg(any())]
     fn seal_managed_sandbox_session(
         &self,
         claims: &ManagedMcpSandboxOpaqueSessionClaims,
@@ -352,6 +356,7 @@ impl AeadMcpSubscriptionStateCodec {
     }
 }
 
+#[cfg(any())]
 #[async_trait]
 impl ManagedMcpSandboxSessionStateSealer for AeadMcpSubscriptionStateCodec {
     async fn seal_managed_mcp_sandbox_session_state(
@@ -439,6 +444,7 @@ fn subscription_state_aad(key_id: &str) -> Vec<u8> {
     aad
 }
 
+#[cfg(any())]
 fn managed_mcp_sandbox_session_state_aad(key_id: &str) -> Vec<u8> {
     let mut aad = Vec::with_capacity(MANAGED_MCP_SANDBOX_SESSION_STATE_AAD.len() + key_id.len());
     aad.extend_from_slice(MANAGED_MCP_SANDBOX_SESSION_STATE_AAD);
@@ -5648,6 +5654,7 @@ mod tests {
         assert!(!debug.contains("opaque-subscription-session-canary"));
     }
 
+    #[cfg(any())]
     #[tokio::test]
     async fn managed_sandbox_session_state_uses_a_domain_separated_egress_key_boundary() {
         let codec = AeadMcpSubscriptionStateCodec::new(

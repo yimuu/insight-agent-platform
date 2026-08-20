@@ -1019,11 +1019,6 @@ async fn validate_frozen_mcp_runtime_at_claim(
             "MCP Capability authorization Policy changed",
         ));
     }
-    if matches!(closure.transport, McpTransportBinding::ManagedStdio { .. }) {
-        return Err(RepositoryError::InvalidInput(
-            "Managed stdio MCP must be admitted directly as Sandbox work".to_owned(),
-        ));
-    }
     Ok(())
 }
 

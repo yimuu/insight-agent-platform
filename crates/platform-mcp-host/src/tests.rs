@@ -115,7 +115,6 @@ fn protocol(tasks: bool) -> McpProtocolPolicyDocument {
             streamable_http_sse: true,
             resumable_stream: true,
             session_affinity: true,
-            managed_stdio: false,
         },
         client_capabilities: McpClientCapabilities {
             elicitation_form: true,
@@ -1155,6 +1154,7 @@ fn tasks_require_profile_negotiation_and_method_gate() {
         .unwrap();
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn wrong_transport_fails_before_dispatch() {
     let fixture = fixture(false, Effect::ReadOnly, 1_000);
@@ -1380,11 +1380,13 @@ async fn streamable_http_connector_receives_only_exact_opaque_authority() {
     assert_eq!(captured.endpoint.host, "mcp.example.test");
 }
 
+#[cfg(any())]
 #[derive(Default)]
 struct RecordingRunnerBroker {
     request: Mutex<Option<McpManagedRunnerRequest>>,
 }
 
+#[cfg(any())]
 #[async_trait]
 impl ManagedMcpRunnerBroker for RecordingRunnerBroker {
     async fn execute(
@@ -1396,6 +1398,7 @@ impl ManagedMcpRunnerBroker for RecordingRunnerBroker {
     }
 }
 
+#[cfg(any())]
 fn managed_stdio_fixture() -> Fixture {
     let mut fixture = fixture(false, Effect::ReadOnly, 1_000);
     let protocol_policy = fixture.contract.server.protocol_policy.clone();
@@ -1493,6 +1496,7 @@ fn managed_stdio_fixture() -> Fixture {
     fixture
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn managed_stdio_is_brokered_with_exact_microvm_contract() {
     let fixture = managed_stdio_fixture();
@@ -1515,6 +1519,7 @@ async fn managed_stdio_is_brokered_with_exact_microvm_contract() {
     );
 }
 
+#[cfg(any())]
 #[test]
 fn managed_stdio_logical_operation_binds_physical_fence_only_after_claim() {
     let fixture = managed_stdio_fixture();
@@ -2313,6 +2318,7 @@ fn execute_subscription_command(
     }
 }
 
+#[cfg(any())]
 #[tokio::test]
 async fn subscription_worker_rejects_managed_stdio_before_transport_dispatch() {
     let now = Utc::now();

@@ -240,11 +240,6 @@ impl McpCapabilityAdapter {
                 CapabilityDispatchError::BackendContractMismatch,
             ));
         }
-        if host_contract.transport_kind() == McpTransportKind::ManagedStdio {
-            return Err(contract_failure(
-                CapabilityDispatchError::BackendPortNotInstalled,
-            ));
-        }
         let codec = self
             .codecs
             .resolve(tool_contract)
