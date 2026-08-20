@@ -533,7 +533,7 @@ impl ContextDatasetGenerationSpec {
             || self.parser_profile.resource_kind != ResourceKind::PolicyRevision
             || self.chunker_profile.resource_kind != ResourceKind::PolicyRevision
             || self.ranking_profile.resource_kind != ResourceKind::PolicyRevision
-            || self.created_by_operation_id.kind() != ResourceKind::ManagementOperation
+            || self.created_by_operation_id.kind() != ResourceKind::Job
             || self
                 .embedding_model_deployment
                 .as_ref()

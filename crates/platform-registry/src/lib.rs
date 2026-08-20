@@ -81,7 +81,7 @@ impl RequestResourceValidation {
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), RegistryCommandError> {
         validate_audit(&self.audit, now)?;
         if self.expected_resource_version <= 0
-            || self.operation_id.kind() != ResourceKind::ManagementOperation
+            || self.operation_id.kind() != ResourceKind::Job
             || self.job_id.kind() != ResourceKind::Job
             || self.attempt_limit <= 0
             || self.attempt_limit > 32
@@ -129,7 +129,7 @@ impl RegistryValidationJobPayload {
 
     pub fn validate_for_owner(&self, owner_id: &ResourceId) -> Result<(), RegistryCommandError> {
         if self.schema_version != 1
-            || self.operation_id.kind() != ResourceKind::ManagementOperation
+            || self.operation_id.kind() != ResourceKind::Job
             || &self.operation_id != owner_id
             || self.resource_id.kind() != self.resource_kind.id_kind()
             || self.expected_resource_version == 0

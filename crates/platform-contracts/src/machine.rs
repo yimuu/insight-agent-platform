@@ -210,10 +210,7 @@ components:
 "##;
 
 pub const EXECUTION_WORK_OWNER_PAIRS: &[(WorkClass, ResourceKind)] = &[
-    (
-        WorkClass::RegistryValidation,
-        ResourceKind::ManagementOperation,
-    ),
+    (WorkClass::RegistryValidation, ResourceKind::Job),
     (WorkClass::Orchestration, ResourceKind::NodeExecution),
     (WorkClass::Model, ResourceKind::ModelTurn),
     (
@@ -228,7 +225,7 @@ pub const EXECUTION_WORK_OWNER_PAIRS: &[(WorkClass, ResourceKind)] = &[
     (WorkClass::Context, ResourceKind::ContextQuery),
     (WorkClass::Sandbox, ResourceKind::Job),
     (WorkClass::Interaction, ResourceKind::Interaction),
-    (WorkClass::Artifact, ResourceKind::ManagementOperation),
+    (WorkClass::Artifact, ResourceKind::Job),
     (WorkClass::Artifact, ResourceKind::InternalBlob),
     (WorkClass::Recovery, ResourceKind::Run),
     (WorkClass::Recovery, ResourceKind::NodeExecution),
@@ -237,7 +234,6 @@ pub const EXECUTION_WORK_OWNER_PAIRS: &[(WorkClass, ResourceKind)] = &[
     (WorkClass::Recovery, ResourceKind::McpOperation),
     (WorkClass::Recovery, ResourceKind::ModelTurn),
     (WorkClass::Recovery, ResourceKind::Job),
-    (WorkClass::Recovery, ResourceKind::ManagementOperation),
 ];
 
 pub const fn is_execution_work_owner_pair(work_class: WorkClass, owner_kind: ResourceKind) -> bool {

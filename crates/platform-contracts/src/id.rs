@@ -74,7 +74,6 @@ pub enum ResourceKind {
     QuotaAccount,
     QuotaLedgerEntry,
     Event,
-    ManagementOperation,
     ServerRequest,
     ArtifactLink,
 }
@@ -198,7 +197,6 @@ descriptors! {
     QuotaAccount => ("qac", "quota_account", Internal),
     QuotaLedgerEntry => ("qle", "quota_ledger_entry", Internal),
     Event => ("evt", "event", Internal),
-    ManagementOperation => ("op", "management_operation", Public),
     ServerRequest => ("req", "server_request", CorrelationOnly),
     ArtifactLink => ("lnk", "artifact_link", Internal),
 }

@@ -315,7 +315,7 @@ pub struct ArtifactScanJobSnapshot {
 impl ArtifactScanJobSnapshot {
     pub fn validate(&self) -> Result<(), ArtifactWorkError> {
         if self.schema_version != 1
-            || self.operation_id.kind() != ResourceKind::ManagementOperation
+            || self.operation_id.kind() != ResourceKind::Job
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.expected_artifact_version == 0
@@ -356,29 +356,17 @@ impl ArtifactJobPayload {
         match self {
             Self::Scan { scan } if scan.scan_kind == ArtifactScanKind::Initial => {
                 scan.validate()?;
-                require_owner(
-                    owner_id,
-                    ResourceKind::ManagementOperation,
-                    &scan.operation_id,
-                )
+                require_owner(owner_id, ResourceKind::Job, &scan.operation_id)
             }
             Self::Rescan { scan } if scan.scan_kind == ArtifactScanKind::Rescan => {
                 scan.validate()?;
-                require_owner(
-                    owner_id,
-                    ResourceKind::ManagementOperation,
-                    &scan.operation_id,
-                )
+                require_owner(owner_id, ResourceKind::Job, &scan.operation_id)
             }
             Self::Delete { deletion } => {
                 deletion
                     .canonical_digest()
                     .map_err(|_| ArtifactWorkError::InvalidJobPayload)?;
-                require_owner(
-                    owner_id,
-                    ResourceKind::ManagementOperation,
-                    &deletion.operation_id,
-                )
+                require_owner(owner_id, ResourceKind::Job, &deletion.operation_id)
             }
             Self::BlobCleanup { cleanup } => {
                 cleanup
@@ -816,7 +804,7 @@ impl CommitArtifactScanOutcome {
         self.evidence.validate()?;
         if self.scan_job_id.kind() != ResourceKind::Job
             || self.evidence.scan_job_id != self.scan_job_id
-            || self.operation_id.kind() != ResourceKind::ManagementOperation
+            || self.operation_id.kind() != ResourceKind::Job
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.duplicate_blob_cleanup_job_id.kind() != ResourceKind::Job
@@ -1233,7 +1221,7 @@ impl ArtifactScanExecution {
             || self.scan.expected_artifact_version != self.expected_artifact_version
             || self.scan.expected_blob_version != self.expected_blob_version
             || self.scan.expected_operation_version != self.expected_operation_version
-            || self.operation_id.kind() != ResourceKind::ManagementOperation
+            || self.operation_id.kind() != ResourceKind::Job
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.expected_operation_version == 0
@@ -1639,7 +1627,7 @@ fn validate_scan_schedule(
     now: DateTime<Utc>,
 ) -> Result<(), ArtifactWorkError> {
     if job_id.kind() != ResourceKind::Job
-        || operation_id.kind() != ResourceKind::ManagementOperation
+        || operation_id.kind() != ResourceKind::Job
         || artifact_id.kind() != ResourceKind::Artifact
         || blob_id.kind() != ResourceKind::InternalBlob
         || expected_artifact_version == 0
@@ -1862,7 +1850,7 @@ mod tests {
         let now = Utc::now();
         let tenant_id = id(ResourceKind::Tenant, 1);
         let worker_id = id(ResourceKind::WorkerProcessGeneration, 2);
-        let operation_id = id(ResourceKind::ManagementOperation, 3);
+        let operation_id = id(ResourceKind::Job, 3);
         let artifact_id = id(ResourceKind::Artifact, 4);
         let blob_id = id(ResourceKind::InternalBlob, 5);
         let scan_job_id = id(ResourceKind::Job, 6);
@@ -2075,7 +2063,7 @@ mod tests {
         let deletion_job_id = id(ResourceKind::Job, 92);
         let deletion = ArtifactDeletionJobSnapshot {
             schema_version: 1,
-            operation_id: id(ResourceKind::ManagementOperation, 93),
+            operation_id: id(ResourceKind::Job, 93),
             artifact_id: id(ResourceKind::Artifact, 94),
             blob_id: id(ResourceKind::InternalBlob, 95),
             mode: mode.clone(),
@@ -2668,7 +2656,7 @@ mod tests {
             scan: fixture(ArtifactScanKind::Rescan).job,
         };
         assert_eq!(
-            scan_payload.validate_for_owner(&id(ResourceKind::ManagementOperation, 3)),
+            scan_payload.validate_for_owner(&id(ResourceKind::Job, 3)),
             Err(ArtifactWorkError::InvalidJobPayload)
         );
     }

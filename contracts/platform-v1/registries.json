@@ -302,7 +302,7 @@
   ],
   "execution_work_owner_pairs": [
     {
-      "owner_kind": "management_operation",
+      "owner_kind": "job",
       "work_class": "registry_validation"
     },
     {
@@ -338,7 +338,7 @@
       "work_class": "interaction"
     },
     {
-      "owner_kind": "management_operation",
+      "owner_kind": "job",
       "work_class": "artifact"
     },
     {
@@ -371,10 +371,6 @@
     },
     {
       "owner_kind": "job",
-      "work_class": "recovery"
-    },
-    {
-      "owner_kind": "management_operation",
       "work_class": "recovery"
     }
   ],
@@ -1199,11 +1195,6 @@
       "exposure": "internal",
       "name": "event",
       "prefix": "evt"
-    },
-    {
-      "exposure": "public",
-      "name": "management_operation",
-      "prefix": "op"
     },
     {
       "exposure": "correlation_only",

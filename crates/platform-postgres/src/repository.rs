@@ -1111,7 +1111,7 @@ impl PgRegistryTransaction {
                 attempt_limit, scheduled_at, deadline, priority, request_digest,
                 payload_schema_version, payload, payload_digest
             ) VALUES (
-                $1, $2, 'registry_validation', 'management_operation', $3, 'ready',
+                $1, $2, 'registry_validation', 'job', $3, 'ready',
                 $4, GREATEST($5, clock_timestamp()), $6, 0, $7, $8, $9, $10
             )
             RETURNING *
@@ -1133,7 +1133,7 @@ impl PgRegistryTransaction {
         append_command_event(
             &mut transaction,
             &command.audit,
-            "management_operation",
+            "job",
             &command.operation_id.to_string(),
             1,
             "resource.validation_requested",

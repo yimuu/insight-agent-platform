@@ -104,7 +104,7 @@ impl ArtifactMetadataSnapshot {
         display_name: Option<String>,
         operation_id: ResourceId,
     ) -> Result<Self, ArtifactCommandError> {
-        if operation_id.kind() != ResourceKind::ManagementOperation
+        if operation_id.kind() != ResourceKind::Job
             || display_name.as_deref().is_some_and(|value| {
                 value.is_empty()
                     || value.len() > MAX_DISPLAY_NAME_BYTES
@@ -127,7 +127,7 @@ impl ArtifactMetadataSnapshot {
 
     pub fn validate(&self) -> Result<(), ArtifactCommandError> {
         if self.schema_version != 1
-            || self.operation_id.kind() != ResourceKind::ManagementOperation
+            || self.operation_id.kind() != ResourceKind::Job
             || self.display_name.as_deref().is_some_and(|value| {
                 value.is_empty()
                     || value.len() > MAX_DISPLAY_NAME_BYTES
@@ -278,7 +278,7 @@ impl PrepareArtifact {
             .validate_at(now)
             .map_err(|_| ArtifactCommandError::InvalidAudit)?;
         let ids = [
-            (&self.operation_id, ResourceKind::ManagementOperation),
+            (&self.operation_id, ResourceKind::Job),
             (&self.artifact_id, ResourceKind::Artifact),
             (&self.blob_id, ResourceKind::InternalBlob),
             (&self.upload_grant_id, ResourceKind::ArtifactGrant),
@@ -401,7 +401,7 @@ impl CompleteArtifactUpload {
             .validate_at(now)
             .map_err(|_| ArtifactCommandError::InvalidAudit)?;
         let ids = [
-            (&self.operation_id, ResourceKind::ManagementOperation),
+            (&self.operation_id, ResourceKind::Job),
             (&self.artifact_id, ResourceKind::Artifact),
             (&self.blob_id, ResourceKind::InternalBlob),
             (&self.upload_grant_id, ResourceKind::ArtifactGrant),
@@ -996,7 +996,7 @@ pub struct ArtifactDeletionJobSnapshot {
 impl ArtifactDeletionJobSnapshot {
     pub fn canonical_digest(&self) -> Result<Sha256Digest, ArtifactCommandError> {
         if self.schema_version != 1
-            || self.operation_id.kind() != ResourceKind::ManagementOperation
+            || self.operation_id.kind() != ResourceKind::Job
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.expected_artifact_version == 0
@@ -1031,7 +1031,7 @@ impl MarkArtifactDeletion {
         self.audit
             .validate_at(now)
             .map_err(|_| ArtifactCommandError::InvalidAudit)?;
-        if self.deletion_operation_id.kind() != ResourceKind::ManagementOperation
+        if self.deletion_operation_id.kind() != ResourceKind::Job
             || self.deletion_job_id.kind() != ResourceKind::Job
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
@@ -1213,7 +1213,7 @@ impl CompleteArtifactDeletion {
         self.audit
             .validate_at(now)
             .map_err(|_| ArtifactCommandError::InvalidAudit)?;
-        if self.deletion_operation_id.kind() != ResourceKind::ManagementOperation
+        if self.deletion_operation_id.kind() != ResourceKind::Job
             || self.deletion_job_id.kind() != ResourceKind::Job
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
@@ -1378,7 +1378,7 @@ impl FinalizeArtifact {
             .validate_at(now)
             .map_err(|_| ArtifactCommandError::InvalidAudit)?;
         let ids = [
-            (&self.operation_id, ResourceKind::ManagementOperation),
+            (&self.operation_id, ResourceKind::Job),
             (&self.artifact_id, ResourceKind::Artifact),
             (&self.blob_id, ResourceKind::InternalBlob),
             (&self.upload_grant_id, ResourceKind::ArtifactGrant),
@@ -1835,7 +1835,6 @@ fn is_producer_kind(kind: ResourceKind) -> bool {
             | ResourceKind::ModelTurn
             | ResourceKind::ContextQuery
             | ResourceKind::Job
-            | ResourceKind::ManagementOperation
     )
 }
 
@@ -1966,7 +1965,7 @@ mod tests {
                 request_digest: digest('b'),
                 receipt_expires_at: now + ChronoDuration::hours(2),
             },
-            operation_id: id(ResourceKind::ManagementOperation, "1006"),
+            operation_id: id(ResourceKind::Job, "1006"),
             artifact_id: id(ResourceKind::Artifact, "1007"),
             blob_id: id(ResourceKind::InternalBlob, "1008"),
             upload_grant_id: id(ResourceKind::ArtifactGrant, "1009"),
@@ -2313,7 +2312,7 @@ mod tests {
             source_artifact_id: source.artifact_id.clone(),
             derived_artifact_id: derived.artifact_id.clone(),
             transformation_deployment_id: id(ResourceKind::CapabilityDeployment, "1018"),
-            producer_owner_id: id(ResourceKind::ManagementOperation, "1019"),
+            producer_owner_id: id(ResourceKind::Job, "1019"),
             expected_source_version: 5,
             expected_derived_version: 5,
             parameters_digest: digest('5'),
@@ -2358,7 +2357,7 @@ mod tests {
                 request_digest: digest('2'),
                 receipt_expires_at: now + ChronoDuration::hours(2),
             },
-            deletion_operation_id: id(ResourceKind::ManagementOperation, "1023"),
+            deletion_operation_id: id(ResourceKind::Job, "1023"),
             deletion_job_id: id(ResourceKind::Job, "1024"),
             artifact_id: target.artifact_id.clone(),
             blob_id: blob.blob_id.clone(),

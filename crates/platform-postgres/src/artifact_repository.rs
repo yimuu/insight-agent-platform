@@ -1012,7 +1012,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
                 tenant_id, artifact_link_id, link_kind, owner_kind, owner_id,
                 target_artifact_id, link_key_digest, state, payload_schema_version,
                 payload, payload_digest, expires_at
-            ) VALUES ($1, $2, 'grant', 'management_operation', $3,
+            ) VALUES ($1, $2, 'grant', 'job', $3,
                       $4, $5, 'active', $6, $7, $8, $9)
             "#,
         )
@@ -2430,7 +2430,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
                 tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
                 state, attempt_limit, scheduled_at, deadline, request_digest,
                 payload_schema_version, payload, payload_digest
-            ) VALUES ($1, $2, 'artifact', 'management_operation', $3, $3, 'ready',
+            ) VALUES ($1, $2, 'artifact', 'job', $3, $3, 'ready',
                       $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
@@ -2787,7 +2787,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
                 tenant_id, artifact_link_id, link_kind, owner_kind, owner_id,
                 target_artifact_id, link_key_digest, state, payload_schema_version,
                 payload, payload_digest
-            ) VALUES ($1, $2, 'reference', 'management_operation', $3,
+            ) VALUES ($1, $2, 'reference', 'job', $3,
                       $4, $5, 'active', $6, $7, $8)
             "#,
         )
@@ -3373,7 +3373,7 @@ async fn lock_deletion_job(
     };
     let valid = row.try_get::<String, _>("tenant_id")? == command.audit.tenant_id.to_string()
         && row.try_get::<String, _>("job_id")? == command.deletion_job_id.to_string()
-        && row.try_get::<String, _>("owner_kind")? == "management_operation"
+        && row.try_get::<String, _>("owner_kind")? == "job"
         && row.try_get::<String, _>("owner_id")? == command.deletion_operation_id.to_string()
         && row.try_get::<Option<String>, _>("invocation_id")?
             == Some(command.deletion_operation_id.to_string())
@@ -3463,7 +3463,7 @@ async fn load_artifact_deletion(
         r#"
         SELECT payload_schema_version, payload, payload_digest
         FROM insight_platform.jobs
-        WHERE tenant_id = $1 AND job_id = $2 AND owner_kind = 'management_operation'
+        WHERE tenant_id = $1 AND job_id = $2 AND owner_kind = 'job'
           AND owner_id = $3 AND invocation_id = $3 AND work_class = 'artifact'
         "#,
     )
@@ -3610,7 +3610,7 @@ async fn insert_artifact_scan_job(
             tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
             state, attempt_limit, scheduled_at, deadline, request_digest,
             payload_schema_version, payload, payload_digest
-        ) VALUES ($1, $2, 'artifact', 'management_operation', $3, $3,
+        ) VALUES ($1, $2, 'artifact', 'job', $3, $3,
                   'ready', $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
@@ -3713,7 +3713,7 @@ async fn load_artifact_scan_work_inner(
             ))
         }
     };
-    if job_row.try_get::<String, _>("owner_kind")? != "management_operation"
+    if job_row.try_get::<String, _>("owner_kind")? != "job"
         || job_row.try_get::<String, _>("owner_id")? != operation_id.to_string()
         || job_row.try_get::<Option<String>, _>("invocation_id")? != Some(operation_id.to_string())
         || scan.operation_id != *operation_id
@@ -4702,7 +4702,7 @@ async fn load_artifact_bundle(
                created_at, released_at
         FROM insight_platform.artifact_links
         WHERE tenant_id = $1 AND artifact_link_id = $2
-          AND link_kind = 'grant' AND owner_kind = 'management_operation'
+          AND link_kind = 'grant' AND owner_kind = 'job'
           AND owner_id = $3 AND target_artifact_id = $4
         "#,
     )
@@ -5243,7 +5243,7 @@ async fn load_finalized_artifact(
                created_at, released_at
         FROM insight_platform.artifact_links
         WHERE tenant_id = $1 AND artifact_link_id = $2
-          AND link_kind = 'reference' AND owner_kind = 'management_operation'
+          AND link_kind = 'reference' AND owner_kind = 'job'
           AND owner_id = $3 AND target_artifact_id = $4
         "#,
     )

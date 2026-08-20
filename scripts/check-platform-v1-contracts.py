@@ -564,7 +564,7 @@ def check_spec_registry_alignment(errors):
     if registries.get("service_classes") != ["low", "normal", "high"]:
         errors.append("17 public ServiceClass registry is not closed")
     expected_work_owner_pairs = [
-        {"work_class": "registry_validation", "owner_kind": "management_operation"},
+        {"work_class": "registry_validation", "owner_kind": "job"},
         {"work_class": "orchestration", "owner_kind": "node_execution"},
         {"work_class": "model", "owner_kind": "model_turn"},
         {"work_class": "capability_native", "owner_kind": "capability_invocation"},
@@ -573,7 +573,7 @@ def check_spec_registry_alignment(errors):
         {"work_class": "context", "owner_kind": "context_query"},
         {"work_class": "sandbox", "owner_kind": "job"},
         {"work_class": "interaction", "owner_kind": "interaction"},
-        {"work_class": "artifact", "owner_kind": "management_operation"},
+        {"work_class": "artifact", "owner_kind": "job"},
         {"work_class": "artifact", "owner_kind": "internal_blob"},
         {"work_class": "recovery", "owner_kind": "run"},
         {"work_class": "recovery", "owner_kind": "node_execution"},
@@ -582,7 +582,6 @@ def check_spec_registry_alignment(errors):
         {"work_class": "recovery", "owner_kind": "mcp_operation"},
         {"work_class": "recovery", "owner_kind": "model_turn"},
         {"work_class": "recovery", "owner_kind": "job"},
-        {"work_class": "recovery", "owner_kind": "management_operation"},
     ]
     if registries.get("execution_work_owner_pairs") != expected_work_owner_pairs:
         errors.append("03/07 execution work owner mapping is not closed")

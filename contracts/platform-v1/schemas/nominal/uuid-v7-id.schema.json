@@ -4,7 +4,7 @@
   "description": "Known resource prefix plus canonical lowercase RFC 9562 UUIDv7.",
   "maxLength": 48,
   "minLength": 39,
-  "pattern": "^(ten|prn|svc|wrk|spr|sbd|agt|aif|arev|adep|skl|srev|sact|cap|cirev|cim|cimp|cdep|ctx|xirev|xim|ximp|xdep|xcb|dset|dgen|cqry|cobs|cit|mcp|mrev|mcdep|mdsc|mab|mop|mpr|mprev|mpdep|mdl|mdrev|mdep|mturn|ures|pol|prev|srt|srrev|spk|sprev|sxp|sxrev|run|val|nod|scp|inv|crun|art|grt|blb|enc|int|apr|job|tsk|rcp|obx|qac|qle|evt|op|req|lnk)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+  "pattern": "^(ten|prn|svc|wrk|spr|sbd|agt|aif|arev|adep|skl|srev|sact|cap|cirev|cim|cimp|cdep|ctx|xirev|xim|ximp|xdep|xcb|dset|dgen|cqry|cobs|cit|mcp|mrev|mcdep|mdsc|mab|mop|mpr|mprev|mpdep|mdl|mdrev|mdep|mturn|ures|pol|prev|srt|srrev|spk|sprev|sxp|sxrev|run|val|nod|scp|inv|crun|art|grt|blb|enc|int|apr|job|tsk|rcp|obx|qac|qle|evt|req|lnk)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
   "title": "UuidV7Id",
   "type": "string",
   "x-platform-max-bytes": 48
