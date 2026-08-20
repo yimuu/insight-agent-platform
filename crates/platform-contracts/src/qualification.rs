@@ -394,7 +394,7 @@ mod tests {
         CandidateManifest::build(NewCandidateManifest {
             git_commit: format!("sha1:{}", "a".repeat(40)).parse().unwrap(),
             contract_digest: sha('b'),
-            database_schema_version: 6,
+            database_schema_version: 7,
             component_images: BTreeMap::from([
                 ("runtime_api".parse().unwrap(), sha('c')),
                 ("scheduler_recovery".parse().unwrap(), sha('d')),
@@ -457,7 +457,7 @@ mod tests {
             CandidateManifest::build(NewCandidateManifest {
                 git_commit: format!("sha1:{}", "a".repeat(40)).parse().unwrap(),
                 contract_digest: sha('b'),
-                database_schema_version: 6,
+                database_schema_version: 7,
                 component_images: BTreeMap::from([("runtime_api".parse().unwrap(), sha('c'))]),
                 worker_manifests: &duplicate_roles,
                 deployment_config_digest: sha('e'),

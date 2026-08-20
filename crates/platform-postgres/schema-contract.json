@@ -22,7 +22,7 @@
   ],
   "postgres_major": 16,
   "schema": "insight_platform",
-  "schema_contract_version": 6,
+  "schema_contract_version": 7,
   "table_count": 23,
   "tables": [
     "artifact_blobs",

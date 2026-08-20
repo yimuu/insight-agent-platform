@@ -21,7 +21,7 @@ use sqlx::{PgPool, Row};
 use std::{collections::BTreeSet, error::Error, fmt};
 
 pub const AUTHORITY_SCHEMA: &str = "insight_platform";
-pub const SCHEMA_CONTRACT_VERSION: u32 = 6;
+pub const SCHEMA_CONTRACT_VERSION: u32 = 7;
 pub const POSTGRES_MAJOR_VERSION: i32 = 16;
 pub const BASELINE_TABLE_COUNT: usize = 23;
 

@@ -177,7 +177,7 @@ def main():
         errors.append("schema contract has missing or unknown top-level fields")
     if contract.get("contract") != "insight.platform/v1/postgres-baseline":
         errors.append("schema contract identity is invalid")
-    if contract.get("schema_contract_version") != 6:
+    if contract.get("schema_contract_version") != 7:
         errors.append("schema contract version must be 6")
     if contract.get("postgres_major") != 16:
         errors.append("PostgreSQL major version must be 16")
