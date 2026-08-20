@@ -14,7 +14,211 @@ use insight_platform_contracts::{
     MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
+
+const MAX_PUBLIC_ARTIFACT_BYTES: u64 = 1_073_741_824;
+const MAX_MEDIA_TYPE_BYTES: usize = 255;
+const MAX_DISPLAY_NAME_BYTES: usize = 512;
+const MAX_UPLOAD_URL_BYTES: usize = 8_192;
+const MAX_COMPLETION_PROOF_BYTES: usize = 4_096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareArtifactUploadRequestV1 {
+    pub schema_version: u32,
+    pub purpose: insight_platform_contracts::ArtifactPurpose,
+    pub classification: insight_platform_contracts::DataClassification,
+    pub expected_size_bytes: u64,
+    pub expected_digest: Option<insight_platform_contracts::Sha256Digest>,
+    pub declared_media_type: Option<String>,
+    pub display_name: Option<String>,
+}
+
+impl PrepareArtifactUploadRequestV1 {
+    pub fn validate(&self) -> Result<(), ArtifactApplicationError> {
+        if self.schema_version != 1
+            || self.expected_size_bytes == 0
+            || self.expected_size_bytes > MAX_PUBLIC_ARTIFACT_BYTES
+            || self
+                .declared_media_type
+                .as_deref()
+                .is_some_and(|value| !valid_media_type(value))
+            || self
+                .display_name
+                .as_deref()
+                .is_some_and(|value| !valid_safe_text(value, MAX_DISPLAY_NAME_BYTES))
+        {
+            return Err(ArtifactApplicationError::Invalid);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OpaqueUploadCompletionProof(String);
+
+impl OpaqueUploadCompletionProof {
+    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactApplicationError> {
+        let value = value.into();
+        if !valid_bounded_ascii(&value, MAX_COMPLETION_PROOF_BYTES) {
+            return Err(ArtifactApplicationError::Invalid);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn validate(&self) -> Result<(), ArtifactApplicationError> {
+        Self::new(self.0.clone()).map(|_| ())
+    }
+}
+
+impl fmt::Debug for OpaqueUploadCompletionProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OpaqueUploadCompletionProof([REDACTED])")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretBearingUploadTargetV1 {
+    pub url: String,
+    pub completion_proof: OpaqueUploadCompletionProof,
+}
+
+impl SecretBearingUploadTargetV1 {
+    fn validate(&self) -> Result<(), ArtifactApplicationError> {
+        let parsed = url::Url::parse(&self.url).map_err(|_| ArtifactApplicationError::Internal)?;
+        if self.url.len() > MAX_UPLOAD_URL_BYTES
+            || parsed.scheme() != "https"
+            || parsed.host_str().is_none()
+            || parsed.username() != ""
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(ArtifactApplicationError::Internal);
+        }
+        self.completion_proof
+            .validate()
+            .map_err(|_| ArtifactApplicationError::Internal)
+    }
+}
+
+impl fmt::Debug for SecretBearingUploadTargetV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretBearingUploadTargetV1([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareArtifactUploadResponseV1 {
+    pub schema_version: u32,
+    pub artifact_id: ResourceId,
+    pub operation_id: ResourceId,
+    pub upload_grant_id: ResourceId,
+    pub artifact_etag: String,
+    pub upload_target: SecretBearingUploadTargetV1,
+    pub upload_expires_at: UtcTimestamp,
+}
+
+impl PrepareArtifactUploadResponseV1 {
+    pub fn validate(&self) -> Result<(), ArtifactApplicationError> {
+        if self.schema_version != 1
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.operation_id.kind() != ResourceKind::Job
+            || self.upload_grant_id.kind() != ResourceKind::ArtifactGrant
+            || !valid_strong_etag(&self.artifact_etag)
+        {
+            return Err(ArtifactApplicationError::Internal);
+        }
+        self.upload_target.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompleteArtifactUploadRequestV1 {
+    pub schema_version: u32,
+    pub completion_proof: OpaqueUploadCompletionProof,
+}
+
+impl CompleteArtifactUploadRequestV1 {
+    pub fn validate(&self) -> Result<(), ArtifactApplicationError> {
+        if self.schema_version != 1 {
+            return Err(ArtifactApplicationError::Invalid);
+        }
+        self.completion_proof.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactMutationAcceptedV1 {
+    pub schema_version: u32,
+    pub artifact_id: ResourceId,
+    pub artifact_etag: String,
+    pub operation_id: ResourceId,
+}
+
+impl ArtifactMutationAcceptedV1 {
+    pub fn validate(&self) -> Result<(), ArtifactApplicationError> {
+        if self.schema_version != 1
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.operation_id.kind() != ResourceKind::Job
+            || !valid_strong_etag(&self.artifact_etag)
+        {
+            return Err(ArtifactApplicationError::Internal);
+        }
+        Ok(())
+    }
+}
+
+fn valid_bounded_ascii(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value.is_ascii()
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_media_type(value: &str) -> bool {
+    if !valid_bounded_ascii(value, MAX_MEDIA_TYPE_BYTES) {
+        return false;
+    }
+    let essence = value.split(';').next().unwrap_or_default().trim();
+    let Some((top_level, subtype)) = essence.split_once('/') else {
+        return false;
+    };
+    let valid_token = |token: &str| {
+        !token.is_empty()
+            && token.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+                    )
+            })
+    };
+    valid_token(top_level) && valid_token(subtype)
+}
+
+fn valid_safe_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
+}
+
+fn valid_strong_etag(value: &str) -> bool {
+    value.len() >= 3
+        && value.len() <= 128
+        && value.starts_with('"')
+        && value.ends_with('"')
+        && !value.starts_with("W/")
+        && value[1..value.len() - 1]
+            .chars()
+            .all(|character| character.is_ascii_graphic() && character != '"')
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +267,7 @@ pub struct ReadArtifactIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactApplicationError {
     Unauthenticated,
+    Invalid,
     Denied,
     NotFound,
     Unavailable,
@@ -158,6 +363,12 @@ fn problem(error: ArtifactApplicationError) -> Response {
             StatusCode::UNAUTHORIZED,
             ApiProblemCode::Unauthenticated,
             "Authentication is required.",
+            false,
+        ),
+        ArtifactApplicationError::Invalid => (
+            StatusCode::BAD_REQUEST,
+            ApiProblemCode::InvalidRequest,
+            "The Artifact request is invalid.",
             false,
         ),
         ArtifactApplicationError::Denied => (
@@ -292,6 +503,63 @@ mod tests {
                 etag: artifact_etag(&id(ResourceKind::Artifact, 3), 2),
             })
         }
+    }
+
+    #[test]
+    fn public_artifact_upload_contract_is_closed_bounded_and_secret_redacted() {
+        let request = PrepareArtifactUploadRequestV1 {
+            schema_version: 1,
+            purpose: ArtifactPurpose::RunInput,
+            classification: DataClassification::Internal,
+            expected_size_bytes: 4,
+            expected_digest: Some(digest('a')),
+            declared_media_type: Some("text/plain; charset=utf-8".to_owned()),
+            display_name: Some("input.txt".to_owned()),
+        };
+        assert!(request.validate().is_ok());
+        let mut invalid = request.clone();
+        invalid.expected_size_bytes = 0;
+        assert_eq!(invalid.validate(), Err(ArtifactApplicationError::Invalid));
+        let mut value = serde_json::to_value(&request).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("blob_id".to_owned(), serde_json::json!("forbidden"));
+        assert!(serde_json::from_value::<PrepareArtifactUploadRequestV1>(value).is_err());
+
+        let proof = OpaqueUploadCompletionProof::new("completion-secret").unwrap();
+        let target = SecretBearingUploadTargetV1 {
+            url: "https://uploads.example/artifact?signature=secret".to_owned(),
+            completion_proof: proof,
+        };
+        let debug = format!("{target:?}");
+        assert!(debug.contains("REDACTED"));
+        assert!(!debug.contains("completion-secret"));
+        assert!(!debug.contains("signature=secret"));
+        assert!(target.validate().is_ok());
+    }
+
+    #[test]
+    fn public_artifact_upload_response_requires_nominal_ids_https_and_strong_etag() {
+        let response = PrepareArtifactUploadResponseV1 {
+            schema_version: 1,
+            artifact_id: id(ResourceKind::Artifact, 3),
+            operation_id: id(ResourceKind::Job, 4),
+            upload_grant_id: id(ResourceKind::ArtifactGrant, 5),
+            artifact_etag: "\"artifact-1\"".to_owned(),
+            upload_target: SecretBearingUploadTargetV1 {
+                url: "https://uploads.example/artifact".to_owned(),
+                completion_proof: OpaqueUploadCompletionProof::new("proof").unwrap(),
+            },
+            upload_expires_at: UtcTimestamp::from_datetime(Utc::now() + Duration::minutes(5)),
+        };
+        assert!(response.validate().is_ok());
+        let mut insecure = response.clone();
+        insecure.upload_target.url = "http://uploads.example/artifact".to_owned();
+        assert_eq!(insecure.validate(), Err(ArtifactApplicationError::Internal));
+        let mut weak = response;
+        weak.artifact_etag = "W/\"artifact-1\"".to_owned();
+        assert_eq!(weak.validate(), Err(ArtifactApplicationError::Internal));
     }
     #[tokio::test]
     async fn artifact_read_is_nominal_and_no_store() {
