@@ -1,18 +1,12 @@
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata:
-  name: default-deny
-  namespace: {{ .Values.namespaces.controller }}
-spec:
-  podSelector: {}
-  policyTypes: [Ingress, Egress]
+metadata: {name: default-deny, namespace: {{ .Values.namespaces.controller }}}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata:
-  name: controller
-  namespace: {{ .Values.namespaces.controller }}
+metadata: {name: controller, namespace: {{ .Values.namespaces.controller }}}
 spec:
   podSelector:
     matchLabels:
@@ -23,27 +17,12 @@ spec:
   ingress:
     - from:
         - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.namespaces.executor }}
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.executor }}}
           podSelector:
             matchLabels:
               app.kubernetes.io/name: {{ .Chart.Name }}
               app.kubernetes.io/instance: {{ .Release.Name }}
               app.kubernetes.io/component: executor-wasi
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.namespaces.executor }}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: executor-microvm
-      ports: [{protocol: TCP, port: {{ int .Values.controller.port }}}]
-    - from:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.egressBrokerNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.egressBrokerPodSelector | nindent 16 }}
       ports: [{protocol: TCP, port: {{ int .Values.controller.port }}}]
   egress:
     - to:
@@ -71,18 +50,12 @@ spec:
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata:
-  name: default-deny
-  namespace: {{ .Values.namespaces.executor }}
-spec:
-  podSelector: {}
-  policyTypes: [Ingress, Egress]
+metadata: {name: default-deny, namespace: {{ .Values.namespaces.executor }}}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata:
-  name: executor-wasi
-  namespace: {{ .Values.namespaces.executor }}
+metadata: {name: executor-wasi, namespace: {{ .Values.namespaces.executor }}}
 spec:
   podSelector:
     matchLabels:
@@ -115,50 +88,7 @@ spec:
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata:
-  name: executor-microvm
-  namespace: {{ .Values.namespaces.executor }}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: executor-microvm
-  policyTypes: [Ingress, Egress]
-  ingress: []
-  egress:
-    - to:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.controller }}}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: controller
-      ports: [{protocol: TCP, port: {{ int .Values.controller.port }}}]
-    - to:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.egressBrokerNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.egressBrokerPodSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.egressBrokerPort }}}]
-    - to:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
-      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
-    - to:
-        {{- range .Values.networkPolicy.natsCidrs }}
-        - ipBlock: {cidr: {{ . }}}
-        {{- end }}
-      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.natsPort }}}]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: attestor
-  namespace: {{ .Values.namespaces.executor }}
+metadata: {name: attestor, namespace: {{ .Values.namespaces.executor }}}
 spec:
   podSelector:
     matchLabels:

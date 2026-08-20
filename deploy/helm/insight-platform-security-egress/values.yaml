@@ -70,8 +70,6 @@ networkPolicy:
       podSelector: {insight.platform/workload-role: mcp-host}
     - namespaceSelector: {insight.platform/workload-namespace: callback-api}
       podSelector: {insight.platform/workload-role: mcp-callback-api}
-    - namespaceSelector: {insight.platform/sandbox-executor-namespace: "true"}
-      podSelector: {insight.platform/workload-role: sandbox-provider.microvm}
   sandboxControllerNamespaceSelector: {kubernetes.io/metadata.name: platform-sandbox}
   sandboxControllerPodSelector: {insight.platform/workload-role: sandbox-controller}
   sandboxControllerPort: 7443
