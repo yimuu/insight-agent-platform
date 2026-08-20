@@ -18,7 +18,8 @@ use insight_platform_postgres::{
 use insight_platform_registry::{
     ActivateResource, CommandAudit, CommandOutcome, CreateDeployment, CreateResourceDraft,
     NewPublishedVersion, PublishResourceVersions, RecordResourceValidation,
-    RequestResourceValidation, SetResourceGate, TransitionResourceLifecycle,
+    RequestResourceValidation, SetResourceGate, SuspendResourceDeployment,
+    TransitionResourceLifecycle,
 };
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -1331,18 +1332,21 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     assert_eq!(run_bindings.agent_interface, interface_ref);
     assert_eq!(run_bindings.plan, plan_ref);
 
+    let activation_audit = audit(TENANT_ID, PRINCIPAL_ID, "7cd9", 'e', 'f');
     let activated_agent = applied(
         registry_command!(
             repository,
             activate_resource,
             ActivateResource {
-                audit: audit(TENANT_ID, PRINCIPAL_ID, "7cd9", 'e', 'f'),
+                audit: activation_audit.clone(),
                 resource_id: id(AGENT_ID),
                 expected_resource_version: 4,
                 target: ActiveTarget::Deployment {
-                    deployment:
-                        ExactDeploymentRef::new(id(AGENT_DEPLOYMENT_ID), deployment_digest,)
-                            .unwrap(),
+                    deployment: ExactDeploymentRef::new(
+                        id(AGENT_DEPLOYMENT_ID),
+                        deployment_digest.clone(),
+                    )
+                    .unwrap(),
                 },
             }
         )
@@ -1352,6 +1356,117 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         activated_agent.active_deployment_id.as_deref(),
         Some(AGENT_DEPLOYMENT_ID)
     );
+    assert_eq!(activated_agent.gate_state, "enabled");
+    assert_eq!(activated_agent.version, 5);
+    let activation_replay = registry_command!(
+        repository,
+        activate_resource,
+        ActivateResource {
+            audit: activation_audit.clone(),
+            resource_id: id(AGENT_ID),
+            expected_resource_version: 4,
+            target: ActiveTarget::Deployment {
+                deployment: ExactDeploymentRef::new(
+                    id(AGENT_DEPLOYMENT_ID),
+                    deployment_digest.clone(),
+                )
+                .unwrap(),
+            },
+        }
+    )
+    .unwrap();
+    assert!(matches!(
+        activation_replay,
+        CommandOutcome::Replayed(ref replayed) if replayed == &activated_agent
+    ));
+
+    let suspension_audit = audit(TENANT_ID, PRINCIPAL_ID, "7cda", '1', '2');
+    let suspended_agent = applied(
+        registry_command!(
+            repository,
+            suspend_resource_deployment,
+            SuspendResourceDeployment {
+                audit: suspension_audit.clone(),
+                resource_id: id(AGENT_ID),
+                deployment_id: id(AGENT_DEPLOYMENT_ID),
+                expected_resource_version: 5,
+            }
+        )
+        .unwrap(),
+    );
+    assert_eq!(suspended_agent.gate_state, "suspended");
+    assert_eq!(suspended_agent.version, 6);
+    let suspension_replay = registry_command!(
+        repository,
+        suspend_resource_deployment,
+        SuspendResourceDeployment {
+            audit: suspension_audit.clone(),
+            resource_id: id(AGENT_ID),
+            deployment_id: id(AGENT_DEPLOYMENT_ID),
+            expected_resource_version: 5,
+        }
+    )
+    .unwrap();
+    assert!(matches!(
+        suspension_replay,
+        CommandOutcome::Replayed(ref replayed) if replayed == &suspended_agent
+    ));
+
+    let restored_agent = applied(
+        registry_command!(
+            repository,
+            activate_resource,
+            ActivateResource {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "7cdb", '3', '4'),
+                resource_id: id(AGENT_ID),
+                expected_resource_version: 6,
+                target: ActiveTarget::Deployment {
+                    deployment:
+                        ExactDeploymentRef::new(id(AGENT_DEPLOYMENT_ID), deployment_digest,)
+                            .unwrap(),
+                },
+            }
+        )
+        .unwrap(),
+    );
+    assert_eq!(restored_agent.gate_state, "enabled");
+    assert_eq!(restored_agent.version, 7);
+    let late_activation_replay = registry_command!(
+        repository,
+        activate_resource,
+        ActivateResource {
+            audit: activation_audit,
+            resource_id: id(AGENT_ID),
+            expected_resource_version: 4,
+            target: ActiveTarget::Deployment {
+                deployment: ExactDeploymentRef::new(
+                    id(AGENT_DEPLOYMENT_ID),
+                    deployment.bindings.digest.parse().unwrap(),
+                )
+                .unwrap(),
+            },
+        }
+    )
+    .unwrap();
+    assert!(matches!(
+        late_activation_replay,
+        CommandOutcome::Replayed(ref replayed) if replayed == &activated_agent
+    ));
+    let late_suspension_replay = registry_command!(
+        repository,
+        suspend_resource_deployment,
+        SuspendResourceDeployment {
+            audit: suspension_audit,
+            resource_id: id(AGENT_ID),
+            deployment_id: id(AGENT_DEPLOYMENT_ID),
+            expected_resource_version: 5,
+        }
+    )
+    .unwrap();
+    assert!(matches!(
+        late_suspension_replay,
+        CommandOutcome::Replayed(ref replayed) if replayed == &suspended_agent
+    ));
 
     let first_update_audit = audit(TENANT_ID, PRINCIPAL_ID, "7ce0", '1', '2');
     let mut first_updated_draft = draft.clone();

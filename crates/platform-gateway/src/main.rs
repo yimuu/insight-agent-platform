@@ -20,8 +20,8 @@ use insight_platform_api::{
     },
     resource::{
         build_resource_router, deployment_etag, resource_etag, resource_version_etag,
-        CreateDeploymentIntent, CreateResourceIntent, DeploymentViewV1, PublishResourceDraftIntent,
-        PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
+        ControlDeploymentIntent, CreateDeploymentIntent, CreateResourceIntent, DeploymentViewV1,
+        PublishResourceDraftIntent, PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
         PublishedResourceVersionSummaryV1, ReadDeploymentIntent, ReadResourceIntent,
         ReadResourceVersionIntent, ResourceApplication, ResourceApplicationError,
         ResourceHttpState, ResourceVersionViewV1, ResourceViewV1, SystemResourceClock,
@@ -29,9 +29,9 @@ use insight_platform_api::{
     },
 };
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, AdministrativeGate, CommandAudit, DeploymentClosure,
-    EntityLifecycle, JsonLimits, OperationViewV1, PrincipalKind, PrincipalSnapshot, ReadOperation,
-    ResourceId, ResourceKind, Sha256Digest,
+    canonical_digest, parse_strict_json, ActiveTarget, AdministrativeGate, CommandAudit,
+    DeploymentClosure, EntityLifecycle, ExactDeploymentRef, JsonLimits, OperationViewV1,
+    PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_postgres::{
     operation_repository::{project_registry_validation_operation, OperationReadError},
@@ -39,8 +39,9 @@ use insight_platform_postgres::{
     verify_schema,
 };
 use insight_platform_registry::{
-    CreateDeployment, CreateResourceDraft, NewPublishedVersion, PublishResourceVersions,
-    RequestResourceValidation, UpdateResourceDraft,
+    ActivateResource, CreateDeployment, CreateResourceDraft, NewPublishedVersion,
+    PublishResourceVersions, RequestResourceValidation, SuspendResourceDeployment,
+    UpdateResourceDraft,
 };
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -505,6 +506,98 @@ impl ResourceApplication for PgResources {
         deployment_view_from_record(record, intent.resource_kind, &intent.resource_id)
     }
 
+    async fn activate_deployment(
+        &self,
+        intent: ControlDeploymentIntent,
+    ) -> Result<ResourceViewV1, ResourceApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let deployment = self
+            .repository
+            .read_deployment_for_activator(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                intent.resource_kind,
+                &intent.resource_id,
+                &intent.deployment_id,
+            )
+            .await
+            .map_err(map_resource_repository_error)?;
+        let deployment_digest: Sha256Digest = deployment
+            .bindings
+            .digest
+            .parse()
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let expected_resource_version = i64::try_from(intent.expected_resource_version)
+            .map_err(|_| ResourceApplicationError::Invalid)?;
+        let audit = resource_command_audit(&intent, now)?;
+        let mut transaction = self
+            .repository
+            .begin_registry_transaction()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let outcome = transaction
+            .activate_resource(ActivateResource {
+                audit,
+                resource_id: intent.resource_id.clone(),
+                expected_resource_version,
+                target: ActiveTarget::Deployment {
+                    deployment: ExactDeploymentRef::new(intent.deployment_id, deployment_digest)
+                        .map_err(|_| ResourceApplicationError::Invalid)?,
+                },
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let record = match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(record)
+            | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
+        };
+        resource_view_from_record(record, intent.resource_kind, &intent.resource_id)
+    }
+
+    async fn suspend_deployment(
+        &self,
+        intent: ControlDeploymentIntent,
+    ) -> Result<ResourceViewV1, ResourceApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let expected_resource_version = i64::try_from(intent.expected_resource_version)
+            .map_err(|_| ResourceApplicationError::Invalid)?;
+        let audit = resource_command_audit(&intent, now)?;
+        let mut transaction = self
+            .repository
+            .begin_registry_transaction()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let outcome = transaction
+            .suspend_resource_deployment(SuspendResourceDeployment {
+                audit,
+                resource_id: intent.resource_id.clone(),
+                deployment_id: intent.deployment_id,
+                expected_resource_version,
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_resource_repository_error)?;
+        let record = match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(record)
+            | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
+        };
+        resource_view_from_record(record, intent.resource_kind, &intent.resource_id)
+    }
+
     async fn publish_resource_draft(
         &self,
         intent: PublishResourceDraftIntent,
@@ -651,6 +744,23 @@ fn public_single_version_kind(
         | Kind::SandboxRuntime
         | Kind::SandboxPackage => Err(ResourceApplicationError::Invalid),
     }
+}
+
+fn resource_command_audit(
+    intent: &ControlDeploymentIntent,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<CommandAudit, ResourceApplicationError> {
+    Ok(CommandAudit {
+        tenant_id: intent.principal.tenant_id.clone(),
+        principal_id: intent.principal.principal_id.clone(),
+        principal_kind: intent.principal.principal_kind,
+        receipt_id: new_id(ResourceKind::Receipt)?,
+        event_id: new_id(ResourceKind::Event)?,
+        outbox_id: new_id(ResourceKind::OutboxEvent)?,
+        idempotency_key_digest: intent.idempotency_key_digest.clone(),
+        request_digest: intent.request_digest.clone(),
+        receipt_expires_at: now + chrono::Duration::hours(24),
+    })
 }
 
 fn published_resource_response(

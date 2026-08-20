@@ -236,6 +236,25 @@ pub struct ActivateResource {
     pub target: ActiveTarget,
 }
 
+#[derive(Debug, Clone)]
+pub struct SuspendResourceDeployment {
+    pub audit: CommandAudit,
+    pub resource_id: ResourceId,
+    pub deployment_id: ResourceId,
+    pub expected_resource_version: i64,
+}
+
+impl SuspendResourceDeployment {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), RegistryCommandError> {
+        validate_audit(&self.audit, now)?;
+        require_positive_version(self.expected_resource_version)?;
+        if !self.deployment_id.kind().is_deployment() {
+            return Err(RegistryCommandError::InvalidDeployment);
+        }
+        Ok(())
+    }
+}
+
 impl ActivateResource {
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), RegistryCommandError> {
         validate_audit(&self.audit, now)?;
@@ -308,6 +327,11 @@ pub trait RegistryTransaction {
     async fn activate_resource(
         &mut self,
         command: ActivateResource,
+    ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error>;
+
+    async fn suspend_resource_deployment(
+        &mut self,
+        command: SuspendResourceDeployment,
     ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error>;
     async fn transition_resource_lifecycle(
         &mut self,

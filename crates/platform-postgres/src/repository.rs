@@ -44,7 +44,7 @@ use insight_platform_registry::{
     ActivateResource, CreateDeployment, CreateResourceDraft, NewPublishedVersion,
     PublishResourceVersions, RecordResourceValidation, RegistryCommandError, RegistryStore,
     RegistryTransaction, RegistryValidationJobPayload, RequestResourceValidation, SetResourceGate,
-    TransitionResourceLifecycle, UpdateResourceDraft,
+    SuspendResourceDeployment, TransitionResourceLifecycle, UpdateResourceDraft,
 };
 use insight_platform_sandbox::{
     SandboxCommandLimits, SandboxContractError as DomainSandboxContractError,
@@ -927,6 +927,52 @@ impl PgRepository {
         Ok(record)
     }
 
+    pub async fn read_deployment_for_activator(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        expected_kind: RegistryResourceKind,
+        resource_id: &ResourceId,
+        deployment_id: &ResourceId,
+    ) -> Result<DeploymentRecord, RepositoryError> {
+        if resource_id.kind() != expected_kind.id_kind()
+            || expected_kind.deployment_kind() != Some(deployment_id.kind())
+        {
+            return Err(RepositoryError::NotFound("deployment"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal
+            .permissions
+            .contains(activate_permission(expected_kind))
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let deployment = load_deployment(&mut transaction, tenant_id, deployment_id).await?;
+        if deployment.resource_id != resource_id.to_string() {
+            return Err(RepositoryError::NotFound("deployment"));
+        }
+        let resource = load_resource(&mut transaction, tenant_id, resource_id).await?;
+        if resource.resource_kind != expected_kind.as_str() {
+            return Err(RepositoryError::NotFound("deployment"));
+        }
+        let closure = decode_deployment_closure(&deployment.bindings)?;
+        if closure.resource_kind() != expected_kind {
+            return Err(RepositoryError::CorruptRow(
+                "deployment closure kind differs from its parent resource".to_owned(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(deployment)
+    }
+
     pub async fn read_resource_for_writer(
         &self,
         tenant_id: &ResourceId,
@@ -1148,13 +1194,15 @@ impl PgRegistryTransaction {
         )
         .await?
         {
-            let result = load_resource_update_receipt(
+            let result = load_resource_projection_receipt(
                 &mut transaction,
                 &command.audit,
                 &command.resource_id,
+                "resource.update_draft",
+                "resource update Receipt result",
             )
             .await?;
-            let record = result.into_record(&command.draft)?;
+            let record = result.into_record()?;
             transaction.commit().await?;
             return Ok(CommandOutcome::Replayed(record));
         }
@@ -1208,7 +1256,13 @@ impl PgRegistryTransaction {
             )?,
         )
         .await?;
-        terminalize_resource_update_receipt(&mut transaction, &command.audit, &record).await?;
+        terminalize_resource_projection_receipt(
+            &mut transaction,
+            &command.audit,
+            &record,
+            "updated",
+        )
+        .await?;
         transaction.commit().await?;
         Ok(CommandOutcome::Applied(record))
     }
@@ -1755,14 +1809,16 @@ impl PgRegistryTransaction {
         )
         .await?
         {
-            let record = load_resource(
+            let result = load_resource_projection_receipt(
                 &mut transaction,
-                &command.audit.tenant_id,
+                &command.audit,
                 &command.resource_id,
+                "resource.activate",
+                "resource activation Receipt result",
             )
             .await?;
             transaction.commit().await?;
-            return Ok(CommandOutcome::Replayed(record));
+            return Ok(CommandOutcome::Replayed(result.into_record()?));
         }
         let locked = load_resource_for_update(
             &mut transaction,
@@ -1776,9 +1832,10 @@ impl PgRegistryTransaction {
             .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
         require_tenant_permission(&mut transaction, &command.audit, activate_permission(kind))
             .await?;
+        let activates_deployment = matches!(&command.target, ActiveTarget::Deployment { .. });
         if locked.version != command.expected_resource_version
             || locked.lifecycle_state != "active"
-            || locked.gate_state != "enabled"
+            || (locked.gate_state != AdministrativeGate::Enabled.as_str() && !activates_deployment)
         {
             return Err(RepositoryError::Conflict("resource"));
         }
@@ -1794,6 +1851,7 @@ impl PgRegistryTransaction {
             r#"
             UPDATE insight_platform.resources
             SET active_version_id = $4, active_deployment_id = $5,
+                gate_state = $6,
                 version = version + 1, updated_at = clock_timestamp()
             WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
             RETURNING tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
@@ -1806,6 +1864,11 @@ impl PgRegistryTransaction {
         .bind(command.expected_resource_version)
         .bind(version_id)
         .bind(deployment_id)
+        .bind(if activates_deployment {
+            AdministrativeGate::Enabled.as_str()
+        } else {
+            locked.gate_state.as_str()
+        })
         .fetch_one(&mut *transaction)
         .await?;
         let record = resource_from_row(row)?;
@@ -1819,11 +1882,103 @@ impl PgRegistryTransaction {
             &TypedPayload::new(1, &command.target)?,
         )
         .await?;
-        terminalize_command_receipt(
+        terminalize_resource_projection_receipt(
             &mut transaction,
             &command.audit,
-            &record.resource_id,
+            &record,
             "activated",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn suspend_resource_deployment(
+        &mut self,
+        command: SuspendResourceDeployment,
+    ) -> Result<CommandOutcome<ResourceRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &command.resource_id.to_string(),
+            "resource.suspend_deployment",
+        )
+        .await?
+        {
+            let result = load_resource_projection_receipt(
+                &mut transaction,
+                &command.audit,
+                &command.resource_id,
+                "resource.suspend_deployment",
+                "resource deployment suspension Receipt result",
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(result.into_record()?));
+        }
+        let locked = load_resource_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.resource_id,
+        )
+        .await?;
+        let kind = locked
+            .resource_kind
+            .parse::<RegistryResourceKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        require_tenant_permission(&mut transaction, &command.audit, activate_permission(kind))
+            .await?;
+        if kind.deployment_kind() != Some(command.deployment_id.kind()) {
+            return Err(RepositoryError::InvalidInput(
+                "suspended Deployment kind does not match its Resource".to_owned(),
+            ));
+        }
+        let deployment_id = command.deployment_id.to_string();
+        if locked.version != command.expected_resource_version
+            || locked.lifecycle_state != EntityLifecycle::Active.as_str()
+            || locked.gate_state != AdministrativeGate::Enabled.as_str()
+            || locked.active_deployment_id.as_deref() != Some(deployment_id.as_str())
+        {
+            return Err(RepositoryError::Conflict("resource active deployment"));
+        }
+        let row = sqlx::query(
+            r#"
+            UPDATE insight_platform.resources
+            SET gate_state = 'suspended', version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
+            RETURNING tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                      draft_generation, active_version_id, active_deployment_id, version,
+                      payload_schema_version, payload, payload_digest, created_at, updated_at
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.resource_id.to_string())
+        .bind(command.expected_resource_version)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let record = resource_from_row(row)?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "resource",
+            &record.resource_id,
+            record.version,
+            "resource.deployment_suspended",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({"deployment_id": command.deployment_id}),
+            )?,
+        )
+        .await?;
+        terminalize_resource_projection_receipt(
+            &mut transaction,
+            &command.audit,
+            &record,
+            "suspended",
         )
         .await?;
         transaction.commit().await?;
@@ -2609,6 +2764,13 @@ impl RegistryTransaction for PgRegistryTransaction {
         command: ActivateResource,
     ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error> {
         PgRegistryTransaction::activate_resource(self, command).await
+    }
+
+    async fn suspend_resource_deployment(
+        &mut self,
+        command: SuspendResourceDeployment,
+    ) -> Result<CommandOutcome<Self::ResourceRecord>, Self::Error> {
+        PgRegistryTransaction::suspend_resource_deployment(self, command).await
     }
 
     async fn transition_resource_lifecycle(
@@ -16913,14 +17075,20 @@ struct ResourceUpdateReceiptResult {
     active_version_id: Option<String>,
     active_deployment_id: Option<String>,
     version: i64,
+    draft: ResourceDraftPayload,
     payload_digest: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
 
 impl ResourceUpdateReceiptResult {
-    fn from_record(record: &ResourceRecord) -> Self {
-        Self {
+    fn from_record(record: &ResourceRecord) -> Result<Self, RepositoryError> {
+        let draft: ResourceDraftPayload =
+            decode_typed_payload(&record.payload, "Resource Receipt Draft")?;
+        draft
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        Ok(Self {
             schema_version: 1,
             tenant_id: record.tenant_id.clone(),
             resource_id: record.resource_id.clone(),
@@ -16931,22 +17099,26 @@ impl ResourceUpdateReceiptResult {
             active_version_id: record.active_version_id.clone(),
             active_deployment_id: record.active_deployment_id.clone(),
             version: record.version,
+            draft,
             payload_digest: record.payload.digest.clone(),
             created_at: record.created_at,
             updated_at: record.updated_at,
-        }
+        })
     }
 
-    fn into_record(self, draft: &ResourceDraftPayload) -> Result<ResourceRecord, RepositoryError> {
+    fn into_record(self) -> Result<ResourceRecord, RepositoryError> {
         if self.schema_version != 1 {
             return Err(RepositoryError::CorruptRow(
                 "resource update Receipt schema is unsupported".to_owned(),
             ));
         }
-        let payload = TypedPayload::new(1, draft)?;
+        self.draft
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let payload = TypedPayload::new(1, &self.draft)?;
         if payload.digest != self.payload_digest {
             return Err(RepositoryError::CorruptRow(
-                "resource update Receipt payload digest differs from replay request".to_owned(),
+                "Resource Receipt payload digest differs from stored Draft".to_owned(),
             ));
         }
         Ok(ResourceRecord {
@@ -19946,10 +20118,12 @@ async fn load_command_receipt_response_reference(
     .ok_or_else(|| RepositoryError::CorruptRow("command Receipt result is missing".to_owned()))
 }
 
-async fn load_resource_update_receipt(
+async fn load_resource_projection_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     audit: &CommandAudit,
     resource_id: &ResourceId,
+    operation: &str,
+    result_name: &str,
 ) -> Result<ResourceUpdateReceiptResult, RepositoryError> {
     let row = sqlx::query(
         r#"
@@ -19957,37 +20131,37 @@ async fn load_resource_update_receipt(
         FROM insight_platform.receipts
         WHERE tenant_id = $1 AND receipt_kind = 'command'
           AND scope_kind = 'resource' AND scope_id = $2 AND dedupe_owner_id = $3
-          AND operation = 'resource.update_draft' AND idempotency_key_digest = $4
-          AND request_digest = $5 AND state = 'succeeded'
+          AND operation = $4 AND idempotency_key_digest = $5
+          AND request_digest = $6 AND state = 'succeeded'
         FOR UPDATE
         "#,
     )
     .bind(audit.tenant_id.to_string())
     .bind(resource_id.to_string())
     .bind(audit.principal_id.to_string())
+    .bind(operation)
     .bind(audit.idempotency_key_digest.to_string())
     .bind(audit.request_digest.to_string())
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or_else(|| {
-        RepositoryError::CorruptRow("resource update Receipt result is missing".to_owned())
-    })?;
+    .ok_or_else(|| RepositoryError::CorruptRow(format!("{result_name} is missing")))?;
     let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
-    decode_versioned_payload(&payload, "resource update Receipt result")
+    decode_versioned_payload(&payload, result_name)
 }
 
-async fn terminalize_resource_update_receipt(
+async fn terminalize_resource_projection_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     audit: &CommandAudit,
     record: &ResourceRecord,
+    disposition: &str,
 ) -> Result<(), RepositoryError> {
-    let result = ResourceUpdateReceiptResult::from_record(record);
+    let result = ResourceUpdateReceiptResult::from_record(record)?;
     let payload = TypedPayload::from_versioned(1, &result, 262_144)?;
     let affected = sqlx::query(
         r#"
         UPDATE insight_platform.receipts
-        SET state = 'succeeded', disposition = 'updated', response_reference_id = $4,
-            payload_schema_version = $5, payload = $6, payload_digest = $7,
+        SET state = 'succeeded', disposition = $4, response_reference_id = $5,
+            payload_schema_version = $6, payload = $7, payload_digest = $8,
             completed_at = clock_timestamp()
         WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
           AND state = 'processing'
@@ -19996,6 +20170,7 @@ async fn terminalize_resource_update_receipt(
     .bind(audit.tenant_id.to_string())
     .bind(audit.receipt_id.to_string())
     .bind(audit.request_digest.to_string())
+    .bind(disposition)
     .bind(&record.resource_id)
     .bind(payload.schema_version)
     .bind(&payload.value)

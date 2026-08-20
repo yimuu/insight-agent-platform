@@ -335,6 +335,18 @@ pub struct CreateDeploymentIntent {
 }
 
 #[derive(Debug, Clone)]
+pub struct ControlDeploymentIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub resource_kind: RegistryResourceKind,
+    pub resource_id: ResourceId,
+    pub deployment_id: ResourceId,
+    pub expected_resource_version: u64,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PublishResourceDraftIntent {
     pub principal: AuthenticatedPrincipal,
     pub resource_kind: RegistryResourceKind,
@@ -396,6 +408,16 @@ pub trait ResourceApplication: Send + Sync {
         intent: CreateDeploymentIntent,
     ) -> Result<DeploymentViewV1, ResourceApplicationError>;
 
+    async fn activate_deployment(
+        &self,
+        intent: ControlDeploymentIntent,
+    ) -> Result<ResourceViewV1, ResourceApplicationError>;
+
+    async fn suspend_deployment(
+        &self,
+        intent: ControlDeploymentIntent,
+    ) -> Result<ResourceViewV1, ResourceApplicationError>;
+
     async fn publish_resource_draft(
         &self,
         intent: PublishResourceDraftIntent,
@@ -448,8 +470,8 @@ pub fn build_resource_router(state: ResourceHttpState) -> Router {
             get(read_resource_version),
         )
         .route(
-            "/v1/{resource_noun}/{resource_id}/deployments/{deployment_id}",
-            get(read_deployment),
+            "/v1/{resource_noun}/{resource_id}/deployments/{deployment_action}",
+            get(read_deployment).post(control_deployment_action),
         )
         .route(
             "/v1/{resource_noun}/{resource_id}/deployments",
@@ -457,6 +479,120 @@ pub fn build_resource_router(state: ResourceHttpState) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_RESOURCE_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn control_deployment_action(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path((resource_noun, resource_id, deployment_action)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let (deployment_id, operation, activate) =
+        if let Some(deployment_id) = deployment_action.strip_suffix(":activate") {
+            (deployment_id, "resource.activate_deployment", true)
+        } else if let Some(deployment_id) = deployment_action.strip_suffix(":suspend") {
+            (deployment_id, "resource.suspend_deployment", false)
+        } else {
+            return problem(ResourceApplicationError::NotFound);
+        };
+    control_deployment(
+        state,
+        principal,
+        resource_noun,
+        resource_id,
+        deployment_id.to_owned(),
+        headers,
+        body,
+        operation,
+        activate,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn control_deployment(
+    state: ResourceHttpState,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    resource_noun: String,
+    resource_id: String,
+    deployment_id: String,
+    headers: HeaderMap,
+    body: Bytes,
+    operation: &'static str,
+    activate: bool,
+) -> Response {
+    if !body.is_empty() {
+        return problem(ResourceApplicationError::Invalid);
+    }
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    let Some(resource_kind) = resource_kind_for_noun(&resource_noun) else {
+        return problem(ResourceApplicationError::NotFound);
+    };
+    let resource_id = match resource_id.parse::<ResourceId>() {
+        Ok(resource_id) if resource_id.kind() == resource_kind.id_kind() => resource_id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let deployment_id = match deployment_id.parse::<ResourceId>() {
+        Ok(deployment_id) if resource_kind.deployment_kind() == Some(deployment_id.kind()) => {
+            deployment_id
+        }
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let expected_resource_version = match expected_resource_version(&headers, &resource_id) {
+        Ok(version) => version,
+        Err(error) => return problem(error),
+    };
+    let idempotency_key_digest = match idempotency_key_digest_for_operation(
+        &headers,
+        &principal,
+        resource_kind,
+        operation,
+        Some(&resource_id),
+    ) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let request_digest = match digest(&serde_json::json!({
+        "deployment_id": deployment_id,
+        "expected_resource_version": expected_resource_version,
+        "idempotency_key_digest": idempotency_key_digest,
+        "operation": operation,
+        "principal_id": principal.principal_id,
+        "resource_id": resource_id,
+        "resource_kind": resource_kind,
+        "schema_version": 1,
+        "tenant_id": principal.tenant_id,
+    })) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let intent = ControlDeploymentIntent {
+        principal,
+        resource_kind,
+        resource_id,
+        deployment_id,
+        expected_resource_version,
+        idempotency_key_digest,
+        request_digest,
+        deadline: state.clock.now()
+            + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS),
+    };
+    let result = if activate {
+        state.application.activate_deployment(intent).await
+    } else {
+        state.application.suspend_deployment(intent).await
+    };
+    match result {
+        Ok(view) if view.validate().is_ok() => read_resource_response(view),
+        Ok(_) => problem(ResourceApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 async fn create_deployment(
@@ -1502,6 +1638,20 @@ mod tests {
             })
         }
 
+        async fn activate_deployment(
+            &self,
+            _intent: ControlDeploymentIntent,
+        ) -> Result<ResourceViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn suspend_deployment(
+            &self,
+            _intent: ControlDeploymentIntent,
+        ) -> Result<ResourceViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
         async fn publish_resource_draft(
             &self,
             intent: PublishResourceDraftIntent,
@@ -1933,6 +2083,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing_fence.status(), StatusCode::PRECONDITION_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn deployment_control_routes_require_empty_body_and_resource_fence() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application,
+            Arc::new(FixedClock(now)),
+        ));
+        let resource_id = id(ResourceKind::Agent, 20);
+        let deployment_id = id(ResourceKind::AgentDeployment, 24);
+        let missing_fence = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/agents/{resource_id}/deployments/{deployment_id}:activate"
+                    ))
+                    .header(IDEMPOTENCY_KEY, "activate-agent-1")
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_fence.status(), StatusCode::PRECONDITION_REQUIRED);
+
+        let body_rejected = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/agents/{resource_id}/deployments/{deployment_id}:suspend"
+                    ))
+                    .header(IDEMPOTENCY_KEY, "suspend-agent-1")
+                    .header(IF_MATCH, resource_etag(&resource_id, 5))
+                    .extension(principal(now))
+                    .body(axum::body::Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_rejected.status(), StatusCode::BAD_REQUEST);
+
+        let unknown_action = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/agents/{resource_id}/deployments/{deployment_id}:retire"
+                    ))
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown_action.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
