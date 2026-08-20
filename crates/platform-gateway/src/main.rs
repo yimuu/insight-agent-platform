@@ -32,6 +32,10 @@ use insight_platform_api::{
         RunApplication, RunApplicationError, RunHttpState, RunResultViewV1, RunViewV1,
         SystemRunClock,
     },
+    task::{
+        build_task_router, task_etag, ReadTaskIntent, SystemTaskClock, TaskApplication,
+        TaskApplicationError, TaskHttpState, TaskOwnerLinkV1, TaskViewV1,
+    },
 };
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ActiveTarget, AdministrativeGate, CommandAudit,
@@ -52,6 +56,7 @@ use insight_platform_registry::{
     PublishResourceVersions, RequestResourceValidation, SuspendResourceDeployment,
     UpdateResourceDraft,
 };
+use insight_platform_tasks::{TaskDefinition, TaskPayload};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{
@@ -187,6 +192,93 @@ impl OperationApplication for PgOperations {
 
 #[derive(Clone)]
 struct PgRuns(Arc<PgRepository>);
+
+#[derive(Clone)]
+struct PgTasks(Arc<PgRepository>);
+
+#[async_trait]
+impl TaskApplication for PgTasks {
+    async fn read_task(&self, intent: ReadTaskIntent) -> Result<TaskViewV1, TaskApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(TaskApplicationError::Unavailable);
+        }
+        let record = self
+            .0
+            .read_task_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.task_id,
+            )
+            .await
+            .map_err(map_task_repository_error)?;
+        let mut payload = record.payload.value;
+        payload
+            .as_object_mut()
+            .ok_or(TaskApplicationError::Internal)?
+            .remove("schema_version");
+        let payload: TaskPayload =
+            serde_json::from_value(payload).map_err(|_| TaskApplicationError::Internal)?;
+        let safe_prompt_key = match payload.definition {
+            TaskDefinition::Approval {
+                safe_prompt_key, ..
+            }
+            | TaskDefinition::Interaction {
+                safe_prompt_key, ..
+            }
+            | TaskDefinition::CapabilityInput {
+                safe_prompt_key, ..
+            }
+            | TaskDefinition::McpOAuthAuthorization {
+                safe_prompt_key, ..
+            }
+            | TaskDefinition::HumanWork {
+                safe_prompt_key, ..
+            } => safe_prompt_key,
+        };
+        let task_id: ResourceId = record
+            .task_id
+            .parse()
+            .map_err(|_| TaskApplicationError::Internal)?;
+        let owner = if let Some(invocation_id) = record.invocation_id {
+            TaskOwnerLinkV1::Invocation {
+                invocation_id: invocation_id
+                    .parse()
+                    .map_err(|_| TaskApplicationError::Internal)?,
+            }
+        } else if let Some(run_id) = record.run_id {
+            TaskOwnerLinkV1::Run {
+                run_id: run_id.parse().map_err(|_| TaskApplicationError::Internal)?,
+            }
+        } else {
+            return Err(TaskApplicationError::Internal);
+        };
+        let version = u64::try_from(record.version).map_err(|_| TaskApplicationError::Internal)?;
+        Ok(TaskViewV1 {
+            schema_version: 1,
+            task_id: task_id.clone(),
+            task_kind: record.task_kind,
+            state: record.state,
+            generation: u64::try_from(record.generation)
+                .map_err(|_| TaskApplicationError::Internal)?,
+            version,
+            safe_prompt_key,
+            response_schema_digest: record
+                .response_schema_digest
+                .map(|value| value.parse())
+                .transpose()
+                .map_err(|_| TaskApplicationError::Internal)?,
+            owner,
+            deadline: insight_platform_contracts::UtcTimestamp::from_datetime(record.deadline),
+            responded_at: record
+                .responded_at
+                .map(insight_platform_contracts::UtcTimestamp::from_datetime),
+            created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
+            updated_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.updated_at),
+            etag: task_etag(&task_id, version),
+        })
+    }
+}
 
 #[async_trait]
 impl RunApplication for PgRuns {
@@ -1290,6 +1382,22 @@ fn map_run_repository_error(error: RepositoryError) -> RunApplicationError {
     }
 }
 
+fn map_task_repository_error(error: RepositoryError) -> TaskApplicationError {
+    match error {
+        RepositoryError::PermissionDenied => TaskApplicationError::Denied,
+        RepositoryError::NotFound(_) => TaskApplicationError::NotFound,
+        RepositoryError::Database(_) | RepositoryError::LeaseExpired => {
+            TaskApplicationError::Unavailable
+        }
+        RepositoryError::InvalidInput(_)
+        | RepositoryError::Conflict(_)
+        | RepositoryError::IdempotencyConflict
+        | RepositoryError::QuotaExceeded
+        | RepositoryError::CorruptRow(_)
+        | RepositoryError::StaleFence => TaskApplicationError::Internal,
+    }
+}
+
 fn build_router(
     repository: Arc<PgRepository>,
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
@@ -1317,14 +1425,18 @@ fn build_router(
         Arc::new(PgRuns(repository.clone())),
         Arc::new(SystemRunClock),
     ));
-    let protected =
-        operation
-            .merge(resource)
-            .merge(run)
-            .route_layer(middleware::from_fn_with_state(
-                authentication,
-                authenticate_public_request,
-            ));
+    let task = build_task_router(TaskHttpState::new(
+        Arc::new(PgTasks(repository.clone())),
+        Arc::new(SystemTaskClock),
+    ));
+    let protected = operation
+        .merge(resource)
+        .merge(run)
+        .merge(task)
+        .route_layer(middleware::from_fn_with_state(
+            authentication,
+            authenticate_public_request,
+        ));
     Router::new()
         .route("/livez", get(live))
         .route("/readyz", get(ready))

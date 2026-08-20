@@ -30,6 +30,7 @@ pub mod oidc;
 pub mod operation;
 pub mod resource;
 pub mod run;
+pub mod task;
 
 pub const MCP_OAUTH_CALLBACK_PATH: &str = "/v1/mcp/oauth/callback";
 

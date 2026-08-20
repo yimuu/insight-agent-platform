@@ -1136,6 +1136,53 @@ impl PgRepository {
         })
     }
 
+    pub async fn read_task_for_principal(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        task_id: &ResourceId,
+    ) -> Result<TaskRecord, RepositoryError> {
+        if !matches!(
+            task_id.kind(),
+            ResourceKind::Interaction | ResourceKind::ApprovalTask
+        ) {
+            return Err(RepositoryError::NotFound("task"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        let task = load_task_by_text(
+            &mut transaction,
+            &tenant_id.to_string(),
+            &task_id.to_string(),
+        )
+        .await?;
+        if !principal
+            .permissions
+            .contains(task.task_kind.responder_permission())
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let projection = task_projection(&task)?;
+        if let TaskDefinition::CapabilityInput {
+            exact_eligible_principal_id: Some(expected),
+            ..
+        } = &projection.payload.definition
+        {
+            if expected != principal_id {
+                return Err(RepositoryError::PermissionDenied);
+            }
+        }
+        transaction.commit().await?;
+        Ok(task)
+    }
+
     pub async fn read_resource_for_writer(
         &self,
         tenant_id: &ResourceId,

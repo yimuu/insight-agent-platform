@@ -2023,6 +2023,17 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(deferred.job.state, "succeeded");
     assert_eq!(deferred.task.state, TaskState::Pending);
     assert_eq!(deferred.task.version, 1);
+    let public_task = repository
+        .read_task_for_principal(
+            &id(TENANT_ID),
+            &id(PRINCIPAL_ID),
+            PrincipalKind::AgentRunner,
+            &task_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(public_task.task_id, task_id.to_string());
+    assert_eq!(public_task.state, TaskState::Pending);
     assert_eq!(deferred.run.state, "waiting");
     assert_eq!(deferred.run.active_work_count, 0);
     assert_eq!(deferred.node_id, selected_node_id.clone());

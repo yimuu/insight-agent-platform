@@ -19,6 +19,7 @@ insight-platform-contracts.workspace = true
 insight-platform-orchestrator.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-registry.workspace = true
+insight-platform-tasks.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
