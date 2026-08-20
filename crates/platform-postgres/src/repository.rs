@@ -16396,23 +16396,19 @@ impl PgRunTransaction {
     ) -> Result<CommandOutcome<RunRecord>, RepositoryError> {
         command.validate_at(Utc::now())?;
         let mut transaction = self.transaction.begin().await?;
-        if claim_command_receipt(
-            &mut transaction,
-            &command.audit,
-            "run",
-            &command.run_id.to_string(),
-            "run.admit",
-        )
-        .await?
-        {
-            let record =
-                load_run(&mut transaction, &command.audit.tenant_id, &command.run_id).await?;
-            transaction.commit().await?;
-            return Ok(CommandOutcome::Replayed(record));
-        }
         let principal =
             require_tenant_permission(&mut transaction, &command.audit, Permission::AgentRun)
                 .await?;
+        if let Some(record) = claim_run_admission_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.admission_scope_id,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
         if command.bindings.principal != principal {
             return Err(RepositoryError::InvalidInput(
                 "run principal snapshot does not match the authorized binding".to_owned(),
@@ -16599,8 +16595,7 @@ impl PgRunTransaction {
             )?,
         )
         .await?;
-        terminalize_command_receipt(&mut transaction, &command.audit, &record.run_id, "admitted")
-            .await?;
+        terminalize_run_admission_receipt(&mut transaction, &command.audit, &record).await?;
         transaction.commit().await?;
         Ok(CommandOutcome::Applied(record))
     }
@@ -17042,7 +17037,8 @@ pub struct SecretBindingMetadataRecord {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunRecord {
     pub tenant_id: String,
     pub run_id: String,
@@ -17070,6 +17066,13 @@ pub struct RunRecord {
     pub terminal_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunAdmissionReceiptResult {
+    schema_version: u32,
+    run: RunRecord,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20082,6 +20085,132 @@ async fn claim_resource_create_receipt(
         .parse()
         .map_err(|_| RepositoryError::CorruptRow("create Receipt result is invalid".to_owned()))?;
     Ok(Some(resource_id))
+}
+
+async fn claim_run_admission_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    admission_scope_id: &ResourceId,
+) -> Result<Option<RunRecord>, RepositoryError> {
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "operation": "run.admit",
+            "principal_id": audit.principal_id,
+            "scope_id": admission_scope_id,
+            "scope_kind": "run_admission",
+        }),
+        65_536,
+    )?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest,
+            state, payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'command', 'run_admission', $3, $4, 'run.admit',
+                  $5, $6, 'processing', $7, $8, $9, $10)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(admission_scope_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(audit.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(None);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state, payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'run_admission' AND scope_id = $2
+          AND dedupe_owner_id = $3 AND operation = 'run.admit'
+          AND idempotency_key_digest = $4
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(admission_scope_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != audit.request_digest.to_string() {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if row.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("run admission receipt"));
+    }
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let result: RunAdmissionReceiptResult =
+        decode_versioned_payload(&payload, "run admission Receipt result")?;
+    if result.schema_version != 1
+        || result.run.tenant_id != audit.tenant_id.to_string()
+        || result.run.version != 1
+        || result.run.state != RunState::Queued.as_str()
+    {
+        return Err(RepositoryError::CorruptRow(
+            "run admission Receipt result is inconsistent".to_owned(),
+        ));
+    }
+    result.run.current.validate(
+        &result
+            .run
+            .run_id
+            .parse()
+            .map_err(|_| RepositoryError::CorruptRow("Run Receipt ID is invalid".to_owned()))?,
+    )?;
+    Ok(Some(result.run))
+}
+
+async fn terminalize_run_admission_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    record: &RunRecord,
+) -> Result<(), RepositoryError> {
+    let result = RunAdmissionReceiptResult {
+        schema_version: 1,
+        run: record.clone(),
+    };
+    let payload = TypedPayload::from_versioned(1, &result, 1_048_576)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = 'admitted', response_reference_id = $4,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND state = 'processing'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(&record.run_id)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("run admission receipt"));
+    }
+    Ok(())
 }
 
 pub(crate) async fn terminalize_command_receipt(

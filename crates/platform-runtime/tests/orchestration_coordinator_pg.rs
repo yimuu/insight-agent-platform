@@ -671,6 +671,7 @@ async fn admit_run(repository: &PgRepository, bindings: RunBindingsSnapshot) -> 
     let input = json!({"question": "coordinator"});
     let command = AdmitRun {
         audit: audit("6021"),
+        admission_scope_id: id(DEPLOYMENT_ID),
         run_id: id(RUN_ID),
         agent_deployment_id: id(DEPLOYMENT_ID),
         root_scope_id: id(SCOPE_ID),
@@ -1393,6 +1394,7 @@ async fn admit_capacity_run(
     let input = json!({"question": "phase2-capacity"});
     let command = AdmitRun {
         audit: fresh_audit(tenant_id, &principal_id),
+        admission_scope_id: bindings.agent.deployment_id.clone(),
         run_id: fresh_id(ResourceKind::Run),
         agent_deployment_id: bindings.agent.deployment_id.clone(),
         root_scope_id: fresh_id(ResourceKind::ScopeInstance),

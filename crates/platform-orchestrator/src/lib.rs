@@ -1457,6 +1457,7 @@ impl RunInputValue {
 #[derive(Debug, Clone)]
 pub struct AdmitRun {
     pub audit: CommandAudit,
+    pub admission_scope_id: ResourceId,
     pub run_id: ResourceId,
     pub agent_deployment_id: ResourceId,
     pub root_scope_id: ResourceId,
@@ -1480,6 +1481,10 @@ impl AdmitRun {
             .map_err(|_| OrchestratorError::InvalidRunAdmission)?;
         self.input.validate(self.inline_limits)?;
         if self.run_id.kind() != ResourceKind::Run
+            || !matches!(
+                self.admission_scope_id.kind(),
+                ResourceKind::Agent | ResourceKind::AgentDeployment
+            )
             || self.agent_deployment_id.kind() != ResourceKind::AgentDeployment
             || self.root_scope_id.kind() != ResourceKind::ScopeInstance
             || self.entry_node_execution_id.kind() != ResourceKind::NodeExecution

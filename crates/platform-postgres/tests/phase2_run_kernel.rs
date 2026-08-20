@@ -1379,11 +1379,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
           (SELECT count(*) FROM insight_platform.run_values WHERE tenant_id = $1 AND run_id = $2) AS values,
           (SELECT count(*) FROM insight_platform.jobs WHERE tenant_id = $1 AND run_id = $2) AS jobs,
           (SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND aggregate_kind = 'run' AND aggregate_id = $2) AS events,
-          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND scope_kind = 'run' AND scope_id = $2) AS receipts
+          (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND scope_kind = 'run_admission' AND scope_id = $3 AND receipt_id = $4) AS receipts
         "#,
     )
     .bind(TENANT_ID)
     .bind(command.run_id.to_string())
+    .bind(command.admission_scope_id.to_string())
+    .bind(command.audit.receipt_id.to_string())
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -1526,6 +1528,35 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(cancelled.state, "cancelling");
     assert_eq!(cancelled.version, 4);
     assert_eq!(cancelled.cancel_generation, 1);
+
+    let mut late_admission_replay = command.clone();
+    late_admission_replay.run_id = id("run_0198f1c3-9a00-7c3e-b1f3-773c28367210");
+    late_admission_replay.root_scope_id = id("scp_0198f1c3-9a00-7c3e-b1f3-773c28367211");
+    late_admission_replay.entry_node_execution_id =
+        id("nod_0198f1c3-9a00-7c3e-b1f3-773c28367212");
+    late_admission_replay.orchestration_job_id =
+        id("job_0198f1c3-9a00-7c3e-b1f3-773c28367213");
+    late_admission_replay.input.value_id =
+        id("val_0198f1c3-9a00-7c3e-b1f3-773c28367214");
+    let unused_candidate_run_id = late_admission_replay.run_id.to_string();
+    assert!(matches!(
+        run_command!(repository, admit_run, late_admission_replay).unwrap(),
+        CommandOutcome::Replayed(record)
+            if record.run_id == command.run_id.to_string()
+                && record.version == 1
+                && record.state == "queued"
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+        )
+        .bind(TENANT_ID)
+        .bind(unused_candidate_run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
 
     let timeout_command = admission(
         AdmissionIds {
@@ -6841,14 +6872,19 @@ struct AdmissionIds<'a> {
 
 fn admission(
     ids: AdmissionIds<'_>,
-    audit: CommandAudit,
+    mut audit: CommandAudit,
     bindings: RunBindingsSnapshot,
     deadline: chrono::DateTime<Utc>,
 ) -> AdmitRun {
     let input: Value = json!({"question": "select one"});
     let content_digest = canonical_digest(&input).unwrap().parse().unwrap();
+    audit.idempotency_key_digest = canonical_digest(&json!(audit.receipt_id.to_string()))
+        .unwrap()
+        .parse()
+        .unwrap();
     AdmitRun {
         audit,
+        admission_scope_id: id(AGENT_DEPLOYMENT_ID),
         run_id: id(ids.run),
         agent_deployment_id: id(AGENT_DEPLOYMENT_ID),
         root_scope_id: id(ids.scope),
