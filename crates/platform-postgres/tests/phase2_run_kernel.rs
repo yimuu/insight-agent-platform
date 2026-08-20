@@ -314,6 +314,14 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     let repository = PgRepository::new(pool.clone());
     seed_authorities(&repository, &pool).await;
     let bindings = seed_agent_registry(&pool).await;
+    let root_target = repository
+        .resolve_root_run_target(&id(TENANT_ID), &id(AGENT_ID))
+        .await
+        .unwrap();
+    assert_eq!(root_target.agent, bindings.agent);
+    assert_eq!(root_target.closure.entry_node_id, "start");
+    assert_eq!(root_target.closure.entry_node_kind, PlanNodeKind::Start);
+    assert!(root_target.context_dataset_views.is_empty());
     let mut security = repository.begin_security_transaction().await.unwrap();
     assert!(matches!(
         security
@@ -1528,6 +1536,21 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(cancelled.state, "cancelling");
     assert_eq!(cancelled.version, 4);
     assert_eq!(cancelled.cancel_generation, 1);
+    let public_replay = repository
+        .read_root_run_admission_replay(
+            &command.audit.tenant_id,
+            &command.audit.principal_id,
+            command.audit.principal_kind,
+            &id(AGENT_ID),
+            &command.audit.idempotency_key_digest,
+            &command.audit.request_digest,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(public_replay.run_id, command.run_id.to_string());
+    assert_eq!(public_replay.version, 1);
+    assert_eq!(public_replay.state, "queued");
 
     let mut late_admission_replay = command.clone();
     late_admission_replay.run_id = id("run_0198f1c3-9a00-7c3e-b1f3-773c28367210");
@@ -6884,7 +6907,7 @@ fn admission(
         .unwrap();
     AdmitRun {
         audit,
-        admission_scope_id: id(AGENT_DEPLOYMENT_ID),
+        admission_scope_id: id(AGENT_ID),
         run_id: id(ids.run),
         agent_deployment_id: id(AGENT_DEPLOYMENT_ID),
         root_scope_id: id(ids.scope),

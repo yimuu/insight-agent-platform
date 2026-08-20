@@ -28,15 +28,17 @@ use insight_platform_api::{
         UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
     run::{
-        build_run_router, run_etag, ReadRunIntent, RunApplication, RunApplicationError,
-        RunHttpState, RunViewV1, SystemRunClock,
+        build_run_router, run_etag, CreateRunIntent, ReadRunIntent, RunApplication,
+        RunApplicationError, RunHttpState, RunViewV1, SystemRunClock,
     },
 };
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ActiveTarget, AdministrativeGate, CommandAudit,
     DeploymentClosure, EntityLifecycle, ExactDeploymentRef, JsonLimits, OperationViewV1,
-    PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId, ResourceKind, Sha256Digest,
+    PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId, ResourceKind, RunBindingsSnapshot,
+    Sha256Digest, ValueRef,
 };
+use insight_platform_orchestrator::{AdmitRun, PlanNodeKey, RunInputValue};
 use insight_platform_postgres::{
     operation_repository::{project_registry_validation_operation, OperationReadError},
     repository::{PgRepository, RepositoryError},
@@ -185,6 +187,124 @@ struct PgRuns(Arc<PgRepository>);
 
 #[async_trait]
 impl RunApplication for PgRuns {
+    async fn create_run(&self, intent: CreateRunIntent) -> Result<RunViewV1, RunApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(RunApplicationError::Unavailable);
+        }
+        if let Some(record) = self
+            .0
+            .read_root_run_admission_replay(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.request.agent_id,
+                &intent.idempotency_key_digest,
+                &intent.request_digest,
+            )
+            .await
+            .map_err(map_run_repository_error)?
+        {
+            return run_view_from_record(record);
+        }
+        let target = self
+            .0
+            .resolve_root_run_target(&intent.principal.tenant_id, &intent.request.agent_id)
+            .await
+            .map_err(map_run_repository_error)?;
+        let principal = PrincipalSnapshot::build(
+            intent.principal.tenant_id.clone(),
+            intent.principal.principal_id.clone(),
+            intent.principal.principal_kind,
+            intent.principal.permissions.clone(),
+            intent.principal.principal_version,
+            intent.principal.binding_generation,
+            intent.principal.binding_version,
+        )
+        .map_err(|_| RunApplicationError::Internal)?;
+        let bindings = RunBindingsSnapshot::build_with_context_dataset_views(
+            target.agent.clone(),
+            principal,
+            &target.closure,
+            target.context_dataset_views,
+        )
+        .map_err(|_| RunApplicationError::Internal)?;
+        let requested_deadline =
+            chrono::DateTime::parse_from_rfc3339(intent.request.deadline.as_str())
+                .map_err(|_| RunApplicationError::Invalid)?
+                .with_timezone(&chrono::Utc);
+        let content_digest = match &intent.request.input.value {
+            ValueRef::Inline { value } => canonical_digest(value)
+                .map_err(|_| RunApplicationError::Invalid)?
+                .parse()
+                .map_err(|_| RunApplicationError::Internal)?,
+            ValueRef::Artifact { artifact }
+                if artifact.classification() == intent.request.input.classification =>
+            {
+                artifact.content_digest().clone()
+            }
+            ValueRef::Artifact { .. } => return Err(RunApplicationError::Invalid),
+        };
+        let make_id = |kind| {
+            ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7())
+                .map_err(|_| RunApplicationError::Internal)
+        };
+        let audit = CommandAudit {
+            tenant_id: intent.principal.tenant_id,
+            principal_id: intent.principal.principal_id,
+            principal_kind: intent.principal.principal_kind,
+            receipt_id: make_id(ResourceKind::Receipt)?,
+            event_id: make_id(ResourceKind::Event)?,
+            outbox_id: make_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: intent.idempotency_key_digest,
+            request_digest: intent.request_digest,
+            receipt_expires_at: now + chrono::Duration::hours(24),
+        };
+        let run_id = make_id(ResourceKind::Run)?;
+        let command = AdmitRun {
+            audit,
+            admission_scope_id: intent.request.agent_id,
+            run_id,
+            agent_deployment_id: target.agent.deployment_id,
+            root_scope_id: make_id(ResourceKind::ScopeInstance)?,
+            entry_node_execution_id: make_id(ResourceKind::NodeExecution)?,
+            orchestration_job_id: make_id(ResourceKind::Job)?,
+            entry_plan_node_key: PlanNodeKey::new(target.closure.entry_node_id)
+                .map_err(|_| RunApplicationError::Internal)?,
+            entry_node_kind: target.closure.entry_node_kind,
+            bindings,
+            input: RunInputValue {
+                value_id: make_id(ResourceKind::RunValue)?,
+                classification: intent.request.input.classification,
+                schema_digest: intent.request.input.schema_digest,
+                content_digest,
+                value: intent.request.input.value,
+            },
+            deadline: requested_deadline,
+            inline_limits: JsonLimits::CONTRACT_FIXTURE,
+            attempt_limit: 3,
+            retry_backoff_milliseconds: 100,
+        };
+        let mut transaction = self
+            .0
+            .begin_run_transaction()
+            .await
+            .map_err(map_run_repository_error)?;
+        let outcome = transaction
+            .admit_run(command)
+            .await
+            .map_err(map_run_repository_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(map_run_repository_error)?;
+        let record = match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(record)
+            | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
+        };
+        run_view_from_record(record)
+    }
+
     async fn read_run(&self, intent: ReadRunIntent) -> Result<RunViewV1, RunApplicationError> {
         if intent.deadline <= chrono::Utc::now() {
             return Err(RunApplicationError::Unavailable);
@@ -199,53 +319,59 @@ impl RunApplication for PgRuns {
             )
             .await
             .map_err(map_run_repository_error)?;
-        let run_id: ResourceId = record
-            .run_id
-            .parse()
-            .map_err(|_| RunApplicationError::Internal)?;
-        let agent_deployment_id = record
-            .agent_deployment_id
-            .parse()
-            .map_err(|_| RunApplicationError::Internal)?;
-        let input_value_id = record
-            .input_value_id
-            .ok_or(RunApplicationError::Internal)?
-            .parse()
-            .map_err(|_| RunApplicationError::Internal)?;
-        let output_value_id = record
-            .output_value_id
-            .map(|id| id.parse())
-            .transpose()
-            .map_err(|_| RunApplicationError::Internal)?;
-        let state = record
-            .state
-            .parse()
-            .map_err(|_| RunApplicationError::Internal)?;
-        let version = u64::try_from(record.version).map_err(|_| RunApplicationError::Internal)?;
-        Ok(RunViewV1 {
-            schema_version: 1,
-            run_id: run_id.clone(),
-            agent_deployment_id,
-            state,
-            version,
-            input_value_id,
-            output_value_id,
-            pause_generation: u64::try_from(record.pause_generation)
-                .map_err(|_| RunApplicationError::Internal)?,
-            cancel_generation: u64::try_from(record.cancel_generation)
-                .map_err(|_| RunApplicationError::Internal)?,
-            deadline: insight_platform_contracts::UtcTimestamp::from_datetime(record.deadline),
-            started_at: record
-                .started_at
-                .map(insight_platform_contracts::UtcTimestamp::from_datetime),
-            terminal_at: record
-                .terminal_at
-                .map(insight_platform_contracts::UtcTimestamp::from_datetime),
-            created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
-            updated_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.updated_at),
-            etag: run_etag(&run_id, version),
-        })
+        run_view_from_record(record)
     }
+}
+
+fn run_view_from_record(
+    record: insight_platform_postgres::repository::RunRecord,
+) -> Result<RunViewV1, RunApplicationError> {
+    let run_id: ResourceId = record
+        .run_id
+        .parse()
+        .map_err(|_| RunApplicationError::Internal)?;
+    let agent_deployment_id = record
+        .agent_deployment_id
+        .parse()
+        .map_err(|_| RunApplicationError::Internal)?;
+    let input_value_id = record
+        .input_value_id
+        .ok_or(RunApplicationError::Internal)?
+        .parse()
+        .map_err(|_| RunApplicationError::Internal)?;
+    let output_value_id = record
+        .output_value_id
+        .map(|id| id.parse())
+        .transpose()
+        .map_err(|_| RunApplicationError::Internal)?;
+    let state = record
+        .state
+        .parse()
+        .map_err(|_| RunApplicationError::Internal)?;
+    let version = u64::try_from(record.version).map_err(|_| RunApplicationError::Internal)?;
+    Ok(RunViewV1 {
+        schema_version: 1,
+        run_id: run_id.clone(),
+        agent_deployment_id,
+        state,
+        version,
+        input_value_id,
+        output_value_id,
+        pause_generation: u64::try_from(record.pause_generation)
+            .map_err(|_| RunApplicationError::Internal)?,
+        cancel_generation: u64::try_from(record.cancel_generation)
+            .map_err(|_| RunApplicationError::Internal)?,
+        deadline: insight_platform_contracts::UtcTimestamp::from_datetime(record.deadline),
+        started_at: record
+            .started_at
+            .map(insight_platform_contracts::UtcTimestamp::from_datetime),
+        terminal_at: record
+            .terminal_at
+            .map(insight_platform_contracts::UtcTimestamp::from_datetime),
+        created_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.created_at),
+        updated_at: insight_platform_contracts::UtcTimestamp::from_datetime(record.updated_at),
+        etag: run_etag(&run_id, version),
+    })
 }
 
 #[derive(Clone)]
@@ -1006,12 +1132,12 @@ fn map_run_repository_error(error: RepositoryError) -> RunApplicationError {
         RepositoryError::Database(_) | RepositoryError::LeaseExpired => {
             RunApplicationError::Unavailable
         }
-        RepositoryError::InvalidInput(_)
-        | RepositoryError::Conflict(_)
-        | RepositoryError::IdempotencyConflict
-        | RepositoryError::QuotaExceeded
-        | RepositoryError::CorruptRow(_)
-        | RepositoryError::StaleFence => RunApplicationError::Internal,
+        RepositoryError::InvalidInput(_) => RunApplicationError::Invalid,
+        RepositoryError::Conflict(_) | RepositoryError::StaleFence => RunApplicationError::Conflict,
+        RepositoryError::IdempotencyConflict => RunApplicationError::IdempotencyConflict,
+        RepositoryError::QuotaExceeded | RepositoryError::CorruptRow(_) => {
+            RunApplicationError::Internal
+        }
     }
 }
 

@@ -364,6 +364,13 @@ pub struct PgRepository {
     recovery_shard_limit: u16,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedRootRunTarget {
+    pub agent: ExactDeploymentRef,
+    pub closure: insight_platform_contracts::AgentDeploymentClosure,
+    pub context_dataset_views: Vec<insight_platform_contracts::RunContextDatasetView>,
+}
+
 impl PgRepository {
     pub fn new(pool: PgPool) -> Self {
         Self::with_hard_limit_profile(pool, &checked_in_hard_limit_profile())
@@ -1107,6 +1114,175 @@ impl PgRepository {
             .execute(&mut *transaction)
             .await?;
         Ok(PgRunTransaction { transaction })
+    }
+
+    pub async fn resolve_root_run_target(
+        &self,
+        tenant_id: &ResourceId,
+        agent_id: &ResourceId,
+    ) -> Result<ResolvedRootRunTarget, RepositoryError> {
+        if tenant_id.kind() != ResourceKind::Tenant || agent_id.kind() != ResourceKind::Agent {
+            return Err(RepositoryError::NotFound("active agent deployment"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let row = sqlx::query(
+            r#"
+            SELECT deployment.tenant_id, deployment.deployment_id, deployment.resource_id,
+                   deployment.resource_version_id, deployment.environment,
+                   deployment.bindings_digest, deployment.payload_schema_version,
+                   deployment.bindings, deployment.created_by, deployment.created_at
+            FROM insight_platform.resources AS resource
+            JOIN insight_platform.deployments AS deployment
+              ON deployment.tenant_id = resource.tenant_id
+             AND deployment.resource_id = resource.resource_id
+             AND deployment.deployment_id = resource.active_deployment_id
+            WHERE resource.tenant_id = $1 AND resource.resource_id = $2
+              AND resource.resource_kind = 'agent'
+              AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("active agent deployment"))?;
+        let deployment = deployment_from_row(row)?;
+        let closure = match decode_deployment_closure(&deployment.bindings)? {
+            DeploymentClosure::Agent(closure) => closure,
+            _ => {
+                return Err(RepositoryError::CorruptRow(
+                    "active Agent Deployment has a non-Agent closure".to_owned(),
+                ));
+            }
+        };
+        let deployment_id: ResourceId = deployment.deployment_id.parse().map_err(|_| {
+            RepositoryError::CorruptRow("Agent Deployment ID is invalid".to_owned())
+        })?;
+        let deployment_digest: Sha256Digest = deployment.bindings.digest.parse().map_err(|_| {
+            RepositoryError::CorruptRow("Agent Deployment digest is invalid".to_owned())
+        })?;
+        let agent = ExactDeploymentRef::new(deployment_id, deployment_digest)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let mut context_dataset_views = Vec::new();
+        for binding in closure.slots.iter().filter_map(|slot| match &slot.target {
+            FrozenSlotTarget::Context { binding } => Some(binding.as_ref()),
+            _ => None,
+        }) {
+            let insight_platform_contracts::ContextConsistencyPolicy::PinAtRunAdmission {
+                dataset_id,
+            } = &binding.consistency
+            else {
+                continue;
+            };
+            let generation = sqlx::query(
+                r#"
+                SELECT version.resource_version_id, version.content_digest
+                FROM insight_platform.resources AS resource
+                JOIN insight_platform.resource_versions AS version
+                  ON version.tenant_id = resource.tenant_id
+                 AND version.resource_id = resource.resource_id
+                 AND version.resource_version_id = resource.active_version_id
+                WHERE resource.tenant_id = $1 AND resource.resource_id = $2
+                  AND resource.resource_kind = 'context_dataset'
+                  AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+                  AND version.resource_version_kind = 'dataset_generation'
+                "#,
+            )
+            .bind(tenant_id.to_string())
+            .bind(dataset_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepositoryError::NotFound(
+                "active Context Dataset Generation",
+            ))?;
+            context_dataset_views.push(insight_platform_contracts::RunContextDatasetView {
+                context_binding_id: binding.context_binding_id.clone(),
+                context_binding_digest: binding.binding_digest.clone(),
+                generation: ExactDatasetGenerationRef {
+                    dataset_id: dataset_id.clone(),
+                    generation_id: generation
+                        .try_get::<String, _>("resource_version_id")?
+                        .parse()
+                        .map_err(|_| {
+                            RepositoryError::CorruptRow(
+                                "Dataset Generation ID is invalid".to_owned(),
+                            )
+                        })?,
+                    generation_digest: generation
+                        .try_get::<String, _>("content_digest")?
+                        .parse()
+                        .map_err(|_| {
+                        RepositoryError::CorruptRow(
+                            "Dataset Generation digest is invalid".to_owned(),
+                        )
+                    })?,
+                },
+            });
+        }
+        transaction.commit().await?;
+        Ok(ResolvedRootRunTarget {
+            agent,
+            closure,
+            context_dataset_views,
+        })
+    }
+
+    pub async fn read_root_run_admission_replay(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        agent_id: &ResourceId,
+        idempotency_key_digest: &Sha256Digest,
+        request_digest: &Sha256Digest,
+    ) -> Result<Option<RunRecord>, RepositoryError> {
+        if agent_id.kind() != ResourceKind::Agent {
+            return Err(RepositoryError::NotFound("run admission receipt"));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::AgentRun) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT request_digest, state, payload_schema_version, payload, payload_digest
+            FROM insight_platform.receipts
+            WHERE tenant_id = $1 AND receipt_kind = 'command'
+              AND scope_kind = 'run_admission' AND scope_id = $2
+              AND dedupe_owner_id = $3 AND operation = 'run.admit'
+              AND idempotency_key_digest = $4
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(principal_id.to_string())
+        .bind(idempotency_key_digest.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        if row.try_get::<String, _>("request_digest")? != request_digest.to_string() {
+            return Err(RepositoryError::IdempotencyConflict);
+        }
+        if row.try_get::<String, _>("state")? != "succeeded" {
+            return Err(RepositoryError::Conflict("run admission receipt"));
+        }
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let result: RunAdmissionReceiptResult =
+            decode_versioned_payload(&payload, "run admission Receipt result")?;
+        validate_run_admission_receipt_result(&result, tenant_id)?;
+        transaction.commit().await?;
+        Ok(Some(result.run))
     }
 
     pub async fn begin_scheduler_transaction(
@@ -20158,8 +20334,16 @@ async fn claim_run_admission_receipt(
     let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
     let result: RunAdmissionReceiptResult =
         decode_versioned_payload(&payload, "run admission Receipt result")?;
+    validate_run_admission_receipt_result(&result, &audit.tenant_id)?;
+    Ok(Some(result.run))
+}
+
+fn validate_run_admission_receipt_result(
+    result: &RunAdmissionReceiptResult,
+    tenant_id: &ResourceId,
+) -> Result<(), RepositoryError> {
     if result.schema_version != 1
-        || result.run.tenant_id != audit.tenant_id.to_string()
+        || result.run.tenant_id != tenant_id.to_string()
         || result.run.version != 1
         || result.run.state != RunState::Queued.as_str()
     {
@@ -20174,7 +20358,7 @@ async fn claim_run_admission_receipt(
             .parse()
             .map_err(|_| RepositoryError::CorruptRow("Run Receipt ID is invalid".to_owned()))?,
     )?;
-    Ok(Some(result.run))
+    Ok(())
 }
 
 async fn terminalize_run_admission_receipt(
