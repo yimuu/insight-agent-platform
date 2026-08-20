@@ -374,6 +374,17 @@ pub struct AwsArtifactUploadProvider {
     kms: Arc<AwsKmsKeyBinding>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AwsArtifactUploadRequest<'a> {
+    pub tenant_id: &'a ResourceId,
+    pub artifact_id: &'a ResourceId,
+    pub blob_id: &'a ResourceId,
+    pub encryption_domain_id: &'a ResourceId,
+    pub expected_size_bytes: u64,
+    pub declared_media_type: Option<&'a str>,
+    pub expires_in: Duration,
+}
+
 impl fmt::Debug for AwsArtifactUploadProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -386,23 +397,17 @@ impl fmt::Debug for AwsArtifactUploadProvider {
 impl AwsArtifactUploadProvider {
     pub async fn prepare_upload(
         &self,
-        tenant_id: &ResourceId,
-        artifact_id: &ResourceId,
-        blob_id: &ResourceId,
-        encryption_domain_id: &ResourceId,
-        expected_size_bytes: u64,
-        declared_media_type: Option<&str>,
-        expires_in: Duration,
+        request: AwsArtifactUploadRequest<'_>,
     ) -> Result<PreparedAwsArtifactUpload, AwsArtifactUploadError> {
-        if tenant_id.kind() != ResourceKind::Tenant
-            || artifact_id.kind() != ResourceKind::Artifact
-            || blob_id.kind() != ResourceKind::InternalBlob
-            || encryption_domain_id.kind() != ResourceKind::EncryptionDomain
-            || expected_size_bytes == 0
-            || expected_size_bytes > self.maximum_object_bytes
-            || expires_in.is_zero()
-            || expires_in > Duration::from_secs(3_600)
-            || declared_media_type.is_some_and(|value| {
+        if request.tenant_id.kind() != ResourceKind::Tenant
+            || request.artifact_id.kind() != ResourceKind::Artifact
+            || request.blob_id.kind() != ResourceKind::InternalBlob
+            || request.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || request.expected_size_bytes == 0
+            || request.expected_size_bytes > self.maximum_object_bytes
+            || request.expires_in.is_zero()
+            || request.expires_in > Duration::from_secs(3_600)
+            || request.declared_media_type.is_some_and(|value| {
                 value.is_empty()
                     || value.len() > 255
                     || !value.is_ascii()
@@ -411,7 +416,10 @@ impl AwsArtifactUploadProvider {
         {
             return Err(AwsArtifactUploadError::InvalidRequest);
         }
-        let object_key = format!("v1/{tenant_id}/{artifact_id}/{blob_id}");
+        let object_key = format!(
+            "v1/{}/{}/{}",
+            request.tenant_id, request.artifact_id, request.blob_id
+        );
         if !valid_opaque_object_key(&object_key) {
             return Err(AwsArtifactUploadError::InvalidRequest);
         }
@@ -423,10 +431,10 @@ impl AwsArtifactUploadProvider {
         }))
         .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
         let encryption_context = object_encryption_context(
-            tenant_id,
-            blob_id,
+            request.tenant_id,
+            request.blob_id,
             &self.storage_binding_digest,
-            encryption_domain_id,
+            request.encryption_domain_id,
             &self.kms.key_id,
         );
         let encrypted = self
@@ -449,20 +457,20 @@ impl AwsArtifactUploadProvider {
             .ciphertext_blob
             .ok_or(AwsArtifactUploadError::InvalidEvidence)?
             .into_inner();
-        let content_length =
-            i64::try_from(expected_size_bytes).map_err(|_| AwsArtifactUploadError::TooLarge)?;
-        let mut request = self
+        let content_length = i64::try_from(request.expected_size_bytes)
+            .map_err(|_| AwsArtifactUploadError::TooLarge)?;
+        let mut upload_request = self
             .s3
             .put_object()
             .bucket(&*self.bucket)
             .key(&object_key)
             .content_length(content_length);
-        if let Some(media_type) = declared_media_type {
-            request = request.content_type(media_type);
+        if let Some(media_type) = request.declared_media_type {
+            upload_request = upload_request.content_type(media_type);
         }
-        let presigned = request
+        let presigned = upload_request
             .presigned(
-                PresigningConfig::expires_in(expires_in)
+                PresigningConfig::expires_in(request.expires_in)
                     .map_err(|_| AwsArtifactUploadError::InvalidRequest)?,
             )
             .await

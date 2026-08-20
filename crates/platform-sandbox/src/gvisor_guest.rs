@@ -124,10 +124,9 @@ impl GvisorGuestExecutionPlan {
 
     pub fn validate(&self) -> Result<(), GvisorGuestBootstrapError> {
         let entrypoint_shape_valid = match (self.runtime_family, self.entrypoint_kind) {
-            (SandboxRuntimeFamily::Python, SandboxEntrypointKind::PythonModule) => self
-                .entrypoint
-                .split('.')
-                .all(|part| valid_language_identifier(part)),
+            (SandboxRuntimeFamily::Python, SandboxEntrypointKind::PythonModule) => {
+                self.entrypoint.split('.').all(valid_language_identifier)
+            }
             (SandboxRuntimeFamily::NodeJs, SandboxEntrypointKind::NodeModule)
             | (SandboxRuntimeFamily::ReviewedShell, SandboxEntrypointKind::ReviewedExecutable) => {
                 self.entrypoint.split('/').all(valid_path_part)

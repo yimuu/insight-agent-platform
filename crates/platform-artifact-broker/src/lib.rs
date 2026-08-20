@@ -27,8 +27,8 @@ mod aws;
 pub use aws::{
     AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig, AwsArtifactProviderConfigError,
     AwsArtifactProviderReadinessError, AwsArtifactUploadError, AwsArtifactUploadProvider,
-    AwsKmsKeyBindingConfig, AwsS3StorageBindingConfig, CompletedAwsArtifactUploadEvidence,
-    PreparedAwsArtifactUpload,
+    AwsArtifactUploadRequest, AwsKmsKeyBindingConfig, AwsS3StorageBindingConfig,
+    CompletedAwsArtifactUploadEvidence, PreparedAwsArtifactUpload,
 };
 
 pub const MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS: usize = 64;

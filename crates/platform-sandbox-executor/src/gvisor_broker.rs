@@ -499,7 +499,8 @@ fn extract_reviewed_oci_bundle(
     expected_package_digest: &Sha256Digest,
     resources: &SandboxResourceEnvelope,
 ) -> Result<(), GvisorBrokerError> {
-    if archive.is_empty() || archive.len() % TAR_BLOCK_BYTES != 0 || destination.exists() {
+    if archive.is_empty() || !archive.len().is_multiple_of(TAR_BLOCK_BYTES) || destination.exists()
+    {
         return Err(GvisorBrokerError::Integrity);
     }
     fs::create_dir(destination).map_err(|_| GvisorBrokerError::Unavailable)?;
@@ -653,9 +654,7 @@ fn set_extracted_permissions(
     directory: bool,
 ) -> Result<(), GvisorBrokerError> {
     use std::os::unix::fs::PermissionsExt as _;
-    let mode = if directory {
-        0o500
-    } else if archived_mode & 0o111 != 0 {
+    let mode = if directory || archived_mode & 0o111 != 0 {
         0o500
     } else {
         0o400

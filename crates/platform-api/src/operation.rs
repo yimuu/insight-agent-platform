@@ -9,7 +9,7 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
     canonical_digest, ApiProblem, ApiProblemCode, OperationViewV1, PrincipalKind, ReadOperation,
-    ResourceId, ResourceKind, Sha256Digest, UtcTimestamp, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
+    ResourceId, ResourceKind, Sha256Digest, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -238,7 +238,7 @@ mod tests {
     use super::*;
     use axum::{body::to_bytes, http::Request};
     use insight_platform_contracts::{
-        operation_etag, PublicJobKind, PublicJobState, PublicJobTarget,
+        operation_etag, PublicJobKind, PublicJobState, PublicJobTarget, UtcTimestamp,
     };
     use std::sync::Mutex;
     use tower::ServiceExt;

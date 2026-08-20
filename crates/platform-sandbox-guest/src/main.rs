@@ -325,7 +325,8 @@ fn extract_bundle(
     destination: &Path,
     plan: &GvisorGuestExecutionPlan,
 ) -> Result<ExtractionUsage, GuestError> {
-    if archive.is_empty() || archive.len() % TAR_BLOCK_BYTES != 0 || destination.exists() {
+    if archive.is_empty() || !archive.len().is_multiple_of(TAR_BLOCK_BYTES) || destination.exists()
+    {
         return Err(GuestError::Integrity);
     }
     fs::create_dir(destination).map_err(|_| GuestError::Unavailable)?;
@@ -424,9 +425,7 @@ fn extract_tar_entries(
 #[cfg(unix)]
 fn set_permissions(path: &Path, archived_mode: u64, directory: bool) -> Result<(), GuestError> {
     use std::os::unix::fs::PermissionsExt as _;
-    let mode = if directory {
-        0o500
-    } else if archived_mode & 0o111 != 0 {
+    let mode = if directory || archived_mode & 0o111 != 0 {
         0o500
     } else {
         0o400

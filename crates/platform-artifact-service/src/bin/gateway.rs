@@ -13,8 +13,8 @@ use chrono::{DateTime, Utc};
 use futures::Stream;
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, ArtifactBrokerReadPermit, AwsArtifactProviderCatalog,
-    AwsArtifactProviderCatalogConfig, AwsArtifactUploadProvider, BrokeredGatewayArtifactReader,
-    GatewayArtifactReadError,
+    AwsArtifactProviderCatalogConfig, AwsArtifactUploadProvider, AwsArtifactUploadRequest,
+    BrokeredGatewayArtifactReader, GatewayArtifactReadError,
 };
 use insight_platform_artifacts::{
     ArtifactStore, ArtifactTransaction, CompleteArtifactUpload, GatewayArtifactReadRequest,
@@ -382,15 +382,15 @@ async fn prepare_upload_inner(
     }
     let upload = state
         .uploads
-        .prepare_upload(
-            &principal.tenant_id,
-            &request.artifact_id,
-            &request.blob_id,
-            &request.encryption_domain_id,
-            request.expected_size_bytes,
-            request.declared_media_type.as_deref(),
-            Duration::from_secs(target_seconds),
-        )
+        .prepare_upload(AwsArtifactUploadRequest {
+            tenant_id: &principal.tenant_id,
+            artifact_id: &request.artifact_id,
+            blob_id: &request.blob_id,
+            encryption_domain_id: &request.encryption_domain_id,
+            expected_size_bytes: request.expected_size_bytes,
+            declared_media_type: request.declared_media_type.as_deref(),
+            expires_in: Duration::from_secs(target_seconds),
+        })
         .await
         .map_err(|_| HttpError::Unavailable)?;
     let token_digest = token_digest(&request.upload_grant_token)?;
