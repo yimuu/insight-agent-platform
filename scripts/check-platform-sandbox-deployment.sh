@@ -11,7 +11,8 @@ command -v ruby >/dev/null
 
 if rg -n -i 'micro.?vm|firecracker|/dev/kvm|managed.?stdio' \
   "$chart" "$root/deploy/helm/insight-platform-security-egress/values.yaml" \
-  "$root/Dockerfile" "$root/crates/platform-sandbox-controller/src/main.rs" \
+  "$root/Dockerfile" "$root/crates/platform-sandbox-attestor/src/main.rs" \
+  "$root/crates/platform-sandbox-controller/src/main.rs" \
   "$root/crates/platform-sandbox-executor/src/main.rs"; then
   echo "sandbox deployment: deferred backend or persistent-session surface remains" >&2
   exit 1

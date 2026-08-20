@@ -13,12 +13,11 @@ use insight_platform_sandbox_attestor::{
 use insight_platform_sandbox_rpc::{
     proto::{
         sandbox_executor_process_registration_service_server::SandboxExecutorProcessRegistrationServiceServer,
-        sandbox_micro_vm_executor_process_registration_service_server::SandboxMicroVmExecutorProcessRegistrationServiceServer,
         sandbox_process_isolation_attestor_service_server::SandboxProcessIsolationAttestorServiceServer,
     },
-    MicroVmExecutorNodeRegistrationIdentity, SandboxControllerWorkloadIdentity,
-    SandboxExecutorProcessRegistrationGrpcService, SandboxInternalRpcLimits,
-    SandboxProcessIsolationAttestorGrpcService, WasiExecutorNodeRegistrationIdentity,
+    SandboxControllerWorkloadIdentity, SandboxExecutorProcessRegistrationGrpcService,
+    SandboxInternalRpcLimits, SandboxProcessIsolationAttestorGrpcService,
+    WasiExecutorNodeRegistrationIdentity,
 };
 use serde::Deserialize;
 use std::{
@@ -188,16 +187,6 @@ async fn run() -> Result<(), ProcessError> {
         registration_service,
         WasiExecutorNodeRegistrationIdentity,
     );
-    let micro_vm_registration_service =
-        SandboxMicroVmExecutorProcessRegistrationServiceServer::new(
-            SandboxExecutorProcessRegistrationGrpcService::new(Arc::clone(&authority), limits),
-        )
-        .max_encoding_message_size(maximum)
-        .max_decoding_message_size(maximum);
-    let micro_vm_registration_service = tonic::service::interceptor::InterceptedService::new(
-        micro_vm_registration_service,
-        MicroVmExecutorNodeRegistrationIdentity,
-    );
     let registration_tls = server_tls(
         REGISTRATION_CA_PATH_ENV,
         REGISTRATION_CERT_PATH_ENV,
@@ -229,7 +218,6 @@ async fn run() -> Result<(), ProcessError> {
             .tls_config(registration_tls)
             .map_err(|_| ProcessError::InvalidConfiguration)?
             .add_service(registration_service)
-            .add_service(micro_vm_registration_service)
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async move {
                 registration_shutdown.cancelled().await;
             })
