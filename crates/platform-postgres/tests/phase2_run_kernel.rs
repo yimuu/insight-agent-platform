@@ -5,9 +5,10 @@ use insight_platform_contracts::{
     DeploymentClosure, ExactDeploymentRef, ExactVersionRef, Failure, FailureClass, FailureCode,
     FailureSource, FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission,
     PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot, SchedulingPolicyDocument,
-    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
+    PublishedVersionPayload, ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot,
+    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef,
 };
 use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
 use insight_platform_orchestrator::{
@@ -1548,6 +1549,57 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(cancelled.state, "cancelling");
     assert_eq!(cancelled.version, 4);
     assert_eq!(cancelled.cancel_generation, 1);
+    let public_events = repository
+        .read_public_run_events_for_principal(
+            &id(TENANT_ID),
+            &id(DENIED_PRINCIPAL_ID),
+            PrincipalKind::AgentRunner,
+            &command.run_id,
+            0,
+            16,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        public_events
+            .iter()
+            .map(|event| (event.sequence, event.event_type))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, PublicRunEventType::RunQueued),
+            (2, PublicRunEventType::RunPaused),
+            (3, PublicRunEventType::RunResumed),
+            (4, PublicRunEventType::RunCancelling),
+        ]
+    );
+    assert_eq!(
+        repository
+            .read_public_run_events_for_principal(
+                &id(TENANT_ID),
+                &id(DENIED_PRINCIPAL_ID),
+                PrincipalKind::AgentRunner,
+                &command.run_id,
+                2,
+                1,
+            )
+            .await
+            .unwrap()[0]
+            .event_type,
+        PublicRunEventType::RunResumed
+    );
+    assert!(matches!(
+        repository
+            .read_public_run_events_for_principal(
+                &id(TENANT_B_ID),
+                &id(DENIED_PRINCIPAL_ID),
+                PrincipalKind::AgentRunner,
+                &command.run_id,
+                0,
+                16,
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
     let public_replay = repository
         .read_root_run_admission_replay(
             &command.audit.tenant_id,

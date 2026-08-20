@@ -11,9 +11,9 @@ use insight_platform_contracts::{
     FailureSource, FrozenSlotTarget, HardLimitProfile, InstallationPrincipalBinding, JobState,
     JsonLimits, NodeExecutionState, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode,
     PolicyKind, PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
-    ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState, SchedulerPriority,
-    ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
+    PublicRunEventType, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
+    ResourceDraftPayload, ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState,
+    SchedulerPriority, ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
     TenantPrincipalPayload, ValueRef, WorkClass, MAX_RESOURCE_DEPENDENCIES,
 };
 use insight_platform_invocations::{
@@ -1004,6 +1004,65 @@ impl PgRepository {
         let run = load_run(&mut transaction, tenant_id, run_id).await?;
         transaction.commit().await?;
         Ok(run)
+    }
+
+    pub async fn read_public_run_events_for_principal(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+        run_id: &ResourceId,
+        after_sequence: u64,
+        limit: u16,
+    ) -> Result<Vec<PublicRunEventRecord>, RepositoryError> {
+        if run_id.kind() != ResourceKind::Run || limit == 0 || limit > 128 {
+            return Err(RepositoryError::InvalidInput(
+                "public Run event query is invalid".to_owned(),
+            ));
+        }
+        let after_sequence = i64::try_from(after_sequence).map_err(|_| {
+            RepositoryError::InvalidInput("public Run event cursor exceeds bigint".to_owned())
+        })?;
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::RuntimeRead) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let run = load_run(&mut transaction, tenant_id, run_id).await?;
+        if after_sequence > run.public_sequence {
+            return Err(RepositoryError::InvalidInput(
+                "public Run event cursor is ahead of authority".to_owned(),
+            ));
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT event_id, aggregate_kind, aggregate_id, aggregate_version,
+                   public_sequence, event_type, payload, occurred_at
+            FROM insight_platform.events
+            WHERE tenant_id = $1 AND run_id = $2 AND visibility = 'public'
+              AND public_sequence > $3
+            ORDER BY public_sequence
+            LIMIT $4
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(run_id.to_string())
+        .bind(after_sequence)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let events = rows
+            .into_iter()
+            .map(public_run_event_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await?;
+        Ok(events)
     }
 
     pub async fn read_run_result_for_principal(
@@ -16706,12 +16765,25 @@ pub(crate) async fn append_scheduler_event(
     event_type: &str,
     payload: &TypedPayload,
 ) -> Result<(), RepositoryError> {
+    let public_event_type = public_run_event_type(aggregate_kind, event_type, &payload.value);
+    let public_sequence = match (run_id, public_event_type) {
+        (Some(run_id), Some(_)) => {
+            Some(next_public_run_sequence(transaction, tenant_id, run_id).await?)
+        }
+        _ => None,
+    };
+    let visibility = if public_sequence.is_some() {
+        "public"
+    } else {
+        "internal"
+    };
     sqlx::query(
         r#"
         INSERT INTO insight_platform.events (
             tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
-            run_id, event_type, visibility, payload_schema_version, payload, payload_digest
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'internal', $8, $9, $10)
+            run_id, public_sequence, event_type, visibility,
+            payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(tenant_id)
@@ -16720,7 +16792,9 @@ pub(crate) async fn append_scheduler_event(
     .bind(aggregate_id)
     .bind(aggregate_version)
     .bind(run_id)
+    .bind(public_sequence)
     .bind(event_type)
+    .bind(visibility)
     .bind(payload.schema_version)
     .bind(&payload.value)
     .bind(&payload.digest)
@@ -16932,24 +17006,26 @@ impl PgRunTransaction {
         .execute(&mut *transaction)
         .await?;
 
-        let record = load_run(&mut transaction, &command.audit.tenant_id, &command.run_id).await?;
+        let admitted =
+            load_run(&mut transaction, &command.audit.tenant_id, &command.run_id).await?;
         append_command_event(
             &mut transaction,
             &command.audit,
             "run",
-            &record.run_id,
-            record.version,
+            &admitted.run_id,
+            admitted.version,
             "run.admitted",
             &TypedPayload::new(
                 1,
                 &serde_json::json!({
-                    "agent_deployment_id": record.agent_deployment_id,
-                    "bindings_digest": record.bindings.canonical_digest,
-                    "input_value_id": record.input_value_id,
+                    "agent_deployment_id": admitted.agent_deployment_id,
+                    "bindings_digest": admitted.bindings.canonical_digest,
+                    "input_value_id": admitted.input_value_id,
                 }),
             )?,
         )
         .await?;
+        let record = load_run(&mut transaction, &command.audit.tenant_id, &command.run_id).await?;
         terminalize_run_admission_receipt(&mut transaction, &command.audit, &record).await?;
         transaction.commit().await?;
         Ok(CommandOutcome::Applied(record))
@@ -17431,6 +17507,16 @@ pub struct RunResultRecord {
     pub schema_digest: Sha256Digest,
     pub content_digest: Sha256Digest,
     pub value: ValueRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicRunEventRecord {
+    pub event_id: ResourceId,
+    pub sequence: u64,
+    pub event_type: PublicRunEventType,
+    pub source_id: ResourceId,
+    pub source_projection_version: u64,
+    pub occurred_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20985,12 +21071,26 @@ async fn append_command_event_version(
     event_type: &str,
     payload: &TypedPayload,
 ) -> Result<(), RepositoryError> {
+    let run_id = (aggregate_kind == "run").then_some(aggregate_id);
+    let public_event_type = public_run_event_type(aggregate_kind, event_type, &payload.value);
+    let public_sequence = match (run_id, public_event_type) {
+        (Some(run_id), Some(_)) => {
+            Some(next_public_run_sequence(transaction, &audit.tenant_id.to_string(), run_id).await?)
+        }
+        _ => None,
+    };
+    let visibility = if public_sequence.is_some() {
+        "public"
+    } else {
+        "internal"
+    };
     sqlx::query(
         r#"
         INSERT INTO insight_platform.events (
             tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
-            event_type, visibility, payload_schema_version, payload, payload_digest
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'internal', $7, $8, $9)
+            run_id, public_sequence, event_type, visibility,
+            payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(audit.tenant_id.to_string())
@@ -20998,7 +21098,10 @@ async fn append_command_event_version(
     .bind(aggregate_kind)
     .bind(aggregate_id)
     .bind(aggregate_version)
+    .bind(run_id)
+    .bind(public_sequence)
     .bind(event_type)
+    .bind(visibility)
     .bind(payload.schema_version)
     .bind(&payload.value)
     .bind(&payload.digest)
@@ -21016,6 +21119,142 @@ async fn append_command_event_version(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+async fn next_public_run_sequence(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    run_id: &str,
+) -> Result<i64, RepositoryError> {
+    sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.runs
+        SET public_sequence = public_sequence + 1
+        WHERE tenant_id = $1 AND run_id = $2
+        RETURNING public_sequence
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(run_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("public Run event authority"))
+}
+
+fn public_run_event_type(
+    aggregate_kind: &str,
+    event_type: &str,
+    payload: &Value,
+) -> Option<PublicRunEventType> {
+    use PublicRunEventType as Public;
+
+    match (aggregate_kind, event_type) {
+        ("run", "run.admitted") => Some(Public::RunQueued),
+        ("run", "run.pause_requested") => Some(Public::RunPaused),
+        ("run", "run.pause_resumed") => Some(Public::RunResumed),
+        ("run", "run.cancel_requested") => Some(Public::RunCancelling),
+        ("run", "run.task_waiting" | "run.child_waiting") => Some(Public::RunWaiting),
+        ("run", "run.failed") => Some(Public::RunFailed),
+        ("run", "run.terminal_committed" | "run.terminal_converged") => {
+            public_terminal_run_event(payload)
+        }
+        ("node_execution", "node.started") => Some(Public::NodeStarted),
+        ("node_execution", "node.failed") => Some(Public::NodeFailed),
+        ("node_execution", "node.cancelled") => Some(Public::NodeCancelled),
+        ("node_execution", "node.terminal_committed" | "node.terminal_converged") => {
+            public_terminal_node_event(payload)
+        }
+        ("child_run_link", "child.started") => Some(Public::ChildStarted),
+        ("child_run_link", "child.completed") => public_terminal_child_event(payload),
+        ("interaction", "interaction.required") => Some(Public::InteractionRequired),
+        ("interaction", "interaction.respond" | "interaction.expired") => {
+            Some(Public::InteractionResolved)
+        }
+        _ => None,
+    }
+}
+
+fn public_terminal_run_event(payload: &Value) -> Option<PublicRunEventType> {
+    use PublicRunEventType as Public;
+    match payload.get("state").and_then(Value::as_str) {
+        Some("succeeded") => Some(Public::RunCompleted),
+        Some("failed") => Some(Public::RunFailed),
+        Some("cancelled") => Some(Public::RunCancelled),
+        Some("timed_out") => Some(Public::RunTimedOut),
+        _ => None,
+    }
+}
+
+fn public_terminal_node_event(payload: &Value) -> Option<PublicRunEventType> {
+    use PublicRunEventType as Public;
+    match payload.get("state").and_then(Value::as_str) {
+        Some("succeeded") => Some(Public::NodeCompleted),
+        Some("failed") => Some(Public::NodeFailed),
+        Some("cancelled") => Some(Public::NodeCancelled),
+        Some("timed_out") => Some(Public::NodeTimedOut),
+        _ => None,
+    }
+}
+
+fn public_terminal_child_event(payload: &Value) -> Option<PublicRunEventType> {
+    use PublicRunEventType as Public;
+    match payload.get("state").and_then(Value::as_str) {
+        Some("succeeded") => Some(Public::ChildCompleted),
+        Some("failed") => Some(Public::ChildFailed),
+        Some("cancelled") => Some(Public::ChildCancelled),
+        Some("timed_out") => Some(Public::ChildTimedOut),
+        _ => Some(Public::ChildCompleted),
+    }
+}
+
+fn public_run_event_from_row(row: PgRow) -> Result<PublicRunEventRecord, RepositoryError> {
+    let aggregate_kind: String = row.try_get("aggregate_kind")?;
+    let stored_event_type: String = row.try_get("event_type")?;
+    let payload: Value = row.try_get("payload")?;
+    let event_type = public_run_event_type(&aggregate_kind, &stored_event_type, &payload)
+        .ok_or_else(|| {
+            RepositoryError::CorruptRow(
+                "public Run Event has no closed public projection".to_owned(),
+            )
+        })?;
+    let event_id = row
+        .try_get::<String, _>("event_id")?
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let source_id = row
+        .try_get::<String, _>("aggregate_id")?
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let source_kind = event_type.durable_source_kind().ok_or_else(|| {
+        RepositoryError::CorruptRow("durable public Event has no source kind".to_owned())
+    })?;
+    let source_projection_version = u64::try_from(
+        row.try_get::<Option<i64>, _>("aggregate_version")?
+            .ok_or_else(|| {
+                RepositoryError::CorruptRow("public Event source version is absent".to_owned())
+            })?,
+    )
+    .map_err(|_| RepositoryError::CorruptRow("invalid public Event source version".to_owned()))?;
+    let sequence = u64::try_from(
+        row.try_get::<Option<i64>, _>("public_sequence")?
+            .ok_or_else(|| {
+                RepositoryError::CorruptRow("public Event sequence is absent".to_owned())
+            })?,
+    )
+    .map_err(|_| RepositoryError::CorruptRow("invalid public Event sequence".to_owned()))?;
+    if event_id.kind() != ResourceKind::Event || source_id.kind() != source_kind.resource_kind() {
+        return Err(RepositoryError::CorruptRow(
+            "public Event nominal identity disagrees with its projection".to_owned(),
+        ));
+    }
+    Ok(PublicRunEventRecord {
+        event_id,
+        sequence,
+        event_type,
+        source_id,
+        source_projection_version,
+        occurred_at: row.try_get("occurred_at")?,
+    })
 }
 
 async fn load_tenant(
