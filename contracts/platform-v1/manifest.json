@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:e702d47c40e15e6b7bd392539b692f2f2a3ed17a791b71438a779bd22dfde46b",
+  "contract_digest": "sha256:32d839a23e132f0a7c6695a4632831bbf9e4f56621ab0d18cad667330623e214",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -69,10 +69,10 @@
       "sha256": "07851119c32bc17ffcce1f2c28d0e833e2689697992623fff03ac2fc36f5ca7d"
     },
     {
-      "bytes": 2292,
+      "bytes": 2745,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/candidate-manifest.schema.json",
-      "sha256": "414309c64439d438088bb4ebed13049c3a9d1c8a514e2b5752ff6656f73c6caa"
+      "sha256": "7616671f78c56ac682755e955ccc1be83b261d8b18cd376a3b56fde045ec12be"
     },
     {
       "bytes": 1117,

@@ -12,7 +12,23 @@
       "maxProperties": 256,
       "minProperties": 1,
       "propertyNames": {
-        "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+        "enum": [
+          "management_api",
+          "runtime_api",
+          "scheduler_recovery",
+          "model_worker",
+          "capability_native_worker",
+          "capability_remote_worker",
+          "context_worker",
+          "mcp_host",
+          "sandbox_controller",
+          "sandbox_wasi_executor",
+          "sandbox_gvisor_executor",
+          "artifact_gateway",
+          "artifact_data_worker",
+          "artifact_maintenance",
+          "egress_secret_broker"
+        ]
       },
       "type": "object"
     },

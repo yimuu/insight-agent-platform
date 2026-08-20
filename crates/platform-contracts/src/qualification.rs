@@ -68,17 +68,63 @@ impl<'de> Deserialize<'de> for GitCommit {
     }
 }
 
-/// Stable process/image role inside one release candidate.
-///
-/// This is a nominal map key, not an extension bag: every installed role is frozen by name and
-/// exact image digest in the CandidateManifest, while the qualification profile decides which
-/// roles are mandatory for that candidate.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ComponentRole(String);
+/// Closed first-release process/image role used by startup and CI/CD manifests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ComponentRole {
+    ManagementApi,
+    RuntimeApi,
+    SchedulerRecovery,
+    ModelWorker,
+    CapabilityNativeWorker,
+    CapabilityRemoteWorker,
+    ContextWorker,
+    McpHost,
+    SandboxController,
+    SandboxWasiExecutor,
+    SandboxGvisorExecutor,
+    ArtifactGateway,
+    ArtifactDataWorker,
+    ArtifactMaintenance,
+    EgressSecretBroker,
+}
 
 impl ComponentRole {
-    pub fn as_str(&self) -> &str {
-        &self.0
+    pub const ALL: &'static [Self] = &[
+        Self::ManagementApi,
+        Self::RuntimeApi,
+        Self::SchedulerRecovery,
+        Self::ModelWorker,
+        Self::CapabilityNativeWorker,
+        Self::CapabilityRemoteWorker,
+        Self::ContextWorker,
+        Self::McpHost,
+        Self::SandboxController,
+        Self::SandboxWasiExecutor,
+        Self::SandboxGvisorExecutor,
+        Self::ArtifactGateway,
+        Self::ArtifactDataWorker,
+        Self::ArtifactMaintenance,
+        Self::EgressSecretBroker,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ManagementApi => "management_api",
+            Self::RuntimeApi => "runtime_api",
+            Self::SchedulerRecovery => "scheduler_recovery",
+            Self::ModelWorker => "model_worker",
+            Self::CapabilityNativeWorker => "capability_native_worker",
+            Self::CapabilityRemoteWorker => "capability_remote_worker",
+            Self::ContextWorker => "context_worker",
+            Self::McpHost => "mcp_host",
+            Self::SandboxController => "sandbox_controller",
+            Self::SandboxWasiExecutor => "sandbox_wasi_executor",
+            Self::SandboxGvisorExecutor => "sandbox_gvisor_executor",
+            Self::ArtifactGateway => "artifact_gateway",
+            Self::ArtifactDataWorker => "artifact_data_worker",
+            Self::ArtifactMaintenance => "artifact_maintenance",
+            Self::EgressSecretBroker => "egress_secret_broker",
+        }
     }
 }
 
@@ -86,19 +132,17 @@ impl FromStr for ComponentRole {
     type Err = CandidateManifestError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if !stable_role(value) {
-            return Err(invalid(
-                "component_images",
-                "component role must be a bounded lowercase stable code",
-            ));
-        }
-        Ok(Self(value.to_owned()))
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|role| role.as_str() == value)
+            .ok_or_else(|| invalid("component_images", "component role is not registered"))
     }
 }
 
 impl fmt::Display for ComponentRole {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -107,7 +151,7 @@ impl Serialize for ComponentRole {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.0)
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -297,18 +341,6 @@ fn valid_lower_hex(value: &str, expected_length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn stable_role(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= MAX_COMPONENT_ROLE_BYTES
-        && bytes[0].is_ascii_lowercase()
-        && bytes.iter().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(*byte, b'_' | b'-' | b'.')
-        })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateManifestError {
     pub field: &'static str,
@@ -364,8 +396,8 @@ mod tests {
             contract_digest: sha('b'),
             database_schema_version: 6,
             component_images: BTreeMap::from([
-                ("runtime-api".parse().unwrap(), sha('c')),
-                ("scheduler".parse().unwrap(), sha('d')),
+                ("runtime_api".parse().unwrap(), sha('c')),
+                ("scheduler_recovery".parse().unwrap(), sha('d')),
             ]),
             worker_manifests: workers,
             deployment_config_digest: sha('e'),
@@ -426,7 +458,7 @@ mod tests {
                 git_commit: format!("sha1:{}", "a".repeat(40)).parse().unwrap(),
                 contract_digest: sha('b'),
                 database_schema_version: 6,
-                component_images: BTreeMap::from([("runtime-api".parse().unwrap(), sha('c'))]),
+                component_images: BTreeMap::from([("runtime_api".parse().unwrap(), sha('c'))]),
                 worker_manifests: &duplicate_roles,
                 deployment_config_digest: sha('e'),
                 hard_limit_profile: &checked_in_hard_limit_profile(),
@@ -481,7 +513,8 @@ mod tests {
             .parse::<GitCommit>()
             .is_ok());
         assert!("ABCDEF".parse::<GitCommit>().is_err());
-        assert!("sandbox.microvm-provider".parse::<ComponentRole>().is_ok());
+        assert!("sandbox_gvisor_executor".parse::<ComponentRole>().is_ok());
+        assert!("sandbox.microvm-provider".parse::<ComponentRole>().is_err());
         assert!("Sandbox Provider".parse::<ComponentRole>().is_err());
     }
 }

@@ -96,7 +96,7 @@ fn candidate_manifest_schema_matches_the_closed_rust_contract() {
         git_commit: format!("sha1:{}", "b".repeat(40)).parse().unwrap(),
         contract_digest: sha('c'),
         database_schema_version: 7,
-        component_images: BTreeMap::from([("runtime-api".parse().unwrap(), sha('d'))]),
+        component_images: BTreeMap::from([("runtime_api".parse().unwrap(), sha('d'))]),
         worker_manifests: std::slice::from_ref(&worker),
         deployment_config_digest: sha('e'),
         hard_limit_profile: &checked_in_hard_limit_profile(),

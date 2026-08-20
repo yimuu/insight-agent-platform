@@ -700,7 +700,7 @@ fn candidate_manifest_schema() -> Value {
                 "minProperties": 1,
                 "maxProperties": MAX_CANDIDATE_COMPONENT_IMAGES,
                 "propertyNames": {
-                    "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+                    "enum": crate::ComponentRole::ALL.iter().map(|role| role.as_str()).collect::<Vec<_>>()
                 },
                 "additionalProperties": digest.clone()
             },
