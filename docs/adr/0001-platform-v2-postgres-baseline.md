@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Reviewed / Awaiting Acceptance |
+| 状态 | Accepted |
 | 日期 | 2026-08-20 |
 | 决策范围 | clean-cut `/v1` 的 PostgreSQL 物理模型 |
 | 规范输入 | `docs/specs/platform-v2/00-overview.md`～`18-deployment-observability-and-qualification.md` |

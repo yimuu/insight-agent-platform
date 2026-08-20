@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Reviewed / Awaiting Acceptance |
+| 状态 | Accepted |
 | 日期 | 2026-08-20 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
@@ -501,6 +501,6 @@ Run/node ID 不进入 metric label。Trace span 可以携带 opaque IDs，但不
 
 ## 22. 未决问题
 
-CR-166已统一root current与child inherited exact binding合同，无installation/release中间层。本规范已Reviewed、
-等待Acceptance；durable state、崩溃恢复与parent/child fixture仍待实现。public status的精简映射与SSE schema由17定义，
+CR-166已统一root current与child inherited exact binding合同，无installation/release中间层。本规范已Accepted；
+durable state、崩溃恢复与parent/child fixture仍待实现。public status的精简映射与SSE schema由17定义，
 不能改变这里的durable first-winner状态机。

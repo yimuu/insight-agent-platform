@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Reviewed / Awaiting Acceptance |
+| 状态 | Accepted |
 | 日期 | 2026-08-20 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |

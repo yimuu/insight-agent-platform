@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Reviewed / Awaiting Acceptance |
+| 状态 | Accepted |
 | 日期 | 2026-08-20 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 10、11、13、14、15、17、18 |
@@ -456,7 +456,7 @@ Effect/idempotency failure与stale exact cancel；不增加表或migration。
 
 该证据证明当前Native执行/取消组合及HTTP/gRPC Egress候选代码边界，不证明所有backend已完成真实进程conformance。
 真实远端服务、Secret Manager/TLS/mTLS composition、callback、Sandbox组合和18的L4～L6资格尚未完成。
-这只是当前实施证据边界；本规范已Reviewed、等待Acceptance，不能用候选代码或fixture绕过Accepted门禁。
+这只是当前实施证据边界；本规范已Accepted，不能用候选代码或fixture绕过Implementation/Verified门禁。
 
 ## 22. 明确推迟的工作
 
@@ -469,6 +469,6 @@ Effect/idempotency failure与stale exact cancel；不增加表或migration。
 
 ## 23. 未决问题
 
-CR-166已将region nominal统一到02，并删除Model/release installation compatibility合同。本规范已Reviewed、等待Acceptance；
+CR-166已将region nominal统一到02，并删除Model/release installation compatibility合同。本规范已Accepted；
 Capability registry、backend resolution和publication fixture仍待实现。具体HTTP/gRPC wire envelope与Sandbox protocol
 分别由10、14冻结，但必须实现本规范的统一Interface和安全合同。

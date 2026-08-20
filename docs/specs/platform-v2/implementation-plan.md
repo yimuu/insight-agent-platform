@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Generated from reviewed CR-166 |
+| 状态 | Accepted / Implementing |
 | 日期 | 2026-08-20 |
 | 合同输入 | 00～18、cross-review CR-166、ADR-0001、AGENTS.md |
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |

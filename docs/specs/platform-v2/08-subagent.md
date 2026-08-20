@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Reviewed / Awaiting Acceptance |
+| 状态 | Accepted |
 | 日期 | 2026-08-20 |
 | 依赖 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`10-capability-invocation.md`](10-capability-invocation.md) |
 | 直接下游 | 17、18 |
@@ -297,5 +297,5 @@ span 中。
 ## 20. 未决问题
 
 CR-166已确认child Run只继承parent允许的exact Deployment/ResourceVersion closure，不读取installation或release candidate。
-本规范已Reviewed、等待Acceptance；parent/child transaction、quota、cancel/recovery和schema fixture仍待实现。Detached background Agent
+本规范已Accepted；parent/child transaction、quota、cancel/recovery和schema fixture仍待实现。Detached background Agent
 尚未进入本合同，也没有隐藏发布开关。

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Reviewed / Awaiting specification acceptance |
+| 状态 | Accepted / Implementation Authorized |
 | 日期 | 2026-08-20 |
 | 输入 | 00～18 live tree、ADR-0001、AGENTS.md |
 | 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复和fixture闭包 |
@@ -22,19 +22,19 @@ CR-166取代CR-165的过度设计。全量审查确认首版目标收敛为：
 - target persistence = schema contract v7、23张总表/22张业务表，不增表；
 - implementation plan = 四阶段，证据按层级归属，不复制proof。
 
-本次没有P0/P1规范冲突。受影响规范已推进为`Reviewed / Awaiting Acceptance`；只能在owner确认后
-批量推进为Accepted，不得把Reviewed目标宣称为current behavior。
+本次没有P0/P1规范冲突。2026-08-20 owner已授权按本计划执行全部spec00～18，受影响规范已作为同一合同批次
+推进为Accepted。Accepted仍不表示target已经成为current behavior；只有通过实现与资格门禁后才能推进状态。
 
 ## 2. 文档状态与依赖
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Reviewed / Awaiting Acceptance | CR-166已写回，等待统一acceptance |
-| 01～10 | Reviewed / Awaiting Acceptance | 依赖顺序与owner边界已统一 |
+| 00 | Accepted / Implementation Authorized | CR-166已写回并获统一acceptance |
+| 01～10 | Accepted | 依赖顺序与owner边界已统一 |
 | 11 Skill | Accepted / Implementation In Progress | 未改变Skill“方法包、非运行时”语义；脚本仍必须发布为Sandbox Capability |
-| 12～18 | Reviewed / Awaiting Acceptance | 已按CR-166重写/修订 |
-| ADR-0001 | Reviewed / Awaiting Acceptance | target v7/23/22与GitOps/Job/Artifact简化对齐 |
-| implementation-plan | Draft target | 只能从本Reviewed cross-review生成，不表示current behavior |
+| 12～18 | Accepted | 已按CR-166重写/修订并获统一acceptance |
+| ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
+| implementation-plan | Accepted / Implementing | 从Accepted合同生成；仍不表示current behavior |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
 18不再是17的Release state上游，因而不存在17→18→17的循环。
@@ -220,10 +220,9 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 | Artifact八role权限与容量矩阵过度分裂 | 收敛为Gateway/Data Worker/Maintenance三role，内部用closed caller capability区分 |
 | microVM/Managed stdio在首版引入Provider/session/child Job恢复 | Sandbox只WASI+gVisor，MCP只remote HTTP，全部推迟 |
 
-## 15. Acceptance 建议
+## 15. Acceptance 记录
 
-CR-166的以下一次性门禁已用于把00～10、12～18和ADR-0001推进到Reviewed；owner可将它们与
-implementation plan作为同一合同批次accept：
+CR-166的以下一次性门禁已用于把00～10、12～18、ADR-0001和implementation plan作为同一合同批次accept：
 
 1. `rg` stale-contract scan确认microVM、Managed stdio、Installation Release、ManagementOperation、
    Model Artifact Producer和八role只出现在历史/否定/明确推迟语境，不再是首版正向requirement；
@@ -235,4 +234,5 @@ implementation plan作为同一合同批次accept：
 ## 16. 未决项
 
 无P0/P1规范冲突；stale-contract、status/dependency、relative-link和`git diff --check`门禁已通过。
-下一步是owner对Reviewed合同批次做Acceptance决定；批准与实现完成都不得被推断。
+owner已明确授权执行spec00～18，Acceptance已记录。下一步按implementation plan进入Phase 1；Acceptance不得被
+推断为实现或资格完成。

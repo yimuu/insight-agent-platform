@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Reviewed / Awaiting Acceptance |
+| 状态 | Accepted |
 | 日期 | 2026-08-20 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -578,5 +578,5 @@ live observation 丢失不改变结果。
 ## 21. 未决问题
 
 CR-166已确认root Run只冻结tenant active exact Deployment closure，Model为Inline-only，无installation/candidate binding。
-本规范已Reviewed、等待Acceptance；相关API、持久化和分层证据仍待实现。05冻结Plan语义，
+本规范已Accepted；相关API、持久化和分层证据仍待实现。05冻结Plan语义，
 Model Provider/ModelTurn由16冻结；具体authoring表面只能在不改变Plan节点代数、类型和恢复语义的前提下单独演进。
