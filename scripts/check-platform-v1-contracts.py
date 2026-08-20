@@ -256,12 +256,27 @@ def check_foundation_surfaces(errors):
     ]
     if any(fragment not in openapi for fragment in callback_contract):
         errors.append("MCP OAuth callback OpenAPI contract is incomplete")
+    operation_contract = [
+        "  /operations/{operation_id}:",
+        "      operationId: getOperation",
+        "      x-insight-authentication: oidc_or_workload_credential",
+        "      x-insight-permission: operation.read",
+        "      x-insight-idempotency: read_only",
+        "      x-insight-rate-class: control_read",
+        "      x-insight-audit: access_log_only",
+        '        "200":',
+        "    OperationViewV1:",
+        "    PublicJobTarget:",
+        "    PublicJobState:",
+    ]
+    if any(fragment not in openapi for fragment in operation_contract):
+        errors.append("public Operation Job projection OpenAPI contract is incomplete")
     path_lines = [
         line for line in openapi.splitlines()
         if line.startswith("  /") and line.endswith(":")
     ]
-    if path_lines != ["  /mcp/oauth/callback:"]:
-        errors.append("OpenAPI exposes an unreviewed Phase 5 path")
+    if path_lines != ["  /operations/{operation_id}:", "  /mcp/oauth/callback:"]:
+        errors.append("OpenAPI exposes a path outside the reviewed implementing slice")
     if any(token in openapi for token in ["access_token", "refresh_token", "error_description"]):
         errors.append("MCP OAuth callback OpenAPI exposes a forbidden sensitive query field")
     if "DurablePublicRunEventPayload:" not in openapi or (

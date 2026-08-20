@@ -7,7 +7,7 @@ use crate::{
         PublicRunEventType, Retryability,
     },
 };
-use chrono::DateTime;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::{error::Error, fmt, str::FromStr};
@@ -93,6 +93,10 @@ impl FromStr for UtcTimestamp {
 }
 
 impl UtcTimestamp {
+    pub fn from_datetime(value: DateTime<Utc>) -> Self {
+        Self(value.to_rfc3339_opts(SecondsFormat::Micros, true))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

@@ -2419,9 +2419,13 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "insight-platform-contracts",
  "insight-platform-mcp-host",
+ "serde",
+ "serde_json",
  "tokio",
  "tower",
+ "uuid",
 ]
 
 [[package]]

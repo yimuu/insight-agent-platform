@@ -69,7 +69,8 @@ ALLOWED_INTERNAL = {
     "artifact_broker": {"artifacts_domain", "contracts", "jobs_domain", "sandbox_domain"},
     "artifact_rpc": {"contracts", "models_domain", "sandbox_domain"},
     "artifact_service": {"artifact_broker", "artifact_rpc", "artifacts_domain", "contracts", "jobs_domain", "platform_postgres", "sandbox_domain"},
-    "platform_api": {"mcp_host"},
+    # HTTP DTOs consume the generated owner contract directly; persistence remains behind ports.
+    "platform_api": {"contracts", "mcp_host"},
     "capability_adapters": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "platform_postgres"},
     "contracts": set(),

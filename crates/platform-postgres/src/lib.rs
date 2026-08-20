@@ -11,6 +11,7 @@ pub mod invocation_repository;
 mod mcp_oauth_cleanup_outbox;
 pub mod mcp_repository;
 pub mod model_turn_repository;
+pub mod operation_repository;
 pub mod repository;
 pub mod sandbox_repository;
 

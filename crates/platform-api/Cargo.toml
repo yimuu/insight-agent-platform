@@ -13,7 +13,11 @@ path = "src/lib.rs"
 async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
+insight-platform-contracts.workspace = true
 insight-platform-mcp-host.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

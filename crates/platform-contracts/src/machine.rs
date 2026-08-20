@@ -46,6 +46,48 @@ x-insight-contract-status: implementing-not-current
 servers:
   - url: /v1
 paths:
+  /operations/{operation_id}:
+    get:
+      operationId: getOperation
+      summary: Read a safe projection of one shared Job
+      tags:
+        - Operations
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: operation.read
+      x-insight-idempotency: read_only
+      x-insight-rate-class: control_read
+      x-insight-audit: access_log_only
+      parameters:
+        - name: operation_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/JobId"
+      responses:
+        "200":
+          description: Safe Job projection. The ETag is derived directly from the Job version.
+          headers:
+            ETag:
+              schema:
+                type: string
+                minLength: 1
+                maxLength: 128
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationViewV1"
+        "401":
+          $ref: "#/components/responses/ApiProblem"
+        "403":
+          $ref: "#/components/responses/ApiProblem"
+        "404":
+          $ref: "#/components/responses/ApiProblem"
+        "500":
+          $ref: "#/components/responses/ApiProblem"
+        "503":
+          $ref: "#/components/responses/ApiProblem"
   /mcp/oauth/callback:
     get:
       operationId: completeMcpOAuthCallback
@@ -177,6 +219,16 @@ paths:
                 enum:
                   - The MCP authorization service is temporarily unavailable.
 components:
+  responses:
+    ApiProblem:
+      description: A bounded, stable public problem response.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiProblem"
   headers:
     NoStore:
       schema:
@@ -187,6 +239,101 @@ components:
         type: string
         const: no-referrer
   schemas:
+    JobId:
+      type: string
+      pattern: "^job_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      minLength: 40
+      maxLength: 40
+    PublicJobState:
+      type: string
+      enum:
+        - queued
+        - running
+        - waiting
+        - succeeded
+        - failed
+        - cancelled
+        - timed_out
+        - reconciliation_required
+    PublicJobTarget:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, resource_id, resource_version]
+          properties:
+            kind: {const: resource_version}
+            resource_id: {$ref: "#/components/schemas/PlatformResourceId"}
+            resource_version: {type: integer, minimum: 1}
+        - type: object
+          additionalProperties: false
+          required: [kind, deployment_id]
+          properties:
+            kind: {const: deployment}
+            deployment_id: {$ref: "#/components/schemas/PlatformResourceId"}
+        - type: object
+          additionalProperties: false
+          required: [kind, context_dataset_id]
+          properties:
+            kind: {const: context_dataset}
+            context_dataset_id: {$ref: "#/components/schemas/PlatformResourceId"}
+        - type: object
+          additionalProperties: false
+          required: [kind, artifact_id]
+          properties:
+            kind: {const: artifact}
+            artifact_id: {$ref: "#/components/schemas/PlatformResourceId"}
+    OperationViewV1:
+      type: object
+      additionalProperties: false
+      required:
+        - operation_id
+        - tenant_id
+        - kind
+        - target
+        - state
+        - progress
+        - result
+        - error
+        - created_at
+        - updated_at
+        - etag
+      properties:
+        operation_id: {$ref: "#/components/schemas/JobId"}
+        tenant_id: {$ref: "#/components/schemas/PlatformResourceId"}
+        kind:
+          type: string
+          enum: [resource_validation, mcp_discovery, context_dataset_build, artifact_verify, artifact_delete]
+        target: {$ref: "#/components/schemas/PublicJobTarget"}
+        state: {$ref: "#/components/schemas/PublicJobState"}
+        progress:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [completed_units, total_units]
+              properties:
+                completed_units: {type: integer, minimum: 0}
+                total_units: {type: integer, minimum: 1}
+            - type: "null"
+        result:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [result_digest]
+              properties:
+                result_digest: {$ref: "#/components/schemas/Digest"}
+            - type: "null"
+        error:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [code, message]
+              properties:
+                code: {type: string, pattern: "^[a-z][a-z0-9_]{0,63}$", maxLength: 64}
+                message: {type: string, minLength: 1, maxLength: 512}
+            - type: "null"
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        etag: {type: string, minLength: 1, maxLength: 128}
     PlatformResourceId:
       $ref: ./schemas/resource-id.schema.json
     Digest:
