@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     CanonicalHttpEndpoint, ClosedJsonValue, ExactDeploymentRef, ExactSecretBindingRef,
     ExactVersionRef, McpClientCapabilities, McpNegotiatedCapabilities, McpTransportBinding,
-    McpTransportKind, PublishedMcpMethod, ResourceId, SandboxIsolationClass, Sha256Digest,
+    McpTransportKind, PublishedMcpMethod, ResourceId, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -194,10 +194,7 @@ fn streamable_http_request(
         endpoint_identity_digest,
         network_policy,
         tls_policy,
-    } = &contract.deployment_closure.transport
-    else {
-        return Err(contract_mismatch());
-    };
+    } = &contract.deployment_closure.transport;
     let method_limits = contract
         .protocol_profile
         .method_limits
@@ -565,10 +562,7 @@ impl McpSubscriptionTransport for StreamableHttpMcpSubscriptionTransport {
             endpoint_identity_digest,
             network_policy,
             tls_policy,
-        } = &contract.deployment_closure.transport
-        else {
-            return Err(contract_mismatch());
-        };
+        } = &contract.deployment_closure.transport;
         binding
             .validate_for_execution_contract_at(contract, Utc::now())
             .map_err(|_| contract_mismatch())?;

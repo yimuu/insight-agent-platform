@@ -10,8 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures::FutureExt;
 use insight_platform_contracts::{
-    ResourceId, ResourceKind, Retryability, SandboxIsolationClass, SandboxJobState, Sha256Digest,
-    WorkerManifest,
+    ResourceId, Retryability, SandboxIsolationClass, SandboxJobState, Sha256Digest, WorkerManifest,
 };
 use serde::{Deserialize, Serialize};
 use std::{

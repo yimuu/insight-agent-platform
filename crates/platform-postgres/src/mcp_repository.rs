@@ -1,11 +1,10 @@
 use crate::repository::{
     append_command_event, append_scheduler_event, claim_command_receipt, decode_deployment_closure,
-    decode_typed_payload, decode_versioned_payload, job_from_row, job_projection, load_deployment,
-    load_resource, load_resource_for_update, load_task_for_update, payload_from_row,
-    require_ready_run_artifact, require_tenant_permission, task_projection,
-    terminalize_command_receipt, validate_deployment_closure_exists,
-    validate_exact_secret_bindings_at_creation, PgRegistryTransaction, PgRepository,
-    RepositoryError, ResourceRecord, TaskRecord, TypedPayload, MAX_JOB_LEASE_MILLISECONDS,
+    decode_typed_payload, decode_versioned_payload, load_deployment, load_resource,
+    load_resource_for_update, load_task_for_update, payload_from_row, require_ready_run_artifact,
+    require_tenant_permission, task_projection, terminalize_command_receipt,
+    validate_deployment_closure_exists, validate_exact_secret_bindings_at_creation,
+    PgRegistryTransaction, PgRepository, RepositoryError, ResourceRecord, TaskRecord, TypedPayload,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -16,12 +15,12 @@ use insight_platform_contracts::{
     ExactDeploymentRef, JobState, McpAuthorizationPrincipalKind, McpAuthorizationState,
     McpDeploymentClosure, McpProtocolPolicyDocument, McpServerExecutionContract, Permission,
     PolicyKind, PrincipalIdentityState, PrincipalKind, RegistryResourceKind, ResourceDocument,
-    ResourceId, ResourceKind, SandboxJobState, Sha256Digest,
+    ResourceId, Sha256Digest,
 };
 use insight_platform_jobs::{
-    decide_claim, decide_expired_lease as decide_expired_job_lease,
+    decide_expired_lease as decide_expired_job_lease,
     decide_owner_terminal as decide_job_owner_terminal, decide_retry as decide_job_retry,
-    decide_terminal as decide_job_terminal, JobLease, JobOwnerRef, JobProjection, LeasePolicy,
+    decide_terminal as decide_job_terminal, JobLease, JobOwnerRef, JobProjection,
 };
 use insight_platform_mcp_host::{
     AuthenticatedMcpOAuthState, AuthorizedMcpOAuthPkceCleanup, BeginMcpOAuthAuthorization,
@@ -7855,6 +7854,7 @@ async fn requeue_recovered_mcp_subscription_job(
     Ok(())
 }
 
+#[cfg(any())]
 async fn terminalize_recovered_mcp_subscription_job(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,

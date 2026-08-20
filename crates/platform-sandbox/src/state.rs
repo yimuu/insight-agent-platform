@@ -8,13 +8,10 @@ use insight_platform_contracts::{
     ArtifactRef, CommandAudit, DataClassification, JobState, ResourceId, ResourceKind,
     Retryability, SandboxJobState, Sha256Digest, ValueRef, WorkClass,
 };
-use insight_platform_invocations::{
-    BackendInputRequest, CapabilityOutputValue, DispatchOutcome, RemoteWait,
-};
 use insight_platform_jobs::{
     decide_cleanup_reconciliation, decide_cleanup_terminal, decide_expired_lease,
     decide_observation_update, decide_owner_terminal, decide_start, JobFence, JobOwnerRef,
-    JobProjection, WakeSource,
+    JobProjection,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;

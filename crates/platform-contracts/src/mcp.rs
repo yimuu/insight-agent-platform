@@ -912,9 +912,7 @@ mod tests {
         binding.validate().unwrap();
 
         let mut insecure = binding;
-        let McpTransportBinding::StreamableHttp { endpoint, .. } = &mut insecure else {
-            unreachable!();
-        };
+        let McpTransportBinding::StreamableHttp { endpoint, .. } = &mut insecure;
         endpoint.scheme = CapabilityEndpointScheme::Http;
         assert_eq!(insecure.validate(), Err(McpContractError::InvalidTransport));
     }

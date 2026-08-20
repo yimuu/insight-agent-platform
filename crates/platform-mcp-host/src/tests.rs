@@ -7,8 +7,7 @@ use insight_platform_contracts::{
     McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities,
     McpOAuthClientAuthenticationKind, McpOAuthEndpoint, McpOAuthTaskBinding, McpServerLimits,
     McpSessionState, McpTransportBinding, McpTransportFeatures, Permission, PermissionSet,
-    PrincipalSnapshot, SandboxIsolationClass, SecretPurpose, SecretResolutionPolicy,
-    MCP_PROTOCOL_BASELINE,
+    PrincipalSnapshot, SecretPurpose, SecretResolutionPolicy, MCP_PROTOCOL_BASELINE,
 };
 use insight_platform_jobs::JobFence;
 use std::{

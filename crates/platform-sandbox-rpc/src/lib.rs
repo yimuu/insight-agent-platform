@@ -13,30 +13,25 @@ use async_trait::async_trait;
 use insight_platform_contracts::ArtifactGrantOperation;
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ArtifactRef, CommandOutcome, HardLimitProfile, JsonLimits,
-    Retryability, Sha256Digest,
+    Sha256Digest,
 };
-use insight_platform_jobs::JobFence;
 #[cfg(test)]
 use insight_platform_sandbox::ScopedArtifactGrant;
 use insight_platform_sandbox::{
-    AbortSandboxExecution, ClaimSandboxJobs, ClaimedSandboxJob, CollectedSandbox,
-    CommitSandboxOutcome, CommitSandboxPhase, DestroySandbox, ExpiredSandboxLease,
-    HeartbeatSandboxExecution, InstalledSandboxBackendDescriptor, PreparedSandbox,
-    ProveSandboxProcessGenerationAbsent, RegisterWasiExecutorProcessGeneration,
-    RevokeWasiSandboxGrants, RunningSandbox, SandboxBackendFailure, SandboxBackendFailureStage,
-    SandboxClaimAuthority, SandboxClaimFailure, SandboxCleanupEvidence, SandboxCommandLimits,
-    SandboxExecutionAuthority, SandboxExecutionRequest, SandboxExecutorBackend,
-    SandboxIsolationBackendKind, SandboxLeaseRecoveryEvidence, SandboxPhaseDecision,
+    ClaimSandboxJobs, ClaimedSandboxJob, CommitSandboxOutcome, CommitSandboxPhase,
+    HeartbeatSandboxExecution, ProveSandboxProcessGenerationAbsent,
+    RegisterWasiExecutorProcessGeneration, RevokeWasiSandboxGrants, SandboxClaimAuthority,
+    SandboxClaimFailure, SandboxCommandLimits, SandboxExecutionAuthority, SandboxPhaseDecision,
     SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolation,
-    SandboxProcessGenerationIsolationError, SandboxTerminationEvidence, TerminateSandbox,
-    VerifyWasiExecutorProcessGeneration, WasiArtifactBroker, WasiArtifactBrokerError,
-    WasiArtifactReadPurpose, WasiArtifactReadRequest, WasiExecutorProcessAttestationAuthority,
-    WasiExecutorProcessIdentityEvidence, WasiExecutorProcessRegistrar,
-    WasiExecutorProcessRegistrationError, WasiExecutorProcessRegistrationVerifier,
-    WasiExecutorRegistrationPeer, WasiGrantRevocationError, WasiGrantRevocationEvidence,
-    WasiGrantRevoker, WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator,
+    SandboxProcessGenerationIsolationError, VerifyWasiExecutorProcessGeneration,
+    WasiArtifactBroker, WasiArtifactBrokerError, WasiArtifactReadPurpose, WasiArtifactReadRequest,
+    WasiExecutorProcessAttestationAuthority, WasiExecutorProcessIdentityEvidence,
+    WasiExecutorProcessRegistrar, WasiExecutorProcessRegistrationError,
+    WasiExecutorProcessRegistrationVerifier, WasiExecutorRegistrationPeer,
+    WasiGrantRevocationError, WasiGrantRevocationEvidence, WasiGrantRevoker,
+    WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
     error::Error,
@@ -499,6 +494,7 @@ pub struct SandboxMicroVmExecutorProcessRegistrationGrpcClient {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+#[cfg(any())]
 enum SandboxIsolationProviderReply<T> {
     Completed(T),
     Failed(SandboxBackendFailure),
@@ -1524,6 +1520,7 @@ impl ManagedMcpSandboxSecretDeliveryAuthority for SandboxSecretDeliveryAuthority
     }
 }
 
+#[cfg(any())]
 fn request_external_effect_possible(request: &SandboxExecutionRequest) -> bool {
     request.effect.risk_rank() >= insight_platform_contracts::Effect::IdempotentWrite.risk_rank()
         || request.network_mode != insight_platform_sandbox::SandboxNetworkMode::None
@@ -2789,6 +2786,7 @@ fn registration_status(error: WasiExecutorProcessRegistrationError) -> Status {
     }
 }
 
+#[cfg(any())]
 fn process_isolation_status(error: SandboxProcessGenerationIsolationError) -> Status {
     match error {
         SandboxProcessGenerationIsolationError::StillLive => {
@@ -3497,6 +3495,7 @@ fn classify_status(status: Status) -> SandboxRpcError {
     }
 }
 
+#[cfg(any())]
 fn isolation_provider_failure(
     stage: SandboxBackendFailureStage,
     execution_may_have_started: bool,
@@ -3581,7 +3580,6 @@ mod tests {
     use hyper_util::rt::TokioIo;
     use insight_platform_contracts::{
         checked_in_hard_limit_profile, ArtifactRef, DataClassification, ResourceId, ResourceKind,
-        MAX_SANDBOX_RUNTIME_BUNDLE_BYTES,
     };
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
@@ -3590,7 +3588,6 @@ mod tests {
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
-        sync::Mutex,
     };
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::oneshot;
@@ -3615,13 +3612,19 @@ mod tests {
         ca_pem: String,
         server_certificate_pem: String,
         server_key_pem: String,
+        #[cfg(any())]
         provider_server_certificate_pem: String,
+        #[cfg(any())]
         provider_server_key_pem: String,
         wasi_certificate_pem: String,
         wasi_key_pem: String,
+        #[cfg(any())]
         microvm_certificate_pem: String,
+        #[cfg(any())]
         microvm_key_pem: String,
+        #[cfg(any())]
         microvm_provider_certificate_pem: String,
+        #[cfg(any())]
         microvm_provider_key_pem: String,
         controller_certificate_pem: String,
         controller_key_pem: String,
@@ -3652,6 +3655,7 @@ mod tests {
             vec![SanType::DnsName("localhost".try_into().unwrap())],
             ExtendedKeyUsagePurpose::ServerAuth,
         );
+        #[cfg(any())]
         let (provider_server_certificate_pem, provider_server_key_pem) = issue(
             vec![
                 SanType::DnsName("localhost".try_into().unwrap()),
@@ -3671,12 +3675,14 @@ mod tests {
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
+        #[cfg(any())]
         let (microvm_certificate_pem, microvm_key_pem) = issue(
             vec![SanType::URI(
                 MICROVM_EXECUTOR_WORKLOAD_IDENTITY.try_into().unwrap(),
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
+        #[cfg(any())]
         let (microvm_provider_certificate_pem, microvm_provider_key_pem) = issue(
             vec![SanType::URI(
                 MICROVM_PROVIDER_WORKLOAD_IDENTITY.try_into().unwrap(),
@@ -3695,13 +3701,19 @@ mod tests {
             ca_pem: ca.pem(),
             server_certificate_pem,
             server_key_pem,
+            #[cfg(any())]
             provider_server_certificate_pem,
+            #[cfg(any())]
             provider_server_key_pem,
             wasi_certificate_pem,
             wasi_key_pem,
+            #[cfg(any())]
             microvm_certificate_pem,
+            #[cfg(any())]
             microvm_key_pem,
+            #[cfg(any())]
             microvm_provider_certificate_pem,
+            #[cfg(any())]
             microvm_provider_key_pem,
             controller_certificate_pem,
             controller_key_pem,
@@ -3713,7 +3725,9 @@ mod tests {
     #[derive(Default)]
     struct RecordingAuthority {
         claims: AtomicUsize,
+        #[cfg(any())]
         managed_heartbeats: AtomicUsize,
+        #[cfg(any())]
         managed_recovery_scans: AtomicUsize,
     }
 
@@ -4010,6 +4024,7 @@ mod tests {
         }
     }
 
+    #[cfg(any())]
     struct FailOnceArtifactBroker {
         calls: AtomicUsize,
         value: Vec<u8>,

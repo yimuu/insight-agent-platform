@@ -1,7 +1,6 @@
 use super::*;
 use futures::StreamExt;
-use insight_platform_contracts::{SecretPurpose, SecretResolutionPolicy};
-use insight_platform_jobs::JobFence;
+use insight_platform_contracts::SecretResolutionPolicy;
 #[cfg(any())]
 use insight_platform_mcp_host::ManagedMcpSandboxSessionIdentity;
 #[cfg(any())]

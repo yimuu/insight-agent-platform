@@ -2,39 +2,18 @@ use super::*;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, AllowedMcpServerCapabilities,
-    ArtifactGrantOperation, ArtifactRef, AuthoringPackage, CapabilityArtifactContract,
-    CapabilityBackendBinding, CapabilityBackendContract, CapabilityBackendFeatures,
-    CapabilityBackendKind, CapabilityBackendLimits, CapabilityCancellationKind,
-    CapabilityDataFlowPolicy, CapabilityDeploymentClosure, CapabilityIdempotencyKind,
-    CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
-    CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
-    CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue, CodeTrustClass, CommandAudit,
-    CommandOutcome, DataClassification, Effect, ExactDeploymentRef, ExactSecretBindingRef,
-    ExactVersionRef, JobState, McpAuthorizationPrincipalKind, McpClientCapabilities,
-    McpDeploymentClosure, McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities,
-    McpProtocolPolicyDocument, McpServerExecutionContract, McpServerLimits,
-    McpToolCapabilityContract, McpTransportBinding, McpTransportFeatures, McpTransportKind,
-    PrincipalKind, PublishedMcpMethod, ResourceId, ResourceKind, Retryability, SandboxAbiVersion,
-    SandboxArtifactIoPolicyDocument, SandboxCleanupPolicy, SandboxEntrypointKind,
-    SandboxIsolationClass, SandboxIsolationPolicyDocument, SandboxJobState,
-    SandboxNetworkPolicyDocument, SandboxPackageResourceSpec, SandboxProfileResourceSpec,
-    SandboxResourcePolicyDocument, SandboxRuntimeFamily, SandboxRuntimeResourceSpec,
-    SandboxSecretDeliveryMode, SandboxSecretResolutionPolicyDocument, SecretPurpose,
-    SecretResolutionPolicy, ValueRef, WorkClass, MCP_PROTOCOL_BASELINE,
+    canonical_digest, checked_in_hard_limit_profile, ArtifactGrantOperation, ArtifactRef,
+    AuthoringPackage, CapabilityBackendBinding, CapabilityDeploymentClosure, CodeTrustClass,
+    CommandAudit, DataClassification, Effect, ExactDeploymentRef, ExactVersionRef, PrincipalKind,
+    ResourceId, ResourceKind, Retryability, SandboxAbiVersion, SandboxArtifactIoPolicyDocument,
+    SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass,
+    SandboxIsolationPolicyDocument, SandboxJobState, SandboxNetworkPolicyDocument,
+    SandboxPackageResourceSpec, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
+    SandboxRuntimeFamily, SandboxRuntimeResourceSpec, ValueRef,
 };
-use insight_platform_invocations::{CapabilityOutputValue, DispatchOutcome};
 use insight_platform_jobs::{decide_claim, JobFence, LeasePolicy};
-use insight_platform_mcp_host::{
-    McpAuthorizationContext, McpHostExecutionContract, McpLogicalOperationRequest,
-    McpResourceSubscriptionBinding, McpSessionBindingKey, McpSessionRecord, McpSubscriptionPayload,
-    McpSubscriptionRecord, McpSubscriptionState, McpSubscriptionWorkerAudit,
-    NewMcpAuthorizationContext, NewMcpHostExecutionContract, NewMcpResourceSubscriptionBinding,
-};
 use std::{
-    collections::BTreeMap,
     convert::Infallible,
-    str::FromStr,
     sync::{Arc, Mutex},
 };
 use tokio::sync::Notify;

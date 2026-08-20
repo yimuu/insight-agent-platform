@@ -15,9 +15,9 @@ use insight_platform_context::{
 use insight_platform_contracts::{
     canonical_digest, canonical_json, ArtifactPurpose, ArtifactRef, ArtifactReferenceKind,
     CapabilityBackendBinding, ClosedJsonSchema, CommandOutcome, DataClassification,
-    DeploymentClosure, EntityLifecycle, InvocationState, McpTransportBinding, NodeExecutionState,
-    Permission, PlanNodeKind, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
-    ResourceId, ResourceKind, RunState, Sha256Digest,
+    DeploymentClosure, EntityLifecycle, InvocationState, NodeExecutionState, Permission,
+    PlanNodeKind, PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId,
+    ResourceKind, RunState, Sha256Digest,
 };
 use insight_platform_invocations::{
     decide_approval_transition, decide_capability_admission, AdmitCapabilityInvocation,

@@ -1,14 +1,13 @@
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, ArtifactGrantOperation, ArtifactRef, CapabilityBackendBinding,
-    CapabilityBackendContract, CapabilityBackendKind, CapabilityDeploymentClosure,
-    CapabilityImplementationResourceSpec, CapabilityInterfaceResourceSpec, CodeTrustClass,
-    DataClassification, Effect, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef,
-    HardLimitProfile, JsonLimits, ResourceDocument, ResourceId, ResourceKind, SandboxAbiVersion,
-    SandboxArtifactIoPolicyDocument, SandboxIsolationClass, SandboxIsolationPolicyDocument,
-    SandboxNetworkPolicyDocument, SandboxPackageResourceSpec, SandboxProfileResourceSpec,
-    SandboxResourcePolicyDocument, SandboxRuntimeFamily, SandboxRuntimeResourceSpec,
-    SandboxSecretResolutionPolicyDocument, Sha256Digest, ValueRef,
+    CapabilityDeploymentClosure, CodeTrustClass, DataClassification, Effect, ExactDeploymentRef,
+    ExactSecretBindingRef, ExactVersionRef, HardLimitProfile, JsonLimits, ResourceDocument,
+    ResourceId, ResourceKind, SandboxAbiVersion, SandboxArtifactIoPolicyDocument,
+    SandboxIsolationClass, SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument,
+    SandboxPackageResourceSpec, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
+    SandboxRuntimeFamily, SandboxRuntimeResourceSpec, SandboxSecretResolutionPolicyDocument,
+    Sha256Digest, ValueRef,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -894,7 +893,7 @@ impl SandboxExecutionRequest {
             &self.artifact_grants,
             &self.secret_grants,
         )?;
-        let mut required_secret_bindings = self
+        let required_secret_bindings = self
             .execution_source
             .capability_deployment_closure()
             .secret_bindings

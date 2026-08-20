@@ -2040,10 +2040,7 @@ async fn sandbox_fixture() {
     let mut drifted_closure = fixture.command.clone();
     let insight_platform_sandbox::SandboxExecutionSource::SandboxCapability {
         capability_deployment_closure: closure,
-    } = &mut drifted_closure.request.execution_source
-    else {
-        panic!("first-release fixture must use a Sandbox Capability");
-    };
+    } = &mut drifted_closure.request.execution_source;
     closure
         .policies
         .push(exact(ResourceKind::PolicyRevision, 299, '4'));

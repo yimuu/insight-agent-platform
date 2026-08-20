@@ -1,14 +1,10 @@
 use crate::{
-    capability_execution_repository::{
-        insert_capability_input_task, insert_capability_value_and_reference,
-        update_capability_invocation,
-    },
+    capability_execution_repository::{insert_capability_input_task, update_capability_invocation},
     invocation_repository::{
-        load_capability_continuation_input, load_capability_execution_input,
-        load_capability_invocation, load_enabled_exact_published_version,
-        load_exact_capability_interface_spec, validate_capability_value_against_schema,
+        load_capability_execution_input, load_capability_invocation,
+        load_enabled_exact_published_version, load_exact_capability_interface_spec,
+        validate_capability_value_against_schema,
     },
-    mcp_repository::resolve_mcp_execution_contract,
     repository::{
         append_command_event, append_scheduler_event, begin_read_only_repeatable,
         claim_command_receipt, decode_deployment_closure, decode_versioned_payload, job_from_row,
@@ -19,7 +15,6 @@ use crate::{
         MAX_JOB_LEASE_MILLISECONDS,
     },
 };
-use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{
     ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, ArtifactReferenceSnapshot,
@@ -35,16 +30,11 @@ use insight_platform_contracts::{
 };
 use insight_platform_invocations::{
     decide_defer_to_sandbox, decide_detached_job_outcome, CapabilityControlKind,
-    CapabilityDetachedPending, CapabilityExecutionInputMaterial, CapabilityInputAction,
-    CapabilityInvocationRecord, CapabilityOutputValue, CapabilityUncertainty,
-    DetachedCapabilityJobOutcome, DetachedSandboxSourceKind, DispatchOutcome,
+    CapabilityExecutionInputMaterial, CapabilityInvocationRecord, CapabilityOutputValue,
+    CapabilityUncertainty, DetachedCapabilityJobOutcome, DetachedSandboxSourceKind,
     InvocationValueStorage, PreviousDetachedSandboxJob,
 };
 use insight_platform_jobs::{decide_claim, decide_heartbeat, JobProjection, LeasePolicy};
-use insight_platform_mcp_host::{
-    McpElicitationAction, McpElicitationResponse, McpExecutionContractQuery,
-    McpLogicalOperationRequest,
-};
 use insight_platform_sandbox::{
     decide_accept, decide_advance_phase, decide_begin_execution, decide_execution_outcome,
     decide_expired_lease_recovery, decide_prestart_control, AcceptSandboxExecution,
