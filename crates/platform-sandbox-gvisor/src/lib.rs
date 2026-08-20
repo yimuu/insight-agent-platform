@@ -9,12 +9,18 @@ use insight_platform_contracts::{ResourceId, ResourceKind, Sha256Digest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Mutex,
     time::Duration,
 };
-use tokio::{io::AsyncReadExt, process::Command, time::timeout};
+use tokio::{
+    io::AsyncReadExt,
+    process::{ChildStderr, ChildStdout, Command},
+    time::timeout,
+};
 
 pub const RUNSC_RUNTIME_NAME: &str = "runsc";
 pub const MAX_RUNSC_OUTPUT_BYTES: usize = 64 * 1024;
@@ -118,7 +124,6 @@ impl RunscCommandPlan {
                 format!("--root={}", config.runtime_root.display()),
                 "--network=none".to_owned(),
                 "--platform=systrap".to_owned(),
-                "--rootless=true".to_owned(),
                 "--directfs=false".to_owned(),
                 "create".to_owned(),
                 format!("--bundle={}", bundle.display()),
@@ -227,6 +232,24 @@ pub struct SystemRunscDriver {
     config: GvisorRuntimeConfig,
 }
 
+/// Production `runsc` lifecycle that preserves the root container's donated stdout/stderr
+/// descriptors between the `create` and `wait` commands.
+///
+/// `runsc create` donates its current stdio descriptors to the sandbox process. Reading those
+/// descriptors to EOF during `create` deadlocks because the sandbox intentionally keeps them open
+/// until the guest exits. This runtime waits only for the short-lived create command, stores the
+/// bounded read ends under the exact container identity, and drains them only alongside `wait`.
+pub struct SystemGvisorRuntime {
+    config: GvisorRuntimeConfig,
+    driver: SystemRunscDriver,
+    guest_io: Mutex<BTreeMap<String, CapturedGuestIo>>,
+}
+
+struct CapturedGuestIo {
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+}
+
 #[async_trait]
 pub trait RunscDriver: Send + Sync {
     async fn verify_runtime(&self) -> Result<(), GvisorRuntimeError>;
@@ -295,6 +318,179 @@ impl SystemRunscDriver {
         timeout(self.config.timeout(), capture)
             .await
             .map_err(|_| GvisorRuntimeError::TimedOut)?
+    }
+}
+
+impl SystemGvisorRuntime {
+    pub fn new(config: GvisorRuntimeConfig) -> Result<Self, GvisorRuntimeError> {
+        let driver = SystemRunscDriver::new(config.clone())?;
+        Ok(Self {
+            config,
+            driver,
+            guest_io: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    async fn create_with_captured_guest_io(
+        &self,
+        identity: &GvisorContainerIdentity,
+        bundle: &Path,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        let container_id = identity.container_id()?;
+        if self
+            .guest_io
+            .lock()
+            .map_err(|_| GvisorRuntimeError::Unavailable)?
+            .contains_key(&container_id)
+        {
+            return Err(GvisorRuntimeError::InvalidIdentity);
+        }
+        let plan = RunscCommandPlan::create(&self.config, identity, bundle)?;
+        if plan.executable != self.config.runsc_path {
+            return Err(GvisorRuntimeError::InvalidCommand);
+        }
+        let mut child = Command::new(&plan.executable)
+            .args(&plan.arguments)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| GvisorRuntimeError::Unavailable)?;
+        let stdout = child.stdout.take().ok_or(GvisorRuntimeError::Unavailable)?;
+        let stderr = child.stderr.take().ok_or(GvisorRuntimeError::Unavailable)?;
+        let status = timeout(self.config.timeout(), child.wait())
+            .await
+            .map_err(|_| GvisorRuntimeError::TimedOut)?
+            .map_err(|_| GvisorRuntimeError::Unavailable)?;
+        if !status.success() {
+            return Err(GvisorRuntimeError::CommandFailed);
+        }
+        self.guest_io
+            .lock()
+            .map_err(|_| GvisorRuntimeError::Unavailable)?
+            .insert(container_id, CapturedGuestIo { stdout, stderr });
+        Ok(RunscCommandOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn take_guest_io(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<CapturedGuestIo, GvisorRuntimeError> {
+        self.guest_io
+            .lock()
+            .map_err(|_| GvisorRuntimeError::Unavailable)?
+            .remove(&identity.container_id()?)
+            .ok_or(GvisorRuntimeError::InvalidIdentity)
+    }
+
+    fn discard_guest_io(&self, identity: &GvisorContainerIdentity) {
+        if let Ok(container_id) = identity.container_id() {
+            if let Ok(mut guest_io) = self.guest_io.lock() {
+                guest_io.remove(&container_id);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl GvisorRuntimePort for SystemGvisorRuntime {
+    async fn verify(&self) -> Result<(), GvisorRuntimeError> {
+        self.driver.verify_runtime().await
+    }
+
+    async fn create(
+        &self,
+        identity: &GvisorContainerIdentity,
+        bundle: &Path,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        let result = self.create_with_captured_guest_io(identity, bundle).await;
+        if result.is_err() {
+            if let Ok(plan) = RunscCommandPlan::delete(&self.config, identity) {
+                let _ = self.driver.execute(plan).await;
+            }
+            self.discard_guest_io(identity);
+        }
+        result
+    }
+
+    async fn start(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        let result = self
+            .driver
+            .execute(RunscCommandPlan::start(&self.config, identity)?)
+            .await;
+        if result.is_err() {
+            let _ = self.terminate(identity, true).await;
+            let _ = self.destroy(identity).await;
+        }
+        result
+    }
+
+    async fn wait(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        let CapturedGuestIo {
+            mut stdout,
+            mut stderr,
+        } = self.take_guest_io(identity)?;
+        let wait = self
+            .driver
+            .execute(RunscCommandPlan::wait(&self.config, identity)?);
+        let collect = async {
+            let (stdout, stderr, waited) =
+                tokio::join!(read_bounded(&mut stdout), read_bounded(&mut stderr), wait);
+            let stdout = stdout.map_err(|_| GvisorRuntimeError::Unavailable)?;
+            let stderr = stderr.map_err(|_| GvisorRuntimeError::Unavailable)?;
+            waited?;
+            Ok(RunscCommandOutput { stdout, stderr })
+        };
+        timeout(self.config.timeout(), collect)
+            .await
+            .map_err(|_| GvisorRuntimeError::TimedOut)?
+    }
+
+    async fn terminate(
+        &self,
+        identity: &GvisorContainerIdentity,
+        force: bool,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        self.driver
+            .execute(RunscCommandPlan::kill(&self.config, identity, force)?)
+            .await
+    }
+
+    async fn destroy(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<RunscCommandOutput, GvisorRuntimeError> {
+        let result = self
+            .driver
+            .execute(RunscCommandPlan::delete(&self.config, identity)?)
+            .await;
+        if result.is_ok() {
+            self.discard_guest_io(identity);
+        }
+        result
+    }
+
+    async fn recover_orphan(
+        &self,
+        identity: &GvisorContainerIdentity,
+    ) -> Result<(), GvisorRuntimeError> {
+        let _ = self.terminate(identity, true).await;
+        let result = self.destroy(identity).await.map(|_| ());
+        if result.is_ok() {
+            self.discard_guest_io(identity);
+        }
+        result
     }
 }
 
@@ -602,7 +798,9 @@ mod tests {
         assert_eq!(plan.executable, Path::new("/opt/insight/bin/runsc"));
         assert!(args.contains(&"--network=none"));
         assert!(args.contains(&"--platform=systrap"));
-        assert!(args.contains(&"--rootless=true"));
+        // The official `create` subcommand rejects `--rootless`; the dedicated executor instead
+        // relies on the publication-validated OCI user namespace and its node security boundary.
+        assert!(!args.contains(&"--rootless=true"));
         assert!(args.contains(&"--directfs=false"));
         assert!(!args
             .iter()
@@ -707,5 +905,67 @@ mod tests {
             *operations.lock().unwrap(),
             vec![RunscOperation::Kill, RunscOperation::Delete]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn system_runtime_preserves_donated_guest_streams_until_wait() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = std::env::temp_dir().join(format!("insight-gvisor-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let runsc = directory.join("runsc");
+        let script = br##"#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    --version)
+      printf 'runsc version test-release\n'
+      exit 0
+      ;;
+    create)
+      (sleep 0.15; printf 'guest-stdout'; printf 'guest-stderr' >&2) &
+      exit 0
+      ;;
+    start|kill|delete)
+      exit 0
+      ;;
+    wait)
+      sleep 0.20
+      printf '{"id":"ignored-runsc-status"}'
+      exit 0
+      ;;
+  esac
+done
+exit 2
+"##;
+        std::fs::write(&runsc, script).unwrap();
+        let mut permissions = std::fs::metadata(&runsc).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&runsc, permissions).unwrap();
+        let runtime_config = GvisorRuntimeConfig {
+            runsc_path: runsc,
+            runsc_version: "runsc version test-release".to_owned(),
+            runsc_binary_digest: format!("sha256:{}", hex_lower(&Sha256::digest(script)))
+                .parse()
+                .unwrap(),
+            runtime_root: directory.join("runtime"),
+            command_timeout_milliseconds: 2_000,
+        };
+        let runtime = SystemGvisorRuntime::new(runtime_config).unwrap();
+        runtime.verify().await.unwrap();
+        let identity = identity();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            runtime.create(&identity, &directory),
+        )
+        .await
+        .expect("create must not wait for donated guest streams")
+        .unwrap();
+        runtime.start(&identity).await.unwrap();
+        let output = runtime.wait(&identity).await.unwrap();
+        assert_eq!(output.stdout, b"guest-stdout");
+        assert_eq!(output.stderr, b"guest-stderr");
+        runtime.destroy(&identity).await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
