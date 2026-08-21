@@ -69,14 +69,19 @@ ALLOWED_INTERNAL = {
     "artifacts_domain": {"contracts", "jobs_domain"},
     "artifact_broker": {"artifacts_domain", "contracts", "jobs_domain", "sandbox_domain"},
     "artifact_rpc": {"contracts", "models_domain", "sandbox_domain"},
-    "artifact_service": {"artifact_broker", "artifact_rpc", "artifacts_domain", "contracts", "jobs_domain", "platform_postgres", "sandbox_domain"},
-    # HTTP DTOs consume the generated owner contract directly; persistence remains behind ports.
-    "platform_api": {"contracts", "mcp_host"},
+    # The Artifact Gateway binary reuses the public Artifact HTTP DTO/authorization boundary;
+    # data and maintenance workers still use their owner/RPC ports and never call public routes.
+    "artifact_service": {"artifact_broker", "artifact_rpc", "artifacts_domain", "contracts", "jobs_domain", "platform_api", "platform_postgres", "sandbox_domain"},
+    # HTTP DTOs consume generated contracts plus safe Artifact/Task domain projections;
+    # persistence and state transitions remain behind application ports.
+    "platform_api": {"artifacts_domain", "contracts", "mcp_host", "tasks_domain"},
     "capability_adapters": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "platform_postgres"},
     "contracts": set(),
     "context_domain": {"contracts", "invocations_domain", "jobs_domain"},
-    "public_gateway": {"contracts", "platform_api", "platform_postgres", "registry_domain"},
+    # The public Gateway is the control-plane composition root. It binds HTTP application ports
+    # to owner adapters but does not execute user code or become durable state authority.
+    "public_gateway": {"context_domain", "contracts", "invocations_domain", "mcp_host", "orchestrator_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain"},
     "egress_core": {"capability_adapters", "contracts", "jobs_domain", "mcp_host", "model_adapters", "sandbox_domain"},
     "egress_broker": {"contracts", "egress_core", "egress_rpc", "model_adapters", "secret_broker", "security_rpc"},
     "egress_rpc": {"capability_adapters", "contracts", "egress_core", "mcp_host", "model_adapters", "sandbox_domain"},
@@ -137,7 +142,9 @@ FORBIDDEN_DIRECT = {
     "callback_api": {"reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "contracts": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "context_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "public_gateway": {"reqwest", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    # Reqwest is confined to the bounded mTLS Artifact Gateway forwarding adapter. Provider/MCP
+    # egress and every cloud administrative SDK remain forbidden in the public Gateway.
+    "public_gateway": {"aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "egress_core": {"axum", "sqlx", "dotenvy", "tracing-subscriber"},
     "egress_broker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "egress_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
