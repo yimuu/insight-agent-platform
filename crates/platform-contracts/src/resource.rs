@@ -743,10 +743,24 @@ authoring_spec!(SandboxProfileResourceSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ExactPolicyBinding {
+    pub deployment: ExactDeploymentRef,
+    pub revision: ExactVersionRef,
+}
+
+impl ExactPolicyBinding {
+    pub fn validate(&self) -> Result<(), ResourceContractError> {
+        require_deployment_kind(&self.deployment, ResourceKind::PolicyDeployment)?;
+        require_kind(&self.revision.revision_id, ResourceKind::PolicyRevision)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkillDeploymentClosure {
     pub skill_revision: ExactVersionRef,
     pub requirements: Vec<FrozenSlotBinding>,
-    pub selection_policy: ExactDeploymentRef,
+    pub selection_policy: ExactPolicyBinding,
     pub qualification_evidence: ArtifactRef,
 }
 
@@ -756,7 +770,7 @@ impl SkillDeploymentClosure {
             &self.skill_revision.revision_id,
             ResourceKind::SkillRevision,
         )?;
-        require_deployment_kind(&self.selection_policy, ResourceKind::PolicyDeployment)?;
+        self.selection_policy.validate()?;
         if self.requirements.len() > MAX_FROZEN_SLOTS {
             return Err(ResourceContractError::UnboundedValue);
         }
@@ -798,7 +812,7 @@ impl PolicyDeploymentClosure {
 pub struct SandboxProfileDeploymentClosure {
     pub profile_revision: ExactVersionRef,
     pub runtime_revision: ExactVersionRef,
-    pub policy_deployments: Vec<ExactDeploymentRef>,
+    pub policy_bindings: Vec<ExactPolicyBinding>,
     pub qualification_evidence: ArtifactRef,
 }
 
@@ -812,7 +826,19 @@ impl SandboxProfileDeploymentClosure {
             &self.runtime_revision.revision_id,
             ResourceKind::SandboxRuntimeRevision,
         )?;
-        validate_deployments(&self.policy_deployments, ResourceKind::PolicyDeployment)?;
+        if self.policy_bindings.len() > MAX_RESOURCE_DEPENDENCIES {
+            return Err(ResourceContractError::UnboundedValue);
+        }
+        let mut deployments = BTreeSet::new();
+        let mut revisions = BTreeSet::new();
+        for binding in &self.policy_bindings {
+            binding.validate()?;
+            if !deployments.insert(&binding.deployment.deployment_id)
+                || !revisions.insert(&binding.revision.revision_id)
+            {
+                return Err(ResourceContractError::DuplicateValue);
+            }
+        }
         self.qualification_evidence
             .validate()
             .map_err(|_| ResourceContractError::InvalidArtifact)
@@ -1419,6 +1445,7 @@ impl DeploymentClosure {
             }
             Self::Skill(closure) => {
                 refs.push(&closure.skill_revision);
+                refs.push(&closure.selection_policy.revision);
                 for requirement in &closure.requirements {
                     match &requirement.target {
                         FrozenSlotTarget::Model {
@@ -1482,7 +1509,13 @@ impl DeploymentClosure {
             }
             Self::Policy(closure) => refs.push(&closure.policy_revision),
             Self::SandboxProfile(closure) => {
-                refs.extend([&closure.profile_revision, &closure.runtime_revision])
+                refs.extend([&closure.profile_revision, &closure.runtime_revision]);
+                refs.extend(
+                    closure
+                        .policy_bindings
+                        .iter()
+                        .map(|binding| &binding.revision),
+                );
             }
         }
         refs
@@ -1512,7 +1545,7 @@ impl DeploymentClosure {
                 refs.extend(closure.backend.exact_deployment_refs())
             }
             Self::Skill(closure) => {
-                refs.push(&closure.selection_policy);
+                refs.push(&closure.selection_policy.deployment);
                 for requirement in &closure.requirements {
                     match &requirement.target {
                         FrozenSlotTarget::Model { candidates, .. }
@@ -1537,10 +1570,29 @@ impl DeploymentClosure {
                     refs.push(mcp_deployment);
                 }
             }
-            Self::SandboxProfile(closure) => refs.extend(closure.policy_deployments.iter()),
+            Self::SandboxProfile(closure) => refs.extend(
+                closure
+                    .policy_bindings
+                    .iter()
+                    .map(|binding| &binding.deployment),
+            ),
             Self::McpServer(_) | Self::ModelProvider(_) | Self::Policy(_) => {}
         }
         refs
+    }
+
+    pub fn exact_policy_bindings(&self) -> Vec<&ExactPolicyBinding> {
+        match self {
+            Self::Skill(closure) => vec![&closure.selection_policy],
+            Self::SandboxProfile(closure) => closure.policy_bindings.iter().collect(),
+            Self::Agent(_)
+            | Self::CapabilityInterface(_)
+            | Self::ContextSourceInterface(_)
+            | Self::McpServer(_)
+            | Self::ModelProvider(_)
+            | Self::ModelProfile(_)
+            | Self::Policy(_) => Vec::new(),
+        }
     }
 
     pub fn exact_dataset_generation_refs(&self) -> Vec<&crate::ExactDatasetGenerationRef> {
@@ -2373,6 +2425,14 @@ mod tests {
         let policy_deployment =
             ExactDeploymentRef::new(id("pdep_0198f1c3-8f49-7c3e-b1f3-773c28367b81"), digest('a'))
                 .unwrap();
+        let policy_binding = ExactPolicyBinding {
+            deployment: policy_deployment.clone(),
+            revision: ExactVersionRef::new(
+                id("prev_0198f1c3-8f49-7c3e-b1f3-773c28367b89"),
+                digest('9'),
+            )
+            .unwrap(),
+        };
         let skill = DeploymentClosure::Skill(SkillDeploymentClosure {
             skill_revision: ExactVersionRef::new(
                 id("srev_0198f1c3-8f49-7c3e-b1f3-773c28367b82"),
@@ -2396,7 +2456,7 @@ mod tests {
                 },
                 binding_digest: digest('4'),
             }],
-            selection_policy: policy_deployment.clone(),
+            selection_policy: policy_binding.clone(),
             qualification_evidence: qualification_artifact(),
         });
         let policy = DeploymentClosure::Policy(PolicyDeploymentClosure {
@@ -2419,7 +2479,7 @@ mod tests {
                 digest('f'),
             )
             .unwrap(),
-            policy_deployments: vec![policy_deployment],
+            policy_bindings: vec![policy_binding],
             qualification_evidence: qualification_artifact(),
         });
         assert!(skill.validate().is_ok());
@@ -2448,7 +2508,7 @@ mod tests {
             DeploymentClosure::Skill(closure) => closure,
             _ => unreachable!(),
         };
-        wrong.selection_policy =
+        wrong.selection_policy.deployment =
             ExactDeploymentRef::new(id("adep_0198f1c3-8f49-7c3e-b1f3-773c28367b86"), digest('1'))
                 .unwrap();
         assert_eq!(

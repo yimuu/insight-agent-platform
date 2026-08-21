@@ -22941,6 +22941,22 @@ pub(crate) async fn validate_deployment_closure_exists(
             return Err(RepositoryError::NotFound("deployment closure binding"));
         }
     }
+    for binding in closure.exact_policy_bindings() {
+        let deployment =
+            load_deployment(transaction, tenant_id, &binding.deployment.deployment_id).await?;
+        if deployment.bindings.digest != binding.deployment.deployment_digest.to_string() {
+            return Err(RepositoryError::Conflict("exact Policy Deployment digest"));
+        }
+        let DeploymentClosure::Policy(policy) = decode_deployment_closure(&deployment.bindings)?
+        else {
+            return Err(RepositoryError::Conflict("exact Policy Deployment closure"));
+        };
+        if policy.policy_revision != binding.revision {
+            return Err(RepositoryError::Conflict(
+                "exact Policy Deployment Revision",
+            ));
+        }
+    }
     validate_active_secret_bindings(transaction, tenant_id, closure.secret_bindings()).await?;
     Ok(())
 }
