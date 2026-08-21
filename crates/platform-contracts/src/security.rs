@@ -1,5 +1,5 @@
 use crate::{
-    canonical_digest, AdministrativeGate, AuthnStrength, ExactVersionRef, Permission,
+    canonical_digest, AdministrativeGate, AuthnStrength, ExactDeploymentRef, Permission,
     PrincipalBindingState, PrincipalKind, ResourceId, ResourceKind, Sha256Digest,
 };
 use chrono::{DateTime, Utc};
@@ -9,9 +9,9 @@ use std::{collections::BTreeSet, error::Error, fmt, str::FromStr};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenantConfig {
-    pub scheduling_policy: Option<ExactVersionRef>,
-    pub artifact_retention_policy: Option<ExactVersionRef>,
-    pub artifact_io_policy: Option<ExactVersionRef>,
+    pub scheduling_policy: Option<ExactDeploymentRef>,
+    pub artifact_retention_policy: Option<ExactDeploymentRef>,
+    pub artifact_io_policy: Option<ExactDeploymentRef>,
 }
 
 impl TenantConfig {
@@ -27,7 +27,7 @@ impl TenantConfig {
             policy
                 .validate()
                 .map_err(|_| SecurityContractError::InvalidTenantConfig)?;
-            if policy.resource_kind != ResourceKind::PolicyRevision {
+            if policy.resource_kind != ResourceKind::PolicyDeployment {
                 return Err(SecurityContractError::InvalidTenantConfig);
             }
         }
@@ -656,9 +656,9 @@ mod tests {
         }
     }
 
-    fn exact_policy(suffix: &str, marker: char) -> ExactVersionRef {
-        ExactVersionRef::new(
-            format!("prev_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")
+    fn exact_policy(suffix: &str, marker: char) -> ExactDeploymentRef {
+        ExactDeploymentRef::new(
+            format!("pdep_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")
                 .parse()
                 .unwrap(),
             format!("sha256:{}", marker.to_string().repeat(64))
@@ -681,12 +681,12 @@ mod tests {
 
         let wire = serde_json::to_value(&config).unwrap();
         assert_eq!(
-            wire["artifact_retention_policy"]["revision_id"],
-            retention.revision_id.to_string()
+            wire["artifact_retention_policy"]["deployment_id"],
+            retention.deployment_id.to_string()
         );
         assert_eq!(
-            wire["artifact_io_policy"]["semantic_digest"],
-            artifact_io.semantic_digest.to_string()
+            wire["artifact_io_policy"]["deployment_digest"],
+            artifact_io.deployment_digest.to_string()
         );
         assert!(serde_json::from_value::<TenantConfig>(serde_json::json!({
             "scheduling_policy": null,
@@ -698,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn tenant_config_rejects_one_revision_in_both_artifact_policy_slots() {
+    fn tenant_config_rejects_one_deployment_in_both_artifact_policy_slots() {
         let policy = exact_policy("7b83", 'c');
         assert_eq!(
             TenantConfig {

@@ -4,11 +4,11 @@ use insight_platform_contracts::{
     ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome, DataClassification,
     DeploymentClosure, ExactDeploymentRef, ExactVersionRef, Failure, FailureClass, FailureCode,
     FailureSource, FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission,
-    PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
-    PublishedVersionPayload, ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot,
-    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef,
+    PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublicRunEventType, PublishedVersionPayload, ResourceDocument, ResourceId, Retryability,
+    RunBindingsSnapshot, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, ValueRef,
 };
 use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
 use insight_platform_orchestrator::{
@@ -49,6 +49,7 @@ const PRINCIPAL_ID: &str = "prn_0198f1c3-9a00-7c3e-b1f3-773c28367003";
 const DENIED_PRINCIPAL_ID: &str = "prn_0198f1c3-9a00-7c3e-b1f3-773c28367004";
 const POLICY_ID: &str = "pol_0198f1c3-9a00-7c3e-b1f3-773c28367005";
 const POLICY_REVISION_ID: &str = "prev_0198f1c3-9a00-7c3e-b1f3-773c28367006";
+const POLICY_DEPLOYMENT_ID: &str = "pdep_0198f1c3-9a00-7c3e-b1f3-773c2836700f";
 const AGENT_ID: &str = "agt_0198f1c3-9a00-7c3e-b1f3-773c28367007";
 const AGENT_INTERFACE_ID: &str = "aif_0198f1c3-9a00-7c3e-b1f3-773c28367008";
 const AGENT_PLAN_ID: &str = "arev_0198f1c3-9a00-7c3e-b1f3-773c28367009";
@@ -314,7 +315,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     verify_schema(&pool).await.unwrap();
     let repository = PgRepository::new(pool.clone());
     seed_authorities(&repository, &pool).await;
-    let bindings = seed_agent_registry(&pool).await;
+    let (bindings, policy_deployment) = seed_agent_registry(&pool).await;
     let root_target = repository
         .resolve_root_run_target(&id(TENANT_ID), &id(AGENT_ID))
         .await
@@ -329,7 +330,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             .bind_tenant_scheduling_policy(BindTenantSchedulingPolicy {
                 audit: audit(TENANT_ID, PRINCIPAL_ID, "700e", 'e', 'f'),
                 expected_tenant_version: 1,
-                policy: ExactVersionRef::new(id(POLICY_REVISION_ID), digest('5')).unwrap(),
+                policy: policy_deployment,
             })
             .await
             .unwrap(),
@@ -7385,7 +7386,7 @@ async fn seed_authorities(repository: &PgRepository, pool: &PgPool) {
     assert_eq!(tenant_count, 2);
 }
 
-async fn seed_agent_registry(pool: &PgPool) -> RunBindingsSnapshot {
+async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploymentRef) {
     let resource_payload = TypedPayload::new(1, &json!({"fixture": "phase2-run"})).unwrap();
     let agent_plan_payload = TypedPayload::new(
         1,
@@ -7589,6 +7590,56 @@ async fn seed_agent_registry(pool: &PgPool) -> RunBindingsSnapshot {
     .unwrap();
 
     let policy = ExactVersionRef::new(id(POLICY_REVISION_ID), digest('5')).unwrap();
+    let policy_deployment_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: policy.clone(),
+            applicability_digest: digest('d'),
+            qualification_evidence: ArtifactRef::new(
+                id("art_0198f1c3-9a00-7c3e-b1f3-773c2836700e"),
+                digest('4'),
+                1,
+                "application/json",
+                DataClassification::Internal,
+                Some("scheduling-policy.json".to_owned()),
+            )
+            .unwrap(),
+        }),
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.deployments (
+            tenant_id, deployment_id, resource_id, resource_version_id, environment,
+            bindings_digest, payload_schema_version, bindings, created_by
+        ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(POLICY_DEPLOYMENT_ID)
+    .bind(POLICY_ID)
+    .bind(POLICY_REVISION_ID)
+    .bind(&policy_deployment_payload.digest)
+    .bind(policy_deployment_payload.schema_version)
+    .bind(&policy_deployment_payload.value)
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resources SET active_version_id = NULL, active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(POLICY_ID)
+    .bind(POLICY_DEPLOYMENT_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    let policy_deployment = ExactDeploymentRef::new(
+        id(POLICY_DEPLOYMENT_ID),
+        policy_deployment_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
     let child_closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(CHILD_AGENT_INTERFACE_ID), digest('8')).unwrap(),
         plan: ExactVersionRef::new(id(CHILD_AGENT_PLAN_ID), digest('9')).unwrap(),
@@ -7682,7 +7733,7 @@ async fn seed_agent_registry(pool: &PgPool) -> RunBindingsSnapshot {
     .unwrap();
 
     let deployment_digest: Sha256Digest = deployment_payload.digest.parse().unwrap();
-    RunBindingsSnapshot::build(
+    let bindings = RunBindingsSnapshot::build(
         ExactDeploymentRef::new(id(AGENT_DEPLOYMENT_ID), deployment_digest).unwrap(),
         PrincipalSnapshot::build(
             id(TENANT_ID),
@@ -7702,5 +7753,6 @@ async fn seed_agent_registry(pool: &PgPool) -> RunBindingsSnapshot {
         .unwrap(),
         &closure,
     )
-    .unwrap()
+    .unwrap();
+    (bindings, policy_deployment)
 }

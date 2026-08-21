@@ -3679,38 +3679,19 @@ impl PgSecurityTransaction {
             return Err(RepositoryError::Conflict("tenant"));
         }
 
-        let row = sqlx::query(
-            r#"
-            SELECT version.payload_schema_version, version.payload, version.payload_digest
-            FROM insight_platform.resource_versions AS version
-            JOIN insight_platform.resources AS resource
-              ON resource.tenant_id = version.tenant_id
-             AND resource.resource_id = version.resource_id
-            WHERE version.tenant_id = $1 AND version.resource_version_id = $2
-              AND version.resource_version_kind = 'policy_revision'
-              AND version.content_digest = $3
-              AND resource.resource_kind = 'policy'
-              AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
-            FOR SHARE OF version, resource
-            "#,
+        lock_active_policy_deployment_for_binding(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.policy,
         )
-        .bind(command.audit.tenant_id.to_string())
-        .bind(command.policy.revision_id.to_string())
-        .bind(command.policy.semantic_digest.to_string())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(RepositoryError::NotFound("scheduling policy version"))?;
-        let payload =
-            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
-        let published = decode_published_version_payload(&payload)?;
-        published
-            .validate_for(RegistryResourceKind::Policy, &command.policy.revision_id)
-            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-        let ResourceDocument::Policy(policy) = published.document else {
-            return Err(RepositoryError::CorruptRow(
-                "policy ResourceVersion contains the wrong document".to_owned(),
-            ));
-        };
+        .await?;
+        let (_, policy) = load_exact_active_policy_deployment(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.policy,
+            PolicyKind::Scheduling,
+        )
+        .await?;
         if policy.policy_kind != PolicyKind::Scheduling || policy.scheduling.is_none() {
             return Err(RepositoryError::InvalidInput(
                 "tenant scheduling binding requires a Scheduling policy document".to_owned(),
@@ -3752,8 +3733,8 @@ impl PgSecurityTransaction {
             &TypedPayload::new(
                 1,
                 &serde_json::json!({
-                    "policy_version_id": command.policy.revision_id,
-                    "policy_version_digest": command.policy.semantic_digest,
+                    "policy_deployment_id": command.policy.deployment_id,
+                    "policy_deployment_digest": command.policy.deployment_digest,
                 }),
             )?,
         )
@@ -3793,38 +3774,19 @@ impl PgSecurityTransaction {
             (&command.retention_policy, PolicyKind::Retention),
             (&command.artifact_io_policy, PolicyKind::ArtifactIo),
         ] {
-            let row = sqlx::query(
-                r#"
-                SELECT version.payload_schema_version, version.payload, version.payload_digest
-                FROM insight_platform.resource_versions AS version
-                JOIN insight_platform.resources AS resource
-                  ON resource.tenant_id = version.tenant_id
-                 AND resource.resource_id = version.resource_id
-                WHERE version.tenant_id = $1 AND version.resource_version_id = $2
-                  AND version.resource_version_kind = 'policy_revision'
-                  AND version.content_digest = $3
-                  AND resource.resource_kind = 'policy'
-                  AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
-                FOR SHARE OF version, resource
-                "#,
+            lock_active_policy_deployment_for_binding(
+                &mut transaction,
+                &command.audit.tenant_id,
+                exact,
             )
-            .bind(command.audit.tenant_id.to_string())
-            .bind(exact.revision_id.to_string())
-            .bind(exact.semantic_digest.to_string())
-            .fetch_optional(&mut *transaction)
-            .await?
-            .ok_or(RepositoryError::NotFound("Artifact policy version"))?;
-            let payload =
-                payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
-            let published = decode_published_version_payload(&payload)?;
-            published
-                .validate_for(RegistryResourceKind::Policy, &exact.revision_id)
-                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-            let ResourceDocument::Policy(policy) = published.document else {
-                return Err(RepositoryError::CorruptRow(
-                    "Artifact policy version contains the wrong document".to_owned(),
-                ));
-            };
+            .await?;
+            let (_, policy) = load_exact_active_policy_deployment(
+                &mut transaction,
+                &command.audit.tenant_id,
+                exact,
+                expected_kind,
+            )
+            .await?;
             if policy.policy_kind != expected_kind {
                 return Err(RepositoryError::InvalidInput(
                     "tenant Artifact policy binding has the wrong PolicyKind".to_owned(),
@@ -3867,10 +3829,10 @@ impl PgSecurityTransaction {
             &TypedPayload::new(
                 1,
                 &serde_json::json!({
-                    "artifact_io_policy_revision_id": command.artifact_io_policy.revision_id,
-                    "artifact_io_policy_digest": command.artifact_io_policy.semantic_digest,
-                    "retention_policy_revision_id": command.retention_policy.revision_id,
-                    "retention_policy_digest": command.retention_policy.semantic_digest,
+                    "artifact_io_policy_deployment_id": command.artifact_io_policy.deployment_id,
+                    "artifact_io_policy_deployment_digest": command.artifact_io_policy.deployment_digest,
+                    "retention_policy_deployment_id": command.retention_policy.deployment_id,
+                    "retention_policy_deployment_digest": command.retention_policy.deployment_digest,
                 }),
             )?,
         )
@@ -16384,51 +16346,16 @@ async fn load_tenant_scheduling_policy(
     let exact = tenant.config.scheduling_policy.ok_or_else(|| {
         RepositoryError::InvalidInput("tenant has no Scheduling policy binding".to_owned())
     })?;
-    let row = sqlx::query(
-        r#"
-        SELECT version.payload_schema_version, version.payload, version.payload_digest
-        FROM insight_platform.resource_versions AS version
-        JOIN insight_platform.resources AS resource
-          ON resource.tenant_id = version.tenant_id
-         AND resource.resource_id = version.resource_id
-        WHERE version.tenant_id = $1 AND version.resource_version_id = $2
-          AND version.resource_version_kind = 'policy_revision'
-          AND version.content_digest = $3
-          AND resource.resource_kind = 'policy'
-          AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
-        FOR SHARE OF version, resource
-        "#,
-    )
-    .bind(tenant_id.to_string())
-    .bind(exact.revision_id.to_string())
-    .bind(exact.semantic_digest.to_string())
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(RepositoryError::NotFound(
-        "active Scheduling policy version",
-    ))?;
-    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
-    let published = decode_published_version_payload(&payload)?;
-    published
-        .validate_for(RegistryResourceKind::Policy, &exact.revision_id)
-        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-    let ResourceDocument::Policy(policy) = published.document else {
-        return Err(RepositoryError::CorruptRow(
-            "Scheduling ResourceVersion contains the wrong document".to_owned(),
-        ));
-    };
-    if policy.policy_kind != PolicyKind::Scheduling {
-        return Err(RepositoryError::CorruptRow(
-            "tenant Scheduling binding resolves to another PolicyKind".to_owned(),
-        ));
-    }
+    let (revision, policy) =
+        load_exact_active_policy_deployment(transaction, tenant_id, &exact, PolicyKind::Scheduling)
+            .await?;
     let document = policy.scheduling.ok_or_else(|| {
         RepositoryError::CorruptRow("Scheduling policy has no closed document".to_owned())
     })?;
     let binding = TenantSchedulingPolicyBinding {
         tenant_id: tenant_id.clone(),
-        policy_version_id: exact.revision_id,
-        policy_version_digest: exact.semantic_digest,
+        policy_version_id: revision.revision_id,
+        policy_version_digest: revision.semantic_digest,
         rules_digest: policy.rules_digest,
         weight: document.weight,
         burst: document.burst,
@@ -22240,6 +22167,133 @@ pub(crate) fn decode_deployment_closure(
         .validate()
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     Ok(closure)
+}
+
+pub(crate) async fn load_exact_active_policy_deployment(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    exact: &ExactDeploymentRef,
+    expected_kind: PolicyKind,
+) -> Result<
+    (
+        ExactVersionRef,
+        insight_platform_contracts::PolicyResourceSpec,
+    ),
+    RepositoryError,
+> {
+    exact
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if exact.resource_kind != ResourceKind::PolicyDeployment {
+        return Err(RepositoryError::CorruptRow(
+            "tenant Policy binding has the wrong Deployment kind".to_owned(),
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT deployment.resource_version_id,
+               deployment.payload_schema_version AS bindings_schema_version,
+               deployment.bindings, deployment.bindings_digest,
+               version.payload_schema_version AS version_schema_version,
+               version.payload AS version_payload, version.payload_digest AS version_payload_digest
+        FROM insight_platform.deployments AS deployment
+        JOIN insight_platform.resources AS resource
+          ON resource.tenant_id = deployment.tenant_id
+         AND resource.resource_id = deployment.resource_id
+        JOIN insight_platform.resource_versions AS version
+          ON version.tenant_id = deployment.tenant_id
+         AND version.resource_version_id = deployment.resource_version_id
+         AND version.resource_id = deployment.resource_id
+        WHERE deployment.tenant_id = $1 AND deployment.deployment_id = $2
+          AND deployment.bindings_digest = $3
+          AND resource.resource_kind = 'policy'
+          AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+          AND resource.active_deployment_id = deployment.deployment_id
+          AND version.resource_version_kind = 'policy_revision'
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(exact.deployment_id.to_string())
+    .bind(exact.deployment_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("active Policy Deployment"))?;
+    let bindings = payload_from_row(
+        &row,
+        "bindings_schema_version",
+        "bindings",
+        "bindings_digest",
+    )?;
+    let DeploymentClosure::Policy(closure) = decode_deployment_closure(&bindings)? else {
+        return Err(RepositoryError::CorruptRow(
+            "Policy Deployment contains the wrong closure".to_owned(),
+        ));
+    };
+    let resource_version_id = row
+        .try_get::<String, _>("resource_version_id")?
+        .parse::<ResourceId>()
+        .map_err(|_| RepositoryError::CorruptRow("Policy Revision ID is invalid".to_owned()))?;
+    if closure.policy_revision.revision_id != resource_version_id {
+        return Err(RepositoryError::CorruptRow(
+            "Policy Deployment closure differs from its owner Revision".to_owned(),
+        ));
+    }
+    let version_payload = payload_from_row(
+        &row,
+        "version_schema_version",
+        "version_payload",
+        "version_payload_digest",
+    )?;
+    let published = decode_published_version_payload(&version_payload)?;
+    published
+        .validate_for(
+            RegistryResourceKind::Policy,
+            &closure.policy_revision.revision_id,
+        )
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let ResourceDocument::Policy(policy) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Policy Revision contains the wrong document".to_owned(),
+        ));
+    };
+    if policy.policy_kind != expected_kind {
+        return Err(RepositoryError::InvalidInput(
+            "Policy Deployment resolves to the wrong PolicyKind".to_owned(),
+        ));
+    }
+    Ok((closure.policy_revision, policy))
+}
+
+async fn lock_active_policy_deployment_for_binding(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    exact: &ExactDeploymentRef,
+) -> Result<(), RepositoryError> {
+    let locked = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT true
+        FROM insight_platform.deployments AS deployment
+        JOIN insight_platform.resources AS resource
+          ON resource.tenant_id = deployment.tenant_id
+         AND resource.resource_id = deployment.resource_id
+        WHERE deployment.tenant_id = $1 AND deployment.deployment_id = $2
+          AND deployment.bindings_digest = $3
+          AND resource.resource_kind = 'policy'
+          AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+          AND resource.active_deployment_id = deployment.deployment_id
+        FOR SHARE OF deployment, resource
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(exact.deployment_id.to_string())
+    .bind(exact.deployment_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .is_some();
+    if !locked {
+        return Err(RepositoryError::NotFound("active Policy Deployment"));
+    }
+    Ok(())
 }
 
 async fn load_run(

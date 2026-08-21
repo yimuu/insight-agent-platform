@@ -17,8 +17,9 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, ArtifactPurpose, ArtifactRef, ArtifactReferenceKind, ArtifactRetentionPolicy,
-    ArtifactState, BlobIntegrityState, CommandAudit, CommandOutcome, DataClassification, Effect,
-    ExactVersionRef, JobState, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
+    ArtifactState, BlobIntegrityState, CommandAudit, CommandOutcome, DataClassification,
+    DeploymentClosure, Effect, ExactDeploymentRef, ExactVersionRef, JobState, Permission,
+    PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
     ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
     SandboxArtifactIoPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
@@ -39,7 +40,7 @@ use insight_platform_postgres::{
 use insight_platform_security::BindTenantArtifactPolicies;
 use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskResolution, TaskState};
 use serde_json::json;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 
 struct FixtureScanner {
     evidence: Result<ArtifactScanEvidence, ArtifactBackendFailure>,
@@ -278,6 +279,88 @@ async fn exact_policy_ref(
     .await
     .unwrap();
     ExactVersionRef::new(revision_id.clone(), content_digest.parse().unwrap()).unwrap()
+}
+
+async fn seed_policy_deployment(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    principal_id: &ResourceId,
+    revision_id: &ResourceId,
+    base: u16,
+) -> ExactDeploymentRef {
+    let row = sqlx::query(
+        r#"
+        SELECT version.resource_id, version.content_digest, version.artifact_id
+        FROM insight_platform.resource_versions AS version
+        WHERE version.tenant_id = $1 AND version.resource_version_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(revision_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let resource_id: ResourceId = row.get::<String, _>("resource_id").parse().unwrap();
+    let revision = ExactVersionRef::new(
+        revision_id.clone(),
+        row.get::<String, _>("content_digest").parse().unwrap(),
+    )
+    .unwrap();
+    let qualification_evidence = ArtifactRef::new(
+        row.get::<String, _>("artifact_id").parse().unwrap(),
+        digest('1'),
+        64,
+        "application/json",
+        DataClassification::Internal,
+        Some("policy-qualification.json".to_owned()),
+    )
+    .unwrap();
+    let bindings = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: revision,
+            applicability_digest: digest('2'),
+            qualification_evidence,
+        }),
+    )
+    .unwrap();
+    let deployment_id = id(ResourceKind::PolicyDeployment, base);
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.deployments (
+            tenant_id, deployment_id, resource_id, resource_version_id, environment,
+            bindings_digest, payload_schema_version, bindings, created_by
+        ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(deployment_id.to_string())
+    .bind(resource_id.to_string())
+    .bind(revision_id.to_string())
+    .bind(&bindings.digest)
+    .bind(bindings.schema_version)
+    .bind(&bindings.value)
+    .bind(principal_id.to_string())
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.resources
+        SET active_version_id = NULL, active_deployment_id = $3,
+            version = version + 1, updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND resource_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(resource_id.to_string())
+    .bind(deployment_id.to_string())
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    ExactDeploymentRef::new(deployment_id, bindings.digest.parse().unwrap()).unwrap()
 }
 
 fn schedule_initial_scan_command(
@@ -1162,8 +1245,17 @@ async fn artifact_upload_lifecycle_fixture() {
         0x0210,
     )
     .await;
-    let retention_policy = exact_policy_ref(&pool, &tenant_a, &retention_a).await;
+    let retention_policy =
+        seed_policy_deployment(&pool, &tenant_a, &allowed_principal, &retention_a, 0x0212).await;
     let scan_policy_a = exact_policy_ref(&pool, &tenant_a, &artifact_io_policy).await;
+    let scan_policy_deployment = seed_policy_deployment(
+        &pool,
+        &tenant_a,
+        &allowed_principal,
+        &artifact_io_policy,
+        0x0213,
+    )
+    .await;
     let wrong_scan_policy = exact_policy_ref(&pool, &tenant_a, &retention_a).await;
     let mut security = repository.begin_security_transaction().await.unwrap();
     let bound = security
@@ -1171,7 +1263,7 @@ async fn artifact_upload_lifecycle_fixture() {
             audit: audit(&tenant_a, &allowed_principal, 0x0220, '5', '6'),
             expected_tenant_version: 1,
             retention_policy: retention_policy.clone(),
-            artifact_io_policy: scan_policy_a.clone(),
+            artifact_io_policy: scan_policy_deployment.clone(),
         })
         .await
         .unwrap();
@@ -1183,7 +1275,10 @@ async fn artifact_upload_lifecycle_fixture() {
         bound.config.artifact_retention_policy,
         Some(retention_policy)
     );
-    assert_eq!(bound.config.artifact_io_policy, Some(scan_policy_a.clone()));
+    assert_eq!(
+        bound.config.artifact_io_policy,
+        Some(scan_policy_deployment)
+    );
     security.commit().await.unwrap();
     let quota_a = id(ResourceKind::QuotaAccount, 0x0300);
     let quota_b = id(ResourceKind::QuotaAccount, 0x0301);

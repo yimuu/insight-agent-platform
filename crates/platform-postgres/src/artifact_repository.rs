@@ -1,10 +1,11 @@
 use crate::repository::{
     append_command_event, append_scheduler_event, begin_read_only_repeatable,
-    claim_command_receipt, decode_published_version_payload, decode_typed_payload, job_from_row,
-    job_projection, load_current_principal_snapshot, load_job_for_update_by_text,
-    load_task_for_update, payload_from_row, require_tenant_permission, safety_scan_cursor_from_row,
-    safety_scan_page, terminalize_command_receipt, validate_safety_scan_request, JobRecord,
-    PgRepository, RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
+    claim_command_receipt, decode_typed_payload, job_from_row, job_projection,
+    load_current_principal_snapshot, load_exact_active_policy_deployment,
+    load_job_for_update_by_text, load_task_for_update, payload_from_row, require_tenant_permission,
+    safety_scan_cursor_from_row, safety_scan_page, terminalize_command_receipt,
+    validate_safety_scan_request, JobRecord, PgRepository, RepositoryError, SafetyScanCursor,
+    SafetyScanPage, SafetyScanShard, TypedPayload,
 };
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{
@@ -708,26 +709,26 @@ impl PgRepository {
         config
             .validate()
             .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-        let retention_policy_revision =
+        let retention_policy_deployment =
             config
                 .artifact_retention_policy
                 .ok_or(RepositoryError::NotFound(
                     "tenant Artifact retention policy",
                 ))?;
-        let artifact_io_policy_revision = config
+        let artifact_io_policy_deployment = config
             .artifact_io_policy
             .ok_or(RepositoryError::NotFound("tenant Artifact I/O policy"))?;
-        let retention = load_exact_artifact_policy(
+        let (retention_policy_revision, retention) = load_exact_active_policy_deployment(
             &mut transaction,
             &tenant_id,
-            &retention_policy_revision,
+            &retention_policy_deployment,
             PolicyKind::Retention,
         )
         .await?;
-        let artifact_io = load_exact_artifact_policy(
+        let (artifact_io_policy_revision, artifact_io) = load_exact_active_policy_deployment(
             &mut transaction,
             &tenant_id,
-            &artifact_io_policy_revision,
+            &artifact_io_policy_deployment,
             PolicyKind::ArtifactIo,
         )
         .await?;
@@ -1757,61 +1758,6 @@ impl PgRepository {
             last_cursor,
         ))
     }
-}
-
-async fn load_exact_artifact_policy(
-    transaction: &mut Transaction<'_, Postgres>,
-    tenant_id: &ResourceId,
-    exact: &ExactVersionRef,
-    expected_kind: PolicyKind,
-) -> Result<insight_platform_contracts::PolicyResourceSpec, RepositoryError> {
-    exact
-        .validate()
-        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-    if exact.resource_kind != ResourceKind::PolicyRevision {
-        return Err(RepositoryError::CorruptRow(
-            "tenant Artifact policy reference has the wrong revision kind".to_owned(),
-        ));
-    }
-    let row = sqlx::query(
-        r#"
-        SELECT version.payload_schema_version, version.payload, version.payload_digest
-        FROM insight_platform.resource_versions AS version
-        JOIN insight_platform.resources AS resource
-          ON resource.tenant_id = version.tenant_id
-         AND resource.resource_id = version.resource_id
-        WHERE version.tenant_id = $1 AND version.resource_version_id = $2
-          AND version.resource_version_kind = 'policy_revision'
-          AND version.content_digest = $3
-          AND resource.resource_kind = 'policy'
-          AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
-        "#,
-    )
-    .bind(tenant_id.to_string())
-    .bind(exact.revision_id.to_string())
-    .bind(exact.semantic_digest.to_string())
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(RepositoryError::NotFound("tenant Artifact policy revision"))?;
-    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
-    let published = decode_published_version_payload(&payload)?;
-    published
-        .validate_for(
-            insight_platform_contracts::RegistryResourceKind::Policy,
-            &exact.revision_id,
-        )
-        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-    let ResourceDocument::Policy(policy) = published.document else {
-        return Err(RepositoryError::CorruptRow(
-            "tenant Artifact policy revision has the wrong document".to_owned(),
-        ));
-    };
-    if policy.policy_kind != expected_kind {
-        return Err(RepositoryError::CorruptRow(
-            "tenant Artifact policy revision has the wrong PolicyKind".to_owned(),
-        ));
-    }
-    Ok(policy)
 }
 
 impl ArtifactStore for PgRepository {

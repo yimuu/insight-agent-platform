@@ -4,10 +4,10 @@ use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, AgentDeploymentClosure, ArtifactRef,
     AuthoringPackage, CommandAudit, CommandOutcome, DataClassification, DeploymentClosure,
     ExactDeploymentRef, ExactVersionRef, JsonLimits, Permission, PermissionSet, PlanNodeKind,
-    PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot,
-    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef, WorkClass, WorkerManifest,
+    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
+    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, ResourceDocument, ResourceId,
+    ResourceKind, RunBindingsSnapshot, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
 };
 use insight_platform_orchestrator::{AdmitRun, PlanNodeKey, RunInputValue};
 use insight_platform_postgres::{
@@ -47,6 +47,7 @@ const TENANT_ID: &str = "ten_0198f1c5-0787-75e1-a9e8-d95ca0f36001";
 const PRINCIPAL_ID: &str = "prn_0198f1c5-0787-75e1-a9e8-d95ca0f36002";
 const POLICY_ID: &str = "pol_0198f1c5-0787-75e1-a9e8-d95ca0f36003";
 const POLICY_REVISION_ID: &str = "prev_0198f1c5-0787-75e1-a9e8-d95ca0f36004";
+const POLICY_DEPLOYMENT_ID: &str = "pdep_0198f1c5-0787-75e1-a9e8-d95ca0f36011";
 const AGENT_ID: &str = "agt_0198f1c5-0787-75e1-a9e8-d95ca0f36005";
 const INTERFACE_ID: &str = "aif_0198f1c5-0787-75e1-a9e8-d95ca0f36006";
 const PLAN_ID: &str = "arev_0198f1c5-0787-75e1-a9e8-d95ca0f36007";
@@ -67,6 +68,55 @@ fn digest(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
         .unwrap()
+}
+
+async fn seed_policy_deployment(
+    pool: &sqlx::PgPool,
+    tenant_id: &ResourceId,
+    principal_id: &ResourceId,
+    policy_id: &ResourceId,
+    deployment_id: ResourceId,
+    revision: ExactVersionRef,
+    qualification_evidence: ArtifactRef,
+) -> ExactDeploymentRef {
+    let bindings = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: revision.clone(),
+            applicability_digest: digest('0'),
+            qualification_evidence,
+        }),
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.deployments (
+            tenant_id, deployment_id, resource_id, resource_version_id, environment,
+            bindings_digest, payload_schema_version, bindings, created_by
+        ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(deployment_id.to_string())
+    .bind(policy_id.to_string())
+    .bind(revision.revision_id.to_string())
+    .bind(&bindings.digest)
+    .bind(bindings.schema_version)
+    .bind(&bindings.value)
+    .bind(principal_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resources SET active_version_id = NULL, active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(policy_id.to_string())
+    .bind(deployment_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    ExactDeploymentRef::new(deployment_id, bindings.digest.parse().unwrap()).unwrap()
 }
 
 fn audit(suffix: &str) -> CommandAudit {
@@ -575,6 +625,24 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
     .unwrap();
 
     let policy = ExactVersionRef::new(id(POLICY_REVISION_ID), digest('a')).unwrap();
+    let policy_deployment = seed_policy_deployment(
+        pool,
+        &id(TENANT_ID),
+        &id(PRINCIPAL_ID),
+        &id(POLICY_ID),
+        id(POLICY_DEPLOYMENT_ID),
+        policy.clone(),
+        ArtifactRef::new(
+            id("art_0198f1c5-0787-75e1-a9e8-d95ca0f36010"),
+            digest('3'),
+            1,
+            "application/json",
+            DataClassification::Internal,
+            Some("scheduling-policy.json".to_owned()),
+        )
+        .unwrap(),
+    )
+    .await;
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(INTERFACE_ID), digest('b')).unwrap(),
         plan: ExactVersionRef::new(id(PLAN_ID), digest('c')).unwrap(),
@@ -620,7 +688,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         .bind_tenant_scheduling_policy(BindTenantSchedulingPolicy {
             audit: audit("6011"),
             expected_tenant_version: 1,
-            policy: policy.clone(),
+            policy: policy_deployment,
         })
         .await
         .unwrap();
@@ -1202,20 +1270,21 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
         burst: 1,
         aging_rounds: 2,
     };
+    let qualification_evidence = ArtifactRef::new(
+        fresh_id(ResourceKind::Artifact),
+        digest('3'),
+        1,
+        "application/json",
+        DataClassification::Internal,
+        Some("scheduling-policy.json".to_owned()),
+    )
+    .unwrap();
     let policy_payload = TypedPayload::new(
         1,
         &PublishedVersionPayload {
             document: ResourceDocument::Policy(PolicyResourceSpec {
                 authoring_package: AuthoringPackage {
-                    artifact: ArtifactRef::new(
-                        fresh_id(ResourceKind::Artifact),
-                        digest('3'),
-                        1,
-                        "application/json",
-                        DataClassification::Internal,
-                        Some("scheduling-policy.json".to_owned()),
-                    )
-                    .unwrap(),
+                    artifact: qualification_evidence.clone(),
                     manifest_digest: digest('4'),
                 },
                 contract_digest: digest('5'),
@@ -1299,6 +1368,16 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
     .unwrap();
 
     let policy = ExactVersionRef::new(policy_revision_id.clone(), digest('a')).unwrap();
+    let policy_deployment = seed_policy_deployment(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &policy_id,
+        fresh_id(ResourceKind::PolicyDeployment),
+        policy.clone(),
+        qualification_evidence,
+    )
+    .await;
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(interface_id, digest('b')).unwrap(),
         plan: ExactVersionRef::new(plan_id.clone(), digest('c')).unwrap(),
@@ -1344,7 +1423,7 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
         .bind_tenant_scheduling_policy(BindTenantSchedulingPolicy {
             audit: fresh_audit(&tenant_id, &principal_id),
             expected_tenant_version: 1,
-            policy: policy.clone(),
+            policy: policy_deployment,
         })
         .await
         .unwrap();

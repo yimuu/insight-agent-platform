@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    canonical_digest, CommandAudit, CommandOutcome, ExactSecretBindingRef, ExactVersionRef,
+    canonical_digest, CommandAudit, CommandOutcome, ExactDeploymentRef, ExactSecretBindingRef,
     PermissionSet, PrincipalKind, ResourceId, ResourceKind, SecretBindingPayload,
     SecretBindingState, SecretPurpose, SecretResolutionPolicy, Sha256Digest,
 };
@@ -257,15 +257,15 @@ pub struct RevokeTenantPrincipal {
 pub struct BindTenantSchedulingPolicy {
     pub audit: CommandAudit,
     pub expected_tenant_version: i64,
-    pub policy: ExactVersionRef,
+    pub policy: ExactDeploymentRef,
 }
 
 #[derive(Debug, Clone)]
 pub struct BindTenantArtifactPolicies {
     pub audit: CommandAudit,
     pub expected_tenant_version: i64,
-    pub retention_policy: ExactVersionRef,
-    pub artifact_io_policy: ExactVersionRef,
+    pub retention_policy: ExactDeploymentRef,
+    pub artifact_io_policy: ExactDeploymentRef,
 }
 
 impl BindTenantArtifactPolicies {
@@ -275,12 +275,12 @@ impl BindTenantArtifactPolicies {
             policy
                 .validate()
                 .map_err(|failure| SecurityCommandError::Contract(failure.to_string()))?;
-            if policy.resource_kind != ResourceKind::PolicyRevision {
+            if policy.resource_kind != ResourceKind::PolicyDeployment {
                 return Err(SecurityCommandError::InvalidTenantPolicy);
             }
         }
         if self.expected_tenant_version <= 0
-            || self.retention_policy.revision_id == self.artifact_io_policy.revision_id
+            || self.retention_policy.deployment_id == self.artifact_io_policy.deployment_id
         {
             return Err(SecurityCommandError::InvalidTenantPolicy);
         }
@@ -295,7 +295,7 @@ impl BindTenantSchedulingPolicy {
             .validate()
             .map_err(|failure| SecurityCommandError::Contract(failure.to_string()))?;
         if self.expected_tenant_version <= 0
-            || self.policy.resource_kind != ResourceKind::PolicyRevision
+            || self.policy.resource_kind != ResourceKind::PolicyDeployment
         {
             return Err(SecurityCommandError::InvalidTenantPolicy);
         }
@@ -511,9 +511,9 @@ mod tests {
             .unwrap()
     }
 
-    fn exact_policy(suffix: &str, marker: char) -> ExactVersionRef {
-        ExactVersionRef::new(
-            format!("prev_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")
+    fn exact_policy(suffix: &str, marker: char) -> ExactDeploymentRef {
+        ExactDeploymentRef::new(
+            format!("pdep_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")
                 .parse()
                 .unwrap(),
             digest(marker),
@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_policy_binding_requires_two_distinct_exact_policy_revisions() {
+    fn artifact_policy_binding_requires_two_distinct_exact_policy_deployments() {
         let retention = exact_policy("7b85", 'a');
         let artifact_io = exact_policy("7b86", 'b');
         BindTenantArtifactPolicies {
