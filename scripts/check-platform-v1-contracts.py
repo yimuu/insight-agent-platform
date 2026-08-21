@@ -913,9 +913,35 @@ def check_spec_registry_alignment(errors):
     deployment_schema = load(CONTRACT_ROOT / "schemas" / "deployment-closure.schema.json")
     if deployment_schema.get("$id") != "urn:insight:platform:v1:deployment-closure":
         errors.append("DeploymentClosure schema has the wrong canonical ID")
-    definition_variants = [
+    deployment_variants = [
+        ("AgentDeploymentClosure", "agent", {
+            "interface", "plan", "entry_node_id", "entry_node_kind", "slots", "policies",
+            "execution_profile"
+        }),
         ("SkillDeploymentClosure", "skill", {
             "skill_revision", "requirements", "selection_policy", "qualification_evidence"
+        }),
+        ("CapabilityDeploymentClosure", "capability_interface", {
+            "implementation", "interface", "backend", "secret_bindings", "policies",
+            "conformance_evidence"
+        }),
+        ("ContextDeploymentClosure", "context_source_interface", {
+            "implementation", "interface", "backend", "secret_bindings", "network_policy",
+            "parser_policy", "chunker_policy", "embedding_model_deployment", "ranking_policy",
+            "data_policy", "conformance_evidence"
+        }),
+        ("McpDeploymentClosure", "mcp_server", {
+            "server_revision", "server_identity_digest", "transport", "protocol_policy",
+            "trust_policy", "auth_policy", "secret_bindings", "conformance_evidence"
+        }),
+        ("ModelProviderDeploymentClosure", "model_provider", {
+            "provider_revision", "endpoint_identity_digest", "secret_bindings", "protocol_policy",
+            "network_policy", "tls_policy", "trust_policy", "data_policy", "region",
+            "conformance_evidence"
+        }),
+        ("ModelDeploymentClosure", "model_profile", {
+            "profile_revision", "provider_deployment", "data_policy", "budget_policy",
+            "public_projection_policy", "generation_defaults"
         }),
         ("PolicyDeploymentClosure", "policy", {
             "policy_revision", "applicability_digest", "qualification_evidence"
@@ -925,11 +951,11 @@ def check_spec_registry_alignment(errors):
         }),
     ]
     defs = deployment_schema.get("$defs", {})
-    expected_refs = [f"#/$defs/{name}" for name, _, _ in definition_variants]
+    expected_refs = [f"#/$defs/{name}" for name, _, _ in deployment_variants]
     actual_refs = [variant.get("$ref") for variant in deployment_schema.get("oneOf", [])]
     if actual_refs != expected_refs:
-        errors.append("DeploymentClosure definition variant registry is incomplete or reordered")
-    for name, resource_kind, binding_fields in definition_variants:
+        errors.append("DeploymentClosure variant registry is incomplete or reordered")
+    for name, resource_kind, binding_fields in deployment_variants:
         variant = defs.get(name, {})
         if variant.get("additionalProperties") is not False:
             errors.append(f"{name} root is not closed")
@@ -949,6 +975,35 @@ def check_spec_registry_alignment(errors):
         policy_binding.get("required", [])
     ) != {"deployment", "revision"}:
         errors.append("ExactPolicyBinding schema is not a closed Deployment + Revision pair")
+    expected_backend_variants = {
+        "CapabilityBackendBinding": ["native", "http", "grpc", "mcp", "sandbox"],
+        "ContextBackendBinding": [
+            "managed_index", "remote_search", "mcp_resources", "sql_catalog",
+            "artifact_collection", "native_catalog"
+        ],
+        "McpTransportBinding": ["streamable_http"],
+    }
+    for name, expected_kinds in expected_backend_variants.items():
+        variants = defs.get(name, {}).get("oneOf", [])
+        actual_kinds = [
+            variant.get("properties", {}).get("kind", {}).get("const")
+            for variant in variants
+        ]
+        if actual_kinds != expected_kinds:
+            errors.append(f"{name} variant registry differs from its Rust owner enum")
+        if any(variant.get("additionalProperties") is not False for variant in variants):
+            errors.append(f"{name} contains an open variant")
+    secret_binding = defs.get("ExactSecretBindingRef", {})
+    expected_secret_fields = {
+        "secret_binding_id", "binding_generation", "provider_id", "purpose",
+        "resolution_policy", "resolution_policy_digest"
+    }
+    if (
+        secret_binding.get("additionalProperties") is not False
+        or set(secret_binding.get("required", [])) != expected_secret_fields
+        or set(secret_binding.get("properties", {})) != expected_secret_fields
+    ):
+        errors.append("ExactSecretBindingRef schema differs from its closed Rust owner fields")
 
     if registries.get("quota_accounting_modes") != ["leased", "consumable", "reclaimable"]:
         errors.append("04 quota accounting mode registry is not closed")

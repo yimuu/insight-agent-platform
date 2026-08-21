@@ -1,5 +1,644 @@
 {
   "$defs": {
+    "AgentDeploymentClosure": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": false,
+          "properties": {
+            "entry_node_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "entry_node_kind": {
+              "enum": [
+                "start",
+                "compute",
+                "branch",
+                "fork",
+                "join",
+                "map",
+                "loop",
+                "error_boundary",
+                "model_loop",
+                "capability_call",
+                "context_query",
+                "child_agent_call",
+                "human_task",
+                "timer_wait",
+                "signal_wait",
+                "return",
+                "raise"
+              ],
+              "type": "string"
+            },
+            "execution_profile": {
+              "$ref": "#/$defs/ExactPolicyBinding"
+            },
+            "interface": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "plan": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "policies": {
+              "items": {
+                "$ref": "#/$defs/ExactPolicyBinding"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "slots": {
+              "items": {
+                "$ref": "frozen-slot-binding.schema.json"
+              },
+              "maxItems": 512,
+              "type": "array"
+            }
+          },
+          "required": [
+            "entry_node_id",
+            "entry_node_kind",
+            "execution_profile",
+            "interface",
+            "plan",
+            "policies",
+            "slots"
+          ],
+          "type": "object"
+        },
+        "resource_kind": {
+          "const": "agent"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "bindings"
+      ],
+      "type": "object"
+    },
+    "CapabilityBackendBinding": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "additionalProperties": false,
+              "properties": {
+                "adapter_module_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                },
+                "worker_manifest_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                }
+              },
+              "required": [
+                "adapter_module_digest",
+                "worker_manifest_digest"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "native"
+            }
+          },
+          "required": [
+            "kind",
+            "binding"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "additionalProperties": false,
+              "properties": {
+                "endpoint": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "base_path": {
+                      "maxLength": 8192,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "host": {
+                      "maxLength": 253,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "port": {
+                      "maximum": 65535,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "scheme": {
+                      "enum": [
+                        "http",
+                        "https"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "scheme",
+                    "host",
+                    "port",
+                    "base_path"
+                  ],
+                  "type": "object"
+                },
+                "endpoint_identity_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                },
+                "network_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "tls_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "trust_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                }
+              },
+              "required": [
+                "endpoint",
+                "endpoint_identity_digest",
+                "network_policy",
+                "tls_policy",
+                "trust_policy"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "http"
+            }
+          },
+          "required": [
+            "kind",
+            "binding"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "additionalProperties": false,
+              "properties": {
+                "endpoint": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "base_path": {
+                      "maxLength": 8192,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "host": {
+                      "maxLength": 253,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "port": {
+                      "maximum": 65535,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "scheme": {
+                      "enum": [
+                        "http",
+                        "https"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "scheme",
+                    "host",
+                    "port",
+                    "base_path"
+                  ],
+                  "type": "object"
+                },
+                "endpoint_identity_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                },
+                "network_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "tls_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "trust_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                }
+              },
+              "required": [
+                "endpoint",
+                "endpoint_identity_digest",
+                "network_policy",
+                "tls_policy",
+                "trust_policy"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "grpc"
+            }
+          },
+          "required": [
+            "kind",
+            "binding"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "additionalProperties": false,
+              "properties": {
+                "authorization_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "discovery_snapshot_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                },
+                "discovery_snapshot_id": {
+                  "$ref": "resource-id.schema.json"
+                },
+                "mcp_deployment": {
+                  "$ref": "#/$defs/ExactDeploymentRef"
+                }
+              },
+              "required": [
+                "authorization_policy",
+                "discovery_snapshot_digest",
+                "discovery_snapshot_id",
+                "mcp_deployment"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "mcp"
+            }
+          },
+          "required": [
+            "kind",
+            "binding"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_io_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "isolation": {
+                  "enum": [
+                    "wasm",
+                    "sandboxed_container"
+                  ],
+                  "type": "string"
+                },
+                "network_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "package": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "profile": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "deployment": {
+                      "$ref": "#/$defs/ExactDeploymentRef"
+                    },
+                    "revision": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    }
+                  },
+                  "required": [
+                    "deployment",
+                    "revision"
+                  ],
+                  "type": "object"
+                },
+                "resource_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "runtime": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "secret_policy": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "artifact_io_policy",
+                "isolation",
+                "network_policy",
+                "package",
+                "profile",
+                "resource_policy",
+                "runtime",
+                "secret_policy"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "sandbox"
+            }
+          },
+          "required": [
+            "kind",
+            "binding"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CapabilityDeploymentClosure": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "$ref": "#/$defs/CapabilityBackendBinding"
+            },
+            "conformance_evidence": {
+              "$ref": "nominal/artifact-ref.schema.json"
+            },
+            "implementation": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "interface": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "policies": {
+              "items": {
+                "$ref": "#/$defs/ExactVersionRef"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "secret_bindings": {
+              "items": {
+                "$ref": "#/$defs/ExactSecretBindingRef"
+              },
+              "maxItems": 64,
+              "type": "array"
+            }
+          },
+          "required": [
+            "backend",
+            "conformance_evidence",
+            "implementation",
+            "interface",
+            "policies",
+            "secret_bindings"
+          ],
+          "type": "object"
+        },
+        "resource_kind": {
+          "const": "capability_interface"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "bindings"
+      ],
+      "type": "object"
+    },
+    "ContextBackendBinding": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "index_namespace_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "kind": {
+              "const": "managed_index"
+            },
+            "region": {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            "service_identity_digest": {
+              "$ref": "nominal/digest.schema.json"
+            }
+          },
+          "required": [
+            "index_namespace_digest",
+            "kind",
+            "region",
+            "service_identity_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "endpoint_identity_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "kind": {
+              "const": "remote_search"
+            },
+            "region": {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "endpoint_identity_digest",
+            "kind",
+            "region"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "discovery_snapshot_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "discovery_snapshot_id": {
+              "$ref": "resource-id.schema.json"
+            },
+            "kind": {
+              "const": "mcp_resources"
+            },
+            "mcp_deployment": {
+              "$ref": "#/$defs/ExactDeploymentRef"
+            }
+          },
+          "required": [
+            "discovery_snapshot_digest",
+            "discovery_snapshot_id",
+            "kind",
+            "mcp_deployment"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "catalog_scope_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "database_identity_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "dialect": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "kind": {
+              "const": "sql_catalog"
+            }
+          },
+          "required": [
+            "catalog_scope_digest",
+            "database_identity_digest",
+            "dialect",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "collection_identity_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "kind": {
+              "const": "artifact_collection"
+            }
+          },
+          "required": [
+            "collection_identity_digest",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "installed_adapter_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "kind": {
+              "const": "native_catalog"
+            }
+          },
+          "required": [
+            "installed_adapter_digest",
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ContextDeploymentClosure": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "$ref": "#/$defs/ContextBackendBinding"
+            },
+            "chunker_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "conformance_evidence": {
+              "$ref": "nominal/artifact-ref.schema.json"
+            },
+            "data_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "embedding_model_deployment": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/ExactDeploymentRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "implementation": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "interface": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "network_policy": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "parser_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "ranking_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "secret_bindings": {
+              "items": {
+                "$ref": "#/$defs/ExactSecretBindingRef"
+              },
+              "maxItems": 64,
+              "type": "array"
+            }
+          },
+          "required": [
+            "backend",
+            "chunker_policy",
+            "conformance_evidence",
+            "data_policy",
+            "embedding_model_deployment",
+            "implementation",
+            "interface",
+            "network_policy",
+            "parser_policy",
+            "ranking_policy",
+            "secret_bindings"
+          ],
+          "type": "object"
+        },
+        "resource_kind": {
+          "const": "context_source_interface"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "bindings"
+      ],
+      "type": "object"
+    },
     "ExactDeploymentRef": {
       "additionalProperties": false,
       "properties": {
@@ -47,6 +686,74 @@
       ],
       "type": "object"
     },
+    "ExactSecretBindingRef": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_generation": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "provider_id": {
+          "$ref": "resource-id.schema.json"
+        },
+        "purpose": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "resolution_policy": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "pinned"
+                },
+                "opaque_version_identity_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                }
+              },
+              "required": [
+                "kind",
+                "opaque_version_identity_digest"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "follow_provider_rotation"
+                },
+                "rotation_policy_revision_id": {
+                  "$ref": "resource-id.schema.json"
+                }
+              },
+              "required": [
+                "kind",
+                "rotation_policy_revision_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "resolution_policy_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "secret_binding_id": {
+          "$ref": "resource-id.schema.json"
+        }
+      },
+      "required": [
+        "secret_binding_id",
+        "binding_generation",
+        "provider_id",
+        "purpose",
+        "resolution_policy",
+        "resolution_policy_digest"
+      ],
+      "type": "object"
+    },
     "ExactVersionRef": {
       "additionalProperties": false,
       "properties": {
@@ -81,6 +788,269 @@
         "revision_id",
         "resource_kind",
         "semantic_digest"
+      ],
+      "type": "object"
+    },
+    "McpDeploymentClosure": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": false,
+          "properties": {
+            "auth_policy": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "conformance_evidence": {
+              "$ref": "nominal/artifact-ref.schema.json"
+            },
+            "protocol_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "secret_bindings": {
+              "items": {
+                "$ref": "#/$defs/ExactSecretBindingRef"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "server_identity_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "server_revision": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "transport": {
+              "$ref": "#/$defs/McpTransportBinding"
+            },
+            "trust_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            }
+          },
+          "required": [
+            "auth_policy",
+            "conformance_evidence",
+            "protocol_policy",
+            "secret_bindings",
+            "server_identity_digest",
+            "server_revision",
+            "transport",
+            "trust_policy"
+          ],
+          "type": "object"
+        },
+        "resource_kind": {
+          "const": "mcp_server"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "bindings"
+      ],
+      "type": "object"
+    },
+    "McpTransportBinding": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "additionalProperties": false,
+              "properties": {
+                "endpoint": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "base_path": {
+                      "maxLength": 8192,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "host": {
+                      "maxLength": 253,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "port": {
+                      "maximum": 65535,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "scheme": {
+                      "enum": [
+                        "http",
+                        "https"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "scheme",
+                    "host",
+                    "port",
+                    "base_path"
+                  ],
+                  "type": "object"
+                },
+                "endpoint_identity_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                },
+                "network_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                },
+                "tls_policy": {
+                  "$ref": "#/$defs/ExactVersionRef"
+                }
+              },
+              "required": [
+                "endpoint",
+                "endpoint_identity_digest",
+                "network_policy",
+                "tls_policy"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "streamable_http"
+            }
+          },
+          "required": [
+            "kind",
+            "binding"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ModelDeploymentClosure": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": false,
+          "properties": {
+            "budget_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "data_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "generation_defaults": {
+              "additionalProperties": false,
+              "properties": {
+                "canonical_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                },
+                "schema_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                },
+                "value": {}
+              },
+              "required": [
+                "schema_digest",
+                "value",
+                "canonical_digest"
+              ],
+              "type": "object"
+            },
+            "profile_revision": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "provider_deployment": {
+              "$ref": "#/$defs/ExactDeploymentRef"
+            },
+            "public_projection_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            }
+          },
+          "required": [
+            "budget_policy",
+            "data_policy",
+            "generation_defaults",
+            "profile_revision",
+            "provider_deployment",
+            "public_projection_policy"
+          ],
+          "type": "object"
+        },
+        "resource_kind": {
+          "const": "model_profile"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "bindings"
+      ],
+      "type": "object"
+    },
+    "ModelProviderDeploymentClosure": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": false,
+          "properties": {
+            "conformance_evidence": {
+              "$ref": "nominal/artifact-ref.schema.json"
+            },
+            "data_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "endpoint_identity_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "network_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "protocol_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "provider_revision": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "region": {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            "secret_bindings": {
+              "items": {
+                "$ref": "#/$defs/ExactSecretBindingRef"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "tls_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "trust_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
+            }
+          },
+          "required": [
+            "conformance_evidence",
+            "data_policy",
+            "endpoint_identity_digest",
+            "network_policy",
+            "protocol_policy",
+            "provider_revision",
+            "region",
+            "secret_bindings",
+            "tls_policy",
+            "trust_policy"
+          ],
+          "type": "object"
+        },
+        "resource_kind": {
+          "const": "model_provider"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "bindings"
       ],
       "type": "object"
     },
@@ -202,10 +1172,28 @@
   },
   "$id": "urn:insight:platform:v1:deployment-closure",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Closed immutable Deployment closure variants generated from the Rust owner contract. CR-173 definition variants are exact Deployment plus Revision bindings; executable variants are added to this same owner schema.",
+  "description": "Closed immutable Deployment closure variants generated from the Rust owner contract. Public management nouns and internal Model Provider deployments share this exact owner schema.",
   "oneOf": [
     {
+      "$ref": "#/$defs/AgentDeploymentClosure"
+    },
+    {
       "$ref": "#/$defs/SkillDeploymentClosure"
+    },
+    {
+      "$ref": "#/$defs/CapabilityDeploymentClosure"
+    },
+    {
+      "$ref": "#/$defs/ContextDeploymentClosure"
+    },
+    {
+      "$ref": "#/$defs/McpDeploymentClosure"
+    },
+    {
+      "$ref": "#/$defs/ModelProviderDeploymentClosure"
+    },
+    {
+      "$ref": "#/$defs/ModelDeploymentClosure"
     },
     {
       "$ref": "#/$defs/PolicyDeploymentClosure"

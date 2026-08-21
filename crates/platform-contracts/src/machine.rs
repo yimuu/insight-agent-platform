@@ -1604,6 +1604,178 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
     contracts
 }
 
+fn deployment_variant_schema(resource_kind: &str, properties: Value) -> Value {
+    let binding_properties = properties
+        .as_object()
+        .expect("deployment binding properties are an object");
+    let required = binding_properties.keys().cloned().collect::<Vec<_>>();
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resource_kind", "bindings"],
+        "properties": {
+            "resource_kind": {"const": resource_kind},
+            "bindings": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": required,
+                "properties": properties
+            }
+        }
+    })
+}
+
+fn tagged_content_variant(kind: &str, properties: Value) -> Value {
+    let fields = properties
+        .as_object()
+        .expect("tagged content properties are an object");
+    let required = fields.keys().cloned().collect::<Vec<_>>();
+    json!({
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "binding"],
+        "properties": {
+            "kind": {"const": kind},
+            "binding": {
+                "type": "object", "additionalProperties": false,
+                "required": required, "properties": properties
+            }
+        }
+    })
+}
+
+fn tagged_flat_variant(kind: &str, properties: Value) -> Value {
+    let mut properties = properties
+        .as_object()
+        .expect("tagged properties are an object")
+        .clone();
+    properties.insert("kind".to_owned(), json!({"const": kind}));
+    let required = properties.keys().cloned().collect::<Vec<_>>();
+    json!({
+        "type": "object", "additionalProperties": false,
+        "required": required, "properties": properties
+    })
+}
+
+fn exact_secret_binding_schema() -> Value {
+    json!({
+        "type": "object", "additionalProperties": false,
+        "required": ["secret_binding_id", "binding_generation", "provider_id", "purpose", "resolution_policy", "resolution_policy_digest"],
+        "properties": {
+            "secret_binding_id": {"$ref": "resource-id.schema.json"},
+            "binding_generation": {"type": "integer", "minimum": 1},
+            "provider_id": {"$ref": "resource-id.schema.json"},
+            "purpose": {"type": "string", "minLength": 1, "maxLength": 128},
+            "resolution_policy": {
+                "oneOf": [
+                    tagged_flat_variant("pinned", json!({
+                        "opaque_version_identity_digest": {"$ref": "nominal/digest.schema.json"}
+                    })),
+                    tagged_flat_variant("follow_provider_rotation", json!({
+                        "rotation_policy_revision_id": {"$ref": "resource-id.schema.json"}
+                    }))
+                ]
+            },
+            "resolution_policy_digest": {"$ref": "nominal/digest.schema.json"}
+        }
+    })
+}
+
+fn endpoint_schema() -> Value {
+    json!({
+        "type": "object", "additionalProperties": false,
+        "required": ["scheme", "host", "port", "base_path"],
+        "properties": {
+            "scheme": {"type": "string", "enum": ["http", "https"]},
+            "host": {"type": "string", "minLength": 1, "maxLength": 253},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "base_path": {"type": "string", "minLength": 1, "maxLength": 8192}
+        }
+    })
+}
+
+fn capability_backend_binding_schema() -> Value {
+    let version = json!({"$ref": "#/$defs/ExactVersionRef"});
+    let digest = json!({"$ref": "nominal/digest.schema.json"});
+    let endpoint = endpoint_schema();
+    let remote = |kind: &str| {
+        tagged_content_variant(
+            kind,
+            json!({
+                "endpoint": endpoint.clone(),
+                "endpoint_identity_digest": digest.clone(),
+                "network_policy": version.clone(),
+                "tls_policy": version.clone(),
+                "trust_policy": version.clone()
+            }),
+        )
+    };
+    json!({"oneOf": [
+        tagged_content_variant("native", json!({
+            "worker_manifest_digest": digest.clone(),
+            "adapter_module_digest": digest.clone()
+        })),
+        remote("http"),
+        remote("grpc"),
+        tagged_content_variant("mcp", json!({
+            "mcp_deployment": {"$ref": "#/$defs/ExactDeploymentRef"},
+            "discovery_snapshot_id": {"$ref": "resource-id.schema.json"},
+            "discovery_snapshot_digest": digest.clone(),
+            "authorization_policy": version.clone()
+        })),
+        tagged_content_variant("sandbox", json!({
+            "runtime": version.clone(),
+            "package": version.clone(),
+            "profile": {
+                "type": "object", "additionalProperties": false,
+                "required": ["deployment", "revision"],
+                "properties": {
+                    "deployment": {"$ref": "#/$defs/ExactDeploymentRef"},
+                    "revision": version.clone()
+                }
+            },
+            "isolation": {"type": "string", "enum": ["wasm", "sandboxed_container"]},
+            "network_policy": version.clone(),
+            "resource_policy": version.clone(),
+            "artifact_io_policy": version.clone(),
+            "secret_policy": {"oneOf": [version, {"type": "null"}]}
+        }))
+    ]})
+}
+
+fn context_backend_binding_schema() -> Value {
+    let digest = json!({"$ref": "nominal/digest.schema.json"});
+    let region = json!({"type": "string", "minLength": 1, "maxLength": 32});
+    json!({"oneOf": [
+        tagged_flat_variant("managed_index", json!({
+            "service_identity_digest": digest.clone(), "index_namespace_digest": digest.clone(), "region": region.clone()
+        })),
+        tagged_flat_variant("remote_search", json!({
+            "endpoint_identity_digest": digest.clone(), "region": region
+        })),
+        tagged_flat_variant("mcp_resources", json!({
+            "mcp_deployment": {"$ref": "#/$defs/ExactDeploymentRef"},
+            "discovery_snapshot_id": {"$ref": "resource-id.schema.json"},
+            "discovery_snapshot_digest": digest.clone()
+        })),
+        tagged_flat_variant("sql_catalog", json!({
+            "database_identity_digest": digest.clone(),
+            "dialect": {"type": "string", "minLength": 1, "maxLength": 128},
+            "catalog_scope_digest": digest.clone()
+        })),
+        tagged_flat_variant("artifact_collection", json!({"collection_identity_digest": digest.clone()})),
+        tagged_flat_variant("native_catalog", json!({"installed_adapter_digest": digest}))
+    ]})
+}
+
+fn mcp_transport_binding_schema() -> Value {
+    json!({"oneOf": [tagged_content_variant("streamable_http", json!({
+        "endpoint": endpoint_schema(),
+        "endpoint_identity_digest": {"$ref": "nominal/digest.schema.json"},
+        "network_policy": {"$ref": "#/$defs/ExactVersionRef"},
+        "tls_policy": {"$ref": "#/$defs/ExactVersionRef"}
+    }))]})
+}
+
 fn deployment_closure_schema() -> Value {
     let exact_version_ref = json!({
         "type": "object",
@@ -1646,13 +1818,23 @@ fn deployment_closure_schema() -> Value {
             "revision": {"$ref": "#/$defs/ExactVersionRef"}
         }
     });
+    let exact_secret_binding = exact_secret_binding_schema();
+    let capability_backend = capability_backend_binding_schema();
+    let context_backend = context_backend_binding_schema();
+    let mcp_transport = mcp_transport_binding_schema();
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "urn:insight:platform:v1:deployment-closure",
         "title": "DeploymentClosure",
-        "description": "Closed immutable Deployment closure variants generated from the Rust owner contract. CR-173 definition variants are exact Deployment plus Revision bindings; executable variants are added to this same owner schema.",
+        "description": "Closed immutable Deployment closure variants generated from the Rust owner contract. Public management nouns and internal Model Provider deployments share this exact owner schema.",
         "oneOf": [
+            {"$ref": "#/$defs/AgentDeploymentClosure"},
             {"$ref": "#/$defs/SkillDeploymentClosure"},
+            {"$ref": "#/$defs/CapabilityDeploymentClosure"},
+            {"$ref": "#/$defs/ContextDeploymentClosure"},
+            {"$ref": "#/$defs/McpDeploymentClosure"},
+            {"$ref": "#/$defs/ModelProviderDeploymentClosure"},
+            {"$ref": "#/$defs/ModelDeploymentClosure"},
             {"$ref": "#/$defs/PolicyDeploymentClosure"},
             {"$ref": "#/$defs/SandboxProfileDeploymentClosure"}
         ],
@@ -1660,6 +1842,19 @@ fn deployment_closure_schema() -> Value {
             "ExactVersionRef": exact_version_ref,
             "ExactDeploymentRef": exact_deployment_ref,
             "ExactPolicyBinding": exact_policy_binding,
+            "ExactSecretBindingRef": exact_secret_binding,
+            "CapabilityBackendBinding": capability_backend,
+            "ContextBackendBinding": context_backend,
+            "McpTransportBinding": mcp_transport,
+            "AgentDeploymentClosure": deployment_variant_schema("agent", json!({
+                "interface": {"$ref": "#/$defs/ExactVersionRef"},
+                "plan": {"$ref": "#/$defs/ExactVersionRef"},
+                "entry_node_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "entry_node_kind": {"type": "string", "enum": wire_values(PlanNodeKind::ALL, |value| value.as_str())},
+                "slots": {"type": "array", "maxItems": 512, "items": {"$ref": "frozen-slot-binding.schema.json"}},
+                "policies": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/ExactPolicyBinding"}},
+                "execution_profile": {"$ref": "#/$defs/ExactPolicyBinding"}
+            })),
             "SkillDeploymentClosure": {
                 "type": "object",
                 "additionalProperties": false,
@@ -1683,6 +1878,65 @@ fn deployment_closure_schema() -> Value {
                     }
                 }
             },
+            "CapabilityDeploymentClosure": deployment_variant_schema("capability_interface", json!({
+                "implementation": {"$ref": "#/$defs/ExactVersionRef"},
+                "interface": {"$ref": "#/$defs/ExactVersionRef"},
+                "backend": {"$ref": "#/$defs/CapabilityBackendBinding"},
+                "secret_bindings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/ExactSecretBindingRef"}},
+                "policies": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/ExactVersionRef"}},
+                "conformance_evidence": {"$ref": "nominal/artifact-ref.schema.json"}
+            })),
+            "ContextDeploymentClosure": deployment_variant_schema("context_source_interface", json!({
+                "implementation": {"$ref": "#/$defs/ExactVersionRef"},
+                "interface": {"$ref": "#/$defs/ExactVersionRef"},
+                "backend": {"$ref": "#/$defs/ContextBackendBinding"},
+                "secret_bindings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/ExactSecretBindingRef"}},
+                "network_policy": {"oneOf": [{"$ref": "#/$defs/ExactVersionRef"}, {"type": "null"}]},
+                "parser_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "chunker_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "embedding_model_deployment": {"oneOf": [{"$ref": "#/$defs/ExactDeploymentRef"}, {"type": "null"}]},
+                "ranking_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "data_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "conformance_evidence": {"$ref": "nominal/artifact-ref.schema.json"}
+            })),
+            "McpDeploymentClosure": deployment_variant_schema("mcp_server", json!({
+                "server_revision": {"$ref": "#/$defs/ExactVersionRef"},
+                "server_identity_digest": {"$ref": "nominal/digest.schema.json"},
+                "transport": {"$ref": "#/$defs/McpTransportBinding"},
+                "protocol_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "trust_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "auth_policy": {"oneOf": [{"$ref": "#/$defs/ExactVersionRef"}, {"type": "null"}]},
+                "secret_bindings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/ExactSecretBindingRef"}},
+                "conformance_evidence": {"$ref": "nominal/artifact-ref.schema.json"}
+            })),
+            "ModelProviderDeploymentClosure": deployment_variant_schema("model_provider", json!({
+                "provider_revision": {"$ref": "#/$defs/ExactVersionRef"},
+                "endpoint_identity_digest": {"$ref": "nominal/digest.schema.json"},
+                "secret_bindings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/ExactSecretBindingRef"}},
+                "protocol_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "network_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "tls_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "trust_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "data_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "region": {"type": "string", "minLength": 1, "maxLength": 32},
+                "conformance_evidence": {"$ref": "nominal/artifact-ref.schema.json"}
+            })),
+            "ModelDeploymentClosure": deployment_variant_schema("model_profile", json!({
+                "profile_revision": {"$ref": "#/$defs/ExactVersionRef"},
+                "provider_deployment": {"$ref": "#/$defs/ExactDeploymentRef"},
+                "data_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "budget_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "public_projection_policy": {"$ref": "#/$defs/ExactVersionRef"},
+                "generation_defaults": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["schema_digest", "value", "canonical_digest"],
+                    "properties": {
+                        "schema_digest": {"$ref": "nominal/digest.schema.json"},
+                        "value": {},
+                        "canonical_digest": {"$ref": "nominal/digest.schema.json"}
+                    }
+                }
+            })),
             "PolicyDeploymentClosure": {
                 "type": "object",
                 "additionalProperties": false,
