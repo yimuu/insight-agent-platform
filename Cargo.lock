@@ -2681,6 +2681,7 @@ dependencies = [
  "chrono",
  "futures",
  "insight-platform-api",
+ "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-invocations",
  "insight-platform-mcp-host",

@@ -482,6 +482,39 @@ paths:
         "404": {$ref: "#/components/responses/ApiProblem"}
         "409": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
+  /contexts/{context_id}/deployments/{context_deployment_id}:build-dataset:
+    post:
+      operationId: buildContextDataset
+      summary: Create a durable Dataset Generation build Job
+      tags: [Contexts]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: context.write
+      x-insight-idempotency: tenant_principal_context_deployment_receipt
+      parameters:
+        - $ref: "#/components/parameters/ContextId"
+        - $ref: "#/components/parameters/ContextDeploymentId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/BuildContextDatasetRequestV1"}
+      responses:
+        "202":
+          description: The shared build Job was accepted; its target is the reserved Dataset ID.
+          headers:
+            Location: {schema: {type: string, pattern: "^/v1/operations/job_"}}
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OperationViewV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /mcp/oauth/callback:
     get:
       operationId: completeMcpOAuthCallback
@@ -639,6 +672,16 @@ components:
       in: path
       required: true
       schema: {$ref: "#/components/schemas/McpDeploymentId"}
+    ContextId:
+      name: context_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/ContextId"}
+    ContextDeploymentId:
+      name: context_deployment_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/ContextDeploymentId"}
     IfMatch:
       name: If-Match
       in: header
@@ -716,6 +759,15 @@ components:
     McpAuthorizationBindingId:
       type: string
       pattern: "^mab_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ContextId:
+      type: string
+      pattern: "^ctx_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ContextDeploymentId:
+      type: string
+      pattern: "^xdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ContextDatasetId:
+      type: string
+      pattern: "^dset_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     DataClassification:
       type: string
       enum: [public, internal, confidential, restricted]
@@ -755,6 +807,17 @@ components:
       properties:
         schema_version: {const: 1}
         authorization_binding_id: {$ref: "#/components/schemas/McpAuthorizationBindingId"}
+        deadline: {$ref: "#/components/schemas/UtcTimestamp"}
+    BuildContextDatasetRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, dataset_id, deadline]
+      properties:
+        schema_version: {const: 1}
+        dataset_id:
+          oneOf:
+            - {$ref: "#/components/schemas/ContextDatasetId"}
+            - {type: "null"}
         deadline: {$ref: "#/components/schemas/UtcTimestamp"}
     RunViewV1:
       type: object

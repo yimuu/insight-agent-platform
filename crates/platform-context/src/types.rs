@@ -1,11 +1,11 @@
 use crate::ContextQueryError;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    canonical_digest, ArtifactRef, ClosedJsonValue, ContextBindingSnapshot,
-    ContextDatasetGenerationSpec, ContextImplementationResourceSpec, ContextInterfaceResourceSpec,
-    ContextLocatorKind, DataClassification, ExactDatasetGenerationRef, ExactDeploymentRef,
-    ExactVersionRef, HardLimitProfile, JsonLimits, PrincipalSnapshot, ResourceId, ResourceKind,
-    Sha256Digest, ValueRef,
+    canonical_digest, ArtifactRef, ClosedJsonValue, CommandAudit, ContextBindingSnapshot,
+    ContextDatasetGenerationSpec, ContextDeploymentClosure, ContextImplementationResourceSpec,
+    ContextInterfaceResourceSpec, ContextLocatorKind, DataClassification,
+    ExactDatasetGenerationRef, ExactDeploymentRef, ExactVersionRef, HardLimitProfile, JsonLimits,
+    PrincipalSnapshot, ResourceId, ResourceKind, Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::ExactInvocationValueRef;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,126 @@ use std::collections::BTreeSet;
 pub const MAX_CONTEXT_SAFE_CODE_BYTES: usize = 128;
 pub const MAX_CONTEXT_LOCATOR_SEGMENTS: usize = 64;
 pub const MAX_CONTEXT_LOCATOR_SEGMENT_BYTES: usize = 256;
+
+#[derive(Debug, Clone)]
+pub struct RequestContextDatasetBuild {
+    pub audit: CommandAudit,
+    pub context_resource_id: ResourceId,
+    pub context_deployment: ExactDeploymentRef,
+    pub dataset_id: ResourceId,
+    pub job_id: ResourceId,
+    pub attempt_limit: u16,
+    pub deadline: DateTime<Utc>,
+}
+
+impl RequestContextDatasetBuild {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ContextQueryError> {
+        self.audit
+            .validate_at(now)
+            .map_err(|_| ContextQueryError::InvalidJob)?;
+        if self.context_resource_id.kind() != ResourceKind::ContextSourceInterface
+            || self.context_deployment.resource_kind != ResourceKind::ContextDeployment
+            || self.context_deployment.validate().is_err()
+            || self.dataset_id.kind() != ResourceKind::ContextDataset
+            || self.job_id.kind() != ResourceKind::Job
+            || self.attempt_limit == 0
+            || self.attempt_limit > 8
+            || self.deadline <= now
+        {
+            return Err(ContextQueryError::InvalidJob);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextDatasetBuildJobPayload {
+    pub schema_version: u32,
+    pub job_id: ResourceId,
+    pub dataset_id: ResourceId,
+    pub context_resource_id: ResourceId,
+    pub context_deployment: ExactDeploymentRef,
+    pub parser_profile: ExactVersionRef,
+    pub chunker_profile: ExactVersionRef,
+    pub embedding_model_deployment: Option<ExactDeploymentRef>,
+    pub ranking_profile: ExactVersionRef,
+    pub data_policy: ExactVersionRef,
+    pub expected_dataset_version: Option<u64>,
+    pub expected_active_generation_id: Option<ResourceId>,
+    pub deadline: DateTime<Utc>,
+}
+
+impl ContextDatasetBuildJobPayload {
+    pub fn from_request(
+        request: &RequestContextDatasetBuild,
+        closure: &ContextDeploymentClosure,
+        expected_dataset_version: Option<u64>,
+        expected_active_generation_id: Option<ResourceId>,
+    ) -> Result<Self, ContextQueryError> {
+        let payload = Self {
+            schema_version: 1,
+            job_id: request.job_id.clone(),
+            dataset_id: request.dataset_id.clone(),
+            context_resource_id: request.context_resource_id.clone(),
+            context_deployment: request.context_deployment.clone(),
+            parser_profile: closure.parser_policy.clone(),
+            chunker_profile: closure.chunker_policy.clone(),
+            embedding_model_deployment: closure.embedding_model_deployment.clone(),
+            ranking_profile: closure.ranking_policy.clone(),
+            data_policy: closure.data_policy.clone(),
+            expected_dataset_version,
+            expected_active_generation_id,
+            deadline: request.deadline,
+        };
+        payload.validate_for_owner(&request.dataset_id)?;
+        Ok(payload)
+    }
+
+    pub fn validate_for_owner(&self, owner: &ResourceId) -> Result<(), ContextQueryError> {
+        if self.schema_version != 1
+            || self.job_id.kind() != ResourceKind::Job
+            || self.dataset_id.kind() != ResourceKind::ContextDataset
+            || &self.dataset_id != owner
+            || self.context_resource_id.kind() != ResourceKind::ContextSourceInterface
+            || self.context_deployment.resource_kind != ResourceKind::ContextDeployment
+            || self.context_deployment.validate().is_err()
+            || self.parser_profile.resource_kind != ResourceKind::PolicyRevision
+            || self.chunker_profile.resource_kind != ResourceKind::PolicyRevision
+            || self.ranking_profile.resource_kind != ResourceKind::PolicyRevision
+            || self.data_policy.resource_kind != ResourceKind::PolicyRevision
+            || self
+                .embedding_model_deployment
+                .as_ref()
+                .is_some_and(|deployment| {
+                    deployment.resource_kind != ResourceKind::ModelDeployment
+                        || deployment.validate().is_err()
+                })
+            || self
+                .expected_dataset_version
+                .is_some_and(|version| version == 0)
+            || self
+                .expected_active_generation_id
+                .as_ref()
+                .is_some_and(|id| id.kind() != ResourceKind::DatasetGeneration)
+            || self.expected_dataset_version.is_some()
+                != self.expected_active_generation_id.is_some()
+        {
+            return Err(ContextQueryError::InvalidJob);
+        }
+        for policy in [
+            &self.parser_profile,
+            &self.chunker_profile,
+            &self.ranking_profile,
+            &self.data_policy,
+        ] {
+            policy
+                .validate()
+                .map_err(|_| ContextQueryError::InvalidJob)?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextQueryLimits {

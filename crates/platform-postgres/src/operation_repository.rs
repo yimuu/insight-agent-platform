@@ -3,6 +3,7 @@ use crate::repository::{
 };
 use chrono::Utc;
 use insight_platform_artifacts::{ArtifactJobPayload, ArtifactUploadOperationSnapshot};
+use insight_platform_context::ContextDatasetBuildJobPayload;
 use insight_platform_contracts::{
     operation_etag, JobState, OperationViewV1, Permission, PublicJobKind, PublicJobState,
     PublicJobTarget, ReadOperation, ResourceId, SafeJobFailure, SafeJobResult, Sha256Digest,
@@ -114,6 +115,33 @@ pub fn project_registry_validation_operation(
     project_operation(job, PublicJobKind::ResourceValidation, target)
 }
 
+pub fn project_context_dataset_build_operation(
+    job: JobRecord,
+) -> Result<OperationViewV1, OperationReadError> {
+    if WorkClass::from_str(&job.work_class).map_err(|_| OperationReadError::CorruptAuthority)?
+        != WorkClass::Context
+        || job.owner_kind != "context_dataset"
+    {
+        return Err(OperationReadError::NotPublic);
+    }
+    let dataset_id: ResourceId = job
+        .owner_id
+        .parse()
+        .map_err(|_| OperationReadError::CorruptAuthority)?;
+    let payload: ContextDatasetBuildJobPayload = serde_json::from_value(job.payload.value.clone())
+        .map_err(|_| OperationReadError::CorruptAuthority)?;
+    payload
+        .validate_for_owner(&dataset_id)
+        .map_err(|_| OperationReadError::CorruptAuthority)?;
+    project_operation(
+        job,
+        PublicJobKind::ContextDatasetBuild,
+        PublicJobTarget::ContextDataset {
+            context_dataset_id: dataset_id,
+        },
+    )
+}
+
 async fn public_kind_and_target(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     job: &JobRecord,
@@ -177,6 +205,24 @@ async fn public_kind_and_target(
                     deployment_id: deployment_id
                         .parse()
                         .map_err(|_| OperationReadError::CorruptAuthority)?,
+                },
+            ))
+        }
+        WorkClass::Context if job.owner_kind == "context_dataset" => {
+            let dataset_id: ResourceId = job
+                .owner_id
+                .parse()
+                .map_err(|_| OperationReadError::CorruptAuthority)?;
+            let payload: ContextDatasetBuildJobPayload =
+                serde_json::from_value(job.payload.value.clone())
+                    .map_err(|_| OperationReadError::CorruptAuthority)?;
+            payload
+                .validate_for_owner(&dataset_id)
+                .map_err(|_| OperationReadError::CorruptAuthority)?;
+            Ok((
+                PublicJobKind::ContextDatasetBuild,
+                PublicJobTarget::ContextDataset {
+                    context_dataset_id: dataset_id,
                 },
             ))
         }

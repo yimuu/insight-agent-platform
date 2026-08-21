@@ -4,9 +4,9 @@ use insight_platform_context::{
     ContextCitation, ContextClaimSlot, ContextItem, ContextObservation, ContextObservationOutput,
     ContextQueryRequest, ContextQueryTransaction, ContextRetrievalEvidence, ContextSignalAudit,
     ContextWorkerAudit, CreateContextQuery, NormalizedContextScore, PrepareContextDispatch,
-    ReadOnlySqlExecutionBinding, ReadOnlySqlPlan, SqlColumnRef, SqlComparisonOperator,
-    SqlObjectName, SqlPredicate, SqlProjection, SqlProjectionExpression, SqlSource,
-    WakeContextDispatch, READONLY_DATABASE_CAPABILITY, TEXT2SQL_PLAN_VALUE_KIND,
+    ReadOnlySqlExecutionBinding, ReadOnlySqlPlan, RequestContextDatasetBuild, SqlColumnRef,
+    SqlComparisonOperator, SqlObjectName, SqlPredicate, SqlProjection, SqlProjectionExpression,
+    SqlSource, WakeContextDispatch, READONLY_DATABASE_CAPABILITY, TEXT2SQL_PLAN_VALUE_KIND,
 };
 use insight_platform_contracts::{
     canonical_digest, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
@@ -554,6 +554,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 permissions: PermissionSet::new(vec![
                     Permission::CapabilityInvoke,
                     Permission::ContextQuery,
+                    Permission::ContextWrite,
                     Permission::RuntimeControl,
                 ])
                 .unwrap(),
@@ -1545,6 +1546,70 @@ async fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     verify_schema(&pool).await.unwrap();
     let repository = PgRepository::new(pool.clone());
     let fixture = seed_fixture(&pool, &repository).await;
+
+    let dataset_id = id(ResourceKind::ContextDataset, 0x700);
+    let mut build_audit = audit(
+        &fixture.tenant_id,
+        &fixture.principal_id,
+        0x701,
+        "dataset-build",
+    );
+    build_audit.idempotency_key_digest = named_digest("dataset-build-key");
+    build_audit.request_digest = named_digest("dataset-build-request");
+    let first_build = RequestContextDatasetBuild {
+        audit: build_audit,
+        context_resource_id: id(ResourceKind::ContextSourceInterface, 0x12),
+        context_deployment: fixture.context_deployment.clone(),
+        dataset_id: dataset_id.clone(),
+        job_id: id(ResourceKind::Job, 0x704),
+        attempt_limit: 3,
+        deadline: Utc::now() + Duration::hours(1),
+    };
+    let original_job = match repository
+        .request_context_dataset_build(first_build.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(job) => job,
+        CommandOutcome::Replayed(_) => panic!("first Dataset build must apply"),
+    };
+    let empty_dataset_roots: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.resources WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(dataset_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(empty_dataset_roots, 0);
+    let mut replay = first_build.clone();
+    replay.audit.receipt_id = id(ResourceKind::Receipt, 0x710);
+    replay.audit.event_id = id(ResourceKind::Event, 0x711);
+    replay.audit.outbox_id = id(ResourceKind::OutboxEvent, 0x712);
+    replay.dataset_id = id(ResourceKind::ContextDataset, 0x713);
+    replay.job_id = id(ResourceKind::Job, 0x714);
+    let replayed_job = match repository
+        .request_context_dataset_build(replay)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Replayed(job) => job,
+        CommandOutcome::Applied(_) => panic!("Dataset build replay must reuse the first Job"),
+    };
+    assert_eq!(replayed_job.job_id, original_job.job_id);
+    assert_eq!(replayed_job.owner_id, dataset_id.to_string());
+    let mut concurrent = first_build;
+    concurrent.audit = audit(
+        &fixture.tenant_id,
+        &fixture.principal_id,
+        0x720,
+        "dataset-build-concurrent",
+    );
+    concurrent.job_id = id(ResourceKind::Job, 0x723);
+    assert!(matches!(
+        repository.request_context_dataset_build(concurrent).await,
+        Err(RepositoryError::Conflict("Context Dataset build"))
+    ));
 
     let command = create_command(&fixture, 0x100);
     let mut cross_tenant = command.clone();

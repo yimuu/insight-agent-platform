@@ -330,6 +330,10 @@
       "work_class": "context"
     },
     {
+      "owner_kind": "context_dataset",
+      "work_class": "context"
+    },
+    {
       "owner_kind": "job",
       "work_class": "sandbox"
     },

@@ -281,6 +281,16 @@ def check_foundation_surfaces(errors):
     ]
     if any(fragment not in openapi for fragment in discovery_contract):
         errors.append("public MCP discovery OpenAPI contract is incomplete")
+    dataset_build_contract = [
+        "  /contexts/{context_id}/deployments/{context_deployment_id}:build-dataset:",
+        "      operationId: buildContextDataset",
+        "      x-insight-permission: context.write",
+        "      x-insight-idempotency: tenant_principal_context_deployment_receipt",
+        "    BuildContextDatasetRequestV1:",
+        "    ContextDatasetId:",
+    ]
+    if any(fragment not in openapi for fragment in dataset_build_contract):
+        errors.append("public Context Dataset build OpenAPI contract is incomplete")
     run_contract = [
         "  /runs:",
         "  /runs/{run_id}:",
@@ -366,6 +376,7 @@ def check_foundation_surfaces(errors):
         "  /artifacts/{artifact_id}:delete:",
         "  /operations/{operation_id}:",
         "  /mcp-servers/{mcp_server_id}/deployments/{mcp_deployment_id}:discover:",
+        "  /contexts/{context_id}/deployments/{context_deployment_id}:build-dataset:",
         "  /mcp/oauth/callback:",
     ]:
         errors.append("OpenAPI exposes a path outside the reviewed implementing slice")
@@ -678,6 +689,7 @@ def check_spec_registry_alignment(errors):
         {"work_class": "capability_remote", "owner_kind": "capability_invocation"},
         {"work_class": "mcp", "owner_kind": "mcp_operation"},
         {"work_class": "context", "owner_kind": "context_query"},
+        {"work_class": "context", "owner_kind": "context_dataset"},
         {"work_class": "sandbox", "owner_kind": "job"},
         {"work_class": "interaction", "owner_kind": "interaction"},
         {"work_class": "artifact", "owner_kind": "artifact"},

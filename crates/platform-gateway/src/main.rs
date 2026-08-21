@@ -26,12 +26,13 @@ use insight_platform_api::{
     },
     resource::{
         build_resource_router, deployment_etag, resource_etag, resource_version_etag,
-        ControlDeploymentIntent, CreateDeploymentIntent, CreateResourceIntent, DeploymentViewV1,
-        DiscoverMcpDeploymentIntent, PublishResourceDraftIntent, PublishResourceDraftRequestV1,
-        PublishResourceDraftResponseV1, PublishedResourceVersionSummaryV1, ReadDeploymentIntent,
-        ReadResourceIntent, ReadResourceVersionIntent, ResourceApplication,
-        ResourceApplicationError, ResourceHttpState, ResourceVersionViewV1, ResourceViewV1,
-        SystemResourceClock, UpdateResourceDraftIntent, ValidateResourceDraftIntent,
+        BuildContextDatasetIntent, ControlDeploymentIntent, CreateDeploymentIntent,
+        CreateResourceIntent, DeploymentViewV1, DiscoverMcpDeploymentIntent,
+        PublishResourceDraftIntent, PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
+        PublishedResourceVersionSummaryV1, ReadDeploymentIntent, ReadResourceIntent,
+        ReadResourceVersionIntent, ResourceApplication, ResourceApplicationError,
+        ResourceHttpState, ResourceVersionViewV1, ResourceViewV1, SystemResourceClock,
+        UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
     run::{
         build_run_router, run_etag, ControlRunIntent, CreateRunIntent, HmacRunEventCursorCodec,
@@ -45,6 +46,7 @@ use insight_platform_api::{
         TaskViewV1,
     },
 };
+use insight_platform_context::RequestContextDatasetBuild;
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ActiveTarget, AdministrativeGate, CommandAudit,
     DeploymentClosure, EntityLifecycle, ExactDeploymentRef, JsonLimits, OperationViewV1,
@@ -60,7 +62,10 @@ use insight_platform_orchestrator::{
 };
 use insight_platform_postgres::{
     artifact_repository::{ArtifactDeletionApprovalDecision, ResolveArtifactDeletionApproval},
-    operation_repository::{project_registry_validation_operation, OperationReadError},
+    operation_repository::{
+        project_context_dataset_build_operation, project_registry_validation_operation,
+        OperationReadError,
+    },
     repository::{
         PgRepository, RepositoryError, ResolveOrchestrationTask,
         ResolveOrchestrationTaskMutationIds,
@@ -1474,6 +1479,69 @@ impl ResourceApplication for PgResources {
             })
             .await
             .map_err(map_operation_read_for_resource)
+    }
+
+    async fn build_context_dataset(
+        &self,
+        intent: BuildContextDatasetIntent,
+    ) -> Result<OperationViewV1, ResourceApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(ResourceApplicationError::Invalid);
+        }
+        let deployment = self
+            .repository
+            .read_context_deployment_for_build(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.resource_id,
+                &intent.deployment_id,
+            )
+            .await
+            .map_err(map_resource_repository_error)?;
+        let exact_deployment = ExactDeploymentRef::new(
+            intent.deployment_id,
+            deployment
+                .bindings
+                .digest
+                .parse()
+                .map_err(|_| ResourceApplicationError::Internal)?,
+        )
+        .map_err(|_| ResourceApplicationError::Internal)?;
+        let dataset_id = match intent.dataset_id {
+            Some(dataset_id) => dataset_id,
+            None => new_id(ResourceKind::ContextDataset)?,
+        };
+        let audit = CommandAudit {
+            tenant_id: intent.principal.tenant_id,
+            principal_id: intent.principal.principal_id,
+            principal_kind: intent.principal.principal_kind,
+            receipt_id: new_id(ResourceKind::Receipt)?,
+            event_id: new_id(ResourceKind::Event)?,
+            outbox_id: new_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: intent.idempotency_key_digest,
+            request_digest: intent.request_digest,
+            receipt_expires_at: now + chrono::Duration::hours(24),
+        };
+        let outcome = self
+            .repository
+            .request_context_dataset_build(RequestContextDatasetBuild {
+                audit,
+                context_resource_id: intent.resource_id,
+                context_deployment: exact_deployment,
+                dataset_id,
+                job_id: new_id(ResourceKind::Job)?,
+                attempt_limit: 3,
+                deadline: intent.deadline,
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        let job = match outcome {
+            insight_platform_contracts::CommandOutcome::Applied(job)
+            | insight_platform_contracts::CommandOutcome::Replayed(job) => job,
+        };
+        project_context_dataset_build_operation(job).map_err(map_operation_read_for_resource)
     }
 
     async fn read_resource(
