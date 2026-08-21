@@ -1329,6 +1329,7 @@ pub const CONTRACT_MANIFEST_INPUTS: &[&str] = &[
     "contracts/platform-v1/schemas/states.json",
     "contracts/platform-v1/schemas/nominal-types.json",
     "contracts/platform-v1/schemas/frozen-slot-binding.schema.json",
+    "contracts/platform-v1/schemas/deployment-closure.schema.json",
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/candidate-manifest.schema.json",
     "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
@@ -1521,6 +1522,7 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
         )
     });
     let frozen_slot_binding_schema = frozen_slot_binding_schema();
+    let deployment_closure_schema = deployment_closure_schema();
     let worker_manifest_schema = worker_manifest_schema();
     let candidate_manifest_schema = candidate_manifest_schema();
     let artifact_retention_policy_schema = artifact_retention_policy_schema();
@@ -1575,6 +1577,10 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
             pretty(&frozen_slot_binding_schema),
         ),
         (
+            "schemas/deployment-closure.schema.json",
+            pretty(&deployment_closure_schema),
+        ),
+        (
             "schemas/worker-manifest.schema.json",
             pretty(&worker_manifest_schema),
         ),
@@ -1596,6 +1602,130 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
         contracts.insert(path, pretty(&schema));
     }
     contracts
+}
+
+fn deployment_closure_schema() -> Value {
+    let exact_version_ref = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision_id", "resource_kind", "semantic_digest"],
+        "properties": {
+            "revision_id": {"$ref": "resource-id.schema.json"},
+            "resource_kind": {
+                "type": "string",
+                "enum": ResourceKind::ALL.iter()
+                    .filter(|kind| kind.is_revision())
+                    .map(|kind| kind.descriptor().name)
+                    .collect::<Vec<_>>()
+            },
+            "semantic_digest": {"$ref": "nominal/digest.schema.json"}
+        }
+    });
+    let exact_deployment_ref = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["deployment_id", "resource_kind", "deployment_digest"],
+        "properties": {
+            "deployment_id": {"$ref": "resource-id.schema.json"},
+            "resource_kind": {
+                "type": "string",
+                "enum": ResourceKind::ALL.iter()
+                    .filter(|kind| kind.is_deployment())
+                    .map(|kind| kind.descriptor().name)
+                    .collect::<Vec<_>>()
+            },
+            "deployment_digest": {"$ref": "nominal/digest.schema.json"}
+        }
+    });
+    let exact_policy_binding = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["deployment", "revision"],
+        "properties": {
+            "deployment": {"$ref": "#/$defs/ExactDeploymentRef"},
+            "revision": {"$ref": "#/$defs/ExactVersionRef"}
+        }
+    });
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:insight:platform:v1:deployment-closure",
+        "title": "DeploymentClosure",
+        "description": "Closed immutable Deployment closure variants generated from the Rust owner contract. CR-173 definition variants are exact Deployment plus Revision bindings; executable variants are added to this same owner schema.",
+        "oneOf": [
+            {"$ref": "#/$defs/SkillDeploymentClosure"},
+            {"$ref": "#/$defs/PolicyDeploymentClosure"},
+            {"$ref": "#/$defs/SandboxProfileDeploymentClosure"}
+        ],
+        "$defs": {
+            "ExactVersionRef": exact_version_ref,
+            "ExactDeploymentRef": exact_deployment_ref,
+            "ExactPolicyBinding": exact_policy_binding,
+            "SkillDeploymentClosure": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["resource_kind", "bindings"],
+                "properties": {
+                    "resource_kind": {"const": "skill"},
+                    "bindings": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["skill_revision", "requirements", "selection_policy", "qualification_evidence"],
+                        "properties": {
+                            "skill_revision": {"$ref": "#/$defs/ExactVersionRef"},
+                            "requirements": {
+                                "type": "array",
+                                "maxItems": 512,
+                                "items": {"$ref": "frozen-slot-binding.schema.json"}
+                            },
+                            "selection_policy": {"$ref": "#/$defs/ExactPolicyBinding"},
+                            "qualification_evidence": {"$ref": "nominal/artifact-ref.schema.json"}
+                        }
+                    }
+                }
+            },
+            "PolicyDeploymentClosure": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["resource_kind", "bindings"],
+                "properties": {
+                    "resource_kind": {"const": "policy"},
+                    "bindings": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["policy_revision", "applicability_digest", "qualification_evidence"],
+                        "properties": {
+                            "policy_revision": {"$ref": "#/$defs/ExactVersionRef"},
+                            "applicability_digest": {"$ref": "nominal/digest.schema.json"},
+                            "qualification_evidence": {"$ref": "nominal/artifact-ref.schema.json"}
+                        }
+                    }
+                }
+            },
+            "SandboxProfileDeploymentClosure": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["resource_kind", "bindings"],
+                "properties": {
+                    "resource_kind": {"const": "sandbox_profile"},
+                    "bindings": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["profile_revision", "runtime_revision", "policy_bindings", "qualification_evidence"],
+                        "properties": {
+                            "profile_revision": {"$ref": "#/$defs/ExactVersionRef"},
+                            "runtime_revision": {"$ref": "#/$defs/ExactVersionRef"},
+                            "policy_bindings": {
+                                "type": "array",
+                                "maxItems": 512,
+                                "items": {"$ref": "#/$defs/ExactPolicyBinding"}
+                            },
+                            "qualification_evidence": {"$ref": "nominal/artifact-ref.schema.json"}
+                        }
+                    }
+                }
+            }
+        }
+    })
 }
 
 fn artifact_retention_policy_schema() -> Value {

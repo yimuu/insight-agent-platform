@@ -34,6 +34,7 @@ CONTRACT_FILES = [
     "contracts/platform-v1/schemas/states.json",
     "contracts/platform-v1/schemas/nominal-types.json",
     "contracts/platform-v1/schemas/frozen-slot-binding.schema.json",
+    "contracts/platform-v1/schemas/deployment-closure.schema.json",
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/candidate-manifest.schema.json",
     "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
@@ -908,6 +909,46 @@ def check_spec_registry_alignment(errors):
             errors.append(f"{slot_kind} slot selection policy does not freeze a Policy Revision")
         if not selection_revision.get("revision_id", {}).get("pattern", "").startswith("^prev_"):
             errors.append(f"{slot_kind} slot selection policy has the wrong Revision ID prefix")
+
+    deployment_schema = load(CONTRACT_ROOT / "schemas" / "deployment-closure.schema.json")
+    if deployment_schema.get("$id") != "urn:insight:platform:v1:deployment-closure":
+        errors.append("DeploymentClosure schema has the wrong canonical ID")
+    definition_variants = [
+        ("SkillDeploymentClosure", "skill", {
+            "skill_revision", "requirements", "selection_policy", "qualification_evidence"
+        }),
+        ("PolicyDeploymentClosure", "policy", {
+            "policy_revision", "applicability_digest", "qualification_evidence"
+        }),
+        ("SandboxProfileDeploymentClosure", "sandbox_profile", {
+            "profile_revision", "runtime_revision", "policy_bindings", "qualification_evidence"
+        }),
+    ]
+    defs = deployment_schema.get("$defs", {})
+    expected_refs = [f"#/$defs/{name}" for name, _, _ in definition_variants]
+    actual_refs = [variant.get("$ref") for variant in deployment_schema.get("oneOf", [])]
+    if actual_refs != expected_refs:
+        errors.append("DeploymentClosure definition variant registry is incomplete or reordered")
+    for name, resource_kind, binding_fields in definition_variants:
+        variant = defs.get(name, {})
+        if variant.get("additionalProperties") is not False:
+            errors.append(f"{name} root is not closed")
+            continue
+        properties = variant.get("properties", {})
+        if properties.get("resource_kind", {}).get("const") != resource_kind:
+            errors.append(f"{name} has the wrong resource_kind discriminator")
+        bindings = properties.get("bindings", {})
+        if bindings.get("additionalProperties") is not False:
+            errors.append(f"{name}.bindings is not closed")
+        if set(bindings.get("required", [])) != binding_fields:
+            errors.append(f"{name}.bindings differs from its Rust owner fields")
+        if set(bindings.get("properties", {})) != binding_fields:
+            errors.append(f"{name}.bindings exposes unknown or missing fields")
+    policy_binding = defs.get("ExactPolicyBinding", {})
+    if policy_binding.get("additionalProperties") is not False or set(
+        policy_binding.get("required", [])
+    ) != {"deployment", "revision"}:
+        errors.append("ExactPolicyBinding schema is not a closed Deployment + Revision pair")
 
     if registries.get("quota_accounting_modes") != ["leased", "consumable", "reclaimable"]:
         errors.append("04 quota accounting mode registry is not closed")

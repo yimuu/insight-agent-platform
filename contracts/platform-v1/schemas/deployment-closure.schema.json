@@ -1,0 +1,218 @@
+{
+  "$defs": {
+    "ExactDeploymentRef": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "deployment_id": {
+          "$ref": "resource-id.schema.json"
+        },
+        "resource_kind": {
+          "enum": [
+            "agent_deployment",
+            "skill_deployment",
+            "capability_deployment",
+            "context_deployment",
+            "mcp_deployment",
+            "model_provider_deployment",
+            "model_deployment",
+            "policy_deployment",
+            "sandbox_profile_deployment"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "deployment_id",
+        "resource_kind",
+        "deployment_digest"
+      ],
+      "type": "object"
+    },
+    "ExactPolicyBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment": {
+          "$ref": "#/$defs/ExactDeploymentRef"
+        },
+        "revision": {
+          "$ref": "#/$defs/ExactVersionRef"
+        }
+      },
+      "required": [
+        "deployment",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ExactVersionRef": {
+      "additionalProperties": false,
+      "properties": {
+        "resource_kind": {
+          "enum": [
+            "agent_interface_revision",
+            "agent_plan_revision",
+            "skill_revision",
+            "capability_interface_revision",
+            "capability_implementation_revision",
+            "context_source_interface_revision",
+            "context_source_implementation_revision",
+            "dataset_generation",
+            "mcp_server_revision",
+            "model_provider_revision",
+            "model_profile_revision",
+            "policy_revision",
+            "sandbox_runtime_revision",
+            "sandbox_package_revision",
+            "sandbox_profile_revision"
+          ],
+          "type": "string"
+        },
+        "revision_id": {
+          "$ref": "resource-id.schema.json"
+        },
+        "semantic_digest": {
+          "$ref": "nominal/digest.schema.json"
+        }
+      },
+      "required": [
+        "revision_id",
+        "resource_kind",
+        "semantic_digest"
+      ],
+      "type": "object"
+    },
+    "PolicyDeploymentClosure": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": false,
+          "properties": {
+            "applicability_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "policy_revision": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "qualification_evidence": {
+              "$ref": "nominal/artifact-ref.schema.json"
+            }
+          },
+          "required": [
+            "policy_revision",
+            "applicability_digest",
+            "qualification_evidence"
+          ],
+          "type": "object"
+        },
+        "resource_kind": {
+          "const": "policy"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "bindings"
+      ],
+      "type": "object"
+    },
+    "SandboxProfileDeploymentClosure": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": false,
+          "properties": {
+            "policy_bindings": {
+              "items": {
+                "$ref": "#/$defs/ExactPolicyBinding"
+              },
+              "maxItems": 512,
+              "type": "array"
+            },
+            "profile_revision": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "qualification_evidence": {
+              "$ref": "nominal/artifact-ref.schema.json"
+            },
+            "runtime_revision": {
+              "$ref": "#/$defs/ExactVersionRef"
+            }
+          },
+          "required": [
+            "profile_revision",
+            "runtime_revision",
+            "policy_bindings",
+            "qualification_evidence"
+          ],
+          "type": "object"
+        },
+        "resource_kind": {
+          "const": "sandbox_profile"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "bindings"
+      ],
+      "type": "object"
+    },
+    "SkillDeploymentClosure": {
+      "additionalProperties": false,
+      "properties": {
+        "bindings": {
+          "additionalProperties": false,
+          "properties": {
+            "qualification_evidence": {
+              "$ref": "nominal/artifact-ref.schema.json"
+            },
+            "requirements": {
+              "items": {
+                "$ref": "frozen-slot-binding.schema.json"
+              },
+              "maxItems": 512,
+              "type": "array"
+            },
+            "selection_policy": {
+              "$ref": "#/$defs/ExactPolicyBinding"
+            },
+            "skill_revision": {
+              "$ref": "#/$defs/ExactVersionRef"
+            }
+          },
+          "required": [
+            "skill_revision",
+            "requirements",
+            "selection_policy",
+            "qualification_evidence"
+          ],
+          "type": "object"
+        },
+        "resource_kind": {
+          "const": "skill"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "bindings"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:insight:platform:v1:deployment-closure",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Closed immutable Deployment closure variants generated from the Rust owner contract. CR-173 definition variants are exact Deployment plus Revision bindings; executable variants are added to this same owner schema.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SkillDeploymentClosure"
+    },
+    {
+      "$ref": "#/$defs/PolicyDeploymentClosure"
+    },
+    {
+      "$ref": "#/$defs/SandboxProfileDeploymentClosure"
+    }
+  ],
+  "title": "DeploymentClosure"
+}
