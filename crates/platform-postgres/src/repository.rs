@@ -1,7 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{ArtifactCommandLimits, ArtifactJobPayload};
 use insight_platform_context::{
-    ContextJobPayload, ContextQueryError as DomainContextQueryError, ContextQueryLimits,
+    ContextDatasetBuildJobPayload, ContextJobPayload, ContextQueryError as DomainContextQueryError,
+    ContextQueryLimits,
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, is_execution_work_owner_pair, ActiveTarget,
@@ -18090,6 +18091,13 @@ fn validate_claimed_job_payload(job: &JobRecord) -> Result<(), RepositoryError> 
                 .validate_for(&job_projection(job)?, limits)
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
         }
+        WorkClass::Context if owner_id.kind() == ResourceKind::ContextDataset => {
+            let payload: ContextDatasetBuildJobPayload =
+                decode_versioned_payload(&job.payload, "Context Dataset build Job")?;
+            payload
+                .validate_for_owner(&owner_id)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
+        }
         WorkClass::Orchestration
         | WorkClass::Model
         | WorkClass::CapabilityNative
@@ -23756,7 +23764,7 @@ pub(crate) fn job_projection(record: &JobRecord) -> Result<JobProjection, Reposi
             }
             payload.wake_contract
         }
-        WorkClass::Context => {
+        WorkClass::Context if owner_id.kind() == ResourceKind::ContextQuery => {
             let payload: ContextJobPayload =
                 decode_versioned_payload(&record.payload, "Context Job")?;
             if payload.binding.context_query_id != owner_id {
@@ -23765,6 +23773,19 @@ pub(crate) fn job_projection(record: &JobRecord) -> Result<JobProjection, Reposi
                 ));
             }
             payload.wake_contract
+        }
+        WorkClass::Context if owner_id.kind() == ResourceKind::ContextDataset => {
+            let payload: ContextDatasetBuildJobPayload =
+                decode_versioned_payload(&record.payload, "Context Dataset build Job")?;
+            payload
+                .validate_for_owner(&owner_id)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            None
+        }
+        WorkClass::Context => {
+            return Err(RepositoryError::CorruptRow(
+                "Context Job has an unsupported owner kind".to_owned(),
+            ));
         }
         _ => None,
     };

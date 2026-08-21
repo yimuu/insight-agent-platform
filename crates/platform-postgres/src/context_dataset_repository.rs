@@ -1,14 +1,20 @@
 use crate::repository::{
-    decode_deployment_closure, decode_versioned_payload, job_from_row, load_deployment,
-    payload_from_row, require_tenant_permission, terminalize_command_receipt,
-    validate_deployment_closure_exists, JobRecord, PgRepository, RepositoryError, TypedPayload,
+    decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
+    load_deployment, payload_from_row, require_ready_run_artifact, require_tenant_permission,
+    terminalize_command_receipt, validate_deployment_closure_exists, JobRecord, PgRepository,
+    RepositoryError, TypedPayload,
 };
 use chrono::{DateTime, Utc};
-use insight_platform_context::{ContextDatasetBuildJobPayload, RequestContextDatasetBuild};
-use insight_platform_contracts::{
-    CommandOutcome, DeploymentClosure, Permission, PublishedVersionPayload, ResourceDocument,
-    ResourceId, ResourceKind,
+use insight_platform_context::{
+    CommitContextDatasetBuild, ContextDatasetBuildJobPayload, ContextDatasetRootPayload,
+    RequestContextDatasetBuild,
 };
+use insight_platform_contracts::{
+    canonical_digest, AuthoringPackage, CommandOutcome, ContextDatasetResourceSpec,
+    DeploymentClosure, JobState, Permission, PublishedVersionPayload, ResourceDocument, ResourceId,
+    ResourceKind, ValidationSummary,
+};
+use insight_platform_jobs::decide_terminal as decide_job_terminal;
 use sqlx::{Postgres, Row, Transaction};
 
 impl PgRepository {
@@ -116,6 +122,287 @@ impl PgRepository {
                 .await?;
         transaction.commit().await?;
         Ok(CommandOutcome::Applied(job))
+    }
+
+    pub async fn commit_context_dataset_build(
+        &self,
+        command: CommitContextDatasetBuild,
+    ) -> Result<JobRecord, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let row = sqlx::query(
+            "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2 FOR UPDATE",
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.job_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("Context Dataset build Job"))?;
+        let current = job_from_row(row)?;
+        let owner: ResourceId = current
+            .owner_id
+            .parse()
+            .map_err(|_| RepositoryError::CorruptRow("Dataset Job owner is invalid".to_owned()))?;
+        let payload: ContextDatasetBuildJobPayload =
+            decode_versioned_payload(&current.payload, "Context Dataset build Job")?;
+        payload.validate_for_owner(&owner)?;
+        if owner != command.dataset_id
+            || payload.job_id != command.job_id
+            || payload.context_deployment != command.generation.context_deployment
+            || payload.parser_profile != command.generation.parser_profile
+            || payload.chunker_profile != command.generation.chunker_profile
+            || payload.embedding_model_deployment != command.generation.embedding_model_deployment
+            || payload.ranking_profile != command.generation.ranking_profile
+            || current.lease_token_digest.as_deref() != Some(command.lease_token_digest.as_str())
+        {
+            return Err(RepositoryError::Conflict("Context Dataset build closure"));
+        }
+        let next = decide_job_terminal(
+            &job_projection(&current)?,
+            &command.fence,
+            database_now,
+            JobState::Succeeded,
+        )?;
+        require_ready_run_artifact(
+            &mut transaction,
+            &command.tenant_id,
+            &command.generation.index_manifest,
+        )
+        .await?;
+        require_ready_run_artifact(
+            &mut transaction,
+            &command.tenant_id,
+            &command.generation.validation_evidence,
+        )
+        .await?;
+        let generation_value = serde_json::to_value(&command.generation)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let generation_digest: insight_platform_contracts::Sha256Digest =
+            canonical_digest(&generation_value)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+                .parse()
+                .map_err(|failure: insight_platform_contracts::NominalTypeError| {
+                    RepositoryError::InvalidInput(failure.to_string())
+                })?;
+        let document = ResourceDocument::ContextDataset(ContextDatasetResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: command.generation.index_manifest.clone(),
+                manifest_digest: command.generation.source_manifest_digest.clone(),
+            },
+            contract_digest: generation_digest.clone(),
+            dependency_versions: vec![
+                command.generation.parser_profile.clone(),
+                command.generation.chunker_profile.clone(),
+                command.generation.ranking_profile.clone(),
+            ],
+            policy_versions: vec![payload.data_policy.clone()],
+            generation: command.generation.clone(),
+        });
+        document
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let document_digest: insight_platform_contracts::Sha256Digest = canonical_digest(
+            &serde_json::to_value(&document)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+        )
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::NominalTypeError| {
+            RepositoryError::InvalidInput(failure.to_string())
+        })?;
+        let published = PublishedVersionPayload {
+            document,
+            validation: ValidationSummary {
+                validator_digest: command
+                    .generation
+                    .validation_evidence
+                    .content_digest()
+                    .clone(),
+                validated_draft_digest: generation_digest,
+                dependency_closure_digest: current.payload.digest.parse().map_err(|_| {
+                    RepositoryError::CorruptRow(
+                        "Dataset build payload digest is invalid".to_owned(),
+                    )
+                })?,
+                security_evidence_digest: command
+                    .generation
+                    .validation_evidence
+                    .content_digest()
+                    .clone(),
+                warnings: Vec::new(),
+            },
+        };
+        let published_payload = TypedPayload::with_limit(1, &published, 1_048_576)?;
+        let root_payload = ContextDatasetRootPayload {
+            schema_version: 1,
+            dataset_id: command.dataset_id.clone(),
+            context_deployment: payload.context_deployment.clone(),
+        };
+        root_payload.validate()?;
+        let root_typed = TypedPayload::from_versioned(1, &root_payload, 262_144)?;
+        let revision_no = if let Some(expected_version) = payload.expected_dataset_version {
+            let active_generation = payload
+                .expected_active_generation_id
+                .as_ref()
+                .ok_or(RepositoryError::Conflict("Dataset active generation fence"))?;
+            let affected = sqlx::query(
+                r#"
+                UPDATE insight_platform.resources
+                SET version = version + 1, updated_at = $5
+                WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
+                  AND active_version_id = $4 AND resource_kind = 'context_dataset'
+                "#,
+            )
+            .bind(command.tenant_id.to_string())
+            .bind(command.dataset_id.to_string())
+            .bind(i64::try_from(expected_version).map_err(|_| {
+                RepositoryError::InvalidInput("Dataset version exceeds bigint".to_owned())
+            })?)
+            .bind(active_generation.to_string())
+            .bind(database_now)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+            if affected != 1 {
+                return Err(RepositoryError::StaleFence);
+            }
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(max(revision_no), 0) + 1 FROM insight_platform.resource_versions WHERE tenant_id = $1 AND resource_id = $2",
+            )
+            .bind(command.tenant_id.to_string())
+            .bind(command.dataset_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO insight_platform.resources (
+                    tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                    draft_generation, version, payload_schema_version, payload, payload_digest,
+                    created_at, updated_at
+                ) VALUES ($1, $2, 'context_dataset', 'active', 'enabled', 1, 1,
+                          $3, $4, $5, $6, $6)
+                "#,
+            )
+            .bind(command.tenant_id.to_string())
+            .bind(command.dataset_id.to_string())
+            .bind(root_typed.schema_version)
+            .bind(&root_typed.value)
+            .bind(&root_typed.digest)
+            .bind(database_now)
+            .execute(&mut *transaction)
+            .await?;
+            1
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.resource_versions (
+                tenant_id, resource_version_id, resource_id, resource_version_kind,
+                revision_no, content_digest, artifact_id, payload_schema_version,
+                payload, payload_digest, created_by, created_at
+            ) VALUES ($1, $2, $3, 'dataset_generation', $4, $5, $6, $7, $8, $9, $10, $11)
+            "#,
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.generation_id.to_string())
+        .bind(command.dataset_id.to_string())
+        .bind(revision_no)
+        .bind(document_digest.to_string())
+        .bind(command.generation.index_manifest.artifact_id().to_string())
+        .bind(published_payload.schema_version)
+        .bind(&published_payload.value)
+        .bind(&published_payload.digest)
+        .bind(command.fence.worker_process_generation_id.to_string())
+        .bind(database_now)
+        .execute(&mut *transaction)
+        .await?;
+        let expected_previous = payload
+            .expected_active_generation_id
+            .as_ref()
+            .map(ToString::to_string);
+        let affected = sqlx::query(
+            r#"
+            UPDATE insight_platform.resources
+            SET active_version_id = $3, updated_at = $4
+            WHERE tenant_id = $1 AND resource_id = $2
+              AND active_version_id IS NOT DISTINCT FROM $5
+            "#,
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.dataset_id.to_string())
+        .bind(command.generation_id.to_string())
+        .bind(database_now)
+        .bind(expected_previous)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(RepositoryError::StaleFence);
+        }
+        let result_digest = document_digest.to_string();
+        let row =
+            sqlx::query(
+                r#"
+            UPDATE insight_platform.jobs
+            SET state = 'succeeded', version = $4, result_digest = $5,
+                worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
+                heartbeat_at = NULL, terminal_at = $6, updated_at = $6
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+            RETURNING *
+            "#,
+            )
+            .bind(command.tenant_id.to_string())
+            .bind(command.job_id.to_string())
+            .bind(current.version)
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(&result_digest)
+            .bind(database_now)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let event_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "context_deployment": payload.context_deployment,
+                "dataset_id": command.dataset_id,
+                "generation_id": command.generation_id,
+                "job_id": command.job_id,
+                "result_digest": result_digest,
+            }),
+        )?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.events (
+                tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
+                event_type, visibility, payload_schema_version, payload, payload_digest
+            ) VALUES ($1, $2, 'context_dataset', $3, $4,
+                      'context.dataset_generation_created', 'internal', $5, $6, $7)
+            "#,
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.event_id.to_string())
+        .bind(command.dataset_id.to_string())
+        .bind(revision_no)
+        .bind(event_payload.schema_version)
+        .bind(&event_payload.value)
+        .bind(&event_payload.digest)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id) VALUES ($1, $2, $3)",
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.outbox_id.to_string())
+        .bind(command.event_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        let record = job_from_row(row)?;
+        transaction.commit().await?;
+        Ok(record)
     }
 }
 

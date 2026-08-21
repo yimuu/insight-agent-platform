@@ -8,6 +8,7 @@ use insight_platform_contracts::{
     PrincipalSnapshot, ResourceId, ResourceKind, Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::ExactInvocationValueRef;
+use insight_platform_jobs::JobFence;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -62,6 +63,62 @@ pub struct ContextDatasetBuildJobPayload {
     pub expected_dataset_version: Option<u64>,
     pub expected_active_generation_id: Option<ResourceId>,
     pub deadline: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextDatasetRootPayload {
+    pub schema_version: u32,
+    pub dataset_id: ResourceId,
+    pub context_deployment: ExactDeploymentRef,
+}
+
+impl ContextDatasetRootPayload {
+    pub fn validate(&self) -> Result<(), ContextQueryError> {
+        if self.schema_version != 1
+            || self.dataset_id.kind() != ResourceKind::ContextDataset
+            || self.context_deployment.resource_kind != ResourceKind::ContextDeployment
+            || self.context_deployment.validate().is_err()
+        {
+            return Err(ContextQueryError::InvalidDatasetView);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitContextDatasetBuild {
+    pub tenant_id: ResourceId,
+    pub job_id: ResourceId,
+    pub dataset_id: ResourceId,
+    pub generation_id: ResourceId,
+    pub fence: JobFence,
+    pub lease_token_digest: Sha256Digest,
+    pub generation: ContextDatasetGenerationSpec,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+}
+
+impl CommitContextDatasetBuild {
+    pub fn validate(&self) -> Result<(), ContextQueryError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.job_id.kind() != ResourceKind::Job
+            || self.dataset_id.kind() != ResourceKind::ContextDataset
+            || self.generation_id.kind() != ResourceKind::DatasetGeneration
+            || self.fence.expected_version == 0
+            || self.fence.worker_process_generation_id.kind()
+                != ResourceKind::WorkerProcessGeneration
+            || self.fence.lease_generation == 0
+            || self.fence.token_digest != self.lease_token_digest
+            || self.generation.created_by_operation_id != self.job_id
+            || self.generation.validate().is_err()
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+        {
+            return Err(ContextQueryError::InvalidJob);
+        }
+        Ok(())
+    }
 }
 
 impl ContextDatasetBuildJobPayload {

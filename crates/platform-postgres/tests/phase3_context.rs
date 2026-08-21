@@ -1,9 +1,10 @@
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_context::{
-    CitationLocator, ClaimContextJobs, CommitContextOutcome, ContextBackendOutcome,
-    ContextCitation, ContextClaimSlot, ContextItem, ContextObservation, ContextObservationOutput,
-    ContextQueryRequest, ContextQueryTransaction, ContextRetrievalEvidence, ContextSignalAudit,
-    ContextWorkerAudit, CreateContextQuery, NormalizedContextScore, PrepareContextDispatch,
+    CitationLocator, ClaimContextJobs, CommitContextDatasetBuild, CommitContextOutcome,
+    ContextBackendOutcome, ContextCitation, ContextClaimSlot, ContextDatasetBuildJobPayload,
+    ContextItem, ContextObservation, ContextObservationOutput, ContextQueryRequest,
+    ContextQueryTransaction, ContextRetrievalEvidence, ContextSignalAudit, ContextWorkerAudit,
+    CreateContextQuery, NormalizedContextScore, PrepareContextDispatch,
     ReadOnlySqlExecutionBinding, ReadOnlySqlPlan, RequestContextDatasetBuild, SqlColumnRef,
     SqlComparisonOperator, SqlObjectName, SqlPredicate, SqlProjection, SqlProjectionExpression,
     SqlSource, WakeContextDispatch, READONLY_DATABASE_CAPABILITY, TEXT2SQL_PLAN_VALUE_KIND,
@@ -19,16 +20,16 @@ use insight_platform_contracts::{
     CommandAudit, CommandOutcome, ContextBackendBinding, ContextBackendContract,
     ContextBackendKind, ContextBackendLimits, ContextBindingSnapshot, ContextCitationContract,
     ContextCitationStrength, ContextConsistencyMode, ContextConsistencyPolicy,
-    ContextDataPolicyContract, ContextDeploymentClosure, ContextImplementationContract,
-    ContextImplementationResourceSpec, ContextInterfaceLimits, ContextInterfaceResourceSpec,
-    ContextLocatorKind, ContextPaginationContract, ContextQueryState, ContextRankingContract,
-    DataClassification, DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
-    ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, JobState, NativeCapabilityContract,
-    Permission, PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
-    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, QuotaDimension,
-    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot,
-    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass,
-    WORKER_PROTOCOL_VERSION,
+    ContextDataPolicyContract, ContextDatasetGenerationSpec, ContextDeploymentClosure,
+    ContextImplementationContract, ContextImplementationResourceSpec, ContextInterfaceLimits,
+    ContextInterfaceResourceSpec, ContextLocatorKind, ContextPaginationContract, ContextQueryState,
+    ContextRankingContract, DataClassification, DataRegion, DeploymentClosure, Effect,
+    EntityLifecycle, ExactDeploymentRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
+    JobState, NativeCapabilityContract, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
+    ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, ExactInvocationValueRef, InvocationOrigin, InvocationPolicyDecision,
@@ -40,8 +41,8 @@ use insight_platform_orchestrator::RunCurrentSnapshot;
 use insight_platform_postgres::{
     context_query_repository::{ClaimedContextExecution, PreparedContextExecution},
     repository::{
-        NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal, PgRepository,
-        RepositoryError, TypedPayload,
+        ClaimJobs, JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewTenant,
+        NewTenantPrincipal, PgRepository, RepositoryError, TypedPayload,
     },
     verify_schema,
 };
@@ -1609,6 +1610,78 @@ async fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     assert!(matches!(
         repository.request_context_dataset_build(concurrent).await,
         Err(RepositoryError::Conflict("Context Dataset build"))
+    ));
+    let worker_id = id(ResourceKind::WorkerProcessGeneration, 0x730);
+    let lease_token_digest = named_digest("dataset-build-lease");
+    let claimed = repository
+        .claim_jobs(ClaimJobs {
+            work_class: WorkClass::Context.to_string(),
+            worker_id: worker_id.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            lease_token_digests: vec![lease_token_digest.clone()],
+        })
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(claimed.job_id, original_job.job_id);
+    let started = repository
+        .start_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: claimed.job_id.clone(),
+            worker_id: worker_id.clone(),
+            lease_epoch: claimed.lease_epoch,
+            expected_job_version: claimed.version,
+            lease_token_digest: lease_token_digest.clone(),
+        })
+        .await
+        .unwrap();
+    let build_payload: ContextDatasetBuildJobPayload =
+        serde_json::from_value(started.payload.value.clone()).unwrap();
+    let completion = CommitContextDatasetBuild {
+        tenant_id: fixture.tenant_id.clone(),
+        job_id: started.job_id.parse().unwrap(),
+        dataset_id: dataset_id.clone(),
+        generation_id: id(ResourceKind::DatasetGeneration, 0x731),
+        fence: insight_platform_jobs::JobFence {
+            expected_version: u64::try_from(started.version).unwrap(),
+            worker_process_generation_id: worker_id,
+            lease_generation: u64::try_from(started.lease_epoch).unwrap(),
+            token_digest: lease_token_digest.clone(),
+        },
+        lease_token_digest,
+        generation: ContextDatasetGenerationSpec {
+            context_deployment: build_payload.context_deployment,
+            source_manifest_digest: named_digest("dataset-source-manifest"),
+            parser_profile: build_payload.parser_profile,
+            chunker_profile: build_payload.chunker_profile,
+            embedding_model_deployment: build_payload.embedding_model_deployment,
+            ranking_profile: build_payload.ranking_profile,
+            index_manifest: artifact(0xa2),
+            validation_evidence: artifact(0xa2),
+            created_by_operation_id: started.job_id.parse().unwrap(),
+        },
+        event_id: id(ResourceKind::Event, 0x732),
+        outbox_id: id(ResourceKind::OutboxEvent, 0x733),
+    };
+    let completed = repository
+        .commit_context_dataset_build(completion.clone())
+        .await
+        .unwrap();
+    assert_eq!(completed.state, JobState::Succeeded.to_string());
+    let active_generation: String = sqlx::query_scalar(
+        "SELECT active_version_id FROM insight_platform.resources WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(dataset_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active_generation, completion.generation_id.to_string());
+    assert!(matches!(
+        repository.commit_context_dataset_build(completion).await,
+        Err(RepositoryError::StaleFence | RepositoryError::Conflict(_))
     ));
 
     let command = create_command(&fixture, 0x100);
