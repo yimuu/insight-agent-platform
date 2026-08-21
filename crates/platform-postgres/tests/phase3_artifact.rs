@@ -1189,6 +1189,53 @@ async fn artifact_upload_lifecycle_fixture() {
             .unwrap();
     }
 
+    let public_authority = repository
+        .resolve_public_artifact_prepare_authority(
+            tenant_a.clone(),
+            allowed_principal.clone(),
+            PrincipalKind::TenantAdmin,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        public_authority.retention_policy_revision.revision_id,
+        retention_a
+    );
+    assert_eq!(
+        public_authority.artifact_io_policy_revision.revision_id,
+        artifact_io_policy
+    );
+    assert_eq!(public_authority.quota_account_id, quota_a);
+    assert_eq!(
+        public_authority.artifact_io_rules_digest,
+        public_authority
+            .artifact_io_policy
+            .canonical_digest()
+            .unwrap()
+    );
+    assert!(matches!(
+        repository
+            .resolve_public_artifact_prepare_authority(
+                tenant_a.clone(),
+                denied_principal.clone(),
+                PrincipalKind::TenantAdmin,
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    assert!(matches!(
+        repository
+            .resolve_public_artifact_prepare_authority(
+                tenant_b.clone(),
+                allowed_principal.clone(),
+                PrincipalKind::TenantAdmin,
+            )
+            .await,
+        Err(RepositoryError::NotFound(
+            "tenant Artifact retention policy"
+        ))
+    ));
+
     let prepared_command = command(
         tenant_a.clone(),
         allowed_principal.clone(),

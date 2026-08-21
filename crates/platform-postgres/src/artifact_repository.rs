@@ -1,7 +1,7 @@
 use crate::repository::{
     append_command_event, append_scheduler_event, begin_read_only_repeatable,
-    claim_command_receipt, decode_typed_payload, job_from_row, job_projection,
-    load_current_principal_snapshot, load_job_for_update_by_text, payload_from_row,
+    claim_command_receipt, decode_published_version_payload, decode_typed_payload, job_from_row,
+    job_projection, load_current_principal_snapshot, load_job_for_update_by_text, payload_from_row,
     require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page,
     terminalize_command_receipt, validate_safety_scan_request, JobRecord, PgRepository,
     RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
@@ -36,8 +36,8 @@ use insight_platform_artifacts::{
 use insight_platform_contracts::{
     ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, BlobIntegrityState,
     CommandOutcome, DataClassification, Effect, ExactVersionRef, JobState, Permission, PolicyKind,
-    PrincipalKind, PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind,
-    Sha256Digest, WorkClass,
+    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, ResourceDocument, ResourceId,
+    ResourceKind, SandboxArtifactIoPolicyDocument, Sha256Digest, TenantConfig, WorkClass,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskState};
@@ -201,6 +201,19 @@ pub struct GatewayArtifactSnapshot {
 pub struct GatewayArtifactDeletionTarget {
     pub artifact: ArtifactRecord,
     pub blob: ArtifactBlobRecord,
+}
+
+/// One coherent current-authority snapshot used to turn a public upload intent into an internal
+/// Artifact command. No caller-selected policy or quota identity crosses this boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicArtifactPrepareAuthority {
+    pub principal: PrincipalSnapshot,
+    pub retention_policy_revision: ExactVersionRef,
+    pub retention_policy: ArtifactRetentionPolicy,
+    pub artifact_io_policy_revision: ExactVersionRef,
+    pub artifact_io_policy: SandboxArtifactIoPolicyDocument,
+    pub artifact_io_rules_digest: Sha256Digest,
+    pub quota_account_id: ResourceId,
 }
 
 #[async_trait::async_trait]
@@ -483,6 +496,117 @@ pub struct RecoveredArtifactJob {
 }
 
 impl PgRepository {
+    pub async fn resolve_public_artifact_prepare_authority(
+        &self,
+        tenant_id: ResourceId,
+        principal_id: ResourceId,
+        principal_kind: PrincipalKind,
+    ) -> Result<PublicArtifactPrepareAuthority, RepositoryError> {
+        if tenant_id.kind() != ResourceKind::Tenant
+            || principal_id.kind() != ResourceKind::Principal
+            || principal_kind == PrincipalKind::InstallationOperator
+        {
+            return Err(RepositoryError::InvalidInput(
+                "public Artifact prepare identity is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = begin_read_only_repeatable(self.pool()).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            &tenant_id,
+            &principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::ArtifactWrite) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let tenant = sqlx::query(
+            r#"
+            SELECT state, config_schema_version, config, config_digest
+            FROM insight_platform.tenants
+            WHERE tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("tenant"))?;
+        if tenant.try_get::<String, _>("state")? != "active" {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let config_payload =
+            payload_from_row(&tenant, "config_schema_version", "config", "config_digest")?;
+        let config: TenantConfig = decode_typed_payload(&config_payload, "tenant config")?;
+        config
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let retention_policy_revision =
+            config
+                .artifact_retention_policy
+                .ok_or(RepositoryError::NotFound(
+                    "tenant Artifact retention policy",
+                ))?;
+        let artifact_io_policy_revision = config
+            .artifact_io_policy
+            .ok_or(RepositoryError::NotFound("tenant Artifact I/O policy"))?;
+        let retention = load_exact_artifact_policy(
+            &mut transaction,
+            &tenant_id,
+            &retention_policy_revision,
+            PolicyKind::Retention,
+        )
+        .await?;
+        let artifact_io = load_exact_artifact_policy(
+            &mut transaction,
+            &tenant_id,
+            &artifact_io_policy_revision,
+            PolicyKind::ArtifactIo,
+        )
+        .await?;
+        let retention_policy = retention.retention.ok_or_else(|| {
+            RepositoryError::CorruptRow(
+                "Retention policy revision has no Retention document".to_owned(),
+            )
+        })?;
+        let artifact_io_rules_digest = artifact_io.rules_digest;
+        let artifact_io_policy = artifact_io.sandbox_artifact_io.ok_or_else(|| {
+            RepositoryError::CorruptRow(
+                "Artifact I/O policy revision has no ArtifactIo document".to_owned(),
+            )
+        })?;
+        let quota_account_id: String = sqlx::query_scalar(
+            r#"
+            SELECT quota_account_id
+            FROM insight_platform.quota_accounts
+            WHERE tenant_id = $1 AND scope_kind = 'tenant' AND scope_id = $1
+              AND work_class = 'artifact' AND metric = 'artifact.staging_bytes'
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("tenant Artifact staging quota"))?;
+        let quota_account_id = quota_account_id.parse::<ResourceId>().map_err(|_| {
+            RepositoryError::CorruptRow("Artifact quota account ID is invalid".to_owned())
+        })?;
+        if quota_account_id.kind() != ResourceKind::QuotaAccount {
+            return Err(RepositoryError::CorruptRow(
+                "Artifact quota account has the wrong ID kind".to_owned(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(PublicArtifactPrepareAuthority {
+            principal,
+            retention_policy_revision,
+            retention_policy,
+            artifact_io_policy_revision,
+            artifact_io_policy,
+            artifact_io_rules_digest,
+            quota_account_id,
+        })
+    }
+
     pub async fn load_gateway_artifact(
         &self,
         tenant_id: ResourceId,
@@ -952,6 +1076,61 @@ impl PgRepository {
             last_cursor,
         ))
     }
+}
+
+async fn load_exact_artifact_policy(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    exact: &ExactVersionRef,
+    expected_kind: PolicyKind,
+) -> Result<insight_platform_contracts::PolicyResourceSpec, RepositoryError> {
+    exact
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if exact.resource_kind != ResourceKind::PolicyRevision {
+        return Err(RepositoryError::CorruptRow(
+            "tenant Artifact policy reference has the wrong revision kind".to_owned(),
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT version.payload_schema_version, version.payload, version.payload_digest
+        FROM insight_platform.resource_versions AS version
+        JOIN insight_platform.resources AS resource
+          ON resource.tenant_id = version.tenant_id
+         AND resource.resource_id = version.resource_id
+        WHERE version.tenant_id = $1 AND version.resource_version_id = $2
+          AND version.resource_version_kind = 'policy_revision'
+          AND version.content_digest = $3
+          AND resource.resource_kind = 'policy'
+          AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(exact.revision_id.to_string())
+    .bind(exact.semantic_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("tenant Artifact policy revision"))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let published = decode_published_version_payload(&payload)?;
+    published
+        .validate_for(
+            insight_platform_contracts::RegistryResourceKind::Policy,
+            &exact.revision_id,
+        )
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let ResourceDocument::Policy(policy) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "tenant Artifact policy revision has the wrong document".to_owned(),
+        ));
+    };
+    if policy.policy_kind != expected_kind {
+        return Err(RepositoryError::CorruptRow(
+            "tenant Artifact policy revision has the wrong PolicyKind".to_owned(),
+        ));
+    }
+    Ok(policy)
 }
 
 impl ArtifactStore for PgRepository {
