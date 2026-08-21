@@ -271,6 +271,16 @@ def check_foundation_surfaces(errors):
     ]
     if any(fragment not in openapi for fragment in operation_contract):
         errors.append("public Operation Job projection OpenAPI contract is incomplete")
+    discovery_contract = [
+        "  /mcp-servers/{mcp_server_id}/deployments/{mcp_deployment_id}:discover:",
+        "      operationId: discoverMcpDeployment",
+        "      x-insight-permission: mcp.write",
+        "      x-insight-idempotency: tenant_principal_mcp_deployment_receipt",
+        "    DiscoverMcpDeploymentRequestV1:",
+        "    McpAuthorizationBindingId:",
+    ]
+    if any(fragment not in openapi for fragment in discovery_contract):
+        errors.append("public MCP discovery OpenAPI contract is incomplete")
     run_contract = [
         "  /runs:",
         "  /runs/{run_id}:",
@@ -355,6 +365,7 @@ def check_foundation_surfaces(errors):
         "  /artifacts/{artifact_id}/content:",
         "  /artifacts/{artifact_id}:delete:",
         "  /operations/{operation_id}:",
+        "  /mcp-servers/{mcp_server_id}/deployments/{mcp_deployment_id}:discover:",
         "  /mcp/oauth/callback:",
     ]:
         errors.append("OpenAPI exposes a path outside the reviewed implementing slice")

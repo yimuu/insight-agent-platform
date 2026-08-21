@@ -10,10 +10,10 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
-    canonical_digest, AdministrativeGate, ApiProblem, ApiProblemCode, DeploymentClosure,
-    EntityLifecycle, OperationViewV1, PublishedVersionPayload, RegistryResourceKind,
-    ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind, Sha256Digest, UtcTimestamp,
-    MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
+    canonical_digest, parse_strict_json, AdministrativeGate, ApiProblem, ApiProblemCode,
+    DeploymentClosure, EntityLifecycle, JsonLimits, OperationViewV1, PublishedVersionPayload,
+    RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
+    Sha256Digest, UtcTimestamp, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use std::sync::Arc;
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
 const IF_MATCH: &str = "if-match";
 const RESOURCE_COMMAND_DEADLINE_MILLISECONDS: i64 = 5_000;
+const MAX_DISCOVERY_DEADLINE_MILLISECONDS: i64 = 600_000;
 const MAX_RESOURCE_REQUEST_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -36,6 +37,27 @@ pub struct CreateDeploymentRequestV1 {
     pub resource_version_id: ResourceId,
     pub environment: String,
     pub closure: DeploymentClosure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoverMcpDeploymentRequestV1 {
+    pub schema_version: u16,
+    pub authorization_binding_id: ResourceId,
+    pub deadline: UtcTimestamp,
+}
+
+impl DiscoverMcpDeploymentRequestV1 {
+    fn deadline_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let deadline = DateTime::parse_from_rfc3339(self.deadline.as_str())
+            .ok()?
+            .with_timezone(&Utc);
+        (self.schema_version == 1
+            && self.authorization_binding_id.kind() == ResourceKind::McpAuthorizationBinding
+            && deadline > now
+            && deadline <= now + Duration::milliseconds(MAX_DISCOVERY_DEADLINE_MILLISECONDS))
+        .then_some(deadline)
+    }
 }
 
 impl CreateDeploymentRequestV1 {
@@ -358,6 +380,17 @@ pub struct PublishResourceDraftIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DiscoverMcpDeploymentIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub resource_id: ResourceId,
+    pub deployment_id: ResourceId,
+    pub authorization_binding_id: ResourceId,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceApplicationError {
     Invalid,
@@ -422,6 +455,13 @@ pub trait ResourceApplication: Send + Sync {
         &self,
         intent: PublishResourceDraftIntent,
     ) -> Result<PublishResourceDraftResponseV1, ResourceApplicationError>;
+
+    async fn discover_mcp_deployment(
+        &self,
+        _intent: DiscoverMcpDeploymentIntent,
+    ) -> Result<OperationViewV1, ResourceApplicationError> {
+        Err(ResourceApplicationError::NotFound)
+    }
 }
 
 pub trait ResourceClock: Send + Sync {
@@ -488,6 +528,18 @@ async fn control_deployment_action(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Some(deployment_id) = deployment_action.strip_suffix(":discover") {
+        return discover_mcp_deployment(
+            state,
+            principal,
+            resource_noun,
+            resource_id,
+            deployment_id.to_owned(),
+            headers,
+            body,
+        )
+        .await;
+    }
     let (deployment_id, operation, activate) =
         if let Some(deployment_id) = deployment_action.strip_suffix(":activate") {
             (deployment_id, "resource.activate_deployment", true)
@@ -508,6 +560,93 @@ async fn control_deployment_action(
         activate,
     )
     .await
+}
+
+async fn discover_mcp_deployment(
+    state: ResourceHttpState,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    resource_noun: String,
+    resource_id: String,
+    deployment_id: String,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    if resource_noun != "mcp-servers" {
+        return problem(ResourceApplicationError::NotFound);
+    }
+    let resource_id = match resource_id.parse::<ResourceId>() {
+        Ok(id) if id.kind() == ResourceKind::McpServer => id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let deployment_id = match deployment_id.parse::<ResourceId>() {
+        Ok(id) if id.kind() == ResourceKind::McpDeployment => id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let value = match parse_strict_json(
+        &body,
+        JsonLimits {
+            max_bytes: MAX_RESOURCE_REQUEST_BYTES,
+            max_depth: 4,
+            max_properties_per_object: 3,
+            max_items_per_array: 1,
+            max_string_bytes: 128,
+        },
+    ) {
+        Ok(value) => value,
+        Err(_) => return problem(ResourceApplicationError::Invalid),
+    };
+    let request: DiscoverMcpDeploymentRequestV1 = match serde_json::from_value(value) {
+        Ok(request) => request,
+        Err(_) => return problem(ResourceApplicationError::Invalid),
+    };
+    let now = state.clock.now();
+    let Some(deadline) = request.deadline_at(now) else {
+        return problem(ResourceApplicationError::Invalid);
+    };
+    let idempotency_key_digest = match idempotency_key_digest_for_operation(
+        &headers,
+        &principal,
+        RegistryResourceKind::McpServer,
+        "mcp.discover",
+        Some(&resource_id),
+    ) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let request_digest = match digest(&serde_json::json!({
+        "authorization_binding_id": request.authorization_binding_id,
+        "deadline": request.deadline,
+        "deployment_id": deployment_id,
+        "idempotency_key_digest": idempotency_key_digest,
+        "operation": "mcp.discover",
+        "principal_id": principal.principal_id,
+        "resource_id": resource_id,
+        "schema_version": 1,
+        "tenant_id": principal.tenant_id,
+    })) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let intent = DiscoverMcpDeploymentIntent {
+        principal,
+        resource_id,
+        deployment_id,
+        authorization_binding_id: request.authorization_binding_id,
+        idempotency_key_digest,
+        request_digest,
+        deadline,
+    };
+    match state.application.discover_mcp_deployment(intent).await {
+        Ok(view) if view.validate().is_ok() => operation_accepted_response(view),
+        Ok(_) => problem(ResourceApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1685,6 +1824,92 @@ mod tests {
                 etag: resource_etag(&intent.resource_id, intent.expected_resource_version + 1),
             })
         }
+
+        async fn discover_mcp_deployment(
+            &self,
+            intent: DiscoverMcpDeploymentIntent,
+        ) -> Result<OperationViewV1, ResourceApplicationError> {
+            let operation_id = id(ResourceKind::Job, 40);
+            let now = UtcTimestamp::from_datetime(Utc::now());
+            Ok(OperationViewV1 {
+                operation_id: operation_id.clone(),
+                tenant_id: intent.principal.tenant_id,
+                kind: PublicJobKind::McpDiscovery,
+                target: PublicJobTarget::Deployment {
+                    deployment_id: intent.deployment_id,
+                },
+                state: PublicJobState::Queued,
+                progress: None,
+                result: None,
+                error: None,
+                created_at: now.clone(),
+                updated_at: now,
+                etag: operation_etag(&operation_id.to_string(), 1),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_discovery_requires_closed_authorization_and_returns_job_operation() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application,
+            Arc::new(FixedClock(now)),
+        ));
+        let resource_id = id(ResourceKind::McpServer, 41);
+        let deployment_id = id(ResourceKind::McpDeployment, 42);
+        let request = DiscoverMcpDeploymentRequestV1 {
+            schema_version: 1,
+            authorization_binding_id: id(ResourceKind::McpAuthorizationBinding, 43),
+            deadline: UtcTimestamp::from_datetime(now + Duration::minutes(5)),
+        };
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/mcp-servers/{resource_id}/deployments/{deployment_id}:discover"
+                    ))
+                    .header("content-type", "application/json")
+                    .header(IDEMPOTENCY_KEY, "discover-mcp-1")
+                    .extension(principal(now))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&request).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response.headers()["location"],
+            format!("/v1/operations/{}", id(ResourceKind::Job, 40))
+        );
+
+        let invalid = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/mcp-servers/{resource_id}/deployments/{deployment_id}:discover"
+                    ))
+                    .header("content-type", "application/json")
+                    .header(IDEMPOTENCY_KEY, "discover-mcp-2")
+                    .extension(principal(now))
+                    .body(axum::body::Body::from(format!(
+                        r#"{{"schema_version":1,"authorization_binding_id":"{}","deadline":"{}","unknown":true}}"#,
+                        id(ResourceKind::McpAuthorizationBinding, 43),
+                        UtcTimestamp::from_datetime(now + Duration::minutes(5))
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

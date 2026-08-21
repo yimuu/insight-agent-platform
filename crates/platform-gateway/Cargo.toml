@@ -19,6 +19,7 @@ futures.workspace = true
 insight-platform-api.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-invocations.workspace = true
+insight-platform-mcp-host.workspace = true
 insight-platform-orchestrator.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-registry.workspace = true

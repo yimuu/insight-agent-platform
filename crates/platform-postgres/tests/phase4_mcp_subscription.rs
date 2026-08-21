@@ -24,7 +24,7 @@ use insight_platform_contracts::{
 };
 use insight_platform_jobs::JobFence as DomainJobFence;
 use insight_platform_mcp_host::{
-    CompleteMcpSubscriptionReconcile, CompleteMcpSubscriptionRefresh,
+    CompleteMcpSubscriptionReconcile, CompleteMcpSubscriptionRefresh, CreateMcpDiscoveryOperation,
     CreateMcpResourceSubscription, EncryptedMcpState, McpAuthorizationBindingRecord,
     McpDiscoveryAdmission, McpDiscoveryOperationPayload, McpDiscoveryResultBinding,
     McpDiscoverySnapshotRecord, McpExecutionContractQuery, McpNotificationApplyDisposition,
@@ -519,6 +519,7 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
                     permissions: PermissionSet::new(vec![
                         Permission::ContextRead,
                         Permission::McpRead,
+                        Permission::McpWrite,
                     ])
                     .unwrap(),
                 },
@@ -1306,6 +1307,43 @@ async fn mcp_subscription_fixture() {
     let repository = PgRepository::new(pool.clone());
     let now = Utc::now();
     let fixture = seed(&pool, &repository, now).await;
+    let mut discovery_audit = command_audit(&fixture.tenant_id, &fixture.principal_id, 0x600, now);
+    discovery_audit.idempotency_key_digest = named_digest("public-discovery-key");
+    discovery_audit.request_digest = named_digest("public-discovery-request");
+    let first_discovery = CreateMcpDiscoveryOperation {
+        audit: discovery_audit,
+        operation_id: id(ResourceKind::McpOperation, 0x610),
+        job_id: id(ResourceKind::Job, 0x611),
+        logical_key: "public-discovery-request".to_owned(),
+        mcp_deployment: fixture.mcp_deployment.clone(),
+        authorization_binding_id: fixture.authorization.authorization_binding_id.clone(),
+        attempt_limit: 3,
+        deadline: now + Duration::minutes(30),
+    };
+    let original = match repository
+        .create_mcp_discovery_operation(first_discovery.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("first discovery command must apply"),
+    };
+    let mut replay = first_discovery;
+    replay.audit.receipt_id = id(ResourceKind::Receipt, 0x620);
+    replay.audit.event_id = id(ResourceKind::Event, 0x621);
+    replay.audit.outbox_id = id(ResourceKind::OutboxEvent, 0x622);
+    replay.operation_id = id(ResourceKind::McpOperation, 0x623);
+    replay.job_id = id(ResourceKind::Job, 0x624);
+    let replayed = match repository
+        .create_mcp_discovery_operation(replay)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Replayed(record) => record,
+        CommandOutcome::Applied(_) => panic!("discovery replay must reuse the first Job"),
+    };
+    assert_eq!(replayed.operation_id, original.operation_id);
+    assert_eq!(replayed.job_id, original.job_id);
     let command = create_command(&fixture, now);
 
     let applied = create_subscription(&repository, command.clone())

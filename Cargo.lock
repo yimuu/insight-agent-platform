@@ -2683,6 +2683,7 @@ dependencies = [
  "insight-platform-api",
  "insight-platform-contracts",
  "insight-platform-invocations",
+ "insight-platform-mcp-host",
  "insight-platform-orchestrator",
  "insight-platform-postgres",
  "insight-platform-registry",

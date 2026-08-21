@@ -913,23 +913,16 @@ impl PgRepository {
         command
             .validate_at(database_now)
             .map_err(invalid_mcp_discovery)?;
-        if claim_command_receipt(
-            &mut transaction,
-            &command.audit,
-            "mcp_operation",
-            &command.operation_id.to_string(),
-            "mcp.discovery.create",
-        )
-        .await?
+        if let Some(original_operation_id) =
+            claim_mcp_discovery_create_receipt(&mut transaction, &command).await?
         {
             let record = load_mcp_discovery_operation(
                 &mut transaction,
                 &command.audit.tenant_id,
-                &command.operation_id,
+                &original_operation_id,
                 false,
             )
             .await?;
-            require_same_discovery_create(&record, &command)?;
             transaction.commit().await?;
             return Ok(CommandOutcome::Replayed(record));
         }
@@ -1777,6 +1770,91 @@ impl PgRepository {
         transaction.commit().await?;
         Ok(observations)
     }
+}
+
+async fn claim_mcp_discovery_create_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &CreateMcpDiscoveryOperation,
+) -> Result<Option<ResourceId>, RepositoryError> {
+    let scope_id = command.mcp_deployment.deployment_id.to_string();
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "operation": "mcp.discovery.create",
+            "principal_id": command.audit.principal_id,
+            "scope_id": scope_id,
+            "scope_kind": "mcp_deployment",
+        }),
+        65_536,
+    )?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest,
+            state, payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'command', 'mcp_deployment', $3, $4,
+                  'mcp.discovery.create', $5, $6, 'processing', $7, $8, $9, $10)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(command.audit.receipt_id.to_string())
+    .bind(&scope_id)
+    .bind(command.audit.principal_id.to_string())
+    .bind(command.audit.idempotency_key_digest.to_string())
+    .bind(command.audit.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(command.audit.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(None);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state, response_reference_id
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'mcp_deployment' AND scope_id = $2
+          AND dedupe_owner_id = $3 AND operation = 'mcp.discovery.create'
+          AND idempotency_key_digest = $4
+        FOR UPDATE
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(&scope_id)
+    .bind(command.audit.principal_id.to_string())
+    .bind(command.audit.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != command.audit.request_digest.to_string() {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if row.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("MCP discovery Receipt"));
+    }
+    let operation_id = row
+        .try_get::<Option<String>, _>("response_reference_id")?
+        .ok_or_else(|| {
+            RepositoryError::CorruptRow("MCP discovery Receipt has no result".to_owned())
+        })?
+        .parse::<ResourceId>()
+        .map_err(|_| {
+            RepositoryError::CorruptRow("MCP discovery Receipt result is invalid".to_owned())
+        })?;
+    if operation_id.kind() != insight_platform_contracts::ResourceKind::McpOperation {
+        return Err(RepositoryError::CorruptRow(
+            "MCP discovery Receipt result has the wrong kind".to_owned(),
+        ));
+    }
+    Ok(Some(operation_id))
 }
 
 #[async_trait]
@@ -2764,22 +2842,6 @@ async fn validate_mcp_discovery_source(
         return Err(RepositoryError::Conflict(
             "MCP discovery ArtifactLink payload",
         ));
-    }
-    Ok(())
-}
-
-fn require_same_discovery_create(
-    record: &McpDiscoveryOperationRecord,
-    command: &CreateMcpDiscoveryOperation,
-) -> Result<(), RepositoryError> {
-    if record.operation_id != command.operation_id
-        || record.job_id != command.job_id
-        || record.logical_key != command.logical_key
-        || record.payload.admission.mcp_deployment != command.mcp_deployment
-        || record.payload.admission.authorization_binding_id != command.authorization_binding_id
-        || record.deadline != command.deadline
-    {
-        return Err(RepositoryError::Conflict("MCP discovery create replay"));
     }
     Ok(())
 }

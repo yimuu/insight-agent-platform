@@ -449,6 +449,39 @@ paths:
           $ref: "#/components/responses/ApiProblem"
         "503":
           $ref: "#/components/responses/ApiProblem"
+  /mcp-servers/{mcp_server_id}/deployments/{mcp_deployment_id}:discover:
+    post:
+      operationId: discoverMcpDeployment
+      summary: Create a durable discovery Job for one exact MCP Deployment
+      tags: [MCP Servers]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: mcp.write
+      x-insight-idempotency: tenant_principal_mcp_deployment_receipt
+      parameters:
+        - $ref: "#/components/parameters/McpServerId"
+        - $ref: "#/components/parameters/McpDeploymentId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DiscoverMcpDeploymentRequestV1"}
+      responses:
+        "202":
+          description: The shared MCP discovery Job was accepted or replayed.
+          headers:
+            Location: {schema: {type: string, pattern: "^/v1/operations/job_"}}
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OperationViewV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /mcp/oauth/callback:
     get:
       operationId: completeMcpOAuthCallback
@@ -596,6 +629,16 @@ components:
       in: path
       required: true
       schema: {$ref: "#/components/schemas/ArtifactId"}
+    McpServerId:
+      name: mcp_server_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/McpServerId"}
+    McpDeploymentId:
+      name: mcp_deployment_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/McpDeploymentId"}
     IfMatch:
       name: If-Match
       in: header
@@ -664,6 +707,15 @@ components:
     ArtifactId:
       type: string
       pattern: "^art_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    McpServerId:
+      type: string
+      pattern: "^mcp_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    McpDeploymentId:
+      type: string
+      pattern: "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    McpAuthorizationBindingId:
+      type: string
+      pattern: "^mab_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     DataClassification:
       type: string
       enum: [public, internal, confidential, restricted]
@@ -695,6 +747,14 @@ components:
             classification: {$ref: "#/components/schemas/DataClassification"}
             schema_digest: {$ref: "#/components/schemas/Digest"}
             value: {$ref: "#/components/schemas/ValueRef"}
+        deadline: {$ref: "#/components/schemas/UtcTimestamp"}
+    DiscoverMcpDeploymentRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, authorization_binding_id, deadline]
+      properties:
+        schema_version: {const: 1}
+        authorization_binding_id: {$ref: "#/components/schemas/McpAuthorizationBindingId"}
         deadline: {$ref: "#/components/schemas/UtcTimestamp"}
     RunViewV1:
       type: object

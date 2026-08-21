@@ -27,11 +27,11 @@ use insight_platform_api::{
     resource::{
         build_resource_router, deployment_etag, resource_etag, resource_version_etag,
         ControlDeploymentIntent, CreateDeploymentIntent, CreateResourceIntent, DeploymentViewV1,
-        PublishResourceDraftIntent, PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
-        PublishedResourceVersionSummaryV1, ReadDeploymentIntent, ReadResourceIntent,
-        ReadResourceVersionIntent, ResourceApplication, ResourceApplicationError,
-        ResourceHttpState, ResourceVersionViewV1, ResourceViewV1, SystemResourceClock,
-        UpdateResourceDraftIntent, ValidateResourceDraftIntent,
+        DiscoverMcpDeploymentIntent, PublishResourceDraftIntent, PublishResourceDraftRequestV1,
+        PublishResourceDraftResponseV1, PublishedResourceVersionSummaryV1, ReadDeploymentIntent,
+        ReadResourceIntent, ReadResourceVersionIntent, ResourceApplication,
+        ResourceApplicationError, ResourceHttpState, ResourceVersionViewV1, ResourceViewV1,
+        SystemResourceClock, UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
     run::{
         build_run_router, run_etag, ControlRunIntent, CreateRunIntent, HmacRunEventCursorCodec,
@@ -54,6 +54,7 @@ use insight_platform_contracts::{
 use insight_platform_invocations::{
     CapabilityApprovalDecision, InvocationTransaction, ResolveCapabilityApproval,
 };
+use insight_platform_mcp_host::CreateMcpDiscoveryOperation;
 use insight_platform_orchestrator::{
     AdmitRun, PlanNodeKey, RequestRunCancel, RunInputValue, SetRunPause,
 };
@@ -1408,6 +1409,73 @@ impl ResourceApplication for PgResources {
         })
     }
 
+    async fn discover_mcp_deployment(
+        &self,
+        intent: DiscoverMcpDeploymentIntent,
+    ) -> Result<OperationViewV1, ResourceApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(ResourceApplicationError::Invalid);
+        }
+        let deployment = self
+            .repository
+            .read_mcp_deployment_for_discovery(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.resource_id,
+                &intent.deployment_id,
+            )
+            .await
+            .map_err(map_resource_repository_error)?;
+        let exact_deployment = ExactDeploymentRef::new(
+            intent.deployment_id,
+            deployment
+                .bindings
+                .digest
+                .parse()
+                .map_err(|_| ResourceApplicationError::Internal)?,
+        )
+        .map_err(|_| ResourceApplicationError::Internal)?;
+        let operation_id = new_id(ResourceKind::McpOperation)?;
+        let job_id = new_id(ResourceKind::Job)?;
+        let audit = CommandAudit {
+            tenant_id: intent.principal.tenant_id.clone(),
+            principal_id: intent.principal.principal_id.clone(),
+            principal_kind: intent.principal.principal_kind,
+            receipt_id: new_id(ResourceKind::Receipt)?,
+            event_id: new_id(ResourceKind::Event)?,
+            outbox_id: new_id(ResourceKind::OutboxEvent)?,
+            idempotency_key_digest: intent.idempotency_key_digest,
+            request_digest: intent.request_digest.clone(),
+            receipt_expires_at: now + chrono::Duration::hours(24),
+        };
+        self.repository
+            .create_mcp_discovery_operation(CreateMcpDiscoveryOperation {
+                audit,
+                operation_id,
+                job_id: job_id.clone(),
+                logical_key: intent.request_digest.to_string(),
+                mcp_deployment: exact_deployment,
+                authorization_binding_id: intent.authorization_binding_id,
+                attempt_limit: 3,
+                deadline: intent.deadline,
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        self.repository
+            .read_public_operation(&ReadOperation {
+                tenant_id: intent.principal.tenant_id,
+                principal_id: intent.principal.principal_id,
+                principal_kind: intent.principal.principal_kind,
+                operation_id: job_id,
+                request_digest: intent.request_digest,
+                deadline: now + chrono::Duration::seconds(5),
+            })
+            .await
+            .map_err(map_operation_read_for_resource)
+    }
+
     async fn read_resource(
         &self,
         intent: ReadResourceIntent,
@@ -2085,6 +2153,18 @@ fn map_resource_repository_error(error: RepositoryError) -> ResourceApplicationE
         RepositoryError::QuotaExceeded | RepositoryError::CorruptRow(_) => {
             ResourceApplicationError::Internal
         }
+    }
+}
+
+fn map_operation_read_for_resource(error: OperationReadError) -> ResourceApplicationError {
+    match error {
+        OperationReadError::InvalidRequest => ResourceApplicationError::Invalid,
+        OperationReadError::Denied => ResourceApplicationError::Denied,
+        OperationReadError::NotFound | OperationReadError::NotPublic => {
+            ResourceApplicationError::NotFound
+        }
+        OperationReadError::AuthorityUnavailable => ResourceApplicationError::Unavailable,
+        OperationReadError::CorruptAuthority => ResourceApplicationError::Internal,
     }
 }
 
