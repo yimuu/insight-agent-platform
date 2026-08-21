@@ -434,22 +434,22 @@
               "items": {
                 "additionalProperties": false,
                 "properties": {
-                  "resource_kind": {
-                    "const": "skill_revision"
-                  },
-                  "revision_id": {
-                    "pattern": "^srev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                    "type": "string"
-                  },
-                  "semantic_digest": {
+                  "deployment_digest": {
                     "pattern": "^sha256:[0-9a-f]{64}$",
                     "type": "string"
+                  },
+                  "deployment_id": {
+                    "pattern": "^skdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                    "type": "string"
+                  },
+                  "resource_kind": {
+                    "const": "skill_deployment"
                   }
                 },
                 "required": [
-                  "revision_id",
+                  "deployment_id",
                   "resource_kind",
-                  "semantic_digest"
+                  "deployment_digest"
                 ],
                 "type": "object"
               },

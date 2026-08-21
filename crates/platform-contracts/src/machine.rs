@@ -2052,7 +2052,7 @@ fn frozen_slot_binding_schema() -> Value {
                     "candidates": {
                         "type": "array", "minItems": 1, "maxItems": 512,
                         "uniqueItems": true,
-                        "items": exact_revision("skill_revision", "srev")
+                        "items": exact_deployment("skill_deployment", "skdep")
                     },
                     "selection_policy": selection_policy
                 }

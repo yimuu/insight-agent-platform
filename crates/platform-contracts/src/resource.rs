@@ -1284,7 +1284,7 @@ pub enum FrozenSlotTarget {
         selection_policy: ExactVersionRef,
     },
     Skill {
-        candidates: Vec<ExactVersionRef>,
+        candidates: Vec<ExactDeploymentRef>,
         selection_policy: ExactVersionRef,
     },
 }
@@ -1328,13 +1328,7 @@ impl FrozenSlotBinding {
                 candidates,
                 selection_policy,
             } => {
-                validate_exact_versions(candidates, MAX_FROZEN_SLOTS)?;
-                if candidates
-                    .iter()
-                    .any(|candidate| candidate.resource_kind != ResourceKind::SkillRevision)
-                {
-                    return Err(ResourceContractError::WrongResourceIdKind);
-                }
+                validate_deployments(candidates, ResourceKind::SkillDeployment)?;
                 require_kind(&selection_policy.revision_id, ResourceKind::PolicyRevision)
             }
         }
@@ -1413,10 +1407,8 @@ impl DeploymentClosure {
                             refs.push(selection_policy);
                         }
                         FrozenSlotTarget::Skill {
-                            candidates,
-                            selection_policy,
+                            selection_policy, ..
                         } => {
-                            refs.extend(candidates.iter());
                             refs.push(selection_policy);
                         }
                         FrozenSlotTarget::Context { binding } => {
@@ -1439,10 +1431,8 @@ impl DeploymentClosure {
                             selection_policy, ..
                         } => refs.push(selection_policy),
                         FrozenSlotTarget::Skill {
-                            candidates,
-                            selection_policy,
+                            selection_policy, ..
                         } => {
-                            refs.extend(candidates.iter());
                             refs.push(selection_policy);
                         }
                         FrozenSlotTarget::Context { binding } => {
@@ -1512,7 +1502,9 @@ impl DeploymentClosure {
                         FrozenSlotTarget::Context { binding } => {
                             refs.push(&binding.context_deployment);
                         }
-                        FrozenSlotTarget::Skill { .. } => {}
+                        FrozenSlotTarget::Skill { candidates, .. } => {
+                            refs.extend(candidates.iter());
+                        }
                     }
                 }
             }
@@ -1531,7 +1523,9 @@ impl DeploymentClosure {
                         FrozenSlotTarget::Context { binding } => {
                             refs.push(&binding.context_deployment)
                         }
-                        FrozenSlotTarget::Skill { .. } => {}
+                        FrozenSlotTarget::Skill { candidates, .. } => {
+                            refs.extend(candidates.iter());
+                        }
                     }
                 }
             }
@@ -1989,10 +1983,8 @@ impl RunBindingsSnapshot {
                     selection_policy, ..
                 } => references.push(selection_policy),
                 FrozenSlotTarget::Skill {
-                    candidates,
-                    selection_policy,
+                    selection_policy, ..
                 } => {
-                    references.extend(candidates.iter());
                     references.push(selection_policy);
                 }
                 FrozenSlotTarget::Context { binding } => {
@@ -2015,7 +2007,9 @@ impl RunBindingsSnapshot {
                 FrozenSlotTarget::Context { binding } => {
                     references.push(&binding.context_deployment);
                 }
-                FrozenSlotTarget::Skill { .. } => {}
+                FrozenSlotTarget::Skill { candidates, .. } => {
+                    references.extend(candidates.iter());
+                }
             }
         }
         references
@@ -2385,7 +2379,23 @@ mod tests {
                 digest('b'),
             )
             .unwrap(),
-            requirements: Vec::new(),
+            requirements: vec![FrozenSlotBinding {
+                slot_id: "summarizer".to_owned(),
+                requirement_digest: digest('1'),
+                target: FrozenSlotTarget::Skill {
+                    candidates: vec![ExactDeploymentRef::new(
+                        id("skdep_0198f1c3-8f49-7c3e-b1f3-773c28367b87"),
+                        digest('2'),
+                    )
+                    .unwrap()],
+                    selection_policy: ExactVersionRef::new(
+                        id("prev_0198f1c3-8f49-7c3e-b1f3-773c28367b88"),
+                        digest('3'),
+                    )
+                    .unwrap(),
+                },
+                binding_digest: digest('4'),
+            }],
             selection_policy: policy_deployment.clone(),
             qualification_evidence: qualification_artifact(),
         });
@@ -2416,6 +2426,18 @@ mod tests {
         assert!(policy.validate().is_ok());
         assert!(sandbox.validate().is_ok());
         assert_eq!(skill.resource_kind(), RegistryResourceKind::Skill);
+        assert!(skill
+            .exact_deployment_refs()
+            .iter()
+            .any(|reference| reference.resource_kind == ResourceKind::SkillDeployment));
+        assert_eq!(
+            skill
+                .exact_version_refs()
+                .iter()
+                .filter(|reference| reference.resource_kind == ResourceKind::SkillRevision)
+                .count(),
+            1
+        );
         assert_eq!(policy.resource_kind(), RegistryResourceKind::Policy);
         assert_eq!(
             sandbox.resource_kind(),

@@ -880,6 +880,23 @@ def check_spec_registry_alignment(errors):
     ]
     if schema_slot_kinds != expected_slot_kinds:
         errors.append("FrozenSlotBinding schema differs from the dependency slot registry")
+    expected_candidate_kinds = {
+        "model": ("model_deployment", "^mdep_"),
+        "capability": ("capability_deployment", "^cdep_"),
+        "child_agent": ("agent_deployment", "^adep_"),
+        "skill": ("skill_deployment", "^skdep_"),
+    }
+    for variant in target_variants:
+        properties = variant.get("properties", {})
+        slot_kind = properties.get("kind", {}).get("const")
+        if slot_kind not in expected_candidate_kinds:
+            continue
+        candidate = properties.get("candidates", {}).get("items", {}).get("properties", {})
+        expected_kind, expected_prefix = expected_candidate_kinds[slot_kind]
+        if candidate.get("resource_kind", {}).get("const") != expected_kind:
+            errors.append(f"{slot_kind} slot candidate has the wrong deployment kind")
+        if not candidate.get("deployment_id", {}).get("pattern", "").startswith(expected_prefix):
+            errors.append(f"{slot_kind} slot candidate has the wrong deployment ID prefix")
 
     if registries.get("quota_accounting_modes") != ["leased", "consumable", "reclaimable"]:
         errors.append("04 quota accounting mode registry is not closed")
