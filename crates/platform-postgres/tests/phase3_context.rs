@@ -599,6 +599,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let cache_policy = version(ResourceKind::PolicyRevision, 0x25);
     let execution_profile = version(ResourceKind::PolicyRevision, 0x26);
     let invocation_policy = version(ResourceKind::PolicyRevision, 0x27);
+    let chunker_policy = version(ResourceKind::PolicyRevision, 0x28);
     let policies = vec![
         authorization_policy.clone(),
         ranking_policy.clone(),
@@ -608,6 +609,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         cache_policy.clone(),
         execution_profile.clone(),
         invocation_policy.clone(),
+        chunker_policy.clone(),
     ];
     seed_policy_versions(pool, &tenant_id, &principal_id, &policy_resource, &policies).await;
     insert_ready_artifact(
@@ -733,6 +735,8 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         secret_bindings: vec![],
         network_policy: None,
         parser_policy: parser_policy.clone(),
+        chunker_policy,
+        embedding_model_deployment: None,
         ranking_policy: ranking_policy.clone(),
         data_policy: data_policy.clone(),
         conformance_evidence: artifact(0xa2),

@@ -1281,6 +1281,7 @@ mod tests {
         let ranking_policy = version(ResourceKind::PolicyRevision, 11);
         let parser_policy = version(ResourceKind::PolicyRevision, 12);
         let data_policy = version(ResourceKind::PolicyRevision, 13);
+        let chunker_policy = version(ResourceKind::PolicyRevision, 17);
         let entitlement_policy = version(ResourceKind::PolicyRevision, 14);
         let cache_policy = version(ResourceKind::PolicyRevision, 15);
         let execution_profile = version(ResourceKind::PolicyRevision, 16);
@@ -1366,6 +1367,8 @@ mod tests {
             secret_bindings: vec![],
             network_policy: None,
             parser_policy: parser_policy.clone(),
+            chunker_policy,
+            embedding_model_deployment: None,
             ranking_policy: ranking_policy.clone(),
             data_policy: data_policy.clone(),
             conformance_evidence: artifact(32),

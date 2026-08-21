@@ -1330,6 +1330,7 @@ impl DeploymentClosure {
                 refs.extend([&closure.implementation, &closure.interface]);
                 refs.extend([
                     &closure.parser_policy,
+                    &closure.chunker_policy,
                     &closure.ranking_policy,
                     &closure.data_policy,
                 ]);
@@ -1386,6 +1387,7 @@ impl DeploymentClosure {
             }
             Self::ModelProfile(closure) => refs.push(&closure.provider_deployment),
             Self::ContextSourceInterface(closure) => {
+                refs.extend(closure.embedding_model_deployment.iter());
                 if let ContextBackendBinding::McpResources { mcp_deployment, .. } = &closure.backend
                 {
                     refs.push(mcp_deployment);
@@ -1516,6 +1518,8 @@ pub struct ContextDeploymentClosure {
     pub secret_bindings: Vec<crate::ExactSecretBindingRef>,
     pub network_policy: Option<ExactVersionRef>,
     pub parser_policy: ExactVersionRef,
+    pub chunker_policy: ExactVersionRef,
+    pub embedding_model_deployment: Option<ExactDeploymentRef>,
     pub ranking_policy: ExactVersionRef,
     pub data_policy: ExactVersionRef,
     pub conformance_evidence: ArtifactRef,
@@ -1535,7 +1539,22 @@ impl ContextDeploymentClosure {
             .validate()
             .map_err(|_| ResourceContractError::InvalidContextContract)?;
         validate_secret_bindings(&self.secret_bindings)?;
-        let mut policies = vec![&self.parser_policy, &self.ranking_policy, &self.data_policy];
+        if self
+            .embedding_model_deployment
+            .as_ref()
+            .is_some_and(|deployment| {
+                deployment.resource_kind != ResourceKind::ModelDeployment
+                    || deployment.validate().is_err()
+            })
+        {
+            return Err(ResourceContractError::InvalidContextContract);
+        }
+        let mut policies = vec![
+            &self.parser_policy,
+            &self.chunker_policy,
+            &self.ranking_policy,
+            &self.data_policy,
+        ];
         policies.extend(self.network_policy.iter());
         validate_distinct_policy_roles(&policies)?;
         self.conformance_evidence

@@ -586,6 +586,7 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
     let ranking_policy = exact(ResourceKind::PolicyRevision, 0x27, "ranking");
     let data_policy = exact(ResourceKind::PolicyRevision, 0x28, "data");
     let cache_policy = exact(ResourceKind::PolicyRevision, 0x29, "cache");
+    let chunker_policy = exact(ResourceKind::PolicyRevision, 0x2a, "chunker");
     let policy_documents = vec![
         (
             protocol_policy.clone(),
@@ -653,6 +654,16 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
                 0x89,
                 PolicyKind::DataFlow,
                 named_digest("cache"),
+                None,
+                None,
+            ),
+        ),
+        (
+            chunker_policy.clone(),
+            policy_document(
+                0x8a,
+                PolicyKind::Chunker,
+                named_digest("chunker"),
                 None,
                 None,
             ),
@@ -1035,6 +1046,8 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
         secret_bindings: vec![],
         network_policy: None,
         parser_policy,
+        chunker_policy,
+        embedding_model_deployment: None,
         ranking_policy,
         data_policy,
         conformance_evidence: objects,
