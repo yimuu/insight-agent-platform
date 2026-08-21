@@ -3,11 +3,11 @@ use insight_platform_contracts::{
     ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
     ArtifactRetentionPolicy, AuthoringPackage, CodeTrustClass, DataClassification,
     DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExactVersionRef, Permission,
-    PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind,
-    PrincipalSnapshot, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
-    ResourceDraftPayload, ResourceId, ResourceKind, RunBindingsSnapshot, SandboxEntrypointKind,
-    SandboxPackageResourceSpec, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary,
+    PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
+    RunBindingsSnapshot, SandboxEntrypointKind, SandboxPackageResourceSpec, Sha256Digest,
+    TenantConfig, TenantPrincipalPayload, ValidationSummary,
 };
 use insight_platform_postgres::{
     repository::{
@@ -35,6 +35,7 @@ const RETENTION_REVISION_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ca3";
 const ENCRYPTION_DOMAIN_ID: &str = "enc_0198f1c3-8f49-7c3e-b1f3-773c28367ca4";
 const RESOURCE_ID: &str = "pol_0198f1c3-8f49-7c3e-b1f3-773c28367c05";
 const VERSION_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367c06";
+const POLICY_DEPLOYMENT_ID: &str = "pdep_0198f1c3-8f49-7c3e-b1f3-773c28367c07";
 const JOB_ID: &str = "job_0198f1c3-8f49-7c3e-b1f3-773c28367c08";
 const ROLLBACK_RESOURCE_ID: &str = "pol_0198f1c3-8f49-7c3e-b1f3-773c28367cb0";
 const AGENT_ID: &str = "agt_0198f1c3-8f49-7c3e-b1f3-773c28367cd0";
@@ -984,8 +985,34 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         Err(RepositoryError::NotFound("resource version"))
     ));
 
-    let target = ActiveTarget::Version {
-        version: ExactVersionRef::new(id(VERSION_ID), digest('6')).unwrap(),
+    let policy_closure = PolicyDeploymentClosure {
+        policy_revision: ExactVersionRef::new(id(VERSION_ID), digest('6')).unwrap(),
+        applicability_digest: digest('5'),
+        qualification_evidence: draft.document.authoring_package().artifact.clone(),
+    };
+    let policy_deployment = applied(
+        registry_command!(
+            repository,
+            create_deployment,
+            CreateDeployment {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "7c55", '8', '9'),
+                deployment_id: id(POLICY_DEPLOYMENT_ID),
+                resource_id: id(RESOURCE_ID),
+                resource_version_id: id(VERSION_ID),
+                environment: "test".to_owned(),
+                closure: DeploymentClosure::Policy(policy_closure),
+                expected_resource_version: 3,
+            }
+        )
+        .unwrap(),
+    );
+    let policy_deployment_digest: Sha256Digest = policy_deployment.bindings.digest.parse().unwrap();
+    let target = ActiveTarget::Deployment {
+        deployment: ExactDeploymentRef::new(
+            id(POLICY_DEPLOYMENT_ID),
+            policy_deployment_digest.clone(),
+        )
+        .unwrap(),
     };
     let activated = applied(
         registry_command!(
@@ -994,14 +1021,18 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             ActivateResource {
                 audit: audit(TENANT_ID, PRINCIPAL_ID, "7c60", '9', 'a'),
                 resource_id: id(RESOURCE_ID),
-                expected_resource_version: 3,
+                expected_resource_version: 4,
                 target: target.clone(),
             }
         )
         .unwrap(),
     );
-    assert_eq!(activated.active_version_id.as_deref(), Some(VERSION_ID));
-    assert_eq!(activated.version, 4);
+    assert!(activated.active_version_id.is_none());
+    assert_eq!(
+        activated.active_deployment_id.as_deref(),
+        Some(POLICY_DEPLOYMENT_ID)
+    );
+    assert_eq!(activated.version, 5);
 
     let suspended = applied(
         registry_command!(
@@ -1010,13 +1041,13 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             SetResourceGate {
                 audit: audit(TENANT_ID, PRINCIPAL_ID, "7c70", 'b', 'c'),
                 resource_id: id(RESOURCE_ID),
-                expected_resource_version: 4,
+                expected_resource_version: 5,
                 target: AdministrativeGate::Suspended,
             }
         )
         .unwrap(),
     );
-    assert_eq!(suspended.version, 5);
+    assert_eq!(suspended.version, 6);
     let failed_audit = audit(TENANT_ID, PRINCIPAL_ID, "7c80", 'd', 'e');
     assert!(matches!(
         registry_command!(
@@ -1048,7 +1079,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             TransitionResourceLifecycle {
                 audit: audit(TENANT_ID, PRINCIPAL_ID, "7c90", 'f', '0'),
                 resource_id: id(RESOURCE_ID),
-                expected_resource_version: 5,
+                expected_resource_version: 6,
                 target: EntityLifecycle::Archived,
             }
         )
@@ -1062,9 +1093,13 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             ActivateResource {
                 audit: audit(TENANT_B_ID, PRINCIPAL_ID, "7ca0", '1', '2'),
                 resource_id: id(RESOURCE_ID),
-                expected_resource_version: 6,
-                target: ActiveTarget::Version {
-                    version: ExactVersionRef::new(id(VERSION_ID), digest('6')).unwrap(),
+                expected_resource_version: 7,
+                target: ActiveTarget::Deployment {
+                    deployment: ExactDeploymentRef::new(
+                        id(POLICY_DEPLOYMENT_ID),
+                        policy_deployment_digest,
+                    )
+                    .unwrap(),
                 },
             }
         ),
@@ -1078,13 +1113,13 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             TransitionResourceLifecycle {
                 audit: audit(TENANT_ID, PRINCIPAL_ID, "7ca1", '3', '4'),
                 resource_id: id(RESOURCE_ID),
-                expected_resource_version: 6,
+                expected_resource_version: 7,
                 target: EntityLifecycle::Active,
             }
         )
         .unwrap(),
     );
-    assert_eq!(restored.version, 7);
+    assert_eq!(restored.version, 8);
     let enabled = applied(
         registry_command!(
             repository,
@@ -1092,13 +1127,13 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             SetResourceGate {
                 audit: audit(TENANT_ID, PRINCIPAL_ID, "7ca2", '5', '6'),
                 resource_id: id(RESOURCE_ID),
-                expected_resource_version: 7,
+                expected_resource_version: 8,
                 target: AdministrativeGate::Enabled,
             }
         )
         .unwrap(),
     );
-    assert_eq!(enabled.version, 8);
+    assert_eq!(enabled.version, 9);
 
     let policy_ref = ExactVersionRef::new(id(VERSION_ID), digest('6')).unwrap();
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
@@ -1478,13 +1513,13 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             insight_platform_registry::UpdateResourceDraft {
                 audit: first_update_audit.clone(),
                 resource_id: id(RESOURCE_ID),
-                expected_resource_version: 8,
+                expected_resource_version: 9,
                 draft: first_updated_draft.clone(),
             }
         )
         .unwrap(),
     );
-    assert_eq!(first_update.version, 9);
+    assert_eq!(first_update.version, 10);
     assert_eq!(first_update.draft_generation, 2);
 
     let mut second_updated_draft = draft;
@@ -1496,13 +1531,13 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             insight_platform_registry::UpdateResourceDraft {
                 audit: audit(TENANT_ID, PRINCIPAL_ID, "7ce1", '3', '4'),
                 resource_id: id(RESOURCE_ID),
-                expected_resource_version: 9,
+                expected_resource_version: 10,
                 draft: second_updated_draft,
             }
         )
         .unwrap(),
     );
-    assert_eq!(second_update.version, 10);
+    assert_eq!(second_update.version, 11);
 
     let replay = registry_command!(
         repository,
@@ -1510,7 +1545,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         insight_platform_registry::UpdateResourceDraft {
             audit: first_update_audit,
             resource_id: id(RESOURCE_ID),
-            expected_resource_version: 8,
+            expected_resource_version: 9,
             draft: first_updated_draft,
         }
     )
@@ -1518,7 +1553,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     let CommandOutcome::Replayed(replayed) = replay else {
         panic!("expected exact historical draft update replay");
     };
-    assert_eq!(replayed.version, 9);
+    assert_eq!(replayed.version, 10);
     assert_eq!(replayed.draft_generation, 2);
     assert_eq!(
         replayed.payload.value["display_name"],
