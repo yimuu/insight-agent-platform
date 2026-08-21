@@ -69,6 +69,10 @@ discovery是durable Job，结果是immutable Discovery Snapshot，包含：
 
 发布Capability/Context投影时必须引用exact snapshot与entry digest。discovery变化只产生新snapshot，不改写旧Deployment。
 
+Public discovery command必须显式携带当前principal可用的`authorization_binding_id`与bounded deadline。Host在创建Job的同一事务
+重验binding tenant、principal kind/generation、exact MCP Deployment、audience、scope、credential generation与expiry；Gateway不得
+通过“第一条可用binding”、active head或自由header猜测授权。Receipt replay返回第一次冻结的binding与Job结果。
+
 ## 6. Tool、Resource 与Prompt
 
 Tool调用始终经过09/10的Capability Interface和Invocation。MCP Host只是backend adapter，不跳过policy、approval、

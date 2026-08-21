@@ -109,6 +109,27 @@ discovery/build command冻结exact Deployment、source/config/schema/validator d
 Discovery Snapshot或Dataset Generation、Ready manifest Artifact、Event/Outbox，并在expected active head CAS成功时移动未来绑定。
 失败/取消/超时不创建半成品generation。
 
+closed command DTO为：
+
+```rust
+struct DiscoverMcpDeploymentRequestV1 {
+    schema_version: ConstU16<1>,
+    authorization_binding_id: McpAuthorizationBindingId,
+    deadline: UtcTimestamp,
+}
+
+struct BuildContextDatasetRequestV1 {
+    schema_version: ConstU16<1>,
+    dataset_id: Option<ContextDatasetId>,
+    deadline: UtcTimestamp,
+}
+```
+
+MCP Host按13在Job创建事务重验authorization binding与path exact Deployment，不能自动选择tenant内任意binding。Dataset build的
+parser/chunker/embedding/ranking来自path Deployment的immutable closure而不是public body。首次build省略`dataset_id`时服务端预留新`dset`，
+Operation target立即返回该ID，但成功前`GET context-datasets`仍为not found；成功事务才物化root和首个generation。重建携带既有ID并验证其
+active generation属于同一exact Deployment。失败不物化预留root，Receipt replay仍返回原Operation target。
+
 ## 7. Operation 是Job projection
 
 ```rust

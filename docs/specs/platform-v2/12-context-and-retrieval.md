@@ -188,7 +188,7 @@ RunBindings 固定 ContextBinding，不表示底层数据永远不变。一致�
 同时出现在 Run diagnostic 和 citation 中，客户端不能把 `ExternalObservation` 宣称为 reproducible snapshot。
 
 Context Deployment是02定义的环境绑定：它固定Implementation、实际source identity/backend deployment、
-SecretBinding、Network、parser/ranking/data policy和绑定exact环境的conformance evidence。backend binding variant必须
+SecretBinding、Network、parser/chunker/embedding/ranking/data policy和绑定exact环境的conformance evidence。backend binding variant必须
 与Implementation contract一致；例如McpResources绑定exact MCP Deployment与Discovery Snapshot，RemoteSearch绑定
 canonical endpoint，ManagedIndex绑定exact index service/region。RunBindings中的ContextBinding只引用exact Deployment
 并增加本Run的consistency/dataset/projection选择；runtime不得从Implementation Revision重新解析source、credential、
@@ -248,6 +248,16 @@ struct DatasetGeneration {
     created_at: DateTime<Utc>,
 }
 ```
+
+Context Deployment必须冻结`parser_profile_revision_id`、`chunker_profile_revision_id`、可选exact
+`embedding_model_deployment_id`与`ranking_profile_revision_id`；build command不得从active head或请求正文临时选择这些依赖。
+不需要embedding的backend必须将该slot显式冻结为`None`，需要embedding的backend缺失slot则Deployment validation fail closed。
+
+Dataset root identity由build admission确定。首次build的public request不携带`dataset_id`时，服务端预留一个新的`dset`并把它冻结为
+shared Job的typed target；预留ID本身不是Resource current state，只有成功提交时才在同一事务物化ContextDataset root和首个`dgen`。
+失败、取消或超时不得留下空root或半成品generation。重建可携带既有`dataset_id`；admission必须验证该root的active generation
+绑定同一exact Context Deployment，否则拒绝。相同tenant、principal、Deployment与Idempotency-Key重放返回第一次预留的ID，不能再分配新ID；
+同一Dataset同时最多一个非terminal build Job，串行成功用expected active generation/version CAS防止lost update。
 
 构建阶段是shared Job的bounded progress，不是第二个Dataset状态机；构建detail只进入Job typed
 payload或Artifact。Job成功事务在ContextDataset root下创建完整DatasetGeneration

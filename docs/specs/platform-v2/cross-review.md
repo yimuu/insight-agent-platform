@@ -1,10 +1,10 @@
-# Platform v2 00～18 Cross-review（CR-171）
+# Platform v2 00～18 Cross-review（CR-172）
 
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementation Authorized |
 | 日期 | 2026-08-21 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-172 implementation feedback |
 | 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft/Deployment/Run admission authority和fixture闭包 |
 
 ## 1. 结论
@@ -42,14 +42,19 @@ Artifact role或第二current authority。
 因此不具确定authority。CR-171在04现有tenant current config内增加两个exact revision slot，15/17要求public Artifact prepare只读取这些slot并验证
 kind/digest/current gate。绑定沿用Tenant CAS/Receipt/Event/Outbox，不新增表、aggregate、head projection或安装级fallback；其余00～18影响复核无变化。
 
+Context public build实施审计又发现两个P1合同缺口：首次build没有可引用的ContextDataset root，且DatasetGeneration所需chunker/embedding未在
+Context Deployment闭包冻结；MCP discover route也未说明authorization binding authority。CR-172先在12冻结完整build closure、预留ID与
+成功时物化规则，在13冻结显式authorization input及同事务重验，再由17固定两个closed DTO。03的shared Job、02的Resource authority、18的
+隔舱与资格语义不变；失败时预留ID不成为Resource，因而不产生空root、第二current state或新表。00～18影响复核未发现新增P0/P1。
+
 ## 2. 文档状态与依赖
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / Implementation Authorized | CR-171已写回并获统一acceptance |
+| 00 | Accepted / Implementation Authorized | CR-172已写回并获统一acceptance |
 | 01～10 | Accepted | 依赖顺序与owner边界已按CR-169统一；CR-170影响复核无语义变化 |
 | 11 Skill | Accepted / Implementation In Progress | 未改变Skill“方法包、非运行时”语义；脚本仍必须发布为Sandbox Capability |
-| 12～18 | Accepted | 15/17继承CR-170 DTO/hop并按CR-171绑定exact tenant Policy slot |
+| 12～18 | Accepted | 继承CR-170/171，并按CR-172冻结Dataset build与MCP discovery public authority |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | Accepted / Implementing | 从Accepted合同生成；仍不表示current behavior |

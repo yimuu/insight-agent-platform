@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-171）
+# Platform v2 四阶段实现计划（CR-172）
 
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / Implementing |
 | 日期 | 2026-08-21 |
-| 合同输入 | 00～18、cross-review CR-171/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-172/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则
@@ -142,13 +142,14 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 2. **Context 与Text2SQL**
 
-   - Context Interface/Implementation/Binding、Dataset Generation build Job、query/citation/cache；
+   - Context Interface/Implementation/Binding、冻结parser/chunker/embedding/ranking闭包的Dataset Generation build Job、query/citation/cache；
+   - 首次build预留Dataset ID、成功时物化root+generation、重建归属验证与active generation CAS；
    - Text2SQL按read-only planning/validation/execution/result-boundary拆分，SQL execution通过exact read-only Capability/remote service；
    - dataset/query saturation不占用Orchestration或Sandbox pool。
 
 3. **Remote MCP Host**
 
-   - Streamable HTTP negotiation、discovery、Tool/Resource/Prompt projection、Task/Elicitation、OAuth和subscription；
+   - Streamable HTTP negotiation、显式authorization binding的discovery、Tool/Resource/Prompt projection、Task/Elicitation、OAuth和subscription；
    - Egress Broker last-hop Secret resolution、catalog endpoint、SSRF/TLS/redirect/DNS/rate/byte/time limits；
    - 无stdio process、persistent Sandbox session或session child Job。
 

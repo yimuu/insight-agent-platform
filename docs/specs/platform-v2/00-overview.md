@@ -19,8 +19,10 @@
 > 2026-08-21的CR-169进一步确认editable Draft只由Resource aggregate拥有，publication才创建immutable ResourceVersion；
 > Deployment是immutable exact closure，Resource active binding + gate是未来Run admission的唯一current authority，并完成
 > Run admission闭包。CR-170在此基础上冻结public Artifact DTO、服务端identity/policy ownership与Public Gateway到Artifact Gateway的
-> mTLS/current-principal rebinding。CR-171进一步以tenant current config的exact Retention/ArtifactIo Policy slot消除default policy歧义，
-> 并完成00～18全量复核。相关规范已完成Acceptance并进入实施授权。旧候选不得作为新实现兼容基线。
+> mTLS/current-principal rebinding。CR-171进一步以tenant current config的exact Retention/ArtifactIo Policy slot消除default policy歧义。
+> 2026-08-21实施反馈发现Dataset build缺少首个root identity且Context Deployment未冻结chunker/embedding，以及MCP discover
+> 未冻结public authorization input；CR-172按12→13→17→18完成上游到下游修订与00～18影响复核。相关规范已完成Acceptance并进入
+> 实施授权。旧候选不得作为新实现兼容基线。
 
 ## 1. 决策摘要
 
