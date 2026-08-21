@@ -1410,6 +1410,17 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(completed.grant.version, 2);
     assert_eq!(completed.operation.state, JobState::Waiting);
     assert_eq!(completed.operation.version, 2);
+    let replay_target = repository
+        .load_gateway_artifact_upload_target(
+            tenant_a.clone(),
+            allowed_principal.clone(),
+            PrincipalKind::TenantAdmin,
+            completed.artifact.artifact_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay_target.grant.state, ArtifactLinkState::Consumed);
+    assert_eq!(replay_target.artifact.state, ArtifactState::Uploaded);
     let replayed_completion = execute_complete(&repository, completed_command.clone())
         .await
         .unwrap();
@@ -1463,6 +1474,22 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(started.blob.version, 2);
     assert_eq!(started.operation.version, 3);
     assert_eq!(started.scan_job_state.as_str(), "ready");
+    let scheduled_replay_target = repository
+        .load_gateway_artifact_upload_target(
+            tenant_a.clone(),
+            allowed_principal.clone(),
+            PrincipalKind::TenantAdmin,
+            started.artifact.artifact_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scheduled_replay_target
+            .operation
+            .snapshot
+            .scan_policy_revision,
+        scan_policy_a
+    );
     assert_eq!(
         execute_schedule_initial_scan(&repository, schedule_scan)
             .await

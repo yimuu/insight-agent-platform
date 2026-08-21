@@ -710,11 +710,11 @@ impl PgRepository {
             JOIN insight_platform.artifact_links AS upload_grant
               ON upload_grant.tenant_id = artifact.tenant_id
              AND upload_grant.target_artifact_id = artifact.artifact_id
-             AND upload_grant.link_kind = 'grant' AND upload_grant.state = 'active'
-             AND upload_grant.released_at IS NULL
-             AND (upload_grant.expires_at IS NULL OR upload_grant.expires_at > clock_timestamp())
+             AND upload_grant.link_kind = 'grant'
+             AND upload_grant.state IN ('active', 'consumed')
+             AND (upload_grant.state = 'consumed' OR upload_grant.released_at IS NULL)
             WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
-              AND artifact.state = 'staging' AND artifact.terminal_at IS NULL
+              AND artifact.state NOT IN ('deleting', 'deleted')
             ORDER BY upload_grant.artifact_link_id
             LIMIT 2
             "#,
@@ -725,10 +725,12 @@ impl PgRepository {
         .await?;
         let [row] = rows.as_slice() else {
             return if rows.is_empty() {
-                Err(RepositoryError::NotFound("staging Artifact upload"))
+                Err(RepositoryError::NotFound(
+                    "Artifact upload completion target",
+                ))
             } else {
                 Err(RepositoryError::CorruptRow(
-                    "staging Artifact has multiple active upload Grants".to_owned(),
+                    "Artifact has multiple current upload Grants".to_owned(),
                 ))
             };
         };
@@ -748,11 +750,11 @@ impl PgRepository {
                 .ok_or_else(|| {
                     RepositoryError::CorruptRow("staging Artifact has no Blob".to_owned())
                 })?,
-            "staging Artifact Blob",
+            "Artifact upload completion Blob",
         )?;
         let upload_grant_id = parse_id(
             row.try_get("upload_grant_id")?,
-            "staging Artifact upload Grant",
+            "Artifact upload completion Grant",
         )?;
         let prepared = load_artifact_bundle(
             &mut transaction,
@@ -764,8 +766,10 @@ impl PgRepository {
         )
         .await?;
         if prepared.grant.snapshot.subject_principal_id != principal_id
-            || prepared.grant.state != ArtifactLinkState::Active
-            || prepared.operation.state != JobState::Waiting
+            || !matches!(
+                prepared.grant.state,
+                ArtifactLinkState::Active | ArtifactLinkState::Consumed
+            )
         {
             return Err(RepositoryError::PermissionDenied);
         }
