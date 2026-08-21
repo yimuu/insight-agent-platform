@@ -2811,4 +2811,53 @@ mod tests {
             .unwrap();
         assert_eq!(wrong_shape.status(), StatusCode::BAD_REQUEST);
     }
+
+    #[tokio::test]
+    async fn all_public_deployment_nouns_reach_the_nominal_handler_matrix() {
+        let expected = [
+            ("agents", RegistryResourceKind::Agent),
+            ("skills", RegistryResourceKind::Skill),
+            ("capabilities", RegistryResourceKind::CapabilityInterface),
+            ("contexts", RegistryResourceKind::ContextSourceInterface),
+            ("mcp-servers", RegistryResourceKind::McpServer),
+            ("models", RegistryResourceKind::ModelProfile),
+            ("policies", RegistryResourceKind::Policy),
+            ("sandboxes", RegistryResourceKind::SandboxProfile),
+        ];
+        assert_eq!(expected.len(), 8);
+        for (noun, kind) in expected {
+            assert_eq!(resource_kind_for_noun(noun), Some(kind));
+            assert!(kind.deployment_kind().is_some());
+        }
+        assert_eq!(resource_kind_for_noun("context-datasets"), None);
+        assert_eq!(resource_kind_for_noun("sandbox-runtimes"), None);
+        assert_eq!(resource_kind_for_noun("unknown"), None);
+
+        let now = Utc::now();
+        let router = build_resource_router(ResourceHttpState::new(
+            Arc::new(FixtureApplication {
+                intents: Mutex::new(Vec::new()),
+            }),
+            Arc::new(FixedClock(now)),
+        ));
+        for (noun, kind) in expected {
+            let wrong_resource_id = id(ResourceKind::Tenant, 90);
+            let deployment_id = id(kind.deployment_kind().unwrap(), 91);
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/v1/{noun}/{wrong_resource_id}/deployments/{deployment_id}:activate"
+                        ))
+                        .extension(principal(now))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{noun}");
+        }
+    }
 }
