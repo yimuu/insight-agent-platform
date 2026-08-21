@@ -78,12 +78,7 @@ selection只由published Sandbox Profile根据trust、Effect、runtime、Secret�
 struct SandboxProfileDeploymentClosure {
     profile_revision: ExactSandboxProfileRevisionRef,
     runtime_revision: ExactSandboxRuntimeRevisionRef,
-    compatible_packages_digest: Digest,
-    isolation_policy: ExactPolicyDeploymentRef,
-    resource_policy: ExactPolicyDeploymentRef,
-    network_policy: ExactPolicyDeploymentRef,
-    artifact_io_policy: ExactPolicyDeploymentRef,
-    secret_resolution_policy: Option<ExactPolicyDeploymentRef>,
+    policy_deployments: Vec<ExactPolicyDeploymentRef>,
     qualification_evidence: ArtifactRef,
 }
 ```

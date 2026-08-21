@@ -22847,6 +22847,18 @@ pub(crate) async fn validate_deployment_closure_exists(
                 ));
             }
         }
+        DeploymentClosure::Skill(skill) => {
+            require_ready_run_artifact(transaction, tenant_id, &skill.qualification_evidence)
+                .await?;
+        }
+        DeploymentClosure::Policy(policy) => {
+            require_ready_run_artifact(transaction, tenant_id, &policy.qualification_evidence)
+                .await?;
+        }
+        DeploymentClosure::SandboxProfile(profile) => {
+            require_ready_run_artifact(transaction, tenant_id, &profile.qualification_evidence)
+                .await?;
+        }
         DeploymentClosure::Agent(_) => {}
     }
     for reference in closure.exact_deployment_refs() {

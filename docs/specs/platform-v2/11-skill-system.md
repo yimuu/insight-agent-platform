@@ -81,11 +81,9 @@ struct SkillRevision {
 
 struct SkillDeploymentClosure {
     skill_revision: ExactSkillRevisionRef,
-    requirement_bindings: Vec<ExactRequirementBinding>,
-    transitive_skill_deployments: Vec<ExactSkillDeploymentRef>,
+    requirements: Vec<FrozenSlotBinding>,
     selection_policy: ExactPolicyDeploymentRef,
     qualification_evidence: ArtifactRef,
-    closure_digest: Digest,
 }
 ```
 

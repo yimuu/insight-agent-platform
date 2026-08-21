@@ -57,10 +57,10 @@
       "pinned_reference": "urn:insight:platform:v1:nominal:UtcTimestamp@sha256:3d11c3a9848b65b6ee13c396fb586e4869d1d12dc7436cedde6a611339b5187b"
     },
     {
-      "canonical_digest": "sha256:cf50f9a295da3fc18945b62f11badc06aad9e3c29ea7949b52b37a0818659513",
+      "canonical_digest": "sha256:1843ef7d553078fa1605b239ed268e11a3ac7c6a4d0210a3b534eea04f9d38a8",
       "name": "UuidV7Id",
       "path": "schemas/nominal/uuid-v7-id.schema.json",
-      "pinned_reference": "urn:insight:platform:v1:nominal:UuidV7Id@sha256:cf50f9a295da3fc18945b62f11badc06aad9e3c29ea7949b52b37a0818659513"
+      "pinned_reference": "urn:insight:platform:v1:nominal:UuidV7Id@sha256:1843ef7d553078fa1605b239ed268e11a3ac7c6a4d0210a3b534eea04f9d38a8"
     }
   ]
 }

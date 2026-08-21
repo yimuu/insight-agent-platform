@@ -106,11 +106,14 @@ impl RegistryResourceKind {
     pub const fn activation_target(self) -> ActivationTargetKind {
         match self {
             Self::Agent
+            | Self::Skill
             | Self::CapabilityInterface
             | Self::ContextSourceInterface
             | Self::McpServer
             | Self::ModelProvider
-            | Self::ModelProfile => ActivationTargetKind::Deployment,
+            | Self::ModelProfile
+            | Self::Policy
+            | Self::SandboxProfile => ActivationTargetKind::Deployment,
             _ => ActivationTargetKind::Version,
         }
     }
@@ -151,11 +154,14 @@ impl RegistryResourceKind {
     pub const fn deployment_kind(self) -> Option<ResourceKind> {
         match self {
             Self::Agent => Some(ResourceKind::AgentDeployment),
+            Self::Skill => Some(ResourceKind::SkillDeployment),
             Self::CapabilityInterface => Some(ResourceKind::CapabilityDeployment),
             Self::ContextSourceInterface => Some(ResourceKind::ContextDeployment),
             Self::McpServer => Some(ResourceKind::McpDeployment),
             Self::ModelProvider => Some(ResourceKind::ModelProviderDeployment),
             Self::ModelProfile => Some(ResourceKind::ModelDeployment),
+            Self::Policy => Some(ResourceKind::PolicyDeployment),
+            Self::SandboxProfile => Some(ResourceKind::SandboxProfileDeployment),
             _ => None,
         }
     }
@@ -736,6 +742,95 @@ authoring_spec!(SandboxProfileResourceSpec {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillDeploymentClosure {
+    pub skill_revision: ExactVersionRef,
+    pub requirements: Vec<FrozenSlotBinding>,
+    pub selection_policy: ExactDeploymentRef,
+    pub qualification_evidence: ArtifactRef,
+}
+
+impl SkillDeploymentClosure {
+    fn validate(&self) -> Result<(), ResourceContractError> {
+        require_kind(
+            &self.skill_revision.revision_id,
+            ResourceKind::SkillRevision,
+        )?;
+        require_deployment_kind(&self.selection_policy, ResourceKind::PolicyDeployment)?;
+        if self.requirements.len() > MAX_FROZEN_SLOTS {
+            return Err(ResourceContractError::UnboundedValue);
+        }
+        let mut slots = BTreeSet::new();
+        for requirement in &self.requirements {
+            requirement.validate()?;
+            if !slots.insert(requirement.slot_id.as_str()) {
+                return Err(ResourceContractError::DuplicateValue);
+            }
+        }
+        self.qualification_evidence
+            .validate()
+            .map_err(|_| ResourceContractError::InvalidArtifact)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyDeploymentClosure {
+    pub policy_revision: ExactVersionRef,
+    pub applicability_digest: Sha256Digest,
+    pub qualification_evidence: ArtifactRef,
+}
+
+impl PolicyDeploymentClosure {
+    fn validate(&self) -> Result<(), ResourceContractError> {
+        require_kind(
+            &self.policy_revision.revision_id,
+            ResourceKind::PolicyRevision,
+        )?;
+        self.qualification_evidence
+            .validate()
+            .map_err(|_| ResourceContractError::InvalidArtifact)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxProfileDeploymentClosure {
+    pub profile_revision: ExactVersionRef,
+    pub runtime_revision: ExactVersionRef,
+    pub policy_deployments: Vec<ExactDeploymentRef>,
+    pub qualification_evidence: ArtifactRef,
+}
+
+impl SandboxProfileDeploymentClosure {
+    fn validate(&self) -> Result<(), ResourceContractError> {
+        require_kind(
+            &self.profile_revision.revision_id,
+            ResourceKind::SandboxProfileRevision,
+        )?;
+        require_kind(
+            &self.runtime_revision.revision_id,
+            ResourceKind::SandboxRuntimeRevision,
+        )?;
+        validate_deployments(&self.policy_deployments, ResourceKind::PolicyDeployment)?;
+        self.qualification_evidence
+            .validate()
+            .map_err(|_| ResourceContractError::InvalidArtifact)
+    }
+}
+
+fn require_deployment_kind(
+    reference: &ExactDeploymentRef,
+    expected: ResourceKind,
+) -> Result<(), ResourceContractError> {
+    reference.validate()?;
+    if reference.resource_kind != expected {
+        return Err(ResourceContractError::WrongResourceIdKind);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "resource_kind",
     content = "spec",
@@ -1255,33 +1350,42 @@ impl FrozenSlotBinding {
 )]
 pub enum DeploymentClosure {
     Agent(AgentDeploymentClosure),
+    Skill(SkillDeploymentClosure),
     CapabilityInterface(CapabilityDeploymentClosure),
     ContextSourceInterface(ContextDeploymentClosure),
     McpServer(McpDeploymentClosure),
     ModelProvider(ModelProviderDeploymentClosure),
     ModelProfile(ModelDeploymentClosure),
+    Policy(PolicyDeploymentClosure),
+    SandboxProfile(SandboxProfileDeploymentClosure),
 }
 
 impl DeploymentClosure {
     pub const fn resource_kind(&self) -> RegistryResourceKind {
         match self {
             Self::Agent(_) => RegistryResourceKind::Agent,
+            Self::Skill(_) => RegistryResourceKind::Skill,
             Self::CapabilityInterface(_) => RegistryResourceKind::CapabilityInterface,
             Self::ContextSourceInterface(_) => RegistryResourceKind::ContextSourceInterface,
             Self::McpServer(_) => RegistryResourceKind::McpServer,
             Self::ModelProvider(_) => RegistryResourceKind::ModelProvider,
             Self::ModelProfile(_) => RegistryResourceKind::ModelProfile,
+            Self::Policy(_) => RegistryResourceKind::Policy,
+            Self::SandboxProfile(_) => RegistryResourceKind::SandboxProfile,
         }
     }
 
     pub fn validate(&self) -> Result<(), ResourceContractError> {
         match self {
             Self::Agent(closure) => closure.validate(),
+            Self::Skill(closure) => closure.validate(),
             Self::CapabilityInterface(closure) => closure.validate(),
             Self::ContextSourceInterface(closure) => closure.validate(),
             Self::McpServer(closure) => closure.validate(),
             Self::ModelProvider(closure) => closure.validate(),
             Self::ModelProfile(closure) => closure.validate(),
+            Self::Policy(closure) => closure.validate(),
+            Self::SandboxProfile(closure) => closure.validate(),
         }
     }
 
@@ -1308,6 +1412,32 @@ impl DeploymentClosure {
                         } => {
                             refs.push(selection_policy);
                         }
+                        FrozenSlotTarget::Skill {
+                            candidates,
+                            selection_policy,
+                        } => {
+                            refs.extend(candidates.iter());
+                            refs.push(selection_policy);
+                        }
+                        FrozenSlotTarget::Context { binding } => {
+                            refs.extend([&binding.authorization_policy, &binding.ranking_policy])
+                        }
+                    }
+                }
+            }
+            Self::Skill(closure) => {
+                refs.push(&closure.skill_revision);
+                for requirement in &closure.requirements {
+                    match &requirement.target {
+                        FrozenSlotTarget::Model {
+                            selection_policy, ..
+                        }
+                        | FrozenSlotTarget::Capability {
+                            selection_policy, ..
+                        }
+                        | FrozenSlotTarget::ChildAgent {
+                            selection_policy, ..
+                        } => refs.push(selection_policy),
                         FrozenSlotTarget::Skill {
                             candidates,
                             selection_policy,
@@ -1360,6 +1490,10 @@ impl DeploymentClosure {
                     &closure.public_projection_policy,
                 ]);
             }
+            Self::Policy(closure) => refs.push(&closure.policy_revision),
+            Self::SandboxProfile(closure) => {
+                refs.extend([&closure.profile_revision, &closure.runtime_revision])
+            }
         }
         refs
     }
@@ -1385,6 +1519,22 @@ impl DeploymentClosure {
             Self::CapabilityInterface(closure) => {
                 refs.extend(closure.backend.exact_deployment_refs())
             }
+            Self::Skill(closure) => {
+                refs.push(&closure.selection_policy);
+                for requirement in &closure.requirements {
+                    match &requirement.target {
+                        FrozenSlotTarget::Model { candidates, .. }
+                        | FrozenSlotTarget::Capability { candidates, .. }
+                        | FrozenSlotTarget::ChildAgent { candidates, .. } => {
+                            refs.extend(candidates.iter());
+                        }
+                        FrozenSlotTarget::Context { binding } => {
+                            refs.push(&binding.context_deployment)
+                        }
+                        FrozenSlotTarget::Skill { .. } => {}
+                    }
+                }
+            }
             Self::ModelProfile(closure) => refs.push(&closure.provider_deployment),
             Self::ContextSourceInterface(closure) => {
                 refs.extend(closure.embedding_model_deployment.iter());
@@ -1393,7 +1543,8 @@ impl DeploymentClosure {
                     refs.push(mcp_deployment);
                 }
             }
-            Self::McpServer(_) | Self::ModelProvider(_) => {}
+            Self::SandboxProfile(closure) => refs.extend(closure.policy_deployments.iter()),
+            Self::McpServer(_) | Self::ModelProvider(_) | Self::Policy(_) => {}
         }
         refs
     }
@@ -1419,10 +1570,30 @@ impl DeploymentClosure {
                 })
                 .collect(),
             Self::CapabilityInterface(_)
+            | Self::Policy(_)
+            | Self::SandboxProfile(_)
             | Self::ContextSourceInterface(_)
             | Self::McpServer(_)
             | Self::ModelProvider(_)
             | Self::ModelProfile(_) => Vec::new(),
+            Self::Skill(closure) => closure
+                .requirements
+                .iter()
+                .filter_map(|requirement| match &requirement.target {
+                    FrozenSlotTarget::Context { binding } => match &binding.consistency {
+                        crate::ContextConsistencyPolicy::PinnedGeneration { generation } => {
+                            Some(generation)
+                        }
+                        crate::ContextConsistencyPolicy::PinAtRunAdmission { .. }
+                        | crate::ContextConsistencyPolicy::LatestAtQueryStart { .. }
+                        | crate::ContextConsistencyPolicy::ExternalObservation => None,
+                    },
+                    FrozenSlotTarget::Model { .. }
+                    | FrozenSlotTarget::Capability { .. }
+                    | FrozenSlotTarget::ChildAgent { .. }
+                    | FrozenSlotTarget::Skill { .. } => None,
+                })
+                .collect(),
         }
     }
 
@@ -1432,7 +1603,11 @@ impl DeploymentClosure {
             Self::ContextSourceInterface(closure) => &closure.secret_bindings,
             Self::McpServer(closure) => &closure.secret_bindings,
             Self::ModelProvider(closure) => &closure.secret_bindings,
-            Self::Agent(_) | Self::ModelProfile(_) => &[],
+            Self::Agent(_)
+            | Self::Skill(_)
+            | Self::ModelProfile(_)
+            | Self::Policy(_)
+            | Self::SandboxProfile(_) => &[],
         }
     }
 }
@@ -2187,6 +2362,79 @@ mod tests {
             .unwrap()
     }
 
+    fn qualification_artifact() -> ArtifactRef {
+        ArtifactRef::new(
+            id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b80"),
+            digest('f'),
+            128,
+            "application/json",
+            DataClassification::Internal,
+            Some("qualification.json".to_owned()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn definition_deployment_closures_are_nominal_and_closed() {
+        let policy_deployment =
+            ExactDeploymentRef::new(id("pdep_0198f1c3-8f49-7c3e-b1f3-773c28367b81"), digest('a'))
+                .unwrap();
+        let skill = DeploymentClosure::Skill(SkillDeploymentClosure {
+            skill_revision: ExactVersionRef::new(
+                id("srev_0198f1c3-8f49-7c3e-b1f3-773c28367b82"),
+                digest('b'),
+            )
+            .unwrap(),
+            requirements: Vec::new(),
+            selection_policy: policy_deployment.clone(),
+            qualification_evidence: qualification_artifact(),
+        });
+        let policy = DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: ExactVersionRef::new(
+                id("prev_0198f1c3-8f49-7c3e-b1f3-773c28367b83"),
+                digest('c'),
+            )
+            .unwrap(),
+            applicability_digest: digest('d'),
+            qualification_evidence: qualification_artifact(),
+        });
+        let sandbox = DeploymentClosure::SandboxProfile(SandboxProfileDeploymentClosure {
+            profile_revision: ExactVersionRef::new(
+                id("sxrev_0198f1c3-8f49-7c3e-b1f3-773c28367b84"),
+                digest('e'),
+            )
+            .unwrap(),
+            runtime_revision: ExactVersionRef::new(
+                id("srrev_0198f1c3-8f49-7c3e-b1f3-773c28367b85"),
+                digest('f'),
+            )
+            .unwrap(),
+            policy_deployments: vec![policy_deployment],
+            qualification_evidence: qualification_artifact(),
+        });
+        assert!(skill.validate().is_ok());
+        assert!(policy.validate().is_ok());
+        assert!(sandbox.validate().is_ok());
+        assert_eq!(skill.resource_kind(), RegistryResourceKind::Skill);
+        assert_eq!(policy.resource_kind(), RegistryResourceKind::Policy);
+        assert_eq!(
+            sandbox.resource_kind(),
+            RegistryResourceKind::SandboxProfile
+        );
+
+        let mut wrong: SkillDeploymentClosure = match skill {
+            DeploymentClosure::Skill(closure) => closure,
+            _ => unreachable!(),
+        };
+        wrong.selection_policy =
+            ExactDeploymentRef::new(id("adep_0198f1c3-8f49-7c3e-b1f3-773c28367b86"), digest('1'))
+                .unwrap();
+        assert_eq!(
+            wrong.validate(),
+            Err(ResourceContractError::WrongResourceIdKind)
+        );
+    }
+
     fn secret_binding(suffix: &str, purpose: &str) -> ExactSecretBindingRef {
         ExactSecretBindingRef::build(
             id(&format!("sbd_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}")),
@@ -2228,7 +2476,19 @@ mod tests {
         );
         assert_eq!(
             RegistryResourceKind::Skill.activation_target(),
-            ActivationTargetKind::Version
+            ActivationTargetKind::Deployment
+        );
+        assert_eq!(
+            RegistryResourceKind::Skill.deployment_kind(),
+            Some(ResourceKind::SkillDeployment)
+        );
+        assert_eq!(
+            RegistryResourceKind::Policy.deployment_kind(),
+            Some(ResourceKind::PolicyDeployment)
+        );
+        assert_eq!(
+            RegistryResourceKind::SandboxProfile.deployment_kind(),
+            Some(ResourceKind::SandboxProfileDeployment)
         );
         assert!(
             RegistryResourceKind::Agent.allows_version_kind(ResourceKind::AgentInterfaceRevision)

@@ -36,7 +36,7 @@ ContextDataset是唯一例外：它不是可调用definition，root的`active_ve
 | Tenant | `ten_` | 所有业务current row的scope |
 | Resource | `res_` | generic lifecycle root |
 | ResourceVersion | kind-specific，如`agtv_`/`skv_`/`capv_` | immutable version |
-| Deployment | kind-specific，如`adep_`/`skdep_`/`cdep_`/`xdep_`/`mdep_`/`moddep_`/`pdep_`/`sbdep_` | exact binding |
+| Deployment | kind-specific，如`adep_`/`skdep_`/`cdep_`/`xdep_`/`mcdep_`/`mdep_`/`pdep_`/`sxdep_` | exact binding |
 | Run / NodeExecution | `run_` / `nod_` | orchestration identity |
 | Invocation / Job / Task | `inv_` / `job_` / `tsk_` | 彼此独立 |
 | RunValue | `val_` | 不与Job/Artifact共享UUID |

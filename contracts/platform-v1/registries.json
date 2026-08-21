@@ -189,11 +189,14 @@
   ],
   "deployment_prefixes": [
     "adep",
+    "skdep",
     "cdep",
     "xdep",
     "mcdep",
     "mpdep",
-    "mdep"
+    "mdep",
+    "pdep",
+    "sxdep"
   ],
   "effects": [
     "pure",
@@ -218,6 +221,10 @@
     {
       "prefix": "srev",
       "resource_kind": "skill_revision"
+    },
+    {
+      "prefix": "skdep",
+      "resource_kind": "skill_deployment"
     },
     {
       "prefix": "cirev",
@@ -284,6 +291,10 @@
       "resource_kind": "model_deployment"
     },
     {
+      "prefix": "pdep",
+      "resource_kind": "policy_deployment"
+    },
+    {
       "prefix": "srrev",
       "resource_kind": "sandbox_runtime_revision"
     },
@@ -294,6 +305,10 @@
     {
       "prefix": "sxrev",
       "resource_kind": "sandbox_profile_revision"
+    },
+    {
+      "prefix": "sxdep",
+      "resource_kind": "sandbox_profile_deployment"
     },
     {
       "prefix": "art",
@@ -907,6 +922,11 @@
     },
     {
       "exposure": "public",
+      "name": "skill_deployment",
+      "prefix": "skdep"
+    },
+    {
+      "exposure": "public",
       "name": "skill_activation",
       "prefix": "sact"
     },
@@ -1072,6 +1092,11 @@
     },
     {
       "exposure": "public",
+      "name": "policy_deployment",
+      "prefix": "pdep"
+    },
+    {
+      "exposure": "public",
       "name": "sandbox_runtime",
       "prefix": "srt"
     },
@@ -1099,6 +1124,11 @@
       "exposure": "public",
       "name": "sandbox_profile_revision",
       "prefix": "sxrev"
+    },
+    {
+      "exposure": "public",
+      "name": "sandbox_profile_deployment",
+      "prefix": "sxdep"
     },
     {
       "exposure": "public",

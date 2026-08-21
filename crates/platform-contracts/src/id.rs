@@ -16,6 +16,7 @@ pub enum ResourceKind {
     AgentDeployment,
     Skill,
     SkillRevision,
+    SkillDeployment,
     SkillActivation,
     CapabilityInterface,
     CapabilityInterfaceRevision,
@@ -49,12 +50,14 @@ pub enum ResourceKind {
     UsageReservation,
     Policy,
     PolicyRevision,
+    PolicyDeployment,
     SandboxRuntime,
     SandboxRuntimeRevision,
     SandboxPackage,
     SandboxPackageRevision,
     SandboxProfile,
     SandboxProfileRevision,
+    SandboxProfileDeployment,
     Run,
     RunValue,
     NodeExecution,
@@ -139,6 +142,7 @@ descriptors! {
     AgentDeployment => ("adep", "agent_deployment", Public),
     Skill => ("skl", "skill", Public),
     SkillRevision => ("srev", "skill_revision", Public),
+    SkillDeployment => ("skdep", "skill_deployment", Public),
     SkillActivation => ("sact", "skill_activation", Public),
     CapabilityInterface => ("cap", "capability_interface", Public),
     CapabilityInterfaceRevision => ("cirev", "capability_interface_revision", Public),
@@ -172,12 +176,14 @@ descriptors! {
     UsageReservation => ("ures", "usage_reservation", Public),
     Policy => ("pol", "policy", Public),
     PolicyRevision => ("prev", "policy_revision", Public),
+    PolicyDeployment => ("pdep", "policy_deployment", Public),
     SandboxRuntime => ("srt", "sandbox_runtime", Public),
     SandboxRuntimeRevision => ("srrev", "sandbox_runtime_revision", Public),
     SandboxPackage => ("spk", "sandbox_package", Public),
     SandboxPackageRevision => ("sprev", "sandbox_package_revision", Public),
     SandboxProfile => ("sxp", "sandbox_profile", Public),
     SandboxProfileRevision => ("sxrev", "sandbox_profile_revision", Public),
+    SandboxProfileDeployment => ("sxdep", "sandbox_profile_deployment", Public),
     Run => ("run", "run", Public),
     RunValue => ("val", "run_value", Internal),
     NodeExecution => ("nod", "node_execution", Public),
@@ -261,11 +267,14 @@ impl ResourceKind {
         matches!(
             self,
             Self::AgentDeployment
+                | Self::SkillDeployment
                 | Self::CapabilityDeployment
                 | Self::ContextDeployment
                 | Self::McpDeployment
                 | Self::ModelProviderDeployment
                 | Self::ModelDeployment
+                | Self::PolicyDeployment
+                | Self::SandboxProfileDeployment
         )
     }
 
@@ -277,6 +286,7 @@ impl ResourceKind {
                 | Self::AgentPlanRevision
                 | Self::AgentDeployment
                 | Self::SkillRevision
+                | Self::SkillDeployment
                 | Self::CapabilityInterfaceRevision
                 | Self::CapabilityImplementationRevision
                 | Self::CapabilityDeployment
@@ -293,9 +303,11 @@ impl ResourceKind {
                 | Self::ModelProviderDeployment
                 | Self::ModelProfileRevision
                 | Self::ModelDeployment
+                | Self::PolicyDeployment
                 | Self::SandboxRuntimeRevision
                 | Self::SandboxPackageRevision
                 | Self::SandboxProfileRevision
+                | Self::SandboxProfileDeployment
         )
     }
 }
