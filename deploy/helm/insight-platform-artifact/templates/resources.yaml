@@ -79,6 +79,9 @@ spec:
             - {name: PLATFORM_ARTIFACT_GATEWAY_CONFIG_DIGEST, value: {{ $component.config.digest | quote }}}
             - name: PLATFORM_ARTIFACT_GATEWAY_DATABASE_URL
               valueFrom: {secretKeyRef: {name: {{ $component.database.existingSecret }}, key: {{ $component.database.urlKey }}}}
+            - {name: PLATFORM_ARTIFACT_GATEWAY_CLIENT_CA_PATH, value: /etc/insight/tls/client-ca.pem}
+            - {name: PLATFORM_ARTIFACT_GATEWAY_CERT_PATH, value: /etc/insight/tls/server.pem}
+            - {name: PLATFORM_ARTIFACT_GATEWAY_KEY_PATH, value: /etc/insight/tls/server-key.pem}
             {{- else if eq $role "data-worker" }}
             - {name: PLATFORM_ARTIFACT_DATA_WORKER_AUDIENCE, value: data_worker}
             - {name: PLATFORM_ARTIFACT_DATA_WORKER_CONFIG, value: /etc/insight/config/config.json}
@@ -106,7 +109,7 @@ spec:
             capabilities: {drop: ["ALL"]}
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
-            {{- if eq $role "data-worker" }}
+            {{- if or (eq $role "gateway") (eq $role "data-worker") }}
             - {name: tls, mountPath: /etc/insight/tls, readOnly: true}
             {{- end }}
             - {name: tmp, mountPath: /tmp}
@@ -115,7 +118,7 @@ spec:
           configMap:
             name: {{ $component.config.existingConfigMap }}
             items: [{key: {{ $component.config.fileKey }}, path: config.json}]
-        {{- if eq $role "data-worker" }}
+        {{- if or (eq $role "gateway") (eq $role "data-worker") }}
         - name: tls
           secret:
             secretName: {{ $component.tls.existingSecret }}

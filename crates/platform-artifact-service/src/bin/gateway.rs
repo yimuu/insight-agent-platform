@@ -1,5 +1,5 @@
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path as AxumPath, State},
     http::{
         header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, ETAG},
@@ -33,6 +33,11 @@ use insight_platform_contracts::{
 use insight_platform_postgres::{
     artifact_repository::GatewayArtifactSnapshot, repository::PgRepository, verify_schema,
 };
+use rustls::{
+    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+    server::WebPkiClientVerifier,
+    RootCertStore, ServerConfig,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -49,13 +54,64 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CONFIG_DIGEST";
 const DATABASE_URL_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_DATABASE_URL";
+const CLIENT_CA_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CLIENT_CA_PATH";
+const SERVER_CERT_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CERT_PATH";
+const SERVER_KEY_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_KEY_PATH";
+const PUBLIC_GATEWAY_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/public-gateway";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 262_144;
 const MAX_GRANT_TOKEN_BYTES: usize = 1_024;
+const MAX_TLS_FILE_BYTES: usize = 1_048_576;
+
+struct ExactMtlsListener {
+    tcp: tokio::net::TcpListener,
+    acceptor: TlsAcceptor,
+}
+
+impl axum::serve::Listener for ExactMtlsListener {
+    type Io = TlsStream<tokio::net::TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, address) = match self.tcp.accept().await {
+                Ok(value) => value,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            let tls = match self.acceptor.accept(stream).await {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let authorized = tls
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certificates| certificates.first())
+                .is_some_and(|certificate| {
+                    has_exact_workload_identity(
+                        certificate.as_ref(),
+                        PUBLIC_GATEWAY_WORKLOAD_IDENTITY,
+                    )
+                });
+            if authorized {
+                return (tls, address);
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.tcp.local_addr()
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -194,7 +250,6 @@ struct PrincipalHeaders {
     principal_id: ResourceId,
     principal_kind: PrincipalKind,
     idempotency_key_digest: Option<Sha256Digest>,
-    idempotency_key: Option<String>,
 }
 
 struct PermitResponseStream {
@@ -267,28 +322,85 @@ async fn run() -> Result<(), GatewayError> {
         .route("/readyz", get(ready))
         .route("/v1/artifacts:prepare-upload", post(prepare_upload))
         .route(
-            "/v1/artifacts/{artifact_id}:complete-upload",
-            post(complete_upload),
+            "/v1/artifacts/{artifact_action}",
+            get(get_artifact).post(mutate_artifact),
         )
-        .route("/v1/artifacts/{artifact_id}", get(get_artifact))
         .route(
             "/v1/artifacts/{artifact_id}/content",
             get(get_artifact_content),
         )
-        .route("/v1/artifacts/{artifact_id}:delete", post(delete_artifact))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(state);
     let address: SocketAddr = config
         .listen_address
         .parse()
         .map_err(|_| GatewayError::InvalidConfiguration)?;
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .map_err(|_| GatewayError::HttpUnavailable)?;
+    let listener = install_mtls_listener(address).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|_| GatewayError::HttpUnavailable)
+}
+
+async fn install_mtls_listener(address: SocketAddr) -> Result<ExactMtlsListener, GatewayError> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let ca = read_bounded(&absolute_path(CLIENT_CA_PATH_ENV)?, MAX_TLS_FILE_BYTES)?;
+    let certificate = read_bounded(&absolute_path(SERVER_CERT_PATH_ENV)?, MAX_TLS_FILE_BYTES)?;
+    let key = read_bounded(&absolute_path(SERVER_KEY_PATH_ENV)?, MAX_TLS_FILE_BYTES)?;
+    let mut roots = RootCertStore::empty();
+    let mut ca_count = 0_usize;
+    for certificate in CertificateDer::pem_slice_iter(&ca) {
+        roots
+            .add(certificate.map_err(|_| GatewayError::InvalidConfiguration)?)
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+        ca_count += 1;
+    }
+    if ca_count == 0 {
+        return Err(GatewayError::InvalidConfiguration);
+    }
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|_| GatewayError::InvalidConfiguration)?;
+    let certificate_chain = CertificateDer::pem_slice_iter(&certificate)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| GatewayError::InvalidConfiguration)?;
+    if certificate_chain.is_empty() {
+        return Err(GatewayError::InvalidConfiguration);
+    }
+    let private_key =
+        PrivateKeyDer::from_pem_slice(&key).map_err(|_| GatewayError::InvalidConfiguration)?;
+    let tls = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certificate_chain, private_key)
+        .map_err(|_| GatewayError::InvalidConfiguration)?;
+    let tcp = tokio::net::TcpListener::bind(address)
+        .await
+        .map_err(|_| GatewayError::HttpUnavailable)?;
+    Ok(ExactMtlsListener {
+        tcp,
+        acceptor: TlsAcceptor::from(Arc::new(tls)),
+    })
+}
+
+fn has_exact_workload_identity(certificate: &[u8], expected: &str) -> bool {
+    let Ok((remainder, certificate)) = parse_x509_certificate(certificate) else {
+        return false;
+    };
+    if !remainder.is_empty() {
+        return false;
+    }
+    let Ok(Some(alternative_names)) = certificate.subject_alternative_name() else {
+        return false;
+    };
+    let mut uris = alternative_names
+        .value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            GeneralName::URI(uri) => Some(*uri),
+            _ => None,
+        });
+    uris.next() == Some(expected) && uris.next().is_none()
 }
 
 async fn ready() -> Response {
@@ -460,16 +572,37 @@ async fn prepare_upload_inner(
     Ok(response)
 }
 
-async fn complete_upload(
+async fn mutate_artifact(
     State(state): State<GatewayState>,
-    AxumPath(artifact_id): AxumPath<ResourceId>,
+    AxumPath(artifact_action): AxumPath<String>,
     headers: HeaderMap,
-    Json(request): Json<CompleteArtifactUploadRequestV1>,
+    body: Bytes,
 ) -> Response {
-    match complete_upload_inner(state, &headers, artifact_id, request).await {
-        Ok(response) => no_store((StatusCode::ACCEPTED, Json(response)).into_response()),
-        Err(error) => problem(error),
+    if let Some(artifact_id) = artifact_action.strip_suffix(":complete-upload") {
+        let Ok(artifact_id) = artifact_id.parse::<ResourceId>() else {
+            return problem(HttpError::NotFound);
+        };
+        let Ok(request) = serde_json::from_slice::<CompleteArtifactUploadRequestV1>(&body) else {
+            return problem(HttpError::Invalid);
+        };
+        return match complete_upload_inner(state, &headers, artifact_id, request).await {
+            Ok(response) => no_store((StatusCode::ACCEPTED, Json(response)).into_response()),
+            Err(error) => problem(error),
+        };
     }
+    if let Some(artifact_id) = artifact_action.strip_suffix(":delete") {
+        let Ok(artifact_id) = artifact_id.parse::<ResourceId>() else {
+            return problem(HttpError::NotFound);
+        };
+        let Ok(request) = serde_json::from_slice::<DeleteArtifactRequest>(&body) else {
+            return problem(HttpError::Invalid);
+        };
+        return match delete_artifact_inner(state, &headers, artifact_id, request).await {
+            Ok(response) => no_store((StatusCode::ACCEPTED, Json(response)).into_response()),
+            Err(error) => problem(error),
+        };
+    }
+    problem(HttpError::NotFound)
 }
 
 async fn complete_upload_inner(
@@ -480,6 +613,12 @@ async fn complete_upload_inner(
 ) -> Result<ArtifactMutationAcceptedV1, HttpError> {
     request.validate().map_err(|_| HttpError::Invalid)?;
     let principal = mutation_principal(headers)?;
+    let expected_artifact_version = headers
+        .get("x-insight-artifact-expected-version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or(HttpError::Invalid)?;
     let complete_digest = request_digest("artifact.complete_upload", &request)?;
     let scan_digest = request_digest("artifact.schedule_scan", &request)?;
     let target = state
@@ -492,6 +631,9 @@ async fn complete_upload_inner(
         )
         .await
         .map_err(map_repository_error)?;
+    if target.artifact.version != expected_artifact_version {
+        return Err(HttpError::Conflict);
+    }
     let grant_token_digest = token_digest(request.completion_proof.as_str())?;
     let observed = state
         .uploads
@@ -707,18 +849,6 @@ async fn get_artifact_content_inner(
     Ok(response)
 }
 
-async fn delete_artifact(
-    State(state): State<GatewayState>,
-    AxumPath(artifact_id): AxumPath<ResourceId>,
-    headers: HeaderMap,
-    Json(request): Json<DeleteArtifactRequest>,
-) -> Response {
-    match delete_artifact_inner(state, &headers, artifact_id, request).await {
-        Ok(response) => no_store((StatusCode::ACCEPTED, Json(response)).into_response()),
-        Err(error) => problem(error),
-    }
-}
-
 async fn delete_artifact_inner(
     state: GatewayState,
     headers: &HeaderMap,
@@ -789,28 +919,26 @@ fn read_principal(headers: &HeaderMap) -> Result<PrincipalHeaders, HttpError> {
             .ok_or(HttpError::Unauthenticated)
     };
     Ok(PrincipalHeaders {
-        tenant_id: value("x-platform-tenant-id")?
+        tenant_id: value("x-insight-verified-tenant-id")?
             .parse()
             .map_err(|_| HttpError::Unauthenticated)?,
-        principal_id: value("x-platform-principal-id")?
+        principal_id: value("x-insight-verified-principal-id")?
             .parse()
             .map_err(|_| HttpError::Unauthenticated)?,
-        principal_kind: PrincipalKind::from_str(value("x-platform-principal-kind")?)
+        principal_kind: PrincipalKind::from_str(value("x-insight-verified-principal-kind")?)
             .map_err(|_| HttpError::Unauthenticated)?,
         idempotency_key_digest: None,
-        idempotency_key: None,
     })
 }
 
 fn mutation_principal(headers: &HeaderMap) -> Result<PrincipalHeaders, HttpError> {
     let mut principal = read_principal(headers)?;
-    let idempotency_key = headers
-        .get("idempotency-key")
+    let idempotency_key_digest = headers
+        .get("x-insight-idempotency-key-digest")
         .and_then(|value| value.to_str().ok())
-        .filter(|value| value.len() >= 32 && value.len() <= 512)
+        .and_then(|value| value.parse::<Sha256Digest>().ok())
         .ok_or(HttpError::Invalid)?;
-    principal.idempotency_key_digest = Some(token_digest(idempotency_key)?);
-    principal.idempotency_key = Some(idempotency_key.to_owned());
+    principal.idempotency_key_digest = Some(idempotency_key_digest);
     Ok(principal)
 }
 
@@ -823,15 +951,18 @@ fn completion_proof(
     artifact_id: &ResourceId,
     upload_grant_id: &ResourceId,
 ) -> Result<OpaqueUploadCompletionProof, HttpError> {
-    let idempotency_key = principal
-        .idempotency_key
-        .as_deref()
+    let idempotency_key_digest = principal
+        .idempotency_key_digest
+        .as_ref()
         .ok_or(HttpError::Invalid)?;
     let message = format!(
         "insight.platform/artifact-upload-completion/v1\0{}\0{}\0{}\0{}",
         principal.tenant_id, principal.principal_id, artifact_id, upload_grant_id
     );
-    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, idempotency_key.as_bytes());
+    let key = ring::hmac::Key::new(
+        ring::hmac::HMAC_SHA256,
+        idempotency_key_digest.as_str().as_bytes(),
+    );
     let tag = ring::hmac::sign(&key, message.as_bytes());
     OpaqueUploadCompletionProof::new(format!("v1.{}", lower_hex(tag.as_ref())))
         .map_err(|_| HttpError::Invalid)
@@ -908,7 +1039,8 @@ fn map_repository_error(
     match error {
         RepositoryError::PermissionDenied => HttpError::Forbidden,
         RepositoryError::NotFound(_) => HttpError::NotFound,
-        RepositoryError::Conflict(_) | RepositoryError::IdempotencyConflict => HttpError::Conflict,
+        RepositoryError::Conflict(_) => HttpError::Conflict,
+        RepositoryError::IdempotencyConflict => HttpError::IdempotencyConflict,
         RepositoryError::QuotaExceeded => HttpError::TooLarge,
         RepositoryError::InvalidInput(_) => HttpError::Invalid,
         _ => HttpError::Unavailable,
@@ -922,6 +1054,7 @@ enum HttpError {
     Forbidden,
     NotFound,
     Conflict,
+    IdempotencyConflict,
     TooLarge,
     Unavailable,
 }
@@ -932,7 +1065,8 @@ fn problem(error: HttpError) -> Response {
         HttpError::Unauthenticated => (StatusCode::UNAUTHORIZED, "authentication_required"),
         HttpError::Forbidden => (StatusCode::FORBIDDEN, "permission_denied"),
         HttpError::NotFound => (StatusCode::NOT_FOUND, "artifact_not_found"),
-        HttpError::Conflict => (StatusCode::CONFLICT, "artifact_conflict"),
+        HttpError::Conflict => (StatusCode::PRECONDITION_FAILED, "artifact_conflict"),
+        HttpError::IdempotencyConflict => (StatusCode::CONFLICT, "idempotency_conflict"),
         HttpError::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "artifact_limit_exceeded"),
         HttpError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "artifact_unavailable"),
     };
@@ -1030,3 +1164,91 @@ impl fmt::Display for GatewayError {
 }
 
 impl Error for GatewayError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcgen::{CertificateParams, KeyPair, SanType};
+
+    fn certificate_with_uris(uris: &[&str]) -> Vec<u8> {
+        let mut parameters = CertificateParams::default();
+        parameters.subject_alt_names = uris
+            .iter()
+            .map(|uri| SanType::URI((*uri).try_into().unwrap()))
+            .collect();
+        let key = KeyPair::generate().unwrap();
+        parameters.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    #[test]
+    fn public_gateway_workload_identity_must_be_the_only_uri_san() {
+        let exact = certificate_with_uris(&[PUBLIC_GATEWAY_WORKLOAD_IDENTITY]);
+        assert!(has_exact_workload_identity(
+            &exact,
+            PUBLIC_GATEWAY_WORKLOAD_IDENTITY
+        ));
+
+        let wrong = certificate_with_uris(&["spiffe://insight.platform/workload/model-worker"]);
+        assert!(!has_exact_workload_identity(
+            &wrong,
+            PUBLIC_GATEWAY_WORKLOAD_IDENTITY
+        ));
+
+        let ambiguous = certificate_with_uris(&[
+            PUBLIC_GATEWAY_WORKLOAD_IDENTITY,
+            "spiffe://insight.platform/workload/also-public-gateway",
+        ]);
+        assert!(!has_exact_workload_identity(
+            &ambiguous,
+            PUBLIC_GATEWAY_WORKLOAD_IDENTITY
+        ));
+    }
+
+    #[test]
+    fn forwarded_principal_assertion_is_closed_and_digest_only() {
+        let tenant = ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7()).unwrap();
+        let principal =
+            ResourceId::from_uuid_v7(ResourceKind::Principal, uuid::Uuid::now_v7()).unwrap();
+        let digest: Sha256Digest = format!("sha256:{}", "a".repeat(64)).parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-insight-verified-tenant-id",
+            HeaderValue::from_str(&tenant.to_string()).unwrap(),
+        );
+        headers.insert(
+            "x-insight-verified-principal-id",
+            HeaderValue::from_str(&principal.to_string()).unwrap(),
+        );
+        headers.insert(
+            "x-insight-verified-principal-kind",
+            HeaderValue::from_static("agent_runner"),
+        );
+        headers.insert(
+            "x-insight-idempotency-key-digest",
+            HeaderValue::from_str(digest.as_str()).unwrap(),
+        );
+        let parsed = mutation_principal(&headers).unwrap();
+        assert_eq!(parsed.tenant_id, tenant);
+        assert_eq!(parsed.principal_id, principal);
+        assert_eq!(parsed.idempotency_key_digest, Some(digest));
+
+        let mut legacy = HeaderMap::new();
+        legacy.insert(
+            "x-platform-tenant-id",
+            HeaderValue::from_str(&tenant.to_string()).unwrap(),
+        );
+        legacy.insert(
+            "x-platform-principal-id",
+            HeaderValue::from_str(&principal.to_string()).unwrap(),
+        );
+        legacy.insert(
+            "x-platform-principal-kind",
+            HeaderValue::from_static("agent_runner"),
+        );
+        legacy.insert("idempotency-key", HeaderValue::from_static("raw-secret"));
+        assert!(matches!(
+            mutation_principal(&legacy),
+            Err(HttpError::Unauthenticated)
+        ));
+    }
+}

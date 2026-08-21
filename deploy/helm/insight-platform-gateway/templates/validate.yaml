@@ -22,6 +22,9 @@
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.runEventCursorKey.digest) }}
 {{- fail "Gateway Run event cursor key digest must be lowercase sha256" }}
 {{- end }}
+{{- if or (not (hasPrefix "https://" .Values.artifactGateway.endpoint)) (empty .Values.artifactGateway.tls.existingSecret) (empty .Values.artifactGateway.tls.keys.ca) (empty .Values.artifactGateway.tls.keys.certificate) (empty .Values.artifactGateway.tls.keys.privateKey) }}
+{{- fail "Gateway to Artifact Gateway requires an HTTPS endpoint and exact mTLS Secret keys" }}
+{{- end }}
 {{- if empty .Values.networkPolicy.postgresCidrs }}
 {{- fail "networkPolicy.postgresCidrs is required" }}
 {{- end }}

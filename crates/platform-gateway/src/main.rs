@@ -11,8 +11,9 @@ use axum::{
 use insight_platform_api::{
     artifact::{
         build_artifact_router, view_from_record as artifact_view_from_record, ArtifactApplication,
-        ArtifactApplicationError, ArtifactHttpState, ArtifactViewV1, ReadArtifactIntent,
-        SystemArtifactClock,
+        ArtifactApplicationError, ArtifactHttpState, ArtifactMutationAcceptedV1, ArtifactViewV1,
+        CompleteArtifactUploadIntent, PrepareArtifactUploadIntent, PrepareArtifactUploadResponseV1,
+        ReadArtifactIntent, SystemArtifactClock,
     },
     authentication::{
         authenticate_public_request, AuthenticationError, ExternalPrincipalBindingAuthority,
@@ -89,8 +90,16 @@ const CONFIG_DIGEST_ENV: &str = "PLATFORM_GATEWAY_CONFIG_DIGEST";
 const DATABASE_URL_ENV: &str = "PLATFORM_GATEWAY_DATABASE_URL";
 const RUN_EVENT_CURSOR_KEY_PATH_ENV: &str = "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH";
 const RUN_EVENT_CURSOR_KEY_DIGEST_ENV: &str = "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST";
+const ARTIFACT_GATEWAY_ENDPOINT_ENV: &str = "PLATFORM_GATEWAY_ARTIFACT_ENDPOINT";
+const ARTIFACT_GATEWAY_CA_PATH_ENV: &str = "PLATFORM_GATEWAY_ARTIFACT_CA_PATH";
+const ARTIFACT_GATEWAY_CERT_PATH_ENV: &str = "PLATFORM_GATEWAY_ARTIFACT_CERT_PATH";
+const ARTIFACT_GATEWAY_KEY_PATH_ENV: &str = "PLATFORM_GATEWAY_ARTIFACT_KEY_PATH";
+const ARTIFACT_GATEWAY_TLS_AUDIENCE: &str =
+    "insight-platform-artifact-gateway.platform-artifacts.svc";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_RUN_EVENT_CURSOR_KEY_BYTES: usize = 64;
+const MAX_TLS_FILE_BYTES: usize = 1_048_576;
+const MAX_ARTIFACT_RESPONSE_BYTES: usize = 262_144;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,10 +220,202 @@ impl OperationApplication for PgOperations {
 struct PgRuns(Arc<PgRepository>);
 
 #[derive(Clone)]
-struct PgArtifacts(Arc<PgRepository>);
+struct PgArtifacts {
+    repository: Arc<PgRepository>,
+    mutation_forwarder: Arc<dyn ArtifactMutationForwarder>,
+}
+
+#[async_trait]
+trait ArtifactMutationForwarder: Send + Sync {
+    async fn prepare(
+        &self,
+        intent: PrepareArtifactUploadIntent,
+    ) -> Result<PrepareArtifactUploadResponseV1, ArtifactApplicationError>;
+
+    async fn complete(
+        &self,
+        intent: CompleteArtifactUploadIntent,
+    ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError>;
+}
+
+#[derive(Clone)]
+struct MtlsArtifactMutationForwarder {
+    client: reqwest::Client,
+    endpoint: String,
+}
+
+impl MtlsArtifactMutationForwarder {
+    fn install() -> Result<Self, ProcessError> {
+        let endpoint = required(ARTIFACT_GATEWAY_ENDPOINT_ENV)?;
+        let parsed =
+            reqwest::Url::parse(&endpoint).map_err(|_| ProcessError::InvalidConfiguration)?;
+        if parsed.scheme() != "https"
+            || parsed.host_str() != Some(ARTIFACT_GATEWAY_TLS_AUDIENCE)
+            || parsed.port() != Some(8080)
+            || parsed.username() != ""
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || parsed.path() != "/"
+        {
+            return Err(ProcessError::InvalidConfiguration);
+        }
+        let ca = read_bounded_file(
+            &required_absolute_path(ARTIFACT_GATEWAY_CA_PATH_ENV)?,
+            MAX_TLS_FILE_BYTES,
+        )?;
+        let certificate = read_bounded_file(
+            &required_absolute_path(ARTIFACT_GATEWAY_CERT_PATH_ENV)?,
+            MAX_TLS_FILE_BYTES,
+        )?;
+        let key = read_bounded_file(
+            &required_absolute_path(ARTIFACT_GATEWAY_KEY_PATH_ENV)?,
+            MAX_TLS_FILE_BYTES,
+        )?;
+        let mut identity = certificate;
+        identity.extend_from_slice(&key);
+        let client = reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(&ca)
+                    .map_err(|_| ProcessError::InvalidConfiguration)?,
+            )
+            .identity(
+                reqwest::Identity::from_pem(&identity)
+                    .map_err(|_| ProcessError::InvalidConfiguration)?,
+            )
+            .build()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+        Ok(Self {
+            client,
+            endpoint: endpoint.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    fn request(
+        &self,
+        path: &str,
+        principal: &insight_platform_api::authentication::AuthenticatedPrincipal,
+        idempotency_key_digest: &Sha256Digest,
+    ) -> reqwest::RequestBuilder {
+        self.client
+            .post(format!("{}{path}", self.endpoint))
+            .header(
+                "x-insight-verified-tenant-id",
+                principal.tenant_id.to_string(),
+            )
+            .header(
+                "x-insight-verified-principal-id",
+                principal.principal_id.to_string(),
+            )
+            .header(
+                "x-insight-verified-principal-kind",
+                principal.principal_kind.as_str(),
+            )
+            .header(
+                "x-insight-idempotency-key-digest",
+                idempotency_key_digest.as_str(),
+            )
+    }
+}
+
+#[async_trait]
+impl ArtifactMutationForwarder for MtlsArtifactMutationForwarder {
+    async fn prepare(
+        &self,
+        intent: PrepareArtifactUploadIntent,
+    ) -> Result<PrepareArtifactUploadResponseV1, ArtifactApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ArtifactApplicationError::Unavailable);
+        }
+        let response = self
+            .request(
+                "/v1/artifacts:prepare-upload",
+                &intent.principal,
+                &intent.idempotency_key_digest,
+            )
+            .json(&intent.request)
+            .send()
+            .await
+            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+        decode_artifact_response(response).await
+    }
+
+    async fn complete(
+        &self,
+        intent: CompleteArtifactUploadIntent,
+    ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ArtifactApplicationError::Unavailable);
+        }
+        let response = self
+            .request(
+                &format!("/v1/artifacts/{}:complete-upload", intent.artifact_id),
+                &intent.principal,
+                &intent.idempotency_key_digest,
+            )
+            .header(
+                "x-insight-artifact-expected-version",
+                intent.expected_artifact_version,
+            )
+            .json(&intent.request)
+            .send()
+            .await
+            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+        decode_artifact_response(response).await
+    }
+}
+
+async fn decode_artifact_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, ArtifactApplicationError> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(match status {
+            reqwest::StatusCode::BAD_REQUEST => ArtifactApplicationError::Invalid,
+            reqwest::StatusCode::UNAUTHORIZED => ArtifactApplicationError::Unauthenticated,
+            reqwest::StatusCode::FORBIDDEN => ArtifactApplicationError::Denied,
+            reqwest::StatusCode::NOT_FOUND => ArtifactApplicationError::NotFound,
+            reqwest::StatusCode::CONFLICT => ArtifactApplicationError::IdempotencyConflict,
+            reqwest::StatusCode::PRECONDITION_FAILED => ArtifactApplicationError::Conflict,
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE => ArtifactApplicationError::TooLarge,
+            _ if status.is_server_error() => ArtifactApplicationError::Unavailable,
+            _ => ArtifactApplicationError::Internal,
+        });
+    }
+    let length = response.content_length().unwrap_or(0);
+    if length > MAX_ARTIFACT_RESPONSE_BYTES as u64 {
+        return Err(ArtifactApplicationError::Internal);
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| ArtifactApplicationError::Unavailable)?;
+    if bytes.len() > MAX_ARTIFACT_RESPONSE_BYTES {
+        return Err(ArtifactApplicationError::Internal);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| ArtifactApplicationError::Internal)
+}
 
 #[async_trait]
 impl ArtifactApplication for PgArtifacts {
+    async fn prepare_artifact_upload(
+        &self,
+        intent: PrepareArtifactUploadIntent,
+    ) -> Result<PrepareArtifactUploadResponseV1, ArtifactApplicationError> {
+        self.mutation_forwarder.prepare(intent).await
+    }
+
+    async fn complete_artifact_upload(
+        &self,
+        intent: CompleteArtifactUploadIntent,
+    ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError> {
+        self.mutation_forwarder.complete(intent).await
+    }
+
     async fn read_artifact(
         &self,
         intent: ReadArtifactIntent,
@@ -223,7 +424,7 @@ impl ArtifactApplication for PgArtifacts {
             return Err(ArtifactApplicationError::Unavailable);
         }
         let snapshot = self
-            .0
+            .repository
             .load_gateway_artifact(
                 intent.principal.tenant_id,
                 intent.principal.principal_id,
@@ -1686,6 +1887,7 @@ fn map_artifact_repository_error(error: RepositoryError) -> ArtifactApplicationE
 
 fn build_router(
     repository: Arc<PgRepository>,
+    artifact_mutation_forwarder: Arc<dyn ArtifactMutationForwarder>,
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
     validator_digest: Sha256Digest,
     validation_profile_digest: Sha256Digest,
@@ -1720,7 +1922,10 @@ fn build_router(
         Arc::new(SystemTaskClock),
     ));
     let artifact = build_artifact_router(ArtifactHttpState::new(
-        Arc::new(PgArtifacts(repository.clone())),
+        Arc::new(PgArtifacts {
+            repository: repository.clone(),
+            mutation_forwarder: artifact_mutation_forwarder,
+        }),
         Arc::new(SystemArtifactClock),
     ));
     let protected = operation
@@ -1859,6 +2064,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .install()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
     let run_event_cursor_codec = load_run_event_cursor_codec()?;
+    let artifact_mutation_forwarder = Arc::new(MtlsArtifactMutationForwarder::install()?);
     let database_url = required(DATABASE_URL_ENV)?;
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
@@ -1875,6 +2081,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         listener,
         build_router(
             repository,
+            artifact_mutation_forwarder,
             verifier,
             config.registry_validator_digest,
             config.registry_validation_profile_digest,
@@ -1893,6 +2100,30 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+
+    #[derive(Debug)]
+    struct UnavailableArtifactForwarder;
+
+    #[async_trait]
+    impl ArtifactMutationForwarder for UnavailableArtifactForwarder {
+        async fn prepare(
+            &self,
+            _intent: PrepareArtifactUploadIntent,
+        ) -> Result<PrepareArtifactUploadResponseV1, ArtifactApplicationError> {
+            Err(ArtifactApplicationError::Unavailable)
+        }
+
+        async fn complete(
+            &self,
+            _intent: CompleteArtifactUploadIntent,
+        ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError> {
+            Err(ArtifactApplicationError::Unavailable)
+        }
+    }
+
+    fn unavailable_artifact_forwarder() -> Arc<dyn ArtifactMutationForwarder> {
+        Arc::new(UnavailableArtifactForwarder)
+    }
 
     fn fixed_digest(character: char) -> Sha256Digest {
         format!("sha256:{}", character.to_string().repeat(64))
@@ -1970,6 +2201,7 @@ mod tests {
             .unwrap();
         let router = build_router(
             Arc::new(PgRepository::new(pool)),
+            unavailable_artifact_forwarder(),
             oidc_config().install().unwrap(),
             fixed_digest('1'),
             fixed_digest('2'),

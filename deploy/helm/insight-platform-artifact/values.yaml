@@ -12,6 +12,9 @@ roles:
     ports: [{name: http, port: 8080}]
     config: {existingConfigMap: insight-platform-artifact-gateway-config, fileKey: artifact-gateway.json, digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
     database: {existingSecret: insight-platform-artifact-gateway-database, urlKey: database-url}
+    tls:
+      existingSecret: insight-platform-artifact-gateway-server-tls
+      keys: {clientCa: client-ca.pem, serverCertificate: server.pem, serverPrivateKey: server-key.pem}
     serviceAccount:
       annotations: {eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-gateway}
     resources:

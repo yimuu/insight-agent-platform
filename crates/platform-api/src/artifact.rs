@@ -1,17 +1,20 @@
 use crate::authentication::AuthenticatedPrincipal;
 use async_trait::async_trait;
 use axum::{
-    extract::{Extension, Path, State},
-    http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
+    extract::{DefaultBodyLimit, Extension, Path, State},
+    http::{
+        header::{CACHE_CONTROL, ETAG, IF_MATCH, LOCATION},
+        HeaderMap, HeaderValue, StatusCode,
+    },
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::ArtifactRecord;
 use insight_platform_contracts::{
-    ApiProblem, ApiProblemCode, ArtifactRef, ArtifactState, ResourceId, ResourceKind, UtcTimestamp,
-    MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
+    ApiProblem, ApiProblemCode, ArtifactRef, ArtifactState, ResourceId, ResourceKind, Sha256Digest,
+    UtcTimestamp, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
@@ -21,6 +24,46 @@ const MAX_MEDIA_TYPE_BYTES: usize = 255;
 const MAX_DISPLAY_NAME_BYTES: usize = 512;
 const MAX_UPLOAD_URL_BYTES: usize = 8_192;
 const MAX_COMPLETION_PROOF_BYTES: usize = 4_096;
+const MAX_ARTIFACT_REQUEST_BYTES: usize = 262_144;
+const MIN_IDEMPOTENCY_KEY_BYTES: usize = 32;
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 512;
+const ARTIFACT_COMMAND_DEADLINE_MILLISECONDS: i64 = 30_000;
+const ARTIFACT_READ_DEADLINE_MILLISECONDS: i64 = 5_000;
+
+#[derive(Clone, PartialEq, Eq)]
+struct SecretIdempotencyKey(String);
+
+impl SecretIdempotencyKey {
+    fn new(value: impl Into<String>) -> Result<Self, ArtifactApplicationError> {
+        let value = value.into();
+        if value.len() < MIN_IDEMPOTENCY_KEY_BYTES
+            || value.len() > MAX_IDEMPOTENCY_KEY_BYTES
+            || !value.is_ascii()
+            || value.chars().any(char::is_control)
+        {
+            return Err(ArtifactApplicationError::Invalid);
+        }
+        Ok(Self(value))
+    }
+
+    fn digest(&self) -> Result<Sha256Digest, ArtifactApplicationError> {
+        let bytes = ring::digest::digest(&ring::digest::SHA256, self.0.as_bytes());
+        let mut encoded = String::from("sha256:");
+        for byte in bytes.as_ref() {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "{byte:02x}").map_err(|_| ArtifactApplicationError::Internal)?;
+        }
+        encoded
+            .parse()
+            .map_err(|_| ArtifactApplicationError::Internal)
+    }
+}
+
+impl fmt::Debug for SecretIdempotencyKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretIdempotencyKey([REDACTED])")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -264,18 +307,50 @@ pub struct ReadArtifactIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PrepareArtifactUploadIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub request: PrepareArtifactUploadRequestV1,
+    pub idempotency_key_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompleteArtifactUploadIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub artifact_id: ResourceId,
+    pub expected_artifact_version: u64,
+    pub request: CompleteArtifactUploadRequestV1,
+    pub idempotency_key_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactApplicationError {
     Unauthenticated,
     Invalid,
     Denied,
     NotFound,
+    Conflict,
+    IdempotencyConflict,
+    PreconditionRequired,
+    TooLarge,
     Unavailable,
     Internal,
 }
 
 #[async_trait]
 pub trait ArtifactApplication: Send + Sync {
+    async fn prepare_artifact_upload(
+        &self,
+        intent: PrepareArtifactUploadIntent,
+    ) -> Result<PrepareArtifactUploadResponseV1, ArtifactApplicationError>;
+
+    async fn complete_artifact_upload(
+        &self,
+        intent: CompleteArtifactUploadIntent,
+    ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError>;
+
     async fn read_artifact(
         &self,
         intent: ReadArtifactIntent,
@@ -306,8 +381,102 @@ impl ArtifactHttpState {
 
 pub fn build_artifact_router(state: ArtifactHttpState) -> Router {
     Router::new()
-        .route("/v1/artifacts/{artifact_id}", get(read_artifact))
+        .route(
+            "/v1/artifacts:prepare-upload",
+            post(prepare_artifact_upload),
+        )
+        .route(
+            "/v1/artifacts/{artifact_action}",
+            get(read_artifact).post(complete_artifact_upload),
+        )
+        .layer(DefaultBodyLimit::max(MAX_ARTIFACT_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn prepare_artifact_upload(
+    State(state): State<ArtifactHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    headers: HeaderMap,
+    Json(request): Json<PrepareArtifactUploadRequestV1>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ArtifactApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ArtifactApplicationError::Unauthenticated);
+    }
+    if request.validate().is_err() {
+        return problem(ArtifactApplicationError::Invalid);
+    }
+    let idempotency_key_digest = match idempotency_key_digest(&headers) {
+        Ok(value) => value,
+        Err(error) => return problem(error),
+    };
+    match state
+        .application
+        .prepare_artifact_upload(PrepareArtifactUploadIntent {
+            principal,
+            request,
+            idempotency_key_digest,
+            deadline: state.clock.now()
+                + Duration::milliseconds(ARTIFACT_COMMAND_DEADLINE_MILLISECONDS),
+        })
+        .await
+    {
+        Ok(view) if view.validate().is_ok() => prepare_upload_response(view),
+        Ok(_) => problem(ArtifactApplicationError::Internal),
+        Err(error) => problem(error),
+    }
+}
+
+async fn complete_artifact_upload(
+    State(state): State<ArtifactHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path(artifact_action): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<CompleteArtifactUploadRequestV1>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ArtifactApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ArtifactApplicationError::Unauthenticated);
+    }
+    if request.validate().is_err() {
+        return problem(ArtifactApplicationError::Invalid);
+    }
+    let Some(artifact_id) = artifact_action.strip_suffix(":complete-upload") else {
+        return problem(ArtifactApplicationError::NotFound);
+    };
+    let artifact_id = match artifact_id.parse::<ResourceId>() {
+        Ok(id) if id.kind() == ResourceKind::Artifact => id,
+        _ => return problem(ArtifactApplicationError::NotFound),
+    };
+    let expected_artifact_version = match expected_artifact_version(&headers, &artifact_id) {
+        Ok(value) => value,
+        Err(error) => return problem(error),
+    };
+    let idempotency_key_digest = match idempotency_key_digest(&headers) {
+        Ok(value) => value,
+        Err(error) => return problem(error),
+    };
+    match state
+        .application
+        .complete_artifact_upload(CompleteArtifactUploadIntent {
+            principal,
+            artifact_id,
+            expected_artifact_version,
+            request,
+            idempotency_key_digest,
+            deadline: state.clock.now()
+                + Duration::milliseconds(ARTIFACT_COMMAND_DEADLINE_MILLISECONDS),
+        })
+        .await
+    {
+        Ok(view) if view.validate().is_ok() => mutation_accepted_response(view),
+        Ok(_) => problem(ArtifactApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 async fn read_artifact(
@@ -330,7 +499,8 @@ async fn read_artifact(
         .read_artifact(ReadArtifactIntent {
             principal,
             artifact_id,
-            deadline: state.clock.now() + Duration::seconds(5),
+            deadline: state.clock.now()
+                + Duration::milliseconds(ARTIFACT_READ_DEADLINE_MILLISECONDS),
         })
         .await
     {
@@ -338,6 +508,86 @@ async fn read_artifact(
         Ok(_) => problem(ArtifactApplicationError::Internal),
         Err(error) => problem(error),
     }
+}
+
+fn idempotency_key_digest(headers: &HeaderMap) -> Result<Sha256Digest, ArtifactApplicationError> {
+    let mut values = headers.get_all("idempotency-key").iter();
+    let value = values
+        .next()
+        .ok_or(ArtifactApplicationError::Invalid)?
+        .to_str()
+        .map_err(|_| ArtifactApplicationError::Invalid)?;
+    if values.next().is_some() {
+        return Err(ArtifactApplicationError::Invalid);
+    }
+    SecretIdempotencyKey::new(value)?.digest()
+}
+
+fn expected_artifact_version(
+    headers: &HeaderMap,
+    artifact_id: &ResourceId,
+) -> Result<u64, ArtifactApplicationError> {
+    let mut values = headers.get_all(IF_MATCH).iter();
+    let value = values
+        .next()
+        .ok_or(ArtifactApplicationError::PreconditionRequired)?;
+    if values.next().is_some() {
+        return Err(ArtifactApplicationError::Invalid);
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| ArtifactApplicationError::Invalid)?;
+    let prefix = format!("\"{artifact_id}-");
+    let version = value
+        .strip_prefix(&prefix)
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or(ArtifactApplicationError::Invalid)?;
+    if version.is_empty() || version.starts_with('0') {
+        return Err(ArtifactApplicationError::Invalid);
+    }
+    version
+        .parse()
+        .map_err(|_| ArtifactApplicationError::Invalid)
+}
+
+fn prepare_upload_response(view: PrepareArtifactUploadResponseV1) -> Response {
+    response_with_authority(
+        StatusCode::CREATED,
+        format!("/v1/artifacts/{}", view.artifact_id),
+        view.artifact_etag.clone(),
+        view,
+    )
+}
+
+fn mutation_accepted_response(view: ArtifactMutationAcceptedV1) -> Response {
+    response_with_authority(
+        StatusCode::ACCEPTED,
+        format!("/v1/operations/{}", view.operation_id),
+        view.artifact_etag.clone(),
+        view,
+    )
+}
+
+fn response_with_authority<T: Serialize>(
+    status: StatusCode,
+    location: String,
+    etag: String,
+    body: T,
+) -> Response {
+    let (Ok(location), Ok(etag)) = (
+        HeaderValue::from_str(&location),
+        HeaderValue::from_str(&etag),
+    ) else {
+        return problem(ArtifactApplicationError::Internal);
+    };
+    let mut response = (status, Json(body)).into_response();
+    response.headers_mut().insert(LOCATION, location);
+    response.headers_mut().insert(ETAG, etag);
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private, max-age=0"),
+    );
+    response
 }
 
 fn artifact_response(view: ArtifactViewV1) -> Response {
@@ -381,6 +631,30 @@ fn problem(error: ArtifactApplicationError) -> Response {
             StatusCode::NOT_FOUND,
             ApiProblemCode::ResourceNotFound,
             "The Artifact was not found.",
+            false,
+        ),
+        ArtifactApplicationError::Conflict => (
+            StatusCode::PRECONDITION_FAILED,
+            ApiProblemCode::PreconditionFailed,
+            "The Artifact state conflicts with this request.",
+            false,
+        ),
+        ArtifactApplicationError::PreconditionRequired => (
+            StatusCode::PRECONDITION_REQUIRED,
+            ApiProblemCode::PreconditionRequired,
+            "A current Artifact If-Match precondition is required.",
+            false,
+        ),
+        ArtifactApplicationError::IdempotencyConflict => (
+            StatusCode::CONFLICT,
+            ApiProblemCode::IdempotencyConflict,
+            "The idempotency key was used for a different Artifact request.",
+            false,
+        ),
+        ArtifactApplicationError::TooLarge => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ApiProblemCode::QuotaExceeded,
+            "The Artifact request exceeds the admitted quota.",
             false,
         ),
         ArtifactApplicationError::Unavailable => (
@@ -471,6 +745,39 @@ mod tests {
     struct App;
     #[async_trait]
     impl ArtifactApplication for App {
+        async fn prepare_artifact_upload(
+            &self,
+            _intent: PrepareArtifactUploadIntent,
+        ) -> Result<PrepareArtifactUploadResponseV1, ArtifactApplicationError> {
+            Ok(PrepareArtifactUploadResponseV1 {
+                schema_version: 1,
+                artifact_id: id(ResourceKind::Artifact, 3),
+                operation_id: id(ResourceKind::Job, 4),
+                upload_grant_id: id(ResourceKind::ArtifactGrant, 5),
+                artifact_etag: artifact_etag(&id(ResourceKind::Artifact, 3), 1),
+                upload_target: SecretBearingUploadTargetV1 {
+                    url: "https://uploads.example/artifact".to_owned(),
+                    completion_proof: OpaqueUploadCompletionProof::new("v1.proof").unwrap(),
+                },
+                upload_expires_at: UtcTimestamp::from_datetime(Utc::now() + Duration::minutes(5)),
+            })
+        }
+
+        async fn complete_artifact_upload(
+            &self,
+            intent: CompleteArtifactUploadIntent,
+        ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError> {
+            Ok(ArtifactMutationAcceptedV1 {
+                schema_version: 1,
+                artifact_id: intent.artifact_id.clone(),
+                artifact_etag: artifact_etag(
+                    &intent.artifact_id,
+                    intent.expected_artifact_version + 2,
+                ),
+                operation_id: id(ResourceKind::Job, 4),
+            })
+        }
+
         async fn read_artifact(
             &self,
             intent: ReadArtifactIntent,
@@ -596,6 +903,128 @@ mod tests {
         assert_eq!(
             response.headers().get(CACHE_CONTROL).unwrap(),
             "no-store, private, max-age=0"
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_upload_handlers_enforce_headers_and_project_authority() {
+        let now = Utc::now();
+        let artifact_id = id(ResourceKind::Artifact, 3);
+        let principal = AuthenticatedPrincipal {
+            tenant_id: id(ResourceKind::Tenant, 1),
+            principal_id: id(ResourceKind::Principal, 2),
+            principal_kind: PrincipalKind::AgentRunner,
+            permissions: PermissionSet::new(vec![Permission::ArtifactWrite]).unwrap(),
+            authn_strength: AuthnStrength::MultiFactor,
+            principal_version: 1,
+            binding_generation: 1,
+            binding_version: 1,
+            credential_digest: digest('b'),
+            credential_expires_at: now + Duration::hours(1),
+        };
+        let router =
+            build_artifact_router(ArtifactHttpState::new(Arc::new(App), Arc::new(Clock(now))));
+        let prepare = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/artifacts:prepare-upload")
+                    .header("content-type", "application/json")
+                    .header(
+                        "idempotency-key",
+                        "artifact-upload-key-with-at-least-32-bytes",
+                    )
+                    .extension(principal.clone())
+                    .body(Body::from(
+                        serde_json::to_vec(&PrepareArtifactUploadRequestV1 {
+                            schema_version: 1,
+                            purpose: ArtifactPurpose::RunInput,
+                            classification: DataClassification::Internal,
+                            expected_size_bytes: 4,
+                            expected_digest: Some(digest('a')),
+                            declared_media_type: Some("text/plain".to_owned()),
+                            display_name: Some("input.txt".to_owned()),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepare.status(), StatusCode::CREATED);
+        assert_eq!(
+            prepare.headers().get(LOCATION).unwrap(),
+            &format!("/v1/artifacts/{artifact_id}")
+        );
+        assert_eq!(
+            prepare.headers().get(ETAG).unwrap(),
+            &artifact_etag(&artifact_id, 1)
+        );
+        assert_eq!(
+            prepare.headers().get(CACHE_CONTROL).unwrap(),
+            "no-store, private, max-age=0"
+        );
+
+        let missing_precondition = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/artifacts/{artifact_id}:complete-upload"))
+                    .header("content-type", "application/json")
+                    .header(
+                        "idempotency-key",
+                        "artifact-complete-key-with-at-least-32-bytes",
+                    )
+                    .extension(principal.clone())
+                    .body(Body::from(
+                        serde_json::to_vec(&CompleteArtifactUploadRequestV1 {
+                            schema_version: 1,
+                            completion_proof: OpaqueUploadCompletionProof::new("v1.proof").unwrap(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            missing_precondition.status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+
+        let complete = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/artifacts/{artifact_id}:complete-upload"))
+                    .header("content-type", "application/json")
+                    .header(
+                        "idempotency-key",
+                        "artifact-complete-key-with-at-least-32-bytes",
+                    )
+                    .header(IF_MATCH, artifact_etag(&artifact_id, 1))
+                    .extension(principal)
+                    .body(Body::from(
+                        serde_json::to_vec(&CompleteArtifactUploadRequestV1 {
+                            schema_version: 1,
+                            completion_proof: OpaqueUploadCompletionProof::new("v1.proof").unwrap(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(complete.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            complete.headers().get(LOCATION).unwrap(),
+            &format!("/v1/operations/{}", id(ResourceKind::Job, 4))
+        );
+        assert_eq!(
+            complete.headers().get(ETAG).unwrap(),
+            &artifact_etag(&artifact_id, 3)
         );
     }
 }

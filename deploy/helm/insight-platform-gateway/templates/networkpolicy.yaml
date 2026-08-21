@@ -23,6 +23,18 @@ spec:
       ports: [{protocol: TCP, port: {{ int .Values.port }}}]
   egress:
     - to:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.artifactGateway.namespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.artifactGateway.podSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: 8080}]
+    - to:
         {{- range .Values.networkPolicy.postgresCidrs }}
         - ipBlock: {cidr: {{ . }}}
         {{- end }}

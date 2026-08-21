@@ -26,8 +26,8 @@
 {{- if hasKey $identities $db }}{{ fail "Artifact roles cannot share a database Secret" }}{{- end }}
 {{- $_ := set $identities $db true -}}
 {{- end }}
-{{- if eq $role "data-worker" }}
-{{- if or (empty $component.tls.existingSecret) (empty $component.tls.keys.clientCa) (empty $component.tls.keys.serverCertificate) (empty $component.tls.keys.serverPrivateKey) }}{{ fail "Data Worker mTLS inputs are required" }}{{- end }}
+{{- if or (eq $role "gateway") (eq $role "data-worker") }}
+{{- if or (empty $component.tls.existingSecret) (empty $component.tls.keys.clientCa) (empty $component.tls.keys.serverCertificate) (empty $component.tls.keys.serverPrivateKey) }}{{ fail (printf "%s mTLS inputs are required" $role) }}{{- end }}
 {{- end }}
 {{- end }}
 {{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.storageProviderCidrs) (empty .Values.networkPolicy.kmsProviderCidrs) (empty .Values.networkPolicy.workloadIdentityCidrs) }}

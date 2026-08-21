@@ -19,6 +19,13 @@ runEventCursorKey:
   existingSecret: insight-platform-gateway-run-event-cursor
   key: cursor-key
   digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+artifactGateway:
+  endpoint: https://insight-platform-artifact-gateway.platform-artifacts.svc:8080/
+  namespaceSelector: {insight.platform/artifact-namespace: "true"}
+  podSelector: {app.kubernetes.io/component: artifact-gateway}
+  tls:
+    existingSecret: insight-platform-gateway-artifact-client-tls
+    keys: {ca: ca.pem, certificate: client.pem, privateKey: client-key.pem}
 
 ingress:
   enabled: true
@@ -30,6 +37,8 @@ ingress:
 
 networkPolicy:
   enabled: true
+  dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
+  dnsPodSelector: {k8s-app: kube-dns}
   postgresCidrs: [10.10.0.0/24]
 
 resources:

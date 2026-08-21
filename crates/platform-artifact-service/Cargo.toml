@@ -35,10 +35,16 @@ insight-platform-postgres.workspace = true
 insight-platform-sandbox.workspace = true
 jsonwebtoken.workspace = true
 ring.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tonic.workspace = true
 uuid.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }

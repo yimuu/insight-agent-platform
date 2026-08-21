@@ -2502,14 +2502,18 @@ dependencies = [
  "insight-platform-postgres",
  "insight-platform-sandbox",
  "jsonwebtoken",
+ "rcgen",
  "ring",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
  "tokio",
+ "tokio-rustls",
  "tonic",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]
@@ -2681,6 +2685,7 @@ dependencies = [
  "insight-platform-postgres",
  "insight-platform-registry",
  "insight-platform-tasks",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",

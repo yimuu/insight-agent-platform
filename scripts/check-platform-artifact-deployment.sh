@@ -38,10 +38,11 @@ for authority in (
         failures.append(f"missing exact Artifact authority {authority}")
 for route in (
     "/v1/artifacts:prepare-upload",
-    "/v1/artifacts/{artifact_id}:complete-upload",
-    'route("/v1/artifacts/{artifact_id}", get(get_artifact))',
+    '"/v1/artifacts/{artifact_action}"',
+    "get(get_artifact).post(mutate_artifact)",
+    'strip_suffix(":complete-upload")',
     "/v1/artifacts/{artifact_id}/content",
-    "/v1/artifacts/{artifact_id}:delete",
+    'strip_suffix(":delete")',
 ):
     if route not in gateway:
         failures.append(f"missing public Artifact Gateway route {route}")
@@ -50,6 +51,14 @@ for role in ("artifact_gateway_role", "artifact_data_reader_role", "artifact_dat
         failures.append(f"missing PostgreSQL role grant matrix entry {role}")
 if "GRANT DELETE" in grants.upper() or "GRANT TRUNCATE" in grants.upper():
     failures.append("Artifact roles must not receive destructive PostgreSQL table privileges")
+for boundary in (
+    "ExactMtlsListener",
+    "PUBLIC_GATEWAY_WORKLOAD_IDENTITY",
+    "x-insight-verified-principal-id",
+    "x-insight-idempotency-key-digest",
+):
+    if boundary not in gateway:
+        failures.append(f"missing authenticated public Artifact hop boundary {boundary}")
 if failures:
     raise SystemExit("\n".join(f"Artifact deployment: {failure}" for failure in failures))
 PY
@@ -66,6 +75,7 @@ negative_values=(
   "--set|roles.gateway.database.existingSecret=insight-platform-artifact-maintenance-database"
   "--set|roles.gateway.serviceAccount.annotations.eks.amazonaws.com/role-arn=arn:aws:iam::111122223333:role/insight-platform-artifact-maintenance"
   "--set|roles.data-worker.tls.existingSecret="
+  "--set|roles.gateway.tls.existingSecret="
 )
 for case in "${negative_values[@]}"; do
   flag=${case%%|*}
@@ -124,6 +134,11 @@ expected.each do |role, (command, database_env)|
   failures << "#{role} API token automount is enabled" unless pod["automountServiceAccountToken"] == false && account["automountServiceAccountToken"] == false
   security = container.fetch("securityContext")
   failures << "#{role} lost Restricted security" unless security["allowPrivilegeEscalation"] == false && security["readOnlyRootFilesystem"] == true && security.dig("capabilities", "drop") == ["ALL"]
+  if role == "gateway"
+    failures << "Artifact Gateway lost mTLS client CA" unless env.key?("PLATFORM_ARTIFACT_GATEWAY_CLIENT_CA_PATH")
+    tls_mount = container.fetch("volumeMounts", []).find { |mount| mount["name"] == "tls" }
+    failures << "Artifact Gateway lost read-only TLS mount" unless tls_mount && tls_mount["readOnly"] == true
+  end
 end
 failures << "Artifact roles share a database Secret" unless identities.flat_map(&:first).uniq.length == 4
 failures << "Artifact roles share a storage identity" unless identities.map(&:last).uniq.length == 3
