@@ -2677,7 +2677,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "bytes",
  "chrono",
+ "futures",
  "insight-platform-api",
  "insight-platform-contracts",
  "insight-platform-invocations",

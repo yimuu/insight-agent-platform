@@ -55,6 +55,7 @@ pub struct SubmitTaskInputV1 {
 pub enum TaskOwnerLinkV1 {
     Run { run_id: ResourceId },
     Invocation { invocation_id: ResourceId },
+    Artifact { artifact_id: ResourceId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

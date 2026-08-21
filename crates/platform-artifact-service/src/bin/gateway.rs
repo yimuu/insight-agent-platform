@@ -12,7 +12,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::Stream;
 use insight_platform_api::artifact::{
-    artifact_etag, ArtifactMutationAcceptedV1, CompleteArtifactUploadRequestV1,
+    artifact_etag, view_from_record, ArtifactMutationAcceptedV1, CompleteArtifactUploadRequestV1,
     OpaqueUploadCompletionProof, PrepareArtifactUploadRequestV1, PrepareArtifactUploadResponseV1,
     SecretBearingUploadTargetV1,
 };
@@ -26,13 +26,10 @@ use insight_platform_artifacts::{
     MarkArtifactDeletion, PrepareArtifact, ScheduleInitialArtifactScan,
 };
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, ArtifactPurpose, CommandAudit, CommandOutcome,
-    DataClassification, JsonLimits, PrincipalKind, ResourceId, ResourceKind, Sha256Digest,
-    UtcTimestamp,
+    canonical_digest, parse_strict_json, CommandAudit, CommandOutcome, JsonLimits, PrincipalKind,
+    ResourceId, ResourceKind, Sha256Digest, UtcTimestamp,
 };
-use insight_platform_postgres::{
-    artifact_repository::GatewayArtifactSnapshot, repository::PgRepository, verify_schema,
-};
+use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
@@ -199,49 +196,6 @@ struct GatewayState {
     scan_retry_backoff_milliseconds: u64,
     maximum_download_bytes: usize,
     download_timeout_milliseconds: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ArtifactResponse {
-    schema_version: u32,
-    artifact_id: ResourceId,
-    purpose: ArtifactPurpose,
-    classification: DataClassification,
-    state: String,
-    version: u64,
-    size_bytes: Option<u64>,
-    content_digest: Option<Sha256Digest>,
-    media_type: Option<String>,
-    display_name: Option<String>,
-    retain_until: DateTime<Utc>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct DeleteArtifactRequest {
-    deletion_operation_id: ResourceId,
-    receipt_id: ResourceId,
-    event_id: ResourceId,
-    outbox_id: ResourceId,
-    expected_artifact_version: u64,
-    approval_task_id: Option<ResourceId>,
-    retry_backoff_milliseconds: u64,
-    deadline: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(deny_unknown_fields)]
-struct DeleteArtifactResponse {
-    schema_version: u32,
-    artifact_id: ResourceId,
-    artifact_state: String,
-    artifact_version: u64,
-    operation_id: ResourceId,
-    operation_state: String,
-    operation_version: u64,
 }
 
 #[derive(Clone)]
@@ -594,10 +548,10 @@ async fn mutate_artifact(
         let Ok(artifact_id) = artifact_id.parse::<ResourceId>() else {
             return problem(HttpError::NotFound);
         };
-        let Ok(request) = serde_json::from_slice::<DeleteArtifactRequest>(&body) else {
+        if !body.is_empty() {
             return problem(HttpError::Invalid);
-        };
-        return match delete_artifact_inner(state, &headers, artifact_id, request).await {
+        }
+        return match delete_artifact_inner(state, &headers, artifact_id).await {
             Ok(response) => no_store((StatusCode::ACCEPTED, Json(response)).into_response()),
             Err(error) => problem(error),
         };
@@ -736,12 +690,14 @@ async fn get_artifact(
             )
             .await
             .map_err(map_repository_error)?;
-        Ok::<_, HttpError>(artifact_response(snapshot))
+        let response = view_from_record(snapshot.artifact, snapshot.content);
+        response.validate().map_err(|_| HttpError::Unavailable)?;
+        Ok::<_, HttpError>(response)
     }
     .await;
     match result {
         Ok(response) => {
-            let etag = format!("\"{}\"", response.version);
+            let etag = response.etag.clone();
             let mut response = no_store((StatusCode::OK, Json(response)).into_response());
             if let Ok(value) = HeaderValue::from_str(&etag) {
                 response.headers_mut().insert(ETAG, value);
@@ -749,25 +705,6 @@ async fn get_artifact(
             response
         }
         Err(error) => problem(error),
-    }
-}
-
-fn artifact_response(snapshot: GatewayArtifactSnapshot) -> ArtifactResponse {
-    let content = snapshot.content.as_ref();
-    ArtifactResponse {
-        schema_version: 1,
-        artifact_id: snapshot.artifact.artifact_id,
-        purpose: snapshot.artifact.purpose,
-        classification: snapshot.artifact.classification,
-        state: snapshot.artifact.state.to_string(),
-        version: snapshot.artifact.version,
-        size_bytes: content.map(|content| content.byte_length()),
-        content_digest: content.map(|content| content.content_digest().clone()),
-        media_type: content.map(|content| content.media_type().to_owned()),
-        display_name: snapshot.artifact.metadata.display_name,
-        retain_until: snapshot.artifact.retain_until,
-        created_at: snapshot.artifact.created_at,
-        updated_at: snapshot.artifact.updated_at,
     }
 }
 
@@ -853,10 +790,22 @@ async fn delete_artifact_inner(
     state: GatewayState,
     headers: &HeaderMap,
     artifact_id: ResourceId,
-    request: DeleteArtifactRequest,
-) -> Result<DeleteArtifactResponse, HttpError> {
+) -> Result<ArtifactMutationAcceptedV1, HttpError> {
     let principal = mutation_principal(headers)?;
-    let request_digest = request_digest("artifact.delete", &request)?;
+    let expected_artifact_version = headers
+        .get("x-insight-artifact-expected-version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or(HttpError::Invalid)?;
+    let request_digest = request_digest(
+        "artifact.delete",
+        &serde_json::json!({
+            "artifact_id": artifact_id,
+            "expected_artifact_version": expected_artifact_version,
+            "schema_version": 1,
+        }),
+    )?;
     let target = state
         .repository
         .load_gateway_artifact_deletion_target(
@@ -867,6 +816,16 @@ async fn delete_artifact_inner(
         )
         .await
         .map_err(map_repository_error)?;
+    if target.artifact.version != expected_artifact_version {
+        return Err(HttpError::Conflict);
+    }
+    let now = Utc::now();
+    let deadline = now + chrono::Duration::hours(1);
+    let operation_id = server_id(ResourceKind::Job);
+    let approval_task_id = target
+        .retention_policy
+        .delete_requires_approval
+        .then(|| server_id(ResourceKind::ApprovalTask));
     let mut transaction = state
         .repository
         .begin()
@@ -876,21 +835,21 @@ async fn delete_artifact_inner(
         .mark_deletion(MarkArtifactDeletion {
             audit: audit(
                 principal,
-                request.receipt_id,
-                request.event_id,
-                request.outbox_id,
+                server_id(ResourceKind::Receipt),
+                server_id(ResourceKind::Event),
+                server_id(ResourceKind::OutboxEvent),
                 request_digest,
-                request.deadline,
+                deadline,
             ),
-            deletion_operation_id: request.deletion_operation_id.clone(),
-            deletion_job_id: request.deletion_operation_id,
-            artifact_id,
+            deletion_operation_id: operation_id.clone(),
+            deletion_job_id: operation_id.clone(),
+            artifact_id: artifact_id.clone(),
             blob_id: target.blob.blob_id,
-            expected_artifact_version: request.expected_artifact_version,
+            expected_artifact_version,
             expected_blob_version: target.blob.version,
-            approval_task_id: request.approval_task_id,
-            retry_backoff_milliseconds: request.retry_backoff_milliseconds,
-            deadline: request.deadline,
+            approval_task_id,
+            retry_backoff_milliseconds: 1_000,
+            deadline,
         })
         .await
         .map_err(map_repository_error)?;
@@ -899,15 +858,14 @@ async fn delete_artifact_inner(
         .await
         .map_err(|_| HttpError::Unavailable)?;
     let marked = outcome_value(marked);
-    Ok(DeleteArtifactResponse {
+    let response = ArtifactMutationAcceptedV1 {
         schema_version: 1,
         artifact_id: marked.artifact.artifact_id,
-        artifact_state: marked.artifact.state.to_string(),
-        artifact_version: marked.artifact.version,
+        artifact_etag: artifact_etag(&artifact_id, marked.artifact.version),
         operation_id: marked.deletion.operation_id,
-        operation_state: marked.deletion.operation_state.to_string(),
-        operation_version: marked.deletion.operation_version,
-    })
+    };
+    response.validate().map_err(|_| HttpError::Unavailable)?;
+    Ok(response)
 }
 
 fn read_principal(headers: &HeaderMap) -> Result<PrincipalHeaders, HttpError> {

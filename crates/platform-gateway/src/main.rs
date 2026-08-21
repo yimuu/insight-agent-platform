@@ -10,10 +10,10 @@ use axum::{
 };
 use insight_platform_api::{
     artifact::{
-        build_artifact_router, view_from_record as artifact_view_from_record, ArtifactApplication,
-        ArtifactApplicationError, ArtifactHttpState, ArtifactMutationAcceptedV1, ArtifactViewV1,
-        CompleteArtifactUploadIntent, PrepareArtifactUploadIntent, PrepareArtifactUploadResponseV1,
-        ReadArtifactIntent, SystemArtifactClock,
+        build_artifact_router, ArtifactApplication, ArtifactApplicationError,
+        ArtifactContentStreamV1, ArtifactHttpState, ArtifactMutationAcceptedV1, ArtifactViewV1,
+        CompleteArtifactUploadIntent, DeleteArtifactIntent, PrepareArtifactUploadIntent,
+        PrepareArtifactUploadResponseV1, ReadArtifactIntent, SystemArtifactClock,
     },
     authentication::{
         authenticate_public_request, AuthenticationError, ExternalPrincipalBindingAuthority,
@@ -49,7 +49,7 @@ use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ActiveTarget, AdministrativeGate, CommandAudit,
     DeploymentClosure, EntityLifecycle, ExactDeploymentRef, JsonLimits, OperationViewV1,
     PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId, ResourceKind, RunBindingsSnapshot,
-    Sha256Digest, ValueRef,
+    Sha256Digest, ValueRef, MAX_ARTIFACT_BYTES,
 };
 use insight_platform_invocations::{
     CapabilityApprovalDecision, InvocationTransaction, ResolveCapabilityApproval,
@@ -58,6 +58,7 @@ use insight_platform_orchestrator::{
     AdmitRun, PlanNodeKey, RequestRunCancel, RunInputValue, SetRunPause,
 };
 use insight_platform_postgres::{
+    artifact_repository::{ArtifactDeletionApprovalDecision, ResolveArtifactDeletionApproval},
     operation_repository::{project_registry_validation_operation, OperationReadError},
     repository::{
         PgRepository, RepositoryError, ResolveOrchestrationTask,
@@ -81,7 +82,9 @@ use std::{
     io::Read as _,
     net::SocketAddr,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -221,7 +224,6 @@ struct PgRuns(Arc<PgRepository>);
 
 #[derive(Clone)]
 struct PgArtifacts {
-    repository: Arc<PgRepository>,
     mutation_forwarder: Arc<dyn ArtifactMutationForwarder>,
 }
 
@@ -236,6 +238,72 @@ trait ArtifactMutationForwarder: Send + Sync {
         &self,
         intent: CompleteArtifactUploadIntent,
     ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError>;
+
+    async fn delete(
+        &self,
+        intent: DeleteArtifactIntent,
+    ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError>;
+
+    async fn read(
+        &self,
+        intent: ReadArtifactIntent,
+    ) -> Result<ArtifactViewV1, ArtifactApplicationError>;
+
+    async fn read_content(
+        &self,
+        intent: ReadArtifactIntent,
+    ) -> Result<ArtifactContentStreamV1, ArtifactApplicationError>;
+}
+
+struct ExactLengthResponseStream {
+    inner: Pin<Box<dyn futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
+    remaining: u64,
+    finished: bool,
+}
+
+impl futures::Stream for ExactLengthResponseStream {
+    type Item = Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.finished {
+            return Poll::Ready(None);
+        }
+        match self.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                let Ok(length) = u64::try_from(bytes.len()) else {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(std::io::Error::other(
+                        "Artifact content length overflow",
+                    ))));
+                };
+                if length > self.remaining {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(std::io::Error::other(
+                        "Artifact content exceeded its verified length",
+                    ))));
+                }
+                self.remaining -= length;
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(_))) => {
+                self.finished = true;
+                Poll::Ready(Some(Err(std::io::Error::other(
+                    "Artifact content stream failed",
+                ))))
+            }
+            Poll::Ready(None) if self.remaining != 0 => {
+                self.finished = true;
+                Poll::Ready(Some(Err(std::io::Error::other(
+                    "Artifact content ended before its verified length",
+                ))))
+            }
+            Poll::Ready(None) => {
+                self.finished = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -320,6 +388,27 @@ impl MtlsArtifactMutationForwarder {
                 idempotency_key_digest.as_str(),
             )
     }
+
+    fn read_request(
+        &self,
+        path: &str,
+        principal: &insight_platform_api::authentication::AuthenticatedPrincipal,
+    ) -> reqwest::RequestBuilder {
+        self.client
+            .get(format!("{}{path}", self.endpoint))
+            .header(
+                "x-insight-verified-tenant-id",
+                principal.tenant_id.to_string(),
+            )
+            .header(
+                "x-insight-verified-principal-id",
+                principal.principal_id.to_string(),
+            )
+            .header(
+                "x-insight-verified-principal-kind",
+                principal.principal_kind.as_str(),
+            )
+    }
 }
 
 #[async_trait]
@@ -367,6 +456,121 @@ impl ArtifactMutationForwarder for MtlsArtifactMutationForwarder {
             .map_err(|_| ArtifactApplicationError::Unavailable)?;
         decode_artifact_response(response).await
     }
+
+    async fn delete(
+        &self,
+        intent: DeleteArtifactIntent,
+    ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ArtifactApplicationError::Unavailable);
+        }
+        let response = self
+            .request(
+                &format!("/v1/artifacts/{}:delete", intent.artifact_id),
+                &intent.principal,
+                &intent.idempotency_key_digest,
+            )
+            .header(
+                "x-insight-artifact-expected-version",
+                intent.expected_artifact_version,
+            )
+            .body(Vec::new())
+            .send()
+            .await
+            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+        decode_artifact_response(response).await
+    }
+
+    async fn read(
+        &self,
+        intent: ReadArtifactIntent,
+    ) -> Result<ArtifactViewV1, ArtifactApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ArtifactApplicationError::Unavailable);
+        }
+        let response = self
+            .read_request(
+                &format!("/v1/artifacts/{}", intent.artifact_id),
+                &intent.principal,
+            )
+            .send()
+            .await
+            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+        decode_artifact_response(response).await
+    }
+
+    async fn read_content(
+        &self,
+        intent: ReadArtifactIntent,
+    ) -> Result<ArtifactContentStreamV1, ArtifactApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ArtifactApplicationError::Unavailable);
+        }
+        let response = self
+            .read_request(
+                &format!("/v1/artifacts/{}/content", intent.artifact_id),
+                &intent.principal,
+            )
+            .send()
+            .await
+            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(map_artifact_status(response.status()));
+        }
+        let content_length = response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (1..=MAX_ARTIFACT_BYTES).contains(value))
+            .ok_or(ArtifactApplicationError::Internal)?;
+        let media_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty() && value.len() <= 255)
+            .ok_or(ArtifactApplicationError::Internal)?
+            .to_owned();
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .ok_or(ArtifactApplicationError::Internal)?
+            .to_owned();
+        if response
+            .headers()
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            != Some("attachment")
+        {
+            return Err(ArtifactApplicationError::Internal);
+        }
+        Ok(ArtifactContentStreamV1 {
+            stream: Box::pin(ExactLengthResponseStream {
+                inner: Box::pin(response.bytes_stream()),
+                remaining: content_length,
+                finished: false,
+            }),
+            content_length,
+            media_type,
+            etag,
+        })
+    }
+}
+
+fn map_artifact_status(status: reqwest::StatusCode) -> ArtifactApplicationError {
+    match status {
+        reqwest::StatusCode::BAD_REQUEST => ArtifactApplicationError::Invalid,
+        reqwest::StatusCode::UNAUTHORIZED => ArtifactApplicationError::Unauthenticated,
+        reqwest::StatusCode::FORBIDDEN => ArtifactApplicationError::Denied,
+        reqwest::StatusCode::NOT_FOUND => ArtifactApplicationError::NotFound,
+        reqwest::StatusCode::CONFLICT => ArtifactApplicationError::IdempotencyConflict,
+        reqwest::StatusCode::PRECONDITION_FAILED => ArtifactApplicationError::Conflict,
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE => ArtifactApplicationError::TooLarge,
+        _ if status.is_server_error() => ArtifactApplicationError::Unavailable,
+        _ => ArtifactApplicationError::Internal,
+    }
 }
 
 async fn decode_artifact_response<T: serde::de::DeserializeOwned>(
@@ -374,17 +578,7 @@ async fn decode_artifact_response<T: serde::de::DeserializeOwned>(
 ) -> Result<T, ArtifactApplicationError> {
     let status = response.status();
     if !status.is_success() {
-        return Err(match status {
-            reqwest::StatusCode::BAD_REQUEST => ArtifactApplicationError::Invalid,
-            reqwest::StatusCode::UNAUTHORIZED => ArtifactApplicationError::Unauthenticated,
-            reqwest::StatusCode::FORBIDDEN => ArtifactApplicationError::Denied,
-            reqwest::StatusCode::NOT_FOUND => ArtifactApplicationError::NotFound,
-            reqwest::StatusCode::CONFLICT => ArtifactApplicationError::IdempotencyConflict,
-            reqwest::StatusCode::PRECONDITION_FAILED => ArtifactApplicationError::Conflict,
-            reqwest::StatusCode::PAYLOAD_TOO_LARGE => ArtifactApplicationError::TooLarge,
-            _ if status.is_server_error() => ArtifactApplicationError::Unavailable,
-            _ => ArtifactApplicationError::Internal,
-        });
+        return Err(map_artifact_status(status));
     }
     let length = response.content_length().unwrap_or(0);
     if length > MAX_ARTIFACT_RESPONSE_BYTES as u64 {
@@ -416,26 +610,25 @@ impl ArtifactApplication for PgArtifacts {
         self.mutation_forwarder.complete(intent).await
     }
 
+    async fn delete_artifact(
+        &self,
+        intent: DeleteArtifactIntent,
+    ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError> {
+        self.mutation_forwarder.delete(intent).await
+    }
+
     async fn read_artifact(
         &self,
         intent: ReadArtifactIntent,
     ) -> Result<ArtifactViewV1, ArtifactApplicationError> {
-        if intent.deadline <= chrono::Utc::now() {
-            return Err(ArtifactApplicationError::Unavailable);
-        }
-        let snapshot = self
-            .repository
-            .load_gateway_artifact(
-                intent.principal.tenant_id,
-                intent.principal.principal_id,
-                intent.principal.principal_kind,
-                intent.artifact_id,
-            )
-            .await
-            .map_err(map_artifact_repository_error)?;
-        let view = artifact_view_from_record(snapshot.artifact, snapshot.content);
-        view.validate()?;
-        Ok(view)
+        self.mutation_forwarder.read(intent).await
+    }
+
+    async fn read_artifact_content(
+        &self,
+        intent: ReadArtifactIntent,
+    ) -> Result<ArtifactContentStreamV1, ArtifactApplicationError> {
+        self.mutation_forwarder.read_content(intent).await
     }
 }
 
@@ -479,6 +672,59 @@ impl TaskApplication for PgTasks {
             .await
             .map_err(map_task_repository_error)?;
         if intent.task_id.kind() == ResourceKind::ApprovalTask {
+            if current.owner_kind == "artifact" {
+                let artifact_id: ResourceId = current
+                    .owner_id
+                    .parse()
+                    .map_err(|_| TaskApplicationError::Internal)?;
+                let payload = decode_task_payload(&current)?;
+                let owner_version = match payload.definition {
+                    TaskDefinition::Approval { owner_version, .. } => owner_version,
+                    _ => return Err(TaskApplicationError::Internal),
+                };
+                let operation_id = self
+                    .0
+                    .find_artifact_deletion_operation(
+                        &intent.principal.tenant_id,
+                        &artifact_id,
+                        &intent.task_id,
+                    )
+                    .await
+                    .map_err(map_task_repository_error)?;
+                let decision = match intent.action {
+                    TaskActionV1::Approve => ArtifactDeletionApprovalDecision::Approve,
+                    TaskActionV1::Reject => ArtifactDeletionApprovalDecision::Reject,
+                    TaskActionV1::Cancel => ArtifactDeletionApprovalDecision::Cancel,
+                    TaskActionV1::SubmitInput => return Err(TaskApplicationError::Invalid),
+                };
+                let principal = intent.principal.clone();
+                let task_id = intent.task_id.clone();
+                self.0
+                    .resolve_artifact_deletion_approval(ResolveArtifactDeletionApproval {
+                        audit: task_command_audit(&intent)?,
+                        artifact_id,
+                        operation_id,
+                        approval_task_id: intent.task_id,
+                        expected_artifact_version: owner_version,
+                        expected_task_generation: u64::try_from(current.generation)
+                            .map_err(|_| TaskApplicationError::Internal)?,
+                        expected_task_version: intent.expected_task_version,
+                        decision,
+                    })
+                    .await
+                    .map_err(map_task_repository_error)?;
+                return self
+                    .0
+                    .read_task_for_principal(
+                        &principal.tenant_id,
+                        &principal.principal_id,
+                        principal.principal_kind,
+                        &task_id,
+                    )
+                    .await
+                    .map_err(map_task_repository_error)
+                    .and_then(task_view_from_record);
+            }
             let decision = match intent.action {
                 TaskActionV1::Approve => CapabilityApprovalDecision::Approve,
                 TaskActionV1::Reject => CapabilityApprovalDecision::Reject,
@@ -672,6 +918,13 @@ fn task_view_from_record(
     } else if let Some(run_id) = record.run_id {
         TaskOwnerLinkV1::Run {
             run_id: run_id.parse().map_err(|_| TaskApplicationError::Internal)?,
+        }
+    } else if record.owner_kind == "artifact" {
+        TaskOwnerLinkV1::Artifact {
+            artifact_id: record
+                .owner_id
+                .parse()
+                .map_err(|_| TaskApplicationError::Internal)?,
         }
     } else {
         return Err(TaskApplicationError::Internal);
@@ -1869,22 +2122,6 @@ fn map_task_repository_error(error: RepositoryError) -> TaskApplicationError {
     }
 }
 
-fn map_artifact_repository_error(error: RepositoryError) -> ArtifactApplicationError {
-    match error {
-        RepositoryError::PermissionDenied => ArtifactApplicationError::Denied,
-        RepositoryError::NotFound(_) => ArtifactApplicationError::NotFound,
-        RepositoryError::Database(_) | RepositoryError::LeaseExpired => {
-            ArtifactApplicationError::Unavailable
-        }
-        RepositoryError::InvalidInput(_)
-        | RepositoryError::Conflict(_)
-        | RepositoryError::IdempotencyConflict
-        | RepositoryError::QuotaExceeded
-        | RepositoryError::CorruptRow(_)
-        | RepositoryError::StaleFence => ArtifactApplicationError::Internal,
-    }
-}
-
 fn build_router(
     repository: Arc<PgRepository>,
     artifact_mutation_forwarder: Arc<dyn ArtifactMutationForwarder>,
@@ -1923,7 +2160,6 @@ fn build_router(
     ));
     let artifact = build_artifact_router(ArtifactHttpState::new(
         Arc::new(PgArtifacts {
-            repository: repository.clone(),
             mutation_forwarder: artifact_mutation_forwarder,
         }),
         Arc::new(SystemArtifactClock),
@@ -2117,6 +2353,27 @@ mod tests {
             &self,
             _intent: CompleteArtifactUploadIntent,
         ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError> {
+            Err(ArtifactApplicationError::Unavailable)
+        }
+
+        async fn delete(
+            &self,
+            _intent: DeleteArtifactIntent,
+        ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError> {
+            Err(ArtifactApplicationError::Unavailable)
+        }
+
+        async fn read(
+            &self,
+            _intent: ReadArtifactIntent,
+        ) -> Result<ArtifactViewV1, ArtifactApplicationError> {
+            Err(ArtifactApplicationError::Unavailable)
+        }
+
+        async fn read_content(
+            &self,
+            _intent: ReadArtifactIntent,
+        ) -> Result<ArtifactContentStreamV1, ArtifactApplicationError> {
             Err(ArtifactApplicationError::Unavailable)
         }
     }

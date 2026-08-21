@@ -1,10 +1,10 @@
 use crate::repository::{
     append_command_event, append_scheduler_event, begin_read_only_repeatable,
     claim_command_receipt, decode_published_version_payload, decode_typed_payload, job_from_row,
-    job_projection, load_current_principal_snapshot, load_job_for_update_by_text, payload_from_row,
-    require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page,
-    terminalize_command_receipt, validate_safety_scan_request, JobRecord, PgRepository,
-    RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
+    job_projection, load_current_principal_snapshot, load_job_for_update_by_text,
+    load_task_for_update, payload_from_row, require_tenant_permission, safety_scan_cursor_from_row,
+    safety_scan_page, terminalize_command_receipt, validate_safety_scan_request, JobRecord,
+    PgRepository, RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
 };
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{
@@ -40,7 +40,10 @@ use insight_platform_contracts::{
     ResourceKind, SandboxArtifactIoPolicyDocument, Sha256Digest, TenantConfig, WorkClass,
 };
 use insight_platform_jobs::JobFence;
-use insight_platform_tasks::{TaskDefinition, TaskPayload, TaskState};
+use insight_platform_tasks::{
+    decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
+    TaskState,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::{collections::BTreeSet, str::FromStr};
@@ -190,6 +193,150 @@ async fn terminalize_artifact_prepare_receipt(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactDeleteReceiptResult {
+    schema_version: u32,
+    artifact_id: ResourceId,
+    blob_id: ResourceId,
+    operation_id: ResourceId,
+    approval_task_id: Option<ResourceId>,
+}
+
+async fn claim_artifact_delete_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &insight_platform_contracts::CommandAudit,
+    artifact_id: &ResourceId,
+) -> Result<Option<ArtifactDeleteReceiptResult>, RepositoryError> {
+    let payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "artifact_id": artifact_id,
+            "operation": "artifact.delete",
+            "principal_id": audit.principal_id,
+        }),
+        65_536,
+    )?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest,
+            state, payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'command', 'artifact', $3, $4,
+                  'artifact.delete', $5, $6, 'processing', $7, $8, $9, $10)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(artifact_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(audit.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(None);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state, payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'artifact' AND scope_id = $2
+          AND dedupe_owner_id = $3 AND operation = 'artifact.delete'
+          AND idempotency_key_digest = $4
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(artifact_id.to_string())
+    .bind(audit.principal_id.to_string())
+    .bind(audit.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != audit.request_digest.to_string() {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if row.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("Artifact delete receipt"));
+    }
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let result: ArtifactDeleteReceiptResult =
+        decode_versioned_payload(&payload, "Artifact delete Receipt result")?;
+    validate_artifact_delete_receipt_result(&result)?;
+    Ok(Some(result))
+}
+
+fn validate_artifact_delete_receipt_result(
+    result: &ArtifactDeleteReceiptResult,
+) -> Result<(), RepositoryError> {
+    if result.schema_version != 1
+        || result.artifact_id.kind() != ResourceKind::Artifact
+        || result.blob_id.kind() != ResourceKind::InternalBlob
+        || result.operation_id.kind() != ResourceKind::Job
+        || result
+            .approval_task_id
+            .as_ref()
+            .is_some_and(|id| id.kind() != ResourceKind::ApprovalTask)
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Artifact delete Receipt result is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn terminalize_artifact_delete_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &insight_platform_contracts::CommandAudit,
+    marked: &MarkedArtifactDeletion,
+    approval_task_id: Option<ResourceId>,
+) -> Result<(), RepositoryError> {
+    let result = ArtifactDeleteReceiptResult {
+        schema_version: 1,
+        artifact_id: marked.artifact.artifact_id.clone(),
+        blob_id: marked.blob.blob_id.clone(),
+        operation_id: marked.deletion.operation_id.clone(),
+        approval_task_id,
+    };
+    validate_artifact_delete_receipt_result(&result)?;
+    let payload = TypedPayload::from_versioned(1, &result, 65_536)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = 'accepted', response_reference_id = $4,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND state = 'processing'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(marked.deletion.operation_id.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("Artifact delete receipt"));
+    }
+    Ok(())
+}
+
 /// Safe database projection consumed by the public Artifact Gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayArtifactSnapshot {
@@ -201,6 +348,26 @@ pub struct GatewayArtifactSnapshot {
 pub struct GatewayArtifactDeletionTarget {
     pub artifact: ArtifactRecord,
     pub blob: ArtifactBlobRecord,
+    pub retention_policy: ArtifactRetentionPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactDeletionApprovalDecision {
+    Approve,
+    Reject,
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveArtifactDeletionApproval {
+    pub audit: insight_platform_contracts::CommandAudit,
+    pub artifact_id: ResourceId,
+    pub operation_id: ResourceId,
+    pub approval_task_id: ResourceId,
+    pub expected_artifact_version: u64,
+    pub expected_task_generation: u64,
+    pub expected_task_version: u64,
+    pub decision: ArtifactDeletionApprovalDecision,
 }
 
 /// One coherent current-authority snapshot used to turn a public upload intent into an internal
@@ -823,8 +990,419 @@ impl PgRepository {
         .await?
         .ok_or(RepositoryError::NotFound("Artifact Blob"))?;
         let blob = blob_from_row(row)?;
+        let retention_policy = load_retention_policy(
+            &mut transaction,
+            &tenant_id,
+            &artifact.retention_policy_revision_id,
+        )
+        .await?;
         transaction.commit().await?;
-        Ok(GatewayArtifactDeletionTarget { artifact, blob })
+        Ok(GatewayArtifactDeletionTarget {
+            artifact,
+            blob,
+            retention_policy,
+        })
+    }
+
+    pub async fn resolve_artifact_deletion_approval(
+        &self,
+        command: ResolveArtifactDeletionApproval,
+    ) -> Result<(), RepositoryError> {
+        let now = Utc::now();
+        command.audit.validate_at(now).map_err(|failure| {
+            RepositoryError::InvalidInput(format!("Artifact approval audit: {failure}"))
+        })?;
+        if command.artifact_id.kind() != ResourceKind::Artifact
+            || command.operation_id.kind() != ResourceKind::Job
+            || command.approval_task_id.kind() != ResourceKind::ApprovalTask
+            || command.expected_artifact_version == 0
+            || command.expected_task_generation == 0
+            || command.expected_task_version == 0
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact deletion approval identity is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool().begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "artifact",
+            &command.artifact_id.to_string(),
+            "artifact.delete.approval.resolve",
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(());
+        }
+        let resolver = require_tenant_permission(
+            &mut transaction,
+            &command.audit,
+            Permission::ApprovalRespond,
+        )
+        .await?;
+        let artifact = load_artifact_record(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.artifact_id,
+        )
+        .await?;
+        let blob_id = artifact
+            .blob_id
+            .as_ref()
+            .ok_or(RepositoryError::NotFound("Artifact deletion Blob"))?
+            .clone();
+        let (blob, aliases) =
+            lock_blob_and_aliases(&mut transaction, &command.audit.tenant_id, &blob_id).await?;
+        let artifact = aliases
+            .iter()
+            .find(|candidate| candidate.artifact_id == command.artifact_id)
+            .cloned()
+            .ok_or(RepositoryError::NotFound("Artifact deletion target"))?;
+        if artifact.version != command.expected_artifact_version {
+            return Err(RepositoryError::Conflict(
+                "Artifact deletion approval Artifact version",
+            ));
+        }
+        let task = load_task_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.approval_task_id,
+        )
+        .await?;
+        if task.owner_kind != "artifact"
+            || task.owner_id != command.artifact_id.to_string()
+            || task.invocation_id.is_some()
+            || task.run_id.is_some()
+            || task.node_id.is_some()
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let task_projection = crate::repository::task_projection(&task)?;
+        let TaskDefinition::Approval {
+            owner_version,
+            owner_snapshot_digest,
+            effect,
+            input_digest,
+            policy_revision_id,
+            ..
+        } = &task_projection.payload.definition
+        else {
+            return Err(RepositoryError::CorruptRow(
+                "Artifact deletion Task is not an approval".to_owned(),
+            ));
+        };
+        if *owner_version != artifact.version
+            || owner_snapshot_digest != input_digest
+            || *effect != Effect::Irreversible
+            || policy_revision_id != &artifact.retention_policy_revision_id
+        {
+            return Err(RepositoryError::CorruptRow(
+                "Artifact deletion approval binding is invalid".to_owned(),
+            ));
+        }
+        let job = sqlx::query(
+            r#"
+            SELECT state, version, deadline, request_digest,
+                   payload_schema_version, payload, payload_digest
+            FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND job_id = $2 AND work_class = 'artifact'
+              AND owner_kind = 'artifact' AND owner_id = $3
+            FOR UPDATE
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.operation_id.to_string())
+        .bind(command.artifact_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("Artifact deletion approval Job"))?;
+        if job.try_get::<String, _>("state")? != "waiting"
+            || job.try_get::<i64, _>("version")? != 1
+            || job.try_get::<String, _>("request_digest")? != owner_snapshot_digest.to_string()
+        {
+            return Err(RepositoryError::Conflict(
+                "Artifact deletion approval Job state",
+            ));
+        }
+        let payload =
+            payload_from_row(&job, "payload_schema_version", "payload", "payload_digest")?;
+        let payload: ArtifactJobPayload = decode_typed_payload(&payload, "Artifact Job")?;
+        let ArtifactJobPayload::Delete { deletion } = payload else {
+            return Err(RepositoryError::CorruptRow(
+                "Artifact deletion approval Job payload is invalid".to_owned(),
+            ));
+        };
+        let approved_artifact_version = artifact.version.checked_add(1).ok_or_else(|| {
+            RepositoryError::InvalidInput("Artifact version overflowed".to_owned())
+        })?;
+        if deletion.operation_id != command.operation_id
+            || deletion.artifact_id != command.artifact_id
+            || deletion.blob_id != blob_id
+            || deletion.expected_artifact_version != approved_artifact_version
+        {
+            return Err(RepositoryError::CorruptRow(
+                "Artifact deletion approval Job authority disagrees".to_owned(),
+            ));
+        }
+        let task_state = match command.decision {
+            ArtifactDeletionApprovalDecision::Approve => TaskState::Approved,
+            ArtifactDeletionApprovalDecision::Reject => TaskState::Rejected,
+            ArtifactDeletionApprovalDecision::Cancel => TaskState::Cancelled,
+        };
+        let next_task = decide_task_resolution(
+            &task_projection,
+            ResolveTask {
+                expected_generation: command.expected_task_generation,
+                expected_version: command.expected_task_version,
+                target: task_state,
+                principal: (command.decision != ArtifactDeletionApprovalDecision::Cancel)
+                    .then_some(resolver),
+                response_value_id: None,
+                response_schema_digest: None,
+            },
+            database_now,
+        )?;
+        let next_task_payload = TypedPayload::new(1, &next_task.payload)?;
+        ensure_one(
+            sqlx::query(
+                r#"
+                UPDATE insight_platform.tasks
+                SET state = $4, version = $5, payload_schema_version = $6,
+                    payload = $7, payload_digest = $8, responded_at = $9, updated_at = $9
+                WHERE tenant_id = $1 AND task_id = $2 AND version = $3
+                  AND generation = $10 AND state = 'pending' AND responded_at IS NULL
+                "#,
+            )
+            .bind(command.audit.tenant_id.to_string())
+            .bind(command.approval_task_id.to_string())
+            .bind(to_i64(command.expected_task_version, "Task version")?)
+            .bind(task_state.as_str())
+            .bind(to_i64(next_task.version, "Task version")?)
+            .bind(next_task_payload.schema_version)
+            .bind(&next_task_payload.value)
+            .bind(&next_task_payload.digest)
+            .bind(database_now)
+            .bind(to_i64(command.expected_task_generation, "Task generation")?)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected(),
+            "Artifact deletion approval Task",
+        )?;
+        if command.decision == ArtifactDeletionApprovalDecision::Approve {
+            let policy = load_retention_policy(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &artifact.retention_policy_revision_id,
+            )
+            .await?;
+            let (live_reference_count, active_hold_count, provenance_count) =
+                artifact_deletion_link_facts(
+                    &mut transaction,
+                    &command.audit.tenant_id,
+                    &command.artifact_id,
+                    database_now,
+                )
+                .await?;
+            let live_alias = aliases.iter().find(|alias| {
+                alias.artifact_id != command.artifact_id && alias.state != ArtifactState::Deleted
+            });
+            let decision_command = MarkArtifactDeletion {
+                audit: command.audit.clone(),
+                deletion_operation_id: command.operation_id.clone(),
+                deletion_job_id: command.operation_id.clone(),
+                artifact_id: command.artifact_id.clone(),
+                blob_id: blob_id.clone(),
+                expected_artifact_version: artifact.version,
+                expected_blob_version: blob.version,
+                approval_task_id: Some(command.approval_task_id.clone()),
+                retry_backoff_milliseconds: deletion.retry_backoff_milliseconds,
+                deadline: job.try_get("deadline")?,
+            };
+            let decision = decide_mark_artifact_deletion(
+                &artifact,
+                &blob,
+                live_alias,
+                ArtifactDeletionAdmissionFacts {
+                    approval_required: true,
+                    approval_satisfied: true,
+                    gc_grace_seconds: policy.gc_grace_seconds,
+                    live_reference_count,
+                    active_hold_count,
+                    blocking_provenance_count: if policy.retain_provenance_sources {
+                        provenance_count
+                    } else {
+                        0
+                    },
+                },
+                &decision_command,
+                database_now,
+            )?;
+            if decision.mode != deletion.mode {
+                return Err(RepositoryError::Conflict(
+                    "Artifact deletion authority changed while awaiting approval",
+                ));
+            }
+            if decision.blob_version != blob.version {
+                ensure_one(
+                    sqlx::query(
+                        "UPDATE insight_platform.artifact_blobs SET state = $4, version = $5, updated_at = $6 WHERE tenant_id = $1 AND blob_id = $2 AND version = $3",
+                    )
+                    .bind(command.audit.tenant_id.to_string())
+                    .bind(blob_id.to_string())
+                    .bind(to_i64(blob.version, "Blob version")?)
+                    .bind(decision.blob_state.as_str())
+                    .bind(to_i64(decision.blob_version, "Blob version")?)
+                    .bind(database_now)
+                    .execute(&mut *transaction)
+                    .await?
+                    .rows_affected(),
+                    "Artifact deletion approval Blob",
+                )?;
+            }
+            ensure_one(
+                sqlx::query(
+                    "UPDATE insight_platform.artifacts SET state = $4, version = $5, updated_at = $6 WHERE tenant_id = $1 AND artifact_id = $2 AND version = $3",
+                )
+                .bind(command.audit.tenant_id.to_string())
+                .bind(command.artifact_id.to_string())
+                .bind(to_i64(artifact.version, "Artifact version")?)
+                .bind(decision.artifact_state.as_str())
+                .bind(to_i64(decision.artifact_version, "Artifact version")?)
+                .bind(database_now)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+                "Artifact deletion approval Artifact",
+            )?;
+            let mut ready_snapshot = deletion;
+            ready_snapshot.expected_operation_version = 2;
+            let ready_payload = TypedPayload::new(
+                1,
+                &ArtifactJobPayload::Delete {
+                    deletion: ready_snapshot,
+                },
+            )?;
+            ensure_one(
+                sqlx::query(
+                    r#"
+                    UPDATE insight_platform.jobs
+                    SET state = 'ready', version = 2, scheduled_at = $4,
+                        payload_schema_version = $5, payload = $6, payload_digest = $7,
+                        updated_at = $4
+                    WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'waiting'
+                    "#,
+                )
+                .bind(command.audit.tenant_id.to_string())
+                .bind(command.operation_id.to_string())
+                .bind(1_i64)
+                .bind(database_now)
+                .bind(ready_payload.schema_version)
+                .bind(&ready_payload.value)
+                .bind(&ready_payload.digest)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+                "Artifact deletion approval Job",
+            )?;
+        } else {
+            ensure_one(
+                sqlx::query(
+                    "UPDATE insight_platform.jobs SET state = 'cancelled', version = 2, terminal_at = $4, updated_at = $4 WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'waiting'",
+                )
+                .bind(command.audit.tenant_id.to_string())
+                .bind(command.operation_id.to_string())
+                .bind(1_i64)
+                .bind(database_now)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+                "Artifact deletion rejected Job",
+            )?;
+        }
+        let event_artifact_version =
+            if command.decision == ArtifactDeletionApprovalDecision::Approve {
+                approved_artifact_version
+            } else {
+                artifact.version
+            };
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "artifact",
+            &command.artifact_id.to_string(),
+            to_i64(event_artifact_version, "Artifact version")?,
+            if command.decision == ArtifactDeletionApprovalDecision::Approve {
+                "artifact.deletion_approved"
+            } else {
+                "artifact.deletion_declined"
+            },
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "approval_task_id": command.approval_task_id,
+                    "decision": format!("{:?}", command.decision).to_ascii_lowercase(),
+                    "operation_id": command.operation_id,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.artifact_id.to_string(),
+            task_state.as_str(),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn find_artifact_deletion_operation(
+        &self,
+        tenant_id: &ResourceId,
+        artifact_id: &ResourceId,
+        approval_task_id: &ResourceId,
+    ) -> Result<ResourceId, RepositoryError> {
+        if tenant_id.kind() != ResourceKind::Tenant
+            || artifact_id.kind() != ResourceKind::Artifact
+            || approval_task_id.kind() != ResourceKind::ApprovalTask
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact deletion approval lookup identity is invalid".to_owned(),
+            ));
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT job.job_id
+            FROM insight_platform.tasks AS task
+            JOIN insight_platform.jobs AS job
+              ON job.tenant_id = task.tenant_id
+             AND job.owner_kind = 'artifact' AND job.owner_id = task.owner_id
+             AND job.work_class = 'artifact'
+             AND job.request_digest = task.payload #>> '{definition,owner_snapshot_digest}'
+            WHERE task.tenant_id = $1 AND task.task_id = $2
+              AND task.task_kind = 'approval' AND task.owner_kind = 'artifact'
+              AND task.owner_id = $3
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(approval_task_id.to_string())
+        .bind(artifact_id.to_string())
+        .fetch_optional(self.pool())
+        .await?
+        .ok_or(RepositoryError::NotFound(
+            "Artifact deletion approval operation",
+        ))?;
+        row.try_get::<String, _>("job_id")?.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )
     }
 
     pub async fn begin_artifact_transaction(
@@ -3494,29 +4072,25 @@ impl ArtifactTransaction for PgArtifactTransaction {
             .fetch_one(&mut *transaction)
             .await?;
         command.validate_at(database_now)?;
-        if claim_command_receipt(
-            &mut transaction,
-            &command.audit,
-            "artifact",
-            &command.artifact_id.to_string(),
-            "artifact.delete.mark",
-        )
-        .await?
+        if let Some(result) =
+            claim_artifact_delete_receipt(&mut transaction, &command.audit, &command.artifact_id)
+                .await?
         {
             let marked = load_artifact_deletion(
                 &mut transaction,
                 &command.audit.tenant_id,
-                &command.artifact_id,
-                &command.blob_id,
-                &command.deletion_operation_id,
-                &command.deletion_job_id,
+                &result.artifact_id,
+                &result.blob_id,
+                &result.operation_id,
+                &result.operation_id,
             )
             .await?;
             transaction.commit().await?;
             return Ok(CommandOutcome::Replayed(marked));
         }
-        require_tenant_permission(&mut transaction, &command.audit, Permission::ArtifactDelete)
-            .await?;
+        let requester =
+            require_tenant_permission(&mut transaction, &command.audit, Permission::ArtifactDelete)
+                .await?;
         let (blob, aliases) =
             lock_blob_and_aliases(&mut transaction, &command.audit.tenant_id, &command.blob_id)
                 .await?;
@@ -3538,8 +4112,28 @@ impl ArtifactTransaction for PgArtifactTransaction {
             &artifact.retention_policy_revision_id,
         )
         .await?;
-        let approval_satisfied =
-            require_deletion_approval(&mut transaction, &command, &artifact, &policy).await?;
+        let approval_task_exists = if let Some(task_id) = command.approval_task_id.as_ref() {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM insight_platform.tasks WHERE tenant_id = $1 AND task_id = $2)",
+            )
+            .bind(command.audit.tenant_id.to_string())
+            .bind(task_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?
+        } else {
+            false
+        };
+        let approval_satisfied = if policy.delete_requires_approval && approval_task_exists {
+            require_deletion_approval(&mut transaction, &command, &artifact, &policy).await?
+        } else {
+            !policy.delete_requires_approval
+        };
+        let create_approval = policy.delete_requires_approval && !approval_task_exists;
+        if create_approval && command.approval_task_id.is_none() {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact deletion requires a server-owned approval Task".to_owned(),
+            ));
+        }
         let (live_reference_count, active_hold_count, provenance_count) =
             artifact_deletion_link_facts(
                 &mut transaction,
@@ -3557,7 +4151,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
             live_alias,
             ArtifactDeletionAdmissionFacts {
                 approval_required: policy.delete_requires_approval,
-                approval_satisfied,
+                approval_satisfied: approval_satisfied || create_approval,
                 gc_grace_seconds: policy.gc_grace_seconds,
                 live_reference_count,
                 active_hold_count,
@@ -3577,6 +4171,129 @@ impl ArtifactTransaction for PgArtifactTransaction {
             .validate_for_owner(&command.artifact_id)
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         let job_payload = TypedPayload::new(1, &artifact_job)?;
+        if create_approval {
+            let existing_waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM insight_platform.jobs WHERE tenant_id = $1 AND work_class = 'artifact' AND owner_kind = 'artifact' AND owner_id = $2 AND state = 'waiting')",
+            )
+            .bind(command.audit.tenant_id.to_string())
+            .bind(command.artifact_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if existing_waiting {
+                return Err(RepositoryError::Conflict(
+                    "Artifact deletion approval is already pending",
+                ));
+            }
+            let approval_task_id = command
+                .approval_task_id
+                .as_ref()
+                .expect("approval Task checked");
+            sqlx::query(
+                r#"
+                INSERT INTO insight_platform.jobs (
+                    tenant_id, job_id, work_class, owner_kind, owner_id, state,
+                    attempt_limit, scheduled_at, deadline, request_digest,
+                    payload_schema_version, payload, payload_digest, created_at, updated_at
+                ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'waiting',
+                          $4, $10, $5, $6, $7, $8, $9, $10, $10)
+                "#,
+            )
+            .bind(command.audit.tenant_id.to_string())
+            .bind(command.deletion_operation_id.to_string())
+            .bind(command.artifact_id.to_string())
+            .bind(
+                i32::try_from(self.limits.maximum_job_attempts()).map_err(|_| {
+                    RepositoryError::InvalidInput(
+                        "Artifact deletion attempt limit exceeds integer".to_owned(),
+                    )
+                })?,
+            )
+            .bind(command.deadline)
+            .bind(command.audit.request_digest.to_string())
+            .bind(job_payload.schema_version)
+            .bind(&job_payload.value)
+            .bind(&job_payload.digest)
+            .bind(database_now)
+            .execute(&mut *transaction)
+            .await?;
+            let task = TaskPayload {
+                definition: TaskDefinition::Approval {
+                    owner_version: artifact.version,
+                    owner_snapshot_digest: command.audit.request_digest.clone(),
+                    effect: Effect::Irreversible,
+                    input_digest: command.audit.request_digest.clone(),
+                    policy_revision_id: artifact.retention_policy_revision_id.clone(),
+                    approver_rule_digest: policy
+                        .canonical_digest()
+                        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+                    safe_prompt_key: "approve_artifact_deletion".to_owned(),
+                },
+                created_by: requester,
+                resolution: None,
+            };
+            task.validate()
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            let task_payload = TypedPayload::new(1, &task)?;
+            sqlx::query(
+                r#"
+                INSERT INTO insight_platform.tasks (
+                    tenant_id, task_id, task_kind, owner_kind, owner_id, run_id, node_id,
+                    invocation_id, state, generation, version, response_schema_digest,
+                    principal_snapshot_schema_version, payload_schema_version, payload,
+                    payload_digest, response_value_id, deadline, responded_at,
+                    created_at, updated_at
+                ) VALUES (
+                    $1, $2, 'approval', 'artifact', $3, NULL, NULL,
+                    NULL, 'pending', 1, 1, NULL,
+                    1, $4, $5, $6, NULL, $7, NULL, $8, $8
+                )
+                "#,
+            )
+            .bind(command.audit.tenant_id.to_string())
+            .bind(approval_task_id.to_string())
+            .bind(command.artifact_id.to_string())
+            .bind(task_payload.schema_version)
+            .bind(&task_payload.value)
+            .bind(&task_payload.digest)
+            .bind(command.deadline)
+            .bind(database_now)
+            .execute(&mut *transaction)
+            .await?;
+            append_command_event(
+                &mut transaction,
+                &command.audit,
+                "artifact",
+                &command.artifact_id.to_string(),
+                to_i64(artifact.version, "Artifact version")?,
+                "artifact.deletion_approval_requested",
+                &TypedPayload::new(
+                    1,
+                    &serde_json::json!({
+                        "approval_task_id": approval_task_id,
+                        "deletion_operation_id": command.deletion_operation_id,
+                    }),
+                )?,
+            )
+            .await?;
+            let marked = load_artifact_deletion(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.artifact_id,
+                &command.blob_id,
+                &command.deletion_operation_id,
+                &command.deletion_job_id,
+            )
+            .await?;
+            terminalize_artifact_delete_receipt(
+                &mut transaction,
+                &command.audit,
+                &marked,
+                Some(approval_task_id.clone()),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Applied(marked));
+        }
         let artifact_version = to_i64(decision.artifact_version, "Artifact version")?;
         let blob_version = to_i64(decision.blob_version, "Blob version")?;
         if decision.blob_version != blob.version {
@@ -3667,13 +4384,6 @@ impl ArtifactTransaction for PgArtifactTransaction {
             )?,
         )
         .await?;
-        terminalize_command_receipt(
-            &mut transaction,
-            &command.audit,
-            &command.artifact_id.to_string(),
-            "deleting",
-        )
-        .await?;
         let marked = load_artifact_deletion(
             &mut transaction,
             &command.audit.tenant_id,
@@ -3681,6 +4391,13 @@ impl ArtifactTransaction for PgArtifactTransaction {
             &command.blob_id,
             &command.deletion_operation_id,
             &command.deletion_job_id,
+        )
+        .await?;
+        terminalize_artifact_delete_receipt(
+            &mut transaction,
+            &command.audit,
+            &marked,
+            command.approval_task_id.clone(),
         )
         .await?;
         transaction.commit().await?;

@@ -13,7 +13,9 @@ path = "src/main.rs"
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
+bytes.workspace = true
 chrono.workspace = true
+futures.workspace = true
 insight-platform-api.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-invocations.workspace = true

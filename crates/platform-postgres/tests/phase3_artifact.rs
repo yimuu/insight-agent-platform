@@ -26,7 +26,10 @@ use insight_platform_contracts::{
 };
 use insight_platform_jobs::JobFence as DomainJobFence;
 use insight_platform_postgres::{
-    artifact_repository::{ArtifactRecoverySlot, DriveExpiredArtifactJobs},
+    artifact_repository::{
+        ArtifactDeletionApprovalDecision, ArtifactRecoverySlot, DriveExpiredArtifactJobs,
+        ResolveArtifactDeletionApproval,
+    },
     repository::{
         ArtifactWorkerRole, ClaimArtifactJobs, JobFence, NewPrincipal, NewQuotaAccount, NewTenant,
         NewTenantPrincipal, PgRepository, RepositoryError, SafetyScanShard, TypedPayload,
@@ -355,7 +358,9 @@ fn commit_scan_command(
     base: u16,
     finding: ScanFinding,
 ) -> CommitArtifactScanOutcome {
-    let observed_at = Utc::now();
+    // Keep external scanner evidence behind the database authority clock even when the
+    // container runtime and test process have sub-second clock skew.
+    let observed_at = Utc::now() - Duration::seconds(1);
     let evidence = ArtifactScanEvidenceDraft {
         schema_version: 1,
         scan_kind: scheduled.scan.scan_kind,
@@ -2467,7 +2472,6 @@ async fn artifact_upload_lifecycle_fixture() {
         retry_backoff_milliseconds: 100,
         deadline: Utc::now() + Duration::hours(1),
     };
-    seed_approved_deletion_task(&pool, &mark_shared, &retention_a).await;
     let mut wrong_approval_binding = mark_shared.clone();
     wrong_approval_binding.audit = audit(&tenant_a, &allowed_principal, 0x1a18, 'f', '0');
     assert!(matches!(
@@ -2520,14 +2524,84 @@ async fn artifact_upload_lifecycle_fixture() {
         CommandOutcome::Replayed(_)
     ));
 
+    let awaiting_approval = execute_mark_deletion(&repository, mark_shared.clone())
+        .await
+        .unwrap();
+    let CommandOutcome::Applied(awaiting_approval) = awaiting_approval else {
+        panic!("shared-Blob Artifact deletion approval request must apply");
+    };
+    assert_eq!(awaiting_approval.artifact.state, ArtifactState::Ready);
+    assert_eq!(awaiting_approval.artifact.version, 5);
+    assert_eq!(
+        awaiting_approval.deletion.operation_state,
+        JobState::Waiting
+    );
+    assert_eq!(awaiting_approval.deletion.operation_version, 1);
+    let approval_task_id = mark_shared.approval_task_id.clone().unwrap();
+    assert_eq!(
+        repository
+            .find_artifact_deletion_operation(
+                &tenant_a,
+                &concurrent_a.artifact_id,
+                &approval_task_id,
+            )
+            .await
+            .unwrap(),
+        mark_shared.deletion_operation_id
+    );
+    let task_state: String = sqlx::query_scalar(
+        "SELECT state FROM insight_platform.tasks WHERE tenant_id = $1 AND task_id = $2",
+    )
+    .bind(tenant_a.to_string())
+    .bind(approval_task_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(task_state, "pending");
+
+    let mut replay_with_new_server_ids = mark_shared.clone();
+    replay_with_new_server_ids.audit.receipt_id = id(ResourceKind::Receipt, 0x1a70);
+    replay_with_new_server_ids.audit.event_id = id(ResourceKind::Event, 0x1a71);
+    replay_with_new_server_ids.audit.outbox_id = id(ResourceKind::OutboxEvent, 0x1a72);
+    replay_with_new_server_ids.deletion_operation_id = id(ResourceKind::Job, 0x1a73);
+    replay_with_new_server_ids.deletion_job_id = id(ResourceKind::Job, 0x1a73);
+    replay_with_new_server_ids.approval_task_id = Some(id(ResourceKind::ApprovalTask, 0x1a75));
+    assert_eq!(
+        execute_mark_deletion(&repository, replay_with_new_server_ids)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(awaiting_approval.clone())
+    );
+
+    let approve = ResolveArtifactDeletionApproval {
+        audit: audit(&tenant_a, &allowed_principal, 0x1a80, '7', '8'),
+        artifact_id: concurrent_a.artifact_id.clone(),
+        operation_id: mark_shared.deletion_operation_id.clone(),
+        approval_task_id,
+        expected_artifact_version: 5,
+        expected_task_generation: 1,
+        expected_task_version: 1,
+        decision: ArtifactDeletionApprovalDecision::Approve,
+    };
+    repository
+        .resolve_artifact_deletion_approval(approve.clone())
+        .await
+        .unwrap();
+    repository
+        .resolve_artifact_deletion_approval(approve)
+        .await
+        .unwrap();
+
     let marked_shared = execute_mark_deletion(&repository, mark_shared.clone())
         .await
         .unwrap();
-    let CommandOutcome::Applied(marked_shared) = marked_shared else {
-        panic!("shared-Blob Artifact deletion mark must apply");
+    let CommandOutcome::Replayed(marked_shared) = marked_shared else {
+        panic!("approved shared-Blob Artifact deletion must replay its original authority");
     };
     assert_eq!(marked_shared.artifact.state, ArtifactState::Deleting);
     assert_eq!(marked_shared.artifact.version, 6);
+    assert_eq!(marked_shared.deletion.operation_state, JobState::Ready);
+    assert_eq!(marked_shared.deletion.operation_version, 2);
     assert_eq!(marked_shared.blob.state, BlobIntegrityState::Verified);
     assert_eq!(marked_shared.blob.version, 3);
     let (alias_artifact_id, alias_artifact_version) = match &marked_shared.deletion.mode {

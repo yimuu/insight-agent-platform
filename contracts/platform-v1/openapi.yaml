@@ -325,6 +325,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/ArtifactId"
         - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
       requestBody:
         required: true
         content:
@@ -345,6 +346,66 @@ paths:
         "403": {$ref: "#/components/responses/ApiProblem"}
         "404": {$ref: "#/components/responses/ApiProblem"}
         "409": {$ref: "#/components/responses/ApiProblem"}
+        "412": {$ref: "#/components/responses/ApiProblem"}
+        "428": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /artifacts/{artifact_id}/content:
+    get:
+      operationId: downloadArtifactContent
+      summary: Stream the current authorized Ready Artifact content
+      tags: [Artifacts]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: artifact.read
+      x-insight-idempotency: read_only
+      x-insight-rate-class: artifact_download
+      parameters:
+        - $ref: "#/components/parameters/ArtifactId"
+      responses:
+        "200":
+          description: Bounded verified attachment stream.
+          headers:
+            Content-Length: {required: true, schema: {type: integer, minimum: 1, maximum: 1073741824}}
+            Content-Disposition: {required: true, schema: {const: attachment}}
+            ETag: {required: true, schema: {type: string, minLength: 3, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            "*/*":
+              schema: {type: string, format: binary, maxLength: 1073741824}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "413": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /artifacts/{artifact_id}:delete:
+    post:
+      operationId: deleteArtifact
+      summary: Request policy-controlled deletion through a shared maintenance Job
+      tags: [Artifacts]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: artifact.delete
+      x-insight-idempotency: artifact_scoped_receipt
+      x-insight-empty-body: required
+      parameters:
+        - $ref: "#/components/parameters/ArtifactId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "202":
+          description: Deletion Job accepted or awaiting its exact policy approval.
+          headers:
+            Location: {schema: {type: string, pattern: "^/v1/operations/job_"}}
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ArtifactMutationAcceptedV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "412": {$ref: "#/components/responses/ApiProblem"}
+        "428": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
   /operations/{operation_id}:
     get:
@@ -701,6 +762,10 @@ components:
               additionalProperties: false
               required: [kind, invocation_id]
               properties: {kind: {const: invocation}, invocation_id: {$ref: "#/components/schemas/PlatformResourceId"}}
+            - type: object
+              additionalProperties: false
+              required: [kind, artifact_id]
+              properties: {kind: {const: artifact}, artifact_id: {$ref: "#/components/schemas/ArtifactId"}}
         deadline: {$ref: "#/components/schemas/UtcTimestamp"}
         responded_at: {oneOf: [{$ref: "#/components/schemas/UtcTimestamp"}, {type: "null"}]}
         created_at: {$ref: "#/components/schemas/UtcTimestamp"}

@@ -1,9 +1,13 @@
 use crate::authentication::AuthenticatedPrincipal;
 use async_trait::async_trait;
 use axum::{
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Extension, Path, State},
     http::{
-        header::{CACHE_CONTROL, ETAG, IF_MATCH, LOCATION},
+        header::{
+            CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_MATCH,
+            LOCATION,
+        },
         HeaderMap, HeaderValue, StatusCode,
     },
     response::{IntoResponse, Response},
@@ -11,13 +15,14 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Duration, Utc};
+use futures::Stream;
 use insight_platform_artifacts::ArtifactRecord;
 use insight_platform_contracts::{
-    ApiProblem, ApiProblemCode, ArtifactRef, ArtifactState, ResourceId, ResourceKind, Sha256Digest,
-    UtcTimestamp, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
+    parse_strict_json, ApiProblem, ApiProblemCode, ArtifactRef, ArtifactState, JsonLimits,
+    ResourceId, ResourceKind, Sha256Digest, UtcTimestamp, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::Arc};
+use std::{fmt, pin::Pin, sync::Arc};
 
 const MAX_PUBLIC_ARTIFACT_BYTES: u64 = 1_073_741_824;
 const MAX_MEDIA_TYPE_BYTES: usize = 255;
@@ -307,6 +312,26 @@ pub struct ReadArtifactIntent {
     pub deadline: DateTime<Utc>,
 }
 
+pub struct ArtifactContentStreamV1 {
+    pub stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+    pub content_length: u64,
+    pub media_type: String,
+    pub etag: String,
+}
+
+impl ArtifactContentStreamV1 {
+    pub fn validate(&self) -> Result<(), ArtifactApplicationError> {
+        if self.content_length == 0
+            || self.content_length > MAX_PUBLIC_ARTIFACT_BYTES
+            || !valid_media_type(&self.media_type)
+            || !valid_strong_etag(&self.etag)
+        {
+            return Err(ArtifactApplicationError::Internal);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PrepareArtifactUploadIntent {
     pub principal: AuthenticatedPrincipal,
@@ -321,6 +346,15 @@ pub struct CompleteArtifactUploadIntent {
     pub artifact_id: ResourceId,
     pub expected_artifact_version: u64,
     pub request: CompleteArtifactUploadRequestV1,
+    pub idempotency_key_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteArtifactIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub artifact_id: ResourceId,
+    pub expected_artifact_version: u64,
     pub idempotency_key_digest: Sha256Digest,
     pub deadline: DateTime<Utc>,
 }
@@ -351,10 +385,20 @@ pub trait ArtifactApplication: Send + Sync {
         intent: CompleteArtifactUploadIntent,
     ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError>;
 
+    async fn delete_artifact(
+        &self,
+        intent: DeleteArtifactIntent,
+    ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError>;
+
     async fn read_artifact(
         &self,
         intent: ReadArtifactIntent,
     ) -> Result<ArtifactViewV1, ArtifactApplicationError>;
+
+    async fn read_artifact_content(
+        &self,
+        intent: ReadArtifactIntent,
+    ) -> Result<ArtifactContentStreamV1, ArtifactApplicationError>;
 }
 
 pub trait ArtifactClock: Send + Sync {
@@ -387,7 +431,11 @@ pub fn build_artifact_router(state: ArtifactHttpState) -> Router {
         )
         .route(
             "/v1/artifacts/{artifact_action}",
-            get(read_artifact).post(complete_artifact_upload),
+            get(read_artifact).post(mutate_artifact),
+        )
+        .route(
+            "/v1/artifacts/{artifact_id}/content",
+            get(read_artifact_content),
         )
         .layer(DefaultBodyLimit::max(MAX_ARTIFACT_REQUEST_BYTES))
         .with_state(state)
@@ -429,12 +477,12 @@ async fn prepare_artifact_upload(
     }
 }
 
-async fn complete_artifact_upload(
+async fn mutate_artifact(
     State(state): State<ArtifactHttpState>,
     principal: Option<Extension<AuthenticatedPrincipal>>,
     Path(artifact_action): Path<String>,
     headers: HeaderMap,
-    Json(request): Json<CompleteArtifactUploadRequestV1>,
+    body: Bytes,
 ) -> Response {
     let Some(Extension(principal)) = principal else {
         return problem(ArtifactApplicationError::Unauthenticated);
@@ -442,10 +490,11 @@ async fn complete_artifact_upload(
     if principal.validate().is_err() {
         return problem(ArtifactApplicationError::Unauthenticated);
     }
-    if request.validate().is_err() {
-        return problem(ArtifactApplicationError::Invalid);
-    }
-    let Some(artifact_id) = artifact_action.strip_suffix(":complete-upload") else {
+    let (artifact_id, action) = if let Some(id) = artifact_action.strip_suffix(":complete-upload") {
+        (id, "complete")
+    } else if let Some(id) = artifact_action.strip_suffix(":delete") {
+        (id, "delete")
+    } else {
         return problem(ArtifactApplicationError::NotFound);
     };
     let artifact_id = match artifact_id.parse::<ResourceId>() {
@@ -460,23 +509,79 @@ async fn complete_artifact_upload(
         Ok(value) => value,
         Err(error) => return problem(error),
     };
-    match state
-        .application
-        .complete_artifact_upload(CompleteArtifactUploadIntent {
-            principal,
-            artifact_id,
-            expected_artifact_version,
-            request,
-            idempotency_key_digest,
-            deadline: state.clock.now()
-                + Duration::milliseconds(ARTIFACT_COMMAND_DEADLINE_MILLISECONDS),
-        })
-        .await
-    {
+    let deadline =
+        state.clock.now() + Duration::milliseconds(ARTIFACT_COMMAND_DEADLINE_MILLISECONDS);
+    let result = if action == "complete" {
+        if !has_json_content_type(&headers) {
+            return problem(ArtifactApplicationError::Invalid);
+        }
+        let Ok(value) = parse_strict_json(
+            &body,
+            JsonLimits {
+                max_bytes: MAX_ARTIFACT_REQUEST_BYTES,
+                max_depth: 8,
+                max_properties_per_object: 16,
+                max_items_per_array: 16,
+                max_string_bytes: MAX_COMPLETION_PROOF_BYTES,
+            },
+        ) else {
+            return problem(ArtifactApplicationError::Invalid);
+        };
+        let Ok(request) = serde_json::from_value::<CompleteArtifactUploadRequestV1>(value) else {
+            return problem(ArtifactApplicationError::Invalid);
+        };
+        if request.validate().is_err() {
+            return problem(ArtifactApplicationError::Invalid);
+        }
+        state
+            .application
+            .complete_artifact_upload(CompleteArtifactUploadIntent {
+                principal,
+                artifact_id,
+                expected_artifact_version,
+                request,
+                idempotency_key_digest,
+                deadline,
+            })
+            .await
+    } else {
+        if !body.is_empty() {
+            return problem(ArtifactApplicationError::Invalid);
+        }
+        state
+            .application
+            .delete_artifact(DeleteArtifactIntent {
+                principal,
+                artifact_id,
+                expected_artifact_version,
+                idempotency_key_digest,
+                deadline,
+            })
+            .await
+    };
+    match result {
         Ok(view) if view.validate().is_ok() => mutation_accepted_response(view),
         Ok(_) => problem(ArtifactApplicationError::Internal),
         Err(error) => problem(error),
     }
+}
+
+fn has_json_content_type(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(CONTENT_TYPE).iter();
+    let Some(value) = values.next().and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    if values.next().is_some() || value.contains(',') {
+        return false;
+    }
+    let mut parts = value.split(';').map(str::trim);
+    if !parts
+        .next()
+        .is_some_and(|media_type| media_type.eq_ignore_ascii_case("application/json"))
+    {
+        return false;
+    }
+    parts.all(|parameter| parameter.eq_ignore_ascii_case("charset=utf-8"))
 }
 
 async fn read_artifact(
@@ -508,6 +613,59 @@ async fn read_artifact(
         Ok(_) => problem(ArtifactApplicationError::Internal),
         Err(error) => problem(error),
     }
+}
+
+async fn read_artifact_content(
+    State(state): State<ArtifactHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path(artifact_id): Path<String>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ArtifactApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ArtifactApplicationError::Unauthenticated);
+    }
+    let artifact_id = match artifact_id.parse::<ResourceId>() {
+        Ok(id) if id.kind() == ResourceKind::Artifact => id,
+        _ => return problem(ArtifactApplicationError::NotFound),
+    };
+    match state
+        .application
+        .read_artifact_content(ReadArtifactIntent {
+            principal,
+            artifact_id,
+            deadline: state.clock.now()
+                + Duration::milliseconds(ARTIFACT_COMMAND_DEADLINE_MILLISECONDS),
+        })
+        .await
+    {
+        Ok(content) if content.validate().is_ok() => artifact_content_response(content),
+        Ok(_) => problem(ArtifactApplicationError::Internal),
+        Err(error) => problem(error),
+    }
+}
+
+fn artifact_content_response(content: ArtifactContentStreamV1) -> Response {
+    let (Ok(length), Ok(media_type), Ok(etag)) = (
+        HeaderValue::from_str(&content.content_length.to_string()),
+        HeaderValue::from_str(&content.media_type),
+        HeaderValue::from_str(&content.etag),
+    ) else {
+        return problem(ArtifactApplicationError::Internal);
+    };
+    let mut response = (StatusCode::OK, Body::from_stream(content.stream)).into_response();
+    response.headers_mut().insert(CONTENT_LENGTH, length);
+    response.headers_mut().insert(CONTENT_TYPE, media_type);
+    response
+        .headers_mut()
+        .insert(CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+    response.headers_mut().insert(ETAG, etag);
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private, max-age=0"),
+    );
+    response
 }
 
 fn idempotency_key_digest(headers: &HeaderMap) -> Result<Sha256Digest, ArtifactApplicationError> {
@@ -778,6 +936,21 @@ mod tests {
             })
         }
 
+        async fn delete_artifact(
+            &self,
+            intent: DeleteArtifactIntent,
+        ) -> Result<ArtifactMutationAcceptedV1, ArtifactApplicationError> {
+            Ok(ArtifactMutationAcceptedV1 {
+                schema_version: 1,
+                artifact_id: intent.artifact_id.clone(),
+                artifact_etag: artifact_etag(
+                    &intent.artifact_id,
+                    intent.expected_artifact_version + 1,
+                ),
+                operation_id: id(ResourceKind::Job, 6),
+            })
+        }
+
         async fn read_artifact(
             &self,
             intent: ReadArtifactIntent,
@@ -808,6 +981,20 @@ mod tests {
                 created_at: now.clone(),
                 updated_at: now,
                 etag: artifact_etag(&id(ResourceKind::Artifact, 3), 2),
+            })
+        }
+
+        async fn read_artifact_content(
+            &self,
+            _intent: ReadArtifactIntent,
+        ) -> Result<ArtifactContentStreamV1, ArtifactApplicationError> {
+            Ok(ArtifactContentStreamV1 {
+                stream: Box::pin(futures::stream::once(async {
+                    Ok(Bytes::from_static(b"test"))
+                })),
+                content_length: 4,
+                media_type: "text/plain".to_owned(),
+                etag: "\"sha256:test\"".to_owned(),
             })
         }
     }
@@ -904,6 +1091,38 @@ mod tests {
             response.headers().get(CACHE_CONTROL).unwrap(),
             "no-store, private, max-age=0"
         );
+
+        let content =
+            build_artifact_router(ArtifactHttpState::new(Arc::new(App), Arc::new(Clock(now))))
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/artifacts/{artifact_id}/content"))
+                        .extension(AuthenticatedPrincipal {
+                            tenant_id: id(ResourceKind::Tenant, 1),
+                            principal_id: id(ResourceKind::Principal, 2),
+                            principal_kind: PrincipalKind::AgentRunner,
+                            permissions: PermissionSet::new(vec![Permission::ArtifactRead])
+                                .unwrap(),
+                            authn_strength: AuthnStrength::MultiFactor,
+                            principal_version: 1,
+                            binding_generation: 1,
+                            binding_version: 1,
+                            credential_digest: digest('b'),
+                            credential_expires_at: now + Duration::hours(1),
+                        })
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        assert_eq!(content.status(), StatusCode::OK);
+        assert_eq!(content.headers().get(CONTENT_LENGTH).unwrap(), "4");
+        assert_eq!(content.headers().get(CONTENT_TYPE).unwrap(), "text/plain");
+        assert_eq!(
+            content.headers().get(CONTENT_DISPOSITION).unwrap(),
+            "attachment"
+        );
+        assert_eq!(content.headers().get(ETAG).unwrap(), "\"sha256:test\"");
     }
 
     #[tokio::test]
@@ -995,6 +1214,7 @@ mod tests {
         );
 
         let complete = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1005,7 +1225,7 @@ mod tests {
                         "artifact-complete-key-with-at-least-32-bytes",
                     )
                     .header(IF_MATCH, artifact_etag(&artifact_id, 1))
-                    .extension(principal)
+                    .extension(principal.clone())
                     .body(Body::from(
                         serde_json::to_vec(&CompleteArtifactUploadRequestV1 {
                             schema_version: 1,
@@ -1025,6 +1245,85 @@ mod tests {
         assert_eq!(
             complete.headers().get(ETAG).unwrap(),
             &artifact_etag(&artifact_id, 3)
+        );
+
+        let duplicate_json = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/artifacts/{artifact_id}:complete-upload"))
+                    .header("content-type", "application/json")
+                    .header(
+                        "idempotency-key",
+                        "artifact-duplicate-key-with-at-least-32-bytes",
+                    )
+                    .header(IF_MATCH, artifact_etag(&artifact_id, 1))
+                    .extension(principal.clone())
+                    .body(Body::from(
+                        r#"{"schema_version":1,"schema_version":1,"completion_proof":"v1.proof"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate_json.status(), StatusCode::BAD_REQUEST);
+
+        let wrong_content_type = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/artifacts/{artifact_id}:complete-upload"))
+                    .header("content-type", "text/plain")
+                    .header(
+                        "idempotency-key",
+                        "artifact-content-type-key-with-at-least-32-bytes",
+                    )
+                    .header(IF_MATCH, artifact_etag(&artifact_id, 1))
+                    .extension(principal.clone())
+                    .body(Body::from(
+                        r#"{"schema_version":1,"completion_proof":"v1.proof"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_content_type.status(), StatusCode::BAD_REQUEST);
+
+        let delete =
+            build_artifact_router(ArtifactHttpState::new(Arc::new(App), Arc::new(Clock(now))))
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/artifacts/{artifact_id}:delete"))
+                        .header(
+                            "idempotency-key",
+                            "artifact-delete-key-with-at-least-32-bytes",
+                        )
+                        .header(IF_MATCH, artifact_etag(&artifact_id, 3))
+                        .extension(AuthenticatedPrincipal {
+                            tenant_id: id(ResourceKind::Tenant, 1),
+                            principal_id: id(ResourceKind::Principal, 2),
+                            principal_kind: PrincipalKind::AgentRunner,
+                            permissions: PermissionSet::new(vec![Permission::ArtifactDelete])
+                                .unwrap(),
+                            authn_strength: AuthnStrength::MultiFactor,
+                            principal_version: 1,
+                            binding_generation: 1,
+                            binding_version: 1,
+                            credential_digest: digest('b'),
+                            credential_expires_at: now + Duration::hours(1),
+                        })
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        assert_eq!(delete.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            delete.headers().get(LOCATION).unwrap(),
+            &format!("/v1/operations/{}", id(ResourceKind::Job, 6))
         );
     }
 }
