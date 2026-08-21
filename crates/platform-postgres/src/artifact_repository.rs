@@ -5894,6 +5894,11 @@ fn operation_from_row(
                 expected_size_bytes: artifact.expected_size_bytes,
                 expected_digest: artifact.expected_digest.clone(),
                 retention_policy_revision_id: artifact.retention_policy_revision_id.clone(),
+                scan_policy_revision: scan.scan_policy_revision,
+                scanner_contract_digest: scan.scanner_contract_digest,
+                ruleset_digest: scan.ruleset_digest,
+                evidence_ttl_milliseconds: scan.evidence_ttl_milliseconds,
+                retry_backoff_milliseconds: scan.retry_backoff_milliseconds,
             }
         }
     };

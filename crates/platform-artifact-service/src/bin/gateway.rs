@@ -11,6 +11,10 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::Stream;
+use insight_platform_api::artifact::{
+    artifact_etag, OpaqueUploadCompletionProof, PrepareArtifactUploadRequestV1,
+    PrepareArtifactUploadResponseV1, SecretBearingUploadTargetV1,
+};
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, ArtifactBrokerReadPermit, AwsArtifactProviderCatalog,
     AwsArtifactProviderCatalogConfig, AwsArtifactUploadProvider, AwsArtifactUploadRequest,
@@ -22,7 +26,8 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ArtifactPurpose, CommandAudit, CommandOutcome,
-    DataClassification, ExactVersionRef, JsonLimits, PrincipalKind, ResourceId, Sha256Digest,
+    DataClassification, ExactVersionRef, JsonLimits, PrincipalKind, ResourceId, ResourceKind,
+    Sha256Digest, UtcTimestamp,
 };
 use insight_platform_postgres::{
     artifact_repository::GatewayArtifactSnapshot, repository::PgRepository, verify_schema,
@@ -59,6 +64,10 @@ struct GatewayConfig {
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
     artifact_provider_catalog: AwsArtifactProviderCatalogConfig,
+    write_encryption_domain_id: ResourceId,
+    scanner_contract_digest: Sha256Digest,
+    scan_evidence_ttl_milliseconds: u64,
+    scan_retry_backoff_milliseconds: u64,
     maximum_upload_target_seconds: u64,
     maximum_download_bytes: usize,
     maximum_download_in_flight: usize,
@@ -104,6 +113,11 @@ impl GatewayConfig {
             || !(2..=64).contains(&self.database_max_connections)
             || !(1..=30_000).contains(&self.database_acquire_timeout_milliseconds)
             || !(60..=3_600).contains(&self.maximum_upload_target_seconds)
+            || self.write_encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || self.scan_evidence_ttl_milliseconds == 0
+            || self.scan_evidence_ttl_milliseconds > 86_400_000
+            || self.scan_retry_backoff_milliseconds == 0
+            || self.scan_retry_backoff_milliseconds > 60_000
             || self.maximum_download_bytes == 0
             || self.maximum_download_bytes > 64 * 1024 * 1024
             || !(1..=4_096).contains(&self.maximum_download_in_flight)
@@ -122,50 +136,12 @@ struct GatewayState {
     uploads: AwsArtifactUploadProvider,
     reader: Arc<BrokeredGatewayArtifactReader>,
     maximum_upload_target_seconds: u64,
+    write_encryption_domain_id: ResourceId,
+    scanner_contract_digest: Sha256Digest,
+    scan_evidence_ttl_milliseconds: u64,
+    scan_retry_backoff_milliseconds: u64,
     maximum_download_bytes: usize,
     download_timeout_milliseconds: u64,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct PrepareUploadRequest {
-    operation_id: ResourceId,
-    artifact_id: ResourceId,
-    blob_id: ResourceId,
-    upload_grant_id: ResourceId,
-    quota_account_id: ResourceId,
-    quota_entry_id: ResourceId,
-    receipt_id: ResourceId,
-    event_id: ResourceId,
-    outbox_id: ResourceId,
-    purpose: ArtifactPurpose,
-    classification: DataClassification,
-    expected_size_bytes: u64,
-    expected_digest: Option<Sha256Digest>,
-    declared_media_type: Option<String>,
-    retention_policy_revision_id: ResourceId,
-    encryption_domain_id: ResourceId,
-    retain_until: DateTime<Utc>,
-    operation_deadline: DateTime<Utc>,
-    grant_expires_at: DateTime<Utc>,
-    upload_grant_token: String,
-    display_name: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(deny_unknown_fields)]
-struct PrepareUploadResponse {
-    schema_version: u32,
-    artifact_id: ResourceId,
-    operation_id: ResourceId,
-    upload_grant_id: ResourceId,
-    artifact_version: u64,
-    blob_version: u64,
-    operation_version: u64,
-    operation_state: String,
-    grant_version: u64,
-    upload_url: String,
-    upload_expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -258,6 +234,7 @@ struct PrincipalHeaders {
     principal_id: ResourceId,
     principal_kind: PrincipalKind,
     idempotency_key_digest: Option<Sha256Digest>,
+    idempotency_key: Option<String>,
 }
 
 struct PermitResponseStream {
@@ -319,6 +296,10 @@ async fn run() -> Result<(), GatewayError> {
         uploads,
         reader: Arc::new(reader),
         maximum_upload_target_seconds: config.maximum_upload_target_seconds,
+        write_encryption_domain_id: config.write_encryption_domain_id,
+        scanner_contract_digest: config.scanner_contract_digest,
+        scan_evidence_ttl_milliseconds: config.scan_evidence_ttl_milliseconds,
+        scan_retry_backoff_milliseconds: config.scan_retry_backoff_milliseconds,
         maximum_download_bytes: config.maximum_download_bytes,
         download_timeout_milliseconds: config.download_timeout_milliseconds,
     };
@@ -357,7 +338,7 @@ async fn ready() -> Response {
 async fn prepare_upload(
     State(state): State<GatewayState>,
     headers: HeaderMap,
-    Json(request): Json<PrepareUploadRequest>,
+    Json(request): Json<PrepareArtifactUploadRequestV1>,
 ) -> Response {
     match prepare_upload_inner(state, &headers, request).await {
         Ok(response) => no_store((StatusCode::CREATED, Json(response)).into_response()),
@@ -368,62 +349,101 @@ async fn prepare_upload(
 async fn prepare_upload_inner(
     state: GatewayState,
     headers: &HeaderMap,
-    request: PrepareUploadRequest,
-) -> Result<PrepareUploadResponse, HttpError> {
+    request: PrepareArtifactUploadRequestV1,
+) -> Result<PrepareArtifactUploadResponseV1, HttpError> {
+    request.validate().map_err(|_| HttpError::Invalid)?;
     let principal = mutation_principal(headers)?;
     let request_digest = request_digest("artifact.prepare_upload", &request)?;
     let now = Utc::now();
-    let target_seconds = state.maximum_upload_target_seconds.min(
-        u64::try_from((request.grant_expires_at - now).num_seconds())
-            .map_err(|_| HttpError::Invalid)?,
-    );
-    if target_seconds == 0 {
-        return Err(HttpError::Invalid);
+    let authority = state
+        .repository
+        .resolve_public_artifact_prepare_authority(
+            principal.tenant_id.clone(),
+            principal.principal_id.clone(),
+            principal.principal_kind,
+        )
+        .await
+        .map_err(map_repository_error)?;
+    if request
+        .declared_media_type
+        .as_ref()
+        .is_some_and(|media_type| {
+            !authority
+                .artifact_io_policy
+                .allowed_input_media_types
+                .iter()
+                .any(|allowed| allowed == media_type)
+        })
+    {
+        return Err(HttpError::Forbidden);
     }
+    let target_seconds = state.maximum_upload_target_seconds;
+    let target_duration =
+        chrono::Duration::seconds(i64::try_from(target_seconds).map_err(|_| HttpError::Invalid)?);
+    let operation_deadline = now + target_duration;
+    let retention_seconds = authority
+        .retention_policy
+        .minimum_retention_seconds
+        .max(target_seconds);
+    let retain_until = now
+        + chrono::Duration::seconds(
+            i64::try_from(retention_seconds).map_err(|_| HttpError::Invalid)?,
+        );
+    let operation_id = server_id(ResourceKind::Job);
+    let artifact_id = server_id(ResourceKind::Artifact);
+    let blob_id = server_id(ResourceKind::InternalBlob);
+    let upload_grant_id = server_id(ResourceKind::ArtifactGrant);
+    let quota_entry_id = server_id(ResourceKind::QuotaLedgerEntry);
+    let candidate_proof = completion_proof(&principal, &artifact_id, &upload_grant_id)?;
     let upload = state
         .uploads
         .prepare_upload(AwsArtifactUploadRequest {
             tenant_id: &principal.tenant_id,
-            artifact_id: &request.artifact_id,
-            blob_id: &request.blob_id,
-            encryption_domain_id: &request.encryption_domain_id,
+            artifact_id: &artifact_id,
+            blob_id: &blob_id,
+            encryption_domain_id: &state.write_encryption_domain_id,
             expected_size_bytes: request.expected_size_bytes,
             declared_media_type: request.declared_media_type.as_deref(),
             expires_in: Duration::from_secs(target_seconds),
         })
         .await
         .map_err(|_| HttpError::Unavailable)?;
-    let token_digest = token_digest(&request.upload_grant_token)?;
+    let token_digest = token_digest(candidate_proof.as_str())?;
     let command = PrepareArtifact {
         audit: audit(
-            principal,
-            request.receipt_id,
-            request.event_id,
-            request.outbox_id,
+            principal.clone(),
+            server_id(ResourceKind::Receipt),
+            server_id(ResourceKind::Event),
+            server_id(ResourceKind::OutboxEvent),
             request_digest,
-            request.operation_deadline,
+            operation_deadline,
         ),
-        operation_id: request.operation_id,
-        artifact_id: request.artifact_id,
-        blob_id: request.blob_id,
-        upload_grant_id: request.upload_grant_id,
-        quota_account_id: request.quota_account_id,
-        quota_entry_id: request.quota_entry_id,
+        operation_id,
+        artifact_id: artifact_id.clone(),
+        blob_id: blob_id.clone(),
+        upload_grant_id: upload_grant_id.clone(),
+        quota_account_id: authority.quota_account_id,
+        quota_entry_id,
         purpose: request.purpose,
         classification: request.classification,
         expected_size_bytes: request.expected_size_bytes,
         expected_digest: request.expected_digest,
         declared_media_type: request.declared_media_type,
-        retention_policy_revision_id: request.retention_policy_revision_id,
-        retain_until: request.retain_until,
-        operation_deadline: request.operation_deadline,
-        grant_expires_at: request.grant_expires_at,
+        retention_policy_revision_id: authority.retention_policy_revision.revision_id,
+        scan_policy_revision: authority.artifact_io_policy_revision,
+        scanner_contract_digest: state.scanner_contract_digest.clone(),
+        ruleset_digest: authority.artifact_io_rules_digest,
+        evidence_ttl_milliseconds: state.scan_evidence_ttl_milliseconds,
+        retry_backoff_milliseconds: state.scan_retry_backoff_milliseconds,
+        retain_until,
+        operation_deadline,
+        grant_expires_at: operation_deadline,
         grant_token_digest: token_digest,
-        storage_backend: upload.storage_backend,
-        storage_binding_digest: upload.storage_binding_digest,
-        object_reference_ciphertext: upload.object_reference_ciphertext,
-        key_id: upload.key_id,
-        encryption_domain_id: request.encryption_domain_id,
+        storage_backend: upload.storage_backend.clone(),
+        storage_binding_digest: upload.storage_binding_digest.clone(),
+        object_reference_ciphertext: upload.object_reference_ciphertext.clone(),
+        key_id: upload.key_id.clone(),
+        encryption_domain_id: state.write_encryption_domain_id.clone(),
         display_name: request.display_name,
     };
     let mut transaction = state
@@ -440,22 +460,44 @@ async fn prepare_upload_inner(
         .await
         .map_err(|_| HttpError::Unavailable)?;
     let prepared = outcome_value(outcome);
-    Ok(PrepareUploadResponse {
+    let upload = if prepared.artifact.artifact_id == artifact_id && prepared.blob.blob_id == blob_id
+    {
+        upload
+    } else {
+        state
+            .uploads
+            .prepare_upload(AwsArtifactUploadRequest {
+                tenant_id: &principal.tenant_id,
+                artifact_id: &prepared.artifact.artifact_id,
+                blob_id: &prepared.blob.blob_id,
+                encryption_domain_id: &state.write_encryption_domain_id,
+                expected_size_bytes: prepared.artifact.expected_size_bytes,
+                declared_media_type: prepared.artifact.declared_media_type.as_deref(),
+                expires_in: Duration::from_secs(target_seconds),
+            })
+            .await
+            .map_err(|_| HttpError::Unavailable)?
+    };
+    let completion_proof = completion_proof(
+        &principal,
+        &prepared.artifact.artifact_id,
+        &prepared.grant.upload_grant_id,
+    )?;
+    let artifact_etag = artifact_etag(&prepared.artifact.artifact_id, prepared.artifact.version);
+    let response = PrepareArtifactUploadResponseV1 {
         schema_version: 1,
         artifact_id: prepared.artifact.artifact_id,
         operation_id: prepared.operation.operation_id,
         upload_grant_id: prepared.grant.upload_grant_id,
-        artifact_version: prepared.artifact.version,
-        blob_version: prepared.blob.version,
-        operation_version: prepared.operation.version,
-        operation_state: prepared.operation.state.to_string(),
-        grant_version: prepared.grant.version,
-        upload_url: upload.upload_url,
-        upload_expires_at: now
-            + chrono::Duration::seconds(
-                i64::try_from(target_seconds).map_err(|_| HttpError::Invalid)?,
-            ),
-    })
+        artifact_etag,
+        upload_target: SecretBearingUploadTargetV1 {
+            url: upload.upload_url,
+            completion_proof,
+        },
+        upload_expires_at: UtcTimestamp::from_datetime(operation_deadline),
+    };
+    response.validate().map_err(|_| HttpError::Unavailable)?;
+    Ok(response)
 }
 
 async fn complete_upload(
@@ -788,6 +830,7 @@ fn read_principal(headers: &HeaderMap) -> Result<PrincipalHeaders, HttpError> {
         principal_kind: PrincipalKind::from_str(value("x-platform-principal-kind")?)
             .map_err(|_| HttpError::Unauthenticated)?,
         idempotency_key_digest: None,
+        idempotency_key: None,
     })
 }
 
@@ -796,10 +839,34 @@ fn mutation_principal(headers: &HeaderMap) -> Result<PrincipalHeaders, HttpError
     let idempotency_key = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty() && value.len() <= 512)
+        .filter(|value| value.len() >= 32 && value.len() <= 512)
         .ok_or(HttpError::Invalid)?;
     principal.idempotency_key_digest = Some(token_digest(idempotency_key)?);
+    principal.idempotency_key = Some(idempotency_key.to_owned());
     Ok(principal)
+}
+
+fn server_id(kind: ResourceKind) -> ResourceId {
+    ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7()).expect("server-generated ID kind")
+}
+
+fn completion_proof(
+    principal: &PrincipalHeaders,
+    artifact_id: &ResourceId,
+    upload_grant_id: &ResourceId,
+) -> Result<OpaqueUploadCompletionProof, HttpError> {
+    let idempotency_key = principal
+        .idempotency_key
+        .as_deref()
+        .ok_or(HttpError::Invalid)?;
+    let message = format!(
+        "insight.platform/artifact-upload-completion/v1\0{}\0{}\0{}\0{}",
+        principal.tenant_id, principal.principal_id, artifact_id, upload_grant_id
+    );
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, idempotency_key.as_bytes());
+    let tag = ring::hmac::sign(&key, message.as_bytes());
+    OpaqueUploadCompletionProof::new(format!("v1.{}", lower_hex(tag.as_ref())))
+        .map_err(|_| HttpError::Invalid)
 }
 
 fn audit(

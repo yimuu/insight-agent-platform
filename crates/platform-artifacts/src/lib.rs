@@ -15,7 +15,8 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
     canonical_digest, ArtifactGrantOperation, ArtifactPurpose, ArtifactRef, ArtifactReferenceKind,
     ArtifactState, ArtifactWorkloadAudience, BlobIntegrityState, CommandAudit, CommandOutcome,
-    DataClassification, HardLimitProfile, JobState, ResourceId, ResourceKind, Sha256Digest,
+    DataClassification, ExactVersionRef, HardLimitProfile, JobState, ResourceId, ResourceKind,
+    Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
@@ -193,10 +194,28 @@ pub struct ArtifactUploadOperationSnapshot {
     pub expected_size_bytes: u64,
     pub expected_digest: Option<Sha256Digest>,
     pub retention_policy_revision_id: ResourceId,
+    pub scan_policy_revision: ExactVersionRef,
+    pub scanner_contract_digest: Sha256Digest,
+    pub ruleset_digest: Sha256Digest,
+    pub evidence_ttl_milliseconds: u64,
+    pub retry_backoff_milliseconds: u64,
 }
 
 impl ArtifactUploadOperationSnapshot {
     pub fn canonical_digest(&self) -> Result<Sha256Digest, ArtifactCommandError> {
+        if self.schema_version != 1
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.retention_policy_revision_id.kind() != ResourceKind::PolicyRevision
+            || self.scan_policy_revision.resource_kind != ResourceKind::PolicyRevision
+            || self.scan_policy_revision.validate().is_err()
+            || self.expected_size_bytes == 0
+            || self.evidence_ttl_milliseconds == 0
+            || self.evidence_ttl_milliseconds > 86_400_000
+            || self.retry_backoff_milliseconds == 0
+            || self.retry_backoff_milliseconds > MAX_ARTIFACT_RETRY_BACKOFF_MILLISECONDS
+        {
+            return Err(ArtifactCommandError::InvalidVerification);
+        }
         digest(self)
     }
 }
@@ -255,6 +274,11 @@ pub struct PrepareArtifact {
     pub expected_digest: Option<Sha256Digest>,
     pub declared_media_type: Option<String>,
     pub retention_policy_revision_id: ResourceId,
+    pub scan_policy_revision: ExactVersionRef,
+    pub scanner_contract_digest: Sha256Digest,
+    pub ruleset_digest: Sha256Digest,
+    pub evidence_ttl_milliseconds: u64,
+    pub retry_backoff_milliseconds: u64,
     pub retain_until: DateTime<Utc>,
     pub operation_deadline: DateTime<Utc>,
     pub grant_expires_at: DateTime<Utc>,
@@ -320,6 +344,7 @@ impl PrepareArtifact {
             return Err(ArtifactCommandError::InvalidStorageBinding);
         }
         self.metadata_snapshot()?;
+        self.operation_snapshot().canonical_digest()?;
         self.upload_grant_snapshot()?;
         self.blob_security_domain().canonical_digest()?;
         Ok(())
@@ -337,6 +362,11 @@ impl PrepareArtifact {
             expected_size_bytes: self.expected_size_bytes,
             expected_digest: self.expected_digest.clone(),
             retention_policy_revision_id: self.retention_policy_revision_id.clone(),
+            scan_policy_revision: self.scan_policy_revision.clone(),
+            scanner_contract_digest: self.scanner_contract_digest.clone(),
+            ruleset_digest: self.ruleset_digest.clone(),
+            evidence_ttl_milliseconds: self.evidence_ttl_milliseconds,
+            retry_backoff_milliseconds: self.retry_backoff_milliseconds,
         }
     }
 
@@ -1974,6 +2004,15 @@ mod tests {
             expected_digest: None,
             declared_media_type: None,
             retention_policy_revision_id: id(ResourceKind::PolicyRevision, "100c"),
+            scan_policy_revision: ExactVersionRef::new(
+                id(ResourceKind::PolicyRevision, "100e"),
+                digest('e'),
+            )
+            .unwrap(),
+            scanner_contract_digest: digest('f'),
+            ruleset_digest: digest('1'),
+            evidence_ttl_milliseconds: 60_000,
+            retry_backoff_milliseconds: 100,
             retain_until: now + ChronoDuration::days(1),
             operation_deadline: now + ChronoDuration::hours(1),
             grant_expires_at: now + ChronoDuration::minutes(30),
@@ -2078,6 +2117,14 @@ mod tests {
         assert_eq!(command.expected_digest, None);
         assert_eq!(command.declared_media_type, None);
         assert_eq!(command.upload_grant_snapshot().unwrap().operations.len(), 2);
+        let frozen = command.operation_snapshot();
+        frozen.canonical_digest().unwrap();
+        assert_eq!(frozen.scan_policy_revision, command.scan_policy_revision);
+        assert_eq!(
+            frozen.scanner_contract_digest,
+            command.scanner_contract_digest
+        );
+        assert_eq!(frozen.ruleset_digest, command.ruleset_digest);
     }
 
     #[test]
