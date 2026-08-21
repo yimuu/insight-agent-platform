@@ -552,6 +552,32 @@ paths:
         "404": {$ref: "#/components/responses/ApiProblem"}
         "409": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
+  /context-datasets/{dataset_id}/versions/{generation_id}:
+    get:
+      operationId: getContextDatasetGeneration
+      summary: Read one immutable Context Dataset Generation
+      tags: [Contexts]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: context.read
+      x-insight-idempotency: read_only
+      x-insight-rate-class: control_read
+      x-insight-audit: access_log_only
+      parameters:
+        - $ref: "#/components/parameters/ContextDatasetId"
+        - $ref: "#/components/parameters/DatasetGenerationId"
+      responses:
+        "200":
+          description: One immutable generation from the typed Dataset root.
+          headers:
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ContextDatasetGenerationViewV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /mcp/oauth/callback:
     get:
       operationId: completeMcpOAuthCallback
@@ -719,6 +745,16 @@ components:
       in: path
       required: true
       schema: {$ref: "#/components/schemas/ContextDeploymentId"}
+    ContextDatasetId:
+      name: dataset_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/ContextDatasetId"}
+    DatasetGenerationId:
+      name: generation_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/DatasetGenerationId"}
     IfMatch:
       name: If-Match
       in: header
@@ -805,6 +841,9 @@ components:
     ContextDatasetId:
       type: string
       pattern: "^dset_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    DatasetGenerationId:
+      type: string
+      pattern: "^dgen_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     DataClassification:
       type: string
       enum: [public, internal, confidential, restricted]
@@ -1099,6 +1138,123 @@ components:
             - type: "null"
         created_at: {$ref: "#/components/schemas/UtcTimestamp"}
         updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    PolicyExactVersionRef:
+      type: object
+      additionalProperties: false
+      required: [revision_id, resource_kind, semantic_digest]
+      properties:
+        revision_id:
+          type: string
+          pattern: "^polr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        resource_kind: {const: policy_revision}
+        semantic_digest: {$ref: "#/components/schemas/Digest"}
+    ContextExactDeploymentRef:
+      type: object
+      additionalProperties: false
+      required: [deployment_id, resource_kind, deployment_digest]
+      properties:
+        deployment_id: {$ref: "#/components/schemas/ContextDeploymentId"}
+        resource_kind: {const: context_deployment}
+        deployment_digest: {$ref: "#/components/schemas/Digest"}
+    ModelExactDeploymentRef:
+      type: object
+      additionalProperties: false
+      required: [deployment_id, resource_kind, deployment_digest]
+      properties:
+        deployment_id:
+          type: string
+          pattern: "^moddep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        resource_kind: {const: model_deployment}
+        deployment_digest: {$ref: "#/components/schemas/Digest"}
+    ContextDatasetGenerationSpec:
+      type: object
+      additionalProperties: false
+      required: [context_deployment, source_manifest_digest, parser_profile, chunker_profile, embedding_model_deployment, ranking_profile, index_manifest, validation_evidence, created_by_operation_id]
+      properties:
+        context_deployment: {$ref: "#/components/schemas/ContextExactDeploymentRef"}
+        source_manifest_digest: {$ref: "#/components/schemas/Digest"}
+        parser_profile: {$ref: "#/components/schemas/PolicyExactVersionRef"}
+        chunker_profile: {$ref: "#/components/schemas/PolicyExactVersionRef"}
+        embedding_model_deployment:
+          oneOf:
+            - {$ref: "#/components/schemas/ModelExactDeploymentRef"}
+            - {type: "null"}
+        ranking_profile: {$ref: "#/components/schemas/PolicyExactVersionRef"}
+        index_manifest: {$ref: "#/components/schemas/ArtifactRef"}
+        validation_evidence: {$ref: "#/components/schemas/ArtifactRef"}
+        created_by_operation_id: {$ref: "#/components/schemas/JobId"}
+    ContextDatasetPublishedVersionPayload:
+      type: object
+      additionalProperties: false
+      required: [document, validation]
+      properties:
+        document:
+          type: object
+          additionalProperties: false
+          required: [resource_kind, spec]
+          properties:
+            resource_kind: {const: context_dataset}
+            spec:
+              type: object
+              additionalProperties: false
+              required: [authoring_package, contract_digest, dependency_versions, policy_versions, generation]
+              properties:
+                authoring_package:
+                  type: object
+                  additionalProperties: false
+                  required: [artifact, manifest_digest]
+                  properties:
+                    artifact: {$ref: "#/components/schemas/ArtifactRef"}
+                    manifest_digest: {$ref: "#/components/schemas/Digest"}
+                contract_digest: {$ref: "#/components/schemas/Digest"}
+                dependency_versions:
+                  type: array
+                  minItems: 3
+                  maxItems: 3
+                  items: {$ref: "#/components/schemas/PolicyExactVersionRef"}
+                policy_versions:
+                  type: array
+                  minItems: 1
+                  maxItems: 1
+                  items: {$ref: "#/components/schemas/PolicyExactVersionRef"}
+                generation: {$ref: "#/components/schemas/ContextDatasetGenerationSpec"}
+        validation:
+          type: object
+          additionalProperties: false
+          required: [validator_digest, validated_draft_digest, dependency_closure_digest, security_evidence_digest, warnings]
+          properties:
+            validator_digest: {$ref: "#/components/schemas/Digest"}
+            validated_draft_digest: {$ref: "#/components/schemas/Digest"}
+            dependency_closure_digest: {$ref: "#/components/schemas/Digest"}
+            security_evidence_digest: {$ref: "#/components/schemas/Digest"}
+            warnings:
+              type: array
+              maxItems: 256
+              items:
+                type: object
+                additionalProperties: false
+                required: [code, path]
+                properties:
+                  code: {type: string, pattern: "^[a-z][a-z0-9_]{0,63}$"}
+                  path: {type: string, maxLength: 512}
+    ContextDatasetGenerationViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, resource_id, resource_kind, resource_version_id, revision_no, content_digest, artifact_id, payload, created_at, etag]
+      properties:
+        schema_version: {const: 1}
+        resource_id: {$ref: "#/components/schemas/ContextDatasetId"}
+        resource_kind: {const: context_dataset}
+        resource_version_id: {$ref: "#/components/schemas/DatasetGenerationId"}
+        revision_no: {type: integer, minimum: 1}
+        content_digest: {$ref: "#/components/schemas/Digest"}
+        artifact_id:
+          oneOf:
+            - {$ref: "#/components/schemas/ArtifactId"}
+            - {type: "null"}
+        payload: {$ref: "#/components/schemas/ContextDatasetPublishedVersionPayload"}
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
         etag: {type: string, minLength: 1, maxLength: 128}
     PlatformResourceId:
       $ref: ./schemas/resource-id.schema.json

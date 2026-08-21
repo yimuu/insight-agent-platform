@@ -291,6 +291,16 @@ def check_foundation_surfaces(errors):
     ]
     if any(fragment not in openapi for fragment in dataset_build_contract):
         errors.append("public Context Dataset build OpenAPI contract is incomplete")
+    dataset_generation_contract = [
+        "  /context-datasets/{dataset_id}/versions/{generation_id}:",
+        "      operationId: getContextDatasetGeneration",
+        "      x-insight-permission: context.read",
+        "    DatasetGenerationId:",
+        "    ContextDatasetGenerationViewV1:",
+        "    ContextDatasetPublishedVersionPayload:",
+    ]
+    if any(fragment not in openapi for fragment in dataset_generation_contract):
+        errors.append("public Context Dataset generation OpenAPI contract is incomplete")
     run_contract = [
         "  /runs:",
         "  /runs/{run_id}:",
@@ -377,6 +387,7 @@ def check_foundation_surfaces(errors):
         "  /operations/{operation_id}:",
         "  /mcp-servers/{mcp_server_id}/deployments/{mcp_deployment_id}:discover:",
         "  /contexts/{context_id}/deployments/{context_deployment_id}:build-dataset:",
+        "  /context-datasets/{dataset_id}/versions/{generation_id}:",
         "  /mcp/oauth/callback:",
     ]:
         errors.append("OpenAPI exposes a path outside the reviewed implementing slice")

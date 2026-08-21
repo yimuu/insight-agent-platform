@@ -534,6 +534,10 @@ impl ResourceHttpState {
 
 pub fn build_resource_router(state: ResourceHttpState) -> Router {
     Router::new()
+        .route(
+            "/v1/context-datasets/{dataset_id}/versions/{generation_id}",
+            get(read_context_dataset_generation),
+        )
         .route("/v1/{resource_noun}", post(create_resource))
         .route("/v1/{resource_noun}/{resource_id}", get(read_resource))
         .route(
@@ -562,6 +566,42 @@ pub fn build_resource_router(state: ResourceHttpState) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_RESOURCE_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn read_context_dataset_generation(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path((dataset_id, generation_id)): Path<(String, String)>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    let dataset_id = match dataset_id.parse::<ResourceId>() {
+        Ok(dataset_id) if dataset_id.kind() == ResourceKind::ContextDataset => dataset_id,
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let generation_id = match generation_id.parse::<ResourceId>() {
+        Ok(generation_id) if generation_id.kind() == ResourceKind::DatasetGeneration => {
+            generation_id
+        }
+        _ => return problem(ResourceApplicationError::NotFound),
+    };
+    let deadline =
+        state.clock.now() + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS);
+    read_resource_version_intent(
+        state,
+        ReadResourceVersionIntent {
+            principal,
+            resource_kind: RegistryResourceKind::ContextDataset,
+            resource_id: dataset_id,
+            resource_version_id: generation_id,
+            deadline,
+        },
+    )
+    .await
 }
 
 async fn control_deployment_action(
@@ -1077,14 +1117,25 @@ async fn read_resource_version(
         Ok(version_id) if resource_kind.allows_version_kind(version_id.kind()) => version_id,
         _ => return problem(ResourceApplicationError::NotFound),
     };
-    let intent = ReadResourceVersionIntent {
-        principal,
-        resource_kind,
-        resource_id,
-        resource_version_id,
-        deadline: state.clock.now()
-            + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS),
-    };
+    let deadline =
+        state.clock.now() + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS);
+    read_resource_version_intent(
+        state,
+        ReadResourceVersionIntent {
+            principal,
+            resource_kind,
+            resource_id,
+            resource_version_id,
+            deadline,
+        },
+    )
+    .await
+}
+
+async fn read_resource_version_intent(
+    state: ResourceHttpState,
+    intent: ReadResourceVersionIntent,
+) -> Response {
     match state.application.read_resource_version(intent).await {
         Ok(view) if view.validate().is_ok() => read_resource_version_response(view),
         Ok(_) => problem(ResourceApplicationError::Internal),
@@ -1654,7 +1705,8 @@ mod tests {
     use axum::{body::to_bytes, http::Request};
     use insight_platform_contracts::{
         operation_etag, AgentDeploymentClosure, ArtifactRef, AuthnStrength, AuthoringPackage,
-        DataClassification, ExactVersionRef, Permission, PermissionSet, PolicyKind,
+        ContextDatasetGenerationSpec, ContextDatasetResourceSpec, DataClassification,
+        ExactDeploymentRef, ExactVersionRef, Permission, PermissionSet, PolicyKind,
         PolicyResourceSpec, PrincipalKind, PublicJobKind, PublicJobState, PublicJobTarget,
         UtcTimestamp, ValidationSummary,
     };
@@ -1724,6 +1776,56 @@ mod tests {
                 sandbox_secret_resolution: None,
             }),
         }
+    }
+
+    fn dataset_document() -> ResourceDocument {
+        let index_manifest = ArtifactRef::new(
+            id(ResourceKind::Artifact, 50),
+            fixed_digest('b'),
+            128,
+            "application/json",
+            DataClassification::Internal,
+            Some("index.json".to_owned()),
+        )
+        .unwrap();
+        let parser_profile =
+            ExactVersionRef::new(id(ResourceKind::PolicyRevision, 51), fixed_digest('c')).unwrap();
+        let chunker_profile =
+            ExactVersionRef::new(id(ResourceKind::PolicyRevision, 52), fixed_digest('d')).unwrap();
+        let ranking_profile =
+            ExactVersionRef::new(id(ResourceKind::PolicyRevision, 53), fixed_digest('e')).unwrap();
+        ResourceDocument::ContextDataset(ContextDatasetResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: index_manifest.clone(),
+                manifest_digest: fixed_digest('f'),
+            },
+            contract_digest: fixed_digest('1'),
+            dependency_versions: vec![
+                parser_profile.clone(),
+                chunker_profile.clone(),
+                ranking_profile.clone(),
+            ],
+            policy_versions: vec![ExactVersionRef::new(
+                id(ResourceKind::PolicyRevision, 54),
+                fixed_digest('2'),
+            )
+            .unwrap()],
+            generation: ContextDatasetGenerationSpec {
+                context_deployment: ExactDeploymentRef::new(
+                    id(ResourceKind::ContextDeployment, 55),
+                    fixed_digest('3'),
+                )
+                .unwrap(),
+                source_manifest_digest: fixed_digest('4'),
+                parser_profile,
+                chunker_profile,
+                embedding_model_deployment: None,
+                ranking_profile,
+                index_manifest: index_manifest.clone(),
+                validation_evidence: index_manifest,
+                created_by_operation_id: id(ResourceKind::Job, 56),
+            },
+        })
     }
 
     struct FixedClock(DateTime<Utc>);
@@ -1844,7 +1946,11 @@ mod tests {
                 content_digest: content_digest.clone(),
                 artifact_id: None,
                 payload: PublishedVersionPayload {
-                    document: request_body().document,
+                    document: if intent.resource_kind == RegistryResourceKind::ContextDataset {
+                        dataset_document()
+                    } else {
+                        request_body().document
+                    },
                     validation: ValidationSummary {
                         validator_digest: fixed_digest('4'),
                         validated_draft_digest: fixed_digest('5'),
@@ -2015,6 +2121,54 @@ mod tests {
                 etag: operation_etag(&operation_id.to_string(), 1),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn context_dataset_generation_has_a_read_only_typed_route() {
+        let now = Utc::now();
+        let router = build_resource_router(ResourceHttpState::new(
+            Arc::new(FixtureApplication {
+                intents: Mutex::new(Vec::new()),
+            }),
+            Arc::new(FixedClock(now)),
+        ));
+        let dataset_id = id(ResourceKind::ContextDataset, 48);
+        let generation_id = id(ResourceKind::DatasetGeneration, 49);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/context-datasets/{dataset_id}/versions/{generation_id}"
+                    ))
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let view: ResourceVersionViewV1 = serde_json::from_slice(&body).unwrap();
+        assert_eq!(view.resource_id, dataset_id);
+        assert_eq!(view.resource_version_id, generation_id);
+        assert_eq!(view.resource_kind, RegistryResourceKind::ContextDataset);
+
+        let wrong_kind = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/context-datasets/{}/versions/{generation_id}",
+                        id(ResourceKind::ContextSourceInterface, 48)
+                    ))
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_kind.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
