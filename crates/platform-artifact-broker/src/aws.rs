@@ -1054,11 +1054,23 @@ fn map_catalog_configuration_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_sdk_s3::primitives::ByteStream;
+    use insight_platform_artifacts::EncryptedArtifactObjectReference;
+    use insight_platform_contracts::{ArtifactRef, DataClassification};
 
     fn digest(character: char) -> Sha256Digest {
         format!("sha256:{}", character.to_string().repeat(64))
             .parse()
             .unwrap()
+    }
+
+    fn id(kind: ResourceKind, suffix: &str) -> ResourceId {
+        format!(
+            "{}_0198f1c8-32e4-75e1-a9e8-d95ca0f4{suffix}",
+            kind.descriptor().prefix
+        )
+        .parse()
+        .unwrap()
     }
 
     fn valid_kms() -> AwsKmsKeyBindingConfig {
@@ -1138,6 +1150,149 @@ mod tests {
         assert_eq!(
             metadata_from_s3(Some("version-1"), Some(9), "version-1", 8),
             Err(ArtifactObjectStoreError::TooLarge)
+        );
+    }
+
+    #[tokio::test]
+    async fn real_https_s3_and_kms_round_trip_exact_generation_when_configured() {
+        let (Ok(endpoint), Ok(bucket), Ok(key_id)) = (
+            std::env::var("PLATFORM_TEST_AWS_ENDPOINT"),
+            std::env::var("PLATFORM_TEST_S3_BUCKET"),
+            std::env::var("PLATFORM_TEST_KMS_KEY_ID"),
+        ) else {
+            return;
+        };
+        let mut kms = valid_kms();
+        kms.endpoint.clone_from(&endpoint);
+        kms.key_id = key_id;
+        kms.kms_binding_digest = kms.calculated_digest().unwrap();
+        let mut s3 = valid_s3(kms.kms_binding_digest.clone());
+        s3.endpoint = endpoint;
+        s3.bucket = bucket;
+        s3.storage_binding_digest = s3.calculated_digest().unwrap();
+        let storage_binding_digest = s3.storage_binding_digest.clone();
+        let catalog = AwsArtifactProviderCatalog::install(AwsArtifactProviderCatalogConfig {
+            schema_version: 1,
+            write_storage_binding_digest: storage_binding_digest.clone(),
+            s3_storage_bindings: vec![s3],
+            kms_key_bindings: vec![kms],
+        })
+        .await
+        .unwrap();
+        catalog.check_readiness().await.unwrap();
+        let (upload, unsealer, stores) = catalog.into_gateway_components();
+
+        let tenant_id = id(ResourceKind::Tenant, "4001");
+        let artifact_id = id(ResourceKind::Artifact, "4002");
+        let blob_id = id(ResourceKind::InternalBlob, "4003");
+        let encryption_domain_id = id(ResourceKind::EncryptionDomain, "4004");
+        let bytes = b"real s3/kms fixture";
+        let prepared = upload
+            .prepare_upload(AwsArtifactUploadRequest {
+                tenant_id: &tenant_id,
+                artifact_id: &artifact_id,
+                blob_id: &blob_id,
+                encryption_domain_id: &encryption_domain_id,
+                expected_size_bytes: u64::try_from(bytes.len()).unwrap(),
+                declared_media_type: Some("application/octet-stream"),
+                expires_in: Duration::from_secs(60),
+            })
+            .await
+            .unwrap();
+        assert!(prepared.upload_url.starts_with("https://"));
+        let object_key = format!("v1/{tenant_id}/{artifact_id}/{blob_id}");
+        let put = upload
+            .s3
+            .put_object()
+            .bucket(&*upload.bucket)
+            .key(&object_key)
+            .content_type("application/octet-stream")
+            .body(ByteStream::from_static(bytes))
+            .send()
+            .await
+            .unwrap();
+        let generation = put.version_id().unwrap().to_owned();
+        let completed = upload
+            .complete_upload(
+                &tenant_id,
+                &artifact_id,
+                &blob_id,
+                &generation,
+                u64::try_from(bytes.len()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.object_generation, generation);
+
+        let artifact = ArtifactRef::new(
+            artifact_id,
+            crate::sha256(bytes),
+            u64::try_from(bytes.len()).unwrap(),
+            "application/octet-stream",
+            DataClassification::Internal,
+            Some("real-s3-kms-fixture.bin".to_owned()),
+        )
+        .unwrap();
+        let wrong_tenant_authorization = AuthorizedArtifactObjectRead {
+            tenant_id: id(ResourceKind::Tenant, "4099"),
+            blob_id: blob_id.clone(),
+            artifact: artifact.clone(),
+            backend: prepared.storage_backend.clone(),
+            storage_binding_digest: storage_binding_digest.clone(),
+            encryption_domain_id: encryption_domain_id.clone(),
+            key_id: prepared.key_id.clone(),
+            object_reference_ciphertext: EncryptedArtifactObjectReference::new(
+                prepared.object_reference_ciphertext.clone(),
+            )
+            .unwrap(),
+            object_generation: generation.clone(),
+            authorization_digest: digest('e'),
+        };
+        assert!(unsealer.unseal(&wrong_tenant_authorization).await.is_err());
+        let authorized = AuthorizedArtifactObjectRead {
+            tenant_id,
+            blob_id,
+            artifact,
+            backend: prepared.storage_backend,
+            storage_binding_digest: storage_binding_digest.clone(),
+            encryption_domain_id,
+            key_id: prepared.key_id,
+            object_reference_ciphertext: EncryptedArtifactObjectReference::new(
+                prepared.object_reference_ciphertext,
+            )
+            .unwrap(),
+            object_generation: generation.clone(),
+            authorization_digest: digest('f'),
+        };
+        let locator = unsealer.unseal(&authorized).await.unwrap();
+        let locator: serde_json::Value = serde_json::from_slice(locator.expose()).unwrap();
+        assert_eq!(locator["object_key"], object_key);
+        assert!(locator.get("object_generation").is_none());
+
+        let store = stores.get(&storage_binding_digest).unwrap();
+        assert_eq!(
+            store
+                .read_exact(&object_key, &generation, bytes.len())
+                .await
+                .unwrap()
+                .expose(),
+            bytes
+        );
+        assert_eq!(
+            store.head_exact(&object_key, "wrong-generation").await,
+            Err(ArtifactObjectStoreError::NotFound)
+        );
+        assert_eq!(
+            store
+                .delete_exact(&object_key, &generation)
+                .await
+                .unwrap()
+                .object_generation,
+            generation
+        );
+        assert_eq!(
+            store.head_exact(&object_key, &generation).await,
+            Err(ArtifactObjectStoreError::NotFound)
         );
     }
 }
