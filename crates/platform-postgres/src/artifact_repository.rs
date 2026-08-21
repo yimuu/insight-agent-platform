@@ -674,6 +674,105 @@ impl PgRepository {
         Ok(GatewayArtifactSnapshot { artifact, content })
     }
 
+    pub async fn load_gateway_artifact_upload_target(
+        &self,
+        tenant_id: ResourceId,
+        principal_id: ResourceId,
+        principal_kind: PrincipalKind,
+        artifact_id: ResourceId,
+    ) -> Result<PreparedArtifact, RepositoryError> {
+        if tenant_id.kind() != ResourceKind::Tenant
+            || principal_id.kind() != ResourceKind::Principal
+            || artifact_id.kind() != ResourceKind::Artifact
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact upload completion identity is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = begin_read_only_repeatable(self.pool()).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            &tenant_id,
+            &principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::ArtifactWrite) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT artifact.blob_id,
+                   artifact.metadata_schema_version, artifact.metadata,
+                   artifact.metadata_digest,
+                   upload_grant.artifact_link_id AS upload_grant_id
+            FROM insight_platform.artifacts AS artifact
+            JOIN insight_platform.artifact_links AS upload_grant
+              ON upload_grant.tenant_id = artifact.tenant_id
+             AND upload_grant.target_artifact_id = artifact.artifact_id
+             AND upload_grant.link_kind = 'grant' AND upload_grant.state = 'active'
+             AND upload_grant.released_at IS NULL
+             AND (upload_grant.expires_at IS NULL OR upload_grant.expires_at > clock_timestamp())
+            WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
+              AND artifact.state = 'staging' AND artifact.terminal_at IS NULL
+            ORDER BY upload_grant.artifact_link_id
+            LIMIT 2
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(artifact_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let [row] = rows.as_slice() else {
+            return if rows.is_empty() {
+                Err(RepositoryError::NotFound("staging Artifact upload"))
+            } else {
+                Err(RepositoryError::CorruptRow(
+                    "staging Artifact has multiple active upload Grants".to_owned(),
+                ))
+            };
+        };
+        let metadata_payload = payload_from_row(
+            row,
+            "metadata_schema_version",
+            "metadata",
+            "metadata_digest",
+        )?;
+        let metadata: ArtifactMetadataSnapshot =
+            decode_versioned_payload(&metadata_payload, "Artifact metadata")?;
+        metadata
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let blob_id = parse_id(
+            row.try_get::<Option<String>, _>("blob_id")?
+                .ok_or_else(|| {
+                    RepositoryError::CorruptRow("staging Artifact has no Blob".to_owned())
+                })?,
+            "staging Artifact Blob",
+        )?;
+        let upload_grant_id = parse_id(
+            row.try_get("upload_grant_id")?,
+            "staging Artifact upload Grant",
+        )?;
+        let prepared = load_artifact_bundle(
+            &mut transaction,
+            &tenant_id,
+            &artifact_id,
+            &blob_id,
+            &upload_grant_id,
+            &metadata.operation_id,
+        )
+        .await?;
+        if prepared.grant.snapshot.subject_principal_id != principal_id
+            || prepared.grant.state != ArtifactLinkState::Active
+            || prepared.operation.state != JobState::Waiting
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        transaction.commit().await?;
+        Ok(prepared)
+    }
+
     pub async fn load_gateway_artifact_deletion_target(
         &self,
         tenant_id: ResourceId,

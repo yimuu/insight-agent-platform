@@ -12,8 +12,9 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::Stream;
 use insight_platform_api::artifact::{
-    artifact_etag, OpaqueUploadCompletionProof, PrepareArtifactUploadRequestV1,
-    PrepareArtifactUploadResponseV1, SecretBearingUploadTargetV1,
+    artifact_etag, ArtifactMutationAcceptedV1, CompleteArtifactUploadRequestV1,
+    OpaqueUploadCompletionProof, PrepareArtifactUploadRequestV1, PrepareArtifactUploadResponseV1,
+    SecretBearingUploadTargetV1,
 };
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, ArtifactBrokerReadPermit, AwsArtifactProviderCatalog,
@@ -26,8 +27,8 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ArtifactPurpose, CommandAudit, CommandOutcome,
-    DataClassification, ExactVersionRef, JsonLimits, PrincipalKind, ResourceId, ResourceKind,
-    Sha256Digest, UtcTimestamp,
+    DataClassification, JsonLimits, PrincipalKind, ResourceId, ResourceKind, Sha256Digest,
+    UtcTimestamp,
 };
 use insight_platform_postgres::{
     artifact_repository::GatewayArtifactSnapshot, repository::PgRepository, verify_schema,
@@ -142,47 +143,6 @@ struct GatewayState {
     scan_retry_backoff_milliseconds: u64,
     maximum_download_bytes: usize,
     download_timeout_milliseconds: u64,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct CompleteUploadRequest {
-    operation_id: ResourceId,
-    artifact_id: ResourceId,
-    blob_id: ResourceId,
-    upload_grant_id: ResourceId,
-    complete_receipt_id: ResourceId,
-    complete_event_id: ResourceId,
-    complete_outbox_id: ResourceId,
-    scan_receipt_id: ResourceId,
-    scan_event_id: ResourceId,
-    scan_outbox_id: ResourceId,
-    expected_artifact_version: u64,
-    expected_blob_version: u64,
-    expected_operation_version: u64,
-    expected_grant_version: u64,
-    grant_generation: u64,
-    upload_grant_token: String,
-    object_generation: String,
-    expected_size_bytes: u64,
-    scan_policy_revision: ExactVersionRef,
-    scanner_contract_digest: Sha256Digest,
-    ruleset_digest: Sha256Digest,
-    evidence_ttl_milliseconds: u64,
-    retry_backoff_milliseconds: u64,
-    deadline: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(deny_unknown_fields)]
-struct CompleteUploadResponse {
-    schema_version: u32,
-    artifact_id: ResourceId,
-    operation_id: ResourceId,
-    artifact_state: String,
-    artifact_version: u64,
-    operation_state: String,
-    operation_version: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -504,12 +464,9 @@ async fn complete_upload(
     State(state): State<GatewayState>,
     AxumPath(artifact_id): AxumPath<ResourceId>,
     headers: HeaderMap,
-    Json(request): Json<CompleteUploadRequest>,
+    Json(request): Json<CompleteArtifactUploadRequestV1>,
 ) -> Response {
-    if artifact_id != request.artifact_id {
-        return problem(HttpError::Invalid);
-    }
-    match complete_upload_inner(state, &headers, request).await {
+    match complete_upload_inner(state, &headers, artifact_id, request).await {
         Ok(response) => no_store((StatusCode::ACCEPTED, Json(response)).into_response()),
         Err(error) => problem(error),
     }
@@ -518,23 +475,34 @@ async fn complete_upload(
 async fn complete_upload_inner(
     state: GatewayState,
     headers: &HeaderMap,
-    request: CompleteUploadRequest,
-) -> Result<CompleteUploadResponse, HttpError> {
+    artifact_id: ResourceId,
+    request: CompleteArtifactUploadRequestV1,
+) -> Result<ArtifactMutationAcceptedV1, HttpError> {
+    request.validate().map_err(|_| HttpError::Invalid)?;
     let principal = mutation_principal(headers)?;
     let complete_digest = request_digest("artifact.complete_upload", &request)?;
     let scan_digest = request_digest("artifact.schedule_scan", &request)?;
+    let target = state
+        .repository
+        .load_gateway_artifact_upload_target(
+            principal.tenant_id.clone(),
+            principal.principal_id.clone(),
+            principal.principal_kind,
+            artifact_id,
+        )
+        .await
+        .map_err(map_repository_error)?;
+    let grant_token_digest = token_digest(request.completion_proof.as_str())?;
     let observed = state
         .uploads
-        .complete_upload(
+        .complete_current_upload(
             &principal.tenant_id,
-            &request.artifact_id,
-            &request.blob_id,
-            &request.object_generation,
-            request.expected_size_bytes,
+            &target.artifact.artifact_id,
+            &target.blob.blob_id,
+            target.artifact.expected_size_bytes,
         )
         .await
         .map_err(|_| HttpError::Unavailable)?;
-    let grant_token_digest = token_digest(&request.upload_grant_token)?;
     let mut transaction = state
         .repository
         .begin()
@@ -544,21 +512,21 @@ async fn complete_upload_inner(
         .complete_upload(CompleteArtifactUpload {
             audit: audit(
                 principal.clone(),
-                request.complete_receipt_id,
-                request.complete_event_id,
-                request.complete_outbox_id,
+                server_id(ResourceKind::Receipt),
+                server_id(ResourceKind::Event),
+                server_id(ResourceKind::OutboxEvent),
                 complete_digest,
-                request.deadline,
+                target.operation.deadline,
             ),
-            operation_id: request.operation_id.clone(),
-            artifact_id: request.artifact_id.clone(),
-            blob_id: request.blob_id.clone(),
-            upload_grant_id: request.upload_grant_id,
-            expected_artifact_version: request.expected_artifact_version,
-            expected_blob_version: request.expected_blob_version,
-            expected_operation_version: request.expected_operation_version,
-            expected_grant_version: request.expected_grant_version,
-            grant_generation: request.grant_generation,
+            operation_id: target.operation.operation_id.clone(),
+            artifact_id: target.artifact.artifact_id.clone(),
+            blob_id: target.blob.blob_id.clone(),
+            upload_grant_id: target.grant.upload_grant_id.clone(),
+            expected_artifact_version: target.artifact.version,
+            expected_blob_version: target.blob.version,
+            expected_operation_version: target.operation.version,
+            expected_grant_version: target.grant.version,
+            grant_generation: target.grant.snapshot.generation,
             grant_token_digest,
             object_generation: observed.object_generation,
             observed_size_bytes: observed.observed_size_bytes,
@@ -571,25 +539,25 @@ async fn complete_upload_inner(
         .schedule_initial_scan(ScheduleInitialArtifactScan {
             audit: audit(
                 principal,
-                request.scan_receipt_id,
-                request.scan_event_id,
-                request.scan_outbox_id,
+                server_id(ResourceKind::Receipt),
+                server_id(ResourceKind::Event),
+                server_id(ResourceKind::OutboxEvent),
                 scan_digest,
-                request.deadline,
+                target.operation.deadline,
             ),
-            scan_job_id: request.operation_id.clone(),
-            operation_id: request.operation_id,
-            artifact_id: request.artifact_id,
-            blob_id: request.blob_id,
+            scan_job_id: target.operation.operation_id.clone(),
+            operation_id: target.operation.operation_id,
+            artifact_id: target.artifact.artifact_id,
+            blob_id: target.blob.blob_id,
             expected_artifact_version: completed.artifact.version,
             expected_blob_version: completed.blob.version,
             expected_operation_version: completed.operation.version,
-            scan_policy_revision: request.scan_policy_revision,
-            scanner_contract_digest: request.scanner_contract_digest,
-            ruleset_digest: request.ruleset_digest,
-            evidence_ttl_milliseconds: request.evidence_ttl_milliseconds,
-            retry_backoff_milliseconds: request.retry_backoff_milliseconds,
-            deadline: request.deadline,
+            scan_policy_revision: target.operation.snapshot.scan_policy_revision,
+            scanner_contract_digest: target.operation.snapshot.scanner_contract_digest,
+            ruleset_digest: target.operation.snapshot.ruleset_digest,
+            evidence_ttl_milliseconds: target.operation.snapshot.evidence_ttl_milliseconds,
+            retry_backoff_milliseconds: target.operation.snapshot.retry_backoff_milliseconds,
+            deadline: target.operation.deadline,
         })
         .await
         .map_err(map_repository_error)?;
@@ -598,15 +566,15 @@ async fn complete_upload_inner(
         .await
         .map_err(|_| HttpError::Unavailable)?;
     let scan = outcome_value(scan);
-    Ok(CompleteUploadResponse {
+    let artifact_etag = artifact_etag(&scan.artifact.artifact_id, scan.artifact.version);
+    let response = ArtifactMutationAcceptedV1 {
         schema_version: 1,
         artifact_id: scan.artifact.artifact_id,
+        artifact_etag,
         operation_id: scan.operation.operation_id,
-        artifact_state: scan.artifact.state.to_string(),
-        artifact_version: scan.artifact.version,
-        operation_state: scan.operation.state.to_string(),
-        operation_version: scan.operation.version,
-    })
+    };
+    response.validate().map_err(|_| HttpError::Unavailable)?;
+    Ok(response)
 }
 
 async fn get_artifact(

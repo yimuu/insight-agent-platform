@@ -846,9 +846,11 @@ async fn seed_retention_root(
         INSERT INTO insight_platform.artifact_blobs (
             tenant_id, blob_id, backend, storage_binding_digest,
             security_domain_digest, object_reference_ciphertext, object_generation, key_id,
-            encryption_domain_id, content_digest, size_bytes, state, verified_at
+            encryption_domain_id, content_digest, size_bytes, state, verified_at,
+            created_at, updated_at
         ) VALUES ($1, $2, 'builtin', $3, $4, $5, 'release-generation-1',
-                  'release-key', $6, $7, 64, 'verified', clock_timestamp())
+                  'release-key', $6, $7, 64, 'verified', statement_timestamp(),
+                  statement_timestamp(), statement_timestamp())
         "#,
     )
     .bind(tenant_id.to_string())
@@ -1266,6 +1268,34 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(prepared.blob.size_bytes, None);
     assert_eq!(prepared.blob.object_generation, None);
     assert_eq!(prepared.grant.snapshot.token_digest, digest('c'));
+    let public_completion_target = repository
+        .load_gateway_artifact_upload_target(
+            tenant_a.clone(),
+            allowed_principal.clone(),
+            PrincipalKind::TenantAdmin,
+            prepared.artifact.artifact_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(public_completion_target, prepared);
+    assert_eq!(
+        public_completion_target
+            .operation
+            .snapshot
+            .scan_policy_revision,
+        scan_policy_a
+    );
+    assert!(matches!(
+        repository
+            .load_gateway_artifact_upload_target(
+                tenant_a.clone(),
+                denied_principal.clone(),
+                PrincipalKind::TenantAdmin,
+                prepared.artifact.artifact_id.clone(),
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
     let verified_without_facts = sqlx::query(
         "UPDATE insight_platform.artifact_blobs SET state = 'verified' WHERE tenant_id = $1 AND blob_id = $2",
     )

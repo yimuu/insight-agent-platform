@@ -496,10 +496,39 @@ impl AwsArtifactUploadProvider {
         object_generation: &str,
         expected_size_bytes: u64,
     ) -> Result<CompletedAwsArtifactUploadEvidence, AwsArtifactUploadError> {
+        self.complete_upload_inner(
+            tenant_id,
+            artifact_id,
+            blob_id,
+            Some(object_generation),
+            expected_size_bytes,
+        )
+        .await
+    }
+
+    pub async fn complete_current_upload(
+        &self,
+        tenant_id: &ResourceId,
+        artifact_id: &ResourceId,
+        blob_id: &ResourceId,
+        expected_size_bytes: u64,
+    ) -> Result<CompletedAwsArtifactUploadEvidence, AwsArtifactUploadError> {
+        self.complete_upload_inner(tenant_id, artifact_id, blob_id, None, expected_size_bytes)
+            .await
+    }
+
+    async fn complete_upload_inner(
+        &self,
+        tenant_id: &ResourceId,
+        artifact_id: &ResourceId,
+        blob_id: &ResourceId,
+        expected_generation: Option<&str>,
+        expected_size_bytes: u64,
+    ) -> Result<CompletedAwsArtifactUploadEvidence, AwsArtifactUploadError> {
         if tenant_id.kind() != ResourceKind::Tenant
             || artifact_id.kind() != ResourceKind::Artifact
             || blob_id.kind() != ResourceKind::InternalBlob
-            || !valid_object_generation(object_generation)
+            || expected_generation.is_some_and(|generation| !valid_object_generation(generation))
             || expected_size_bytes > self.maximum_object_bytes
         {
             return Err(AwsArtifactUploadError::InvalidRequest);
@@ -510,14 +539,21 @@ impl AwsArtifactUploadProvider {
             .head_object()
             .bucket(&*self.bucket)
             .key(&object_key)
-            .version_id(object_generation)
+            .set_version_id(expected_generation.map(ToOwned::to_owned))
             .send()
             .await
             .map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
+        let observed_generation = output
+            .version_id()
+            .filter(|generation| valid_object_generation(generation))
+            .ok_or(AwsArtifactUploadError::InvalidEvidence)?;
+        if expected_generation.is_some_and(|expected| expected != observed_generation) {
+            return Err(AwsArtifactUploadError::InvalidEvidence);
+        }
         let metadata = metadata_from_s3(
             output.version_id(),
             output.content_length(),
-            object_generation,
+            observed_generation,
             self.maximum_object_bytes,
         )
         .map_err(|error| match error {
@@ -536,7 +572,7 @@ impl AwsArtifactUploadProvider {
             "artifact_id": artifact_id,
             "blob_id": blob_id,
             "kind": "s3_upload_observed",
-            "object_generation": object_generation,
+            "object_generation": observed_generation,
             "schema_version": 1,
             "size_bytes": metadata.byte_length,
             "storage_binding_digest": self.storage_binding_digest,
@@ -546,7 +582,7 @@ impl AwsArtifactUploadProvider {
         .parse()
         .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
         Ok(CompletedAwsArtifactUploadEvidence {
-            object_generation: object_generation.to_owned(),
+            object_generation: observed_generation.to_owned(),
             observed_size_bytes: metadata.byte_length,
             backend_evidence_digest,
         })
