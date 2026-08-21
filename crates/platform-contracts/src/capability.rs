@@ -516,7 +516,7 @@ pub enum CapabilityBackendBinding {
     Sandbox {
         runtime: ExactVersionRef,
         package: ExactVersionRef,
-        profile: ExactVersionRef,
+        profile: crate::ExactSandboxProfileBinding,
         isolation: SandboxIsolationClass,
         network_policy: ExactVersionRef,
         resource_policy: ExactVersionRef,
@@ -593,7 +593,6 @@ impl CapabilityBackendBinding {
                 for (reference, kind) in [
                     (runtime, ResourceKind::SandboxRuntimeRevision),
                     (package, ResourceKind::SandboxPackageRevision),
-                    (profile, ResourceKind::SandboxProfileRevision),
                 ] {
                     reference
                         .validate()
@@ -602,6 +601,9 @@ impl CapabilityBackendBinding {
                         return Err(CapabilityContractError::InvalidBinding);
                     }
                 }
+                profile
+                    .validate()
+                    .map_err(|_| CapabilityContractError::InvalidBinding)?;
                 let mut policies = vec![network_policy, resource_policy, artifact_io_policy];
                 policies.extend(secret_policy.iter());
                 validate_distinct_policy_refs(&policies)
@@ -663,7 +665,7 @@ impl CapabilityBackendBinding {
                 let mut values = vec![
                     runtime,
                     package,
-                    profile,
+                    &profile.revision,
                     network_policy,
                     resource_policy,
                     artifact_io_policy,
@@ -677,6 +679,7 @@ impl CapabilityBackendBinding {
     pub fn exact_deployment_refs(&self) -> Vec<&ExactDeploymentRef> {
         match self {
             Self::Mcp { mcp_deployment, .. } => vec![mcp_deployment],
+            Self::Sandbox { profile, .. } => vec![&profile.deployment],
             _ => Vec::new(),
         }
     }

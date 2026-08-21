@@ -8,11 +8,11 @@ use crate::{
     repository::{
         append_command_event, append_scheduler_event, begin_read_only_repeatable,
         claim_command_receipt, decode_deployment_closure, decode_versioned_payload, job_from_row,
-        job_projection, load_deployment, load_job_for_update_by_text, load_resource,
-        payload_from_row, require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page,
-        terminalize_command_receipt, validate_safety_scan_request, JobRecord, PgRepository,
-        RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
-        MAX_JOB_LEASE_MILLISECONDS,
+        job_projection, load_deployment, load_exact_active_policy_deployment,
+        load_job_for_update_by_text, load_resource, payload_from_row, require_tenant_permission,
+        safety_scan_cursor_from_row, safety_scan_page, terminalize_command_receipt,
+        validate_safety_scan_request, JobRecord, PgRepository, RepositoryError, SafetyScanCursor,
+        SafetyScanPage, SafetyScanShard, TypedPayload, MAX_JOB_LEASE_MILLISECONDS,
     },
 };
 use chrono::{DateTime, Duration, Utc};
@@ -22,11 +22,11 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, ArtifactGrantOperation, ArtifactPurpose, ArtifactReferenceKind,
-    CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle, ExactVersionRef,
-    Failure, FailureClass, FailureCode, FailureSource, InvocationState, JobState, Permission,
-    PlatformFailureCode, PolicyKind, PolicyResourceSpec, QuotaDimension, RegistryResourceKind,
-    ResourceDocument, ResourceId, ResourceKind, Retryability, SandboxJobState, Sha256Digest,
-    ValueRef, WorkClass,
+    CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle, ExactPolicyBinding,
+    ExactSandboxProfileBinding, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
+    InvocationState, JobState, Permission, PlatformFailureCode, PolicyKind, PolicyResourceSpec,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
+    SandboxJobState, Sha256Digest, ValueRef, WorkClass,
 };
 use insight_platform_invocations::{
     decide_defer_to_sandbox, decide_detached_job_outcome, CapabilityControlKind,
@@ -4353,7 +4353,7 @@ async fn verify_sandbox_exact_bindings(
         &request.runtime,
         &request.package_revision,
         &request.package,
-        &request.profile_revision,
+        &request.profile_binding,
         &request.profile,
         &request.policies,
     )
@@ -4372,7 +4372,7 @@ pub(crate) async fn verify_managed_mcp_session_sandbox_bindings(
         &request.runtime,
         &request.package_revision,
         &request.package,
-        &request.profile_revision,
+        &request.profile_binding,
         &request.profile,
         &request.policies,
     )
@@ -4387,7 +4387,7 @@ async fn verify_sandbox_resource_closure(
     runtime_document: &insight_platform_contracts::SandboxRuntimeResourceSpec,
     package_revision: &ExactVersionRef,
     package_document: &insight_platform_contracts::SandboxPackageResourceSpec,
-    profile_revision: &ExactVersionRef,
+    profile_binding: &ExactSandboxProfileBinding,
     profile_document: &insight_platform_contracts::SandboxProfileResourceSpec,
     policies: &SandboxExecutionPolicyClosure,
 ) -> Result<(), RepositoryError> {
@@ -4405,10 +4405,60 @@ async fn verify_sandbox_resource_closure(
         RegistryResourceKind::SandboxPackage,
     )
     .await?;
+    let profile_deployment = load_deployment(
+        transaction,
+        tenant_id,
+        &profile_binding.deployment.deployment_id,
+    )
+    .await?;
+    if profile_deployment.bindings.digest
+        != profile_binding.deployment.deployment_digest.to_string()
+        || profile_deployment.resource_version_id
+            != profile_binding.revision.revision_id.to_string()
+    {
+        return Err(RepositoryError::Conflict(
+            "Sandbox frozen Profile Deployment binding",
+        ));
+    }
+    let profile_closure = match decode_deployment_closure(&profile_deployment.bindings)? {
+        DeploymentClosure::SandboxProfile(closure) => closure,
+        _ => {
+            return Err(RepositoryError::Conflict(
+                "Sandbox frozen Profile Deployment closure",
+            ));
+        }
+    };
+    let profile_resource_id = profile_deployment
+        .resource_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let profile_resource = load_resource(transaction, tenant_id, &profile_resource_id).await?;
+    let profile_deployment_id = profile_binding.deployment.deployment_id.to_string();
+    if profile_resource.resource_kind != RegistryResourceKind::SandboxProfile.as_str()
+        || profile_resource.lifecycle_state != EntityLifecycle::Active.as_str()
+        || profile_resource.gate_state != "enabled"
+        || profile_resource.active_deployment_id.as_deref() != Some(profile_deployment_id.as_str())
+    {
+        return Err(RepositoryError::Conflict("Sandbox Profile Deployment gate"));
+    }
+    if profile_closure.profile_revision != profile_binding.revision
+        || profile_closure.runtime_revision != *runtime_revision
+        || profile_closure.policy_bindings.len() != profile_document.policy_versions.len()
+        || profile_closure.policy_bindings.iter().any(|binding| {
+            !profile_document
+                .policy_versions
+                .iter()
+                .any(|revision| revision == &binding.revision)
+        })
+    {
+        return Err(RepositoryError::Conflict(
+            "Sandbox frozen Profile Deployment closure",
+        ));
+    }
     let profile = load_enabled_exact_published_version(
         transaction,
         tenant_id,
-        profile_revision,
+        &profile_binding.revision,
         RegistryResourceKind::SandboxProfile,
     )
     .await?;
@@ -4423,35 +4473,40 @@ async fn verify_sandbox_resource_closure(
     let isolation_policy = load_exact_sandbox_policy(
         transaction,
         tenant_id,
-        &profile_document.isolation_policy,
+        exact_sandbox_policy_binding(&profile_closure, &profile_document.isolation_policy)?,
         PolicyKind::Isolation,
     )
     .await?;
     let resource_policy = load_exact_sandbox_policy(
         transaction,
         tenant_id,
-        &profile_document.resource_policy,
+        exact_sandbox_policy_binding(&profile_closure, &profile_document.resource_policy)?,
         PolicyKind::Resource,
     )
     .await?;
     let network_policy = load_exact_sandbox_policy(
         transaction,
         tenant_id,
-        &profile_document.network_policy,
+        exact_sandbox_policy_binding(&profile_closure, &profile_document.network_policy)?,
         PolicyKind::Network,
     )
     .await?;
     let artifact_io_policy = load_exact_sandbox_policy(
         transaction,
         tenant_id,
-        &profile_document.artifact_io_policy,
+        exact_sandbox_policy_binding(&profile_closure, &profile_document.artifact_io_policy)?,
         PolicyKind::ArtifactIo,
     )
     .await?;
     let secret_policy = match &profile_document.secret_policy {
         Some(exact) => Some(
-            load_exact_sandbox_policy(transaction, tenant_id, exact, PolicyKind::SecretResolution)
-                .await?,
+            load_exact_sandbox_policy(
+                transaction,
+                tenant_id,
+                exact_sandbox_policy_binding(&profile_closure, exact)?,
+                PolicyKind::SecretResolution,
+            )
+            .await?,
         ),
         None => None,
     };
@@ -4471,29 +4526,38 @@ async fn verify_sandbox_resource_closure(
     Ok(())
 }
 
+fn exact_sandbox_policy_binding<'a>(
+    closure: &'a insight_platform_contracts::SandboxProfileDeploymentClosure,
+    revision: &ExactVersionRef,
+) -> Result<&'a ExactPolicyBinding, RepositoryError> {
+    closure
+        .policy_bindings
+        .iter()
+        .find(|binding| &binding.revision == revision)
+        .ok_or(RepositoryError::Conflict(
+            "Sandbox Profile Policy Deployment binding",
+        ))
+}
+
 async fn load_exact_sandbox_policy(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
-    exact: &ExactVersionRef,
+    binding: &ExactPolicyBinding,
     expected_kind: PolicyKind,
 ) -> Result<PolicyResourceSpec, RepositoryError> {
-    let published = load_enabled_exact_published_version(
+    let (revision, policy) = load_exact_active_policy_deployment(
         transaction,
         tenant_id,
-        exact,
-        RegistryResourceKind::Policy,
+        &binding.deployment,
+        expected_kind,
     )
     .await?;
-    published.document.validate().map_err(|failure| {
-        RepositoryError::CorruptRow(format!("published Sandbox Policy is invalid: {failure}"))
-    })?;
-    match published.document {
-        ResourceDocument::Policy(policy) if policy.policy_kind == expected_kind => Ok(policy),
-        ResourceDocument::Policy(_) => Err(RepositoryError::Conflict("Sandbox exact Policy kind")),
-        _ => Err(RepositoryError::CorruptRow(
-            "Sandbox Policy revision contains the wrong Resource document".to_owned(),
-        )),
+    if revision != binding.revision {
+        return Err(RepositoryError::Conflict(
+            "Sandbox exact Policy Deployment Revision",
+        ));
     }
+    Ok(policy)
 }
 
 async fn lock_and_persist_artifact_grants(

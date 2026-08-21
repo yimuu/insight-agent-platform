@@ -79,7 +79,7 @@ pub struct ManagedMcpSandboxSessionRequest {
     pub runtime: insight_platform_contracts::SandboxRuntimeResourceSpec,
     pub package_revision: insight_platform_contracts::ExactVersionRef,
     pub package: insight_platform_contracts::SandboxPackageResourceSpec,
-    pub profile_revision: insight_platform_contracts::ExactVersionRef,
+    pub profile_binding: insight_platform_contracts::ExactSandboxProfileBinding,
     pub profile: insight_platform_contracts::SandboxProfileResourceSpec,
     pub policies: Box<SandboxExecutionPolicyClosure>,
     pub isolation_class: SandboxIsolationClass,
@@ -121,7 +121,7 @@ impl ManagedMcpSandboxSessionRequest {
         self.package_revision
             .validate()
             .map_err(|_| SandboxContractError::InvalidExactBinding)?;
-        self.profile_revision
+        self.profile_binding
             .validate()
             .map_err(|_| SandboxContractError::InvalidExactBinding)?;
         ResourceDocument::SandboxRuntime(self.runtime.clone())
@@ -152,10 +152,13 @@ impl ManagedMcpSandboxSessionRequest {
             || self.identity.logical_job_id != self.subscription_binding.job_id
             || self.runtime_revision.resource_kind != ResourceKind::SandboxRuntimeRevision
             || self.package_revision.resource_kind != ResourceKind::SandboxPackageRevision
-            || self.profile_revision.resource_kind != ResourceKind::SandboxProfileRevision
+            || self.profile_binding.deployment.resource_kind
+                != ResourceKind::SandboxProfileDeployment
+            || self.profile_binding.revision.resource_kind
+                != ResourceKind::SandboxProfileRevision
             || runtime != &self.runtime_revision
             || package != &self.package_revision
-            || profile != &self.profile_revision
+            || profile != &self.profile_binding
             || *isolation != SandboxIsolationClass::MicroVm
             || self.isolation_class != SandboxIsolationClass::MicroVm
             || isolation_policy != &self.profile.isolation_policy

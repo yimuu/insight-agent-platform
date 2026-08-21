@@ -15,13 +15,14 @@ use insight_platform_contracts::{
     CapabilityIdempotencyKind, CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec,
     CapabilityProgressContract, CapabilityProgressDurability, CapabilityProgressMode,
     ClosedJsonSchema, CodeTrustClass, CommandAudit, CommandOutcome, DataClassification,
-    DeploymentClosure, Effect, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
-    InvocationState, JsonLimits, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, SandboxAbiVersion,
-    SandboxArtifactIoPolicyDocument, SandboxCleanupPolicy, SandboxEntrypointKind,
-    SandboxIsolationClass, SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument,
-    SandboxPackageResourceSpec, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
+    DeploymentClosure, Effect, ExactDeploymentRef, ExactPolicyBinding, ExactSandboxProfileBinding,
+    ExactVersionRef, InvocationState, JsonLimits, Permission, PermissionSet,
+    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
+    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, RegistryResourceKind,
+    ResourceDocument, ResourceId, ResourceKind, SandboxAbiVersion, SandboxArtifactIoPolicyDocument,
+    SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass,
+    SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument, SandboxPackageResourceSpec,
+    SandboxProfileDeploymentClosure, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
     SandboxRuntimeFamily, SandboxRuntimeResourceSpec, Sha256Digest, TenantConfig,
     TenantPrincipalPayload, ValidationSummary, ValueRef,
 };
@@ -256,6 +257,14 @@ fn validation() -> ValidationSummary {
     }
 }
 
+fn policy_deployment_closure(revision: ExactVersionRef) -> PolicyDeploymentClosure {
+    PolicyDeploymentClosure {
+        policy_revision: revision,
+        applicability_digest: sha('7'),
+        qualification_evidence: artifact(77, '8'),
+    }
+}
+
 fn rebind_sandbox_input_grant(
     request: &mut insight_platform_sandbox::SandboxExecutionRequest,
     grant_suffix: u16,
@@ -267,6 +276,22 @@ fn rebind_sandbox_input_grant(
     *grant = grant.clone().seal().unwrap();
 }
 
+fn reidentify_accept_command(
+    command: &mut AcceptSandboxExecution,
+    base_suffix: u16,
+    digest_character: char,
+) {
+    command.audit.receipt_id = id(ResourceKind::Receipt, base_suffix);
+    command.audit.event_id = id(ResourceKind::Event, base_suffix + 1);
+    command.audit.outbox_id = id(ResourceKind::OutboxEvent, base_suffix + 2);
+    command.audit.idempotency_key_digest = sha(digest_character);
+    command.audit.request_digest = command.request.request_digest.clone();
+    command.usage_reservation_id = id(ResourceKind::UsageReservation, base_suffix + 3);
+    command.quota_entry_ids = (base_suffix + 4..base_suffix + 8)
+        .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+        .collect();
+}
+
 struct Fixture {
     tenant_id: ResourceId,
     principal_id: ResourceId,
@@ -276,6 +301,7 @@ struct Fixture {
     capability_interface: ExactVersionRef,
     error_schema_digest: Sha256Digest,
     capability_closure: CapabilityDeploymentClosure,
+    profile_closure: SandboxProfileDeploymentClosure,
     resources: Vec<(
         ResourceId,
         RegistryResourceKind,
@@ -346,7 +372,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
         allowed_trust_classes: vec![CodeTrustClass::BuiltIn],
         allowed_runtime_families: vec![SandboxRuntimeFamily::WasmWasi],
         minimum_isolation: SandboxIsolationClass::Wasm,
-        isolation_policy,
+        isolation_policy: isolation_policy.clone(),
         resource_policy: resource_policy.clone(),
         network_policy: network_policy.clone(),
         artifact_io_policy: artifact_io_policy.clone(),
@@ -354,6 +380,44 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
         cleanup: SandboxCleanupPolicy::SingleUseDestroy,
         max_job_duration_milliseconds: 60_000,
         semantic_digest: sha('3'),
+    };
+    let profile_closure = SandboxProfileDeploymentClosure {
+        profile_revision: profile_revision.clone(),
+        runtime_revision: runtime_revision.clone(),
+        policy_bindings: [
+            (&isolation_policy, 73),
+            (&resource_policy, 74),
+            (&network_policy, 75),
+            (&artifact_io_policy, 76),
+        ]
+        .into_iter()
+        .map(|(revision, suffix)| {
+            let closure = policy_deployment_closure(revision.clone());
+            let bindings = TypedPayload::new(1, &DeploymentClosure::Policy(closure)).unwrap();
+            ExactPolicyBinding {
+                deployment: ExactDeploymentRef::new(
+                    id(ResourceKind::PolicyDeployment, suffix),
+                    bindings.digest.parse().unwrap(),
+                )
+                .unwrap(),
+                revision: revision.clone(),
+            }
+        })
+        .collect(),
+        qualification_evidence: artifact(77, '8'),
+    };
+    let profile_bindings = TypedPayload::new(
+        1,
+        &DeploymentClosure::SandboxProfile(profile_closure.clone()),
+    )
+    .unwrap();
+    let profile_binding = ExactSandboxProfileBinding {
+        deployment: ExactDeploymentRef::new(
+            id(ResourceKind::SandboxProfileDeployment, 78),
+            profile_bindings.digest.parse().unwrap(),
+        )
+        .unwrap(),
+        revision: profile_revision.clone(),
     };
     let capability_resource_id = id(ResourceKind::CapabilityInterface, 30);
     let capability_interface = exact(ResourceKind::CapabilityInterfaceRevision, 31, '8');
@@ -449,7 +513,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
     let backend = CapabilityBackendBinding::Sandbox {
         runtime: runtime_revision.clone(),
         package: package_revision.clone(),
-        profile: profile_revision.clone(),
+        profile: profile_binding.clone(),
         isolation: SandboxIsolationClass::Wasm,
         network_policy,
         resource_policy,
@@ -537,7 +601,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
         runtime: runtime.clone(),
         package_revision: package_revision.clone(),
         package: package.clone(),
-        profile_revision: profile_revision.clone(),
+        profile_binding,
         profile: profile.clone(),
         policies: Box::new(policy_closure()),
         isolation_class: SandboxIsolationClass::Wasm,
@@ -617,6 +681,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
         capability_interface,
         error_schema_digest,
         capability_closure,
+        profile_closure,
         resources: vec![
             (
                 id(ResourceKind::CapabilityInterface, 30),
@@ -817,6 +882,105 @@ async fn seed(pool: &PgPool, repository: &PgRepository, fixture: &Fixture) {
         insert_resource_version(pool, fixture, resource_id, *kind, exact, document).await;
     }
     seed_sandbox_input_artifact(pool, fixture).await;
+
+    for binding in &fixture.profile_closure.policy_bindings {
+        let (resource_id, _, _, _) = fixture
+            .resources
+            .iter()
+            .find(|(_, kind, exact, _)| {
+                *kind == RegistryResourceKind::Policy && exact == &binding.revision
+            })
+            .unwrap();
+        let policy_bindings = TypedPayload::new(
+            1,
+            &DeploymentClosure::Policy(policy_deployment_closure(binding.revision.clone())),
+        )
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.deployments (
+                tenant_id, deployment_id, resource_id, resource_version_id,
+                environment, bindings_digest, payload_schema_version, bindings, created_by
+            ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(binding.deployment.deployment_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(binding.revision.revision_id.to_string())
+        .bind(&policy_bindings.digest)
+        .bind(policy_bindings.schema_version)
+        .bind(&policy_bindings.value)
+        .bind(fixture.principal_id.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE insight_platform.resources SET active_version_id = NULL, active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(binding.deployment.deployment_id.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    let profile_bindings = TypedPayload::new(
+        1,
+        &DeploymentClosure::SandboxProfile(fixture.profile_closure.clone()),
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.deployments (
+            tenant_id, deployment_id, resource_id, resource_version_id,
+            environment, bindings_digest, payload_schema_version, bindings, created_by
+        ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(
+        fixture
+            .command
+            .request
+            .profile_binding
+            .deployment
+            .deployment_id
+            .to_string(),
+    )
+    .bind(id(ResourceKind::SandboxProfile, 55).to_string())
+    .bind(
+        fixture
+            .profile_closure
+            .profile_revision
+            .revision_id
+            .to_string(),
+    )
+    .bind(&profile_bindings.digest)
+    .bind(profile_bindings.schema_version)
+    .bind(&profile_bindings.value)
+    .bind(fixture.principal_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resources SET active_version_id = NULL, active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(id(ResourceKind::SandboxProfile, 55).to_string())
+    .bind(
+        fixture
+            .command
+            .request
+            .profile_binding
+            .deployment
+            .deployment_id
+            .to_string(),
+    )
+    .execute(pool)
+    .await
+    .unwrap();
 
     let bindings = TypedPayload::new(
         1,
@@ -2051,6 +2215,61 @@ async fn sandbox_fixture() {
     let now = database_now;
     let fixture = fixture(now);
     seed(&pool, &repository, &fixture).await;
+
+    sqlx::query(
+        "UPDATE insight_platform.resources SET gate_state = 'suspended' WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(id(ResourceKind::SandboxProfile, 55).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut suspended_profile = fixture.command.clone();
+    reidentify_accept_command(&mut suspended_profile, 820, '6');
+    assert!(matches!(
+        repository.accept_sandbox_execution(suspended_profile).await,
+        Err(RepositoryError::Conflict("Sandbox Profile Deployment gate"))
+    ));
+    sqlx::query(
+        "UPDATE insight_platform.resources SET gate_state = 'enabled' WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(id(ResourceKind::SandboxProfile, 55).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let policy_resource_id = fixture
+        .resources
+        .iter()
+        .find(|(_, kind, exact, _)| {
+            *kind == RegistryResourceKind::Policy
+                && exact == &fixture.profile_closure.policy_bindings[0].revision
+        })
+        .map(|(resource_id, _, _, _)| resource_id)
+        .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resources SET gate_state = 'suspended' WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(policy_resource_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut suspended_policy = fixture.command.clone();
+    reidentify_accept_command(&mut suspended_policy, 830, '7');
+    assert!(matches!(
+        repository.accept_sandbox_execution(suspended_policy).await,
+        Err(RepositoryError::NotFound("active Policy Deployment"))
+    ));
+    sqlx::query(
+        "UPDATE insight_platform.resources SET gate_state = 'enabled' WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(policy_resource_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let mut drifted_closure = fixture.command.clone();
     let insight_platform_sandbox::SandboxExecutionSource::SandboxCapability {

@@ -4,12 +4,12 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, ArtifactGrantOperation, ArtifactRef,
     AuthoringPackage, CapabilityBackendBinding, CapabilityDeploymentClosure, CodeTrustClass,
-    CommandAudit, DataClassification, Effect, ExactDeploymentRef, ExactVersionRef, PrincipalKind,
-    ResourceId, ResourceKind, Retryability, SandboxAbiVersion, SandboxArtifactIoPolicyDocument,
-    SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass,
-    SandboxIsolationPolicyDocument, SandboxJobState, SandboxNetworkPolicyDocument,
-    SandboxPackageResourceSpec, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
-    SandboxRuntimeFamily, SandboxRuntimeResourceSpec, ValueRef,
+    CommandAudit, DataClassification, Effect, ExactDeploymentRef, ExactSandboxProfileBinding,
+    ExactVersionRef, PrincipalKind, ResourceId, ResourceKind, Retryability, SandboxAbiVersion,
+    SandboxArtifactIoPolicyDocument, SandboxCleanupPolicy, SandboxEntrypointKind,
+    SandboxIsolationClass, SandboxIsolationPolicyDocument, SandboxJobState,
+    SandboxNetworkPolicyDocument, SandboxPackageResourceSpec, SandboxProfileResourceSpec,
+    SandboxResourcePolicyDocument, SandboxRuntimeFamily, SandboxRuntimeResourceSpec, ValueRef,
 };
 use insight_platform_jobs::{decide_claim, JobFence, LeasePolicy};
 use std::{
@@ -212,6 +212,10 @@ fn request_at(now: DateTime<Utc>) -> SandboxExecutionRequest {
     let runtime_revision = exact(ResourceKind::SandboxRuntimeRevision, 10, '1');
     let package_revision = exact(ResourceKind::SandboxPackageRevision, 11, '2');
     let profile_revision = exact(ResourceKind::SandboxProfileRevision, 12, '3');
+    let profile_binding = ExactSandboxProfileBinding {
+        deployment: deployment(ResourceKind::SandboxProfileDeployment, 18, '8'),
+        revision: profile_revision.clone(),
+    };
     let isolation_policy = exact(ResourceKind::PolicyRevision, 13, '4');
     let resource_policy = exact(ResourceKind::PolicyRevision, 14, '5');
     let network_policy = exact(ResourceKind::PolicyRevision, 15, '6');
@@ -291,7 +295,7 @@ fn request_at(now: DateTime<Utc>) -> SandboxExecutionRequest {
         backend: CapabilityBackendBinding::Sandbox {
             runtime: runtime_revision.clone(),
             package: package_revision.clone(),
-            profile: profile_revision.clone(),
+            profile: profile_binding.clone(),
             isolation: SandboxIsolationClass::Wasm,
             network_policy,
             resource_policy,
@@ -321,7 +325,7 @@ fn request_at(now: DateTime<Utc>) -> SandboxExecutionRequest {
         runtime,
         package_revision,
         package,
-        profile_revision,
+        profile_binding,
         profile,
         policies: Box::new(policy_closure(
             SandboxRuntimeFamily::WasmWasi,
@@ -478,7 +482,7 @@ mod deferred_managed_mcp_tests {
             transport: McpTransportBinding::ManagedStdio {
                 package: request.package_revision.clone(),
                 runtime: request.runtime_revision.clone(),
-                profile: request.profile_revision.clone(),
+                profile: request.profile_binding.revision.clone(),
                 isolation: SandboxIsolationClass::MicroVm,
                 isolation_policy,
                 resource_policy,
@@ -2240,7 +2244,7 @@ mod deferred_managed_mcp_tests {
             runtime: operation_request.runtime,
             package_revision: operation_request.package_revision,
             package: operation_request.package,
-            profile_revision: operation_request.profile_revision,
+            profile_binding: operation_request.profile_binding,
             profile: operation_request.profile,
             policies: operation_request.policies,
             isolation_class: operation_request.isolation_class,

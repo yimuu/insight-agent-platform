@@ -2,12 +2,12 @@ use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, ArtifactGrantOperation, ArtifactRef, CapabilityBackendBinding,
     CapabilityDeploymentClosure, CodeTrustClass, DataClassification, Effect, ExactDeploymentRef,
-    ExactSecretBindingRef, ExactVersionRef, HardLimitProfile, JsonLimits, ResourceDocument,
-    ResourceId, ResourceKind, SandboxAbiVersion, SandboxArtifactIoPolicyDocument,
-    SandboxIsolationClass, SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument,
-    SandboxPackageResourceSpec, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
-    SandboxRuntimeFamily, SandboxRuntimeResourceSpec, SandboxSecretResolutionPolicyDocument,
-    Sha256Digest, ValueRef,
+    ExactSandboxProfileBinding, ExactSecretBindingRef, ExactVersionRef, HardLimitProfile,
+    JsonLimits, ResourceDocument, ResourceId, ResourceKind, SandboxAbiVersion,
+    SandboxArtifactIoPolicyDocument, SandboxIsolationClass, SandboxIsolationPolicyDocument,
+    SandboxNetworkPolicyDocument, SandboxPackageResourceSpec, SandboxProfileResourceSpec,
+    SandboxResourcePolicyDocument, SandboxRuntimeFamily, SandboxRuntimeResourceSpec,
+    SandboxSecretResolutionPolicyDocument, Sha256Digest, ValueRef,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -391,9 +391,9 @@ impl ScopedSandboxCallback {
 
 /// Closed, provider-enforceable policy documents for one Sandbox execution.
 ///
-/// Exact Policy Revision identities remain frozen in `SandboxProfileResourceSpec`. Admission loads
-/// those revisions and proves that each document below is the document published by that exact
-/// revision before a physical Job can be created.
+/// Exact Policy Deployment/Revision pairs remain frozen in the selected Sandbox Profile
+/// Deployment. Admission proves that each document below is published by that exact pair before a
+/// physical Job can be created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxExecutionPolicyClosure {
@@ -558,7 +558,7 @@ pub struct SandboxExecutionRequest {
     pub runtime: SandboxRuntimeResourceSpec,
     pub package_revision: ExactVersionRef,
     pub package: SandboxPackageResourceSpec,
-    pub profile_revision: ExactVersionRef,
+    pub profile_binding: ExactSandboxProfileBinding,
     pub profile: SandboxProfileResourceSpec,
     pub policies: Box<SandboxExecutionPolicyClosure>,
     pub isolation_class: SandboxIsolationClass,
@@ -629,7 +629,7 @@ impl SandboxExecutionRequest {
         self.package_revision
             .validate()
             .map_err(|_| SandboxContractError::InvalidExactBinding)?;
-        self.profile_revision
+        self.profile_binding
             .validate()
             .map_err(|_| SandboxContractError::InvalidExactBinding)?;
         self.execution_source
@@ -820,10 +820,12 @@ impl SandboxExecutionRequest {
             || self.capability_deployment.resource_kind != ResourceKind::CapabilityDeployment
             || self.runtime_revision.resource_kind != ResourceKind::SandboxRuntimeRevision
             || self.package_revision.resource_kind != ResourceKind::SandboxPackageRevision
-            || self.profile_revision.resource_kind != ResourceKind::SandboxProfileRevision
+            || self.profile_binding.deployment.resource_kind
+                != ResourceKind::SandboxProfileDeployment
+            || self.profile_binding.revision.resource_kind != ResourceKind::SandboxProfileRevision
             || runtime != &self.runtime_revision
             || package != &self.package_revision
-            || profile != &self.profile_revision
+            || profile != &self.profile_binding
             || *isolation != self.isolation_class
             || network_policy != &self.profile.network_policy
             || resource_policy != &self.profile.resource_policy

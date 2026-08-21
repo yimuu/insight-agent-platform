@@ -3,10 +3,10 @@ use chrono::Duration as ChronoDuration;
 use insight_platform_contracts::{
     checked_in_hard_limit_profile, ArtifactRef, AuthoringPackage, CapabilityBackendBinding,
     CapabilityDeploymentClosure, CodeTrustClass, DataClassification, ExactDeploymentRef,
-    ExactVersionRef, ResourceKind, SandboxArtifactIoPolicyDocument, SandboxCleanupPolicy,
-    SandboxIsolationPolicyDocument, SandboxJobState, SandboxNetworkPolicyDocument,
-    SandboxPackageResourceSpec, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
-    SandboxRuntimeResourceSpec,
+    ExactSandboxProfileBinding, ExactVersionRef, ResourceKind, SandboxArtifactIoPolicyDocument,
+    SandboxCleanupPolicy, SandboxIsolationPolicyDocument, SandboxJobState,
+    SandboxNetworkPolicyDocument, SandboxPackageResourceSpec, SandboxProfileResourceSpec,
+    SandboxResourcePolicyDocument, SandboxRuntimeResourceSpec,
 };
 use insight_platform_sandbox::{
     SafeSandboxTraceContext, SandboxCommandLimits, SandboxExecutionPolicyClosure,
@@ -203,6 +203,10 @@ fn request(now: DateTime<Utc>, module: &[u8]) -> SandboxExecutionRequest {
     let runtime_revision = exact(ResourceKind::SandboxRuntimeRevision, 10, '1');
     let package_revision = exact(ResourceKind::SandboxPackageRevision, 11, '2');
     let profile_revision = exact(ResourceKind::SandboxProfileRevision, 12, '3');
+    let profile_binding = ExactSandboxProfileBinding {
+        deployment: deployment(ResourceKind::SandboxProfileDeployment, 18, '8'),
+        revision: profile_revision.clone(),
+    };
     let isolation_policy = exact(ResourceKind::PolicyRevision, 13, '4');
     let resource_policy = exact(ResourceKind::PolicyRevision, 14, '5');
     let network_policy = exact(ResourceKind::PolicyRevision, 15, '6');
@@ -283,7 +287,7 @@ fn request(now: DateTime<Utc>, module: &[u8]) -> SandboxExecutionRequest {
         backend: CapabilityBackendBinding::Sandbox {
             runtime: runtime_revision.clone(),
             package: package_revision.clone(),
-            profile: profile_revision.clone(),
+            profile: profile_binding.clone(),
             isolation: SandboxIsolationClass::Wasm,
             network_policy,
             resource_policy,
@@ -313,7 +317,7 @@ fn request(now: DateTime<Utc>, module: &[u8]) -> SandboxExecutionRequest {
         runtime,
         package_revision,
         package,
-        profile_revision,
+        profile_binding,
         profile,
         policies: Box::new(policy_closure()),
         isolation_class: SandboxIsolationClass::Wasm,

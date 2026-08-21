@@ -12,8 +12,9 @@ use insight_platform_contracts::{
     CapabilityDeploymentClosure, CapabilityIdempotencyKind, CapabilityImplementationResourceSpec,
     CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
     CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
-    CodeTrustClass, DataClassification, Effect, ExactDeploymentRef, ExactSecretBindingRef,
-    ExactVersionRef, McpAuthorizationPrincipalKind, McpClientCapabilities, McpDeploymentClosure,
+    CodeTrustClass, DataClassification, Effect, ExactDeploymentRef, ExactSandboxProfileBinding,
+    ExactSecretBindingRef, ExactVersionRef, McpAuthorizationPrincipalKind, McpClientCapabilities,
+    McpDeploymentClosure,
     McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities, McpProtocolPolicyDocument,
     McpServerExecutionContract, McpServerLimits, McpToolCapabilityContract, McpTransportBinding,
     McpTransportFeatures, McpTransportKind, PrincipalKind, PublishedMcpMethod, ResourceId,
@@ -207,6 +208,10 @@ fn base_request(now: DateTime<Utc>) -> SandboxExecutionRequest {
     let runtime_revision = exact(ResourceKind::SandboxRuntimeRevision, 10, '1');
     let package_revision = exact(ResourceKind::SandboxPackageRevision, 11, '2');
     let profile_revision = exact(ResourceKind::SandboxProfileRevision, 12, '3');
+    let profile_binding = ExactSandboxProfileBinding {
+        deployment: deployment(ResourceKind::SandboxProfileDeployment, 18, '8'),
+        revision: profile_revision.clone(),
+    };
     let isolation_policy = exact(ResourceKind::PolicyRevision, 13, '4');
     let resource_policy = exact(ResourceKind::PolicyRevision, 14, '5');
     let network_policy = exact(ResourceKind::PolicyRevision, 15, '6');
@@ -288,7 +293,7 @@ fn base_request(now: DateTime<Utc>) -> SandboxExecutionRequest {
         backend: CapabilityBackendBinding::Sandbox {
             runtime: runtime_revision.clone(),
             package: package_revision.clone(),
-            profile: profile_revision.clone(),
+            profile: profile_binding.clone(),
             isolation: SandboxIsolationClass::Wasm,
             network_policy,
             resource_policy,
@@ -318,7 +323,7 @@ fn base_request(now: DateTime<Utc>) -> SandboxExecutionRequest {
         runtime,
         package_revision,
         package,
-        profile_revision,
+        profile_binding,
         profile,
         policies: Box::new(policy_closure()),
         isolation_class: SandboxIsolationClass::Wasm,
@@ -465,7 +470,7 @@ fn managed_request(now: DateTime<Utc>) -> SandboxExecutionRequest {
         transport: McpTransportBinding::ManagedStdio {
             package: request.package_revision.clone(),
             runtime: request.runtime_revision.clone(),
-            profile: request.profile_revision.clone(),
+            profile: request.profile_binding.revision.clone(),
             isolation: SandboxIsolationClass::MicroVm,
             isolation_policy,
             resource_policy,

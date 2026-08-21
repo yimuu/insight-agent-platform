@@ -748,6 +748,23 @@ pub struct ExactPolicyBinding {
     pub revision: ExactVersionRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactSandboxProfileBinding {
+    pub deployment: ExactDeploymentRef,
+    pub revision: ExactVersionRef,
+}
+
+impl ExactSandboxProfileBinding {
+    pub fn validate(&self) -> Result<(), ResourceContractError> {
+        require_deployment_kind(&self.deployment, ResourceKind::SandboxProfileDeployment)?;
+        require_kind(
+            &self.revision.revision_id,
+            ResourceKind::SandboxProfileRevision,
+        )
+    }
+}
+
 impl ExactPolicyBinding {
     pub fn validate(&self) -> Result<(), ResourceContractError> {
         require_deployment_kind(&self.deployment, ResourceKind::PolicyDeployment)?;
