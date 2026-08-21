@@ -2,11 +2,11 @@ use crate::{
     invocation_repository::load_enabled_exact_published_version,
     repository::{
         append_command_event, append_scheduler_event, claim_command_receipt,
-        decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
-        load_deployment, load_job_for_update_by_text, load_resource, load_run_for_update,
-        payload_from_row, require_ready_run_artifact, require_tenant_permission,
-        terminalize_command_receipt, DeploymentRecord, JobRecord, PgRepository, RepositoryError,
-        RunRecord, TypedPayload,
+        decode_deployment_closure, decode_typed_payload, decode_versioned_payload, job_from_row,
+        job_projection, load_deployment, load_job_for_update_by_text, load_resource,
+        load_run_for_update, payload_from_row, require_ready_run_artifact,
+        require_tenant_permission, terminalize_command_receipt, DeploymentRecord, JobRecord,
+        PgRepository, RepositoryError, RunRecord, TypedPayload,
     },
 };
 use chrono::{DateTime, Utc};
@@ -833,8 +833,7 @@ async fn load_active_dataset_generation(
         generation_digest,
     };
     let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
-    let published: PublishedVersionPayload =
-        decode_versioned_payload(&payload, "Dataset Generation")?;
+    let published: PublishedVersionPayload = decode_typed_payload(&payload, "Dataset Generation")?;
     published
         .validate_for(RegistryResourceKind::ContextDataset, &exact.generation_id)
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
@@ -906,8 +905,7 @@ async fn load_dataset_generation_by_id(
             .map_err(|failure| RepositoryError::CorruptRow(format!("Dataset digest: {failure}")))?,
     };
     let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
-    let published: PublishedVersionPayload =
-        decode_versioned_payload(&payload, "Dataset Generation")?;
+    let published: PublishedVersionPayload = decode_typed_payload(&payload, "Dataset Generation")?;
     published
         .validate_for(RegistryResourceKind::ContextDataset, generation_id)
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;

@@ -1,8 +1,8 @@
 use crate::repository::{
-    decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
-    load_deployment, payload_from_row, require_ready_run_artifact, require_tenant_permission,
-    terminalize_command_receipt, validate_deployment_closure_exists, JobRecord, PgRepository,
-    RepositoryError, TypedPayload,
+    decode_deployment_closure, decode_typed_payload, decode_versioned_payload, job_from_row,
+    job_projection, load_deployment, payload_from_row, require_ready_run_artifact,
+    require_tenant_permission, terminalize_command_receipt, validate_deployment_closure_exists,
+    JobRecord, PgRepository, RepositoryError, TypedPayload,
 };
 use chrono::{DateTime, Utc};
 use insight_platform_context::{
@@ -462,7 +462,7 @@ async fn lock_dataset_build_target(
         "payload_digest",
     )?;
     let published: PublishedVersionPayload =
-        decode_versioned_payload(&typed, "Context Dataset generation")?;
+        decode_typed_payload(&typed, "Context Dataset generation")?;
     let ResourceDocument::ContextDataset(dataset) = published.document else {
         return Err(RepositoryError::CorruptRow(
             "Dataset generation contains the wrong document".to_owned(),

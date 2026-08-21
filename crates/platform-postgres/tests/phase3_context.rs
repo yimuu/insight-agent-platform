@@ -1670,6 +1670,7 @@ async fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         .await
         .unwrap();
     assert_eq!(completed.state, JobState::Succeeded.to_string());
+    let first_generation_id = completion.generation_id.clone();
     let active_generation: String = sqlx::query_scalar(
         "SELECT active_version_id FROM insight_platform.resources WHERE tenant_id = $1 AND resource_id = $2",
     )
@@ -1683,6 +1684,111 @@ async fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         repository.commit_context_dataset_build(completion).await,
         Err(RepositoryError::StaleFence | RepositoryError::Conflict(_))
     ));
+
+    let mut rebuild_audit = audit(
+        &fixture.tenant_id,
+        &fixture.principal_id,
+        0x740,
+        "dataset-rebuild",
+    );
+    rebuild_audit.idempotency_key_digest = named_digest("dataset-rebuild-key");
+    rebuild_audit.request_digest = named_digest("dataset-rebuild-request");
+    let rebuild_job = match repository
+        .request_context_dataset_build(RequestContextDatasetBuild {
+            audit: rebuild_audit,
+            context_resource_id: id(ResourceKind::ContextSourceInterface, 0x12),
+            context_deployment: fixture.context_deployment.clone(),
+            dataset_id: dataset_id.clone(),
+            job_id: id(ResourceKind::Job, 0x743),
+            attempt_limit: 3,
+            deadline: Utc::now() + Duration::hours(1),
+        })
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(job) => job,
+        CommandOutcome::Replayed(_) => panic!("Dataset rebuild must apply"),
+    };
+    let rebuild_worker = id(ResourceKind::WorkerProcessGeneration, 0x744);
+    let rebuild_token = named_digest("dataset-rebuild-lease");
+    let rebuild_claim = repository
+        .claim_jobs(ClaimJobs {
+            work_class: WorkClass::Context.to_string(),
+            worker_id: rebuild_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            lease_token_digests: vec![rebuild_token.clone()],
+        })
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(rebuild_claim.job_id, rebuild_job.job_id);
+    let rebuild_started = repository
+        .start_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: rebuild_claim.job_id,
+            worker_id: rebuild_worker.clone(),
+            lease_epoch: rebuild_claim.lease_epoch,
+            expected_job_version: rebuild_claim.version,
+            lease_token_digest: rebuild_token.clone(),
+        })
+        .await
+        .unwrap();
+    let rebuild_payload: ContextDatasetBuildJobPayload =
+        serde_json::from_value(rebuild_started.payload.value.clone()).unwrap();
+    assert_eq!(
+        rebuild_payload.expected_active_generation_id,
+        Some(first_generation_id)
+    );
+    assert_eq!(rebuild_payload.expected_dataset_version, Some(1));
+    let second_generation_id = id(ResourceKind::DatasetGeneration, 0x745);
+    repository
+        .commit_context_dataset_build(CommitContextDatasetBuild {
+            tenant_id: fixture.tenant_id.clone(),
+            job_id: rebuild_started.job_id.parse().unwrap(),
+            dataset_id: dataset_id.clone(),
+            generation_id: second_generation_id.clone(),
+            fence: insight_platform_jobs::JobFence {
+                expected_version: u64::try_from(rebuild_started.version).unwrap(),
+                worker_process_generation_id: rebuild_worker,
+                lease_generation: u64::try_from(rebuild_started.lease_epoch).unwrap(),
+                token_digest: rebuild_token.clone(),
+            },
+            lease_token_digest: rebuild_token,
+            generation: ContextDatasetGenerationSpec {
+                context_deployment: rebuild_payload.context_deployment,
+                source_manifest_digest: named_digest("dataset-rebuild-source-manifest"),
+                parser_profile: rebuild_payload.parser_profile,
+                chunker_profile: rebuild_payload.chunker_profile,
+                embedding_model_deployment: rebuild_payload.embedding_model_deployment,
+                ranking_profile: rebuild_payload.ranking_profile,
+                index_manifest: artifact(0xa2),
+                validation_evidence: artifact(0xa2),
+                created_by_operation_id: rebuild_started.job_id.parse().unwrap(),
+            },
+            event_id: id(ResourceKind::Event, 0x746),
+            outbox_id: id(ResourceKind::OutboxEvent, 0x747),
+        })
+        .await
+        .unwrap();
+    let rebuilt: (i64, String, i64) = sqlx::query_as(
+        r#"
+        SELECT resource.version, resource.active_version_id, count(version.resource_version_id)
+        FROM insight_platform.resources AS resource
+        JOIN insight_platform.resource_versions AS version
+          ON version.tenant_id = resource.tenant_id
+         AND version.resource_id = resource.resource_id
+        WHERE resource.tenant_id = $1 AND resource.resource_id = $2
+        GROUP BY resource.version, resource.active_version_id
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(dataset_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rebuilt, (2, second_generation_id.to_string(), 2));
 
     let command = create_command(&fixture, 0x100);
     let mut cross_tenant = command.clone();
