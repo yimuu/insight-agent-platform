@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation In Progress |
+| 状态 | Draft / Architecture Revision CR-173 |
 | 日期 | 2026-08-07 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) |
 | 直接下游 | 12、17、18 |
@@ -49,8 +49,8 @@ SkillActivation；Skill 本身不拥有执行状态。
 | Skill Entity | 可变名称、标签和生命周期容器 |
 | Skill Draft | 可编辑作者内容，不可用于 Run |
 | Skill Revision | 已验证、不可变的方法包与依赖声明 |
-| Skill Closure | Revision 加全部传递 Skill dependency 的有向无环闭包 |
-| Skill Candidate Set | Agent Deployment 允许在运行时选择的 exact Revision 集合 |
+| Skill Closure | Deployment冻结的Revision及全部传递Skill dependency有向无环闭包 |
+| Skill Candidate Set | Agent Deployment 允许在运行时选择的exact Skill Deployment集合 |
 | Skill Binding | requirement alias 到 exact Skill/Capability/Context/Model binding 的映射 |
 | Skill Selection | 在固定候选集合内决定使用哪些 Skill 的纯决策 |
 | Skill Activation | 某 Run scope 实际启用 Skill 的 durable 事实 |
@@ -77,6 +77,15 @@ struct SkillRevision {
     model_requirements: Vec<ModelFeatureRequirement>,
     package_artifact_id: ArtifactId,
     semantic_digest: Digest,
+}
+
+struct SkillDeploymentClosure {
+    skill_revision: ExactSkillRevisionRef,
+    requirement_bindings: Vec<ExactRequirementBinding>,
+    transitive_skill_deployments: Vec<ExactSkillDeploymentRef>,
+    selection_policy: ExactPolicyDeploymentRef,
+    qualification_evidence: ArtifactRef,
+    closure_digest: Digest,
 }
 ```
 
@@ -207,7 +216,7 @@ Agent Deployment validation 必须验证：
 5. Skill suspension、来源信任和 conformance evidence 允许新绑定；
 6. 候选集合不会使 Model tool name、Context alias 或 child binding 冲突。
 
-Run admission 复制 exact Skill Revision IDs 和 closure digest 到 RunBindings。之后 active head、package 更新、
+Run admission复制exact Skill Deployment、Revision IDs和closure digest到RunBindings。之后active binding、package更新、
 Registry 删除请求或 discovery 变化均不影响该 Run。
 
 ## 9. Selection
@@ -297,8 +306,9 @@ ResumeSkill
 所有mutation使用02/03的tenant/principal/command scope/idempotency key与request digest。上传package先得到ArtifactRef，再由
 validation 异步解析。发布事件只携带 ID、digest、状态和安全分类，不携带 instruction/reference 正文。
 
-Skill没有独立Deployment；Agent Deployment直接绑定exact Skill Revision及其Capability requirement resolution。
-`BindSkillRevisionToAgentDeployment`是Agent Deployment resolution的一部分，不是Skill mutation或运行时lookup。
+Skill Deployment不是进程或执行状态；它冻结exact Skill Revision、已解析的Capability/Context/Model/Skill requirement closure、
+适用Policy与qualification evidence。Agent Deployment只绑定允许的exact Skill Deployments并再次冻结其closure digest。
+`BindSkillDeploymentToAgentDeployment`是Agent Deployment resolution的一部分，不是Skill mutation或运行时lookup。
 
 运行事件的公开最小集合为 `skill.selected`、`skill.activated`、`skill.rejected`。默认只公开 display label 和
 状态；选择证据、包内容、Capability map 与安全失败仅在授权的 diagnostic projection 中可见。
@@ -310,12 +320,12 @@ Skill管理生命周期严格沿用02，Revision永不改变状态：
 ```text
 Draft(version N) -> Validation Operation -> ValidEvidence | InvalidEvidence
 ValidEvidence + unchanged Draft -> immutable Skill Revision
-Skill ActiveHead(generation N) -> Revision | Cleared       # CAS
+Skill ActiveBinding(generation N) -> Deployment | Cleared  # CAS
 Skill Suspension(generation N) -> Enabled | Suspended      # 独立安全门
 ```
 
-`Deployable`只是在Agent Deployment validation时计算的结果，不是Skill Revision字段。Retired属于Entity lifecycle，
-Suspended属于独立generation gate；两者都不能改写Revision或用active head为空推断。
+`Deployable`只在Skill Deployment validation时计算，不是Skill Revision字段。Retired属于Entity lifecycle，Suspended属于独立
+generation gate；两者都不能改写Revision/Deployment或用active binding为空推断。
 
 Activation 状态机：
 
@@ -338,13 +348,13 @@ Active -> Superseded
 
 ## 14. Persistence 与 Artifact 映射
 
-Skill Draft/Revision/active target/suspension 使用共享 Resource/ResourceVersion。依赖、requirements、package entry index 与
+Skill Draft/Revision/Deployment/active binding/suspension 使用共享 Resource/ResourceVersion/Deployment。依赖、requirements、package entry index 与
 prompt asset refs 是 closed、bounded ResourceVersion payload；正文、大 reference 和 package archive 只存 Artifact。
 Selection/Activation 保存为 Run 或 Invocation 的 typed snapshot，历史进入 Event；selection key 由 owner aggregate CAS 保证。
 
 ## 15. 不变量
 
-- Skill Revision 发布后不可变，运行时只能使用 RunBindings 中的 exact Revision；
+- Skill Revision与Deployment发布后不可变，运行时只能使用RunBindings中的exact Deployment/Revision；
 - Skill 不能直接产生外部 Effect，所有 Effect 必须经过真实 CapabilityInvocation；
 - Skill 的 instruction 不能提高消息优先级或扩大 Principal 权限；
 - Skill package 不含可执行 entrypoint、Secret value、动态 endpoint 或 mutable dependency；
@@ -361,8 +371,8 @@ Selection/Activation 保存为 Run 或 Invocation 的 typed snapshot，历史进
 - selector 有独立并发预算，队列满时 durable defer，不占 Model/Capability permit；
 - package validation、malware scan 和 closure resolution 使用有界 Worker；
 - candidate 数、description bytes、embedding inputs、activation 数和 assembly tokens 均有硬上限；
-- Registry cache key 必须包含 tenant、Revision ID、policy generation 和 package digest；
-- cache miss 不允许退回 active head 或网络自动发现。
+- Registry cache key必须包含tenant、Deployment/Revision ID、policy generation和package digest；
+- cache miss不允许退回active binding或网络自动发现。
 
 ## 17. 超时、重试、取消与恢复
 
@@ -414,7 +424,7 @@ suspend 和 selection override。
 - canonical package 在 Rust/TypeScript fixture 中产生相同 digest；
 - path traversal、symlink、archive bomb、未知字段和 executable entry 被拒绝；
 - Skill dependency cycle、alias conflict、missing requirement 和过大闭包被拒绝；
-- active head 在 Run 中途变化不改变 candidate/closure digest；
+- active Skill Deployment在Run中途变化不改变candidate/closure digest；
 - 模型返回未绑定 Skill、重复 ID 或权限 override 时 proposal 被拒绝；
 - Skill code file 无法在 API、Worker 或 Sandbox 自动执行；
 - Capability Effect/Approval 不会被 Skill instruction 弱化；

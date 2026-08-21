@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted |
+| 状态 | Draft / CR-173 Cross-review |
 | 日期 | 2026-08-20 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -180,8 +180,8 @@ enum DependencySlot {
 ```
 
 每个 slot 有稳定 `slot_id`、精确 Interface Revision 或受限 compatibility requirement、用途和数据策略。
-Agent Deployment将每个slot解析为精确resource Deployment，或对无独立Deployment的资源解析为exact Revision；
-RunBindings固定该结果。运行时只能在已经绑定的候选集合中选择，不能discovery或追随active head。
+Agent Deployment将每个slot解析为exact resource Deployment并同时冻结其owner Revision；RunBindings固定该结果。
+运行时只能在已经绑定的candidate集合中选择，不能discovery、绕过Deployment或追随active binding。
 
 ## 8. Canonical Typed Plan
 
@@ -221,9 +221,9 @@ struct AgentDeployment {
     entry_node_id: PlanNodeId,
     entry_node_kind: PlanNodeKind,
     resolved_slots: Vec<FrozenSlotBinding>,
-    policy_revision_ids: Vec<ResourceVersionId>,
-    execution_profile_revision_id: ResourceVersionId,
-    public_projection_policy_revision_id: ResourceVersionId,
+    policy_deployments: Vec<ExactPolicyDeploymentRef>,
+    execution_profile_deployment: ExactPolicyDeploymentRef,
+    public_projection_policy_deployment: ExactPolicyDeploymentRef,
     validation_evidence_id: EvidenceId,
     deployment_digest: Digest,
 }
@@ -231,7 +231,7 @@ struct AgentDeployment {
 ```
 
 每个candidate ID必须通过slot variant对应的resource kind/prefix验证：Model只接受`mdep`，Capability只接受`cdep`，
-ChildAgent只接受`adep`，Skill只接受`srev`；Context slot必须内嵌带`xcb` identity/canonical digest且引用exact `xdep`的
+ChildAgent只接受`adep`，Skill只接受`skdep`；Context slot必须内嵌带`xcb` identity/canonical digest且引用exact `xdep`的
 ContextBindingSnapshot。`entry_node_id`/`entry_node_kind`必须与exact Plan Revision内已验证Typed Plan的入口一致，并进入
 Deployment closure digest；Run admission不得重新读取Artifact或接受调用方提供的内部入口。candidate集合规范排序、非空（除明确
 optional slot）且有硬上限。Deployment validation计算完整dependency closure、Interface兼容、Effect/Policy、Secret
@@ -364,7 +364,7 @@ struct ModelLoopNode {
 
 运行过程：
 
-1. 组装固定Agent/Skill Revision内的Prompt Asset、Skill内容、Context与安全Message；
+1. 组装固定Agent/Skill Deployment closure内exact Revision的Prompt Asset、Skill内容、Context与安全Message；
 2. 创建 durable ModelTurn；
 3. 校验模型响应；
 4. 如果是 tool intent，校验名称映射、参数、轮次、次数、Effect 和 policy；

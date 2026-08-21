@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted |
+| 状态 | Draft / Architecture Revision CR-173 |
 | 日期 | 2026-08-21 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
@@ -86,6 +86,10 @@ GET    /v1/{kind}/{resource_id}/deployments/{deployment_id}
 POST   /v1/{kind}/{resource_id}/deployments/{deployment_id}:activate
 POST   /v1/{kind}/{resource_id}/deployments/{deployment_id}:suspend
 ```
+
+上述八类public noun都必须具有closed Deployment variant；不能注册路径后对Skill、Policy或Sandbox永久返回shape error。
+Capability/Context/Model public noun分别投影其可调用Interface/Profile owner，内部Implementation/Provider等仍通过同一shared
+lifecycle管理但不增加generic arbitrary-JSON public route。ContextDataset只暴露第6节generation read/build，不暴露普通Deployment mutation。
 
 create/draft-update/validate/publish/deploy/activate/suspend语义由02拥有。Resource拥有唯一current editable Draft；Draft update使用
 `If-Match`并推进generation、使旧validation失效。publish以Resource ETag + draft generation + digest为fence并创建immutable Version；

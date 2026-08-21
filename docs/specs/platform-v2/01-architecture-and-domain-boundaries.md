@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted |
+| 状态 | Draft / CR-173 Cross-review |
 | 日期 | 2026-08-21 |
 | 依赖 | [`00-overview.md`](00-overview.md) |
 | 直接下游 | 02、03、04、05、18 |

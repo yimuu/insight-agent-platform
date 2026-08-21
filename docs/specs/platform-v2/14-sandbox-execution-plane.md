@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted |
+| 状态 | Draft / Architecture Revision CR-173 |
 | 日期 | 2026-08-21 |
 | 依赖 | 03、04、07、09、10、15 |
 | 直接下游 | 17、18 |
@@ -74,6 +74,20 @@ enum IsolationClass { WasiRestricted, GvisorContainer }
 selection只由published Sandbox Profile根据trust、Effect、runtime、Secret、network、filesystem与resource需求决定；
 调用方不能降级。
 
+```rust
+struct SandboxProfileDeploymentClosure {
+    profile_revision: ExactSandboxProfileRevisionRef,
+    runtime_revision: ExactSandboxRuntimeRevisionRef,
+    compatible_packages_digest: Digest,
+    isolation_policy: ExactPolicyDeploymentRef,
+    resource_policy: ExactPolicyDeploymentRef,
+    network_policy: ExactPolicyDeploymentRef,
+    artifact_io_policy: ExactPolicyDeploymentRef,
+    secret_resolution_policy: Option<ExactPolicyDeploymentRef>,
+    qualification_evidence: ArtifactRef,
+}
+```
+
 | 需求 | WASI | gVisor |
 |---|---:|---:|
 | 纯函数WASM、无network/Secret | 允许 | 允许但非首选 |
@@ -94,7 +108,7 @@ struct SandboxExecutionRequestV1 {
     lease_generation: u64,
     package_artifact: ArtifactRef,
     runtime_catalog_version_id: ResourceVersionId,
-    sandbox_profile_version_id: ResourceVersionId,
+    sandbox_profile_deployment_id: DeploymentId,
     isolation: IsolationClass,
     entrypoint: Entrypoint,
     input: RunValueId,
@@ -108,7 +122,8 @@ struct SandboxExecutionRequestV1 {
 }
 ```
 
-request是closed、canonical、有size limit的immutable snapshot。Controller重新验证tenant、Invocation、Job lease、package digest、
+request是closed、canonical、有size limit的immutable snapshot。Sandbox Profile Deployment冻结exact Profile Revision、Runtime/Package
+compatibility、隔离Policy与qualification evidence。Controller重新验证tenant、Invocation、Job lease、package digest、
 Deployment/Profile/runtime binding和hard limits。旧lease generation、未发布package、未声明port、未授权Secret或
 isolation降级全部fail closed。
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted |
+| 状态 | Draft / Architecture Revision CR-173 |
 | 日期 | 2026-08-21 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
@@ -18,6 +18,11 @@ Resource -> immutable ResourceVersion -> Deployment -> tenant active binding
 ResourceVersion表示可重现的逻辑定义，Deployment表示可运行的exact环境绑定。Run admission一次性冻结
 所需Deployment和ResourceVersion闭包，active head与GitOps rollout变化不修改已存Run。
 
+这里的“可运行”包含可被未来Run选择/解析的定义绑定，不等于启动独立进程。Skill Deployment冻结一个exact Skill Revision及其
+requirement resolution；Policy Deployment冻结一个exact Policy Revision及其适用环境/资格闭包；Sandbox Deployment冻结exact
+Profile、Runtime/Package compatibility与隔离policy闭包。它们不得绕过Deployment而直接把ResourceVersion设为tenant active binding。
+ContextDataset是唯一例外：它不是可调用definition，root的`active_version_id`只表示未来query使用的immutable Dataset Generation data head。
+
 首版没有Installation业务identity、Release/Candidate binding、compatibility generation或installation-scoped current row。
 
 ## 2. Nominal ID registry
@@ -31,7 +36,7 @@ ResourceVersion表示可重现的逻辑定义，Deployment表示可运行的exac
 | Tenant | `ten_` | 所有业务current row的scope |
 | Resource | `res_` | generic lifecycle root |
 | ResourceVersion | kind-specific，如`agtv_`/`skv_`/`capv_` | immutable version |
-| Deployment | `dep_` | exact runnable binding |
+| Deployment | kind-specific，如`adep_`/`skdep_`/`cdep_`/`xdep_`/`mdep_`/`moddep_`/`pdep_`/`sbdep_` | exact binding |
 | Run / NodeExecution | `run_` / `nod_` | orchestration identity |
 | Invocation / Job / Task | `inv_` / `job_` / `tsk_` | 彼此独立 |
 | RunValue | `val_` | 不与Job/Artifact共享UUID |
@@ -64,7 +69,8 @@ struct Resource {
     draft_generation: u64,
     draft: TypedDraftPayload,
     validation: Option<ValidationSummary>,
-    active_version_id: Option<ResourceVersionId>,
+    active_deployment_id: Option<DeploymentId>,
+    active_data_version_id: Option<ResourceVersionId>, // ContextDataset only
     lifecycle_state: ResourceLifecycleState,
     projection_version: u64,
 }
@@ -73,10 +79,14 @@ struct Resource {
 ResourceKind是closed registry，至少包含Agent、Skill、CapabilityInterface、CapabilityImplementation、ContextSource、ContextDataset、
 ModelProvider、ModelProfile、McpServer、Policy、SandboxRuntime和SandboxProfile。shared table不消除domain payload的nominal type。
 
-Resource拥有name、唯一current editable Draft、validation fence、current head和lifecycle；Draft不是一条尚未发布的
+Resource拥有name、唯一current editable Draft、validation fence、current binding/data head和lifecycle；Draft不是一条尚未发布的
 ResourceVersion，也不在`resource_versions`中创建mutable row。ResourceVersion只拥有publication产生的immutable definition，
 不复制active state。Draft update/validation/publication与head mutation使用expected Resource projection version，validation还绑定
 exact draft generation + document digest；tenant + kind + normalized name唯一。
+
+除ContextDataset外，`active_data_version_id`必须为空且active command只接受属于该Resource的exact Deployment。ContextDataset不创建
+可调用Deployment，`active_deployment_id`必须为空，Dataset build成功事务以generation CAS更新`active_data_version_id`。物理列名可以沿用
+baseline的`active_version_id`，但规范与Rust owner type不得把它解释为普通definition active head。
 
 ## 5. ResourceVersion
 
@@ -122,6 +132,10 @@ struct Deployment {
 Deployment是一经创建就不可变的exact runnable closure：它不复制Version definition，只冻结环境相关backend、
 credential reference、region（若该typed closure需要）、runtime/protocol和exact dependency。Deployment不拥有可变state、
 projection version或另一个current head；可绑定性由它引用的immutable closure与Secret/policy安全门禁共同决定。
+
+closed Deployment closure matrix至少包含Agent、Skill、Capability、Context、MCP、Model Provider/Profile、Policy与Sandbox Profile；
+每个variant必须携带其owner exact Revision。definition-only variant仍必须冻结selection/requirement/applicability或qualification evidence，
+不能用空closure、裸Version ID或通用JSON代替。
 Agent Deployment还必须冻结由exact Plan Revision验证得到的entry node ID/kind；该入口进入closure digest，root Run admission
 不得从untrusted请求接收内部node kind，也不得在事务中临时读取Artifact来猜入口。
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted |
+| 状态 | Draft / Architecture Revision CR-173 |
 | 日期 | 2026-08-20 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
@@ -56,13 +56,14 @@ tenant级默认policy选择由tenant current aggregate中的closed `TenantConfig
 
 ```rust
 struct TenantConfigV1 {
-    scheduling_policy: Option<ExactPolicyRevisionRef>,
-    artifact_retention_policy: Option<ExactPolicyRevisionRef>,
-    artifact_io_policy: Option<ExactPolicyRevisionRef>,
+    scheduling_policy: Option<ExactPolicyDeploymentRef>,
+    artifact_retention_policy: Option<ExactPolicyDeploymentRef>,
+    artifact_io_policy: Option<ExactPolicyDeploymentRef>,
 }
 ```
 
-三个slot彼此独立且只能指向该tenant内enabled、active Resource所发布的exact immutable Policy Revision；绑定command使用Tenant strong
+三个slot彼此独立且只能指向该tenant内enabled、active Resource的exact immutable Policy Deployment；Deployment closure再冻结唯一
+Policy Revision及其digest。绑定command使用Tenant strong
 version CAS、Receipt、Event与Outbox原子更新，只改变对应slot而保留其他slot。Artifact public prepare要求后两个slot均存在并分别验证
 `PolicyKind::Retention`与`PolicyKind::ArtifactIo`，缺失、错kind、digest不符或同revision复用均fail closed。不得扫描多个active Policy后任取一条，
 也不以进程config、请求body或排序约定替代tenant current authority。
@@ -106,8 +107,20 @@ enum PolicyKind {
 }
 ```
 
+```rust
+struct PolicyDeploymentClosure {
+    policy_revision: ExactPolicyRevisionRef,
+    environment: CanonicalEnvironment,
+    applicability_digest: Digest,
+    qualification_evidence: ArtifactRef,
+}
+```
+
+Policy Deployment不执行代码；它是tenant可绑定的exact applicability/qualification closure。Resource active binding指向Deployment，
+TenantConfig和Run snapshot同时冻结Deployment与其中Revision，禁止跳过Deployment直接追随Revision head。
+
 每个Policy payload是closed、versioned、canonical、有size limit的nominal type。发布时执行syntax/semantic/cross-policy/hard-limit
-验证。Run/Invocation/Job冻结exact Policy ResourceVersion/digest，不在历史工作上自动换成current head。
+验证。Run/Invocation/Job冻结exact Policy Deployment及其Policy ResourceVersion/digest，不在历史工作上自动换成current head。
 
 current emergency gate可以阻止尚未开始的外部leaf、撤销grant/Secret/network或触发cancel，但不修改冻结snapshot、
 不改写已提交结果。决策保存policy ID/version/digest、input evidence digest、decision/reason和time，不保存Secret/正文。

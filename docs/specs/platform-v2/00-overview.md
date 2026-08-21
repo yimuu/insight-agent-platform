@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation Authorized |
+| 状态 | Draft / Architecture Revision CR-173 |
 | 日期 | 2026-08-21 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -11,6 +11,11 @@
 > `Platform v2` 是架构代号，不是公共 API 版本。目标系统会在 clean replacement 后直接占用 `/v1` 和
 > `insight.platform/v1`；它不兼容当前 `insight.agent/v1`。这里出现的类型、API、数据库表、配置和容量要求在实现、
 > conformance tests 与资格验收完成前都不是当前平台合同。
+
+> 2026-08-21 implementation feedback（CR-173）：owner registry仍允许Skill、Policy与Sandbox Profile直接激活
+> ResourceVersion，且public generic deployment route对这些kind实际不可用；这与本索引及工程规则要求的统一
+> `Resource -> ResourceVersion -> Deployment -> Binding`生命周期冲突。02为上游authority，00～18受影响合同已退回
+> Architecture Revision；完成closure matrix、Run binding、API与资格fixture的全量复核前，不再授权继续生成完整Management API。
 
 > 2026-08-09 persistence reset：此前 migration 1～35 及 177 表候选把行为不变量过度绑定为专用表、evidence 表和
 > deferred trigger，已经停止继续实施。共享 Resource/Job/Task/Event/Receipt 模型的首轮cross-review曾完成；2026-08-15因
@@ -50,25 +55,25 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Accepted / Implementation Authorized | 总体路线、规范模板、依赖和完成定义 |
-| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted | 系统架构、领域对象和所有权边界 |
-| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted | PostgreSQL、事务、Outbox、Lease、恢复 |
-| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted | Agent Interface、Typed Plan、Model Loop |
-| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted | Scheduler、Worker、Lease、背压和隔舱并发 |
-| 08 | [`08-subagent.md`](08-subagent.md) | Accepted | Child Run、父子通信、取消传播和循环限制 |
-| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted | Capability Interface、Implementation、Registry |
-| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted | 调用协议、幂等、同步快路径、异步恢复 |
-| 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / Implementation In Progress | Skill Package、发现、选择、绑定和依赖 |
-| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted | ContextSource、检索、引用和数据权限 |
-| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
-| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted | S3、内容寻址、上传、生命周期和内容安全 |
-| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 00 | `00-overview.md` | Draft / CR-173 | 总体路线、规范模板、依赖和完成定义 |
+| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Draft / CR-173 review | 系统架构、领域对象和所有权边界 |
+| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Draft / CR-173 owner revision | ID、Resource、Version、Deployment、Binding |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Draft / CR-173 review | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Draft / CR-173 owner revision | 多租户、授权、Secret、Effect、Quota、Approval |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Draft / CR-173 review | Agent Interface、Typed Plan、Model Loop |
+| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Draft / CR-173 review | Run、NodeExecution、暂停、重试、取消 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Draft / CR-173 review | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 08 | [`08-subagent.md`](08-subagent.md) | Draft / CR-173 review | Child Run、父子通信、取消传播和循环限制 |
+| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Draft / CR-173 review | Capability Interface、Implementation、Registry |
+| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Draft / CR-173 review | 调用协议、幂等、同步快路径、异步恢复 |
+| 11 | [`11-skill-system.md`](11-skill-system.md) | Draft / CR-173 owner revision | Skill Package、发现、选择、绑定和依赖 |
+| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Draft / CR-173 review | ContextSource、检索、引用和数据权限 |
+| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Draft / CR-173 review | MCP Transport、OAuth、投影、Task 和 Subscription |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Draft / CR-173 owner revision | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
+| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Draft / CR-173 review | S3、内容寻址、上传、生命周期和内容安全 |
+| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Draft / CR-173 review | Provider、Model Profile、ModelTurn、流式响应和预算 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Draft / CR-173 projection revision | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Draft / CR-173 qualification revision | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得
@@ -168,7 +173,7 @@ Draft
 1. 在已资格CapacityProfile的混合并发负载下，Sandbox饱和不降低API、Model Worker和critical-control的准入能力；
 2. Runtime、MCP Host、Sandbox Executor 任一进程被终止后，已提交状态可恢复且无越权重放；
 3. 丢失或重复全部 wake hint 时，安全扫描最终收敛；
-4. Agent、Skill、Capability 或 Provider active head 在 Run 中途切换，不改变该 Run 的绑定；
+4. Agent、Skill、Capability或Provider active Deployment在Run中途切换，不改变该Run的冻结绑定；
 5. 同一个 idempotency key 的并发提交只产生一个逻辑 Invocation；
 6. 跨租户 ID、Artifact、Secret、Context 和 callback 均无法读取或关联；
 7. 非幂等副作用在不确定结果下进入人工处置，不自动伪装为安全重试；

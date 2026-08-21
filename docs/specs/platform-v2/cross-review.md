@@ -1,13 +1,19 @@
-# Platform v2 00～18 Cross-review（CR-172）
+# Platform v2 00～18 Cross-review（CR-173）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / Implementation Authorized |
+| 状态 | Open / Architecture Revision |
 | 日期 | 2026-08-21 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-172 implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-173 implementation feedback |
 | 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft/Deployment/Run admission authority和fixture闭包 |
 
 ## 1. 结论
+
+CR-173尚未授权继续生成完整Management API。实施对照发现Rust `activation_target()`和`DeploymentClosure`只覆盖六类
+Deployment，而02/17与工程规则要求八个public动态管理noun走统一Deployment binding；Skill、Policy、Sandbox详细规范又保留了
+Version active-head表述。该P0合同冲突必须先按02→04/11/14→05/06/09/10/12/13/15/16→17→18顺序消解，并重跑下述00～18矩阵。
+
+CR-172的其余结论作为审查输入保留，但在CR-173关闭前不构成Implementation Authorization。
 
 CR-171继承CR-170的public Artifact DTO与可信服务交接结论，并消解实施反馈发现的tenant Artifact default Policy authority缺口。全量审查确认首版目标收敛为：
 
@@ -51,13 +57,13 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / Implementation Authorized | CR-172已写回并获统一acceptance |
-| 01～10 | Accepted | 依赖顺序与owner边界已按CR-169统一；CR-170影响复核无语义变化 |
-| 11 Skill | Accepted / Implementation In Progress | 未改变Skill“方法包、非运行时”语义；脚本仍必须发布为Sandbox Capability |
-| 12～18 | Accepted | 继承CR-170/171，并按CR-172冻结Dataset build与MCP discovery public authority |
+| 00 | Draft / CR-173 | Implementation Authorization已撤回，等待closure matrix复核 |
+| 01～10 | Draft / CR-173 review | 02/04上游变更的ID、binding、transaction与Run snapshot影响复核中 |
+| 11 Skill | Draft / CR-173 owner revision | Skill仍是方法包/非进程，但新增exact Deployment requirement closure |
+| 12～18 | Draft / CR-173 review | Dataset例外、Sandbox Deployment、public schema与资格fixture复核中 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
-| implementation-plan | Accepted / Implementing | 从Accepted合同生成；仍不表示current behavior |
+| implementation-plan | Draft / Architecture Revision | 仅允许CR-173 lifecycle修复，其他阶段暂停扩面 |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
 18不再是17的Release state上游，因而不存在17→18→17的循环。
@@ -237,7 +243,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 14. 本次冲突消解
 
-| 原冲突 | CR-171 current resolution |
+| 原冲突 | reviewed resolution/input |
 |---|---|
 | `SandboxJobId`/同UUID alias与shared Job冲突 | 只保留JobId，RunValueId独立；无Sandbox child aggregate |
 | ArtifactLink stored owner fence会随owner正常推进而失效 | stored version只是create-time CAS evidence；read不与current version比较；release另携current expected version |
@@ -252,10 +258,12 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 | public Run未选择Agent且admission entry无durable authority | request显式携带`agent_id`；Agent Deployment冻结validated entry ID/kind，admission不接受内部入口或临时读Artifact |
 | Artifact candidate把内部ID/policy/grant token当作public request并只信自由principal header | public DTO只含业务意图与opaque completion proof；服务端生成内部identity/closure；Public Gateway到Artifact Gateway使用exact audience mTLS并在DB重绑定current principal |
 | 多个active Artifact Policy使“服务端选择”没有唯一authority | Tenant current config新增exact Retention与ArtifactIo revision slot；Artifact prepare验证slot kind/digest/gate，禁止任取active row或fallback |
+| 02要求统一Deployment binding，但Skill/Policy/Sandbox仍直接激活Version | CR-173目标：增加closed `skdep`/`pdep`/`sbdep` closure；definition-only Deployment不执行代码，但冻结requirement/applicability/qualification；ContextDataset generation data head是唯一Version-head例外 |
+| 17注册八类deployment route而Rust closure只支持六类 | CR-173目标：owner ID/kind/closure/allowed-edge先闭合，再开放完整OpenAPI；unsupported kind不得以永久shape error冒充已实现route |
 
 ## 15. Acceptance 记录
 
-CR-171及2026-08-21实现反馈cross-review的以下门禁已用于把00～18、ADR-0001、ADR-0002和implementation plan作为同一合同批次accept：
+以下1～12项是CR-172历史Acceptance记录，不代表CR-173已关闭；CR-173必须在它们之上补齐13～17并重新签署Acceptance：
 
 1. `rg` stale-contract scan确认microVM、Managed stdio、Installation Release、ManagementOperation、
    Model Artifact Producer和八role只出现在历史/否定/明确推迟语境，不再是首版正向requirement；
@@ -278,9 +286,13 @@ CR-171及2026-08-21实现反馈cross-review的以下门禁已用于把00～18、
     retry或audit identity作为调用方字段；upload target/proof是唯一显式Secret-bearing响应例外，并被no-store/redaction/非明文Receipt约束。
 12. TenantConfig slot复核确认Scheduling/Retention/ArtifactIo各有一个exact optional current binding；mutation保留未修改slot，Artifact prepare要求后两者，
     不扫描或排序多个active Policy，不新增tenant-policy join/head表。
+13. owner registry新增Skill/Policy/Sandbox Deployment nominal kinds、prefix与allowed-kind matrix，禁止definition Version成为普通active binding；
+14. `DeploymentClosure`为八个public noun提供closed variant，每个variant引用唯一owner Revision并冻结bounded requirement/policy/qualification closure；
+15. Agent/Run/child/Invocation/Artifact/Sandbox snapshots逐字段改为exact Deployment + Revision，不从active binding重建历史；
+16. fresh PostgreSQL验证八类create/activate/suspend并发CAS、wrong owner/tenant/kind/digest、Receipt replay与Event/Outbox原子性，且不新增表；
+17. OpenAPI/owner schema/protobuf/fixtures逐字段一致，八类route均有真实handler与positive/negative conformance，ContextDataset仍只有build/generation API。
 
 ## 16. 未决项
 
-无P0/P1规范冲突；stale-contract、status/dependency、relative-link和`git diff --check`门禁已通过。
-owner已明确授权执行spec00～18，Acceptance已记录。下一步按implementation plan进入Phase 1；Acceptance不得被
-推断为实现或资格完成。
+CR-173当前有一个未关闭P0：definition-only Deployment lifecycle尚未在owner types、Run bindings、repository、public schema和fixture
+形成单一闭包。00～18维持Draft；完成Acceptance 13～17前，只允许按上游到下游顺序修复该冲突，不得宣称完整Management API或Phase完成。
