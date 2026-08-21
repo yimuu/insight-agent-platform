@@ -2,18 +2,21 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Open / Architecture Revision |
-| 日期 | 2026-08-21 |
+| 状态 | Closed / CR-173 Accepted |
+| 日期 | 2026-08-22 |
 | 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-173 implementation feedback |
 | 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft/Deployment/Run admission authority和fixture闭包 |
 
 ## 1. 结论
 
-CR-173尚未授权继续生成完整Management API。实施对照发现Rust `activation_target()`和`DeploymentClosure`只覆盖六类
-Deployment，而02/17与工程规则要求八个public动态管理noun走统一Deployment binding；Skill、Policy、Sandbox详细规范又保留了
-Version active-head表述。该P0合同冲突必须先按02→04/11/14→05/06/09/10/12/13/15/16→17→18顺序消解，并重跑下述00～18矩阵。
+CR-173发现的definition-only Deployment P0已按
+02→04/11/14→05/06/09/10/12/13/15/16→17→18顺序关闭。Skill、Policy、Sandbox现在与其余public noun一样使用
+immutable exact Deployment closure、Resource active binding和AdministrativeGate；owner registry、Run/Sandbox binding、PostgreSQL
+lifecycle、generated owner schema与八类public route保持同一authority。Acceptance 13～17的正负、并发、Receipt/Event/Outbox与
+machine-contract门禁通过，00～18全量复核未发现新的P0/P1合同冲突。
 
-CR-172的其余结论作为审查输入保留，但在CR-173关闭前不构成Implementation Authorization。
+因此CR-173恢复Implementation Authorization并将00～18合同推进为Accepted。Accepted只表示target合同闭合；它不表示target已成为
+current production behavior，也不替代18要求的L4～L6、CapacityProfile、restore/soak、signed supply-chain或GitOps cutover证据。
 
 CR-171继承CR-170的public Artifact DTO与可信服务交接结论，并消解实施反馈发现的tenant Artifact default Policy authority缺口。全量审查确认首版目标收敛为：
 
@@ -57,13 +60,13 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Draft / CR-173 | Implementation Authorization已撤回，等待closure matrix复核 |
-| 01～10 | Draft / CR-173 review | 02/04上游变更的ID、binding、transaction与Run snapshot影响复核中 |
-| 11 Skill | Draft / CR-173 owner revision | Skill仍是方法包/非进程，但新增exact Deployment requirement closure |
-| 12～18 | Draft / CR-173 review | Dataset例外、Sandbox Deployment、public schema与资格fixture复核中 |
+| 00 | Accepted / CR-173 | target协议、authority与current-behavior边界闭合 |
+| 01～10 | Accepted / CR-173 | ID、binding、transaction、Run snapshot与调用模型影响复核完成 |
+| 11 Skill | Accepted / CR-173 | Skill仍是方法包/非进程，并使用exact Deployment requirement closure |
+| 12～18 | Accepted / CR-173 | Dataset例外、Sandbox Deployment、public schema与分层资格合同复核完成 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
-| implementation-plan | Draft / Architecture Revision | 仅允许CR-173 lifecycle修复，其他阶段暂停扩面 |
+| implementation-plan | In Progress | L1～L3与public contract已恢复；L4～L6、CapacityProfile和GitOps cutover仍待外部资格环境 |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
 18不再是17的Release state上游，因而不存在17→18→17的循环。
@@ -294,5 +297,8 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-173当前有一个未关闭P0：definition-only Deployment lifecycle尚未在owner types、Run bindings、repository、public schema和fixture
-形成单一闭包。00～18维持Draft；完成Acceptance 13～17前，只允许按上游到下游顺序修复该冲突，不得宣称完整Management API或Phase完成。
+CR-173合同范围没有未关闭P0/P1。Acceptance 13～17已形成单一闭包，00～18状态为Accepted。
+
+实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
+soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，
+不回退已闭合合同，但在实际通过前禁止宣称Phase 4、production capacity或Platform v2总体完成。

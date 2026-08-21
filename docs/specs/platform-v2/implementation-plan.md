@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision |
-| 日期 | 2026-08-21 |
+| 状态 | In Progress / CR-173 contracts accepted; L4～L6 pending |
+| 日期 | 2026-08-22 |
 | 合同输入 | 00～18、cross-review CR-173/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
@@ -12,9 +12,8 @@
 本计划只描述目标实现顺序，不宣称任一Draft API、schema、topology、capacity或runtime已是current behavior。
 只有当phase的code、migration、manifests、tests、runbooks和evidence同时通过适用门禁，才能标记完成。
 
-CR-173关闭前，仅允许修复Deployment lifecycle上游合同、owner types、repository与对应negative/concurrency fixture；完整Management
-OpenAPI、production qualification和cutover继续暂停。恢复顺序为closed Deployment matrix → exact binding/Run snapshot → public route/schema
-→ L1～L6 fixture。
+CR-173的恢复顺序已经完成到public route/schema与L1～L3开发门禁：closed Deployment matrix → exact binding/Run snapshot →
+public route/schema。production qualification与cutover仍必须继续执行L4～L6，不能用开发fixture、静态manifest检查或合同Accepted状态替代。
 
 实现遵循以下顺序：
 
