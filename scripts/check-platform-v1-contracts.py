@@ -311,10 +311,19 @@ def check_foundation_surfaces(errors):
     if any(fragment not in openapi for fragment in task_contract):
         errors.append("public Task OpenAPI contract is incomplete")
     artifact_contract = [
+        "  /artifacts:prepare-upload:",
         "  /artifacts/{artifact_id}:",
+        "  /artifacts/{artifact_id}:complete-upload:",
+        "      operationId: prepareArtifactUpload",
         "      operationId: getArtifact",
+        "      operationId: completeArtifactUpload",
+        "      x-insight-permission: artifact.write",
         "      x-insight-permission: artifact.read",
         "    ArtifactId:",
+        "    PrepareArtifactUploadRequestV1:",
+        "    PrepareArtifactUploadResponseV1:",
+        "    CompleteArtifactUploadRequestV1:",
+        "    ArtifactMutationAcceptedV1:",
         "    ArtifactViewV1:",
     ]
     if any(fragment not in openapi for fragment in artifact_contract):
@@ -336,7 +345,9 @@ def check_foundation_surfaces(errors):
         "  /tasks/{task_id}:approve:",
         "  /tasks/{task_id}:reject:",
         "  /tasks/{task_id}:cancel:",
+        "  /artifacts:prepare-upload:",
         "  /artifacts/{artifact_id}:",
+        "  /artifacts/{artifact_id}:complete-upload:",
         "  /operations/{operation_id}:",
         "  /mcp/oauth/callback:",
     ]:

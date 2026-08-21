@@ -295,6 +295,37 @@ paths:
         "401": {$ref: "#/components/responses/ApiProblem"}
         "403": {$ref: "#/components/responses/ApiProblem"}
         "409": {$ref: "#/components/responses/ApiProblem"}
+  /artifacts:prepare-upload:
+    post:
+      operationId: prepareArtifactUpload
+      summary: Prepare a server-owned staging Artifact and short-lived upload target
+      tags: [Artifacts]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: artifact.write
+      x-insight-idempotency: tenant_principal_artifact_collection_receipt
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PrepareArtifactUploadRequestV1"}
+      responses:
+        "201":
+          description: Staging Artifact, shared verification Job, Grant, and secret-bearing target.
+          headers:
+            Location: {schema: {type: string, pattern: "^/v1/artifacts/art_"}}
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PrepareArtifactUploadResponseV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "413": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /artifacts/{artifact_id}:
     get:
       operationId: getArtifact
@@ -319,6 +350,38 @@ paths:
         "401": {$ref: "#/components/responses/ApiProblem"}
         "403": {$ref: "#/components/responses/ApiProblem"}
         "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /artifacts/{artifact_id}:complete-upload:
+    post:
+      operationId: completeArtifactUpload
+      summary: Verify the current provider generation and schedule the frozen scan
+      tags: [Artifacts]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: artifact.write
+      x-insight-idempotency: artifact_scoped_receipt
+      parameters:
+        - $ref: "#/components/parameters/ArtifactId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CompleteArtifactUploadRequestV1"}
+      responses:
+        "202":
+          description: Provider generation accepted and the shared verification Job made ready.
+          headers:
+            Location: {schema: {type: string, pattern: "^/v1/operations/job_"}}
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ArtifactMutationAcceptedV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
   /operations/{operation_id}:
     get:
@@ -680,6 +743,61 @@ components:
         created_at: {$ref: "#/components/schemas/UtcTimestamp"}
         updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
         etag: {type: string, minLength: 1, maxLength: 128}
+    PrepareArtifactUploadRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, purpose, classification, expected_size_bytes, expected_digest, declared_media_type, display_name]
+      properties:
+        schema_version: {const: 1}
+        purpose: {type: string, enum: [authoring_document, interface_contract, typed_plan, package, sbom, backend_binding, model_generation_defaults, run_input, run_output, capability_input, capability_output, context_source, context_derived, mcp_resource, sandbox_input, sandbox_output, diagnostic, export]}
+        classification: {$ref: "#/components/schemas/DataClassification"}
+        expected_size_bytes: {type: integer, minimum: 1, maximum: 1073741824}
+        expected_digest: {oneOf: [{$ref: "#/components/schemas/Digest"}, {type: "null"}]}
+        declared_media_type: {oneOf: [{type: string, minLength: 3, maxLength: 255}, {type: "null"}]}
+        display_name: {oneOf: [{type: string, minLength: 1, maxLength: 512}, {type: "null"}]}
+    OpaqueUploadCompletionProof:
+      type: string
+      minLength: 1
+      maxLength: 4096
+      pattern: "^[A-Za-z0-9._~-]+$"
+      writeOnly: true
+      x-insight-secret-bearing: true
+    SecretBearingUploadTargetV1:
+      type: object
+      additionalProperties: false
+      required: [url, completion_proof]
+      x-insight-secret-bearing: true
+      properties:
+        url: {type: string, format: uri, pattern: "^https://", maxLength: 8192, writeOnly: true}
+        completion_proof: {$ref: "#/components/schemas/OpaqueUploadCompletionProof"}
+    PrepareArtifactUploadResponseV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, artifact_id, operation_id, upload_grant_id, artifact_etag, upload_target, upload_expires_at]
+      properties:
+        schema_version: {const: 1}
+        artifact_id: {$ref: "#/components/schemas/ArtifactId"}
+        operation_id: {$ref: "#/components/schemas/JobId"}
+        upload_grant_id: {type: string, pattern: "^grt_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", minLength: 40, maxLength: 40}
+        artifact_etag: {type: string, minLength: 3, maxLength: 128}
+        upload_target: {$ref: "#/components/schemas/SecretBearingUploadTargetV1"}
+        upload_expires_at: {$ref: "#/components/schemas/UtcTimestamp"}
+    CompleteArtifactUploadRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, completion_proof]
+      properties:
+        schema_version: {const: 1}
+        completion_proof: {$ref: "#/components/schemas/OpaqueUploadCompletionProof"}
+    ArtifactMutationAcceptedV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, artifact_id, artifact_etag, operation_id]
+      properties:
+        schema_version: {const: 1}
+        artifact_id: {$ref: "#/components/schemas/ArtifactId"}
+        artifact_etag: {type: string, minLength: 3, maxLength: 128}
+        operation_id: {$ref: "#/components/schemas/JobId"}
     ArtifactViewV1:
       type: object
       additionalProperties: false
