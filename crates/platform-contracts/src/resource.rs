@@ -1295,11 +1295,11 @@ pub struct FrozenSlotBinding {
 pub enum FrozenSlotTarget {
     Model {
         candidates: Vec<ExactDeploymentRef>,
-        selection_policy: ExactVersionRef,
+        selection_policy: ExactPolicyBinding,
     },
     Capability {
         candidates: Vec<ExactDeploymentRef>,
-        selection_policy: ExactVersionRef,
+        selection_policy: ExactPolicyBinding,
         tool_alias: Option<String>,
     },
     Context {
@@ -1307,11 +1307,11 @@ pub enum FrozenSlotTarget {
     },
     ChildAgent {
         candidates: Vec<ExactDeploymentRef>,
-        selection_policy: ExactVersionRef,
+        selection_policy: ExactPolicyBinding,
     },
     Skill {
         candidates: Vec<ExactDeploymentRef>,
-        selection_policy: ExactVersionRef,
+        selection_policy: ExactPolicyBinding,
     },
 }
 
@@ -1326,7 +1326,7 @@ impl FrozenSlotBinding {
                 selection_policy,
             } => {
                 validate_deployments(candidates, ResourceKind::ModelDeployment)?;
-                require_kind(&selection_policy.revision_id, ResourceKind::PolicyRevision)
+                selection_policy.validate()
             }
             FrozenSlotTarget::Capability {
                 candidates,
@@ -1334,7 +1334,7 @@ impl FrozenSlotBinding {
                 tool_alias,
             } => {
                 validate_deployments(candidates, ResourceKind::CapabilityDeployment)?;
-                require_kind(&selection_policy.revision_id, ResourceKind::PolicyRevision)?;
+                selection_policy.validate()?;
                 if tool_alias.as_ref().is_some_and(|alias| !is_code(alias)) {
                     return Err(ResourceContractError::InvalidCode);
                 }
@@ -1348,14 +1348,14 @@ impl FrozenSlotBinding {
                 selection_policy,
             } => {
                 validate_deployments(candidates, ResourceKind::AgentDeployment)?;
-                require_kind(&selection_policy.revision_id, ResourceKind::PolicyRevision)
+                selection_policy.validate()
             }
             FrozenSlotTarget::Skill {
                 candidates,
                 selection_policy,
             } => {
                 validate_deployments(candidates, ResourceKind::SkillDeployment)?;
-                require_kind(&selection_policy.revision_id, ResourceKind::PolicyRevision)
+                selection_policy.validate()
             }
         }
     }
@@ -1416,9 +1416,9 @@ impl DeploymentClosure {
                 refs.extend([
                     &closure.interface,
                     &closure.plan,
-                    &closure.execution_profile,
+                    &closure.execution_profile.revision,
                 ]);
-                refs.extend(closure.policies.iter());
+                refs.extend(closure.policies.iter().map(|binding| &binding.revision));
                 for slot in &closure.slots {
                     match &slot.target {
                         FrozenSlotTarget::Model {
@@ -1430,12 +1430,12 @@ impl DeploymentClosure {
                         | FrozenSlotTarget::ChildAgent {
                             selection_policy, ..
                         } => {
-                            refs.push(selection_policy);
+                            refs.push(&selection_policy.revision);
                         }
                         FrozenSlotTarget::Skill {
                             selection_policy, ..
                         } => {
-                            refs.push(selection_policy);
+                            refs.push(&selection_policy.revision);
                         }
                         FrozenSlotTarget::Context { binding } => {
                             refs.extend([&binding.authorization_policy, &binding.ranking_policy])
@@ -1456,11 +1456,11 @@ impl DeploymentClosure {
                         }
                         | FrozenSlotTarget::ChildAgent {
                             selection_policy, ..
-                        } => refs.push(selection_policy),
+                        } => refs.push(&selection_policy.revision),
                         FrozenSlotTarget::Skill {
                             selection_policy, ..
                         } => {
-                            refs.push(selection_policy);
+                            refs.push(&selection_policy.revision);
                         }
                         FrozenSlotTarget::Context { binding } => {
                             refs.extend([&binding.authorization_policy, &binding.ranking_policy])
@@ -1527,19 +1527,36 @@ impl DeploymentClosure {
             Self::Agent(closure) => {
                 for slot in &closure.slots {
                     match &slot.target {
-                        FrozenSlotTarget::Model { candidates, .. }
-                        | FrozenSlotTarget::Capability { candidates, .. }
-                        | FrozenSlotTarget::ChildAgent { candidates, .. } => {
+                        FrozenSlotTarget::Model {
+                            candidates,
+                            selection_policy,
+                        }
+                        | FrozenSlotTarget::Capability {
+                            candidates,
+                            selection_policy,
+                            ..
+                        }
+                        | FrozenSlotTarget::ChildAgent {
+                            candidates,
+                            selection_policy,
+                        } => {
                             refs.extend(candidates.iter());
+                            refs.push(&selection_policy.deployment);
                         }
                         FrozenSlotTarget::Context { binding } => {
                             refs.push(&binding.context_deployment);
                         }
-                        FrozenSlotTarget::Skill { candidates, .. } => {
+                        FrozenSlotTarget::Skill {
+                            candidates,
+                            selection_policy,
+                        } => {
                             refs.extend(candidates.iter());
+                            refs.push(&selection_policy.deployment);
                         }
                     }
                 }
+                refs.extend(closure.policies.iter().map(|binding| &binding.deployment));
+                refs.push(&closure.execution_profile.deployment);
             }
             Self::CapabilityInterface(closure) => {
                 refs.extend(closure.backend.exact_deployment_refs())
@@ -1583,10 +1600,51 @@ impl DeploymentClosure {
 
     pub fn exact_policy_bindings(&self) -> Vec<&ExactPolicyBinding> {
         match self {
-            Self::Skill(closure) => vec![&closure.selection_policy],
+            Self::Agent(closure) => {
+                let mut bindings = closure.policies.iter().collect::<Vec<_>>();
+                bindings.push(&closure.execution_profile);
+                for slot in &closure.slots {
+                    match &slot.target {
+                        FrozenSlotTarget::Model {
+                            selection_policy, ..
+                        }
+                        | FrozenSlotTarget::Capability {
+                            selection_policy, ..
+                        }
+                        | FrozenSlotTarget::ChildAgent {
+                            selection_policy, ..
+                        }
+                        | FrozenSlotTarget::Skill {
+                            selection_policy, ..
+                        } => bindings.push(selection_policy),
+                        FrozenSlotTarget::Context { .. } => {}
+                    }
+                }
+                bindings
+            }
+            Self::Skill(closure) => {
+                let mut bindings = vec![&closure.selection_policy];
+                for requirement in &closure.requirements {
+                    match &requirement.target {
+                        FrozenSlotTarget::Model {
+                            selection_policy, ..
+                        }
+                        | FrozenSlotTarget::Capability {
+                            selection_policy, ..
+                        }
+                        | FrozenSlotTarget::ChildAgent {
+                            selection_policy, ..
+                        }
+                        | FrozenSlotTarget::Skill {
+                            selection_policy, ..
+                        } => bindings.push(selection_policy),
+                        FrozenSlotTarget::Context { .. } => {}
+                    }
+                }
+                bindings
+            }
             Self::SandboxProfile(closure) => closure.policy_bindings.iter().collect(),
-            Self::Agent(_)
-            | Self::CapabilityInterface(_)
+            Self::CapabilityInterface(_)
             | Self::ContextSourceInterface(_)
             | Self::McpServer(_)
             | Self::ModelProvider(_)
@@ -1666,8 +1724,8 @@ pub struct AgentDeploymentClosure {
     pub entry_node_id: String,
     pub entry_node_kind: PlanNodeKind,
     pub slots: Vec<FrozenSlotBinding>,
-    pub policies: Vec<ExactVersionRef>,
-    pub execution_profile: ExactVersionRef,
+    pub policies: Vec<ExactPolicyBinding>,
+    pub execution_profile: ExactPolicyBinding,
 }
 
 impl AgentDeploymentClosure {
@@ -1680,11 +1738,8 @@ impl AgentDeploymentClosure {
         if !is_code(&self.entry_node_id) {
             return Err(ResourceContractError::UnboundedValue);
         }
-        validate_policy_versions(&self.policies)?;
-        require_kind(
-            &self.execution_profile.revision_id,
-            ResourceKind::PolicyRevision,
-        )?;
+        validate_policy_bindings(&self.policies)?;
+        self.execution_profile.validate()?;
         if self.slots.len() > MAX_FROZEN_SLOTS {
             return Err(ResourceContractError::UnboundedValue);
         }
@@ -1897,8 +1952,8 @@ pub struct RunBindingsSnapshot {
     pub principal: PrincipalSnapshot,
     pub slots: Vec<FrozenSlotBinding>,
     pub context_dataset_views: Vec<crate::RunContextDatasetView>,
-    pub policies: Vec<ExactVersionRef>,
-    pub execution_profile: ExactVersionRef,
+    pub policies: Vec<ExactPolicyBinding>,
+    pub execution_profile: ExactPolicyBinding,
     pub canonical_digest: Sha256Digest,
 }
 
@@ -1927,7 +1982,11 @@ impl RunBindingsSnapshot {
         let mut slots = closure.slots.clone();
         slots.sort_by(|left, right| left.slot_id.cmp(&right.slot_id));
         let mut policies = closure.policies.clone();
-        policies.sort_by(|left, right| left.revision_id.cmp(&right.revision_id));
+        policies.sort_by(|left, right| {
+            left.deployment
+                .deployment_id
+                .cmp(&right.deployment.deployment_id)
+        });
         context_dataset_views
             .sort_by(|left, right| left.context_binding_id.cmp(&right.context_binding_id));
         let unsigned = UnsignedRunBindingsSnapshot {
@@ -1972,7 +2031,6 @@ impl RunBindingsSnapshot {
             || self.agent.resource_kind != ResourceKind::AgentDeployment
             || self.agent_interface.resource_kind != ResourceKind::AgentInterfaceRevision
             || self.plan.resource_kind != ResourceKind::AgentPlanRevision
-            || self.execution_profile.resource_kind != ResourceKind::PolicyRevision
         {
             return Err(ResourceContractError::WrongResourceIdKind);
         }
@@ -1981,7 +2039,8 @@ impl RunBindingsSnapshot {
             .map_err(|_| ResourceContractError::InvalidPrincipalSnapshot)?;
         validate_slot_bindings(&self.slots)?;
         validate_run_context_dataset_views(&self.slots, &self.context_dataset_views)?;
-        validate_policy_versions(&self.policies)?;
+        self.execution_profile.validate()?;
+        validate_policy_bindings(&self.policies)?;
         if !self
             .slots
             .windows(2)
@@ -1993,7 +2052,7 @@ impl RunBindingsSnapshot {
             || !self
                 .policies
                 .windows(2)
-                .all(|pair| pair[0].revision_id < pair[1].revision_id)
+                .all(|pair| pair[0].deployment.deployment_id < pair[1].deployment.deployment_id)
         {
             return Err(ResourceContractError::DuplicateValue);
         }
@@ -2021,8 +2080,12 @@ impl RunBindingsSnapshot {
     }
 
     pub fn exact_version_refs(&self) -> Vec<&ExactVersionRef> {
-        let mut references = vec![&self.agent_interface, &self.plan, &self.execution_profile];
-        references.extend(self.policies.iter());
+        let mut references = vec![
+            &self.agent_interface,
+            &self.plan,
+            &self.execution_profile.revision,
+        ];
+        references.extend(self.policies.iter().map(|binding| &binding.revision));
         for slot in &self.slots {
             match &slot.target {
                 FrozenSlotTarget::Model {
@@ -2033,11 +2096,11 @@ impl RunBindingsSnapshot {
                 }
                 | FrozenSlotTarget::ChildAgent {
                     selection_policy, ..
-                } => references.push(selection_policy),
+                } => references.push(&selection_policy.revision),
                 FrozenSlotTarget::Skill {
                     selection_policy, ..
                 } => {
-                    references.push(selection_policy);
+                    references.push(&selection_policy.revision);
                 }
                 FrozenSlotTarget::Context { binding } => {
                     references.extend([&binding.authorization_policy, &binding.ranking_policy])
@@ -2051,19 +2114,36 @@ impl RunBindingsSnapshot {
         let mut references = vec![&self.agent];
         for slot in &self.slots {
             match &slot.target {
-                FrozenSlotTarget::Model { candidates, .. }
-                | FrozenSlotTarget::Capability { candidates, .. }
-                | FrozenSlotTarget::ChildAgent { candidates, .. } => {
+                FrozenSlotTarget::Model {
+                    candidates,
+                    selection_policy,
+                }
+                | FrozenSlotTarget::Capability {
+                    candidates,
+                    selection_policy,
+                    ..
+                }
+                | FrozenSlotTarget::ChildAgent {
+                    candidates,
+                    selection_policy,
+                } => {
                     references.extend(candidates.iter());
+                    references.push(&selection_policy.deployment);
                 }
                 FrozenSlotTarget::Context { binding } => {
                     references.push(&binding.context_deployment);
                 }
-                FrozenSlotTarget::Skill { candidates, .. } => {
+                FrozenSlotTarget::Skill {
+                    candidates,
+                    selection_policy,
+                } => {
                     references.extend(candidates.iter());
+                    references.push(&selection_policy.deployment);
                 }
             }
         }
+        references.extend(self.policies.iter().map(|binding| &binding.deployment));
+        references.push(&self.execution_profile.deployment);
         references
     }
 
@@ -2106,8 +2186,8 @@ struct UnsignedRunBindingsSnapshot<'a> {
     principal: &'a PrincipalSnapshot,
     slots: &'a [FrozenSlotBinding],
     context_dataset_views: &'a [crate::RunContextDatasetView],
-    policies: &'a [ExactVersionRef],
-    execution_profile: &'a ExactVersionRef,
+    policies: &'a [ExactPolicyBinding],
+    execution_profile: &'a ExactPolicyBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2203,6 +2283,23 @@ fn validate_policy_versions(values: &[ExactVersionRef]) -> Result<(), ResourceCo
         .any(|value| value.resource_kind != ResourceKind::PolicyRevision)
     {
         return Err(ResourceContractError::WrongResourceIdKind);
+    }
+    Ok(())
+}
+
+fn validate_policy_bindings(values: &[ExactPolicyBinding]) -> Result<(), ResourceContractError> {
+    if values.len() > MAX_RESOURCE_POLICIES {
+        return Err(ResourceContractError::UnboundedValue);
+    }
+    let mut deployments = BTreeSet::new();
+    let mut revisions = BTreeSet::new();
+    for value in values {
+        value.validate()?;
+        if !deployments.insert(&value.deployment.deployment_id)
+            || !revisions.insert(&value.revision.revision_id)
+        {
+            return Err(ResourceContractError::DuplicateValue);
+        }
     }
     Ok(())
 }
@@ -2420,12 +2517,35 @@ mod tests {
         .unwrap()
     }
 
+    fn policy_binding(
+        deployment_suffix: &str,
+        revision_suffix: &str,
+        marker: char,
+    ) -> ExactPolicyBinding {
+        ExactPolicyBinding {
+            deployment: ExactDeploymentRef::new(
+                id(&format!(
+                    "pdep_0198f1c3-8f49-7c3e-b1f3-773c2836{deployment_suffix}"
+                )),
+                digest(marker),
+            )
+            .unwrap(),
+            revision: ExactVersionRef::new(
+                id(&format!(
+                    "prev_0198f1c3-8f49-7c3e-b1f3-773c2836{revision_suffix}"
+                )),
+                digest(marker),
+            )
+            .unwrap(),
+        }
+    }
+
     #[test]
     fn definition_deployment_closures_are_nominal_and_closed() {
         let policy_deployment =
             ExactDeploymentRef::new(id("pdep_0198f1c3-8f49-7c3e-b1f3-773c28367b81"), digest('a'))
                 .unwrap();
-        let policy_binding = ExactPolicyBinding {
+        let policy_binding_pair = ExactPolicyBinding {
             deployment: policy_deployment.clone(),
             revision: ExactVersionRef::new(
                 id("prev_0198f1c3-8f49-7c3e-b1f3-773c28367b89"),
@@ -2448,15 +2568,11 @@ mod tests {
                         digest('2'),
                     )
                     .unwrap()],
-                    selection_policy: ExactVersionRef::new(
-                        id("prev_0198f1c3-8f49-7c3e-b1f3-773c28367b88"),
-                        digest('3'),
-                    )
-                    .unwrap(),
+                    selection_policy: policy_binding("7b8a", "7b88", '3'),
                 },
                 binding_digest: digest('4'),
             }],
-            selection_policy: policy_binding.clone(),
+            selection_policy: policy_binding_pair.clone(),
             qualification_evidence: qualification_artifact(),
         });
         let policy = DeploymentClosure::Policy(PolicyDeploymentClosure {
@@ -2479,7 +2595,7 @@ mod tests {
                 digest('f'),
             )
             .unwrap(),
-            policy_bindings: vec![policy_binding],
+            policy_bindings: vec![policy_binding_pair],
             qualification_evidence: qualification_artifact(),
         });
         assert!(skill.validate().is_ok());
@@ -2595,11 +2711,7 @@ mod tests {
             entry_node_kind: PlanNodeKind::Start,
             slots: vec![],
             policies: vec![],
-            execution_profile: ExactVersionRef::new(
-                id("prev_0198f1c3-8f49-7c3e-b1f3-773c28367b93"),
-                digest('d'),
-            )
-            .unwrap(),
+            execution_profile: policy_binding("7b97", "7b93", 'd'),
         };
         let snapshot = RunBindingsSnapshot::build(
             ExactDeploymentRef::new(id("adep_0198f1c3-8f49-7c3e-b1f3-773c28367b94"), digest('e'))
@@ -2674,12 +2786,25 @@ mod tests {
                 },
                 binding_digest: digest('7'),
             }],
-            policies: vec![authorization_policy, ranking_policy],
-            execution_profile: ExactVersionRef::new(
-                id("prev_0198f1c3-8f49-7c3e-b1f3-773c28367c09"),
-                digest('8'),
-            )
-            .unwrap(),
+            policies: vec![
+                ExactPolicyBinding {
+                    deployment: ExactDeploymentRef::new(
+                        id("pdep_0198f1c3-8f49-7c3e-b1f3-773c28367c0d"),
+                        digest('2'),
+                    )
+                    .unwrap(),
+                    revision: authorization_policy,
+                },
+                ExactPolicyBinding {
+                    deployment: ExactDeploymentRef::new(
+                        id("pdep_0198f1c3-8f49-7c3e-b1f3-773c28367c0e"),
+                        digest('3'),
+                    )
+                    .unwrap(),
+                    revision: ranking_policy,
+                },
+            ],
+            execution_profile: policy_binding("7c0f", "7c09", '8'),
         };
         let agent = ExactDeploymentRef::new(agent_deployment_id, digest('9')).unwrap();
         let principal = PrincipalSnapshot::build(

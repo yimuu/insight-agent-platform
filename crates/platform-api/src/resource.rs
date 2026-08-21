@@ -1706,9 +1706,9 @@ mod tests {
     use insight_platform_contracts::{
         operation_etag, AgentDeploymentClosure, ArtifactRef, AuthnStrength, AuthoringPackage,
         ContextDatasetGenerationSpec, ContextDatasetResourceSpec, DataClassification,
-        ExactDeploymentRef, ExactVersionRef, Permission, PermissionSet, PolicyKind,
-        PolicyResourceSpec, PrincipalKind, PublicJobKind, PublicJobState, PublicJobTarget,
-        UtcTimestamp, ValidationSummary,
+        ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, Permission, PermissionSet,
+        PolicyKind, PolicyResourceSpec, PrincipalKind, PublicJobKind, PublicJobState,
+        PublicJobTarget, UtcTimestamp, ValidationSummary,
     };
     use std::sync::Mutex;
     use tower::ServiceExt;
@@ -1726,6 +1726,21 @@ mod tests {
         format!("sha256:{}", character.to_string().repeat(64))
             .parse()
             .unwrap()
+    }
+
+    fn policy_binding(suffix: u16, marker: char) -> ExactPolicyBinding {
+        ExactPolicyBinding {
+            deployment: ExactDeploymentRef::new(
+                id(ResourceKind::PolicyDeployment, suffix),
+                fixed_digest(marker),
+            )
+            .unwrap(),
+            revision: ExactVersionRef::new(
+                id(ResourceKind::PolicyRevision, suffix),
+                fixed_digest(marker),
+            )
+            .unwrap(),
+        }
     }
 
     fn principal(now: DateTime<Utc>) -> AuthenticatedPrincipal {
@@ -1986,11 +2001,7 @@ mod tests {
                 entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
                 slots: Vec::new(),
                 policies: Vec::new(),
-                execution_profile: ExactVersionRef::new(
-                    id(ResourceKind::PolicyRevision, 23),
-                    fixed_digest('3'),
-                )
-                .unwrap(),
+                execution_profile: policy_binding(23, '3'),
             });
             let closure_digest = deployment_closure_digest(&closure).unwrap();
             Ok(DeploymentViewV1 {
@@ -2630,11 +2641,7 @@ mod tests {
                 entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
                 slots: Vec::new(),
                 policies: Vec::new(),
-                execution_profile: ExactVersionRef::new(
-                    id(ResourceKind::PolicyRevision, 23),
-                    fixed_digest('3'),
-                )
-                .unwrap(),
+                execution_profile: policy_binding(23, '3'),
             }),
         };
         let response = router

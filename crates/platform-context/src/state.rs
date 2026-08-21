@@ -307,7 +307,12 @@ pub fn decide_context_query_admission(
         facts.policy_generation,
         deadline,
     )?;
-    let mut policies = facts.run_bindings.policies.clone();
+    let mut policies = facts
+        .run_bindings
+        .policies
+        .iter()
+        .map(|binding| binding.revision.clone())
+        .collect::<Vec<_>>();
     policies.extend([
         facts.binding.authorization_policy.clone(),
         facts.binding.ranking_policy.clone(),
@@ -1200,7 +1205,7 @@ mod tests {
         ContextConsistencyMode, ContextDataPolicyContract, ContextImplementationContract,
         ContextInterfaceLimits, ContextLocatorKind, ContextPaginationContract,
         ContextRankingContract, DataClassification, DataRegion, ExactDeploymentRef,
-        FrozenSlotBinding, PermissionSet, PrincipalKind,
+        ExactPolicyBinding, FrozenSlotBinding, PermissionSet, PrincipalKind,
     };
     use insight_platform_invocations::InvocationValueStorage;
     use insight_platform_jobs::{JobFence, WakeKind};
@@ -1219,6 +1224,17 @@ mod tests {
         )
         .parse()
         .unwrap()
+    }
+
+    fn policy_binding(revision: ExactVersionRef, suffix: u16) -> ExactPolicyBinding {
+        ExactPolicyBinding {
+            deployment: ExactDeploymentRef::new(
+                id(ResourceKind::PolicyDeployment, suffix),
+                named_digest(&format!("policy-deployment-{suffix}")),
+            )
+            .unwrap(),
+            revision,
+        }
     }
 
     fn named_digest(label: &str) -> Sha256Digest {
@@ -1397,12 +1413,12 @@ mod tests {
                 binding_digest: named_digest("slot-binding"),
             }],
             policies: vec![
-                authorization_policy,
-                ranking_policy,
-                parser_policy,
-                data_policy,
+                policy_binding(authorization_policy, 42),
+                policy_binding(ranking_policy, 43),
+                policy_binding(parser_policy, 44),
+                policy_binding(data_policy, 45),
             ],
-            execution_profile,
+            execution_profile: policy_binding(execution_profile, 46),
         };
         let principal = PrincipalSnapshot::build(
             tenant_id.clone(),

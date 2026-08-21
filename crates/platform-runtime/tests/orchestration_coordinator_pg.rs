@@ -3,11 +3,12 @@ use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, AgentDeploymentClosure, ArtifactRef,
     AuthoringPackage, CommandAudit, CommandOutcome, DataClassification, DeploymentClosure,
-    ExactDeploymentRef, ExactVersionRef, JsonLimits, Permission, PermissionSet, PlanNodeKind,
-    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
-    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, ResourceDocument, ResourceId,
-    ResourceKind, RunBindingsSnapshot, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
+    ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, JsonLimits, Permission, PermissionSet,
+    PlanNodeKind, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, SchedulingPolicyDocument,
+    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass,
+    WorkerManifest,
 };
 use insight_platform_orchestrator::{AdmitRun, PlanNodeKey, RunInputValue};
 use insight_platform_postgres::{
@@ -643,14 +644,18 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         .unwrap(),
     )
     .await;
+    let policy_binding = ExactPolicyBinding {
+        deployment: policy_deployment.clone(),
+        revision: policy.clone(),
+    };
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(INTERFACE_ID), digest('b')).unwrap(),
         plan: ExactVersionRef::new(id(PLAN_ID), digest('c')).unwrap(),
         entry_node_id: "start".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
-        policies: vec![policy.clone()],
-        execution_profile: policy.clone(),
+        policies: vec![policy_binding.clone()],
+        execution_profile: policy_binding,
     };
     let deployment_payload =
         TypedPayload::new(1, &DeploymentClosure::Agent(closure.clone())).unwrap();
@@ -1378,14 +1383,18 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
         qualification_evidence,
     )
     .await;
+    let policy_binding = ExactPolicyBinding {
+        deployment: policy_deployment.clone(),
+        revision: policy.clone(),
+    };
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(interface_id, digest('b')).unwrap(),
         plan: ExactVersionRef::new(plan_id.clone(), digest('c')).unwrap(),
         entry_node_id: "start".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
-        policies: vec![policy.clone()],
-        execution_profile: policy.clone(),
+        policies: vec![policy_binding.clone()],
+        execution_profile: policy_binding,
     };
     let deployment_payload =
         TypedPayload::new(1, &DeploymentClosure::Agent(closure.clone())).unwrap();

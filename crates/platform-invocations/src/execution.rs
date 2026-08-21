@@ -2394,9 +2394,9 @@ mod tests {
     use insight_platform_contracts::{
         CapabilityArtifactContract, CapabilityBackendFeatures, CapabilityCancellationKind,
         CapabilityDataFlowPolicy, CapabilityIdempotencyKind, CapabilityInterfaceLimits,
-        CapabilityProgressContract, ExactDeploymentRef, ExactVersionRef, FailureClass, FailureCode,
-        FailureSource, Permission, PermissionSet, PlatformFailureCode, PrincipalKind,
-        PrincipalSnapshot,
+        CapabilityProgressContract, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
+        FailureClass, FailureCode, FailureSource, Permission, PermissionSet, PlatformFailureCode,
+        PrincipalKind, PrincipalSnapshot,
     };
 
     fn id(value: &str) -> ResourceId {
@@ -2465,7 +2465,14 @@ mod tests {
             slot_id: "capability".to_owned(),
             slot_binding_digest: hash('f'),
             run_bindings_digest: hash('1'),
-            selection_policy: policy,
+            selection_policy: ExactPolicyBinding {
+                deployment: ExactDeploymentRef::new(
+                    id("pdep_0198f1c8-32e4-75e1-a9e8-d95ca0f40020"),
+                    hash('c'),
+                )
+                .unwrap(),
+                revision: policy,
+            },
             selection_evidence: InvocationSelectionEvidence::build(
                 std::slice::from_ref(&deployment),
                 0,

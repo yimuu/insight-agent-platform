@@ -14,12 +14,13 @@ use insight_platform_contracts::{
     CapabilityIdempotencyKind, CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
     CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
     CapabilityProgressMode, ClosedJsonSchema, CommandAudit, CommandOutcome, DataClassification,
-    DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactVersionRef,
-    FrozenSlotBinding, FrozenSlotTarget, InteractionKind, NativeCapabilityContract, Permission,
-    PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind,
-    PrincipalSnapshot, PublishedVersionPayload, QuotaDimension, RegistryResourceKind,
-    ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
+    ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, InteractionKind,
+    NativeCapabilityContract, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
+    ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, BackendInputRequest, CapabilityApprovalDecision,
@@ -2138,6 +2139,11 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             .await
             .unwrap();
     }
+    let policy_binding = ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(id(ResourceKind::PolicyDeployment, 0x71), digest('7'))
+            .unwrap(),
+        revision: policy_exact.clone(),
+    };
     let agent_closure = AgentDeploymentClosure {
         interface: agent_interface_exact,
         plan: agent_plan_exact,
@@ -2148,13 +2154,13 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             requirement_digest: digest('8'),
             target: FrozenSlotTarget::Capability {
                 candidates: vec![capability_deployment.clone()],
-                selection_policy: policy_exact.clone(),
+                selection_policy: policy_binding.clone(),
                 tool_alias: Some("write".to_owned()),
             },
             binding_digest: digest('9'),
         }],
-        policies: vec![policy_exact.clone()],
-        execution_profile: policy_exact.clone(),
+        policies: vec![policy_binding.clone()],
+        execution_profile: policy_binding,
     };
     let agent_payload =
         TypedPayload::new(1, &DeploymentClosure::Agent(agent_closure.clone())).unwrap();

@@ -2,8 +2,8 @@ use chrono::{Duration, Utc};
 use insight_platform_contracts::{
     ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
     ArtifactRetentionPolicy, AuthoringPackage, CodeTrustClass, DataClassification,
-    DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExactVersionRef, Permission,
-    PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
+    Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
     RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
     RunBindingsSnapshot, SandboxEntrypointKind, SandboxPackageResourceSpec, Sha256Digest,
@@ -1097,7 +1097,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
                 target: ActiveTarget::Deployment {
                     deployment: ExactDeploymentRef::new(
                         id(POLICY_DEPLOYMENT_ID),
-                        policy_deployment_digest,
+                        policy_deployment_digest.clone(),
                     )
                     .unwrap(),
                 },
@@ -1136,6 +1136,11 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     assert_eq!(enabled.version, 9);
 
     let policy_ref = ExactVersionRef::new(id(VERSION_ID), digest('6')).unwrap();
+    let policy_binding = ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(id(POLICY_DEPLOYMENT_ID), policy_deployment_digest)
+            .unwrap(),
+        revision: policy_ref.clone(),
+    };
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_package: draft.document.authoring_package().clone(),
         contract_digest: digest('a'),
@@ -1229,8 +1234,8 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         entry_node_id: "start".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
-        policies: vec![policy_ref.clone()],
-        execution_profile: policy_ref.clone(),
+        policies: vec![policy_binding.clone()],
+        execution_profile: policy_binding,
     };
     let deployment_audit = audit(TENANT_ID, PRINCIPAL_ID, "7cd7", 'c', 'd');
     let deployment = applied(

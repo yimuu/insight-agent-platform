@@ -897,6 +897,17 @@ def check_spec_registry_alignment(errors):
             errors.append(f"{slot_kind} slot candidate has the wrong deployment kind")
         if not candidate.get("deployment_id", {}).get("pattern", "").startswith(expected_prefix):
             errors.append(f"{slot_kind} slot candidate has the wrong deployment ID prefix")
+        selection = properties.get("selection_policy", {}).get("properties", {})
+        selection_deployment = selection.get("deployment", {}).get("properties", {})
+        selection_revision = selection.get("revision", {}).get("properties", {})
+        if selection_deployment.get("resource_kind", {}).get("const") != "policy_deployment":
+            errors.append(f"{slot_kind} slot selection policy does not freeze a Policy Deployment")
+        if not selection_deployment.get("deployment_id", {}).get("pattern", "").startswith("^pdep_"):
+            errors.append(f"{slot_kind} slot selection policy has the wrong Deployment ID prefix")
+        if selection_revision.get("resource_kind", {}).get("const") != "policy_revision":
+            errors.append(f"{slot_kind} slot selection policy does not freeze a Policy Revision")
+        if not selection_revision.get("revision_id", {}).get("pattern", "").startswith("^prev_"):
+            errors.append(f"{slot_kind} slot selection policy has the wrong Revision ID prefix")
 
     if registries.get("quota_accounting_modes") != ["leased", "consumable", "reclaimable"]:
         errors.append("04 quota accounting mode registry is not closed")

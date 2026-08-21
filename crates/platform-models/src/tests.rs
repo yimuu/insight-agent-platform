@@ -3,12 +3,12 @@ use chrono::{Duration, Utc};
 use insight_platform_contracts::{
     canonical_digest, AgentDeploymentClosure, ArtifactRef, AuthoringPackage, ClosedJsonValue,
     CommandAudit, ContextWindowContract, DataClassification, DataRegion, DecimalMoney,
-    ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding,
-    FrozenSlotTarget, InstalledModelAdapter, ModelCatalogEvidence, ModelDeploymentClosure,
-    ModelIdentityStability, ModelLimits, ModelModalities, ModelProfileResourceSpec,
-    ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelToolContract,
-    ModelUsageContract, Permission, PermissionSet, PrincipalKind, PrincipalSnapshot,
-    ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
+    ExactDeploymentRef, ExactPolicyBinding, ExactSecretBindingRef, ExactVersionRef,
+    FrozenSlotBinding, FrozenSlotTarget, InstalledModelAdapter, ModelCatalogEvidence,
+    ModelDeploymentClosure, ModelIdentityStability, ModelLimits, ModelModalities,
+    ModelProfileResourceSpec, ModelProviderDeploymentClosure, ModelProviderResourceSpec,
+    ModelToolContract, ModelUsageContract, Permission, PermissionSet, PrincipalKind,
+    PrincipalSnapshot, ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
     ProviderTrainingPolicy, ResourceId, ResourceKind, RunBindingsSnapshot, SecretPurpose,
     SecretResolutionPolicy, Sha256Digest, StructuredOutputContract, ValueRef,
 };
@@ -45,6 +45,13 @@ fn version(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef 
 
 fn deployment(kind: ResourceKind, suffix: u16, character: char) -> ExactDeploymentRef {
     ExactDeploymentRef::new(id(kind, suffix), sha(character)).unwrap()
+}
+
+fn policy_binding(suffix: u16, character: char) -> ExactPolicyBinding {
+    ExactPolicyBinding {
+        deployment: deployment(ResourceKind::PolicyDeployment, suffix, character),
+        revision: policy(suffix, character),
+    }
 }
 
 fn artifact(suffix: u16, character: char, purpose: &str) -> ArtifactRef {
@@ -266,7 +273,7 @@ fn fixture() -> Fixture {
         1,
     )
     .unwrap();
-    let selection_policy = policy(39, 'd');
+    let selection_policy = policy_binding(39, 'd');
     let agent_closure = AgentDeploymentClosure {
         interface: version(ResourceKind::AgentInterfaceRevision, 50, 'e'),
         plan: version(ResourceKind::AgentPlanRevision, 51, 'f'),
@@ -281,8 +288,8 @@ fn fixture() -> Fixture {
             },
             binding_digest: sha('2'),
         }],
-        policies: vec![policy(52, '3')],
-        execution_profile: policy(53, '4'),
+        policies: vec![policy_binding(52, '3')],
+        execution_profile: policy_binding(53, '4'),
     };
     let run_bindings = RunBindingsSnapshot::build(
         deployment(ResourceKind::AgentDeployment, 54, '5'),

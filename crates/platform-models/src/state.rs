@@ -6,11 +6,11 @@ use crate::{
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     CommandAudit, CommandOutcome, DecimalMoney, DeploymentClosure, ExactDeploymentRef,
-    ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource, FrozenSlotTarget,
-    ModelDeploymentClosure, ModelProfileResourceSpec, ModelProviderDeploymentClosure,
-    ModelProviderResourceSpec, ModelTurnState, NodeExecutionState, Permission, PlanNodeKind,
-    PlatformFailureCode, PrincipalSnapshot, ResourceDocument, ResourceId, ResourceKind,
-    Retryability, RunBindingsSnapshot, RunState, Sha256Digest, WorkClass,
+    ExactPolicyBinding, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
+    FrozenSlotTarget, ModelDeploymentClosure, ModelProfileResourceSpec,
+    ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelTurnState, NodeExecutionState,
+    Permission, PlanNodeKind, PlatformFailureCode, PrincipalSnapshot, ResourceDocument, ResourceId,
+    ResourceKind, Retryability, RunBindingsSnapshot, RunState, Sha256Digest, WorkClass,
 };
 use insight_platform_invocations::{ExactInvocationValueRef, InvocationSelectionEvidence};
 use insight_platform_jobs::{
@@ -55,7 +55,7 @@ pub struct ModelTurnAdmissionSnapshot {
     pub slot_id: String,
     pub slot_binding_digest: Sha256Digest,
     pub run_bindings_digest: Sha256Digest,
-    pub selection_policy: ExactVersionRef,
+    pub selection_policy: ExactPolicyBinding,
     pub selection_evidence: InvocationSelectionEvidence,
     pub model_deployment: ExactDeploymentRef,
     pub model_closure: ModelDeploymentClosure,
@@ -113,7 +113,6 @@ impl ModelTurnAdmissionSnapshot {
             || self.scope_instance_id.kind() != ResourceKind::ScopeInstance
             || self.round_ordinal == 0
             || !is_code(&self.slot_id, MAX_MODEL_NAME_BYTES)
-            || self.selection_policy.resource_kind != ResourceKind::PolicyRevision
             || self.model_deployment.resource_kind != ResourceKind::ModelDeployment
             || self.provider_deployment.resource_kind != ResourceKind::ModelProviderDeployment
             || self.profile_revision.resource_kind != ResourceKind::ModelProfileRevision
@@ -123,7 +122,7 @@ impl ModelTurnAdmissionSnapshot {
             || self.provider_closure.provider_revision != self.provider_revision
             || self.profile.provider_revision != self.provider_revision
             || self.provider.protocol_policy != self.provider_closure.protocol_policy
-            || !self.policies.contains(&self.selection_policy)
+            || !self.policies.contains(&self.selection_policy.revision)
             || self.model_closure.generation_defaults.schema_digest
                 != self.profile.parameter_schema_digest
             || !matches!(
@@ -1574,14 +1573,17 @@ pub trait ModelTurnStore {
 }
 
 fn exact_model_policies(
-    run: &[ExactVersionRef],
-    selection: &ExactVersionRef,
+    run: &[ExactPolicyBinding],
+    selection: &ExactPolicyBinding,
     truncation: &ExactVersionRef,
     model: &ModelDeploymentClosure,
     provider: &ModelProviderDeploymentClosure,
 ) -> Result<Vec<ExactVersionRef>, ModelTurnError> {
-    let mut policies = run.to_vec();
-    policies.extend([selection.clone(), truncation.clone()]);
+    let mut policies = run
+        .iter()
+        .map(|binding| binding.revision.clone())
+        .collect::<Vec<_>>();
+    policies.extend([selection.revision.clone(), truncation.clone()]);
     policies.extend([
         model.data_policy.clone(),
         model.budget_policy.clone(),

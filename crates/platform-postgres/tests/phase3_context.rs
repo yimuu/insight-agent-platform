@@ -24,12 +24,12 @@ use insight_platform_contracts::{
     ContextImplementationContract, ContextImplementationResourceSpec, ContextInterfaceLimits,
     ContextInterfaceResourceSpec, ContextLocatorKind, ContextPaginationContract, ContextQueryState,
     ContextRankingContract, DataClassification, DataRegion, DeploymentClosure, Effect,
-    EntityLifecycle, ExactDeploymentRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
-    JobState, NativeCapabilityContract, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
-    RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
-    ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, FrozenSlotBinding,
+    FrozenSlotTarget, JobState, NativeCapabilityContract, Permission, PermissionSet, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
+    ResourceKind, RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, ExactInvocationValueRef, InvocationOrigin, InvocationPolicyDecision,
@@ -131,6 +131,17 @@ fn readonly_sql_plan_schema() -> ClosedJsonSchema {
 
 fn version(kind: ResourceKind, suffix: u16) -> ExactVersionRef {
     ExactVersionRef::new(id(kind, suffix), named_digest(&format!("version-{suffix}"))).unwrap()
+}
+
+fn policy_binding(revision: ExactVersionRef, suffix: u16) -> ExactPolicyBinding {
+    ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(
+            id(ResourceKind::PolicyDeployment, suffix),
+            named_digest(&format!("policy-deployment-{suffix}")),
+        )
+        .unwrap(),
+        revision,
+    }
 }
 
 fn artifact(suffix: u16) -> ArtifactRef {
@@ -956,20 +967,20 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 requirement_digest: named_digest("readonly-slot-requirement"),
                 target: FrozenSlotTarget::Capability {
                     candidates: vec![readonly_capability_deployment.clone()],
-                    selection_policy: invocation_policy.clone(),
+                    selection_policy: policy_binding(invocation_policy.clone(), 0x72),
                     tool_alias: Some("database_query".to_owned()),
                 },
                 binding_digest: named_digest("readonly-slot-binding"),
             },
         ],
         policies: vec![
-            authorization_policy,
-            ranking_policy,
-            parser_policy,
-            data_policy,
-            invocation_policy.clone(),
+            policy_binding(authorization_policy, 0x73),
+            policy_binding(ranking_policy, 0x74),
+            policy_binding(parser_policy, 0x75),
+            policy_binding(data_policy, 0x76),
+            policy_binding(invocation_policy.clone(), 0x77),
         ],
-        execution_profile,
+        execution_profile: policy_binding(execution_profile, 0x78),
     };
     let agent_payload =
         TypedPayload::new(1, &DeploymentClosure::Agent(agent_closure.clone())).unwrap();
@@ -1194,7 +1205,11 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         readonly_input_schema_digest,
         catalog_projection_digest,
         database_identity_digest,
-        invocation_policies: run_bindings.policies.clone(),
+        invocation_policies: run_bindings
+            .policies
+            .iter()
+            .map(|binding| binding.revision.clone())
+            .collect(),
         score_domain_digest,
         deadline,
     }

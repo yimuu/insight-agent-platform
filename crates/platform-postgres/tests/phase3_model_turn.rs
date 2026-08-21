@@ -8,18 +8,18 @@ use insight_platform_contracts::{
     CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
     CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonValue, CommandAudit,
     CommandOutcome, ContextWindowContract, DataClassification, DataRegion, DecimalMoney,
-    DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactSecretBindingRef,
-    ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, InstalledModelAdapter, JobState,
-    ModelCatalogEvidence, ModelDeploymentClosure, ModelIdentityStability, ModelLimits,
-    ModelModalities, ModelProfileResourceSpec, ModelProviderDeploymentClosure,
-    ModelProviderResourceSpec, ModelToolContract, ModelTurnState, ModelUsageContract,
-    NativeCapabilityContract, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, ProviderDataHandlingContract,
-    ProviderModelIdentity, ProviderRequestLimits, ProviderTrainingPolicy, PublishedVersionPayload,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
-    RunBindingsSnapshot, SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest,
-    StructuredOutputContract, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef,
-    WorkClass, WORKER_PROTOCOL_VERSION,
+    DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
+    ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
+    InstalledModelAdapter, JobState, ModelCatalogEvidence, ModelDeploymentClosure,
+    ModelIdentityStability, ModelLimits, ModelModalities, ModelProfileResourceSpec,
+    ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelToolContract, ModelTurnState,
+    ModelUsageContract, NativeCapabilityContract, Permission, PermissionSet, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
+    ProviderTrainingPolicy, PublishedVersionPayload, QuotaDimension, RegistryResourceKind,
+    ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, SecretBindingPayload,
+    SecretPurpose, SecretResolutionPolicy, Sha256Digest, StructuredOutputContract, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_models::{
@@ -1006,6 +1006,21 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         )
         .await;
     }
+    let selection_policy_binding = ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(id(ResourceKind::PolicyDeployment, 0x3b), digest('c'))
+            .unwrap(),
+        revision: selection_policy.clone(),
+    };
+    let agent_policy_binding = ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(id(ResourceKind::PolicyDeployment, 0x3c), digest('d'))
+            .unwrap(),
+        revision: agent_policy,
+    };
+    let execution_profile_binding = ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(id(ResourceKind::PolicyDeployment, 0x3d), digest('e'))
+            .unwrap(),
+        revision: execution_profile,
+    };
     let agent_closure = AgentDeploymentClosure {
         interface: agent_interface,
         plan: agent_plan.clone(),
@@ -1017,7 +1032,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 requirement_digest: digest('e'),
                 target: FrozenSlotTarget::Model {
                     candidates: vec![model_deployment.clone()],
-                    selection_policy: selection_policy.clone(),
+                    selection_policy: selection_policy_binding,
                 },
                 binding_digest: digest('f'),
             },
@@ -1026,14 +1041,14 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 requirement_digest: digest('1'),
                 target: FrozenSlotTarget::Capability {
                     candidates: vec![capability_deployment.clone()],
-                    selection_policy: agent_policy.clone(),
+                    selection_policy: agent_policy_binding.clone(),
                     tool_alias: Some("search".to_owned()),
                 },
                 binding_digest: digest('2'),
             },
         ],
-        policies: vec![agent_policy],
-        execution_profile,
+        policies: vec![agent_policy_binding],
+        execution_profile: execution_profile_binding,
     };
     let agent_payload =
         TypedPayload::new(1, &DeploymentClosure::Agent(agent_closure.clone())).unwrap();

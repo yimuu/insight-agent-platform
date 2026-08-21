@@ -2,13 +2,13 @@ use chrono::{Duration, Utc};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, AgentDeploymentClosure, AgentResourceSpec,
     ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome, DataClassification,
-    DeploymentClosure, ExactDeploymentRef, ExactVersionRef, Failure, FailureClass, FailureCode,
-    FailureSource, FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission,
-    PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublicRunEventType, PublishedVersionPayload, ResourceDocument, ResourceId, Retryability,
-    RunBindingsSnapshot, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef,
+    DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, Failure,
+    FailureClass, FailureCode, FailureSource, FrozenSlotBinding, FrozenSlotTarget, InteractionKind,
+    JsonLimits, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode,
+    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
+    PrincipalKind, PrincipalSnapshot, PublicRunEventType, PublishedVersionPayload,
+    ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot, SchedulingPolicyDocument,
+    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef,
 };
 use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
 use insight_platform_orchestrator::{
@@ -7640,14 +7640,18 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         policy_deployment_payload.digest.parse().unwrap(),
     )
     .unwrap();
+    let policy_binding = ExactPolicyBinding {
+        deployment: policy_deployment.clone(),
+        revision: policy.clone(),
+    };
     let child_closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(CHILD_AGENT_INTERFACE_ID), digest('8')).unwrap(),
         plan: ExactVersionRef::new(id(CHILD_AGENT_PLAN_ID), digest('9')).unwrap(),
         entry_node_id: "start".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
-        policies: vec![policy.clone()],
-        execution_profile: policy.clone(),
+        policies: vec![policy_binding.clone()],
+        execution_profile: policy_binding.clone(),
     };
     let child_deployment_payload =
         TypedPayload::new(1, &DeploymentClosure::Agent(child_closure)).unwrap();
@@ -7685,12 +7689,12 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             requirement_digest: digest('b'),
             target: FrozenSlotTarget::ChildAgent {
                 candidates: vec![child_deployment],
-                selection_policy: policy.clone(),
+                selection_policy: policy_binding.clone(),
             },
             binding_digest: digest('c'),
         }],
-        policies: vec![policy.clone()],
-        execution_profile: policy,
+        policies: vec![policy_binding.clone()],
+        execution_profile: policy_binding,
     };
     let deployment_payload =
         TypedPayload::new(1, &DeploymentClosure::Agent(closure.clone())).unwrap();

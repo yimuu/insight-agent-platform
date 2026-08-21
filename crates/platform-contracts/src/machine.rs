@@ -1896,7 +1896,15 @@ fn frozen_slot_binding_schema() -> Value {
             }
         })
     };
-    let selection_policy = exact_revision("policy_revision", "prev");
+    let selection_policy = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["deployment", "revision"],
+        "properties": {
+            "deployment": exact_deployment("policy_deployment", "pdep"),
+            "revision": exact_revision("policy_revision", "prev")
+        }
+    });
     let dataset_id = json!({
         "type": "string",
         "pattern": "^dset_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

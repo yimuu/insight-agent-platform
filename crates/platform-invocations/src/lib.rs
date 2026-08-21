@@ -14,11 +14,11 @@ use insight_platform_contracts::{
     CapabilityCancellationKind, CapabilityDataFlowPolicy, CapabilityDeploymentClosure,
     CapabilityIdempotencyKind, CapabilityInterfaceLimits, CapabilityName,
     CapabilityProgressContract, CapabilityProgressMode, CommandAudit, CommandOutcome,
-    DataClassification, Effect, ExactDeploymentRef, ExactVersionRef, Failure, FailureClass,
-    FailureCode, FailureSource, FrozenSlotTarget, HardLimitProfile, InvocationState, JsonLimits,
-    NodeExecutionState, Permission, PlanNodeKind, PlatformFailureCode, PrincipalSnapshot,
-    ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState, SecretPurpose,
-    Sha256Digest,
+    DataClassification, Effect, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, Failure,
+    FailureClass, FailureCode, FailureSource, FrozenSlotTarget, HardLimitProfile, InvocationState,
+    JsonLimits, NodeExecutionState, Permission, PlanNodeKind, PlatformFailureCode,
+    PrincipalSnapshot, ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState,
+    SecretPurpose, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
@@ -631,7 +631,7 @@ pub struct CapabilityAdmissionSnapshot {
     pub slot_id: String,
     pub slot_binding_digest: Sha256Digest,
     pub run_bindings_digest: Sha256Digest,
-    pub selection_policy: ExactVersionRef,
+    pub selection_policy: ExactPolicyBinding,
     pub selection_evidence: InvocationSelectionEvidence,
     pub deployment: ExactDeploymentRef,
     pub interface: ExactVersionRef,
@@ -706,7 +706,6 @@ impl CapabilityAdmissionSnapshot {
             .map_err(|_| InvocationError::InvalidPrincipal)?;
         if self.schema_version != 1
             || !is_stable_code(&self.slot_id, MAX_SLOT_ID_BYTES)
-            || self.selection_policy.resource_kind != ResourceKind::PolicyRevision
             || self.deployment.resource_kind != ResourceKind::CapabilityDeployment
             || self.interface.resource_kind != ResourceKind::CapabilityInterfaceRevision
             || CapabilityName::new(self.capability_name.as_str()).is_err()
@@ -1516,10 +1515,14 @@ pub trait InvocationStore {
 }
 
 fn exact_invocation_policies(
-    run: &[ExactVersionRef],
+    run: &[ExactPolicyBinding],
     deployment: &[ExactVersionRef],
 ) -> Result<Vec<ExactVersionRef>, InvocationError> {
-    let mut policies = run.iter().chain(deployment).cloned().collect::<Vec<_>>();
+    let mut policies = run
+        .iter()
+        .map(|binding| binding.revision.clone())
+        .chain(deployment.iter().cloned())
+        .collect::<Vec<_>>();
     policies.sort_by(|left, right| left.revision_id.cmp(&right.revision_id));
     policies.dedup_by(|left, right| left.revision_id == right.revision_id);
     if policies.iter().any(|policy| {
@@ -1664,6 +1667,13 @@ mod tests {
         ExactVersionRef::new(id(value), digest_value(digest_character)).unwrap()
     }
 
+    fn policy_binding(deployment: &str, revision: &str, marker: char) -> ExactPolicyBinding {
+        ExactPolicyBinding {
+            deployment: ExactDeploymentRef::new(id(deployment), digest_value(marker)).unwrap(),
+            revision: exact_version(revision, marker),
+        }
+    }
+
     fn principal(tenant: &ResourceId, principal: &ResourceId) -> PrincipalSnapshot {
         PrincipalSnapshot::build(
             tenant.clone(),
@@ -1763,7 +1773,11 @@ mod tests {
             slot_id: "capability".to_owned(),
             slot_binding_digest: digest_value('3'),
             run_bindings_digest: digest_value('4'),
-            selection_policy: exact_version("prev_0198f1c3-8f49-7c3e-b1f3-773c28367b9b", '5'),
+            selection_policy: policy_binding(
+                "pdep_0198f1c3-8f49-7c3e-b1f3-773c28367b9c",
+                "prev_0198f1c3-8f49-7c3e-b1f3-773c28367b9b",
+                '5',
+            ),
             selection_evidence: InvocationSelectionEvidence::build(
                 std::slice::from_ref(&deployment),
                 0,

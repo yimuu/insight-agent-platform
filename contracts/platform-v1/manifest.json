@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:df9e7ae513eedf7e10624e736b9907e6526fcd0b6d513050a7c8457c926a8b53",
+  "contract_digest": "sha256:9e8bf1a701f2b13b5322e8b76381868a2329025e41c41567e47ea8f903662273",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -57,10 +57,10 @@
       "sha256": "dd32337cd585c94af523b767b1c96cb88a02f309c93e38461c08f18634b440e2"
     },
     {
-      "bytes": 16842,
+      "bytes": 24280,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/frozen-slot-binding.schema.json",
-      "sha256": "88b87beca05ef736a85be53bb8a2ac546d11c4adefb984571d6d640d771d0dc0"
+      "sha256": "47baa322cbd057e1cb1dcedb51925522f8bdd332f5a2c4c5e8ee1e31035ab1d7"
     },
     {
       "bytes": 1524,

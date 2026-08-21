@@ -56,22 +56,54 @@
             "selection_policy": {
               "additionalProperties": false,
               "properties": {
-                "resource_kind": {
-                  "const": "policy_revision"
+                "deployment": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "deployment_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "deployment_id": {
+                      "pattern": "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "resource_kind": {
+                      "const": "policy_deployment"
+                    }
+                  },
+                  "required": [
+                    "deployment_id",
+                    "resource_kind",
+                    "deployment_digest"
+                  ],
+                  "type": "object"
                 },
-                "revision_id": {
-                  "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                  "type": "string"
-                },
-                "semantic_digest": {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
+                "revision": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "resource_kind": {
+                      "const": "policy_revision"
+                    },
+                    "revision_id": {
+                      "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "semantic_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "revision_id",
+                    "resource_kind",
+                    "semantic_digest"
+                  ],
+                  "type": "object"
                 }
               },
               "required": [
-                "revision_id",
-                "resource_kind",
-                "semantic_digest"
+                "deployment",
+                "revision"
               ],
               "type": "object"
             }
@@ -120,22 +152,54 @@
             "selection_policy": {
               "additionalProperties": false,
               "properties": {
-                "resource_kind": {
-                  "const": "policy_revision"
+                "deployment": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "deployment_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "deployment_id": {
+                      "pattern": "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "resource_kind": {
+                      "const": "policy_deployment"
+                    }
+                  },
+                  "required": [
+                    "deployment_id",
+                    "resource_kind",
+                    "deployment_digest"
+                  ],
+                  "type": "object"
                 },
-                "revision_id": {
-                  "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                  "type": "string"
-                },
-                "semantic_digest": {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
+                "revision": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "resource_kind": {
+                      "const": "policy_revision"
+                    },
+                    "revision_id": {
+                      "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "semantic_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "revision_id",
+                    "resource_kind",
+                    "semantic_digest"
+                  ],
+                  "type": "object"
                 }
               },
               "required": [
-                "revision_id",
-                "resource_kind",
-                "semantic_digest"
+                "deployment",
+                "revision"
               ],
               "type": "object"
             },
@@ -175,22 +239,54 @@
                 "authorization_policy": {
                   "additionalProperties": false,
                   "properties": {
-                    "resource_kind": {
-                      "const": "policy_revision"
+                    "deployment": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "deployment_digest": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "deployment_id": {
+                          "pattern": "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        },
+                        "resource_kind": {
+                          "const": "policy_deployment"
+                        }
+                      },
+                      "required": [
+                        "deployment_id",
+                        "resource_kind",
+                        "deployment_digest"
+                      ],
+                      "type": "object"
                     },
-                    "revision_id": {
-                      "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                      "type": "string"
-                    },
-                    "semantic_digest": {
-                      "pattern": "^sha256:[0-9a-f]{64}$",
-                      "type": "string"
+                    "revision": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "resource_kind": {
+                          "const": "policy_revision"
+                        },
+                        "revision_id": {
+                          "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        },
+                        "semantic_digest": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "revision_id",
+                        "resource_kind",
+                        "semantic_digest"
+                      ],
+                      "type": "object"
                     }
                   },
                   "required": [
-                    "revision_id",
-                    "resource_kind",
-                    "semantic_digest"
+                    "deployment",
+                    "revision"
                   ],
                   "type": "object"
                 },
@@ -317,22 +413,54 @@
                 "ranking_policy": {
                   "additionalProperties": false,
                   "properties": {
-                    "resource_kind": {
-                      "const": "policy_revision"
+                    "deployment": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "deployment_digest": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "deployment_id": {
+                          "pattern": "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        },
+                        "resource_kind": {
+                          "const": "policy_deployment"
+                        }
+                      },
+                      "required": [
+                        "deployment_id",
+                        "resource_kind",
+                        "deployment_digest"
+                      ],
+                      "type": "object"
                     },
-                    "revision_id": {
-                      "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                      "type": "string"
-                    },
-                    "semantic_digest": {
-                      "pattern": "^sha256:[0-9a-f]{64}$",
-                      "type": "string"
+                    "revision": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "resource_kind": {
+                          "const": "policy_revision"
+                        },
+                        "revision_id": {
+                          "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
+                        },
+                        "semantic_digest": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "revision_id",
+                        "resource_kind",
+                        "semantic_digest"
+                      ],
+                      "type": "object"
                     }
                   },
                   "required": [
-                    "revision_id",
-                    "resource_kind",
-                    "semantic_digest"
+                    "deployment",
+                    "revision"
                   ],
                   "type": "object"
                 },
@@ -400,22 +528,54 @@
             "selection_policy": {
               "additionalProperties": false,
               "properties": {
-                "resource_kind": {
-                  "const": "policy_revision"
+                "deployment": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "deployment_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "deployment_id": {
+                      "pattern": "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "resource_kind": {
+                      "const": "policy_deployment"
+                    }
+                  },
+                  "required": [
+                    "deployment_id",
+                    "resource_kind",
+                    "deployment_digest"
+                  ],
+                  "type": "object"
                 },
-                "revision_id": {
-                  "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                  "type": "string"
-                },
-                "semantic_digest": {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
+                "revision": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "resource_kind": {
+                      "const": "policy_revision"
+                    },
+                    "revision_id": {
+                      "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "semantic_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "revision_id",
+                    "resource_kind",
+                    "semantic_digest"
+                  ],
+                  "type": "object"
                 }
               },
               "required": [
-                "revision_id",
-                "resource_kind",
-                "semantic_digest"
+                "deployment",
+                "revision"
               ],
               "type": "object"
             }
@@ -464,22 +624,54 @@
             "selection_policy": {
               "additionalProperties": false,
               "properties": {
-                "resource_kind": {
-                  "const": "policy_revision"
+                "deployment": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "deployment_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "deployment_id": {
+                      "pattern": "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "resource_kind": {
+                      "const": "policy_deployment"
+                    }
+                  },
+                  "required": [
+                    "deployment_id",
+                    "resource_kind",
+                    "deployment_digest"
+                  ],
+                  "type": "object"
                 },
-                "revision_id": {
-                  "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                  "type": "string"
-                },
-                "semantic_digest": {
-                  "pattern": "^sha256:[0-9a-f]{64}$",
-                  "type": "string"
+                "revision": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "resource_kind": {
+                      "const": "policy_revision"
+                    },
+                    "revision_id": {
+                      "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "semantic_digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "revision_id",
+                    "resource_kind",
+                    "semantic_digest"
+                  ],
+                  "type": "object"
                 }
               },
               "required": [
-                "revision_id",
-                "resource_kind",
-                "semantic_digest"
+                "deployment",
+                "revision"
               ],
               "type": "object"
             }
