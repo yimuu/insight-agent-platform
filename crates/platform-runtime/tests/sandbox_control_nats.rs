@@ -28,12 +28,12 @@ fn digest(character: char) -> Sha256Digest {
 }
 
 fn signal(worker_process_generation_id: ResourceId) -> SandboxStopSignal {
-    SandboxStopSignal {
+    let signal = SandboxStopSignal {
         schema_version: 1,
         tenant_id: id(ResourceKind::Tenant, "3001"),
         sandbox_job_id: id(ResourceKind::Job, "3002"),
         invocation_id: id(ResourceKind::CapabilityInvocation, "3003"),
-        job_id: id(ResourceKind::Job, "3004"),
+        job_id: id(ResourceKind::Job, "3002"),
         request_digest: digest('a'),
         attempt_no: 1,
         lease_generation: 1,
@@ -45,7 +45,9 @@ fn signal(worker_process_generation_id: ResourceId) -> SandboxStopSignal {
         signal_digest: digest('0'),
     }
     .seal()
-    .unwrap()
+    .unwrap();
+    signal.validate().unwrap();
+    signal
 }
 
 #[derive(Default)]

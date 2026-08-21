@@ -1546,7 +1546,6 @@ impl ArtifactObjectReferenceUnsealer for FixtureArtifactUnsealer {
         };
         let plaintext = serde_jcs::to_vec(&serde_json::json!({
             "backend": "s3",
-            "object_generation": authorized.object_generation,
             "object_key": object_key,
             "schema_version": 1,
             "storage_binding_digest": authorized.storage_binding_digest,
@@ -1639,8 +1638,9 @@ impl SandboxExecutorBackend for WasiBackend {
             })
             .await
             .map_err(|_| {
-                test_backend_failure(
+                test_backend_failure_with_code(
                     insight_platform_sandbox::SandboxBackendFailureStage::Preparing,
+                    "sandbox_fixture_runtime_bundle_read_failed",
                 )
             })?;
         if runtime_bundle != runtime_bundle_bytes() {
@@ -1709,7 +1709,10 @@ impl SandboxExecutorBackend for WasiBackend {
             ));
         }
         let bytes = self.artifact_broker.read_exact(read).await.map_err(|_| {
-            test_backend_failure(insight_platform_sandbox::SandboxBackendFailureStage::Preparing)
+            test_backend_failure_with_code(
+                insight_platform_sandbox::SandboxBackendFailureStage::Preparing,
+                "sandbox_fixture_input_read_failed",
+            )
         })?;
         let value = parse_strict_json(
             &bytes,
@@ -1755,7 +1758,10 @@ impl SandboxExecutorBackend for WasiBackend {
         }
         validation.value = value;
         self.validator.validate(validation).await.map_err(|_| {
-            test_backend_failure(insight_platform_sandbox::SandboxBackendFailureStage::Preparing)
+            test_backend_failure_with_code(
+                insight_platform_sandbox::SandboxBackendFailureStage::Preparing,
+                "sandbox_fixture_input_validation_failed",
+            )
         })?;
         Ok(PreparedSandbox {
             provider_process_generation_id: None,
@@ -1957,9 +1963,16 @@ impl SandboxExecutorBackend for WasiBackend {
 fn test_backend_failure(
     stage: insight_platform_sandbox::SandboxBackendFailureStage,
 ) -> SandboxBackendFailure {
+    test_backend_failure_with_code(stage, "sandbox_fixture_validation_failed")
+}
+
+fn test_backend_failure_with_code(
+    stage: insight_platform_sandbox::SandboxBackendFailureStage,
+    safe_code: &str,
+) -> SandboxBackendFailure {
     SandboxBackendFailure {
         stage,
-        safe_code: "sandbox_fixture_validation_failed".to_owned(),
+        safe_code: safe_code.to_owned(),
         safe_message: "Sandbox fixture value validation failed".to_owned(),
         retryability: insight_platform_contracts::Retryability::Never,
         evidence_digest: sha('f'),
