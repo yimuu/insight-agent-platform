@@ -2110,7 +2110,8 @@ fn deployment_variant_schema(resource_kind: &str, properties: Value) -> Value {
     let binding_properties = properties
         .as_object()
         .expect("deployment binding properties are an object");
-    let required = binding_properties.keys().cloned().collect::<Vec<_>>();
+    let mut required = binding_properties.keys().cloned().collect::<Vec<_>>();
+    required.sort_unstable();
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -2131,7 +2132,8 @@ fn tagged_content_variant(kind: &str, properties: Value) -> Value {
     let fields = properties
         .as_object()
         .expect("tagged content properties are an object");
-    let required = fields.keys().cloned().collect::<Vec<_>>();
+    let mut required = fields.keys().cloned().collect::<Vec<_>>();
+    required.sort_unstable();
     json!({
         "type": "object", "additionalProperties": false,
         "required": ["kind", "binding"],
@@ -2151,7 +2153,8 @@ fn tagged_flat_variant(kind: &str, properties: Value) -> Value {
         .expect("tagged properties are an object")
         .clone();
     properties.insert("kind".to_owned(), json!({"const": kind}));
-    let required = properties.keys().cloned().collect::<Vec<_>>();
+    let mut required = properties.keys().cloned().collect::<Vec<_>>();
+    required.sort_unstable();
     json!({
         "type": "object", "additionalProperties": false,
         "required": required, "properties": properties
