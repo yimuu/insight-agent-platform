@@ -46,6 +46,222 @@ x-insight-contract-status: implementing-not-current
 servers:
   - url: /v1
 paths:
+  /{resource_noun}:
+    post:
+      operationId: createManagedResource
+      summary: Create one typed public management Resource with its editable Draft
+      tags: [Resources]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: resource.write
+      x-insight-idempotency: tenant_principal_resource_collection_receipt
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateResourceRequestV1"}
+      responses:
+        "201": {$ref: "#/components/responses/ResourceCreatedResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /{resource_noun}/{resource_id}:
+    get:
+      operationId: getManagedResource
+      summary: Read the current typed Resource and editable Draft projection
+      tags: [Resources]
+      x-insight-permission: resource.read
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200": {$ref: "#/components/responses/ResourceResponse"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /{resource_noun}/{resource_id}/draft:
+    put:
+      operationId: updateManagedResourceDraft
+      summary: Replace the current editable Draft under a strong Resource fence
+      tags: [Resources]
+      x-insight-permission: resource.write
+      x-insight-idempotency: resource_scoped_receipt
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/ResourceId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ResourceDraftPayload"}
+      responses:
+        "200": {$ref: "#/components/responses/ResourceResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "412": {$ref: "#/components/responses/ApiProblem"}
+        "428": {$ref: "#/components/responses/ApiProblem"}
+  /{resource_noun}/{resource_id}/draft:validate:
+    post:
+      operationId: validateManagedResourceDraft
+      summary: Create a shared validation Job for the exact current Draft generation
+      tags: [Resources]
+      x-insight-permission: resource.write
+      x-insight-idempotency: resource_scoped_receipt
+      x-insight-empty-body: required
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/ResourceId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202": {$ref: "#/components/responses/OperationAcceptedResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "412": {$ref: "#/components/responses/ApiProblem"}
+        "428": {$ref: "#/components/responses/ApiProblem"}
+  /{resource_noun}/{resource_id}/draft:publish:
+    post:
+      operationId: publishManagedResourceDraft
+      summary: Publish immutable Version records from one validated Draft generation
+      tags: [Resources]
+      x-insight-permission: resource.write
+      x-insight-idempotency: resource_scoped_receipt
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/ResourceId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PublishResourceDraftRequestV1"}
+      responses:
+        "200": {$ref: "#/components/responses/PublishResourceResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "412": {$ref: "#/components/responses/ApiProblem"}
+        "428": {$ref: "#/components/responses/ApiProblem"}
+  /{resource_noun}/{resource_id}/versions/{version_id}:
+    get:
+      operationId: getManagedResourceVersion
+      summary: Read one immutable published Version
+      tags: [Resources]
+      x-insight-permission: resource.read
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/ResourceId"
+        - $ref: "#/components/parameters/ResourceVersionId"
+      responses:
+        "200": {$ref: "#/components/responses/ResourceVersionResponse"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /{resource_noun}/{resource_id}/deployments:
+    post:
+      operationId: createManagedResourceDeployment
+      summary: Create one immutable exact Deployment closure
+      tags: [Resources]
+      x-insight-permission: resource.write
+      x-insight-idempotency: resource_scoped_receipt
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/ResourceId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateDeploymentRequestV1"}
+      responses:
+        "201": {$ref: "#/components/responses/DeploymentCreatedResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "412": {$ref: "#/components/responses/ApiProblem"}
+        "428": {$ref: "#/components/responses/ApiProblem"}
+  /{resource_noun}/{resource_id}/deployments/{deployment_id}:
+    get:
+      operationId: getManagedResourceDeployment
+      summary: Read one immutable exact Deployment closure
+      tags: [Resources]
+      x-insight-permission: resource.read
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/ResourceId"
+        - $ref: "#/components/parameters/DeploymentId"
+      responses:
+        "200": {$ref: "#/components/responses/DeploymentResponse"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /{resource_noun}/{resource_id}/deployments/{deployment_id}:activate:
+    post:
+      operationId: activateManagedResourceDeployment
+      summary: Set the exact path Deployment as the enabled future binding
+      tags: [Resources]
+      x-insight-permission: resource.write
+      x-insight-idempotency: resource_scoped_receipt
+      x-insight-empty-body: required
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/ResourceId"
+        - $ref: "#/components/parameters/DeploymentId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/ResourceResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "412": {$ref: "#/components/responses/ApiProblem"}
+        "428": {$ref: "#/components/responses/ApiProblem"}
+  /{resource_noun}/{resource_id}/deployments/{deployment_id}:suspend:
+    post:
+      operationId: suspendManagedResourceDeployment
+      summary: Suspend the exact currently active future binding
+      tags: [Resources]
+      x-insight-permission: resource.write
+      x-insight-idempotency: resource_scoped_receipt
+      x-insight-empty-body: required
+      parameters:
+        - $ref: "#/components/parameters/ResourceNoun"
+        - $ref: "#/components/parameters/ResourceId"
+        - $ref: "#/components/parameters/DeploymentId"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": {$ref: "#/components/responses/ResourceResponse"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "412": {$ref: "#/components/responses/ApiProblem"}
+        "428": {$ref: "#/components/responses/ApiProblem"}
   /runs:
     post:
       operationId: createRun
@@ -710,6 +926,28 @@ paths:
                   - The MCP authorization service is temporarily unavailable.
 components:
   parameters:
+    ResourceNoun:
+      name: resource_noun
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [agents, skills, capabilities, contexts, models, mcp-servers, policies, sandboxes]
+    ResourceId:
+      name: resource_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/PublicManagementResourceId"}
+    ResourceVersionId:
+      name: version_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/PublicManagementVersionId"}
+    DeploymentId:
+      name: deployment_id
+      in: path
+      required: true
+      schema: {$ref: "#/components/schemas/PublicManagementDeploymentId"}
     RunId:
       name: run_id
       in: path
@@ -775,6 +1013,65 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ApiProblem"
+    ResourceResponse:
+      description: Current typed Resource projection with a strong aggregate ETag.
+      headers:
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ResourceViewV1"}
+    ResourceCreatedResponse:
+      description: Resource and editable Draft committed atomically or replayed from its Receipt.
+      headers:
+        Location: {schema: {type: string, pattern: "^/v1/(agents|skills|capabilities|contexts|models|mcp-servers|policies|sandboxes)/"}}
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ResourceViewV1"}
+    ResourceVersionResponse:
+      description: One immutable typed published Version.
+      headers:
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ResourceVersionViewV1"}
+    DeploymentResponse:
+      description: One immutable typed Deployment closure.
+      headers:
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/DeploymentViewV1"}
+    DeploymentCreatedResponse:
+      description: Immutable Deployment closure committed atomically or replayed from its Receipt.
+      headers:
+        Location: {schema: {type: string, pattern: "^/v1/(agents|skills|capabilities|contexts|models|mcp-servers|policies|sandboxes)/.+/deployments/"}}
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/DeploymentViewV1"}
+    PublishResourceResponse:
+      description: Immutable published Version identities from the fenced Draft generation.
+      headers:
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/PublishResourceDraftResponseV1"}
+    OperationAcceptedResponse:
+      description: Shared durable Job accepted or replayed.
+      headers:
+        Location: {schema: {type: string, pattern: "^/v1/operations/job_"}}
+        ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/OperationViewV1"}
     RunControlResponse:
       description: The durable control intent winner and current Run projection.
       headers:
@@ -805,6 +1102,211 @@ components:
         type: string
         const: no-referrer
   schemas:
+    PublicManagementResourceKind:
+      type: string
+      enum: [agent, skill, capability_interface, context_source_interface, model_profile, mcp_server, policy, sandbox_profile]
+    PublicManagementResourceId:
+      type: string
+      pattern: "^(agt|skl|cap|ctx|mdl|mcp|pol|sxp)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    PublicManagementVersionId:
+      type: string
+      pattern: "^(aif|arev|srev|cirev|xirev|mdrev|mrev|prev|sxrev)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    PublicManagementDeploymentId:
+      type: string
+      pattern: "^(adep|skdep|cdep|xdep|mdep|mcdep|pdep|sxdep)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    CreateResourceRequestV1:
+      type: object
+      additionalProperties: false
+      required: [display_name, document]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 255}
+        document: {$ref: "#/components/schemas/ResourceDocument"}
+    ResourceDraftPayload:
+      type: object
+      additionalProperties: false
+      required: [display_name, document, validation]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 255}
+        document: {$ref: "#/components/schemas/ResourceDocument"}
+        validation:
+          oneOf:
+            - {$ref: "#/components/schemas/ValidationSummary"}
+            - {type: "null"}
+    ValidationSummary:
+      type: object
+      additionalProperties: false
+      required: [validator_digest, validated_draft_digest, dependency_closure_digest, security_evidence_digest, warnings]
+      properties:
+        validator_digest: {$ref: "#/components/schemas/Digest"}
+        validated_draft_digest: {$ref: "#/components/schemas/Digest"}
+        dependency_closure_digest: {$ref: "#/components/schemas/Digest"}
+        security_evidence_digest: {$ref: "#/components/schemas/Digest"}
+        warnings:
+          type: array
+          maxItems: 256
+          items:
+            type: object
+            additionalProperties: false
+            required: [code, path]
+            properties:
+              code: {type: string, minLength: 1, maxLength: 128, pattern: "^[a-z][a-z0-9_.-]*$"}
+              path: {type: string, maxLength: 512}
+    PublishResourceDraftRequestV1:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, revision_no, content_digest, artifact_id]
+          properties:
+            kind: {const: single}
+            revision_no: {type: integer, minimum: 1}
+            content_digest: {$ref: "#/components/schemas/Digest"}
+            artifact_id: {oneOf: [{$ref: "#/components/schemas/ArtifactId"}, {type: "null"}]}
+        - type: object
+          additionalProperties: false
+          required: [kind, revision_no, interface_content_digest, plan_content_digest, artifact_id]
+          properties:
+            kind: {const: agent}
+            revision_no: {type: integer, minimum: 1}
+            interface_content_digest: {$ref: "#/components/schemas/Digest"}
+            plan_content_digest: {$ref: "#/components/schemas/Digest"}
+            artifact_id: {oneOf: [{$ref: "#/components/schemas/ArtifactId"}, {type: "null"}]}
+    CreateDeploymentRequestV1:
+      type: object
+      additionalProperties: false
+      required: [resource_version_id, environment, closure]
+      properties:
+        resource_version_id: {$ref: "#/components/schemas/PublicManagementVersionId"}
+        environment: {type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$"}
+        closure: {$ref: "#/components/schemas/DeploymentClosure"}
+    ResourceViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, resource_id, resource_kind, lifecycle_state, gate_state, draft_generation, version, draft, etag]
+      properties:
+        schema_version: {const: 1}
+        resource_id: {$ref: "#/components/schemas/PublicManagementResourceId"}
+        resource_kind: {$ref: "#/components/schemas/PublicManagementResourceKind"}
+        lifecycle_state: {type: string, enum: [active, archived, retired]}
+        gate_state: {type: string, enum: [enabled, suspended]}
+        draft_generation: {type: integer, minimum: 1}
+        version: {type: integer, minimum: 1}
+        draft: {$ref: "#/components/schemas/ResourceDraftPayload"}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    ResourceVersionViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, resource_id, resource_kind, resource_version_id, revision_no, content_digest, artifact_id, payload, created_at, etag]
+      properties:
+        schema_version: {const: 1}
+        resource_id: {$ref: "#/components/schemas/PublicManagementResourceId"}
+        resource_kind: {$ref: "#/components/schemas/PublicManagementResourceKind"}
+        resource_version_id: {$ref: "#/components/schemas/PublicManagementVersionId"}
+        revision_no: {type: integer, minimum: 1}
+        content_digest: {$ref: "#/components/schemas/Digest"}
+        artifact_id: {oneOf: [{$ref: "#/components/schemas/ArtifactId"}, {type: "null"}]}
+        payload:
+          type: object
+          additionalProperties: false
+          required: [document, validation]
+          properties:
+            document: {$ref: "#/components/schemas/ResourceDocument"}
+            validation: {$ref: "#/components/schemas/ValidationSummary"}
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    PublishedResourceVersionSummaryV1:
+      type: object
+      additionalProperties: false
+      required: [resource_version_id, revision_no, content_digest, artifact_id, etag]
+      properties:
+        resource_version_id: {$ref: "#/components/schemas/PublicManagementVersionId"}
+        revision_no: {type: integer, minimum: 1}
+        content_digest: {$ref: "#/components/schemas/Digest"}
+        artifact_id: {oneOf: [{$ref: "#/components/schemas/ArtifactId"}, {type: "null"}]}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    PublishResourceDraftResponseV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, resource_id, resource_kind, draft_generation, version, published_versions, etag]
+      properties:
+        schema_version: {const: 1}
+        resource_id: {$ref: "#/components/schemas/PublicManagementResourceId"}
+        resource_kind: {$ref: "#/components/schemas/PublicManagementResourceKind"}
+        draft_generation: {type: integer, minimum: 1}
+        version: {type: integer, minimum: 1}
+        published_versions: {type: array, minItems: 1, maxItems: 2, items: {$ref: "#/components/schemas/PublishedResourceVersionSummaryV1"}}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    DeploymentViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, deployment_id, resource_id, resource_kind, resource_version_id, environment, closure_digest, closure, created_at, etag]
+      properties:
+        schema_version: {const: 1}
+        deployment_id: {$ref: "#/components/schemas/PublicManagementDeploymentId"}
+        resource_id: {$ref: "#/components/schemas/PublicManagementResourceId"}
+        resource_kind: {$ref: "#/components/schemas/PublicManagementResourceKind"}
+        resource_version_id: {$ref: "#/components/schemas/PublicManagementVersionId"}
+        environment: {type: string, minLength: 1, maxLength: 128}
+        closure_digest: {$ref: "#/components/schemas/Digest"}
+        closure: {$ref: "#/components/schemas/DeploymentClosure"}
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    ResourceDocument:
+      description: >-
+        Public projection of the Rust ResourceDocument owner union. Each spec is decoded by its
+        nominal deny-unknown-fields Rust type and validated before any application command runs.
+      x-insight-rust-owner: ResourceDocument
+      x-insight-owner-validation-required: true
+      oneOf:
+        - {$ref: "#/components/schemas/AgentResourceDocument"}
+        - {$ref: "#/components/schemas/SkillResourceDocument"}
+        - {$ref: "#/components/schemas/CapabilityResourceDocument"}
+        - {$ref: "#/components/schemas/ContextResourceDocument"}
+        - {$ref: "#/components/schemas/ModelResourceDocument"}
+        - {$ref: "#/components/schemas/McpResourceDocument"}
+        - {$ref: "#/components/schemas/PolicyResourceDocument"}
+        - {$ref: "#/components/schemas/SandboxResourceDocument"}
+    AgentResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: agent}, spec: {type: object}}
+    SkillResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: skill}, spec: {type: object}}
+    CapabilityResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: capability_interface}, spec: {type: object}}
+    ContextResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: context_source_interface}, spec: {type: object}}
+    ModelResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: model_profile}, spec: {type: object}}
+    McpResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: mcp_server}, spec: {type: object}}
+    PolicyResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: policy}, spec: {type: object}}
+    SandboxResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: sandbox_profile}, spec: {type: object}}
+    DeploymentClosure:
+      $ref: ./schemas/deployment-closure.schema.json
     RunId:
       type: string
       pattern: "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -828,7 +1330,7 @@ components:
       pattern: "^mcp_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     McpDeploymentId:
       type: string
-      pattern: "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      pattern: "^mcdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     McpAuthorizationBindingId:
       type: string
       pattern: "^mab_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -1164,7 +1666,7 @@ components:
       properties:
         deployment_id:
           type: string
-          pattern: "^moddep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          pattern: "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         resource_kind: {const: model_deployment}
         deployment_digest: {$ref: "#/components/schemas/Digest"}
     ContextDatasetGenerationSpec:

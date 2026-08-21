@@ -238,6 +238,38 @@ def check_foundation_surfaces(errors):
         errors.append("OpenAPI must use the clean-cut /v1 server base")
     if "/v2" in openapi:
         errors.append("OpenAPI must not expose /v2")
+    management_contract = [
+        "  /{resource_noun}:",
+        "      operationId: createManagedResource",
+        "  /{resource_noun}/{resource_id}:",
+        "      operationId: getManagedResource",
+        "  /{resource_noun}/{resource_id}/draft:",
+        "      operationId: updateManagedResourceDraft",
+        "  /{resource_noun}/{resource_id}/draft:validate:",
+        "      operationId: validateManagedResourceDraft",
+        "  /{resource_noun}/{resource_id}/draft:publish:",
+        "      operationId: publishManagedResourceDraft",
+        "  /{resource_noun}/{resource_id}/versions/{version_id}:",
+        "      operationId: getManagedResourceVersion",
+        "  /{resource_noun}/{resource_id}/deployments:",
+        "      operationId: createManagedResourceDeployment",
+        "  /{resource_noun}/{resource_id}/deployments/{deployment_id}:",
+        "      operationId: getManagedResourceDeployment",
+        "  /{resource_noun}/{resource_id}/deployments/{deployment_id}:activate:",
+        "      operationId: activateManagedResourceDeployment",
+        "  /{resource_noun}/{resource_id}/deployments/{deployment_id}:suspend:",
+        "      operationId: suspendManagedResourceDeployment",
+        "        enum: [agents, skills, capabilities, contexts, models, mcp-servers, policies, sandboxes]",
+        '      pattern: "^(aif|arev|srev|cirev|xirev|mdrev|mrev|prev|sxrev)_',
+        '      pattern: "^(adep|skdep|cdep|xdep|mdep|mcdep|pdep|sxdep)_',
+        "        closure: {$ref: \"#/components/schemas/DeploymentClosure\"}",
+        "    DeploymentClosure:",
+        "      $ref: ./schemas/deployment-closure.schema.json",
+    ]
+    if any(fragment not in openapi for fragment in management_contract):
+        errors.append("public Resource lifecycle OpenAPI contract is incomplete or nominally drifted")
+    if "  /resources" in openapi or "generic arbitrary JSON" in openapi:
+        errors.append("OpenAPI must not expose a generic arbitrary-Resource registry")
     callback_contract = [
         "  /mcp/oauth/callback:",
         "      operationId: completeMcpOAuthCallback",
@@ -368,6 +400,16 @@ def check_foundation_surfaces(errors):
         if line.startswith("  /") and line.endswith(":")
     ]
     if path_lines != [
+        "  /{resource_noun}:",
+        "  /{resource_noun}/{resource_id}:",
+        "  /{resource_noun}/{resource_id}/draft:",
+        "  /{resource_noun}/{resource_id}/draft:validate:",
+        "  /{resource_noun}/{resource_id}/draft:publish:",
+        "  /{resource_noun}/{resource_id}/versions/{version_id}:",
+        "  /{resource_noun}/{resource_id}/deployments:",
+        "  /{resource_noun}/{resource_id}/deployments/{deployment_id}:",
+        "  /{resource_noun}/{resource_id}/deployments/{deployment_id}:activate:",
+        "  /{resource_noun}/{resource_id}/deployments/{deployment_id}:suspend:",
         "  /runs:",
         "  /runs/{run_id}:",
         "  /runs/{run_id}/result:",
