@@ -6,8 +6,10 @@ use insight_platform_contracts::{
     Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
     RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
-    RunBindingsSnapshot, SandboxEntrypointKind, SandboxPackageResourceSpec, Sha256Digest,
-    TenantConfig, TenantPrincipalPayload, ValidationSummary,
+    RunBindingsSnapshot, SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass,
+    SandboxPackageResourceSpec, SandboxProfileDeploymentClosure, SandboxProfileResourceSpec,
+    SandboxRuntimeFamily, Sha256Digest, SkillDeploymentClosure, SkillResourceSpec, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary,
 };
 use insight_platform_postgres::{
     repository::{
@@ -43,6 +45,18 @@ const AGENT_INTERFACE_ID: &str = "aif_0198f1c3-8f49-7c3e-b1f3-773c28367cd1";
 const AGENT_PLAN_ID: &str = "arev_0198f1c3-8f49-7c3e-b1f3-773c28367cd2";
 const AGENT_DEPLOYMENT_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd3";
 const AGENT_DEPLOYMENT_REPLAY_CANDIDATE_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd4";
+const POLICY_VERSION_2_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ce1";
+const POLICY_VERSION_3_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ce2";
+const POLICY_VERSION_4_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ce3";
+const POLICY_DEPLOYMENT_2_ID: &str = "pdep_0198f1c3-8f49-7c3e-b1f3-773c28367ce4";
+const POLICY_DEPLOYMENT_3_ID: &str = "pdep_0198f1c3-8f49-7c3e-b1f3-773c28367ce5";
+const POLICY_DEPLOYMENT_4_ID: &str = "pdep_0198f1c3-8f49-7c3e-b1f3-773c28367ce6";
+const SKILL_ID: &str = "skl_0198f1c3-8f49-7c3e-b1f3-773c28367ce7";
+const SKILL_VERSION_ID: &str = "srev_0198f1c3-8f49-7c3e-b1f3-773c28367ce8";
+const SKILL_DEPLOYMENT_ID: &str = "skdep_0198f1c3-8f49-7c3e-b1f3-773c28367ce9";
+const SANDBOX_PROFILE_ID: &str = "sxp_0198f1c3-8f49-7c3e-b1f3-773c28367cea";
+const SANDBOX_PROFILE_VERSION_ID: &str = "sxrev_0198f1c3-8f49-7c3e-b1f3-773c28367ceb";
+const SANDBOX_PROFILE_DEPLOYMENT_ID: &str = "sxdep_0198f1c3-8f49-7c3e-b1f3-773c28367cec";
 
 fn id(value: &str) -> ResourceId {
     value.parse().unwrap()
@@ -74,6 +88,7 @@ fn audit(
     }
 }
 
+#[track_caller]
 fn applied<T>(outcome: CommandOutcome<T>) -> T {
     match outcome {
         CommandOutcome::Applied(value) => value,
@@ -514,8 +529,14 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
                     Permission::AgentPublish,
                     Permission::AgentDeploy,
                     Permission::AgentActivate,
+                    Permission::SkillRead,
+                    Permission::SkillWrite,
+                    Permission::SkillPublish,
+                    Permission::SkillBind,
+                    Permission::SkillActivate,
                     Permission::SandboxWrite,
                     Permission::SandboxPublish,
+                    Permission::SandboxActivate,
                 ])
                 .unwrap(),
             },
@@ -617,9 +638,11 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         INSERT INTO insight_platform.artifact_blobs (
             tenant_id, blob_id, backend, storage_binding_digest,
             security_domain_digest, object_reference_ciphertext, object_generation, key_id,
-            encryption_domain_id, content_digest, size_bytes, state, verified_at
-        ) VALUES ($1, $2, 'fixture', $3, $4, $5, 'generation-1', 'fixture-key',
-                  $6, $7, 16, 'verified', clock_timestamp())
+            encryption_domain_id, content_digest, size_bytes, state, verified_at,
+            created_at, updated_at
+        ) SELECT $1, $2, 'fixture', $3, $4, $5, 'generation-1', 'fixture-key',
+                 $6, $7, 16, 'verified', observed_at, observed_at, observed_at
+          FROM (SELECT clock_timestamp() AS observed_at) AS clock
         "#,
     )
     .bind(TENANT_ID)
@@ -1607,4 +1630,504 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     assert_eq!(publish_replay.resource.draft_generation, 1);
     assert!(publish_replay.resource.active_version_id.is_none());
     assert_eq!(publish_replay.versions[0].resource_version_id, VERSION_ID);
+
+    let qualification_artifact = ArtifactRef::new(
+        id(ARTIFACT_ID),
+        digest('5'),
+        16,
+        "application/json",
+        DataClassification::Internal,
+        Some("policy.json".to_owned()),
+    )
+    .unwrap();
+    let mut policy_bindings = vec![ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(
+            id(POLICY_DEPLOYMENT_ID),
+            policy_deployment.bindings.digest.parse().unwrap(),
+        )
+        .unwrap(),
+        revision: ExactVersionRef::new(id(VERSION_ID), digest('6')).unwrap(),
+    }];
+    let dependency_policy_document = ResourceDocument::Policy(PolicyResourceSpec {
+        authoring_package: AuthoringPackage {
+            artifact: qualification_artifact.clone(),
+            manifest_digest: digest('6'),
+        },
+        contract_digest: digest('7'),
+        dependency_versions: vec![],
+        policy_versions: vec![],
+        policy_kind: PolicyKind::Authorization,
+        rules_digest: digest('8'),
+        scheduling: None,
+        retention: None,
+        mcp_protocol: None,
+        mcp_auth: None,
+        sandbox_isolation: None,
+        sandbox_resource: None,
+        sandbox_network: None,
+        sandbox_artifact_io: None,
+        sandbox_secret_resolution: None,
+    });
+    for (ordinal, (version_id, deployment_id, content_digest)) in [
+        (POLICY_VERSION_2_ID, POLICY_DEPLOYMENT_2_ID, digest('7')),
+        (POLICY_VERSION_3_ID, POLICY_DEPLOYMENT_3_ID, digest('8')),
+        (POLICY_VERSION_4_ID, POLICY_DEPLOYMENT_4_ID, digest('9')),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let revision = ExactVersionRef::new(id(version_id), content_digest).unwrap();
+        let published = TypedPayload::new(
+            1,
+            &PublishedVersionPayload {
+                document: dependency_policy_document.clone(),
+                validation: ValidationSummary {
+                    validator_digest: digest('1'),
+                    validated_draft_digest: digest('2'),
+                    dependency_closure_digest: digest('3'),
+                    security_evidence_digest: digest('4'),
+                    warnings: vec![],
+                },
+            },
+        )
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.resource_versions (
+                tenant_id, resource_version_id, resource_id, resource_version_kind,
+                revision_no, content_digest, payload_schema_version, payload,
+                payload_digest, created_by
+            ) VALUES ($1, $2, $3, 'policy_revision', $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(TENANT_ID)
+        .bind(version_id)
+        .bind(RESOURCE_ID)
+        .bind(2 + ordinal as i64)
+        .bind(revision.semantic_digest.to_string())
+        .bind(published.schema_version)
+        .bind(&published.value)
+        .bind(&published.digest)
+        .bind(PRINCIPAL_ID)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let deployment_closure = DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: revision.clone(),
+            applicability_digest: digest('5'),
+            qualification_evidence: qualification_artifact.clone(),
+        });
+        let deployment = TypedPayload::new(1, &deployment_closure).unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.deployments (
+                tenant_id, deployment_id, resource_id, resource_version_id,
+                environment, bindings_digest, payload_schema_version, bindings, created_by
+            ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+            "#,
+        )
+        .bind(TENANT_ID)
+        .bind(deployment_id)
+        .bind(RESOURCE_ID)
+        .bind(version_id)
+        .bind(&deployment.digest)
+        .bind(deployment.schema_version)
+        .bind(&deployment.value)
+        .bind(PRINCIPAL_ID)
+        .execute(&pool)
+        .await
+        .unwrap();
+        policy_bindings.push(ExactPolicyBinding {
+            deployment: ExactDeploymentRef::new(
+                id(deployment_id),
+                deployment.digest.parse().unwrap(),
+            )
+            .unwrap(),
+            revision,
+        });
+    }
+
+    let skill_document = ResourceDocument::Skill(SkillResourceSpec {
+        authoring_package: AuthoringPackage {
+            artifact: qualification_artifact.clone(),
+            manifest_digest: digest('1'),
+        },
+        contract_digest: digest('2'),
+        dependency_versions: vec![],
+        policy_versions: vec![policy_bindings[0].revision.clone()],
+        instruction_set_digest: digest('3'),
+        requirement_set_digest: digest('4'),
+    });
+    let skill_draft = ResourceDraftPayload {
+        display_name: "Qualified deployment skill".to_owned(),
+        document: skill_document.clone(),
+        validation: None,
+    };
+    applied(
+        registry_command!(
+            repository,
+            create_resource_draft,
+            CreateResourceDraft {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "9b10", '4', '2'),
+                resource_id: id(SKILL_ID),
+                draft: skill_draft.clone(),
+            }
+        )
+        .unwrap(),
+    );
+    let skill_draft_digest = skill_draft.document_digest().unwrap();
+    let skill_validation = ValidationSummary {
+        validator_digest: digest('5'),
+        validated_draft_digest: skill_draft_digest.clone(),
+        dependency_closure_digest: digest('6'),
+        security_evidence_digest: digest('7'),
+        warnings: vec![],
+    };
+    applied(
+        registry_command!(
+            repository,
+            record_resource_validation,
+            RecordResourceValidation {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "9b11", '6', '4'),
+                resource_id: id(SKILL_ID),
+                expected_resource_version: 1,
+                expected_draft_digest: skill_draft_digest.clone(),
+                validation: skill_validation.clone(),
+            }
+        )
+        .unwrap(),
+    );
+    applied(
+        registry_command!(
+            repository,
+            publish_resource_versions,
+            PublishResourceVersions {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "9b12", '4', '6'),
+                resource_id: id(SKILL_ID),
+                expected_resource_version: 2,
+                expected_draft_digest: skill_draft_digest,
+                versions: vec![NewPublishedVersion {
+                    resource_version_id: id(SKILL_VERSION_ID),
+                    revision_no: 1,
+                    content_digest: digest('8'),
+                    artifact_id: None,
+                    payload: PublishedVersionPayload {
+                        document: skill_document,
+                        validation: skill_validation,
+                    },
+                }],
+            }
+        )
+        .unwrap(),
+    );
+    let skill_closure = SkillDeploymentClosure {
+        skill_revision: ExactVersionRef::new(id(SKILL_VERSION_ID), digest('8')).unwrap(),
+        requirements: vec![],
+        selection_policy: policy_bindings[0].clone(),
+        qualification_evidence: qualification_artifact.clone(),
+    };
+    let skill_deployment = applied(
+        registry_command!(
+            repository,
+            create_deployment,
+            CreateDeployment {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "9b13", '4', '8'),
+                deployment_id: id(SKILL_DEPLOYMENT_ID),
+                resource_id: id(SKILL_ID),
+                resource_version_id: id(SKILL_VERSION_ID),
+                environment: "test".to_owned(),
+                closure: DeploymentClosure::Skill(skill_closure.clone()),
+                expected_resource_version: 3,
+            }
+        )
+        .unwrap(),
+    );
+    let skill_deployment_ref = ExactDeploymentRef::new(
+        id(SKILL_DEPLOYMENT_ID),
+        skill_deployment.bindings.digest.parse().unwrap(),
+    )
+    .unwrap();
+    let skill_activation_audit = audit(TENANT_ID, PRINCIPAL_ID, "9b14", '4', 'a');
+    let activated_skill = applied(
+        registry_command!(
+            repository,
+            activate_resource,
+            ActivateResource {
+                audit: skill_activation_audit.clone(),
+                resource_id: id(SKILL_ID),
+                expected_resource_version: 4,
+                target: ActiveTarget::Deployment {
+                    deployment: skill_deployment_ref.clone(),
+                },
+            }
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        activated_skill.active_deployment_id.as_deref(),
+        Some(SKILL_DEPLOYMENT_ID)
+    );
+    assert!(matches!(
+        registry_command!(
+            repository,
+            activate_resource,
+            ActivateResource {
+                audit: skill_activation_audit,
+                resource_id: id(SKILL_ID),
+                expected_resource_version: 4,
+                target: ActiveTarget::Deployment {
+                    deployment: skill_deployment_ref.clone(),
+                },
+            }
+        )
+        .unwrap(),
+        CommandOutcome::Replayed(ref replayed) if replayed == &activated_skill
+    ));
+    let skill_suspension_audit = audit(TENANT_ID, PRINCIPAL_ID, "9b15", '2', 'c');
+    let suspended_skill = applied(
+        registry_command!(
+            repository,
+            suspend_resource_deployment,
+            SuspendResourceDeployment {
+                audit: skill_suspension_audit.clone(),
+                resource_id: id(SKILL_ID),
+                deployment_id: id(SKILL_DEPLOYMENT_ID),
+                expected_resource_version: 5,
+            }
+        )
+        .unwrap(),
+    );
+    assert_eq!(suspended_skill.gate_state, "suspended");
+
+    let policy_revisions = policy_bindings
+        .iter()
+        .map(|binding| binding.revision.clone())
+        .collect::<Vec<_>>();
+    let sandbox_profile_document = ResourceDocument::SandboxProfile(SandboxProfileResourceSpec {
+        authoring_package: AuthoringPackage {
+            artifact: qualification_artifact.clone(),
+            manifest_digest: digest('2'),
+        },
+        contract_digest: digest('3'),
+        dependency_versions: vec![],
+        policy_versions: policy_revisions.clone(),
+        allowed_trust_classes: vec![CodeTrustClass::BuiltIn],
+        allowed_runtime_families: vec![SandboxRuntimeFamily::WasmWasi],
+        minimum_isolation: SandboxIsolationClass::Wasm,
+        isolation_policy: policy_revisions[0].clone(),
+        resource_policy: policy_revisions[1].clone(),
+        network_policy: policy_revisions[2].clone(),
+        artifact_io_policy: policy_revisions[3].clone(),
+        secret_policy: None,
+        cleanup: SandboxCleanupPolicy::SingleUseDestroy,
+        max_job_duration_milliseconds: 60_000,
+        semantic_digest: digest('4'),
+    });
+    let sandbox_profile_draft = ResourceDraftPayload {
+        display_name: "WASI deployment profile".to_owned(),
+        document: sandbox_profile_document.clone(),
+        validation: None,
+    };
+    applied(
+        registry_command!(
+            repository,
+            create_resource_draft,
+            CreateResourceDraft {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "9b20", '5', '2'),
+                resource_id: id(SANDBOX_PROFILE_ID),
+                draft: sandbox_profile_draft.clone(),
+            }
+        )
+        .unwrap(),
+    );
+    let sandbox_profile_draft_digest = sandbox_profile_draft.document_digest().unwrap();
+    let sandbox_profile_validation = ValidationSummary {
+        validator_digest: digest('5'),
+        validated_draft_digest: sandbox_profile_draft_digest.clone(),
+        dependency_closure_digest: digest('6'),
+        security_evidence_digest: digest('7'),
+        warnings: vec![],
+    };
+    applied(
+        registry_command!(
+            repository,
+            record_resource_validation,
+            RecordResourceValidation {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "9b21", '7', '4'),
+                resource_id: id(SANDBOX_PROFILE_ID),
+                expected_resource_version: 1,
+                expected_draft_digest: sandbox_profile_draft_digest.clone(),
+                validation: sandbox_profile_validation.clone(),
+            }
+        )
+        .unwrap(),
+    );
+    applied(
+        registry_command!(
+            repository,
+            publish_resource_versions,
+            PublishResourceVersions {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "9b22", '5', '6'),
+                resource_id: id(SANDBOX_PROFILE_ID),
+                expected_resource_version: 2,
+                expected_draft_digest: sandbox_profile_draft_digest,
+                versions: vec![NewPublishedVersion {
+                    resource_version_id: id(SANDBOX_PROFILE_VERSION_ID),
+                    revision_no: 1,
+                    content_digest: digest('8'),
+                    artifact_id: None,
+                    payload: PublishedVersionPayload {
+                        document: sandbox_profile_document,
+                        validation: sandbox_profile_validation,
+                    },
+                }],
+            }
+        )
+        .unwrap(),
+    );
+    let sandbox_profile_closure = SandboxProfileDeploymentClosure {
+        profile_revision: ExactVersionRef::new(id(SANDBOX_PROFILE_VERSION_ID), digest('8'))
+            .unwrap(),
+        runtime_revision: ExactVersionRef::new(
+            sandbox_id(ResourceKind::SandboxRuntimeRevision, 2),
+            digest('1'),
+        )
+        .unwrap(),
+        policy_bindings,
+        qualification_evidence: qualification_artifact,
+    };
+    let wrong_owner_audit = audit(TENANT_ID, PRINCIPAL_ID, "9b23", '5', '8');
+    assert!(matches!(
+        registry_command!(
+            repository,
+            create_deployment,
+            CreateDeployment {
+                audit: wrong_owner_audit.clone(),
+                deployment_id: sandbox_id(ResourceKind::SkillDeployment, 0x8a23),
+                resource_id: id(SANDBOX_PROFILE_ID),
+                resource_version_id: id(SANDBOX_PROFILE_VERSION_ID),
+                environment: "test".to_owned(),
+                closure: DeploymentClosure::Skill(skill_closure),
+                expected_resource_version: 3,
+            }
+        ),
+        Err(RepositoryError::InvalidInput(_))
+    ));
+    let wrong_owner_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND receipt_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(wrong_owner_audit.receipt_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(wrong_owner_receipts, 0);
+    let sandbox_profile_deployment = applied(
+        registry_command!(
+            repository,
+            create_deployment,
+            CreateDeployment {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "9b24", '5', 'a'),
+                deployment_id: id(SANDBOX_PROFILE_DEPLOYMENT_ID),
+                resource_id: id(SANDBOX_PROFILE_ID),
+                resource_version_id: id(SANDBOX_PROFILE_VERSION_ID),
+                environment: "test".to_owned(),
+                closure: DeploymentClosure::SandboxProfile(sandbox_profile_closure),
+                expected_resource_version: 3,
+            }
+        )
+        .unwrap(),
+    );
+    let sandbox_profile_deployment_ref = ExactDeploymentRef::new(
+        id(SANDBOX_PROFILE_DEPLOYMENT_ID),
+        sandbox_profile_deployment.bindings.digest.parse().unwrap(),
+    )
+    .unwrap();
+    let sandbox_activation_audit = audit(TENANT_ID, PRINCIPAL_ID, "9b25", '5', 'c');
+    let activated_sandbox_profile = applied(
+        registry_command!(
+            repository,
+            activate_resource,
+            ActivateResource {
+                audit: sandbox_activation_audit.clone(),
+                resource_id: id(SANDBOX_PROFILE_ID),
+                expected_resource_version: 4,
+                target: ActiveTarget::Deployment {
+                    deployment: sandbox_profile_deployment_ref.clone(),
+                },
+            }
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        activated_sandbox_profile.active_deployment_id.as_deref(),
+        Some(SANDBOX_PROFILE_DEPLOYMENT_ID)
+    );
+    assert!(matches!(
+        registry_command!(
+            repository,
+            activate_resource,
+            ActivateResource {
+                audit: sandbox_activation_audit.clone(),
+                resource_id: id(SANDBOX_PROFILE_ID),
+                expected_resource_version: 4,
+                target: ActiveTarget::Deployment {
+                    deployment: sandbox_profile_deployment_ref,
+                },
+            }
+        )
+        .unwrap(),
+        CommandOutcome::Replayed(ref replayed) if replayed == &activated_sandbox_profile
+    ));
+    let sandbox_suspension_audit = audit(TENANT_ID, PRINCIPAL_ID, "9b26", '3', 'e');
+    let suspended_sandbox_profile = applied(
+        registry_command!(
+            repository,
+            suspend_resource_deployment,
+            SuspendResourceDeployment {
+                audit: sandbox_suspension_audit.clone(),
+                resource_id: id(SANDBOX_PROFILE_ID),
+                deployment_id: id(SANDBOX_PROFILE_DEPLOYMENT_ID),
+                expected_resource_version: 5,
+            }
+        )
+        .unwrap(),
+    );
+    assert_eq!(suspended_sandbox_profile.gate_state, "suspended");
+    assert!(matches!(
+        registry_command!(
+            repository,
+            suspend_resource_deployment,
+            SuspendResourceDeployment {
+                audit: sandbox_suspension_audit.clone(),
+                resource_id: id(SANDBOX_PROFILE_ID),
+                deployment_id: id(SANDBOX_PROFILE_DEPLOYMENT_ID),
+                expected_resource_version: 5,
+            }
+        )
+        .unwrap(),
+        CommandOutcome::Replayed(ref replayed) if replayed == &suspended_sandbox_profile
+    ));
+    for command_audit in [
+        skill_suspension_audit,
+        sandbox_activation_audit,
+        sandbox_suspension_audit,
+    ] {
+        let atomic_evidence: (i64, i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+              (SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND receipt_id = $2),
+              (SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND event_id = $3),
+              (SELECT count(*) FROM insight_platform.outbox_events WHERE tenant_id = $1 AND outbox_id = $4)
+            "#,
+        )
+        .bind(TENANT_ID)
+        .bind(command_audit.receipt_id.to_string())
+        .bind(command_audit.event_id.to_string())
+        .bind(command_audit.outbox_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(atomic_evidence, (1, 1, 1));
+    }
 }
