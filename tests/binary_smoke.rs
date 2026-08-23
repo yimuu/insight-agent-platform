@@ -1237,7 +1237,7 @@ history:
 object_storage:
   s3:
     endpoint: {s3_endpoint}
-    public_endpoint: {s3_endpoint}
+    public_endpoint: https://artifacts.example.test
     region: us-east-1
     bucket: binary-smoke
     force_path_style: true
