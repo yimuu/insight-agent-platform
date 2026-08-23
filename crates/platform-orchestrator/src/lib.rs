@@ -5,6 +5,14 @@
 
 #![allow(async_fn_in_trait)]
 
+mod expression;
+
+pub use expression::{
+    DataPortKey, ExactDataPortRef, ExpressionError, ExpressionFieldName, ExpressionLimits,
+    TypedExpressionProgram, TypedInstruction, MAX_EXPRESSION_FIELD_BYTES,
+    MAX_EXPRESSION_INPUT_PORTS, MAX_EXPRESSION_INSTRUCTIONS, MAX_EXPRESSION_STACK_DEPTH,
+};
+
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, CommandAudit, CommandOutcome, DataClassification, ExactDeploymentRef,
