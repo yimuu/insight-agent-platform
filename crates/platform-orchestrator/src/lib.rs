@@ -15,10 +15,10 @@ pub use expression::{
 
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    canonical_digest, CommandAudit, CommandOutcome, DataClassification, ExactDeploymentRef,
-    Failure, HardLimitProfile, JobState, JsonLimits, LimitUnit, NodeExecutionState, PlanNodeKind,
-    PrincipalSnapshot, ResourceId, ResourceKind, RunBindingsSnapshot, RunState, Sha256Digest,
-    ValueRef,
+    canonical_digest, ClosedJsonValue, CommandAudit, CommandOutcome, DataClassification,
+    ExactDeploymentRef, Failure, HardLimitProfile, JobState, JsonLimits, LimitUnit,
+    NodeExecutionState, PlanNodeKind, PrincipalSnapshot, ResourceId, ResourceKind,
+    RunBindingsSnapshot, RunState, Sha256Digest, ValueRef,
 };
 use insight_platform_jobs::WakeContract;
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -501,6 +501,343 @@ pub enum ControllerObservation {
     MapSettlement { children: Vec<ChildOutcome> },
     Loop { iteration: u32, condition: bool },
     ErrorBoundary { failure_code: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommittedExpressionInput {
+    pub run_value_id: ResourceId,
+    pub port: ExactDataPortRef,
+    pub value: ClosedJsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerDerivedOutput {
+    pub port: ExactDataPortRef,
+    pub value: ClosedJsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerInputEvidence {
+    pub run_value_id: ResourceId,
+    pub port: ExactDataPortRef,
+    pub content_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerObservationEvidence {
+    pub schema_version: u32,
+    pub node_execution_id: ResourceId,
+    pub node_execution_version: i64,
+    pub expression_digests: Vec<Sha256Digest>,
+    pub inputs: Vec<ControllerInputEvidence>,
+    pub result_digest: Sha256Digest,
+    pub canonical_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerEvaluation {
+    pub observation: ControllerObservation,
+    pub outputs: Vec<ControllerDerivedOutput>,
+    pub evaluated_results: Vec<ClosedJsonValue>,
+    pub evidence: ControllerObservationEvidence,
+}
+
+impl ControllerObservationEvidence {
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        if self.schema_version != 1
+            || self.node_execution_id.kind() != ResourceKind::NodeExecution
+            || self.node_execution_version <= 0
+            || self.inputs.iter().any(|input| {
+                input.run_value_id.kind() != ResourceKind::RunValue
+                    || input.content_digest.as_str().is_empty()
+            })
+            || self
+                .inputs
+                .iter()
+                .map(|input| &input.port)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.inputs.len()
+            || controller_evidence_digest(
+                &self.node_execution_id,
+                self.node_execution_version,
+                &self.expression_digests,
+                &self.inputs,
+                &self.result_digest,
+            )? != self.canonical_digest
+        {
+            return Err(OrchestratorError::InvalidControllerEvidence);
+        }
+        Ok(())
+    }
+}
+
+impl ControllerEvaluation {
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        self.evidence.validate()?;
+        if self
+            .outputs
+            .iter()
+            .map(|output| &output.port)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != self.outputs.len()
+            || self.outputs.iter().any(|output| {
+                output.value.schema_digest != output.port.schema_digest
+                    || output.value.validate().is_err()
+            })
+            || self
+                .evaluated_results
+                .iter()
+                .any(|result| result.validate().is_err())
+        {
+            return Err(OrchestratorError::InvalidControllerEvidence);
+        }
+        let value =
+            serde_json::to_value((&self.observation, &self.outputs, &self.evaluated_results))
+                .map_err(|_| OrchestratorError::Canonicalization)?;
+        let result_digest: Sha256Digest = canonical_digest(&value)
+            .map_err(|_| OrchestratorError::Canonicalization)?
+            .parse()
+            .map_err(|_| OrchestratorError::Canonicalization)?;
+        if result_digest != self.evidence.result_digest {
+            return Err(OrchestratorError::InvalidControllerEvidence);
+        }
+        Ok(())
+    }
+}
+
+pub fn derive_expression_controller(
+    node: &RuntimeNode,
+    committed_inputs: Vec<CommittedExpressionInput>,
+    node_execution_id: ResourceId,
+    node_execution_version: i64,
+    loop_iteration: u32,
+    limits: ExpressionLimits,
+) -> Result<ControllerEvaluation, OrchestratorError> {
+    if node_execution_id.kind() != ResourceKind::NodeExecution || node_execution_version <= 0 {
+        return Err(OrchestratorError::InvalidControllerEvidence);
+    }
+    let mut values = BTreeMap::new();
+    let mut authorities = BTreeMap::new();
+    for input in committed_inputs {
+        if input.run_value_id.kind() != ResourceKind::RunValue
+            || input.value.schema_digest != input.port.schema_digest
+            || input.value.validate().is_err()
+            || values
+                .insert(input.port.clone(), input.value.clone())
+                .is_some()
+        {
+            return Err(OrchestratorError::InvalidControllerEvidence);
+        }
+        authorities.insert(input.port, input.run_value_id);
+    }
+
+    let programs = match node {
+        RuntimeNode::Compute { assignments, .. } => assignments
+            .iter()
+            .map(|assignment| &assignment.expression)
+            .collect::<Vec<_>>(),
+        RuntimeNode::Branch { ordered_arms, .. } => {
+            ordered_arms.iter().map(|arm| &arm.when).collect()
+        }
+        RuntimeNode::Map { items, .. } => vec![items],
+        RuntimeNode::Loop { condition, .. } => vec![condition],
+        _ => return Err(OrchestratorError::ObservationMismatch),
+    };
+    let generated_ports = match node {
+        RuntimeNode::Compute { assignments, .. } => assignments
+            .iter()
+            .map(|assignment| assignment.output_port.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        _ => std::collections::BTreeSet::new(),
+    };
+    let mut required_ports = Vec::new();
+    let mut seen_ports = std::collections::BTreeSet::new();
+    for program in &programs {
+        for port in &program.input_ports {
+            if !generated_ports.contains(port) && seen_ports.insert(port.clone()) {
+                required_ports.push(port.clone());
+            }
+        }
+    }
+    if authorities.len() != required_ports.len()
+        || authorities.keys().any(|port| !seen_ports.contains(port))
+    {
+        return Err(OrchestratorError::InvalidControllerEvidence);
+    }
+    let used_inputs = required_ports
+        .iter()
+        .map(|port| {
+            let run_value_id = authorities
+                .get(port)
+                .ok_or(OrchestratorError::InvalidControllerEvidence)?;
+            let value = values
+                .get(port)
+                .ok_or(OrchestratorError::InvalidControllerEvidence)?;
+            Ok(ControllerInputEvidence {
+                run_value_id: run_value_id.clone(),
+                port: port.clone(),
+                content_digest: value.canonical_digest.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, OrchestratorError>>()?;
+    let expression_digests = programs
+        .iter()
+        .map(|program| program.semantic_digest.clone())
+        .collect::<Vec<_>>();
+    let mut outputs = Vec::new();
+    let mut evaluated_results = Vec::new();
+    let observation = match node {
+        RuntimeNode::Compute { assignments, .. } => {
+            for assignment in assignments {
+                let result = evaluate_controller_program(&assignment.expression, &values, limits)?;
+                values.insert(assignment.output_port.clone(), result.clone());
+                evaluated_results.push(result.clone());
+                outputs.push(ControllerDerivedOutput {
+                    port: assignment.output_port.clone(),
+                    value: result,
+                });
+            }
+            ControllerObservation::None
+        }
+        RuntimeNode::Branch {
+            ordered_arms,
+            otherwise,
+        } => {
+            let mut selected = otherwise.clone();
+            for arm in ordered_arms {
+                let result = evaluate_controller_program(&arm.when, &values, limits)?;
+                let condition = result
+                    .value
+                    .as_bool()
+                    .ok_or(OrchestratorError::ExpressionEvaluation)?;
+                evaluated_results.push(result);
+                if condition {
+                    selected = arm.target.clone();
+                    break;
+                }
+            }
+            ControllerObservation::Branch { selected }
+        }
+        RuntimeNode::Map {
+            items,
+            maximum_items,
+            ..
+        } => {
+            let result = evaluate_controller_program(items, &values, limits)?;
+            let item_count = u32::try_from(
+                result
+                    .value
+                    .as_array()
+                    .ok_or(OrchestratorError::ExpressionEvaluation)?
+                    .len(),
+            )
+            .map_err(|_| OrchestratorError::ExpressionEvaluation)?;
+            if item_count > *maximum_items {
+                return Err(OrchestratorError::ExpressionEvaluation);
+            }
+            evaluated_results.push(result);
+            ControllerObservation::Map { item_count }
+        }
+        RuntimeNode::Loop { condition, .. } => {
+            let result = evaluate_controller_program(condition, &values, limits)?;
+            let condition = result
+                .value
+                .as_bool()
+                .ok_or(OrchestratorError::ExpressionEvaluation)?;
+            evaluated_results.push(result);
+            ControllerObservation::Loop {
+                iteration: loop_iteration,
+                condition,
+            }
+        }
+        _ => unreachable!(),
+    };
+
+    let result_value = serde_json::to_value((&observation, &outputs, &evaluated_results))
+        .map_err(|_| OrchestratorError::Canonicalization)?;
+    let result_digest = canonical_digest(&result_value)
+        .map_err(|_| OrchestratorError::Canonicalization)?
+        .parse()
+        .map_err(|_| OrchestratorError::Canonicalization)?;
+    let canonical_digest = controller_evidence_digest(
+        &node_execution_id,
+        node_execution_version,
+        &expression_digests,
+        &used_inputs,
+        &result_digest,
+    )?;
+    let evaluation = ControllerEvaluation {
+        observation,
+        outputs,
+        evaluated_results,
+        evidence: ControllerObservationEvidence {
+            schema_version: 1,
+            node_execution_id,
+            node_execution_version,
+            expression_digests,
+            inputs: used_inputs,
+            result_digest,
+            canonical_digest,
+        },
+    };
+    evaluation.validate()?;
+    Ok(evaluation)
+}
+
+fn evaluate_controller_program(
+    program: &TypedExpressionProgram,
+    values: &BTreeMap<ExactDataPortRef, ClosedJsonValue>,
+    limits: ExpressionLimits,
+) -> Result<ClosedJsonValue, OrchestratorError> {
+    let mut selected = BTreeMap::new();
+    for port in &program.input_ports {
+        let value = values
+            .get(port)
+            .ok_or(OrchestratorError::ExpressionEvaluation)?;
+        selected.insert(port.clone(), value.clone());
+    }
+    program
+        .evaluate(&selected, limits)
+        .map_err(|_| OrchestratorError::ExpressionEvaluation)
+}
+
+#[derive(Serialize)]
+struct UnsignedControllerEvidence<'a> {
+    schema_version: u32,
+    node_execution_id: &'a ResourceId,
+    node_execution_version: i64,
+    expression_digests: &'a [Sha256Digest],
+    inputs: &'a [ControllerInputEvidence],
+    result_digest: &'a Sha256Digest,
+}
+
+fn controller_evidence_digest(
+    node_execution_id: &ResourceId,
+    node_execution_version: i64,
+    expression_digests: &[Sha256Digest],
+    inputs: &[ControllerInputEvidence],
+    result_digest: &Sha256Digest,
+) -> Result<Sha256Digest, OrchestratorError> {
+    let value = serde_json::to_value(UnsignedControllerEvidence {
+        schema_version: 1,
+        node_execution_id,
+        node_execution_version,
+        expression_digests,
+        inputs,
+        result_digest,
+    })
+    .map_err(|_| OrchestratorError::Canonicalization)?;
+    canonical_digest(&value)
+        .map_err(|_| OrchestratorError::Canonicalization)?
+        .parse()
+        .map_err(|_| OrchestratorError::Canonicalization)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1769,6 +2106,8 @@ pub enum OrchestratorError {
     InvalidPlan,
     UnknownPlanNodeReference,
     ObservationMismatch,
+    ExpressionEvaluation,
+    InvalidControllerEvidence,
     UnhandledFailure,
     InvalidRunControl,
     InvalidTimeoutObservation,
@@ -1793,6 +2132,12 @@ impl fmt::Display for OrchestratorError {
             Self::InvalidPlan => "runtime plan is invalid or outside its hard limits",
             Self::UnknownPlanNodeReference => "runtime plan references an unknown node",
             Self::ObservationMismatch => "controller observation does not match the node kind",
+            Self::ExpressionEvaluation => {
+                "controller expression input, type, result, or hard limit is invalid"
+            }
+            Self::InvalidControllerEvidence => {
+                "controller expression evidence identity or content is invalid"
+            }
             Self::UnhandledFailure => "error boundary has no matching stable failure route",
             Self::InvalidRunControl => "run control snapshot is invalid",
             Self::InvalidTimeoutObservation => "timeout observation is early or invalid",
@@ -1871,6 +2216,16 @@ mod tests {
             port_id: DataPortKey::new(port.to_owned()).unwrap(),
             schema_digest: digest('1'),
         }
+    }
+
+    fn load_program(port: ExactDataPortRef) -> TypedExpressionProgram {
+        TypedExpressionProgram::build(
+            vec![port.clone()],
+            vec![TypedInstruction::LoadPort { port }],
+            digest('1'),
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1956,6 +2311,121 @@ mod tests {
             branch.validate(limits()),
             Err(OrchestratorError::InvalidPlan)
         );
+    }
+
+    #[test]
+    fn controller_observation_is_derived_from_exact_committed_values() {
+        let predicate = exact_port("source", "predicate");
+        let node = RuntimeNode::Branch {
+            ordered_arms: vec![BranchArm {
+                when: load_program(predicate.clone()),
+                target: key("selected"),
+            }],
+            otherwise: key("otherwise"),
+        };
+        let inputs = vec![CommittedExpressionInput {
+            run_value_id: id("val_0198f1c5-0787-75e1-a9e8-d95ca0f37020"),
+            port: predicate,
+            value: ClosedJsonValue::build(digest('1'), serde_json::json!(true)).unwrap(),
+        }];
+        let first = derive_expression_controller(
+            &node,
+            inputs.clone(),
+            id("nod_0198f1c5-0787-75e1-a9e8-d95ca0f37021"),
+            3,
+            0,
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap();
+        let second = derive_expression_controller(
+            &node,
+            inputs,
+            id("nod_0198f1c5-0787-75e1-a9e8-d95ca0f37021"),
+            3,
+            0,
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            first.observation,
+            ControllerObservation::Branch {
+                selected: key("selected")
+            }
+        );
+        assert_eq!(first.evidence.inputs.len(), 1);
+        assert_eq!(first.evidence.expression_digests.len(), 1);
+        assert!(first.validate().is_ok());
+        let mut forged = first.clone();
+        forged.evidence.result_digest = digest('f');
+        assert_eq!(
+            forged.validate(),
+            Err(OrchestratorError::InvalidControllerEvidence)
+        );
+
+        let injected = vec![CommittedExpressionInput {
+            run_value_id: id("val_0198f1c5-0787-75e1-a9e8-d95ca0f37022"),
+            port: exact_port("source", "unexpected"),
+            value: ClosedJsonValue::build(digest('1'), serde_json::json!(true)).unwrap(),
+        }];
+        assert_eq!(
+            derive_expression_controller(
+                &node,
+                injected,
+                id("nod_0198f1c5-0787-75e1-a9e8-d95ca0f37021"),
+                3,
+                0,
+                ExpressionLimits::ABSOLUTE,
+            ),
+            Err(OrchestratorError::InvalidControllerEvidence)
+        );
+    }
+
+    #[test]
+    fn compute_derivation_chains_outputs_without_external_injection() {
+        let first_port = exact_port("compute", "first");
+        let second_port = exact_port("compute", "second");
+        let increment = TypedExpressionProgram::build(
+            vec![first_port.clone()],
+            vec![
+                TypedInstruction::LoadPort {
+                    port: first_port.clone(),
+                },
+                TypedInstruction::Literal {
+                    value: ClosedJsonValue::build(digest('1'), serde_json::json!(1)).unwrap(),
+                },
+                TypedInstruction::IntegerAdd,
+            ],
+            digest('1'),
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap();
+        let node = RuntimeNode::Compute {
+            assignments: vec![
+                PortAssignment {
+                    output_port: first_port,
+                    expression: literal_program(serde_json::json!(41)),
+                },
+                PortAssignment {
+                    output_port: second_port,
+                    expression: increment,
+                },
+            ],
+            next: key("return"),
+        };
+        let evaluation = derive_expression_controller(
+            &node,
+            vec![],
+            id("nod_0198f1c5-0787-75e1-a9e8-d95ca0f37023"),
+            1,
+            0,
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap();
+        assert_eq!(evaluation.observation, ControllerObservation::None);
+        assert_eq!(evaluation.outputs.len(), 2);
+        assert_eq!(evaluation.outputs[1].value.value, serde_json::json!(42));
+        assert!(evaluation.evidence.inputs.is_empty());
     }
 
     #[test]
