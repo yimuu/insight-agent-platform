@@ -78,7 +78,8 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    Compute现已在同一事务写immutable output RunValue、owner-derived classification与Scope environment CAS，再提交既有Node/Job/
    Receipt/Event/Outbox；fresh PostgreSQL同时覆盖output ID冲突整批回滚。尚缺Map item value binding、Loop carried rollover及完整production store
    composition；手工注入`ControllerObservation`仍不计production证据。CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
-   CR-178已冻结Map exact item port/element schema与Plan version 2，代码和L1～L3 fixture尚待本批后续实现。
+   CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向与fresh PostgreSQL既有Plan闭包已实现；
+   每item RunValue/MapItem Scope原子写及其L2/L3 batch/crash fixture仍待后续实现。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

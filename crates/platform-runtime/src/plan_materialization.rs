@@ -271,7 +271,7 @@ mod tests {
         let start = PlanNodeKey::new("start".to_owned()).unwrap();
         let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
         RuntimePlan {
-            plan_version: 1,
+            plan_version: 2,
             interface_revision_id: id(ResourceKind::AgentInterfaceRevision, "7701"),
             entry_node_id: start.clone(),
             nodes: BTreeMap::from([

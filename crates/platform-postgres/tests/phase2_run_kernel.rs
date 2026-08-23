@@ -135,8 +135,12 @@ fn echo_run_input_program() -> TypedExpressionProgram {
     .unwrap()
 }
 
-fn item_port() -> DataPortKey {
-    DataPortKey::new("item".to_owned()).unwrap()
+fn item_port(node: &str) -> insight_platform_orchestrator::ExactDataPortRef {
+    insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
+        producer_node_id: PlanNodeKey::new(node.to_owned()).unwrap(),
+        port_id: DataPortKey::new("item".to_owned()).unwrap(),
+        schema_digest: digest('1'),
+    }
 }
 
 fn runtime_plan() -> RuntimePlan {
@@ -167,7 +171,7 @@ fn runtime_plan() -> RuntimePlan {
     let input_otherwise = PlanNodeKey::new("input_otherwise".to_owned()).unwrap();
     let input_compute = PlanNodeKey::new("input_compute".to_owned()).unwrap();
     RuntimePlan {
-        plan_version: 1,
+        plan_version: 2,
         interface_revision_id: id(AGENT_INTERFACE_ID),
         entry_node_id: entry.clone(),
         nodes: BTreeMap::from([
@@ -312,7 +316,7 @@ fn runtime_plan() -> RuntimePlan {
                 map_node.clone(),
                 RuntimeNode::Map {
                     items: literal_program(json!([])),
-                    item_port: item_port(),
+                    item_port: item_port("map"),
                     body: map_body.clone(),
                     next: finish.clone(),
                     maximum_items: 3,
@@ -330,7 +334,7 @@ fn runtime_plan() -> RuntimePlan {
                 fail_fast_map.clone(),
                 RuntimeNode::Map {
                     items: literal_program(json!([])),
-                    item_port: item_port(),
+                    item_port: item_port("fail_fast_map"),
                     body: fail_fast_map_body.clone(),
                     next: finish.clone(),
                     maximum_items: 3,

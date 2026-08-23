@@ -132,7 +132,7 @@ pub enum RuntimeNode {
     },
     Map {
         items: TypedExpressionProgram,
-        item_port: DataPortKey,
+        item_port: ExactDataPortRef,
         body: PlanNodeKey,
         next: PlanNodeKey,
         maximum_items: u32,
@@ -284,7 +284,7 @@ pub struct RuntimePlan {
 
 impl RuntimePlan {
     pub fn validate(&self, limits: PlanLimits) -> Result<(), OrchestratorError> {
-        if self.plan_version != 1
+        if self.plan_version != 2
             || self.interface_revision_id.kind() != ResourceKind::AgentInterfaceRevision
             || limits.maximum_nodes == 0
             || limits.maximum_edges == 0
@@ -385,11 +385,13 @@ fn validate_node(
         },
         RuntimeNode::Map {
             items,
+            item_port,
             maximum_items,
             ..
         } if *maximum_items == 0
             || *maximum_items > limits.maximum_map_items
-            || items.validate(limits.expression).is_err() =>
+            || items.validate(limits.expression).is_err()
+            || item_port.producer_node_id() != Some(node_key) =>
         {
             Err(OrchestratorError::InvalidPlan)
         }
@@ -2277,8 +2279,8 @@ mod tests {
         .unwrap()
     }
 
-    fn item_port() -> DataPortKey {
-        DataPortKey::new("item".to_owned()).unwrap()
+    fn item_port(node: &str) -> ExactDataPortRef {
+        exact_port(node, "item")
     }
 
     fn exact_port(node: &str, port: &str) -> ExactDataPortRef {
@@ -2302,7 +2304,7 @@ mod tests {
     #[test]
     fn runtime_plan_is_closed_bounded_and_digestible() {
         let plan = RuntimePlan {
-            plan_version: 1,
+            plan_version: 2,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("start"),
             nodes: BTreeMap::from([
@@ -2316,6 +2318,12 @@ mod tests {
             ]),
         };
         plan.validate(limits()).unwrap();
+        let mut obsolete = plan.clone();
+        obsolete.plan_version = 1;
+        assert_eq!(
+            obsolete.validate(limits()),
+            Err(OrchestratorError::InvalidPlan)
+        );
         assert_eq!(
             plan.canonical_digest(limits()),
             plan.canonical_digest(limits())
@@ -2338,7 +2346,7 @@ mod tests {
         )
         .unwrap();
         let plan = RuntimePlan {
-            plan_version: 1,
+            plan_version: 2,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("compute"),
             nodes: BTreeMap::from([
@@ -2360,7 +2368,7 @@ mod tests {
         let mut forged = literal_program(serde_json::json!(true));
         forged.semantic_digest = digest('f');
         let branch = RuntimePlan {
-            plan_version: 1,
+            plan_version: 2,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("branch"),
             nodes: BTreeMap::from([
@@ -2549,7 +2557,7 @@ mod tests {
         let start = key("start");
         let finish = key("finish");
         let plan = RuntimePlan {
-            plan_version: 1,
+            plan_version: 2,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: start.clone(),
             nodes: BTreeMap::from([
@@ -2663,7 +2671,7 @@ mod tests {
     fn map_failure_policies_are_bounded_and_deterministic() {
         let all_settled = RuntimeNode::Map {
             items: literal_program(serde_json::json!([])),
-            item_port: item_port(),
+            item_port: item_port("map"),
             body: key("body"),
             next: key("next"),
             maximum_items: 4,
@@ -2692,7 +2700,7 @@ mod tests {
 
         let fail_fast = RuntimeNode::Map {
             items: literal_program(serde_json::json!([])),
-            item_port: item_port(),
+            item_port: item_port("map"),
             body: key("body"),
             next: key("next"),
             maximum_items: 4,
@@ -2712,7 +2720,7 @@ mod tests {
 
         let bounded = RuntimeNode::Map {
             items: literal_program(serde_json::json!([])),
-            item_port: item_port(),
+            item_port: item_port("map"),
             body: key("body"),
             next: key("next"),
             maximum_items: 4,
@@ -2761,13 +2769,28 @@ mod tests {
                 &key("map"),
                 &RuntimeNode::Map {
                     items: literal_program(serde_json::json!([])),
-                    item_port: item_port(),
+                    item_port: item_port("map"),
                     body: key("body"),
                     next: key("next"),
                     maximum_items: 2,
                     failure_policy: MapFailurePolicy::BoundedErrorCount {
                         maximum_failures: 3,
                     },
+                },
+                limits(),
+            ),
+            Err(OrchestratorError::InvalidPlan)
+        );
+        assert_eq!(
+            validate_node(
+                &key("map"),
+                &RuntimeNode::Map {
+                    items: literal_program(serde_json::json!([])),
+                    item_port: item_port("different_map"),
+                    body: key("body"),
+                    next: key("next"),
+                    maximum_items: 2,
+                    failure_policy: MapFailurePolicy::AllSettled,
                 },
                 limits(),
             ),
