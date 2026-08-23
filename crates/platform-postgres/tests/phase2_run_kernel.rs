@@ -17,17 +17,19 @@ use insight_platform_contracts::{
 };
 use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
 use insight_platform_orchestrator::{
-    AdmitRun, ChildBudget, ChildCancellationPolicy, ChildOutcome, ControllerObservation,
-    DataPortKey, ExpressionLimits, JoinPolicy, JoinRemainderPolicy, MapFailurePolicy,
-    ObserveRunTimeout, PlanLimits, PlanNodeKey, RequestRunCancel, RunInputValue, RuntimeNode,
-    RuntimePlan, SetRunPause, TypedExpressionProgram, TypedInstruction,
+    derive_expression_controller, AdmitRun, ChildBudget, ChildCancellationPolicy, ChildOutcome,
+    CommittedExpressionInput, ControllerObservation, DataPortKey, ExpressionLimits, JoinPolicy,
+    JoinRemainderPolicy, MapFailurePolicy, ObserveRunTimeout, PlanLimits, PlanNodeKey,
+    RequestRunCancel, RunInputValue, RuntimeNode, RuntimePlan, SetRunPause, TypedExpressionProgram,
+    TypedInstruction,
 };
 use insight_platform_postgres::{
     repository::{
-        ApplyOrchestrationControllerStep, ChildRunCancellationSlot, ClaimOrchestrationJobs,
-        ClaimedOrchestrationJob, CompleteOrchestrationRun, ControllerActivationSlot,
-        ControllerPendingNodeSlot, ControllerPendingWakeSlot, ControllerRemainderCancellationSlot,
-        ControllerScopeSlot, ControllerStepMutationIds, ControllerStructuralExitSlot,
+        ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep,
+        ChildRunCancellationSlot, ClaimOrchestrationJobs, ClaimedOrchestrationJob,
+        CompleteOrchestrationRun, ControllerActivationSlot, ControllerPendingNodeSlot,
+        ControllerPendingWakeSlot, ControllerRemainderCancellationSlot, ControllerScopeSlot,
+        ControllerStepMutationIds, ControllerStructuralExitSlot,
         DeferOrchestrationChildMutationIds, DeferOrchestrationTaskMutationIds,
         DeferOrchestrationToChildRun, DeferOrchestrationToTask, DriveChildRunCancellations,
         DriveDueOrchestrationRetries, DriveExpiredOrchestrationJobs,
@@ -5774,7 +5776,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         expression_facts.inputs[0].value,
         expression_admission.input.value
     );
-    let mut stale_expression_fence = expression_fence;
+    let mut stale_expression_fence = expression_fence.clone();
     stale_expression_fence.expected_job_version -= 1;
     assert!(matches!(
         repository
@@ -5782,6 +5784,98 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             .await,
         Err(RepositoryError::Conflict("running Job fence"))
     ));
+    let materialized_inputs = expression_facts
+        .inputs
+        .iter()
+        .map(|input| {
+            let ValueRef::Inline { value } = &input.value else {
+                panic!("expression fixture input must be Inline")
+            };
+            CommittedExpressionInput {
+                run_value_id: input.run_value_id.clone(),
+                port: input.port.clone(),
+                classification: input.classification,
+                value: ClosedJsonValue::build(input.schema_digest.clone(), value.clone()).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let plan = runtime_plan();
+    let evaluation = derive_expression_controller(
+        plan.node(&expression_facts.plan_node_key).unwrap(),
+        materialized_inputs.clone(),
+        expression_facts.node_execution_id.clone(),
+        expression_facts.node_execution_version,
+        expression_facts.loop_iteration,
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap();
+    let expression_step = ApplyOrchestrationControllerStep {
+        fence: expression_fence.clone(),
+        plan: plan.clone(),
+        observation: evaluation.observation.clone(),
+        idempotency_key_digest: digest('6'),
+        request_digest: digest('7'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        mutations: ControllerStepMutationIds {
+            receipt_id: fixture_platform_id("rcp", "aa20"),
+            quota_entry_ids: ["aa21", "aa22", "aa23", "aa24"]
+                .map(|suffix| fixture_platform_id("qle", suffix))
+                .to_vec(),
+            run_event_id: fixture_platform_id("evt", "aa25"),
+            run_outbox_id: fixture_platform_id("obx", "aa25"),
+            node_event_id: fixture_platform_id("evt", "aa26"),
+            node_outbox_id: fixture_platform_id("obx", "aa26"),
+            job_event_id: fixture_platform_id("evt", "aa27"),
+            job_outbox_id: fixture_platform_id("obx", "aa27"),
+            activations: vec![ControllerActivationSlot {
+                node_execution_id: fixture_platform_id("nod", "aa28"),
+                orchestration_job_id: fixture_platform_id("job", "aa29"),
+                scope: None,
+                node_event_id: fixture_platform_id("evt", "aa2a"),
+                node_outbox_id: fixture_platform_id("obx", "aa2a"),
+                job_event_id: fixture_platform_id("evt", "aa2b"),
+                job_outbox_id: fixture_platform_id("obx", "aa2b"),
+            }],
+            pending_nodes: vec![],
+            structural_exit: None,
+            pending_wake: None,
+            remainder_cancellations: vec![],
+        },
+    };
+    let mut downgraded_inputs = materialized_inputs.clone();
+    downgraded_inputs[0].classification = DataClassification::Public;
+    let downgraded_evaluation = derive_expression_controller(
+        plan.node(&expression_facts.plan_node_key).unwrap(),
+        downgraded_inputs.clone(),
+        expression_facts.node_execution_id.clone(),
+        expression_facts.node_execution_version,
+        0,
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap();
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler
+            .apply_derived_expression_controller_step(ApplyDerivedExpressionControllerStep {
+                step: expression_step.clone(),
+                materialized_inputs: downgraded_inputs,
+                evaluation: downgraded_evaluation,
+            })
+            .await,
+        Err(RepositoryError::Conflict("derived expression input evidence"))
+    ));
+    scheduler.rollback().await.unwrap();
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let derived_branch = scheduler
+        .apply_derived_expression_controller_step(ApplyDerivedExpressionControllerStep {
+            step: expression_step,
+            materialized_inputs,
+            evaluation,
+        })
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert!(matches!(derived_branch, CommandOutcome::Applied(_)));
     let expression_run_version: i64 = sqlx::query_scalar(
         "SELECT version FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
     )

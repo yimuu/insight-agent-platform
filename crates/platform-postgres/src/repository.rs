@@ -33,9 +33,10 @@ use insight_platform_mcp_host::McpJobPayload;
 use insight_platform_models::{ModelTurnError as DomainModelTurnError, ModelTurnLimits};
 use insight_platform_orchestrator::{
     decide_cancel, decide_child_link_cancel, decide_child_link_terminal, decide_controller,
-    decide_orchestration_convergence, decide_pause, decide_timeout, prepare_child_run,
-    required_expression_inputs, AdmitRun, ChildBudget, ChildCancellationPolicy, ChildLinkState,
-    ChildOutcome, ChildRunLinkPayload, ChildRunLinkProjection, ControlDecision, ControllerDecision,
+    decide_orchestration_convergence, decide_pause, decide_timeout, derive_expression_controller,
+    prepare_child_run, required_expression_inputs, AdmitRun, ChildBudget, ChildCancellationPolicy,
+    ChildLinkState, ChildOutcome, ChildRunLinkPayload, ChildRunLinkProjection,
+    CommittedExpressionInput, ControlDecision, ControllerDecision, ControllerEvaluation,
     ControllerObservation, ExactDataPortRef, ExactRunValueRef, JoinPolicy, JoinRemainderPolicy,
     MapFailurePolicy, ObserveRunTimeout, OrchestrationConvergenceDecision,
     OrchestrationConvergenceFacts, OrchestrationConvergenceReason, OrchestrationJobPayload,
@@ -4956,6 +4957,35 @@ impl PgSchedulerTransaction {
         &mut self,
         command: ApplyOrchestrationControllerStep,
     ) -> Result<CommandOutcome<AppliedOrchestrationControllerStep>, RepositoryError> {
+        self.apply_orchestration_controller_step_internal(command, None)
+            .await
+    }
+
+    pub async fn apply_derived_expression_controller_step(
+        &mut self,
+        command: ApplyDerivedExpressionControllerStep,
+    ) -> Result<CommandOutcome<AppliedOrchestrationControllerStep>, RepositoryError> {
+        command.validate(self.plan_limits)?;
+        let ApplyDerivedExpressionControllerStep {
+            step,
+            materialized_inputs,
+            evaluation,
+        } = command;
+        self.apply_orchestration_controller_step_internal(
+            step,
+            Some(DerivedExpressionCommitEvidence {
+                materialized_inputs,
+                evaluation,
+            }),
+        )
+        .await
+    }
+
+    async fn apply_orchestration_controller_step_internal(
+        &mut self,
+        command: ApplyOrchestrationControllerStep,
+        derived: Option<DerivedExpressionCommitEvidence>,
+    ) -> Result<CommandOutcome<AppliedOrchestrationControllerStep>, RepositoryError> {
         command.validate(self.plan_limits)?;
         let plan_digest = command
             .plan
@@ -4991,6 +5021,9 @@ impl PgSchedulerTransaction {
                     "run_outbox_id": command.mutations.run_outbox_id,
                 },
                 "observation": command.observation,
+                "observation_evidence_digest": derived
+                    .as_ref()
+                    .map(|evidence| &evidence.evaluation.evidence.canonical_digest),
                 "pending_nodes": command
                     .mutations
                     .pending_nodes
@@ -5100,6 +5133,20 @@ impl PgSchedulerTransaction {
             &command.observation,
         )
         .await?;
+        if let Some(derived) = &derived {
+            require_exact_derived_expression_evidence(
+                &mut transaction,
+                &observed,
+                &parents,
+                &source_node,
+                runtime_node,
+                &command.observation,
+                derived,
+                self.plan_limits.expression,
+                self.scope_environment_limits,
+            )
+            .await?;
+        }
         let decision = decide_controller(runtime_node, &command.observation)?;
         let shape = match (&decision, runtime_node) {
             (
@@ -8088,6 +8135,7 @@ async fn load_resolved_expression_values(
             SELECT value.value_id, value.classification, value.schema_digest,
                    value.content_digest, value.inline_value, value.artifact_id,
                    artifact.state AS artifact_state, artifact.terminal_at AS artifact_terminal_at,
+                   artifact.classification AS artifact_classification,
                    artifact.verified_media_type, blob.state AS blob_state,
                    blob.deleted_at AS blob_deleted_at, blob.content_digest AS blob_content_digest,
                    blob.size_bytes
@@ -8154,7 +8202,11 @@ async fn load_resolved_expression_values(
                     && row
                         .try_get::<Option<String>, _>("blob_content_digest")?
                         .as_deref()
-                        == Some(content_digest.as_str()) =>
+                        == Some(content_digest.as_str())
+                    && row
+                        .try_get::<Option<String>, _>("artifact_classification")?
+                        .as_deref()
+                        == Some(classification.as_str()) =>
             {
                 ValueRef::Artifact {
                     artifact: ArtifactRef::new(
@@ -9045,6 +9097,114 @@ async fn require_exact_controller_observation(
     };
     if observation != &exact {
         return Err(RepositoryError::Conflict("exact Join observation"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn require_exact_derived_expression_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    runtime_node: &insight_platform_orchestrator::RuntimeNode,
+    observation: &ControllerObservation,
+    derived: &DerivedExpressionCommitEvidence,
+    expression_limits: insight_platform_orchestrator::ExpressionLimits,
+    scope_limits: ScopeEnvironmentLimits,
+) -> Result<(), RepositoryError> {
+    if matches!(
+        runtime_node,
+        insight_platform_orchestrator::RuntimeNode::Compute { .. }
+    ) {
+        return Err(RepositoryError::InvalidInput(
+            "Compute requires atomic output RunValue mutation slots".to_owned(),
+        ));
+    }
+    if !matches!(
+        runtime_node,
+        insight_platform_orchestrator::RuntimeNode::Branch { .. }
+            | insight_platform_orchestrator::RuntimeNode::Map { .. }
+            | insight_platform_orchestrator::RuntimeNode::Loop { .. }
+    ) || &derived.evaluation.observation != observation
+        || derived.evaluation.evidence.node_execution_version != source_node.version
+        || derived.evaluation.evidence.node_execution_id.to_string() != parents.node_id
+        || !derived.evaluation.outputs.is_empty()
+    {
+        return Err(RepositoryError::Conflict(
+            "derived expression controller evidence",
+        ));
+    }
+    let required_ports = required_expression_inputs(runtime_node)?;
+    let tenant_id: ResourceId = current_job.tenant_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let scope_id: ResourceId = parents.scope_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let environments =
+        load_scope_environment_chain(transaction, &tenant_id, &run_id, &scope_id, scope_limits)
+            .await?;
+    let value_refs = insight_platform_orchestrator::resolve_scope_inputs(
+        &required_ports,
+        &environments,
+        scope_limits,
+    )?;
+    let resolved = load_resolved_expression_values(
+        transaction,
+        &tenant_id,
+        &run_id,
+        required_ports,
+        value_refs,
+    )
+    .await?;
+    if resolved.len() != derived.materialized_inputs.len() {
+        return Err(RepositoryError::Conflict(
+            "derived expression input closure",
+        ));
+    }
+    for (expected, materialized) in resolved.iter().zip(&derived.materialized_inputs) {
+        if expected.run_value_id != materialized.run_value_id
+            || expected.port != materialized.port
+            || expected.classification != materialized.classification
+            || expected.schema_digest != materialized.value.schema_digest
+            || expected.content_digest != materialized.value.canonical_digest
+            || materialized.value.validate().is_err()
+            || matches!(
+                &expected.value,
+                ValueRef::Inline { value } if value != &materialized.value.value
+            )
+        {
+            return Err(RepositoryError::Conflict(
+                "derived expression input evidence",
+            ));
+        }
+    }
+    let loop_iteration = match observation {
+        ControllerObservation::Loop { iteration, .. } => *iteration,
+        _ => 0,
+    };
+    let exact = derive_expression_controller(
+        runtime_node,
+        derived.materialized_inputs.clone(),
+        derived.evaluation.evidence.node_execution_id.clone(),
+        source_node.version,
+        loop_iteration,
+        expression_limits,
+    )?;
+    if exact != derived.evaluation {
+        return Err(RepositoryError::Conflict(
+            "derived expression evaluation evidence",
+        ));
     }
     Ok(())
 }
@@ -19159,6 +19319,36 @@ pub struct ApplyOrchestrationControllerStep {
     pub request_digest: Sha256Digest,
     pub receipt_expires_at: DateTime<Utc>,
     pub mutations: ControllerStepMutationIds,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyDerivedExpressionControllerStep {
+    pub step: ApplyOrchestrationControllerStep,
+    pub materialized_inputs: Vec<CommittedExpressionInput>,
+    pub evaluation: ControllerEvaluation,
+}
+
+impl ApplyDerivedExpressionControllerStep {
+    fn validate(&self, plan_limits: PlanLimits) -> Result<(), RepositoryError> {
+        self.step.validate(plan_limits)?;
+        self.evaluation
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if self.step.observation != self.evaluation.observation
+            || self.materialized_inputs.len() > plan_limits.expression.maximum_input_ports
+        {
+            return Err(RepositoryError::InvalidInput(
+                "derived expression command is inconsistent".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DerivedExpressionCommitEvidence {
+    materialized_inputs: Vec<CommittedExpressionInput>,
+    evaluation: ControllerEvaluation,
 }
 
 impl ApplyOrchestrationControllerStep {

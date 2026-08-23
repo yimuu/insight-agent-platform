@@ -73,8 +73,9 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    交给真实Plan/Capability/Task/Subagent状态机的production handler仍未实现。
    closed expression owner、纯确定性evaluator、Plan节点与HardLimitProfile v5消费现已落地，production driver API也不接受外部
    observation；CR-176 Scope data-port environment owner、root/child binding、bounded lexical lookup、exact Inline/Ready Artifact
-   authority读取与stale fence拒绝已经实现并通过fresh PostgreSQL Phase 2。尚缺commit侧对input/evaluation/classification evidence的事务内
-   重验、Compute RunValue + Scope CAS原子写，以及Map item/Loop carried binding；手工注入`ControllerObservation`仍不计production证据。
+   authority读取与stale fence拒绝已经实现并通过fresh PostgreSQL Phase 2。derived commit现已对Branch/Map/Loop在事务内重验
+   input/evaluation/classification evidence并重新执行pure evaluator，fresh PostgreSQL覆盖Branch正向提交和伪造classification整批回滚。
+   尚缺Compute RunValue + Scope CAS原子写，以及Map item/Loop carried binding；手工注入`ControllerObservation`仍不计production证据。
    CR-177已冻结output classification lattice规则，但实现与L1～L3 fixture尚待完成。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
