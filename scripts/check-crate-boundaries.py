@@ -32,6 +32,7 @@ INTERNAL_ROLES = {
     "insight-platform-invocations": "invocations_domain",
     "insight-platform-jobs": "jobs_domain",
     "insight-platform-mcp-host": "mcp_host",
+    "insight-platform-observability": "observability",
     "insight-platform-model-adapters": "model_adapters",
     "insight-platform-model-worker": "model_worker",
     "insight-platform-models": "models_domain",
@@ -76,12 +77,12 @@ ALLOWED_INTERNAL = {
     # persistence and state transitions remain behind application ports.
     "platform_api": {"artifacts_domain", "contracts", "mcp_host", "tasks_domain"},
     "capability_adapters": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
-    "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "platform_postgres"},
+    "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "observability", "platform_postgres"},
     "contracts": set(),
     "context_domain": {"contracts", "invocations_domain", "jobs_domain"},
     # The public Gateway is the control-plane composition root. It binds HTTP application ports
     # to owner adapters but does not execute user code or become durable state authority.
-    "public_gateway": {"context_domain", "contracts", "invocations_domain", "mcp_host", "orchestrator_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain"},
+    "public_gateway": {"context_domain", "contracts", "invocations_domain", "mcp_host", "observability", "orchestrator_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain"},
     "egress_core": {"capability_adapters", "contracts", "jobs_domain", "mcp_host", "model_adapters", "sandbox_domain"},
     "egress_broker": {"contracts", "egress_core", "egress_rpc", "model_adapters", "secret_broker", "security_rpc"},
     "egress_rpc": {"capability_adapters", "contracts", "egress_core", "mcp_host", "model_adapters", "sandbox_domain"},
@@ -91,6 +92,7 @@ ALLOWED_INTERNAL = {
     "model_adapters": {"contracts", "jobs_domain", "models_domain"},
     "model_worker": {"artifact_rpc", "contracts", "egress_rpc", "jobs_domain", "model_adapters", "models_domain", "platform_postgres", "platform_worker"},
     "models_domain": {"contracts", "invocations_domain", "jobs_domain"},
+    "observability": set(),
     "orchestrator_domain": {"contracts", "jobs_domain"},
     "registry_domain": {"contracts"},
     "scheduler_domain": {"contracts"},
@@ -154,6 +156,7 @@ FORBIDDEN_DIRECT = {
     "model_adapters": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "model_worker": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
     "models_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "observability": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "orchestrator_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "registry_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "scheduler_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},

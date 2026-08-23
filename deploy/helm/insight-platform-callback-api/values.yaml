@@ -8,6 +8,12 @@ namespace: platform-control
 replicas: 2
 port: 8080
 
+monitoring:
+  enabled: true
+  interval: 30s
+  namespaceSelector: {insight.platform/monitoring-namespace: "true"}
+  podSelector: {app.kubernetes.io/name: prometheus}
+
 config:
   existingConfigMap: insight-platform-callback-api-candidate
   fileKey: callback-api.json

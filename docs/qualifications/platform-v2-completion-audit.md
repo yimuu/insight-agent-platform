@@ -30,7 +30,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
 | Public API | `/v1` OpenAPI/owner schema、route负向conformance与root public API baseline通过 | public contract实现闭合 |
 | 已有部署 | Gateway、Callback、Model Worker、Artifact三role、Sandbox、Security/Egress Helm静态门禁通过 | 只证明这些checked-in清单的静态边界 |
-| Gateway observability | bounded operation/outcome request counter、latency histogram、ready gauge、`/metrics`与ServiceMonitor/NetworkPolicy | 只闭合Public Gateway SLI采集，不代表全平台observability |
+| HTTP observability | shared bounded-label owner；Gateway与Callback具备request/outcome、latency、ready、`/metrics`及ServiceMonitor/NetworkPolicy | 闭合两个公网HTTP role，不代表全平台observability |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator | 可验证证据形状，不证明任一外部门禁通过 |
 | Runbooks | production dependency recovery与GitOps clean-cut手册已提交 | 操作准备完成，execution evidence pending |
@@ -96,15 +96,15 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 - minimal `/v1` Resource/Run/Task/Artifact/MCP binding/SSE contracts与Gateway实现；
 - If-Match、OIDC principal、Receipt/problem/cursor/body/rate/quota负向合同；
 - 已存在role清单的ServiceAccount、NetworkPolicy、PDB/HPA、digest与security context静态检查；
-- Public Gateway低基数HTTP request/outcome、latency histogram与ready指标，以及受NetworkPolicy约束的ServiceMonitor；
+- shared低基数HTTP telemetry owner，以及Public Gateway、Callback API的request/outcome、latency histogram、ready指标和受NetworkPolicy约束的ServiceMonitor；
 - production QualificationProfile、Candidate/Capacity/Evidence validator、拓扑preflight和资格运行手册。
 
 ### 仓库内缺口
 
 1. 18列出的Scheduler/Recovery、Capability Worker、Context Worker、MCP Host等独立物理role没有release chart。
-2. 除Public Gateway首批Prometheus SLI外，其余Platform v2 binaries仍只有结构化日志或process-local snapshots；缺少完整
+2. 除Public Gateway与Callback API的首批Prometheus SLI外，其余Platform v2 binaries仍只有结构化日志或process-local snapshots；缺少完整
    Prometheus/OTel export、低基数queue/dependency/recovery指标、trace propagation/redaction的process wiring。
-3. 没有Platform v2 ServiceMonitor/PodMonitor、dashboard、symptom-first PrometheusRule与逐alert runbook。
+3. Gateway与Callback已有ServiceMonitor；其余role仍缺少ServiceMonitor/PodMonitor，且全平台尚无dashboard、symptom-first PrometheusRule与逐alert runbook。
 4. 没有把全部role render/startup manifest/NetworkPolicy/DB pool/identity互斥纳入一个完整release topology checker。
 5. 没有可重现的signed image/SBOM/provenance build pipeline与GitOps environment repository输入。
 
@@ -122,7 +122,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 1. Scheduler/Recovery binary、真实orchestration handler和独立release chart；
 2. Capability Worker、Context Worker、remote MCP Host production composition与charts；
-3. shared low-cardinality process observability boundary，逐role接入metrics/trace/redaction；
+3. 将已闭合的shared low-cardinality HTTP observability boundary逐role接入，并补queue/dependency metrics、trace/redaction；
 4. ServiceMonitor/dashboard/alerts/runbooks和完整topology静态checker；
 5. reproducible signed candidate pipeline与production runner入口；
 6. 外部L4～L6、GitOps clean cut、current文档与规范归档。

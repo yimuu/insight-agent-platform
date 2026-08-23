@@ -66,9 +66,9 @@ spec:
             - {name: PLATFORM_CALLBACK_API_EGRESS_CA_PATH, value: /etc/insight/egress-tls/ca.pem}
             - {name: PLATFORM_CALLBACK_API_EGRESS_CERT_PATH, value: /etc/insight/egress-tls/client.pem}
             - {name: PLATFORM_CALLBACK_API_EGRESS_KEY_PATH, value: /etc/insight/egress-tls/client-key.pem}
-          startupProbe: {tcpSocket: {port: http}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
-          readinessProbe: {tcpSocket: {port: http}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
-          livenessProbe: {tcpSocket: {port: http}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          startupProbe: {httpGet: {path: /livez, port: http}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /livez, port: http}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
           resources: {{ toYaml .Values.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false

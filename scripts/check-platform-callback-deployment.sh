@@ -18,6 +18,7 @@ for dependency in (
     "insight-platform-api.workspace = true",
     "insight-platform-egress-rpc.workspace = true",
     "insight-platform-postgres.workspace = true",
+    "insight-platform-observability.workspace = true",
 ):
     if dependency not in manifest:
         failures.append(f"callback process is missing {dependency}")
@@ -31,6 +32,13 @@ if "MCP_OAUTH_CALLBACK_PATH" not in (root / "crates/platform-api/src/lib.rs").re
     failures.append("callback HTTP adapter is not installed")
 if re.search(r"reqwest|aws_sdk|SecretManager|KmsClient", source):
     failures.append("callback composition bypasses the Egress RPC boundary")
+for metric_contract in (
+    'route("/metrics", get(callback_metrics))',
+    "ProcessHttpMetrics::install",
+    "callback_operation",
+):
+    if metric_contract not in source:
+        failures.append(f"callback observability contract is missing {metric_contract}")
 
 try:
     subprocess.run(
@@ -61,6 +69,16 @@ if "/etc/insight/oauth-state-keys" not in rendered:
     failures.append("callback Deployment must mount the OAuth state-key Secret")
 if "PLATFORM_CALLBACK_API_DATABASE_URL" not in rendered:
     failures.append("callback Deployment is missing its database authority credential")
+for required in (
+    "kind: ServiceMonitor",
+    "path: /metrics",
+    "path: /livez",
+    "path: /readyz",
+    'insight.platform/monitoring-namespace: "true"',
+    "app.kubernetes.io/name: prometheus",
+):
+    if required not in rendered:
+        failures.append(f"callback render is missing {required}")
 for forbidden in ("AWS_ACCESS_KEY", "AWS_SECRET", "SECRET_MANAGER", "KMS_ENDPOINT"):
     if forbidden in rendered:
         failures.append(f"callback Deployment contains forbidden external-provider credential: {forbidden}")

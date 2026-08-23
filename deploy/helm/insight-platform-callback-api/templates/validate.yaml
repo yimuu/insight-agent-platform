@@ -31,3 +31,9 @@
 {{- if empty .Values.networkPolicy.postgresCidrs }}
 {{- fail "networkPolicy.postgresCidrs is required" }}
 {{- end }}
+{{- if not .Values.monitoring.enabled }}
+{{- fail "monitoring.enabled must remain true" }}
+{{- end }}
+{{- if or (empty .Values.monitoring.namespaceSelector) (empty .Values.monitoring.podSelector) }}
+{{- fail "monitoring requires exact namespace and pod selectors" }}
+{{- end }}

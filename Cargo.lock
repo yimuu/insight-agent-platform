@@ -2539,6 +2539,7 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
  "insight-platform-mcp-host",
+ "insight-platform-observability",
  "insight-platform-postgres",
  "serde",
  "serde_json",
@@ -2546,6 +2547,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tonic",
+ "tower",
  "url",
  "uuid",
 ]
@@ -2685,6 +2687,7 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-invocations",
  "insight-platform-mcp-host",
+ "insight-platform-observability",
  "insight-platform-orchestrator",
  "insight-platform-postgres",
  "insight-platform-registry",
@@ -2793,6 +2796,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "insight-platform-observability"
+version = "0.1.0"
 
 [[package]]
 name = "insight-platform-orchestrator"

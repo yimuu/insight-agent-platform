@@ -4,6 +4,14 @@
 //! authorization codes cross the exact MCP Host mTLS Egress RPC and never enter database rows,
 //! events, logs or configuration.
 
+use axum::{
+    extract::{Extension, Request},
+    http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
 use insight_platform_api::{
     build_mcp_oauth_callback_router, McpOAuthCallbackHttpState, SystemMcpOAuthCallbackClock,
 };
@@ -16,6 +24,7 @@ use insight_platform_mcp_host::{
     McpOAuthStateCodecConfig, McpOAuthStateKey, SensitiveMcpOAuthStateKey,
     UuidMcpOAuthCallbackIdentityFactory, MCP_OAUTH_STATE_KEY_BYTES,
 };
+use insight_platform_observability::ProcessHttpMetrics;
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -27,7 +36,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 use url::Url;
@@ -42,6 +51,83 @@ const EGRESS_KEY_PATH_ENV: &str = "PLATFORM_CALLBACK_API_EGRESS_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
 const OAUTH_STATE_KEY_DIRECTORY: &str = "/etc/insight/oauth-state-keys";
+const CALLBACK_HTTP_OPERATIONS: &[&str] = &["live", "ready", "metrics", "oauth_callback", "other"];
+
+fn callback_operation(path: &str) -> &'static str {
+    match path {
+        "/livez" => "live",
+        "/readyz" => "ready",
+        "/metrics" => "metrics",
+        insight_platform_api::MCP_OAUTH_CALLBACK_PATH => "oauth_callback",
+        _ => "other",
+    }
+}
+
+fn install_callback_metrics() -> Arc<ProcessHttpMetrics> {
+    Arc::new(
+        ProcessHttpMetrics::install("mcp-callback-api", CALLBACK_HTTP_OPERATIONS)
+            .expect("static Callback API metric labels are valid"),
+    )
+}
+
+fn build_process_router(callback: Router, metrics: Arc<ProcessHttpMetrics>) -> Router {
+    Router::new()
+        .route("/livez", get(callback_live))
+        .route("/readyz", get(callback_ready))
+        .route("/metrics", get(callback_metrics))
+        .merge(callback)
+        .layer(middleware::from_fn(observe_callback_request))
+        .layer(Extension(metrics))
+}
+
+async fn callback_live() -> Response {
+    callback_health("live")
+}
+
+async fn callback_ready(Extension(metrics): Extension<Arc<ProcessHttpMetrics>>) -> Response {
+    if metrics.is_ready() {
+        callback_health("ready")
+    } else {
+        callback_response(StatusCode::SERVICE_UNAVAILABLE, "not ready")
+    }
+}
+
+async fn callback_metrics(Extension(metrics): Extension<Arc<ProcessHttpMetrics>>) -> Response {
+    let mut response = metrics.render_prometheus().into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn observe_callback_request(request: Request, next: Next) -> Response {
+    let metrics = request
+        .extensions()
+        .get::<Arc<ProcessHttpMetrics>>()
+        .cloned()
+        .expect("Callback API metrics Extension is installed by build_process_router");
+    let operation = callback_operation(request.uri().path());
+    let started = Instant::now();
+    let response = next.run(request).await;
+    metrics.observe(operation, response.status().as_u16(), started.elapsed());
+    response
+}
+
+fn callback_health(state: &'static str) -> Response {
+    callback_response(StatusCode::OK, state)
+}
+
+fn callback_response(status: StatusCode, body: &'static str) -> Response {
+    let mut response = (status, body).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -244,13 +330,16 @@ async fn run() -> Result<(), ProcessError> {
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
-    let router = build_mcp_oauth_callback_router(McpOAuthCallbackHttpState::new(
+    let callback = build_mcp_oauth_callback_router(McpOAuthCallbackHttpState::new(
         application,
         Arc::new(SystemMcpOAuthCallbackClock),
     ));
+    let metrics = install_callback_metrics();
+    let router = build_process_router(callback, Arc::clone(&metrics));
     let listener = tokio::net::TcpListener::bind(&config.listen_address)
         .await
         .map_err(|_| ProcessError::ServerFailure)?;
+    metrics.mark_ready();
     let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = shutdown_receiver.await;
@@ -448,6 +537,8 @@ impl Error for ProcessError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, routing::get};
+    use tower::ServiceExt;
 
     #[test]
     fn oauth_state_key_paths_are_confined() {
@@ -465,5 +556,55 @@ mod tests {
         assert!(valid_tls_server_name("egress.platform-egress.svc"));
         assert!(!valid_tls_server_name("https://egress"));
         assert!(!valid_tls_server_name("egress/path"));
+    }
+
+    #[tokio::test]
+    async fn process_routes_expose_health_and_bounded_metrics() {
+        let metrics = install_callback_metrics();
+        metrics.mark_ready();
+        let router = build_process_router(
+            Router::new().route(
+                insight_platform_api::MCP_OAUTH_CALLBACK_PATH,
+                get(|| async { StatusCode::BAD_REQUEST }),
+            ),
+            metrics,
+        );
+        let callback = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/mcp/oauth/callback?state=secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(callback.status(), StatusCode::BAD_REQUEST);
+        let ready = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 65_536)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("component_role=\"mcp-callback-api\",operation=\"oauth_callback\",outcome=\"rejected\"} 1"));
+        assert!(!body.contains("state=secret"));
     }
 }

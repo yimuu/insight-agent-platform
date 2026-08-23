@@ -22,6 +22,7 @@ insight-platform-context.workspace = true
 insight-platform-invocations.workspace = true
 insight-platform-mcp-host.workspace = true
 insight-platform-orchestrator.workspace = true
+insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-registry.workspace = true
 insight-platform-tasks.workspace = true

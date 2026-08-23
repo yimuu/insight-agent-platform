@@ -15,6 +15,7 @@ failures = []
 for dependency in (
     "insight-platform-api.workspace = true",
     "insight-platform-postgres.workspace = true",
+    "insight-platform-observability.workspace = true",
 ):
     if dependency not in manifest:
         failures.append(f"Gateway process is missing {dependency}")
@@ -31,9 +32,8 @@ if "authenticate_public_request" not in source or "read_public_operation" not in
     failures.append("Gateway does not compose authentication and Operation authority")
 for metric_contract in (
     'route("/metrics", get(prometheus_metrics))',
-    "insight_platform_gateway_http_requests_total",
-    "insight_platform_gateway_http_request_duration_seconds",
-    "GatewayHttpOperation::from_path",
+    "ProcessHttpMetrics::install",
+    "gateway_operation",
 ):
     if metric_contract not in source:
         failures.append(f"Gateway observability contract is missing {metric_contract}")

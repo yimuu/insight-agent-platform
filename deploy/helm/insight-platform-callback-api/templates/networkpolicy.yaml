@@ -21,6 +21,14 @@ spec:
           podSelector:
             matchLabels: {{ toYaml .Values.ingress.podSelector | nindent 16 }}
       ports: [{protocol: TCP, port: {{ int .Values.port }}}]
+    {{- if .Values.monitoring.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.monitoring.namespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.monitoring.podSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.port }}}]
+    {{- end }}
   egress:
     - to:
         - namespaceSelector:
