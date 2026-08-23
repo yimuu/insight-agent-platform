@@ -81,16 +81,39 @@ pub enum MapFailurePolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortAssignment {
+    pub output_port: ExactDataPortRef,
+    pub expression: TypedExpressionProgram,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchArm {
+    pub when: TypedExpressionProgram,
+    pub target: PlanNodeKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopCarriedPort {
+    pub body_output_port: ExactDataPortRef,
+    pub next_iteration_port: ExactDataPortRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeNode {
     Start {
         next: PlanNodeKey,
     },
     Compute {
+        assignments: Vec<PortAssignment>,
         next: PlanNodeKey,
     },
     Branch {
-        ordered_targets: Vec<PlanNodeKey>,
+        ordered_arms: Vec<BranchArm>,
+        otherwise: PlanNodeKey,
     },
     Fork {
         legs: Vec<PlanNodeKey>,
@@ -103,12 +126,16 @@ pub enum RuntimeNode {
         next: PlanNodeKey,
     },
     Map {
+        items: TypedExpressionProgram,
+        item_port: DataPortKey,
         body: PlanNodeKey,
         next: PlanNodeKey,
         maximum_items: u32,
         failure_policy: MapFailurePolicy,
     },
     Loop {
+        condition: TypedExpressionProgram,
+        carried_ports: Vec<LoopCarriedPort>,
         body: PlanNodeKey,
         exit: PlanNodeKey,
         maximum_iterations: u32,
@@ -168,7 +195,7 @@ impl RuntimeNode {
     fn references(&self) -> Vec<&PlanNodeKey> {
         match self {
             Self::Start { next }
-            | Self::Compute { next }
+            | Self::Compute { next, .. }
             | Self::ModelLoop { resume: next }
             | Self::CapabilityCall { resume: next }
             | Self::ContextQuery { resume: next }
@@ -176,7 +203,14 @@ impl RuntimeNode {
             | Self::HumanTask { resume: next }
             | Self::TimerWait { resume: next }
             | Self::SignalWait { resume: next } => vec![next],
-            Self::Branch { ordered_targets } => ordered_targets.iter().collect(),
+            Self::Branch {
+                ordered_arms,
+                otherwise,
+            } => ordered_arms
+                .iter()
+                .map(|arm| &arm.target)
+                .chain(std::iter::once(otherwise))
+                .collect(),
             Self::Fork { legs, join } => legs.iter().chain(std::iter::once(join)).collect(),
             Self::Join { next, .. } => vec![next],
             Self::Map { body, next, .. } => vec![body, next],
@@ -198,6 +232,7 @@ pub struct PlanLimits {
     pub maximum_map_items: u32,
     pub maximum_loop_iterations: u32,
     pub maximum_error_handlers: usize,
+    pub expression: ExpressionLimits,
 }
 
 impl PlanLimits {
@@ -226,6 +261,8 @@ impl PlanLimits {
             maximum_loop_iterations: u32::try_from(registry.loop_iterations.q1_default)
                 .map_err(|_| OrchestratorError::InvalidPlan)?,
             maximum_error_handlers: usize::try_from(registry.branch_legs.q1_default)
+                .map_err(|_| OrchestratorError::InvalidPlan)?,
+            expression: ExpressionLimits::from_profile(profile)
                 .map_err(|_| OrchestratorError::InvalidPlan)?,
         })
     }
@@ -257,8 +294,8 @@ impl RuntimePlan {
             return Err(OrchestratorError::InvalidPlan);
         }
         let mut edge_count = 0_usize;
-        for node in self.nodes.values() {
-            validate_node(node, limits)?;
+        for (node_key, node) in &self.nodes {
+            validate_node(node_key, node, limits)?;
             let references = node.references();
             edge_count = edge_count
                 .checked_add(references.len())
@@ -292,14 +329,36 @@ impl RuntimePlan {
     }
 }
 
-fn validate_node(node: &RuntimeNode, limits: PlanLimits) -> Result<(), OrchestratorError> {
+fn validate_node(
+    node_key: &PlanNodeKey,
+    node: &RuntimeNode,
+    limits: PlanLimits,
+) -> Result<(), OrchestratorError> {
     match node {
-        RuntimeNode::Branch { ordered_targets }
-            if ordered_targets.is_empty()
-                || ordered_targets.len() > limits.maximum_fan_out
-                || has_duplicate_keys(ordered_targets) =>
-        {
-            Err(OrchestratorError::InvalidPlan)
+        RuntimeNode::Compute { assignments, .. } => {
+            validate_assignments(node_key, assignments, limits.expression)
+        }
+        RuntimeNode::Branch {
+            ordered_arms,
+            otherwise,
+        } => {
+            if ordered_arms.is_empty()
+                || ordered_arms.len() + 1 > limits.maximum_fan_out
+                || ordered_arms.iter().any(|arm| &arm.target == otherwise)
+                || has_duplicate_keys(
+                    &ordered_arms
+                        .iter()
+                        .map(|arm| arm.target.clone())
+                        .collect::<Vec<_>>(),
+                )
+                || ordered_arms
+                    .iter()
+                    .any(|arm| arm.when.validate(limits.expression).is_err())
+            {
+                Err(OrchestratorError::InvalidPlan)
+            } else {
+                Ok(())
+            }
         }
         RuntimeNode::Fork { legs, join }
             if legs.is_empty()
@@ -319,8 +378,13 @@ fn validate_node(node: &RuntimeNode, limits: PlanLimits) -> Result<(), Orchestra
             (JoinPolicy::AllSuccess | JoinPolicy::AllSettled, None, None) => Ok(()),
             _ => Err(OrchestratorError::InvalidPlan),
         },
-        RuntimeNode::Map { maximum_items, .. }
-            if *maximum_items == 0 || *maximum_items > limits.maximum_map_items =>
+        RuntimeNode::Map {
+            items,
+            maximum_items,
+            ..
+        } if *maximum_items == 0
+            || *maximum_items > limits.maximum_map_items
+            || items.validate(limits.expression).is_err() =>
         {
             Err(OrchestratorError::InvalidPlan)
         }
@@ -332,8 +396,29 @@ fn validate_node(node: &RuntimeNode, limits: PlanLimits) -> Result<(), Orchestra
             Err(OrchestratorError::InvalidPlan)
         }
         RuntimeNode::Loop {
-            maximum_iterations, ..
-        } if *maximum_iterations == 0 || *maximum_iterations > limits.maximum_loop_iterations => {
+            condition,
+            carried_ports,
+            maximum_iterations,
+            ..
+        } if *maximum_iterations == 0
+            || *maximum_iterations > limits.maximum_loop_iterations
+            || condition.validate(limits.expression).is_err()
+            || carried_ports
+                .iter()
+                .map(|port| &port.next_iteration_port)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != carried_ports.len()
+            || carried_ports
+                .iter()
+                .map(|port| &port.body_output_port)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != carried_ports.len()
+            || carried_ports
+                .iter()
+                .any(|port| &port.next_iteration_port.node_id != node_key) =>
+        {
             Err(OrchestratorError::InvalidPlan)
         }
         RuntimeNode::ErrorBoundary { handlers, .. }
@@ -344,6 +429,38 @@ fn validate_node(node: &RuntimeNode, limits: PlanLimits) -> Result<(), Orchestra
         }
         _ => Ok(()),
     }
+}
+
+fn validate_assignments(
+    node_key: &PlanNodeKey,
+    assignments: &[PortAssignment],
+    limits: ExpressionLimits,
+) -> Result<(), OrchestratorError> {
+    let outputs = assignments
+        .iter()
+        .map(|assignment| &assignment.output_port)
+        .collect::<std::collections::BTreeSet<_>>();
+    if outputs.len() != assignments.len()
+        || assignments
+            .iter()
+            .any(|assignment| &assignment.output_port.node_id != node_key)
+    {
+        return Err(OrchestratorError::InvalidPlan);
+    }
+    let mut available = std::collections::BTreeSet::new();
+    for assignment in assignments {
+        if assignment.expression.validate(limits).is_err()
+            || assignment
+                .expression
+                .input_ports
+                .iter()
+                .any(|input| outputs.contains(input) && !available.contains(input))
+        {
+            return Err(OrchestratorError::InvalidPlan);
+        }
+        available.insert(&assignment.output_port);
+    }
+    Ok(())
 }
 
 fn has_duplicate_keys(values: &[PlanNodeKey]) -> bool {
@@ -450,14 +567,18 @@ pub fn decide_controller(
 ) -> Result<ControllerDecision, OrchestratorError> {
     match (node, observation) {
         (
-            RuntimeNode::Start { next } | RuntimeNode::Compute { next },
+            RuntimeNode::Start { next } | RuntimeNode::Compute { next, .. },
             ControllerObservation::None,
         ) => Ok(ControllerDecision::CompleteNode {
             activate: vec![next.clone()],
         }),
-        (RuntimeNode::Branch { ordered_targets }, ControllerObservation::Branch { selected })
-            if ordered_targets.contains(selected) =>
-        {
+        (
+            RuntimeNode::Branch {
+                ordered_arms,
+                otherwise,
+            },
+            ControllerObservation::Branch { selected },
+        ) if ordered_arms.iter().any(|arm| &arm.target == selected) || otherwise == selected => {
             Ok(ControllerDecision::CompleteNode {
                 activate: vec![selected.clone()],
             })
@@ -483,6 +604,7 @@ pub fn decide_controller(
                 next,
                 maximum_items,
                 failure_policy,
+                ..
             },
             ControllerObservation::Map { item_count },
         ) if item_count <= maximum_items => Ok(ControllerDecision::OpenMapItems {
@@ -504,6 +626,7 @@ pub fn decide_controller(
                 body,
                 exit,
                 maximum_iterations,
+                ..
             },
             ControllerObservation::Loop {
                 iteration,
@@ -1721,6 +1844,32 @@ mod tests {
             maximum_map_items: 16,
             maximum_loop_iterations: 16,
             maximum_error_handlers: 8,
+            expression: ExpressionLimits::ABSOLUTE,
+        }
+    }
+
+    fn literal_program(value: serde_json::Value) -> TypedExpressionProgram {
+        TypedExpressionProgram::build(
+            vec![],
+            vec![TypedInstruction::Literal {
+                value: insight_platform_contracts::ClosedJsonValue::build(digest('1'), value)
+                    .unwrap(),
+            }],
+            digest('1'),
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap()
+    }
+
+    fn item_port() -> DataPortKey {
+        DataPortKey::new("item".to_owned()).unwrap()
+    }
+
+    fn exact_port(node: &str, port: &str) -> ExactDataPortRef {
+        ExactDataPortRef {
+            node_id: key(node),
+            port_id: DataPortKey::new(port.to_owned()).unwrap(),
+            schema_digest: digest('1'),
         }
     }
 
@@ -1748,6 +1897,65 @@ mod tests {
         let mut value = serde_json::to_value(&plan).unwrap();
         value["unknown"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RuntimePlan>(value).is_err());
+    }
+
+    #[test]
+    fn compute_assignments_are_exact_topological_and_digest_bound() {
+        let future = exact_port("compute", "future");
+        let reads_future = TypedExpressionProgram::build(
+            vec![future.clone()],
+            vec![TypedInstruction::LoadPort {
+                port: future.clone(),
+            }],
+            digest('1'),
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap();
+        let plan = RuntimePlan {
+            plan_version: 1,
+            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            entry_node_id: key("compute"),
+            nodes: BTreeMap::from([
+                (
+                    key("compute"),
+                    RuntimeNode::Compute {
+                        assignments: vec![PortAssignment {
+                            output_port: future,
+                            expression: reads_future,
+                        }],
+                        next: key("return"),
+                    },
+                ),
+                (key("return"), RuntimeNode::Return),
+            ]),
+        };
+        assert_eq!(plan.validate(limits()), Err(OrchestratorError::InvalidPlan));
+
+        let mut forged = literal_program(serde_json::json!(true));
+        forged.semantic_digest = digest('f');
+        let branch = RuntimePlan {
+            plan_version: 1,
+            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            entry_node_id: key("branch"),
+            nodes: BTreeMap::from([
+                (
+                    key("branch"),
+                    RuntimeNode::Branch {
+                        ordered_arms: vec![BranchArm {
+                            when: forged,
+                            target: key("left"),
+                        }],
+                        otherwise: key("right"),
+                    },
+                ),
+                (key("left"), RuntimeNode::Return),
+                (key("right"), RuntimeNode::Return),
+            ]),
+        };
+        assert_eq!(
+            branch.validate(limits()),
+            Err(OrchestratorError::InvalidPlan)
+        );
     }
 
     #[test]
@@ -1788,7 +1996,11 @@ mod tests {
     #[test]
     fn branch_does_not_activate_unselected_paths() {
         let node = RuntimeNode::Branch {
-            ordered_targets: vec![key("left"), key("right")],
+            ordered_arms: vec![BranchArm {
+                when: literal_program(serde_json::json!(false)),
+                target: key("left"),
+            }],
+            otherwise: key("right"),
         };
         assert_eq!(
             decide_controller(
@@ -1849,6 +2061,8 @@ mod tests {
             })
         );
         let loop_node = RuntimeNode::Loop {
+            condition: literal_program(serde_json::json!(true)),
+            carried_ports: vec![],
             body: key("body"),
             exit: key("exit"),
             maximum_iterations: 3,
@@ -1870,6 +2084,8 @@ mod tests {
     #[test]
     fn map_failure_policies_are_bounded_and_deterministic() {
         let all_settled = RuntimeNode::Map {
+            items: literal_program(serde_json::json!([])),
+            item_port: item_port(),
             body: key("body"),
             next: key("next"),
             maximum_items: 4,
@@ -1897,6 +2113,8 @@ mod tests {
         );
 
         let fail_fast = RuntimeNode::Map {
+            items: literal_program(serde_json::json!([])),
+            item_port: item_port(),
             body: key("body"),
             next: key("next"),
             maximum_items: 4,
@@ -1915,6 +2133,8 @@ mod tests {
         );
 
         let bounded = RuntimeNode::Map {
+            items: literal_program(serde_json::json!([])),
+            item_port: item_port(),
             body: key("body"),
             next: key("next"),
             maximum_items: 4,
@@ -1960,7 +2180,10 @@ mod tests {
 
         assert_eq!(
             validate_node(
+                &key("map"),
                 &RuntimeNode::Map {
+                    items: literal_program(serde_json::json!([])),
+                    item_port: item_port(),
                     body: key("body"),
                     next: key("next"),
                     maximum_items: 2,

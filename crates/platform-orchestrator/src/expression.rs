@@ -124,7 +124,8 @@ pub enum TypedInstruction {
     Select,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExpressionLimits {
     pub maximum_instructions: usize,
     pub maximum_input_ports: usize,

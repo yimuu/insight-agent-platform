@@ -5,20 +5,22 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, AgentDeploymentClosure,
-    AgentResourceSpec, ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome,
-    DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
-    Failure, FailureClass, FailureCode, FailureSource, FrozenSlotBinding, FrozenSlotTarget,
-    InteractionKind, JsonLimits, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode,
-    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
-    PrincipalKind, PrincipalSnapshot, PublicRunEventType, PublishedVersionPayload,
-    ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot, SchedulingPolicyDocument,
-    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef,
+    AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonValue, CommandAudit,
+    CommandOutcome, DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding,
+    ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource, FrozenSlotBinding,
+    FrozenSlotTarget, InteractionKind, JsonLimits, Permission, PermissionSet, PlanNodeKind,
+    PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
+    PublishedVersionPayload, ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot,
+    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef,
 };
 use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
 use insight_platform_orchestrator::{
     AdmitRun, ChildBudget, ChildCancellationPolicy, ChildOutcome, ControllerObservation,
-    JoinPolicy, JoinRemainderPolicy, MapFailurePolicy, ObserveRunTimeout, PlanLimits, PlanNodeKey,
-    RequestRunCancel, RunInputValue, RuntimeNode, RuntimePlan, SetRunPause,
+    DataPortKey, ExpressionLimits, JoinPolicy, JoinRemainderPolicy, MapFailurePolicy,
+    ObserveRunTimeout, PlanLimits, PlanNodeKey, RequestRunCancel, RunInputValue, RuntimeNode,
+    RuntimePlan, SetRunPause, TypedExpressionProgram, TypedInstruction,
 };
 use insight_platform_postgres::{
     repository::{
@@ -84,6 +86,22 @@ fn digest(character: char) -> Sha256Digest {
         .unwrap()
 }
 
+fn literal_program(value: Value) -> TypedExpressionProgram {
+    TypedExpressionProgram::build(
+        vec![],
+        vec![TypedInstruction::Literal {
+            value: ClosedJsonValue::build(digest('1'), value).unwrap(),
+        }],
+        digest('1'),
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap()
+}
+
+fn item_port() -> DataPortKey {
+    DataPortKey::new("item".to_owned()).unwrap()
+}
+
 fn runtime_plan() -> RuntimePlan {
     let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
@@ -126,8 +144,20 @@ fn runtime_plan() -> RuntimePlan {
                     join: join.clone(),
                 },
             ),
-            (left, RuntimeNode::Compute { next: join.clone() }),
-            (right, RuntimeNode::Compute { next: join.clone() }),
+            (
+                left,
+                RuntimeNode::Compute {
+                    assignments: vec![],
+                    next: join.clone(),
+                },
+            ),
+            (
+                right,
+                RuntimeNode::Compute {
+                    assignments: vec![],
+                    next: join.clone(),
+                },
+            ),
             (
                 join,
                 RuntimeNode::Join {
@@ -147,12 +177,14 @@ fn runtime_plan() -> RuntimePlan {
             (
                 quorum_left,
                 RuntimeNode::Compute {
+                    assignments: vec![],
                     next: quorum_join.clone(),
                 },
             ),
             (
                 quorum_right,
                 RuntimeNode::Compute {
+                    assignments: vec![],
                     next: quorum_join.clone(),
                 },
             ),
@@ -175,12 +207,14 @@ fn runtime_plan() -> RuntimePlan {
             (
                 cancel_left,
                 RuntimeNode::Compute {
+                    assignments: vec![],
                     next: cancel_join.clone(),
                 },
             ),
             (
                 cancel_right,
                 RuntimeNode::Compute {
+                    assignments: vec![],
                     next: cancel_join.clone(),
                 },
             ),
@@ -206,37 +240,57 @@ fn runtime_plan() -> RuntimePlan {
             (
                 boundary_body,
                 RuntimeNode::Compute {
+                    assignments: vec![],
                     next: finish.clone(),
                 },
             ),
             (
                 boundary_handler,
                 RuntimeNode::Compute {
+                    assignments: vec![],
                     next: finish.clone(),
                 },
             ),
             (
                 loop_node.clone(),
                 RuntimeNode::Loop {
+                    condition: literal_program(json!(true)),
+                    carried_ports: vec![],
                     body: loop_body.clone(),
                     exit: finish.clone(),
                     maximum_iterations: 2,
                 },
             ),
-            (loop_body, RuntimeNode::Compute { next: loop_node }),
+            (
+                loop_body,
+                RuntimeNode::Compute {
+                    assignments: vec![],
+                    next: loop_node,
+                },
+            ),
             (
                 map_node.clone(),
                 RuntimeNode::Map {
+                    items: literal_program(json!([])),
+                    item_port: item_port(),
                     body: map_body.clone(),
                     next: finish.clone(),
                     maximum_items: 3,
                     failure_policy: MapFailurePolicy::AllSettled,
                 },
             ),
-            (map_body, RuntimeNode::Compute { next: map_node }),
+            (
+                map_body,
+                RuntimeNode::Compute {
+                    assignments: vec![],
+                    next: map_node,
+                },
+            ),
             (
                 fail_fast_map.clone(),
                 RuntimeNode::Map {
+                    items: literal_program(json!([])),
+                    item_port: item_port(),
                     body: fail_fast_map_body.clone(),
                     next: finish.clone(),
                     maximum_items: 3,
@@ -246,6 +300,7 @@ fn runtime_plan() -> RuntimePlan {
             (
                 fail_fast_map_body,
                 RuntimeNode::Compute {
+                    assignments: vec![],
                     next: fail_fast_map,
                 },
             ),
