@@ -6,11 +6,16 @@
 #![allow(async_fn_in_trait)]
 
 mod expression;
+mod scope_environment;
 
 pub use expression::{
     DataPortKey, ExactDataPortRef, ExpressionError, ExpressionFieldName, ExpressionLimits,
     TypedExpressionProgram, TypedInstruction, MAX_EXPRESSION_FIELD_BYTES,
     MAX_EXPRESSION_INPUT_PORTS, MAX_EXPRESSION_INSTRUCTIONS, MAX_EXPRESSION_STACK_DEPTH,
+};
+pub use scope_environment::{
+    resolve_scope_inputs, ExactRunValueRef, ScopeDataBinding, ScopeDataEnvironmentSnapshot,
+    ScopeEnvironmentLimits,
 };
 
 use chrono::{DateTime, Utc};
@@ -2108,6 +2113,9 @@ pub enum OrchestratorError {
     ObservationMismatch,
     ExpressionEvaluation,
     InvalidControllerEvidence,
+    InvalidScopeEnvironment,
+    ScopePortConflict,
+    ScopePortUnbound,
     UnhandledFailure,
     InvalidRunControl,
     InvalidTimeoutObservation,
@@ -2138,6 +2146,11 @@ impl fmt::Display for OrchestratorError {
             Self::InvalidControllerEvidence => {
                 "controller expression evidence identity or content is invalid"
             }
+            Self::InvalidScopeEnvironment => {
+                "Scope data-port environment is invalid or outside its hard limits"
+            }
+            Self::ScopePortConflict => "Scope data port is already bound in the local environment",
+            Self::ScopePortUnbound => "required Scope data port has no lexical RunValue binding",
             Self::UnhandledFailure => "error boundary has no matching stable failure route",
             Self::InvalidRunControl => "run control snapshot is invalid",
             Self::InvalidTimeoutObservation => "timeout observation is early or invalid",

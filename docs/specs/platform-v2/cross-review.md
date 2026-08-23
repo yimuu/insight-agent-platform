@@ -130,7 +130,8 @@ CR-175全量影响复核确认01～04、06～17无需字段或语义修改；Art
 - **事务与并发**：root input、Compute outputs、Map item和Loop carried binding与RunValue insert、Scope version CAS、Node/Job、quota、
   Receipt/Event/Outbox同事务；duplicate port、stale Scope或Job fence只有一个winner且无孤立RunValue。
 - **权限与隔舱**：只有Scheduler owner transaction读写environment；public/API、NATS或Artifact RPC不能提交port binding。Artifact正文仍按15授权读取。
-- **容量与恢复**：词法lookup深度和binding count有profile hard limit；Inline DB结构guard容纳hard max，runtime按更小effective值拒绝；重启从
+- **容量与恢复**：词法lookup复用`registry_plan.plan_nodes`、binding count复用`run_scheduler.value_refs_per_run`，不新增隐式profile字段；
+  Inline DB结构guard容纳hard max，runtime按更小effective值拒绝；重启从
   Scope payload和immutable RunValue恢复，不依赖进程缓存。
 - **fixtures**：L1覆盖digest/shadow/duplicate/depth，L2 real PostgreSQL覆盖root/Compute/Map/Loop原子CAS与跨scope/tenant负向，L3证明
   两个Map item的同Plan port不串值以及crash后重放一致。

@@ -612,7 +612,7 @@ CREATE TABLE insight_platform.run_values (
     CONSTRAINT run_values_content_digest_ck CHECK (insight_platform.is_sha256(content_digest)),
     CONSTRAINT run_values_storage_ck CHECK (
         (inline_value IS NOT NULL AND artifact_id IS NULL
-            AND octet_length(inline_value::text) <= 65536)
+            AND octet_length(inline_value::text) <= 1048576)
         OR (inline_value IS NULL AND artifact_id IS NOT NULL)
     )
 );

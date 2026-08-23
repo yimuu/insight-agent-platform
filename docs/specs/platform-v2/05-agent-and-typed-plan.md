@@ -253,7 +253,9 @@ struct LoopNode { condition: TypedExpressionProgram, carried_ports: Vec<LoopCarr
 
 `ExactDataPortRef`标识Plan级producer node/port/schema，不直接等同某个动态NodeExecution。运行时从当前Scope开始按父Scope词法链解析
 `ExactDataPortRef`，得到一个`ExactRunValueRef { value_id, schema_digest, content_digest }`；最近Scope胜出。只有Map item port、Loop carried
-port及显式结构化scope entry可以shadow，普通Compute重复绑定同一port必须冲突。解析深度受Plan/scope hard limit约束，不扫描整个Run。
+port及显式结构化scope entry可以shadow，普通Compute重复绑定同一port必须冲突。解析链不超过现有
+`registry_plan.plan_nodes` effective limit，每Scope binding数和全Run引用数均不超过`run_scheduler.value_refs_per_run` effective limit；
+不新增隐式profile字段，也不扫描整个Run。
 
 ## 9. Agent Deployment
 

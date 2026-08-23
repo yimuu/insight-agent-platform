@@ -12,10 +12,10 @@
     "is_platform_id(text)",
     "is_sha256(text)"
   ],
-  "migration_set_digest": "sha256:895ce4b3f4d3bdfd4d0dd9c5b3d9ce48d403f174e8a8d0b7e33e01dc168bd6e7",
+  "migration_set_digest": "sha256:01ea6b63bbc8eabac588ea7704fb19eccb6b4b841108307c58be1a99b6f26ba6",
   "migrations": [
     {
-      "checksum": "sha256:024266792f605f30b5a6b8c3afe22444adf00d745518f9c15eddcbc9fd7c95c4",
+      "checksum": "sha256:b07880925316c939794feab9d3f5d0b1a62b4dc1e3fa3b09f81866182114baa3",
       "name": "platform_baseline",
       "version": 1
     }
