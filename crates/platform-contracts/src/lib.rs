@@ -48,12 +48,14 @@ pub use nominal::{
 };
 pub use operation::*;
 pub use qualification::{
-    CandidateManifest, CandidateManifestError, ComponentRole, GitCommit, NewCandidateManifest,
+    CandidateManifest, CandidateManifestError, CapacityPool, CapacityPoolKind, CapacityProfile,
+    ComponentRole, GitCommit, HpaTarget, LeaseTarget, NewCandidateManifest,
     QualificationArtifactLink, QualificationEnvironmentClass, QualificationEvidenceManifest,
     QualificationGate, QualificationGateEvidence, QualificationLayer, QualificationManifestError,
-    QualificationOutcome, QualificationProfile, MAX_CANDIDATE_COMPONENT_IMAGES,
-    MAX_CANDIDATE_WORKER_MANIFESTS, MAX_QUALIFICATION_ARTIFACTS, MAX_QUALIFICATION_NAME_BYTES,
-    MAX_QUALIFICATION_TOOL_VERSIONS, MAX_QUALIFICATION_VERSION_BYTES,
+    QualificationOutcome, QualificationProfile, QueueTarget, RecoveryTarget, ReplicaTarget,
+    SafetyScanTarget, SloIndicator, SloTarget, CAPACITY_PROFILE_VERSION,
+    MAX_CANDIDATE_COMPONENT_IMAGES, MAX_CANDIDATE_WORKER_MANIFESTS, MAX_QUALIFICATION_ARTIFACTS,
+    MAX_QUALIFICATION_NAME_BYTES, MAX_QUALIFICATION_TOOL_VERSIONS, MAX_QUALIFICATION_VERSION_BYTES,
     QUALIFICATION_EVIDENCE_VERSION, QUALIFICATION_PROFILE_VERSION,
 };
 pub use registry::{

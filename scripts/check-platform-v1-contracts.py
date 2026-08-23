@@ -37,6 +37,7 @@ CONTRACT_FILES = [
     "contracts/platform-v1/schemas/deployment-closure.schema.json",
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/candidate-manifest.schema.json",
+    "contracts/platform-v1/schemas/capacity-profile.schema.json",
     "contracts/platform-v1/schemas/qualification-profile.schema.json",
     "contracts/platform-v1/schemas/qualification-evidence-manifest.schema.json",
     "contracts/platform-v1/qualification/production-release-profile.json",
@@ -530,6 +531,34 @@ def check_candidate_manifest(errors):
         or workers.get("items", {}).get("pattern") != DIGEST.pattern
     ):
         errors.append("CandidateManifest worker manifest closure is invalid")
+
+
+def check_capacity_profile(errors):
+    schema = load(CONTRACT_ROOT / "schemas" / "capacity-profile.schema.json")
+    properties = schema.get("properties", {})
+    expected = {
+        "schema_version", "profile_name", "environment_class", "deployment_config_digest",
+        "replicas", "pools", "permits", "queues", "leases", "safety_scan", "hpa",
+        "slo_targets", "recovery",
+    }
+    if schema.get("additionalProperties") is not False or set(schema.get("required", [])) != expected or set(properties) != expected:
+        errors.append("CapacityProfile schema is not closed")
+    if properties.get("schema_version", {}).get("const") != 1:
+        errors.append("CapacityProfile schema version is invalid")
+    if properties.get("deployment_config_digest", {}).get("pattern") != DIGEST.pattern:
+        errors.append("CapacityProfile deployment digest is invalid")
+    pool = properties.get("pools", {}).get("items", {})
+    if pool.get("additionalProperties") is not False or set(pool.get("required", [])) != {
+        "kind", "name", "database_pool", "storage_pool", "semaphore", "max_in_flight"
+    }:
+        errors.append("CapacityProfile pool shape is not closed")
+    lease = properties.get("leases", {}).get("additionalProperties", {})
+    if lease.get("additionalProperties") is not False or set(lease.get("required", [])) != {
+        "lease_milliseconds", "heartbeat_milliseconds"
+    }:
+        errors.append("CapacityProfile lease shape is not closed")
+    if properties.get("slo_targets", {}).get("items", {}).get("additionalProperties") is not False:
+        errors.append("CapacityProfile SLO shape is not closed")
 
 
 def check_qualification_manifests(errors):
@@ -1429,6 +1458,7 @@ def main():
     check_foundation_surfaces(errors)
     check_worker_manifest(errors)
     check_candidate_manifest(errors)
+    check_capacity_profile(errors)
     check_qualification_manifests(errors)
     check_nominal_schemas(errors)
     check_contract_manifest(errors)

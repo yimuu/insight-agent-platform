@@ -10,3 +10,8 @@ checker. `/v1/mcp/oauth/callback` is the first active machine-contract slice bec
 PostgreSQL first-winner authority and hardened HTTP adapter are implemented. It remains
 `implementing_not_current`: checked-in paths are target contracts, not deployed/current behavior,
 until qualification and clean replacement complete.
+
+`schemas/capacity-profile.schema.json` is the generated closed shape for environment replica,
+pool, permit, queue, lease/heartbeat, scan, HPA, SLO and recovery inputs. A valid profile is only a
+candidate input: production status additionally requires its exact digest in the L5 capacity gate
+and passing L4-L6 evidence for the same deployment configuration.

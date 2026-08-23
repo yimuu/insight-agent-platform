@@ -1834,6 +1834,7 @@ pub const CONTRACT_MANIFEST_INPUTS: &[&str] = &[
     "contracts/platform-v1/schemas/deployment-closure.schema.json",
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/candidate-manifest.schema.json",
+    "contracts/platform-v1/schemas/capacity-profile.schema.json",
     "contracts/platform-v1/schemas/qualification-profile.schema.json",
     "contracts/platform-v1/schemas/qualification-evidence-manifest.schema.json",
     "contracts/platform-v1/qualification/production-release-profile.json",
@@ -2034,6 +2035,7 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
     let deployment_closure_schema = deployment_closure_schema();
     let worker_manifest_schema = worker_manifest_schema();
     let candidate_manifest_schema = candidate_manifest_schema();
+    let capacity_profile_schema = capacity_profile_schema();
     let qualification_profile_schema = qualification_profile_schema();
     let qualification_evidence_manifest_schema = qualification_evidence_manifest_schema();
     let production_qualification_profile = production_qualification_profile();
@@ -2099,6 +2101,10 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
         (
             "schemas/candidate-manifest.schema.json",
             pretty(&candidate_manifest_schema),
+        ),
+        (
+            "schemas/capacity-profile.schema.json",
+            pretty(&capacity_profile_schema),
         ),
         (
             "schemas/qualification-profile.schema.json",
@@ -2647,6 +2653,136 @@ fn candidate_manifest_schema() -> Value {
                 "type": "string",
                 "format": "date-time",
                 "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"
+            }
+        }
+    })
+}
+
+fn capacity_profile_schema() -> Value {
+    let role_names = crate::ComponentRole::ALL
+        .iter()
+        .map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    let work_classes = WorkClass::ALL
+        .iter()
+        .map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    let positive_u32 = json!({"type": "integer", "minimum": 1, "maximum": u32::MAX});
+    let replica = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["min_replicas", "max_replicas"],
+        "properties": {
+            "min_replicas": {"type": "integer", "minimum": 1, "maximum": u16::MAX},
+            "max_replicas": {"type": "integer", "minimum": 1, "maximum": u16::MAX}
+        }
+    });
+    let nullable_name = json!({
+        "type": ["string", "null"],
+        "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    });
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:insight:platform:v1:capacity-profile",
+        "title": "CapacityProfile",
+        "description": "Versioned environment capacity input bound to one deployment configuration. Schema validity does not claim L4-L6 qualification.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "schema_version", "profile_name", "environment_class", "deployment_config_digest",
+            "replicas", "pools", "permits", "queues", "leases", "safety_scan", "hpa",
+            "slo_targets", "recovery"
+        ],
+        "properties": {
+            "schema_version": {"type": "integer", "const": crate::CAPACITY_PROFILE_VERSION},
+            "profile_name": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$"},
+            "environment_class": {"type": "string", "enum": ["development", "staging", "production"]},
+            "deployment_config_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "replicas": {
+                "type": "object", "minProperties": 1,
+                "propertyNames": {"enum": role_names.clone()},
+                "additionalProperties": replica.clone()
+            },
+            "pools": {
+                "type": "array", "minItems": 2, "maxItems": crate::CapacityPoolKind::ALL.len(),
+                "items": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["kind", "name", "database_pool", "storage_pool", "semaphore", "max_in_flight"],
+                    "properties": {
+                        "kind": {"type": "string", "enum": crate::CapacityPoolKind::ALL.iter().map(|value| value.as_str()).collect::<Vec<_>>()},
+                        "name": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"},
+                        "database_pool": nullable_name.clone(),
+                        "storage_pool": nullable_name,
+                        "semaphore": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"},
+                        "max_in_flight": positive_u32.clone()
+                    }
+                }
+            },
+            "permits": {
+                "type": "object", "minProperties": 1,
+                "propertyNames": {"enum": work_classes.clone()},
+                "additionalProperties": positive_u32.clone()
+            },
+            "queues": {
+                "type": "object", "minProperties": 1,
+                "propertyNames": {"enum": work_classes.clone()},
+                "additionalProperties": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["max_depth", "max_oldest_age_milliseconds"],
+                    "properties": {
+                        "max_depth": positive_u32.clone(),
+                        "max_oldest_age_milliseconds": positive_u32.clone()
+                    }
+                }
+            },
+            "leases": {
+                "type": "object", "minProperties": 1,
+                "propertyNames": {"enum": work_classes},
+                "additionalProperties": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["lease_milliseconds", "heartbeat_milliseconds"],
+                    "properties": {
+                        "lease_milliseconds": positive_u32.clone(),
+                        "heartbeat_milliseconds": positive_u32.clone()
+                    }
+                }
+            },
+            "safety_scan": {
+                "type": "object", "additionalProperties": false,
+                "required": ["interval_milliseconds", "batch_size"],
+                "properties": {
+                    "interval_milliseconds": positive_u32.clone(),
+                    "batch_size": positive_u32.clone()
+                }
+            },
+            "hpa": {
+                "type": "object", "minProperties": 1,
+                "propertyNames": {"enum": role_names},
+                "additionalProperties": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["target_utilization_basis_points"],
+                    "properties": {
+                        "target_utilization_basis_points": {"type": "integer", "minimum": 1, "maximum": 10000}
+                    }
+                }
+            },
+            "slo_targets": {
+                "type": "array", "minItems": 1, "maxItems": crate::SloIndicator::ALL.len(),
+                "items": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["indicator", "objective_basis_points", "window_seconds", "threshold_milliseconds"],
+                    "properties": {
+                        "indicator": {"type": "string", "enum": crate::SloIndicator::ALL.iter().map(|value| value.as_str()).collect::<Vec<_>>()},
+                        "objective_basis_points": {"type": "integer", "minimum": 1, "maximum": 10000},
+                        "window_seconds": positive_u32.clone(),
+                        "threshold_milliseconds": positive_u32.clone()
+                    }
+                }
+            },
+            "recovery": {
+                "type": "object", "additionalProperties": false,
+                "required": ["rpo_seconds", "rto_seconds"],
+                "properties": {"rpo_seconds": positive_u32.clone(), "rto_seconds": positive_u32}
             }
         }
     })

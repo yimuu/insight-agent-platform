@@ -1,0 +1,370 @@
+{
+  "$id": "urn:insight:platform:v1:capacity-profile",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Versioned environment capacity input bound to one deployment configuration. Schema validity does not claim L4-L6 qualification.",
+  "properties": {
+    "deployment_config_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "environment_class": {
+      "enum": [
+        "development",
+        "staging",
+        "production"
+      ],
+      "type": "string"
+    },
+    "hpa": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "target_utilization_basis_points": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target_utilization_basis_points"
+        ],
+        "type": "object"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "management_api",
+          "runtime_api",
+          "scheduler_recovery",
+          "model_worker",
+          "capability_native_worker",
+          "capability_remote_worker",
+          "context_worker",
+          "mcp_host",
+          "sandbox_controller",
+          "sandbox_wasi_executor",
+          "sandbox_gvisor_executor",
+          "artifact_gateway",
+          "artifact_data_worker",
+          "artifact_maintenance",
+          "egress_secret_broker"
+        ]
+      },
+      "type": "object"
+    },
+    "leases": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "heartbeat_milliseconds": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "lease_milliseconds": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lease_milliseconds",
+          "heartbeat_milliseconds"
+        ],
+        "type": "object"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "registry_validation",
+          "orchestration",
+          "model",
+          "capability_native",
+          "capability_remote",
+          "mcp",
+          "context",
+          "sandbox",
+          "interaction",
+          "artifact",
+          "recovery"
+        ]
+      },
+      "type": "object"
+    },
+    "permits": {
+      "additionalProperties": {
+        "maximum": 4294967295,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "registry_validation",
+          "orchestration",
+          "model",
+          "capability_native",
+          "capability_remote",
+          "mcp",
+          "context",
+          "sandbox",
+          "interaction",
+          "artifact",
+          "recovery"
+        ]
+      },
+      "type": "object"
+    },
+    "pools": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "database_pool": {
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "business",
+              "critical_control",
+              "sandbox",
+              "model",
+              "mcp",
+              "artifact_gateway",
+              "artifact_data_worker",
+              "artifact_maintenance"
+            ],
+            "type": "string"
+          },
+          "max_in_flight": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+            "type": "string"
+          },
+          "semaphore": {
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+            "type": "string"
+          },
+          "storage_pool": {
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "name",
+          "database_pool",
+          "storage_pool",
+          "semaphore",
+          "max_in_flight"
+        ],
+        "type": "object"
+      },
+      "maxItems": 8,
+      "minItems": 2,
+      "type": "array"
+    },
+    "profile_name": {
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+      "type": "string"
+    },
+    "queues": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "max_depth": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_oldest_age_milliseconds": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_depth",
+          "max_oldest_age_milliseconds"
+        ],
+        "type": "object"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "registry_validation",
+          "orchestration",
+          "model",
+          "capability_native",
+          "capability_remote",
+          "mcp",
+          "context",
+          "sandbox",
+          "interaction",
+          "artifact",
+          "recovery"
+        ]
+      },
+      "type": "object"
+    },
+    "recovery": {
+      "additionalProperties": false,
+      "properties": {
+        "rpo_seconds": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "rto_seconds": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rpo_seconds",
+        "rto_seconds"
+      ],
+      "type": "object"
+    },
+    "replicas": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "max_replicas": {
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "min_replicas": {
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min_replicas",
+          "max_replicas"
+        ],
+        "type": "object"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "management_api",
+          "runtime_api",
+          "scheduler_recovery",
+          "model_worker",
+          "capability_native_worker",
+          "capability_remote_worker",
+          "context_worker",
+          "mcp_host",
+          "sandbox_controller",
+          "sandbox_wasi_executor",
+          "sandbox_gvisor_executor",
+          "artifact_gateway",
+          "artifact_data_worker",
+          "artifact_maintenance",
+          "egress_secret_broker"
+        ]
+      },
+      "type": "object"
+    },
+    "safety_scan": {
+      "additionalProperties": false,
+      "properties": {
+        "batch_size": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "interval_milliseconds": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "interval_milliseconds",
+        "batch_size"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "slo_targets": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "indicator": {
+            "enum": [
+              "api_availability",
+              "api_latency",
+              "run_admission",
+              "scheduler_drive",
+              "job_queue_age",
+              "critical_control_availability",
+              "recovery_lag"
+            ],
+            "type": "string"
+          },
+          "objective_basis_points": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "threshold_milliseconds": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "window_seconds": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "indicator",
+          "objective_basis_points",
+          "window_seconds",
+          "threshold_milliseconds"
+        ],
+        "type": "object"
+      },
+      "maxItems": 7,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "profile_name",
+    "environment_class",
+    "deployment_config_digest",
+    "replicas",
+    "pools",
+    "permits",
+    "queues",
+    "leases",
+    "safety_scan",
+    "hpa",
+    "slo_targets",
+    "recovery"
+  ],
+  "title": "CapacityProfile",
+  "type": "object"
+}

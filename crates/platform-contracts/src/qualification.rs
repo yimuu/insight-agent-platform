@@ -1,4 +1,6 @@
-use crate::{canonical_digest, HardLimitProfile, Sha256Digest, UtcTimestamp, WorkerManifest};
+use crate::{
+    canonical_digest, HardLimitProfile, Sha256Digest, UtcTimestamp, WorkClass, WorkerManifest,
+};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,6 +14,7 @@ pub const MAX_CANDIDATE_WORKER_MANIFESTS: usize = 512;
 pub const MAX_COMPONENT_ROLE_BYTES: usize = 128;
 pub const QUALIFICATION_PROFILE_VERSION: u16 = 1;
 pub const QUALIFICATION_EVIDENCE_VERSION: u16 = 1;
+pub const CAPACITY_PROFILE_VERSION: u16 = 1;
 pub const MAX_QUALIFICATION_TOOL_VERSIONS: usize = 64;
 pub const MAX_QUALIFICATION_ARTIFACTS: usize = 256;
 pub const MAX_QUALIFICATION_NAME_BYTES: usize = 128;
@@ -184,6 +187,374 @@ pub enum QualificationEnvironmentClass {
     Production,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityPoolKind {
+    Business,
+    CriticalControl,
+    Sandbox,
+    Model,
+    Mcp,
+    ArtifactGateway,
+    ArtifactDataWorker,
+    ArtifactMaintenance,
+}
+
+impl CapacityPoolKind {
+    pub const ALL: &'static [Self] = &[
+        Self::Business,
+        Self::CriticalControl,
+        Self::Sandbox,
+        Self::Model,
+        Self::Mcp,
+        Self::ArtifactGateway,
+        Self::ArtifactDataWorker,
+        Self::ArtifactMaintenance,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Business => "business",
+            Self::CriticalControl => "critical_control",
+            Self::Sandbox => "sandbox",
+            Self::Model => "model",
+            Self::Mcp => "mcp",
+            Self::ArtifactGateway => "artifact_gateway",
+            Self::ArtifactDataWorker => "artifact_data_worker",
+            Self::ArtifactMaintenance => "artifact_maintenance",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplicaTarget {
+    pub min_replicas: u16,
+    pub max_replicas: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityPool {
+    pub kind: CapacityPoolKind,
+    pub name: String,
+    pub database_pool: Option<String>,
+    pub storage_pool: Option<String>,
+    pub semaphore: String,
+    pub max_in_flight: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueTarget {
+    pub max_depth: u32,
+    pub max_oldest_age_milliseconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseTarget {
+    pub lease_milliseconds: u32,
+    pub heartbeat_milliseconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SafetyScanTarget {
+    pub interval_milliseconds: u32,
+    pub batch_size: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HpaTarget {
+    pub target_utilization_basis_points: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SloIndicator {
+    ApiAvailability,
+    ApiLatency,
+    RunAdmission,
+    SchedulerDrive,
+    JobQueueAge,
+    CriticalControlAvailability,
+    RecoveryLag,
+}
+
+impl SloIndicator {
+    pub const ALL: &'static [Self] = &[
+        Self::ApiAvailability,
+        Self::ApiLatency,
+        Self::RunAdmission,
+        Self::SchedulerDrive,
+        Self::JobQueueAge,
+        Self::CriticalControlAvailability,
+        Self::RecoveryLag,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApiAvailability => "api_availability",
+            Self::ApiLatency => "api_latency",
+            Self::RunAdmission => "run_admission",
+            Self::SchedulerDrive => "scheduler_drive",
+            Self::JobQueueAge => "job_queue_age",
+            Self::CriticalControlAvailability => "critical_control_availability",
+            Self::RecoveryLag => "recovery_lag",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SloTarget {
+    pub indicator: SloIndicator,
+    pub objective_basis_points: u16,
+    pub window_seconds: u32,
+    pub threshold_milliseconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryTarget {
+    pub rpo_seconds: u32,
+    pub rto_seconds: u32,
+}
+
+/// Versioned environment capacity input. Passing validation proves a closed configuration, not
+/// that its production capacity has been qualified; L4-L6 evidence remains the authority for that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityProfile {
+    pub schema_version: u16,
+    pub profile_name: String,
+    pub environment_class: QualificationEnvironmentClass,
+    pub deployment_config_digest: Sha256Digest,
+    pub replicas: BTreeMap<ComponentRole, ReplicaTarget>,
+    pub pools: Vec<CapacityPool>,
+    pub permits: BTreeMap<WorkClass, u32>,
+    pub queues: BTreeMap<WorkClass, QueueTarget>,
+    pub leases: BTreeMap<WorkClass, LeaseTarget>,
+    pub safety_scan: SafetyScanTarget,
+    pub hpa: BTreeMap<ComponentRole, HpaTarget>,
+    pub slo_targets: Vec<SloTarget>,
+    pub recovery: RecoveryTarget,
+}
+
+impl CapacityProfile {
+    pub fn validate(&self) -> Result<(), QualificationManifestError> {
+        if self.schema_version != CAPACITY_PROFILE_VERSION {
+            return Err(qualification_invalid(
+                "schema_version",
+                "unsupported capacity profile version",
+            ));
+        }
+        if !valid_qualification_name(&self.profile_name) {
+            return Err(qualification_invalid(
+                "profile_name",
+                "profile name is invalid",
+            ));
+        }
+        if self.replicas.is_empty()
+            || self
+                .replicas
+                .values()
+                .any(|target| target.min_replicas == 0 || target.min_replicas > target.max_replicas)
+        {
+            return Err(qualification_invalid(
+                "replicas",
+                "replica ranges must be non-empty and positive",
+            ));
+        }
+        if self.pools.is_empty()
+            || !strictly_sorted_unique(&self.pools.iter().map(|pool| pool.kind).collect::<Vec<_>>())
+            || self.pools.iter().any(|pool| {
+                !valid_capacity_name(&pool.name)
+                    || !valid_capacity_name(&pool.semaphore)
+                    || pool
+                        .database_pool
+                        .as_deref()
+                        .is_some_and(|name| !valid_capacity_name(name))
+                    || pool
+                        .storage_pool
+                        .as_deref()
+                        .is_some_and(|name| !valid_capacity_name(name))
+                    || pool.max_in_flight == 0
+            })
+        {
+            return Err(qualification_invalid(
+                "pools",
+                "capacity pools must be canonical, unique and positive",
+            ));
+        }
+        let business = self
+            .pools
+            .iter()
+            .find(|pool| pool.kind == CapacityPoolKind::Business);
+        let control = self
+            .pools
+            .iter()
+            .find(|pool| pool.kind == CapacityPoolKind::CriticalControl);
+        if business.is_none()
+            || control.is_none()
+            || business.unwrap().name == control.unwrap().name
+        {
+            return Err(qualification_invalid(
+                "pools",
+                "business and critical-control pools must be distinct",
+            ));
+        }
+        let isolated = self
+            .pools
+            .iter()
+            .filter(|pool| {
+                !matches!(
+                    pool.kind,
+                    CapacityPoolKind::Business | CapacityPoolKind::CriticalControl
+                )
+            })
+            .collect::<Vec<_>>();
+        if has_duplicate(isolated.iter().map(|pool| pool.semaphore.as_str()))
+            || has_duplicate(
+                isolated
+                    .iter()
+                    .filter_map(|pool| pool.database_pool.as_deref()),
+            )
+            || has_duplicate(
+                isolated
+                    .iter()
+                    .filter_map(|pool| pool.storage_pool.as_deref()),
+            )
+        {
+            return Err(qualification_invalid(
+                "pools",
+                "execution roles must not share isolated authorities",
+            ));
+        }
+        if self.permits.is_empty()
+            || self.permits.values().any(|value| *value == 0)
+            || self.queues.is_empty()
+            || self
+                .queues
+                .values()
+                .any(|target| target.max_depth == 0 || target.max_oldest_age_milliseconds == 0)
+            || self.leases.is_empty()
+            || self.leases.values().any(|target| {
+                target.heartbeat_milliseconds == 0
+                    || target.lease_milliseconds == 0
+                    || target.heartbeat_milliseconds.saturating_mul(3) >= target.lease_milliseconds
+            })
+        {
+            return Err(qualification_invalid("work_class_capacity", "permit, queue and heartbeat/lease values must be positive and heartbeat must be below lease/3"));
+        }
+        if self.safety_scan.interval_milliseconds == 0 || self.safety_scan.batch_size == 0 {
+            return Err(qualification_invalid(
+                "safety_scan",
+                "safety scan must be bounded and positive",
+            ));
+        }
+        if self.hpa.is_empty()
+            || self.hpa.iter().any(|(role, target)| {
+                !self.replicas.contains_key(role)
+                    || target.target_utilization_basis_points == 0
+                    || target.target_utilization_basis_points > 10_000
+            })
+        {
+            return Err(qualification_invalid(
+                "hpa",
+                "HPA targets must reference replica roles and be bounded",
+            ));
+        }
+        let indicators = self
+            .slo_targets
+            .iter()
+            .map(|target| target.indicator)
+            .collect::<Vec<_>>();
+        if self.slo_targets.is_empty()
+            || !strictly_sorted_unique(&indicators)
+            || self.slo_targets.iter().any(|target| {
+                target.objective_basis_points == 0
+                    || target.objective_basis_points > 10_000
+                    || target.window_seconds == 0
+                    || target.threshold_milliseconds == 0
+            })
+        {
+            return Err(qualification_invalid(
+                "slo_targets",
+                "SLO targets must be canonical, unique and bounded",
+            ));
+        }
+        if self.recovery.rpo_seconds == 0 || self.recovery.rto_seconds == 0 {
+            return Err(qualification_invalid(
+                "recovery",
+                "RPO and RTO must be positive",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_against_candidate(
+        &self,
+        candidate: &CandidateManifest,
+    ) -> Result<(), QualificationManifestError> {
+        self.validate()?;
+        candidate.validate().map_err(|_| {
+            qualification_invalid("deployment_config_digest", "candidate is invalid")
+        })?;
+        if self.deployment_config_digest != candidate.deployment_config_digest {
+            return Err(qualification_invalid(
+                "deployment_config_digest",
+                "capacity profile does not match candidate deployment configuration",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_production_release(
+        &self,
+        candidate: &CandidateManifest,
+    ) -> Result<(), QualificationManifestError> {
+        self.validate_against_candidate(candidate)?;
+        if self.environment_class != QualificationEnvironmentClass::Production
+            || self.replicas.len() != ComponentRole::ALL.len()
+            || self.hpa.len() != ComponentRole::ALL.len()
+            || self.pools.len() != CapacityPoolKind::ALL.len()
+            || self.permits.len() != WorkClass::ALL.len()
+            || self.queues.len() != WorkClass::ALL.len()
+            || self.leases.len() != WorkClass::ALL.len()
+            || self.slo_targets.len() != SloIndicator::ALL.len()
+        {
+            return Err(qualification_invalid(
+                "environment_class",
+                "production capacity profile must close every role, pool, work class and SLO indicator",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, QualificationManifestError> {
+        self.validate()?;
+        qualification_digest(self, "capacity_profile")
+    }
+}
+
+fn valid_capacity_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+}
+
+fn has_duplicate<'a>(values: impl Iterator<Item = &'a str>) -> bool {
+    let mut seen = BTreeSet::new();
+    values.into_iter().any(|value| !seen.insert(value))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QualificationProfile {
@@ -293,6 +664,32 @@ pub struct QualificationEvidenceManifest {
 }
 
 impl QualificationEvidenceManifest {
+    pub fn validate_with_capacity(
+        &self,
+        profile: &QualificationProfile,
+        capacity: &CapacityProfile,
+        candidate: &CandidateManifest,
+    ) -> Result<(), QualificationManifestError> {
+        self.validate_against(profile, candidate)?;
+        capacity.validate_for_production_release(candidate)?;
+        let capacity_digest = capacity.canonical_digest()?;
+        let capacity_evidence = self
+            .results
+            .iter()
+            .find(|result| result.gate == QualificationGate::CapacityProfile)
+            .ok_or_else(|| qualification_invalid("results", "capacity profile gate is missing"))?;
+        if !capacity_evidence
+            .evidence_digests
+            .contains(&capacity_digest)
+        {
+            return Err(qualification_invalid(
+                "results",
+                "capacity profile gate does not reference the exact capacity profile digest",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate_against(
         &self,
         profile: &QualificationProfile,
@@ -928,6 +1325,202 @@ mod tests {
         }
     }
 
+    fn capacity_profile() -> CapacityProfile {
+        CapacityProfile {
+            schema_version: CAPACITY_PROFILE_VERSION,
+            profile_name: "staging-candidate".to_owned(),
+            environment_class: QualificationEnvironmentClass::Staging,
+            deployment_config_digest: sha('e'),
+            replicas: BTreeMap::from([(
+                ComponentRole::RuntimeApi,
+                ReplicaTarget {
+                    min_replicas: 2,
+                    max_replicas: 4,
+                },
+            )]),
+            pools: vec![
+                CapacityPool {
+                    kind: CapacityPoolKind::Business,
+                    name: "business".to_owned(),
+                    database_pool: Some("db-business".to_owned()),
+                    storage_pool: None,
+                    semaphore: "sem-business".to_owned(),
+                    max_in_flight: 32,
+                },
+                CapacityPool {
+                    kind: CapacityPoolKind::CriticalControl,
+                    name: "critical-control".to_owned(),
+                    database_pool: Some("db-control".to_owned()),
+                    storage_pool: None,
+                    semaphore: "sem-control".to_owned(),
+                    max_in_flight: 8,
+                },
+                CapacityPool {
+                    kind: CapacityPoolKind::Sandbox,
+                    name: "sandbox".to_owned(),
+                    database_pool: Some("db-sandbox".to_owned()),
+                    storage_pool: Some("storage-sandbox".to_owned()),
+                    semaphore: "sem-sandbox".to_owned(),
+                    max_in_flight: 8,
+                },
+                CapacityPool {
+                    kind: CapacityPoolKind::Model,
+                    name: "model".to_owned(),
+                    database_pool: Some("db-model".to_owned()),
+                    storage_pool: Some("storage-model".to_owned()),
+                    semaphore: "sem-model".to_owned(),
+                    max_in_flight: 8,
+                },
+            ],
+            permits: BTreeMap::from([(WorkClass::Orchestration, 16), (WorkClass::Recovery, 4)]),
+            queues: BTreeMap::from([
+                (
+                    WorkClass::Orchestration,
+                    QueueTarget {
+                        max_depth: 128,
+                        max_oldest_age_milliseconds: 5_000,
+                    },
+                ),
+                (
+                    WorkClass::Recovery,
+                    QueueTarget {
+                        max_depth: 32,
+                        max_oldest_age_milliseconds: 1_000,
+                    },
+                ),
+            ]),
+            leases: BTreeMap::from([
+                (
+                    WorkClass::Orchestration,
+                    LeaseTarget {
+                        lease_milliseconds: 30_000,
+                        heartbeat_milliseconds: 5_000,
+                    },
+                ),
+                (
+                    WorkClass::Recovery,
+                    LeaseTarget {
+                        lease_milliseconds: 15_000,
+                        heartbeat_milliseconds: 4_000,
+                    },
+                ),
+            ]),
+            safety_scan: SafetyScanTarget {
+                interval_milliseconds: 1_000,
+                batch_size: 100,
+            },
+            hpa: BTreeMap::from([(
+                ComponentRole::RuntimeApi,
+                HpaTarget {
+                    target_utilization_basis_points: 7_000,
+                },
+            )]),
+            slo_targets: vec![
+                SloTarget {
+                    indicator: SloIndicator::ApiAvailability,
+                    objective_basis_points: 9_990,
+                    window_seconds: 2_592_000,
+                    threshold_milliseconds: 1,
+                },
+                SloTarget {
+                    indicator: SloIndicator::RecoveryLag,
+                    objective_basis_points: 9_900,
+                    window_seconds: 86_400,
+                    threshold_milliseconds: 30_000,
+                },
+            ],
+            recovery: RecoveryTarget {
+                rpo_seconds: 300,
+                rto_seconds: 1_800,
+            },
+        }
+    }
+
+    fn production_capacity_profile() -> CapacityProfile {
+        let mut profile = capacity_profile();
+        profile.environment_class = QualificationEnvironmentClass::Production;
+        profile.replicas = ComponentRole::ALL
+            .iter()
+            .copied()
+            .map(|role| {
+                (
+                    role,
+                    ReplicaTarget {
+                        min_replicas: 2,
+                        max_replicas: 4,
+                    },
+                )
+            })
+            .collect();
+        profile.hpa = ComponentRole::ALL
+            .iter()
+            .copied()
+            .map(|role| {
+                (
+                    role,
+                    HpaTarget {
+                        target_utilization_basis_points: 7_000,
+                    },
+                )
+            })
+            .collect();
+        profile.pools = CapacityPoolKind::ALL
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, kind)| CapacityPool {
+                kind,
+                name: format!("pool-{index}"),
+                database_pool: Some(format!("db-{index}")),
+                storage_pool: Some(format!("storage-{index}")),
+                semaphore: format!("semaphore-{index}"),
+                max_in_flight: 8,
+            })
+            .collect();
+        profile.permits = WorkClass::ALL
+            .iter()
+            .copied()
+            .map(|work_class| (work_class, 8))
+            .collect();
+        profile.queues = WorkClass::ALL
+            .iter()
+            .copied()
+            .map(|work_class| {
+                (
+                    work_class,
+                    QueueTarget {
+                        max_depth: 32,
+                        max_oldest_age_milliseconds: 1_000,
+                    },
+                )
+            })
+            .collect();
+        profile.leases = WorkClass::ALL
+            .iter()
+            .copied()
+            .map(|work_class| {
+                (
+                    work_class,
+                    LeaseTarget {
+                        lease_milliseconds: 30_000,
+                        heartbeat_milliseconds: 5_000,
+                    },
+                )
+            })
+            .collect();
+        profile.slo_targets = SloIndicator::ALL
+            .iter()
+            .copied()
+            .map(|indicator| SloTarget {
+                indicator,
+                objective_basis_points: 9_900,
+                window_seconds: 86_400,
+                threshold_milliseconds: 30_000,
+            })
+            .collect();
+        profile
+    }
+
     fn evidence(
         profile: &QualificationProfile,
         candidate: &CandidateManifest,
@@ -1086,6 +1679,104 @@ mod tests {
         let mut unordered = profile;
         unordered.required_gates.swap(0, 1);
         assert_eq!(unordered.validate().unwrap_err().field, "required_gates");
+    }
+
+    #[test]
+    fn capacity_profile_is_digestible_and_bound_to_candidate_deployment_config() {
+        let profile = capacity_profile();
+        profile.validate().unwrap();
+        assert!(profile
+            .canonical_digest()
+            .unwrap()
+            .as_str()
+            .starts_with("sha256:"));
+        let candidate = candidate(&[worker(
+            "orchestration.primary",
+            WorkClass::Orchestration,
+            '1',
+        )]);
+        profile.validate_against_candidate(&candidate).unwrap();
+
+        let mut drifted = profile;
+        drifted.deployment_config_digest = sha('d');
+        assert_eq!(
+            drifted
+                .validate_against_candidate(&candidate)
+                .unwrap_err()
+                .field,
+            "deployment_config_digest"
+        );
+    }
+
+    #[test]
+    fn capacity_profile_rejects_lease_and_isolation_aliases() {
+        let mut profile = capacity_profile();
+        profile
+            .leases
+            .get_mut(&WorkClass::Recovery)
+            .unwrap()
+            .heartbeat_milliseconds = 5_000;
+        assert_eq!(profile.validate().unwrap_err().field, "work_class_capacity");
+
+        let mut profile = capacity_profile();
+        profile.pools[3].semaphore = profile.pools[2].semaphore.clone();
+        assert_eq!(profile.validate().unwrap_err().field, "pools");
+    }
+
+    #[test]
+    fn release_evidence_references_the_exact_production_capacity_profile() {
+        let workers = [worker(
+            "orchestration.primary",
+            WorkClass::Orchestration,
+            '1',
+        )];
+        let qualification = production_profile();
+        let mut candidate = candidate(&workers);
+        candidate.component_images = ComponentRole::ALL
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, role)| (role, sha(char::from(b"0123456789abcdef"[index]))))
+            .collect();
+        candidate.qualification_profile_digest = qualification.canonical_digest().unwrap();
+        let capacity = production_capacity_profile();
+        let mut evidence = evidence(&qualification, &candidate);
+        let capacity_digest = capacity.canonical_digest().unwrap();
+        evidence.artifact_links.insert(
+            0,
+            QualificationArtifactLink {
+                name: "capacity-profile".to_owned(),
+                content_digest: capacity_digest.clone(),
+                media_type: "application/json".to_owned(),
+                byte_length: 4096,
+            },
+        );
+        let capacity_result = evidence
+            .results
+            .iter_mut()
+            .find(|result| result.gate == QualificationGate::CapacityProfile)
+            .unwrap();
+        capacity_result.evidence_digests.push(capacity_digest);
+        capacity_result.evidence_digests.sort();
+        evidence
+            .validate_with_capacity(&qualification, &capacity, &candidate)
+            .unwrap();
+
+        let capacity_result = evidence
+            .results
+            .iter_mut()
+            .find(|result| result.gate == QualificationGate::CapacityProfile)
+            .unwrap();
+        capacity_result
+            .evidence_digests
+            .retain(|digest| digest != &capacity.canonical_digest().unwrap());
+        assert_eq!(
+            evidence
+                .validate_with_capacity(&qualification, &capacity, &candidate)
+                .unwrap_err()
+                .field,
+            "results"
+        );
     }
 
     #[test]

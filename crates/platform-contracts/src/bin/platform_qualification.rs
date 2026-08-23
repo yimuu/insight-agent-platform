@@ -1,6 +1,6 @@
 use insight_platform_contracts::{
-    parse_strict_json, CandidateManifest, JsonLimits, QualificationEvidenceManifest,
-    QualificationProfile,
+    parse_strict_json, CandidateManifest, CapacityProfile, JsonLimits,
+    QualificationEvidenceManifest, QualificationProfile,
 };
 use serde::de::DeserializeOwned;
 use std::{env, fs, path::Path, process};
@@ -14,6 +14,30 @@ fn main() {
 
 fn run(arguments: Vec<String>) -> Result<(), String> {
     match arguments.as_slice() {
+        [command, capacity_path] if command == "validate-capacity-profile" => {
+            let profile: CapacityProfile = read_closed_json(capacity_path)?;
+            let digest = profile.canonical_digest().map_err(|failure| failure.to_string())?;
+            println!("capacity profile valid but not thereby production-qualified ({digest})");
+            Ok(())
+        }
+        [command, capacity_path, candidate_path] if command == "validate-candidate-capacity" => {
+            let profile: CapacityProfile = read_closed_json(capacity_path)?;
+            let candidate: CandidateManifest = read_closed_json(candidate_path)?;
+            profile.validate_against_candidate(&candidate).map_err(|failure| failure.to_string())?;
+            let digest = profile.canonical_digest().map_err(|failure| failure.to_string())?;
+            println!("candidate capacity closure valid but not thereby production-qualified ({digest})");
+            Ok(())
+        }
+        [command, capacity_path, candidate_path] if command == "validate-production-capacity" => {
+            let profile: CapacityProfile = read_closed_json(capacity_path)?;
+            let candidate: CandidateManifest = read_closed_json(candidate_path)?;
+            profile
+                .validate_for_production_release(&candidate)
+                .map_err(|failure| failure.to_string())?;
+            let digest = profile.canonical_digest().map_err(|failure| failure.to_string())?;
+            println!("production capacity input closure valid but not thereby qualified ({digest})");
+            Ok(())
+        }
         [command, profile_path] if command == "validate-profile" => {
             let profile: QualificationProfile = read_closed_json(profile_path)?;
             let digest = profile
@@ -45,10 +69,11 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
             println!("production candidate closure valid ({digest})");
             Ok(())
         }
-        [command, profile_path, candidate_path, evidence_path]
+        [command, profile_path, capacity_path, candidate_path, evidence_path]
             if command == "validate-release-evidence" =>
         {
             let profile: QualificationProfile = read_closed_json(profile_path)?;
+            let capacity: CapacityProfile = read_closed_json(capacity_path)?;
             let candidate: CandidateManifest = read_closed_json(candidate_path)?;
             let evidence: QualificationEvidenceManifest = read_closed_json(evidence_path)?;
             profile
@@ -58,7 +83,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
                 .validate_for_production_release(&profile)
                 .map_err(|failure| failure.to_string())?;
             evidence
-                .validate_against(&profile, &candidate)
+                .validate_with_capacity(&profile, &capacity, &candidate)
                 .map_err(|failure| failure.to_string())?;
             if !evidence.passed() {
                 return Err("one or more required qualification gates failed".to_owned());
@@ -70,7 +95,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         _ => Err(
-            "usage: platform-qualification validate-profile <profile.json> | validate-production-profile <profile.json> | validate-production-candidate <profile.json> <candidate.json> | validate-release-evidence <profile.json> <candidate.json> <evidence.json>"
+            "usage: platform-qualification validate-capacity-profile <capacity.json> | validate-candidate-capacity <capacity.json> <candidate.json> | validate-production-capacity <capacity.json> <candidate.json> | validate-profile <profile.json> | validate-production-profile <profile.json> | validate-production-candidate <profile.json> <candidate.json> | validate-release-evidence <profile.json> <capacity.json> <candidate.json> <evidence.json>"
                 .to_owned(),
         ),
     }

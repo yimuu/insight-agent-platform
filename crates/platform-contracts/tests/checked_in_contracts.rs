@@ -1,7 +1,7 @@
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile,
     machine::{check_contract_tree, repository_root_from_manifest},
-    parse_strict_json, CandidateManifest, JsonLimits, NewCandidateManifest,
+    parse_strict_json, CandidateManifest, CapacityProfile, JsonLimits, NewCandidateManifest,
     QualificationArtifactLink, QualificationEvidenceManifest, QualificationGateEvidence,
     QualificationOutcome, QualificationProfile, Sha256Digest, WorkClass, WorkerManifest,
     QUALIFICATION_EVIDENCE_VERSION, WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
@@ -113,6 +113,52 @@ fn candidate_manifest_schema_matches_the_closed_rust_contract() {
     invalid["git_commit"] = serde_json::json!("latest");
     assert!(!validator.is_valid(&invalid));
     assert!(serde_json::from_value::<CandidateManifest>(invalid).is_err());
+}
+
+#[test]
+fn capacity_profile_schema_matches_the_closed_rust_contract() {
+    let root = repository_root_from_manifest();
+    let schema: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join("contracts/platform-v1/schemas/capacity-profile.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let validator = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .build(&schema)
+        .unwrap();
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "profile_name": "staging-candidate",
+        "environment_class": "staging",
+        "deployment_config_digest": sha('e'),
+        "replicas": {"runtime_api": {"min_replicas": 2, "max_replicas": 4}},
+        "pools": [
+            {"kind": "business", "name": "business", "database_pool": "db-business", "storage_pool": null, "semaphore": "sem-business", "max_in_flight": 16},
+            {"kind": "critical_control", "name": "control", "database_pool": "db-control", "storage_pool": null, "semaphore": "sem-control", "max_in_flight": 4}
+        ],
+        "permits": {"orchestration": 8},
+        "queues": {"orchestration": {"max_depth": 32, "max_oldest_age_milliseconds": 1000}},
+        "leases": {"orchestration": {"lease_milliseconds": 30000, "heartbeat_milliseconds": 5000}},
+        "safety_scan": {"interval_milliseconds": 1000, "batch_size": 100},
+        "hpa": {"runtime_api": {"target_utilization_basis_points": 7000}},
+        "slo_targets": [{"indicator": "api_availability", "objective_basis_points": 9990, "window_seconds": 2592000, "threshold_milliseconds": 1}],
+        "recovery": {"rpo_seconds": 300, "rto_seconds": 1800}
+    });
+    assert!(validator.is_valid(&value));
+    let profile: CapacityProfile = serde_json::from_value(value.clone()).unwrap();
+    profile.validate().unwrap();
+
+    let mut invalid = value;
+    invalid["leases"]["orchestration"]["heartbeat_milliseconds"] = serde_json::json!(10_000);
+    assert!(validator.is_valid(&invalid));
+    assert_eq!(
+        serde_json::from_value::<CapacityProfile>(invalid)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .field,
+        "work_class_capacity"
+    );
 }
 
 #[test]

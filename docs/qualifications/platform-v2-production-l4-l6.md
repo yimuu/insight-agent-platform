@@ -21,6 +21,7 @@
 
 ```bash
 export PLATFORM_CANDIDATE_MANIFEST=/secure/ci-artifacts/candidate-manifest.json
+export PLATFORM_CAPACITY_PROFILE=/secure/ci-artifacts/capacity-profile.json
 export PLATFORM_QUALIFICATION_OUTPUT_DIR=/secure/ci-artifacts/platform-v2-qualification-$CI_RUN_ID
 
 bash scripts/preflight-platform-production-qualification.sh
@@ -48,6 +49,7 @@ canonical topology digest；它不保存credential、Secret、Pod环境、外部
 cargo run --locked -p insight-platform-contracts --bin platform-qualification -- \
   validate-release-evidence \
   contracts/platform-v1/qualification/production-release-profile.json \
+  "$PLATFORM_CAPACITY_PROFILE" \
   "$PLATFORM_CANDIDATE_MANIFEST" \
   "$PLATFORM_QUALIFICATION_OUTPUT_DIR/qualification-evidence.json"
 ```
