@@ -315,7 +315,11 @@ fn runtime_plan() -> RuntimePlan {
             (
                 map_node.clone(),
                 RuntimeNode::Map {
-                    items: literal_program(json!([])),
+                    items: literal_program(json!([
+                        {"item": 0},
+                        {"item": 1},
+                        {"item": 2}
+                    ])),
                     item_port: item_port("map"),
                     body: map_body.clone(),
                     next: finish.clone(),
@@ -6532,13 +6536,39 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Replayed(_) => panic!("Map start must apply"),
     };
     scheduler.commit().await.unwrap();
+    let first_map_fence = JobFence {
+        expected_job_version: map_started.version,
+        ..map_start.fence.clone()
+    };
+    let first_map_facts = map_repository
+        .load_expression_controller_facts(&first_map_fence, &runtime_plan())
+        .await
+        .unwrap();
+    assert!(first_map_facts.inputs.is_empty());
+    let first_map_plan = runtime_plan();
+    let first_map_evaluation = derive_expression_controller(
+        first_map_plan
+            .node(&first_map_facts.plan_node_key)
+            .unwrap(),
+        vec![],
+        first_map_facts.node_execution_id.clone(),
+        first_map_facts.node_execution_version,
+        first_map_facts.loop_iteration,
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap();
+    assert_eq!(
+        first_map_evaluation.observation,
+        ControllerObservation::Map { item_count: 3 }
+    );
+    let first_map_value_ids = [
+        fixture_platform_id("val", "982e"),
+        fixture_platform_id("val", "982f"),
+    ];
     let open_first_map_batch = ApplyOrchestrationControllerStep {
-        fence: JobFence {
-            expected_job_version: map_started.version,
-            ..map_start.fence.clone()
-        },
-        plan: runtime_plan(),
-        observation: ControllerObservation::Map { item_count: 3 },
+        fence: first_map_fence,
+        plan: first_map_plan,
+        observation: first_map_evaluation.observation.clone(),
         idempotency_key_digest: digest('c'),
         request_digest: digest('d'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -6598,9 +6628,15 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             remainder_cancellations: Vec::new(),
         },
     };
+    let first_map_derived = ApplyDerivedExpressionControllerStep {
+        step: open_first_map_batch,
+        materialized_inputs: vec![],
+        evaluation: first_map_evaluation,
+        output_value_ids: first_map_value_ids.to_vec(),
+    };
     let mut scheduler = map_repository.begin_scheduler_transaction().await.unwrap();
     let first_map_batch = match scheduler
-        .apply_orchestration_controller_step(open_first_map_batch.clone())
+        .apply_derived_expression_controller_step(first_map_derived.clone())
         .await
         .unwrap()
     {
@@ -6616,7 +6652,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     let mut scheduler = map_repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler
-            .apply_orchestration_controller_step(open_first_map_batch)
+            .apply_derived_expression_controller_step(first_map_derived)
             .await
             .unwrap(),
         CommandOutcome::Replayed(record)
@@ -6661,13 +6697,32 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Replayed(_) => panic!("Map admission continuation start must apply"),
     };
     scheduler.commit().await.unwrap();
+    let final_map_fence = JobFence {
+        expected_job_version: map_admission_started.version,
+        ..map_admission_start.fence.clone()
+    };
+    let final_map_facts = map_repository
+        .load_expression_controller_facts(&final_map_fence, &runtime_plan())
+        .await
+        .unwrap();
+    assert!(final_map_facts.inputs.is_empty());
+    let final_map_plan = runtime_plan();
+    let final_map_evaluation = derive_expression_controller(
+        final_map_plan
+            .node(&final_map_facts.plan_node_key)
+            .unwrap(),
+        vec![],
+        final_map_facts.node_execution_id.clone(),
+        final_map_facts.node_execution_version,
+        final_map_facts.loop_iteration,
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap();
+    let final_map_value_id = fixture_platform_id("val", "984f");
     let open_final_map_batch = ApplyOrchestrationControllerStep {
-        fence: JobFence {
-            expected_job_version: map_admission_started.version,
-            ..map_admission_start.fence.clone()
-        },
-        plan: runtime_plan(),
-        observation: ControllerObservation::Map { item_count: 3 },
+        fence: final_map_fence,
+        plan: final_map_plan,
+        observation: final_map_evaluation.observation.clone(),
         idempotency_key_digest: digest('2'),
         request_digest: digest('3'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -6707,7 +6762,12 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     let mut scheduler = map_repository.begin_scheduler_transaction().await.unwrap();
     let final_map_batch = match scheduler
-        .apply_orchestration_controller_step(open_final_map_batch)
+        .apply_derived_expression_controller_step(ApplyDerivedExpressionControllerStep {
+            step: open_final_map_batch,
+            materialized_inputs: vec![],
+            evaluation: final_map_evaluation,
+            output_value_ids: vec![final_map_value_id.clone()],
+        })
         .await
         .unwrap()
     {
@@ -6733,6 +6793,64 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .await
     .unwrap();
     assert_eq!(map_scope_indexes, vec![0, 1, 2]);
+    let stored_map_values = sqlx::query_as::<_, (String, String, Value)>(
+        r#"
+        SELECT value_id, classification, inline_value
+        FROM insight_platform.run_values
+        WHERE tenant_id = $1 AND value_id = ANY($2)
+        ORDER BY value_id
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(
+        first_map_value_ids
+            .iter()
+            .chain(std::iter::once(&final_map_value_id))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored_map_values.len(), 3);
+    assert!(stored_map_values
+        .iter()
+        .all(|(_, classification, _)| classification == DataClassification::Internal.as_str()));
+    assert_eq!(
+        stored_map_values
+            .iter()
+            .map(|(_, _, value)| value.clone())
+            .collect::<Vec<_>>(),
+        vec![json!({"item": 0}), json!({"item": 1}), json!({"item": 2})]
+    );
+    for (scope, value_id) in first_map_batch
+        .created_scopes
+        .iter()
+        .chain(final_map_batch.created_scopes.iter())
+        .zip(
+            first_map_value_ids
+                .iter()
+                .chain(std::iter::once(&final_map_value_id)),
+        )
+    {
+        let payload: Value = sqlx::query_scalar(
+            "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+        )
+        .bind(TENANT_ID)
+        .bind(scope.scope_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(payload.to_string().contains(&value_id.to_string()));
+        assert_eq!(
+            payload["environment"]["bindings"][0]["port"]["producer_node_id"],
+            json!("map")
+        );
+        assert_eq!(
+            payload["environment"]["bindings"][0]["port"]["port_id"],
+            json!("item")
+        );
+    }
 
     let map_item_fixtures = [
         (

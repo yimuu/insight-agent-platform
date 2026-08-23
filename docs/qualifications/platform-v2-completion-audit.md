@@ -2,7 +2,7 @@
 
 状态：In Progress / repository and production gaps remain
 
-日期：2026-08-23
+日期：2026-08-24
 
 本审计按 `00-overview.md` 的统一完成定义和 `implementation-plan.md` 四阶段 exit gate 核对当前工作树。
 它记录可以复现的证据与缺口，不改变合同，也不把存在源码、测试或静态清单等同于 production behavior。
@@ -76,10 +76,12 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    authority读取与stale fence拒绝已经实现并通过fresh PostgreSQL Phase 2。derived commit现已对Branch/Map/Loop在事务内重验
    input/evaluation/classification evidence并重新执行pure evaluator，fresh PostgreSQL覆盖Branch正向提交和伪造classification整批回滚。
    Compute现已在同一事务写immutable output RunValue、owner-derived classification与Scope environment CAS，再提交既有Node/Job/
-   Receipt/Event/Outbox；fresh PostgreSQL同时覆盖output ID冲突整批回滚。尚缺Map item value binding、Loop carried rollover及完整production store
+   Receipt/Event/Outbox；fresh PostgreSQL同时覆盖output ID冲突整批回滚。Map现在按冻结的batch cursor为每个item写immutable
+   RunValue，以owner-derived classification和exact Plan v2 item port绑定新MapItem Scope，并与Scope/Node/Job/Receipt/Event/Outbox
+   原子提交；fresh PostgreSQL覆盖多batch、动态Scope隔离与Receipt replay。尚缺Loop carried rollover及完整production store
    composition；手工注入`ControllerObservation`仍不计production证据。CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
-   CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向与fresh PostgreSQL既有Plan闭包已实现；
-   每item RunValue/MapItem Scope原子写及其L2/L3 batch/crash fixture仍待后续实现。
+   CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向、每item RunValue/MapItem Scope原子写及
+   L2 batch/replay fixture已实现；process crash/restart的L3 fixture仍待production handler闭合后完成。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

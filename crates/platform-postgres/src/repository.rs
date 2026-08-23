@@ -5169,17 +5169,6 @@ impl PgSchedulerTransaction {
                 self.scope_environment_limits,
             )
             .await?;
-            parents.scope_version = commit_derived_compute_outputs(
-                &mut transaction,
-                &observed,
-                &parents,
-                &source_node,
-                runtime_node,
-                derived,
-                self.expression_inline_limits,
-                self.scope_environment_limits,
-            )
-            .await?;
         }
         let decision = decide_controller(runtime_node, &command.observation)?;
         let shape = match (&decision, runtime_node) {
@@ -5315,6 +5304,25 @@ impl PgSchedulerTransaction {
             )),
         };
         shape.validate_slots(&command.mutations)?;
+        let derived_scope_bindings = if let Some(derived) = &derived {
+            let committed = commit_derived_expression_values(
+                &mut transaction,
+                &observed,
+                &parents,
+                &source_node,
+                runtime_node,
+                &shape,
+                &command.mutations,
+                derived,
+                self.expression_inline_limits,
+                self.scope_environment_limits,
+            )
+            .await?;
+            parents.scope_version = committed.source_scope_version;
+            committed.new_scope_bindings
+        } else {
+            Vec::new()
+        };
 
         let current = load_job_for_update_by_text(
             &mut transaction,
@@ -5356,6 +5364,7 @@ impl PgSchedulerTransaction {
             &command.plan,
             &command.request_digest,
             self.scope_environment_limits,
+            &derived_scope_bindings,
             database_now,
         )
         .await?;
@@ -9236,16 +9245,33 @@ async fn require_exact_derived_expression_evidence(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn commit_derived_compute_outputs(
+async fn commit_derived_expression_values(
     transaction: &mut Transaction<'_, Postgres>,
     current_job: &JobRecord,
     parents: &LockedOrchestrationJobParents,
     source_node: &ControllerSourceNode,
     runtime_node: &insight_platform_orchestrator::RuntimeNode,
+    shape: &ControllerStepShape,
+    mutations: &ControllerStepMutationIds,
     derived: &DerivedExpressionCommitEvidence,
     inline_limits: JsonLimits,
     scope_limits: ScopeEnvironmentLimits,
-) -> Result<i64, RepositoryError> {
+) -> Result<CommittedDerivedExpressionValues, RepositoryError> {
+    if let insight_platform_orchestrator::RuntimeNode::Map { item_port, .. } = runtime_node {
+        return commit_derived_map_item_values(
+            transaction,
+            current_job,
+            parents,
+            source_node,
+            item_port,
+            shape,
+            mutations,
+            derived,
+            inline_limits,
+            scope_limits,
+        )
+        .await;
+    }
     if !matches!(
         runtime_node,
         insight_platform_orchestrator::RuntimeNode::Compute { .. }
@@ -9253,7 +9279,10 @@ async fn commit_derived_compute_outputs(
         if !derived.evaluation.outputs.is_empty() || !derived.output_value_ids.is_empty() {
             return Err(RepositoryError::Conflict("non-Compute expression outputs"));
         }
-        return Ok(parents.scope_version);
+        return Ok(CommittedDerivedExpressionValues {
+            source_scope_version: parents.scope_version,
+            new_scope_bindings: Vec::new(),
+        });
     }
     if derived.evaluation.outputs.len() != derived.output_value_ids.len() {
         return Err(RepositoryError::InvalidInput(
@@ -9414,7 +9443,141 @@ async fn commit_derived_compute_outputs(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::Conflict("Compute output Scope CAS"))?;
-    Ok(next_scope_version)
+    Ok(CommittedDerivedExpressionValues {
+        source_scope_version: next_scope_version,
+        new_scope_bindings: Vec::new(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_derived_map_item_values(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    item_port: &ExactDataPortRef,
+    shape: &ControllerStepShape,
+    mutations: &ControllerStepMutationIds,
+    derived: &DerivedExpressionCommitEvidence,
+    inline_limits: JsonLimits,
+    scope_limits: ScopeEnvironmentLimits,
+) -> Result<CommittedDerivedExpressionValues, RepositoryError> {
+    let ControllerStepShape::MapBatch {
+        batch_start,
+        batch_size,
+        item_count,
+        ..
+    } = shape
+    else {
+        if !derived.output_value_ids.is_empty() {
+            return Err(RepositoryError::InvalidInput(
+                "zero-item Map has item value mutation slots".to_owned(),
+            ));
+        }
+        return Ok(CommittedDerivedExpressionValues {
+            source_scope_version: parents.scope_version,
+            new_scope_bindings: Vec::new(),
+        });
+    };
+    if item_port.producer_node_id() != Some(&source_node.plan_node_key)
+        || !derived.evaluation.outputs.is_empty()
+        || derived.evaluation.evaluated_results.len() != 1
+        || derived.output_value_ids.len() != usize::try_from(*batch_size).unwrap_or(usize::MAX)
+        || mutations.activations.len() != derived.output_value_ids.len()
+    {
+        return Err(RepositoryError::InvalidInput(
+            "Map item value mutation shape".to_owned(),
+        ));
+    }
+    let items = derived.evaluation.evaluated_results[0]
+        .value
+        .as_array()
+        .ok_or_else(|| RepositoryError::Conflict("derived Map array"))?;
+    if items.len() != usize::try_from(*item_count).unwrap_or(usize::MAX) {
+        return Err(RepositoryError::Conflict("derived Map item count"));
+    }
+    let current_value_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.run_values WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let next_value_count = usize::try_from(current_value_count)
+        .ok()
+        .and_then(|count| count.checked_add(derived.output_value_ids.len()))
+        .ok_or(RepositoryError::Conflict("RunValue reference bound"))?;
+    if next_value_count > scope_limits.maximum_bindings_per_scope {
+        return Err(RepositoryError::Conflict("RunValue reference bound"));
+    }
+    let mut new_scope_bindings = Vec::with_capacity(derived.output_value_ids.len());
+    for (offset, (value_id, activation)) in derived
+        .output_value_ids
+        .iter()
+        .zip(&mutations.activations)
+        .enumerate()
+    {
+        let item_index = usize::try_from(*batch_start)
+            .ok()
+            .and_then(|start| start.checked_add(offset))
+            .ok_or_else(|| RepositoryError::InvalidInput("Map item index overflow".to_owned()))?;
+        let item = items
+            .get(item_index)
+            .ok_or(RepositoryError::Conflict("derived Map item"))?
+            .clone();
+        let value = insight_platform_contracts::ClosedJsonValue::build(
+            item_port.schema_digest().clone(),
+            item,
+        )
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if (ValueRef::Inline {
+            value: value.value.clone(),
+        })
+        .validate(inline_limits)
+        .is_err()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Map item violates its Inline limit".to_owned(),
+            ));
+        }
+        let scope_instance_id = activation
+            .scope
+            .as_ref()
+            .ok_or_else(|| RepositoryError::InvalidInput("Map item Scope slot".to_owned()))?
+            .scope_instance_id
+            .clone();
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_values (
+                tenant_id, value_id, run_id, node_id, value_kind, classification,
+                schema_digest, content_digest, inline_value, artifact_id
+            ) VALUES ($1, $2, $3, $4, 'map_item', $5, $6, $7, $8, NULL)
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(value_id.to_string())
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .bind(derived.evaluation.effective_classification.as_str())
+        .bind(value.schema_digest.to_string())
+        .bind(value.canonical_digest.to_string())
+        .bind(&value.value)
+        .execute(&mut **transaction)
+        .await?;
+        new_scope_bindings.push(DerivedNewScopeBinding {
+            scope_instance_id,
+            port: item_port.clone(),
+            value: ExactRunValueRef {
+                value_id: value_id.clone(),
+                schema_digest: value.schema_digest,
+                content_digest: value.canonical_digest,
+            },
+        });
+    }
+    Ok(CommittedDerivedExpressionValues {
+        source_scope_version: parents.scope_version,
+        new_scope_bindings,
+    })
 }
 
 async fn load_parallel_leg_exit(
@@ -9861,11 +10024,29 @@ async fn mutate_orchestration_controller_step(
     plan: &RuntimePlan,
     request_digest: &Sha256Digest,
     scope_environment_limits: ScopeEnvironmentLimits,
+    derived_scope_bindings: &[DerivedNewScopeBinding],
     database_now: DateTime<Utc>,
 ) -> Result<AppliedOrchestrationControllerStep, RepositoryError> {
     let targets = shape.activation_targets()?;
     let slots = &mutations.activations;
     let pending_slots = &mutations.pending_nodes;
+    if derived_scope_bindings
+        .iter()
+        .map(|binding| &binding.scope_instance_id)
+        .collect::<BTreeSet<_>>()
+        .len()
+        != derived_scope_bindings.len()
+        || derived_scope_bindings.iter().any(|binding| {
+            !slots.iter().any(|slot| {
+                slot.scope.as_ref().map(|scope| &scope.scope_instance_id)
+                    == Some(&binding.scope_instance_id)
+            })
+        })
+    {
+        return Err(RepositoryError::InvalidInput(
+            "derived Scope bindings do not match activation slots".to_owned(),
+        ));
+    }
     let result_payload = TypedPayload::with_limit(
         1,
         &serde_json::json!({
@@ -10023,13 +10204,24 @@ async fn mutate_orchestration_controller_step(
                     ));
                 }
             };
+            let environment = if let Some(binding) = derived_scope_bindings
+                .iter()
+                .find(|binding| binding.scope_instance_id == scope.scope_instance_id)
+            {
+                ScopeDataEnvironmentSnapshot::build(
+                    BTreeMap::from([(binding.port.clone(), binding.value.clone())]),
+                    scope_environment_limits,
+                )
+            } else {
+                ScopeDataEnvironmentSnapshot::empty(scope_environment_limits)
+            }
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
             let scope_payload = TypedPayload::with_limit(
                 1,
                 &StoredControllerScopePayload {
                     controller_node_execution_id: scope_controller_node_execution_id,
                     descriptor,
-                    environment: ScopeDataEnvironmentSnapshot::empty(scope_environment_limits)
-                        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+                    environment,
                 },
                 262_144,
             )?;
@@ -19545,7 +19737,7 @@ impl ApplyDerivedExpressionControllerStep {
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         if self.step.observation != self.evaluation.observation
             || self.materialized_inputs.len() > plan_limits.expression.maximum_input_ports
-            || self.output_value_ids.len() != self.evaluation.outputs.len()
+            || self.output_value_ids.len() > plan_limits.maximum_map_items as usize
             || self
                 .output_value_ids
                 .iter()
@@ -19566,6 +19758,18 @@ struct DerivedExpressionCommitEvidence {
     materialized_inputs: Vec<CommittedExpressionInput>,
     evaluation: ControllerEvaluation,
     output_value_ids: Vec<ResourceId>,
+}
+
+#[derive(Debug, Clone)]
+struct DerivedNewScopeBinding {
+    scope_instance_id: ResourceId,
+    port: ExactDataPortRef,
+    value: ExactRunValueRef,
+}
+
+struct CommittedDerivedExpressionValues {
+    source_scope_version: i64,
+    new_scope_bindings: Vec<DerivedNewScopeBinding>,
 }
 
 impl ApplyOrchestrationControllerStep {
