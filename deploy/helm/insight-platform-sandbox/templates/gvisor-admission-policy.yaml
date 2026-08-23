@@ -144,9 +144,16 @@ spec:
         object.spec.runtimeClassName == {{ .Values.gvisor.runtimeClassName | quote }} &&
         object.spec.serviceAccountName == {{ .Values.gvisor.guestServiceAccount | quote }} &&
         object.spec.automountServiceAccountToken == false &&
+        (!has(object.spec.nodeName) || object.spec.nodeName == '') &&
+        object.spec.schedulerName == {{ .Values.admission.schedulerName | quote }} &&
         object.spec.restartPolicy == 'Never' && object.spec.enableServiceLinks == false &&
         !object.spec.hostNetwork && !object.spec.hostPID && !object.spec.hostIPC &&
+        object.spec.dnsPolicy == 'ClusterFirst' &&
         object.spec.nodeSelector == {{ .Values.gvisor.nodeSelector | toJson }} &&
+        object.spec.securityContext.runAsUser == 65532 &&
+        object.spec.securityContext.runAsGroup == 65532 &&
+        object.spec.securityContext.runAsNonRoot &&
+        object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
         (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
         (!has(object.spec.initContainers) || object.spec.initContainers.size() == 0) &&
         object.spec.containers.size() == 1
@@ -160,10 +167,53 @@ spec:
         object.spec.containers[0].securityContext.privileged == false &&
         object.spec.containers[0].securityContext.readOnlyRootFilesystem &&
         object.spec.containers[0].securityContext.runAsNonRoot &&
+        object.spec.containers[0].securityContext.runAsUser == 65532 &&
+        object.spec.containers[0].securityContext.runAsGroup == 65532 &&
+        object.spec.containers[0].securityContext.seccompProfile.type == 'RuntimeDefault' &&
         object.spec.containers[0].securityContext.capabilities.drop == ['ALL'] &&
+        object.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
+        object.spec.containers[0].terminationMessagePath == '/dev/termination-log' &&
+        object.spec.containers[0].terminationMessagePolicy == 'File' &&
         object.spec.containers[0].resources.requests == object.spec.containers[0].resources.limits &&
         object.spec.containers[0].resources.requests.all(k, v, k in ['cpu', 'memory', 'ephemeral-storage'])
       message: guest image, entrypoint, privilege and resource envelope are closed
+    - expression: >-
+        (!has(object.spec.containers[0].envFrom) || object.spec.containers[0].envFrom.size() == 0) &&
+        object.spec.containers[0].env.size() == 10 &&
+        object.spec.containers[0].env.map(e, e.name).all(n, n in [
+          'INSIGHT_SANDBOX_BOOTSTRAP_ENDPOINT', 'INSIGHT_SANDBOX_BOOTSTRAP_TOKEN_PATH',
+          'INSIGHT_SANDBOX_BOOTSTRAP_CA_PATH', 'INSIGHT_SANDBOX_TENANT_ID',
+          'INSIGHT_SANDBOX_JOB_ID', 'INSIGHT_SANDBOX_REQUEST_DIGEST',
+          'INSIGHT_SANDBOX_POD_NAMESPACE', 'INSIGHT_SANDBOX_POD_NAME',
+          'INSIGHT_SANDBOX_POD_UID', 'INSIGHT_SANDBOX_SERVICE_ACCOUNT_NAME']) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_BOOTSTRAP_ENDPOINT' && e.value == {{ .Values.gvisor.bootstrapEndpoint | quote }} && !has(e.valueFrom)) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_BOOTSTRAP_TOKEN_PATH' && e.value == '/var/run/secrets/insight.platform/token' && !has(e.valueFrom)) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_BOOTSTRAP_CA_PATH' && e.value == {{ .Values.gvisor.bootstrapCaPath | quote }} && !has(e.valueFrom)) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_TENANT_ID' && e.value.matches('^ten_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') && !has(e.valueFrom)) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_JOB_ID' && e.value == object.metadata.annotations['insight.platform/job-id'] && !has(e.valueFrom)) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_REQUEST_DIGEST' && e.value == object.metadata.annotations['insight.platform/request-digest'] && !has(e.valueFrom)) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_POD_NAMESPACE' && e.valueFrom.fieldRef.apiVersion == 'v1' && e.valueFrom.fieldRef.fieldPath == 'metadata.namespace' && !has(e.value)) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_POD_NAME' && e.valueFrom.fieldRef.apiVersion == 'v1' && e.valueFrom.fieldRef.fieldPath == 'metadata.name' && !has(e.value)) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_POD_UID' && e.valueFrom.fieldRef.apiVersion == 'v1' && e.valueFrom.fieldRef.fieldPath == 'metadata.uid' && !has(e.value)) &&
+        object.spec.containers[0].env.exists_one(e,
+          e.name == 'INSIGHT_SANDBOX_SERVICE_ACCOUNT_NAME' && e.value == {{ .Values.gvisor.guestServiceAccount | quote }} && !has(e.valueFrom))
+      message: guest environment is closed and cannot reference Secret or ConfigMap data
+    - expression: >-
+        object.spec.containers[0].volumeMounts.size() == 2 &&
+        object.spec.containers[0].volumeMounts.exists_one(m,
+          m.name == 'bootstrap-token' && m.mountPath == '/var/run/secrets/insight.platform' && m.readOnly) &&
+        object.spec.containers[0].volumeMounts.exists_one(m,
+          m.name == 'scratch' && m.mountPath == '/scratch' && (!has(m.readOnly) || !m.readOnly))
+      message: guest mounts are limited to the bootstrap token and bounded scratch
     - expression: >-
         object.spec.volumes.size() == 2 &&
         object.spec.volumes.exists_one(v,

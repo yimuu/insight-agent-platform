@@ -115,6 +115,15 @@ guest_expressions = guest_admission&.dig("spec", "validations")&.map { |validati
 unless guest_expressions.any? { |expression| expression.include?("request.operation == 'CREATE'") && expression.include?("object.spec.schedulingGates == [{'name': 'insight.platform/await-fenced-start'}]") }
   failures << "gVisor guest CREATE does not require the exact fenced-start scheduling gate"
 end
+unless guest_expressions.any? { |expression| expression.include?("!has(object.spec.nodeName)") && expression.include?("object.spec.schedulerName == \"default-scheduler\"") }
+  failures << "gVisor guest can bypass its exact scheduler/node selector"
+end
+unless guest_expressions.any? { |expression| expression.include?("env.size() == 10") && expression.include?("!has(object.spec.containers[0].envFrom)") }
+  failures << "gVisor guest environment is not closed against Secret/ConfigMap injection"
+end
+unless guest_expressions.any? { |expression| expression.include?("volumeMounts.size() == 2") && expression.include?("/var/run/secrets/insight.platform") }
+  failures << "gVisor guest volume mounts are not closed"
+end
 
 runtime_class = docs.find { |doc| doc["kind"] == "RuntimeClass" }
 failures << "runsc RuntimeClass is absent or drifted" unless runtime_class&.dig("metadata", "name") == "runsc" && runtime_class["handler"] == "runsc"
