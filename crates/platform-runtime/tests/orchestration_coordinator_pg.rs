@@ -120,6 +120,71 @@ async fn seed_policy_deployment(
     ExactDeploymentRef::new(deployment_id, bindings.digest.parse().unwrap()).unwrap()
 }
 
+async fn insert_ready_artifact(
+    pool: &sqlx::PgPool,
+    tenant_id: &ResourceId,
+    principal_id: &ResourceId,
+    retention_policy_revision_id: &ResourceId,
+    artifact: &ArtifactRef,
+) {
+    let now: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT statement_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let blob_id = fresh_id(ResourceKind::InternalBlob);
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest, security_domain_digest,
+            object_reference_ciphertext, object_generation, key_id, encryption_domain_id,
+            content_digest, size_bytes, state, version, verified_at, created_at, updated_at
+        ) VALUES ($1, $2, 'fixture-runtime', $3, $4, $5, 'generation-1', 'fixture-key', $6,
+                  $7, $8, 'verified', 1, $9, $9, $9)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(blob_id.to_string())
+    .bind(fresh_digest().to_string())
+    .bind(fresh_digest().to_string())
+    .bind(vec![1_u8, 2, 3])
+    .bind(fresh_id(ResourceKind::EncryptionDomain).to_string())
+    .bind(artifact.content_digest().to_string())
+    .bind(i64::try_from(artifact.byte_length()).unwrap())
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    let metadata = TypedPayload::new(1, &json!({"fixture": "orchestration-capacity"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification, expected_size_bytes,
+            expected_digest, declared_media_type, verified_media_type, state, version,
+            metadata_schema_version, metadata, metadata_digest, retention_policy_revision_id,
+            retain_until, created_by, created_at, updated_at
+        ) VALUES ($1, $2, $3, 'qualification', $4, $5, $6, $7, $7, 'ready', 1,
+                  $8, $9, $10, $11, $12, $13, $14, $14)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(artifact.artifact_id().to_string())
+    .bind(blob_id.to_string())
+    .bind(artifact.classification().as_str())
+    .bind(i64::try_from(artifact.byte_length()).unwrap())
+    .bind(artifact.content_digest().to_string())
+    .bind(artifact.media_type())
+    .bind(metadata.schema_version)
+    .bind(&metadata.value)
+    .bind(&metadata.digest)
+    .bind(retention_policy_revision_id.to_string())
+    .bind(now + ChronoDuration::days(1))
+    .bind(principal_id.to_string())
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 fn audit(suffix: &str) -> CommandAudit {
     CommandAudit {
         tenant_id: id(TENANT_ID),
@@ -479,8 +544,8 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
     repository
         .create_principal(NewPrincipal {
             principal_id: id(PRINCIPAL_ID),
-            authentication_authority_digest: digest('1'),
-            subject_digest: digest('2'),
+            authentication_authority_digest: fresh_digest(),
+            subject_digest: fresh_digest(),
             installation_bindings: PrincipalBindingsPayload {
                 installation_bindings: vec![],
             },
@@ -625,6 +690,23 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
     .await
     .unwrap();
 
+    let qualification_evidence = ArtifactRef::new(
+        id("art_0198f1c5-0787-75e1-a9e8-d95ca0f36010"),
+        digest('3'),
+        1,
+        "application/json",
+        DataClassification::Internal,
+        Some("scheduling-policy.json".to_owned()),
+    )
+    .unwrap();
+    insert_ready_artifact(
+        pool,
+        &id(TENANT_ID),
+        &id(PRINCIPAL_ID),
+        &id(POLICY_REVISION_ID),
+        &qualification_evidence,
+    )
+    .await;
     let policy = ExactVersionRef::new(id(POLICY_REVISION_ID), digest('a')).unwrap();
     let policy_deployment = seed_policy_deployment(
         pool,
@@ -633,15 +715,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         &id(POLICY_ID),
         id(POLICY_DEPLOYMENT_ID),
         policy.clone(),
-        ArtifactRef::new(
-            id("art_0198f1c5-0787-75e1-a9e8-d95ca0f36010"),
-            digest('3'),
-            1,
-            "application/json",
-            DataClassification::Internal,
-            Some("scheduling-policy.json".to_owned()),
-        )
-        .unwrap(),
+        qualification_evidence,
     )
     .await;
     let policy_binding = ExactPolicyBinding {
@@ -1371,6 +1445,15 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
     .execute(pool)
     .await
     .unwrap();
+
+    insert_ready_artifact(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &policy_revision_id,
+        &qualification_evidence,
+    )
+    .await;
 
     let policy = ExactVersionRef::new(policy_revision_id.clone(), digest('a')).unwrap();
     let policy_deployment = seed_policy_deployment(
