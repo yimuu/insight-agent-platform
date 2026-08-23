@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-177 |
+| 状态 | Accepted / CR-178 |
 | 日期 | 2026-08-23 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -244,12 +244,15 @@ JSON或相同typed failure。增加opcode必须提升`expression_version`并同�
 ```rust
 struct ComputeNode { assignments: Vec<PortAssignment>, next: PlanNodeId }
 struct BranchNode { ordered_arms: Vec<{ when: TypedExpressionProgram, target: PlanNodeId }>, otherwise: PlanNodeId }
-struct MapNode { items: TypedExpressionProgram, item_port: DataPortId, body: PlanNodeId, next: PlanNodeId, max_items: u32, failure_policy: MapFailurePolicy }
+struct MapNode { items: TypedExpressionProgram, item_port: ExactDataPortRef, body: PlanNodeId, next: PlanNodeId, max_items: u32, failure_policy: MapFailurePolicy }
 struct LoopNode { condition: TypedExpressionProgram, carried_ports: Vec<LoopCarriedPort>, body: PlanNodeId, exit: PlanNodeId, max_iterations: u32 }
 ```
 
 `Compute.assignments`必须按拓扑排序且每个output port只写一次；Branch按声明顺序执行并始终有`otherwise`；Map的`items`
 输出必须是有界array；Loop的`condition`输出必须是non-null boolean。表达式所需input port是Node readiness条件的一部分。
+Map `item_port`必须是producer等于当前Map node的`NodeOutput` ref并冻结element schema digest；Compiler/publication必须从items
+array schema验证其element schema完全一致，不能在runtime从array digest猜测、复用array schema或接受caller声明。该wire变更将未发布
+Typed Plan `plan_version`提升为2，version 1不进入clean-cut target。
 
 表达式classification不是caller输入，也不增加可降级的output annotation。同一expression controller先对全部external input
 RunValue classification做`Public < Internal < Confidential < Restricted` lattice join；Compute的全部派生output继承该join结果。

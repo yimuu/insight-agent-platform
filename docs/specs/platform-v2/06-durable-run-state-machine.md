@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-177 |
+| 状态 | Accepted / CR-178 |
 | 日期 | 2026-08-23 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
@@ -328,6 +328,8 @@ Compute output RunValue的classification由05 owner规则计算：external input
 
 首次Map求值原子冻结input value ref、item count、batch cursor与failure policy；后续批次只消费该冻结payload。Loop每次iteration
 冻结loop-carried value refs和condition evidence。Branch只为winner创建NodeExecution；未选arm与`otherwise`之外不存在Skipped事实。
+每个Map item admission用05 exact `item_port` schema创建独立immutable RunValue，并在新MapItem Scope环境绑定该port；item正文来自已验证
+array element，classification继承本次expression effective classification。RunValue insert、Scope payload、item Node/Job及批次cursor同事务。
 
 ## 11. Parallel、Map 与 Join Settlement
 
