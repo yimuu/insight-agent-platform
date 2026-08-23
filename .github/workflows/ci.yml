@@ -64,6 +64,8 @@ jobs:
         run: bash scripts/check-platform-artifact-deployment.sh
       - name: Check callback API deployment boundary
         run: bash scripts/check-platform-callback-deployment.sh
+      - name: Check MCP cleanup worker deployment boundary
+        run: bash scripts/check-platform-mcp-cleanup-deployment.sh
       - name: Check root public API baseline
         run: CARGO_TARGET_DIR=target bash scripts/check-public-api-baseline.sh
       - name: Format

@@ -29,7 +29,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 | Rust workspace | workspace all-target/all-feature tests与Clippy `-D warnings`通过 | L1～L3范围内有效 |
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
 | Public API | `/v1` OpenAPI/owner schema、route负向conformance与root public API baseline通过 | public contract实现闭合 |
-| 已有部署 | Gateway、Callback、Model Worker、Artifact三role、Sandbox、Security/Egress Helm静态门禁通过 | 只证明这些checked-in清单的静态边界 |
+| 已有部署 | Gateway、Callback、MCP cleanup、Model Worker、Artifact三role、Sandbox、Security/Egress Helm静态门禁通过 | 只证明这些checked-in清单的静态边界 |
 | HTTP observability | shared bounded-label owner；Gateway与Callback具备request/outcome、latency、ready、`/metrics`及ServiceMonitor/NetworkPolicy | 闭合两个公网HTTP role，不代表全平台observability |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator | 可验证证据形状，不证明任一外部门禁通过 |
@@ -97,6 +97,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 - If-Match、OIDC principal、Receipt/problem/cursor/body/rate/quota负向合同；
 - 已存在role清单的ServiceAccount、NetworkPolicy、PDB/HPA、digest与security context静态检查；
 - shared低基数HTTP telemetry owner，以及Public Gateway、Callback API的request/outcome、latency histogram、ready指标和受NetworkPolicy约束的ServiceMonitor；
+- durable MCP OAuth PKCE cleanup worker已进入workspace/runtime image，并具备独立Deployment、PDB、default-deny与精确PostgreSQL/Egress网络边界；
 - production QualificationProfile、Candidate/Capacity/Evidence validator、拓扑preflight和资格运行手册。
 
 ### 仓库内缺口

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: insight-platform-mcp-cleanup-worker
+description: Durable Platform v1 MCP OAuth PKCE cleanup worker
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.30.0-0"

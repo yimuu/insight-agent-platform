@@ -1,0 +1,7 @@
+{{- if lt (int .Values.replicas) 2 }}{{- fail "replicas must be at least 2" }}{{- end }}
+{{- if not .Values.networkPolicy.enabled }}{{- fail "networkPolicy.enabled must remain true" }}{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}{{- fail "image.digest must be immutable" }}{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) }}{{- fail "config.digest must be immutable" }}{{- end }}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.config.fileKey) }}{{- fail "Candidate config reference is required" }}{{- end }}
+{{- if or (empty .Values.database.existingSecret) (empty .Values.egressTls.existingSecret) }}{{- fail "database and Egress mTLS Secrets are required" }}{{- end }}
+{{- if empty .Values.networkPolicy.postgresCidrs }}{{- fail "networkPolicy.postgresCidrs is required" }}{{- end }}
