@@ -35,11 +35,12 @@ use insight_platform_orchestrator::{
     decide_cancel, decide_child_link_cancel, decide_child_link_terminal, decide_controller,
     decide_orchestration_convergence, decide_pause, decide_timeout, prepare_child_run, AdmitRun,
     ChildBudget, ChildCancellationPolicy, ChildLinkState, ChildOutcome, ChildRunLinkPayload,
-    ChildRunLinkProjection, ControlDecision, ControllerDecision, ControllerObservation, JoinPolicy,
-    JoinRemainderPolicy, MapFailurePolicy, ObserveRunTimeout, OrchestrationConvergenceDecision,
-    OrchestrationConvergenceFacts, OrchestrationConvergenceReason, OrchestrationJobPayload,
-    OrchestratorError, PlanLimits, PlanNodeKey, PrepareChildRun, RequestRunCancel,
-    RunCurrentSnapshot, RunInputValue, RunStore, RunTransaction, RuntimePlan, SetRunPause,
+    ChildRunLinkProjection, ControlDecision, ControllerDecision, ControllerObservation,
+    ExactDataPortRef, ExactRunValueRef, JoinPolicy, JoinRemainderPolicy, MapFailurePolicy,
+    ObserveRunTimeout, OrchestrationConvergenceDecision, OrchestrationConvergenceFacts,
+    OrchestrationConvergenceReason, OrchestrationJobPayload, OrchestratorError, PlanLimits,
+    PlanNodeKey, PrepareChildRun, RequestRunCancel, RunCurrentSnapshot, RunInputValue, RunStore,
+    RunTransaction, RuntimePlan, ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits, SetRunPause,
 };
 use insight_platform_registry::{
     ActivateResource, CreateDeployment, CreateResourceDraft, NewPublishedVersion,
@@ -361,6 +362,7 @@ pub struct PgRepository {
     sandbox_limits: SandboxCommandLimits,
     scheduler_limits: SchedulerHardLimits,
     plan_limits: PlanLimits,
+    scope_environment_limits: ScopeEnvironmentLimits,
     recovery_batch_limit: u16,
     recovery_shard_limit: u16,
 }
@@ -424,6 +426,8 @@ impl PgRepository {
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
             scheduler_limits,
             plan_limits: PlanLimits::from_profile(profile)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            scope_environment_limits: ScopeEnvironmentLimits::from_profile(profile)
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
             recovery_batch_limit,
             recovery_shard_limit,
@@ -1484,7 +1488,10 @@ impl PgRepository {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
             .execute(&mut *transaction)
             .await?;
-        Ok(PgRunTransaction { transaction })
+        Ok(PgRunTransaction {
+            transaction,
+            scope_environment_limits: self.scope_environment_limits,
+        })
     }
 
     pub async fn resolve_root_run_target(
@@ -1667,6 +1674,7 @@ impl PgRepository {
             transaction,
             limits: self.scheduler_limits,
             plan_limits: self.plan_limits,
+            scope_environment_limits: self.scope_environment_limits,
             recovery_batch_limit: self.recovery_batch_limit,
             recovery_shard_limit: self.recovery_shard_limit,
         })
@@ -4339,6 +4347,7 @@ pub struct PgSchedulerTransaction {
     transaction: Transaction<'static, Postgres>,
     limits: SchedulerHardLimits,
     plan_limits: PlanLimits,
+    scope_environment_limits: ScopeEnvironmentLimits,
     recovery_batch_limit: u16,
     recovery_shard_limit: u16,
 }
@@ -5155,6 +5164,7 @@ impl PgSchedulerTransaction {
             &command.mutations,
             &command.plan,
             &command.request_digest,
+            self.scope_environment_limits,
             database_now,
         )
         .await?;
@@ -5781,6 +5791,7 @@ impl PgSchedulerTransaction {
             &child_bindings,
             &child_ancestry,
             &child_link_payload,
+            self.scope_environment_limits,
             database_now,
         )
         .await?;
@@ -7802,6 +7813,26 @@ async fn insert_run_output_value(
     Ok(output.value_id.to_string())
 }
 
+fn root_scope_environment(
+    input: &RunInputValue,
+    limits: ScopeEnvironmentLimits,
+) -> Result<ScopeDataEnvironmentSnapshot, RepositoryError> {
+    ScopeDataEnvironmentSnapshot::build(
+        BTreeMap::from([(
+            ExactDataPortRef::RunInput {
+                schema_digest: input.schema_digest.clone(),
+            },
+            ExactRunValueRef {
+                value_id: input.value_id.clone(),
+                schema_digest: input.schema_digest.clone(),
+                content_digest: input.content_digest.clone(),
+            },
+        )]),
+        limits,
+    )
+    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))
+}
+
 fn orchestration_job_payload_with_wake(
     current: &JobRecord,
     wake_contract: Option<WakeContract>,
@@ -9082,6 +9113,7 @@ async fn mutate_orchestration_controller_step(
     mutations: &ControllerStepMutationIds,
     plan: &RuntimePlan,
     request_digest: &Sha256Digest,
+    scope_environment_limits: ScopeEnvironmentLimits,
     database_now: DateTime<Utc>,
 ) -> Result<AppliedOrchestrationControllerStep, RepositoryError> {
     let targets = shape.activation_targets()?;
@@ -9249,6 +9281,8 @@ async fn mutate_orchestration_controller_step(
                 &StoredControllerScopePayload {
                     controller_node_execution_id: scope_controller_node_execution_id,
                     descriptor,
+                    environment: ScopeDataEnvironmentSnapshot::empty(scope_environment_limits)
+                        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
                 },
                 262_144,
             )?;
@@ -11971,6 +12005,7 @@ async fn mutate_deferred_orchestration_child_run(
     child_bindings: &RunBindingsSnapshot,
     child_ancestry: &insight_platform_orchestrator::RunAncestrySnapshot,
     child_link_payload: &ChildRunLinkPayload,
+    scope_environment_limits: ScopeEnvironmentLimits,
     database_now: DateTime<Utc>,
 ) -> Result<DeferredOrchestrationChildRun, RepositoryError> {
     if !NodeExecutionState::Running.can_transition_to(NodeExecutionState::Waiting) {
@@ -12051,10 +12086,10 @@ async fn mutate_deferred_orchestration_child_run(
 
     let child_scope_payload = TypedPayload::new(
         1,
-        &serde_json::json!({
-            "root_run_id": child_ancestry.root_run_id,
-            "scope_kind": "root",
-        }),
+        &StoredRootScopePayload {
+            root_run_id: child_ancestry.root_run_id.clone(),
+            environment: root_scope_environment(&command.input, scope_environment_limits)?,
+        },
     )?;
     sqlx::query(
         r#"
@@ -17008,6 +17043,7 @@ pub(crate) async fn append_scheduler_event(
 
 pub struct PgRunTransaction {
     transaction: Transaction<'static, Postgres>,
+    scope_environment_limits: ScopeEnvironmentLimits,
 }
 
 impl PgRunTransaction {
@@ -17080,10 +17116,10 @@ impl PgRunTransaction {
 
         let scope_payload = TypedPayload::new(
             1,
-            &serde_json::json!({
-                "scope_kind": "root",
-                "root_run_id": command.run_id,
-            }),
+            &StoredRootScopePayload {
+                root_run_id: command.run_id.clone(),
+                environment: root_scope_environment(&command.input, self.scope_environment_limits)?,
+            },
         )?;
         sqlx::query(
             r#"
@@ -18897,9 +18933,17 @@ enum StoredControllerScopeDescriptor {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct StoredRootScopePayload {
+    root_run_id: ResourceId,
+    environment: ScopeDataEnvironmentSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredControllerScopePayload {
     controller_node_execution_id: ResourceId,
     descriptor: StoredControllerScopeDescriptor,
+    environment: ScopeDataEnvironmentSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]

@@ -263,7 +263,8 @@ struct ExactRunValueRef { value_id: RunValueId, schema_digest: Digest, content_d
 ```
 
 它只拥有port到immutable RunValue的current绑定，不复制值正文、classification或Artifact locator；`run_values`仍是值事实唯一authority。
-root admission把输入绑定写入root Scope；Compute terminal、Map item admission和Loop iteration rollover在同一事务中创建RunValue并以Scope
+root admission把请求RunValue绑定到唯一`RunInput { schema_digest }` key写入root Scope，无需读取Plan Artifact；Compute terminal、
+Map item admission和Loop iteration rollover在同一事务中创建RunValue并以Scope
 version CAS更新环境。解析按当前Scope→parent Scope逐级执行，深度使用`registry_plan.plan_nodes` effective limit，binding数使用
 `run_scheduler.value_refs_per_run` effective limit；每级payload/digest、Run/tenant、RunValue schema/content均重验。普通写禁止覆盖
 已绑定port；只有Plan声明的Map item/Loop carried shadow规则可以在新child Scope绑定同名port。

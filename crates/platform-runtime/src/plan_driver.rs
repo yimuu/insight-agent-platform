@@ -295,8 +295,8 @@ mod tests {
     }
 
     fn materialized() -> (MaterializedTypedPlan, ExactDataPortRef) {
-        let port = ExactDataPortRef {
-            node_id: key("source"),
+        let port = ExactDataPortRef::NodeOutput {
+            producer_node_id: key("source"),
             port_id: DataPortKey::new("predicate".to_owned()).unwrap(),
             schema_digest: digest('1'),
         };

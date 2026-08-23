@@ -50,11 +50,35 @@ impl<'de> Deserialize<'de> for DataPortKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExactDataPortRef {
-    pub node_id: super::PlanNodeKey,
-    pub port_id: DataPortKey,
-    pub schema_digest: Sha256Digest,
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExactDataPortRef {
+    RunInput {
+        schema_digest: Sha256Digest,
+    },
+    NodeOutput {
+        producer_node_id: super::PlanNodeKey,
+        port_id: DataPortKey,
+        schema_digest: Sha256Digest,
+    },
+}
+
+impl ExactDataPortRef {
+    pub fn schema_digest(&self) -> &Sha256Digest {
+        match self {
+            Self::RunInput { schema_digest } | Self::NodeOutput { schema_digest, .. } => {
+                schema_digest
+            }
+        }
+    }
+
+    pub fn producer_node_id(&self) -> Option<&super::PlanNodeKey> {
+        match self {
+            Self::RunInput { .. } => None,
+            Self::NodeOutput {
+                producer_node_id, ..
+            } => Some(producer_node_id),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -261,7 +285,7 @@ fn evaluate_instruction(
             value
                 .validate()
                 .map_err(|_| ExpressionError::InvalidInput)?;
-            if value.schema_digest != port.schema_digest {
+            if &value.schema_digest != port.schema_digest() {
                 return Err(ExpressionError::SchemaMismatch);
             }
             stack.push(value.value.clone());
@@ -766,8 +790,8 @@ mod tests {
     }
 
     fn port(value: &str) -> ExactDataPortRef {
-        ExactDataPortRef {
-            node_id: super::super::PlanNodeKey::new("compute".to_owned()).unwrap(),
+        ExactDataPortRef::NodeOutput {
+            producer_node_id: super::super::PlanNodeKey::new("compute".to_owned()).unwrap(),
             port_id: DataPortKey::new(value.to_owned()).unwrap(),
             schema_digest: digest('1'),
         }

@@ -422,7 +422,7 @@ fn validate_node(
                 != carried_ports.len()
             || carried_ports
                 .iter()
-                .any(|port| &port.next_iteration_port.node_id != node_key) =>
+                .any(|port| port.next_iteration_port.producer_node_id() != Some(node_key)) =>
         {
             Err(OrchestratorError::InvalidPlan)
         }
@@ -448,7 +448,7 @@ fn validate_assignments(
     if outputs.len() != assignments.len()
         || assignments
             .iter()
-            .any(|assignment| &assignment.output_port.node_id != node_key)
+            .any(|assignment| assignment.output_port.producer_node_id() != Some(node_key))
     {
         return Err(OrchestratorError::InvalidPlan);
     }
@@ -593,7 +593,7 @@ impl ControllerEvaluation {
             .len()
             != self.outputs.len()
             || self.outputs.iter().any(|output| {
-                output.value.schema_digest != output.port.schema_digest
+                &output.value.schema_digest != output.port.schema_digest()
                     || output.value.validate().is_err()
             })
             || self
@@ -632,7 +632,7 @@ pub fn derive_expression_controller(
     let mut authorities = BTreeMap::new();
     for input in committed_inputs {
         if input.run_value_id.kind() != ResourceKind::RunValue
-            || input.value.schema_digest != input.port.schema_digest
+            || &input.value.schema_digest != input.port.schema_digest()
             || input.value.validate().is_err()
             || values
                 .insert(input.port.clone(), input.value.clone())
@@ -2224,8 +2224,8 @@ mod tests {
     }
 
     fn exact_port(node: &str, port: &str) -> ExactDataPortRef {
-        ExactDataPortRef {
-            node_id: key(node),
+        ExactDataPortRef::NodeOutput {
+            producer_node_id: key(node),
             port_id: DataPortKey::new(port.to_owned()).unwrap(),
             schema_digest: digest('1'),
         }

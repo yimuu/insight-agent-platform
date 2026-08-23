@@ -251,7 +251,9 @@ struct LoopNode { condition: TypedExpressionProgram, carried_ports: Vec<LoopCarr
 `Compute.assignments`必须按拓扑排序且每个output port只写一次；Branch按声明顺序执行并始终有`otherwise`；Map的`items`
 输出必须是有界array；Loop的`condition`输出必须是non-null boolean。表达式所需input port是Node readiness条件的一部分。
 
-`ExactDataPortRef`标识Plan级producer node/port/schema，不直接等同某个动态NodeExecution。运行时从当前Scope开始按父Scope词法链解析
+`ExactDataPortRef`是closed source enum：`RunInput { schema_digest }`或
+`NodeOutput { producer_node_id, port_id, schema_digest }`；RunInput不是伪造的Plan node，也不存在自由source kind。它标识Plan级
+输入或producer node/port/schema，不直接等同某个动态NodeExecution。运行时从当前Scope开始按父Scope词法链解析
 `ExactDataPortRef`，得到一个`ExactRunValueRef { value_id, schema_digest, content_digest }`；最近Scope胜出。只有Map item port、Loop carried
 port及显式结构化scope entry可以shadow，普通Compute重复绑定同一port必须冲突。解析链不超过现有
 `registry_plan.plan_nodes` effective limit，每Scope binding数和全Run引用数均不超过`run_scheduler.value_refs_per_run` effective limit；

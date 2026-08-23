@@ -42,7 +42,7 @@ pub struct ExactRunValueRef {
 impl ExactRunValueRef {
     pub fn validate_for_port(&self, port: &ExactDataPortRef) -> Result<(), OrchestratorError> {
         if self.value_id.kind() != ResourceKind::RunValue
-            || self.schema_digest != port.schema_digest
+            || &self.schema_digest != port.schema_digest()
         {
             return Err(OrchestratorError::InvalidScopeEnvironment);
         }
@@ -198,8 +198,8 @@ mod tests {
     }
 
     fn port(name: &str) -> ExactDataPortRef {
-        ExactDataPortRef {
-            node_id: PlanNodeKey::new("compute".to_owned()).unwrap(),
+        ExactDataPortRef::NodeOutput {
+            producer_node_id: PlanNodeKey::new("compute".to_owned()).unwrap(),
             port_id: DataPortKey::new(name.to_owned()).unwrap(),
             schema_digest: digest('1'),
         }
