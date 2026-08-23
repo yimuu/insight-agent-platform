@@ -1,0 +1,180 @@
+{
+  "$id": "urn:insight:platform:v1:qualification-evidence-manifest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Content-addressed result closure for one exact candidate, qualification profile, topology and tool set. Missing gates cannot be represented as success.",
+  "properties": {
+    "artifact_links": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "byte_length": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "content_digest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "media_type": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "content_digest",
+          "media_type",
+          "byte_length"
+        ],
+        "type": "object"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "type": "array"
+    },
+    "candidate_manifest_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+      "type": "string"
+    },
+    "qualification_profile_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "results": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_digests": {
+            "items": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "gate": {
+            "enum": [
+              "artifact_role_isolation",
+              "artifact_s3_kms_faults",
+              "backup_restore",
+              "capacity_profile",
+              "clean_baseline_migration",
+              "component_protocols",
+              "cross_tenant_security",
+              "domain_contracts",
+              "event_outbox_recovery",
+              "gitops_rollout_rollback",
+              "gvisor_admission_policy",
+              "gvisor_launcher_rbac",
+              "gvisor_runtime",
+              "job_lease_loss",
+              "lane_saturation",
+              "mcp_remote_protocol",
+              "model_inline_tool_loop",
+              "receipt_replay",
+              "repository_transactions",
+              "rolling_fault_recovery",
+              "run_admission_activation_race",
+              "secret_log_redaction",
+              "signed_supply_chain",
+              "sustained_soak",
+              "upgrade_rollback_rehearsal",
+              "wasi_runtime"
+            ],
+            "type": "string"
+          },
+          "layer": {
+            "enum": [
+              "l1_domain",
+              "l2_repository",
+              "l3_component",
+              "l4_topology",
+              "l5_capacity",
+              "l6_release"
+            ],
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "passed",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "gate",
+          "layer",
+          "outcome",
+          "evidence_digests"
+        ],
+        "type": "object"
+      },
+      "maxItems": 26,
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "seed": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "started_at": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+      "type": "string"
+    },
+    "tool_versions": {
+      "additionalProperties": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxProperties": 64,
+      "minProperties": 1,
+      "propertyNames": {
+        "maxLength": 128,
+        "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+      },
+      "type": "object"
+    },
+    "topology_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "qualification_profile_digest",
+    "candidate_manifest_digest",
+    "topology_digest",
+    "seed",
+    "started_at",
+    "completed_at",
+    "tool_versions",
+    "results",
+    "artifact_links"
+  ],
+  "title": "QualificationEvidenceManifest",
+  "type": "object"
+}

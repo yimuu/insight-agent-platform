@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "check-platform-contracts"
 path = "src/bin/check_platform_contracts.rs"
 
+[[bin]]
+name = "platform-qualification"
+path = "src/bin/platform_qualification.rs"
+
 [dependencies]
 chrono.workspace = true
 jsonschema.workspace = true

@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:aef8b1fb5287ee07a2d62412d9d0cc76f124fd9e9469c1b5194d19ee496c8783",
+  "contract_digest": "sha256:e7631534b338f928f72111372bb051640ae32fba6d3744c8de95d97edad5cc0b",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -9,10 +9,10 @@
       "sha256": "7fd031891a18863c7187471a8cd34a8273fcd62cb23459152e173d81bfa8a4cc"
     },
     {
-      "bytes": 27759,
+      "bytes": 30015,
       "media_type": "application/json",
       "path": "contracts/platform-v1/registries.json",
-      "sha256": "b59c16c957ac1f5086addd3069cce7f161c0f94407c272015e47f9451fcb5645"
+      "sha256": "0f464236a6c69aa1d848d726779216a3698818006b83dbfeeb12cf20e50d3326"
     },
     {
       "bytes": 1949,
@@ -79,6 +79,24 @@
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/candidate-manifest.schema.json",
       "sha256": "7616671f78c56ac682755e955ccc1be83b261d8b18cd376a3b56fde045ec12be"
+    },
+    {
+      "bytes": 2477,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/qualification-profile.schema.json",
+      "sha256": "2d7be3d0fd6ecf97cfd3fd77bb309ef11ad1fac1a01e5f8140ddc05d6e08d309"
+    },
+    {
+      "bytes": 4827,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/qualification-evidence-manifest.schema.json",
+      "sha256": "21d1df5c6da08facf2199b168225d5d0f100e96d3d1c37b58f8be6301785b511"
+    },
+    {
+      "bytes": 972,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/qualification/production-release-profile.json",
+      "sha256": "083a9e27f7a869b807deda367ed182f03129594f321035bcf9baf829d3f7f192"
     },
     {
       "bytes": 1117,

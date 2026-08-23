@@ -37,6 +37,9 @@ CONTRACT_FILES = [
     "contracts/platform-v1/schemas/deployment-closure.schema.json",
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/candidate-manifest.schema.json",
+    "contracts/platform-v1/schemas/qualification-profile.schema.json",
+    "contracts/platform-v1/schemas/qualification-evidence-manifest.schema.json",
+    "contracts/platform-v1/qualification/production-release-profile.json",
     "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
     "contracts/platform-v1/schemas/policies/scheduling-policy.schema.json",
     "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
@@ -527,6 +530,151 @@ def check_candidate_manifest(errors):
         or workers.get("items", {}).get("pattern") != DIGEST.pattern
     ):
         errors.append("CandidateManifest worker manifest closure is invalid")
+
+
+def check_qualification_manifests(errors):
+    registries = load(CONTRACT_ROOT / "registries.json")
+    profile = load(CONTRACT_ROOT / "schemas" / "qualification-profile.schema.json")
+    evidence = load(
+        CONTRACT_ROOT / "schemas" / "qualification-evidence-manifest.schema.json"
+    )
+    production = load(
+        CONTRACT_ROOT / "qualification" / "production-release-profile.json"
+    )
+    expected_layers = [
+        "l1_domain",
+        "l2_repository",
+        "l3_component",
+        "l4_topology",
+        "l5_capacity",
+        "l6_release",
+    ]
+    expected_gates = [
+        ("artifact_role_isolation", "l4_topology"),
+        ("artifact_s3_kms_faults", "l4_topology"),
+        ("backup_restore", "l6_release"),
+        ("capacity_profile", "l5_capacity"),
+        ("clean_baseline_migration", "l2_repository"),
+        ("component_protocols", "l3_component"),
+        ("cross_tenant_security", "l2_repository"),
+        ("domain_contracts", "l1_domain"),
+        ("event_outbox_recovery", "l2_repository"),
+        ("gitops_rollout_rollback", "l6_release"),
+        ("gvisor_admission_policy", "l4_topology"),
+        ("gvisor_launcher_rbac", "l4_topology"),
+        ("gvisor_runtime", "l4_topology"),
+        ("job_lease_loss", "l2_repository"),
+        ("lane_saturation", "l5_capacity"),
+        ("mcp_remote_protocol", "l3_component"),
+        ("model_inline_tool_loop", "l3_component"),
+        ("receipt_replay", "l2_repository"),
+        ("repository_transactions", "l2_repository"),
+        ("rolling_fault_recovery", "l4_topology"),
+        ("run_admission_activation_race", "l2_repository"),
+        ("secret_log_redaction", "l2_repository"),
+        ("signed_supply_chain", "l6_release"),
+        ("sustained_soak", "l5_capacity"),
+        ("upgrade_rollback_rehearsal", "l6_release"),
+        ("wasi_runtime", "l3_component"),
+    ]
+    if registries.get("qualification_layers") != expected_layers:
+        errors.append("18 qualification layer registry is not closed")
+    if registries.get("qualification_gates") != [
+        {"name": name, "layer": layer} for name, layer in expected_gates
+    ]:
+        errors.append("18 qualification gate/layer registry is not closed")
+
+    profile_fields = {
+        "schema_version",
+        "profile_name",
+        "environment_class",
+        "required_gates",
+        "minimum_soak_seconds",
+        "requires_runsc",
+        "requires_multi_node",
+        "requires_signed_supply_chain",
+    }
+    profile_properties = profile.get("properties", {})
+    if (
+        profile.get("additionalProperties") is not False
+        or set(profile.get("required", [])) != profile_fields
+        or set(profile_properties) != profile_fields
+    ):
+        errors.append("QualificationProfile schema is not closed")
+    if profile_properties.get("required_gates", {}).get("items", {}).get("enum") != [
+        name for name, _ in expected_gates
+    ]:
+        errors.append("QualificationProfile gates differ from the registry")
+    if profile_properties.get("environment_class", {}).get("enum") != [
+        "development",
+        "staging",
+        "production",
+    ]:
+        errors.append("QualificationProfile environment class is not closed")
+    if (
+        set(production) != profile_fields
+        or production.get("schema_version") != 1
+        or production.get("profile_name") != "production-release"
+        or production.get("environment_class") != "production"
+        or production.get("required_gates") != [name for name, _ in expected_gates]
+        or not isinstance(production.get("minimum_soak_seconds"), int)
+        or production.get("minimum_soak_seconds", 0) <= 0
+        or production.get("requires_runsc") is not True
+        or production.get("requires_multi_node") is not True
+        or production.get("requires_signed_supply_chain") is not True
+    ):
+        errors.append("production QualificationProfile is not the complete L1-L6 closure")
+
+    evidence_fields = {
+        "schema_version",
+        "qualification_profile_digest",
+        "candidate_manifest_digest",
+        "topology_digest",
+        "seed",
+        "started_at",
+        "completed_at",
+        "tool_versions",
+        "results",
+        "artifact_links",
+    }
+    evidence_properties = evidence.get("properties", {})
+    if (
+        evidence.get("additionalProperties") is not False
+        or set(evidence.get("required", [])) != evidence_fields
+        or set(evidence_properties) != evidence_fields
+    ):
+        errors.append("QualificationEvidenceManifest schema is not closed")
+    for field in [
+        "qualification_profile_digest",
+        "candidate_manifest_digest",
+        "topology_digest",
+    ]:
+        if evidence_properties.get(field, {}).get("pattern") != DIGEST.pattern:
+            errors.append(f"QualificationEvidenceManifest {field} is not a digest")
+    result = evidence_properties.get("results", {}).get("items", {})
+    result_fields = {"gate", "layer", "outcome", "evidence_digests"}
+    if (
+        result.get("additionalProperties") is not False
+        or set(result.get("required", [])) != result_fields
+        or set(result.get("properties", {})) != result_fields
+        or result.get("properties", {}).get("gate", {}).get("enum")
+        != [name for name, _ in expected_gates]
+        or result.get("properties", {}).get("layer", {}).get("enum")
+        != expected_layers
+        or result.get("properties", {}).get("outcome", {}).get("enum")
+        != ["passed", "failed"]
+    ):
+        errors.append("QualificationEvidenceManifest gate result is not closed")
+    artifact = evidence_properties.get("artifact_links", {}).get("items", {})
+    artifact_fields = {"name", "content_digest", "media_type", "byte_length"}
+    if (
+        artifact.get("additionalProperties") is not False
+        or set(artifact.get("required", [])) != artifact_fields
+        or set(artifact.get("properties", {})) != artifact_fields
+        or artifact.get("properties", {}).get("content_digest", {}).get("pattern")
+        != DIGEST.pattern
+    ):
+        errors.append("QualificationEvidenceManifest artifact link is not closed")
 
 
 def check_nominal_schemas(errors):
@@ -1281,6 +1429,7 @@ def main():
     check_foundation_surfaces(errors)
     check_worker_manifest(errors)
     check_candidate_manifest(errors)
+    check_qualification_manifests(errors)
     check_nominal_schemas(errors)
     check_contract_manifest(errors)
     check_spec_registry_alignment(errors)

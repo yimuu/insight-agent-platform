@@ -718,6 +718,120 @@
     "artifact_verify",
     "artifact_delete"
   ],
+  "qualification_gates": [
+    {
+      "layer": "l4_topology",
+      "name": "artifact_role_isolation"
+    },
+    {
+      "layer": "l4_topology",
+      "name": "artifact_s3_kms_faults"
+    },
+    {
+      "layer": "l6_release",
+      "name": "backup_restore"
+    },
+    {
+      "layer": "l5_capacity",
+      "name": "capacity_profile"
+    },
+    {
+      "layer": "l2_repository",
+      "name": "clean_baseline_migration"
+    },
+    {
+      "layer": "l3_component",
+      "name": "component_protocols"
+    },
+    {
+      "layer": "l2_repository",
+      "name": "cross_tenant_security"
+    },
+    {
+      "layer": "l1_domain",
+      "name": "domain_contracts"
+    },
+    {
+      "layer": "l2_repository",
+      "name": "event_outbox_recovery"
+    },
+    {
+      "layer": "l6_release",
+      "name": "gitops_rollout_rollback"
+    },
+    {
+      "layer": "l4_topology",
+      "name": "gvisor_admission_policy"
+    },
+    {
+      "layer": "l4_topology",
+      "name": "gvisor_launcher_rbac"
+    },
+    {
+      "layer": "l4_topology",
+      "name": "gvisor_runtime"
+    },
+    {
+      "layer": "l2_repository",
+      "name": "job_lease_loss"
+    },
+    {
+      "layer": "l5_capacity",
+      "name": "lane_saturation"
+    },
+    {
+      "layer": "l3_component",
+      "name": "mcp_remote_protocol"
+    },
+    {
+      "layer": "l3_component",
+      "name": "model_inline_tool_loop"
+    },
+    {
+      "layer": "l2_repository",
+      "name": "receipt_replay"
+    },
+    {
+      "layer": "l2_repository",
+      "name": "repository_transactions"
+    },
+    {
+      "layer": "l4_topology",
+      "name": "rolling_fault_recovery"
+    },
+    {
+      "layer": "l2_repository",
+      "name": "run_admission_activation_race"
+    },
+    {
+      "layer": "l2_repository",
+      "name": "secret_log_redaction"
+    },
+    {
+      "layer": "l6_release",
+      "name": "signed_supply_chain"
+    },
+    {
+      "layer": "l5_capacity",
+      "name": "sustained_soak"
+    },
+    {
+      "layer": "l6_release",
+      "name": "upgrade_rollback_rehearsal"
+    },
+    {
+      "layer": "l3_component",
+      "name": "wasi_runtime"
+    }
+  ],
+  "qualification_layers": [
+    "l1_domain",
+    "l2_repository",
+    "l3_component",
+    "l4_topology",
+    "l5_capacity",
+    "l6_release"
+  ],
   "quota_accounting_modes": [
     "leased",
     "consumable",

@@ -49,7 +49,12 @@ pub use nominal::{
 pub use operation::*;
 pub use qualification::{
     CandidateManifest, CandidateManifestError, ComponentRole, GitCommit, NewCandidateManifest,
-    MAX_CANDIDATE_COMPONENT_IMAGES, MAX_CANDIDATE_WORKER_MANIFESTS,
+    QualificationArtifactLink, QualificationEnvironmentClass, QualificationEvidenceManifest,
+    QualificationGate, QualificationGateEvidence, QualificationLayer, QualificationManifestError,
+    QualificationOutcome, QualificationProfile, MAX_CANDIDATE_COMPONENT_IMAGES,
+    MAX_CANDIDATE_WORKER_MANIFESTS, MAX_QUALIFICATION_ARTIFACTS, MAX_QUALIFICATION_NAME_BYTES,
+    MAX_QUALIFICATION_TOOL_VERSIONS, MAX_QUALIFICATION_VERSION_BYTES,
+    QUALIFICATION_EVIDENCE_VERSION, QUALIFICATION_PROFILE_VERSION,
 };
 pub use registry::{
     require_cursor_purpose, validate_public_event_envelope, AgentAuthoringMode, ApiProblemCode,

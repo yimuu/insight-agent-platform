@@ -1834,6 +1834,9 @@ pub const CONTRACT_MANIFEST_INPUTS: &[&str] = &[
     "contracts/platform-v1/schemas/deployment-closure.schema.json",
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/candidate-manifest.schema.json",
+    "contracts/platform-v1/schemas/qualification-profile.schema.json",
+    "contracts/platform-v1/schemas/qualification-evidence-manifest.schema.json",
+    "contracts/platform-v1/qualification/production-release-profile.json",
     "contracts/platform-v1/schemas/policies/artifact-retention-policy.schema.json",
     "contracts/platform-v1/schemas/policies/scheduling-policy.schema.json",
     "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
@@ -1889,6 +1892,10 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
             json!({"name": rank.as_str(), "ordinal": rank.ordinal()})
         }).collect::<Vec<_>>(),
         "work_classes": wire_values(WorkClass::ALL, |value| value.as_str()),
+        "qualification_layers": crate::QualificationLayer::ALL.iter().map(|layer| layer.as_str()).collect::<Vec<_>>(),
+        "qualification_gates": crate::QualificationGate::ALL.iter().map(|gate| {
+            json!({"name": gate.as_str(), "layer": gate.layer().as_str()})
+        }).collect::<Vec<_>>(),
         "artifact_purposes": wire_values(ArtifactPurpose::ALL, |value| value.as_str()),
         "artifact_reference_kinds": wire_values(ArtifactReferenceKind::ALL, |value| value.as_str()),
         "artifact_grant_operations": wire_values(ArtifactGrantOperation::ALL, |value| value.as_str()),
@@ -2027,6 +2034,9 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
     let deployment_closure_schema = deployment_closure_schema();
     let worker_manifest_schema = worker_manifest_schema();
     let candidate_manifest_schema = candidate_manifest_schema();
+    let qualification_profile_schema = qualification_profile_schema();
+    let qualification_evidence_manifest_schema = qualification_evidence_manifest_schema();
+    let production_qualification_profile = production_qualification_profile();
     let artifact_retention_policy_schema = artifact_retention_policy_schema();
     let scheduling_policy_schema = scheduling_policy_schema();
     let public_run_payload_schema = durable_public_run_payload_schema();
@@ -2089,6 +2099,18 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
         (
             "schemas/candidate-manifest.schema.json",
             pretty(&candidate_manifest_schema),
+        ),
+        (
+            "schemas/qualification-profile.schema.json",
+            pretty(&qualification_profile_schema),
+        ),
+        (
+            "schemas/qualification-evidence-manifest.schema.json",
+            pretty(&qualification_evidence_manifest_schema),
+        ),
+        (
+            "qualification/production-release-profile.json",
+            pretty(&production_qualification_profile),
         ),
         (
             "schemas/policies/artifact-retention-policy.schema.json",
@@ -2625,6 +2647,175 @@ fn candidate_manifest_schema() -> Value {
                 "type": "string",
                 "format": "date-time",
                 "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"
+            }
+        }
+    })
+}
+
+fn qualification_profile_schema() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:insight:platform:v1:qualification-profile",
+        "title": "QualificationProfile",
+        "description": "Versioned L1-L6 qualification requirements referenced by CandidateManifest. It is a GitOps/CI artifact, not runtime state.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "schema_version",
+            "profile_name",
+            "environment_class",
+            "required_gates",
+            "minimum_soak_seconds",
+            "requires_runsc",
+            "requires_multi_node",
+            "requires_signed_supply_chain"
+        ],
+        "properties": {
+            "schema_version": {"type": "integer", "const": crate::QUALIFICATION_PROFILE_VERSION},
+            "profile_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": crate::MAX_QUALIFICATION_NAME_BYTES,
+                "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+                "x-platform-max-bytes": crate::MAX_QUALIFICATION_NAME_BYTES
+            },
+            "environment_class": {
+                "type": "string",
+                "enum": ["development", "staging", "production"]
+            },
+            "required_gates": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": crate::QualificationGate::ALL.len(),
+                "uniqueItems": true,
+                "items": {
+                    "type": "string",
+                    "enum": crate::QualificationGate::ALL.iter().map(|gate| gate.as_str()).collect::<Vec<_>>()
+                },
+                "description": "Canonical ascending gate set; production Rust validation requires the complete L1-L6 closure."
+            },
+            "minimum_soak_seconds": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
+            "requires_runsc": {"type": "boolean"},
+            "requires_multi_node": {"type": "boolean"},
+            "requires_signed_supply_chain": {"type": "boolean"}
+        }
+    })
+}
+
+fn production_qualification_profile() -> Value {
+    serde_json::to_value(crate::QualificationProfile {
+        schema_version: crate::QUALIFICATION_PROFILE_VERSION,
+        profile_name: "production-release".to_owned(),
+        environment_class: crate::QualificationEnvironmentClass::Production,
+        required_gates: crate::QualificationGate::ALL.to_vec(),
+        minimum_soak_seconds: 86_400,
+        requires_runsc: true,
+        requires_multi_node: true,
+        requires_signed_supply_chain: true,
+    })
+    .expect("production qualification profile serializes")
+}
+
+fn qualification_evidence_manifest_schema() -> Value {
+    let digest = json!({"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"});
+    let timestamp = json!({
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"
+    });
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:insight:platform:v1:qualification-evidence-manifest",
+        "title": "QualificationEvidenceManifest",
+        "description": "Content-addressed result closure for one exact candidate, qualification profile, topology and tool set. Missing gates cannot be represented as success.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "schema_version",
+            "qualification_profile_digest",
+            "candidate_manifest_digest",
+            "topology_digest",
+            "seed",
+            "started_at",
+            "completed_at",
+            "tool_versions",
+            "results",
+            "artifact_links"
+        ],
+        "properties": {
+            "schema_version": {"type": "integer", "const": crate::QUALIFICATION_EVIDENCE_VERSION},
+            "qualification_profile_digest": digest.clone(),
+            "candidate_manifest_digest": digest.clone(),
+            "topology_digest": digest.clone(),
+            "seed": {"type": "integer", "minimum": 0, "maximum": crate::MAX_SAFE_JSON_INTEGER},
+            "started_at": timestamp.clone(),
+            "completed_at": timestamp,
+            "tool_versions": {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": crate::MAX_QUALIFICATION_TOOL_VERSIONS,
+                "propertyNames": {
+                    "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+                    "maxLength": crate::MAX_QUALIFICATION_NAME_BYTES
+                },
+                "additionalProperties": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": crate::MAX_QUALIFICATION_VERSION_BYTES
+                }
+            },
+            "results": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": crate::QualificationGate::ALL.len(),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["gate", "layer", "outcome", "evidence_digests"],
+                    "properties": {
+                        "gate": {
+                            "type": "string",
+                            "enum": crate::QualificationGate::ALL.iter().map(|gate| gate.as_str()).collect::<Vec<_>>()
+                        },
+                        "layer": {
+                            "type": "string",
+                            "enum": crate::QualificationLayer::ALL.iter().map(|layer| layer.as_str()).collect::<Vec<_>>()
+                        },
+                        "outcome": {"type": "string", "enum": ["passed", "failed"]},
+                        "evidence_digests": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": crate::MAX_QUALIFICATION_ARTIFACTS,
+                            "uniqueItems": true,
+                            "items": digest.clone()
+                        }
+                    }
+                }
+            },
+            "artifact_links": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": crate::MAX_QUALIFICATION_ARTIFACTS,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "content_digest", "media_type", "byte_length"],
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": crate::MAX_QUALIFICATION_NAME_BYTES,
+                            "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+                        },
+                        "content_digest": digest,
+                        "media_type": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": crate::MAX_QUALIFICATION_NAME_BYTES
+                        },
+                        "byte_length": {"type": "integer", "minimum": 1, "maximum": crate::MAX_SAFE_JSON_INTEGER}
+                    }
+                }
             }
         }
     })

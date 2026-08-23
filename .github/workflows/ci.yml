@@ -35,7 +35,12 @@ jobs:
       - name: Check DSL cutover residuals
         run: bash scripts/check-cutover-residuals.sh
       - name: Check Platform v1 machine contracts and fixtures
-        run: python3 scripts/check-platform-v1-contracts.py && cargo run --locked -p insight-platform-contracts --bin check-platform-contracts
+        run: |
+          python3 scripts/check-platform-v1-contracts.py
+          cargo run --locked -p insight-platform-contracts --bin check-platform-contracts
+          cargo run --locked -p insight-platform-contracts --bin platform-qualification -- \
+            validate-production-profile \
+            contracts/platform-v1/qualification/production-release-profile.json
       - name: Check Platform v1 PostgreSQL schema contract
         run: python3 scripts/check-platform-postgres-schema.py && cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract
       - name: Check crate boundaries and dependency feature baseline
