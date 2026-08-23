@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-175 |
+| 状态 | Accepted / CR-176 |
 | 日期 | 2026-08-23 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -39,6 +39,11 @@
 > instruction/input/stack上限，但18拥有的profile registry没有对应typed字段。CR-175在18补齐三个closed limit及profile version，
 > 05明确绝对上限与deployment profile的双重约束；00～18完成容量、schema、错误和fixture影响复核后恢复实施授权。
 
+> 2026-08-23 implementation feedback（CR-176）：PostgreSQL production Plan driver接线时确认现有`run_values`只保存immutable
+> value，`run_nodes.output_value_id`只能表达单一最终输出，无法作为多个exact Plan data port的绑定权威；动态Map/Loop scope也会产生同一
+> Plan port的不同实例。CR-176把port→RunValue current environment收敛到既有Scope aggregate typed payload，冻结词法scope解析与原子
+> CAS，并对齐Inline RunValue数据库结构上限；不新增表或第二value authority。
+
 ## 1. 决策摘要
 
 Platform v2 采用以下不可逆的架构决定：
@@ -65,14 +70,14 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Accepted / CR-175 | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | Accepted / CR-176 | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-173 | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-173 | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-173 | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-176 | PostgreSQL、事务、Outbox、Lease、恢复 |
 | 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-173 | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-175 | Agent Interface、Typed Plan、Model Loop |
-| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-174 | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-174 | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-176 | Agent Interface、Typed Plan、Model Loop |
+| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-176 | Run、NodeExecution、暂停、重试、取消 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-176 | Scheduler、Worker、Lease、背压和隔舱并发 |
 | 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-173 | Child Run、父子通信、取消传播和循环限制 |
 | 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / CR-173 | Capability Interface、Implementation、Registry |
 | 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-173 | 调用协议、幂等、同步快路径、异步恢复 |

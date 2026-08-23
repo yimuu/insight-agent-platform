@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
+| 状态 | Accepted / CR-176 |
 | 日期 | 2026-08-20 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
@@ -98,6 +98,7 @@ Receipt
 
 - Resource active switch + Event/Outbox + Receipt；
 - Run admission + frozen bindings + initial Node/Job + quota + Event/Outbox + Receipt；
+- expression controller commit + immutable RunValue rows + current Scope data-environment CAS + Node/Job + quota + Event/Outbox + Receipt；
 - parent/child Run link + child frozen bindings + initial work；
 - Job terminal + owner terminal/wake + quota settle + Event/Outbox；
 - Task terminal + owner wake + Receipt/Event/Outbox；
@@ -188,6 +189,11 @@ UnknownOutcome | InternalInvariant`。retryable是由owner policy决定的属性
 - ArtifactLink在owner正常version推进后仍有效，release使用current owner fence；
 - transaction kill/deadlock/serialization fixture不留半成品owner/Event/Outbox/Receipt；
 - JSONB/registry/codegen/conformance与size limits全部fail closed。
+
+`run_values`行拥有immutable值identity/schema/content/storage；Scope aggregate的bounded typed JSONB只保存
+`ExactDataPortRef -> ExactRunValueRef` current binding。不得在RunValue行增加可变“current port”列，也不得以
+`run_nodes.output_value_id`表达多port环境。Inline JSONB结构guard必须至少容纳HardLimitProfile的
+`run_scheduler.inline_value_bytes.hard_max`且仍由Rust按effective Q1/deployment值先行收紧；两者漂移时startup/schema qualification fail closed。
 
 ## 14. 明确推迟
 

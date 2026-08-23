@@ -1,13 +1,17 @@
-# Platform v2 00～18 Cross-review（CR-175）
+# Platform v2 00～18 Cross-review（CR-176）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-175 Accepted |
+| 状态 | Closed / CR-176 Accepted |
 | 日期 | 2026-08-23 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-175 implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-176 implementation feedback |
 | 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft/Deployment/Run admission authority和fixture闭包 |
 
 ## 1. 结论
+
+CR-176发现的data-port binding P1已按03→05→06→07关闭：immutable value仍由`run_values`唯一拥有，既有Scope aggregate payload
+拥有bounded exact port→RunValue current environment；root/Compute/Map/Loop以同事务Scope CAS更新，Scheduler按bounded词法scope链解析并
+在commit重验。Inline JSONB结构guard与profile hard max对齐。不新增表、current projection、trigger或WorkClass。
 
 CR-175发现的expression profile P1已按05→18关闭：`HardLimitProfile v5`为instruction/input/stack增加独立typed limit，
 代码绝对上限、profile hard max、deployment effective value和overflow outcome形成单一闭包；旧version、缺字段、错误unit、零值或放大
@@ -24,7 +28,7 @@ immutable exact Deployment closure、Resource active binding和AdministrativeGat
 lifecycle、generated owner schema与八类public route保持同一authority。Acceptance 13～17的正负、并发、Receipt/Event/Outbox与
 machine-contract门禁通过，00～18全量复核未发现新的P0/P1合同冲突。
 
-因此CR-175恢复Implementation Authorization并将受影响合同推进为Accepted。Accepted只表示target合同闭合；它不表示target已成为
+因此CR-176恢复Implementation Authorization并将受影响合同推进为Accepted。Accepted只表示target合同闭合；它不表示target已成为
 current production behavior，也不替代18要求的L4～L6、CapacityProfile、restore/soak、signed supply-chain或GitOps cutover证据。
 
 CR-171继承CR-170的public Artifact DTO与可信服务交接结论，并消解实施反馈发现的tenant Artifact default Policy authority缺口。全量审查确认首版目标收敛为：
@@ -69,13 +73,13 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / CR-175 | target协议、authority与current-behavior边界闭合 |
-| 01～04 | Accepted / CR-173（CR-175影响复核） | owner、ID、Resource、事务与Policy authority不变 |
-| 05 | Accepted / CR-175 | typed expression及其独立versioned hard limits闭合 |
-| 06～07 | Accepted / CR-174（CR-175影响复核） | derived observation、RunValue原子提交与Scheduler边界不变 |
-| 08～16 | Accepted / CR-173（CR-175影响复核） | Subagent/Capability/Skill/Context/MCP/Sandbox/Artifact/Model owner合同不变 |
-| 17 | Accepted / CR-174（CR-175影响复核） | public禁止observation注入与错误投影不变 |
-| 18 | Accepted / CR-175 | profile v5、物理identity/permit与分层资格闭合 |
+| 00 | Accepted / CR-176 | target协议、authority与current-behavior边界闭合 |
+| 01～02、04 | Accepted / CR-173（CR-176影响复核） | owner、ID、Resource与Policy authority不变 |
+| 03 | Accepted / CR-176 | Scope binding/RunValue/Inline结构与原子事务闭合 |
+| 05～07 | Accepted / CR-176 | typed expression、scope解析、derived observation与Scheduler边界闭合 |
+| 08～16 | Accepted / CR-173（CR-176影响复核） | Subagent/Capability/Skill/Context/MCP/Sandbox/Artifact/Model owner合同不变 |
+| 17 | Accepted / CR-174（CR-176影响复核） | public禁止observation注入与错误投影不变 |
+| 18 | Accepted / CR-175（CR-176影响复核） | profile v5、物理identity/permit与分层资格不变 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | In Progress | L1～L3与public contract已恢复；L4～L6、CapacityProfile和GitOps cutover仍待外部资格环境 |
@@ -116,6 +120,22 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 CR-175全量影响复核确认01～04、06～17无需字段或语义修改；Artifact/Model Inline、remote MCP、WASI+gVisor、GitOps release、
 23/22表预算与`/v1` clean-cut结论保持不变。
+
+### 2.3 CR-176 data-port environment cross-review
+
+- **State ownership**：RunValue row拥有immutable value；Scope payload只拥有current port binding。Node单一`output_value_id`继续只表示
+  leaf/final output，不承担多port环境；Event/Receipt只保存evidence digest。
+- **IDs与schema**：binding使用Plan `ExactDataPortRef`和`ExactRunValueRef`，同时重验tenant/run/schema/content；Scope payload schema version、
+  size、binding count和canonical digest closed，unknown field fail closed。
+- **事务与并发**：root input、Compute outputs、Map item和Loop carried binding与RunValue insert、Scope version CAS、Node/Job、quota、
+  Receipt/Event/Outbox同事务；duplicate port、stale Scope或Job fence只有一个winner且无孤立RunValue。
+- **权限与隔舱**：只有Scheduler owner transaction读写environment；public/API、NATS或Artifact RPC不能提交port binding。Artifact正文仍按15授权读取。
+- **容量与恢复**：词法lookup深度和binding count有profile hard limit；Inline DB结构guard容纳hard max，runtime按更小effective值拒绝；重启从
+  Scope payload和immutable RunValue恢复，不依赖进程缓存。
+- **fixtures**：L1覆盖digest/shadow/duplicate/depth，L2 real PostgreSQL覆盖root/Compute/Map/Loop原子CAS与跨scope/tenant负向，L3证明
+  两个Map item的同Plan port不串值以及crash后重放一致。
+
+CR-176全量影响复核确认不改变public DTO、外部协议、Artifact/Model/MCP/Sandbox拓扑、23/22表预算或GitOps发布权威。
 
 ## 3. 状态所有权
 
@@ -342,10 +362,12 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 17. OpenAPI/owner schema/protobuf/fixtures逐字段一致，八类route均有真实handler与positive/negative conformance，ContextDataset仍只有build/generation API。
 18. HardLimitProfile v5的三个expression字段在Rust owner、generated schema、checked-in profile和Scheduler Plan validation中逐字段一致；旧version、
     缺字段、wrong unit、zero、profile放大与超过代码绝对上限的fixture全部fail closed。
+19. Scope data environment owner type、baseline JSONB结构guard与repository transaction一致；fresh PostgreSQL证明多output、词法shadow、
+    stale Scope/Job fence、跨tenant/run/digest及Map/Loop动态实例隔离，且schema仍为23/22表。
 
 ## 16. 未决项
 
-CR-175合同范围没有未关闭P0/P1。Acceptance 18与既有13～17形成单一闭包，00～18状态为Accepted。
+CR-176合同范围没有未关闭P0/P1。Acceptance 19与既有13～18形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-175）
+# Platform v2 四阶段实现计划（CR-176）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-175 contracts accepted; L4～L6 pending |
+| 状态 | In Progress / CR-176 contracts accepted; L4～L6 pending |
 | 日期 | 2026-08-23 |
-| 合同输入 | 00～18、cross-review CR-175/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-176/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则
@@ -21,6 +21,9 @@ materialize/evaluate/first-winner提交边界。此前手工注入`ControllerObs
 
 CR-175补齐`HardLimitProfile v5`的expression instructions/input ports/stack depth三项typed limit。Phase 1 machine schema、fixture、
 startup validation与Phase 2 Plan publication/evaluation必须消费同一profile字段；不得借用其他Plan limit或只依赖代码常量。
+
+CR-176冻结Scope aggregate内的exact data-port environment。Phase 1 baseline须对齐Inline JSONB结构hard max；Phase 2必须实现
+root input binding、bounded lexical lookup、Compute/Map/Loop原子RunValue+Scope CAS，并证明同一Plan port在动态Scope间不串值。
 
 实现遵循以下顺序：
 

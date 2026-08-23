@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-175 |
+| 状态 | Accepted / CR-176 |
 | 日期 | 2026-08-23 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -250,6 +250,10 @@ struct LoopNode { condition: TypedExpressionProgram, carried_ports: Vec<LoopCarr
 
 `Compute.assignments`必须按拓扑排序且每个output port只写一次；Branch按声明顺序执行并始终有`otherwise`；Map的`items`
 输出必须是有界array；Loop的`condition`输出必须是non-null boolean。表达式所需input port是Node readiness条件的一部分。
+
+`ExactDataPortRef`标识Plan级producer node/port/schema，不直接等同某个动态NodeExecution。运行时从当前Scope开始按父Scope词法链解析
+`ExactDataPortRef`，得到一个`ExactRunValueRef { value_id, schema_digest, content_digest }`；最近Scope胜出。只有Map item port、Loop carried
+port及显式结构化scope entry可以shadow，普通Compute重复绑定同一port必须冲突。解析深度受Plan/scope hard limit约束，不扫描整个Run。
 
 ## 9. Agent Deployment
 

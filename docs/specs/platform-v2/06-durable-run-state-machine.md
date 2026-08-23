@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-174 |
+| 状态 | Accepted / CR-176 |
 | 日期 | 2026-08-23 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
@@ -251,6 +251,22 @@ error_boundary`。
 
 Child Agent 是独立 Run，不作为本表中的嵌套 Scope；父子关系由 ChildRunLink 表示。
 
+每个Scope current payload内嵌一个bounded closed环境：
+
+```rust
+struct ScopeDataEnvironmentSnapshot {
+    schema_version: u32,
+    bindings: BTreeMap<ExactDataPortRef, ExactRunValueRef>,
+    canonical_digest: Digest,
+}
+struct ExactRunValueRef { value_id: RunValueId, schema_digest: Digest, content_digest: Digest }
+```
+
+它只拥有port到immutable RunValue的current绑定，不复制值正文、classification或Artifact locator；`run_values`仍是值事实唯一authority。
+root admission把输入绑定写入root Scope；Compute terminal、Map item admission和Loop iteration rollover在同一事务中创建RunValue并以Scope
+version CAS更新环境。解析按当前Scope→parent Scope逐级执行，最多到profile scope depth；每级payload/digest、Run/tenant、RunValue
+schema/content均重验。普通写禁止覆盖已绑定port；只有Plan声明的Map item/Loop carried shadow规则可以在新child Scope绑定同名port。
+
 ## 9. Control Token 与 Data Value
 
 Scheduler 通过持久化 control token 决定 readiness：
@@ -300,7 +316,7 @@ Controller 不执行网络 I/O，不持有跨 await transaction，不依赖进�
 Branch/Map/Loop/Compute的`ControllerObservation`不是authority或可调用API参数，而是05 closed evaluator对exact Plan程序与
 immutable RunValue的派生结果。执行分两段：Scheduler可在事务外物化/验证Plan和RunValue正文并纯计算；提交事务必须重新锁定
 Job/Run/Node current version，重验所有input `ValueRef` identity/schema/content digest、expression digest与输出canonical digest，
-然后原子写入Compute产生的immutable RunValue、Scope/Node/Job转换、Receipt/Event/Outbox。任一输入已改变、缺失、跨run/tenant、
+然后原子写入Compute产生的immutable RunValue、Scope environment CAS、Node/Job转换、Receipt/Event/Outbox。任一输入已改变、缺失、跨run/tenant、
 Artifact正文不匹配或fence丢失时整批不可见。RunValue不可变，因此成功提交后无需另建observation current projection；Receipt/Event
 只保存bounded evidence digest与引用。
 
