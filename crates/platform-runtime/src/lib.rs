@@ -4,6 +4,7 @@
 //! process-local Worker capacity to durable claim transactions and owns role-scoped runtime I/O.
 
 mod execution;
+mod generation_handler;
 mod identity;
 mod orchestration;
 mod plan_materialization;
@@ -14,6 +15,7 @@ mod sandbox_outcome;
 mod sandbox_recovery;
 
 pub use execution::*;
+pub use generation_handler::*;
 pub use identity::*;
 pub use insight_platform_sandbox_rpc::{
     NatsSandboxControlListener, NatsSandboxControlSignalSink, NatsSandboxControlTransportConfig,

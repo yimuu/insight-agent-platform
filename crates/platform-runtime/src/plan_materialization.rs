@@ -1,5 +1,6 @@
 //! Exact Scheduler materialization of the immutable Typed Plan bound to a running Job.
 
+use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_artifacts::{
     ArtifactObjectReadAuthorityError, SchedulerTypedPlanLease, SchedulerTypedPlanReadError,
@@ -44,6 +45,15 @@ pub struct SchedulerPlanMaterializer<A, R> {
     authority: Arc<A>,
     reader: Arc<R>,
     config: SchedulerPlanMaterializerConfig,
+}
+
+#[async_trait]
+pub trait TypedPlanMaterializer: Send + Sync + 'static {
+    async fn materialize_plan(
+        &self,
+        job: &JobRecord,
+        fence: &JobFence,
+    ) -> Result<MaterializedTypedPlan, SchedulerPlanMaterializerError>;
 }
 
 impl<A, R> SchedulerPlanMaterializer<A, R>
@@ -142,6 +152,21 @@ where
             return Err(SchedulerPlanMaterializerError::Integrity);
         }
         Ok(MaterializedTypedPlan { request, plan })
+    }
+}
+
+#[async_trait]
+impl<A, R> TypedPlanMaterializer for SchedulerPlanMaterializer<A, R>
+where
+    A: SchedulerTypedPlanRequestResolver + 'static,
+    R: SchedulerTypedPlanReader + 'static,
+{
+    async fn materialize_plan(
+        &self,
+        job: &JobRecord,
+        fence: &JobFence,
+    ) -> Result<MaterializedTypedPlan, SchedulerPlanMaterializerError> {
+        self.materialize(job, fence).await
     }
 }
 

@@ -203,6 +203,13 @@ pub struct StartedOrchestrationJob {
 }
 
 impl StartedOrchestrationJob {
+    pub(crate) fn from_parts(
+        claimed: insight_platform_postgres::repository::ClaimedOrchestrationJob,
+        started: JobRecord,
+    ) -> Self {
+        Self { claimed, started }
+    }
+
     pub fn claimed(&self) -> &insight_platform_postgres::repository::ClaimedOrchestrationJob {
         &self.claimed
     }
@@ -310,7 +317,7 @@ where
                     };
                     validate_started_job(&claimed.job, &started)?;
                     fence.expected_job_version = started.version;
-                    return Ok((StartedOrchestrationJob { claimed, started }, fence));
+                    return Ok((StartedOrchestrationJob::from_parts(claimed, started), fence));
                 }
                 Err(GenerationStoreFailure::Unavailable)
                     if chrono::Utc::now() < lease_expires_at =>
