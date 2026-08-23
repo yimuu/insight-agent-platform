@@ -11,7 +11,8 @@ use insight_platform_artifacts::{
     ArtifactDeleteObjectAuthority, ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError,
     ArtifactScanObjectReadAuthority, ArtifactScanRequest, AuthorizedArtifactDeleteObject,
     AuthorizedArtifactObjectRead, AuthorizedArtifactScanObjectRead, DeleteArtifactBlobGeneration,
-    GatewayArtifactReadRequest,
+    GatewayArtifactReadRequest, SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest,
+    SchedulerTypedPlanReader,
 };
 use insight_platform_contracts::{parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_sandbox::{
@@ -310,6 +311,11 @@ pub struct BrokeredGatewayArtifactReader {
     core: ArtifactBrokerCore,
 }
 
+pub struct BrokeredSchedulerTypedPlanReader {
+    authority: Arc<dyn ArtifactObjectReadAuthority<SchedulerTypedPlanReadRequest>>,
+    core: ArtifactBrokerCore,
+}
+
 pub struct BrokeredArtifactScannerReader {
     authority: Arc<dyn ArtifactScanObjectReadAuthority<ArtifactScanRequest>>,
     core: ArtifactBrokerCore,
@@ -442,6 +448,20 @@ impl ArtifactReadRequest for GatewayArtifactReadRequest {
     }
 }
 
+impl ArtifactReadRequest for SchedulerTypedPlanReadRequest {
+    fn deadline(&self) -> chrono::DateTime<Utc> {
+        self.deadline
+    }
+
+    fn maximum_bytes(&self) -> usize {
+        self.maximum_bytes
+    }
+
+    fn artifact(&self) -> Option<&insight_platform_contracts::ArtifactRef> {
+        Some(&self.artifact)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArtifactBrokerReadError {
     Unavailable,
@@ -490,6 +510,42 @@ impl BrokeredGatewayArtifactReader {
     }
 }
 
+impl BrokeredSchedulerTypedPlanReader {
+    pub fn new(
+        authority: Arc<dyn ArtifactObjectReadAuthority<SchedulerTypedPlanReadRequest>>,
+        unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
+        stores: InstalledArtifactObjectStoreCatalog,
+        limits: ArtifactBrokerLimits,
+    ) -> Result<Self, ArtifactBrokerConfigurationError> {
+        Ok(Self {
+            authority,
+            core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
+        })
+    }
+
+    pub async fn read(
+        &self,
+        request: &SchedulerTypedPlanReadRequest,
+    ) -> Result<BrokeredArtifactRead, SchedulerTypedPlanReadError> {
+        self.core
+            .read(self.authority.as_ref(), request)
+            .await
+            .map_err(SchedulerTypedPlanReadError::from)
+    }
+}
+
+#[async_trait]
+impl SchedulerTypedPlanReader for BrokeredSchedulerTypedPlanReader {
+    async fn read_exact(
+        &self,
+        request: SchedulerTypedPlanReadRequest,
+    ) -> Result<Vec<u8>, SchedulerTypedPlanReadError> {
+        self.read(&request)
+            .await
+            .map(BrokeredArtifactRead::into_bytes)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayArtifactReadError {
     Unavailable,
@@ -500,6 +556,18 @@ pub enum GatewayArtifactReadError {
 }
 
 impl From<ArtifactBrokerReadError> for GatewayArtifactReadError {
+    fn from(value: ArtifactBrokerReadError) -> Self {
+        match value {
+            ArtifactBrokerReadError::Unavailable => Self::Unavailable,
+            ArtifactBrokerReadError::Denied => Self::Denied,
+            ArtifactBrokerReadError::NotFound => Self::NotFound,
+            ArtifactBrokerReadError::TooLarge => Self::TooLarge,
+            ArtifactBrokerReadError::Integrity => Self::Integrity,
+        }
+    }
+}
+
+impl From<ArtifactBrokerReadError> for SchedulerTypedPlanReadError {
     fn from(value: ArtifactBrokerReadError) -> Self {
         match value {
             ArtifactBrokerReadError::Unavailable => Self::Unavailable,

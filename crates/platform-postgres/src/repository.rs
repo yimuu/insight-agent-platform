@@ -23440,23 +23440,15 @@ fn deployment_from_row(row: PgRow) -> Result<DeploymentRecord, RepositoryError> 
     })
 }
 
-fn run_from_row(row: PgRow) -> Result<RunRecord, RepositoryError> {
-    let run_id_text: String = row.try_get("run_id")?;
-    let run_id: ResourceId =
-        run_id_text
-            .parse()
-            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
-                RepositoryError::CorruptRow(failure.to_string())
-            })?;
-    if run_id.kind() != ResourceKind::Run {
-        return Err(RepositoryError::CorruptRow(
-            "run_id has the wrong nominal kind".to_owned(),
-        ));
-    }
-
-    let bindings_schema_version: i32 = row.try_get("bindings_schema_version")?;
-    let bindings_value: Value = row.try_get("bindings")?;
-    let bindings_digest: String = row.try_get("bindings_digest")?;
+pub(crate) fn run_bindings_from_row(
+    row: &PgRow,
+    schema_column: &str,
+    value_column: &str,
+    digest_column: &str,
+) -> Result<RunBindingsSnapshot, RepositoryError> {
+    let bindings_schema_version: i32 = row.try_get(schema_column)?;
+    let bindings_value: Value = row.try_get(value_column)?;
+    let bindings_digest: String = row.try_get(digest_column)?;
     if bindings_schema_version != 1
         || bindings_value.get("schema_version").and_then(Value::as_i64) != Some(1)
     {
@@ -23481,6 +23473,28 @@ fn run_from_row(row: PgRow) -> Result<RunRecord, RepositoryError> {
             "run bindings canonical digest does not match".to_owned(),
         ));
     }
+    Ok(bindings)
+}
+
+fn run_from_row(row: PgRow) -> Result<RunRecord, RepositoryError> {
+    let run_id_text: String = row.try_get("run_id")?;
+    let run_id: ResourceId =
+        run_id_text
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    if run_id.kind() != ResourceKind::Run {
+        return Err(RepositoryError::CorruptRow(
+            "run_id has the wrong nominal kind".to_owned(),
+        ));
+    }
+    let bindings = run_bindings_from_row(
+        &row,
+        "bindings_schema_version",
+        "bindings",
+        "bindings_digest",
+    )?;
 
     let current_payload = payload_from_row(
         &row,

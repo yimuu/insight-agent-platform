@@ -58,6 +58,8 @@ networkPolicy:
   publicGatewayPodSelector: {insight.platform/workload-role: public-gateway}
   sandboxControllerNamespaceSelector: {insight.platform/sandbox-controller-namespace: "true"}
   sandboxControllerPodSelector: {insight.platform/workload-role: sandbox-controller}
+  schedulerNamespaceSelector: {insight.platform/workload-namespace: scheduler}
+  schedulerPodSelector: {insight.platform/workload-role: scheduler}
   sandboxGuestNamespaceSelector: {insight.platform/sandbox-guest-namespace: "true"}
   sandboxGuestPodSelector: {insight.platform/workload-role: gvisor-guest}
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}

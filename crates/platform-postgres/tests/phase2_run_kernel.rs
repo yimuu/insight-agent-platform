@@ -1,10 +1,13 @@
 use chrono::{Duration, Utc};
+use insight_platform_artifacts::{
+    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, SchedulerTypedPlanReadRequest,
+};
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, AgentDeploymentClosure, AgentResourceSpec,
-    ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome, DataClassification,
-    DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, Failure,
-    FailureClass, FailureCode, FailureSource, FrozenSlotBinding, FrozenSlotTarget, InteractionKind,
-    JsonLimits, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode,
+    canonical_digest, canonical_json, checked_in_hard_limit_profile, AgentDeploymentClosure,
+    AgentResourceSpec, ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome,
+    DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
+    Failure, FailureClass, FailureCode, FailureSource, FrozenSlotBinding, FrozenSlotTarget,
+    InteractionKind, JsonLimits, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode,
     PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
     PrincipalKind, PrincipalSnapshot, PublicRunEventType, PublishedVersionPayload,
     ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot, SchedulingPolicyDocument,
@@ -65,6 +68,10 @@ const WORKER_B_ID: &str = "wrk_0198f1c3-9a00-7c3e-b1f3-773c2836700f";
 const WORKER_C_ID: &str = "wrk_0198f1c3-9a00-7c3e-b1f3-773c2836701f";
 const WORKER_D_ID: &str = "wrk_0198f1c3-9a00-7c3e-b1f3-773c2836702f";
 const QUOTA_ACCOUNT_ID: &str = "qac_0198f1c3-9a00-7c3e-b1f3-773c2836700d";
+const AGENT_AUTHORING_ARTIFACT_ID: &str = "art_0198f1c3-9a00-7c3e-b1f3-773c2836704c";
+const TYPED_PLAN_ARTIFACT_ID: &str = "art_0198f1c3-9a00-7c3e-b1f3-773c2836702c";
+const TYPED_PLAN_BLOB_ID: &str = "blb_0198f1c3-9a00-7c3e-b1f3-773c2836702c";
+const TYPED_PLAN_ENCRYPTION_DOMAIN_ID: &str = "enc_0198f1c3-9a00-7c3e-b1f3-773c2836702c";
 
 fn id(value: &str) -> ResourceId {
     value.parse().unwrap()
@@ -691,7 +698,45 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     assert_eq!(running_for_recovery.attempt_no, 1);
+    let typed_plan_bytes = canonical_json(&serde_json::to_value(runtime_plan()).unwrap()).unwrap();
+    let typed_plan_artifact = ArtifactRef::new(
+        id(TYPED_PLAN_ARTIFACT_ID),
+        runtime_plan().canonical_digest(plan_limits()).unwrap(),
+        u64::try_from(typed_plan_bytes.len()).unwrap(),
+        "application/json",
+        DataClassification::Internal,
+        Some("typed-plan.json".to_owned()),
+    )
+    .unwrap();
+    let typed_plan_read = SchedulerTypedPlanReadRequest {
+        tenant_id: id(TENANT_ID),
+        run_id: id(running_for_recovery.run_id.as_deref().unwrap()),
+        orchestration_job_id: id(&running_for_recovery.job_id),
+        worker_process_generation_id: id(WORKER_D_ID),
+        lease_generation: u64::try_from(running_for_recovery.lease_epoch).unwrap(),
+        lease_token_digest: digest('0'),
+        plan_revision_id: id(AGENT_PLAN_ID),
+        artifact: typed_plan_artifact,
+        request_digest: digest('3'),
+        maximum_bytes: typed_plan_bytes.len(),
+        deadline: Utc::now() + Duration::milliseconds(100),
+    };
+    let authorized = repository
+        .authorize_object_read(&typed_plan_read)
+        .await
+        .unwrap();
+    assert_eq!(authorized.blob_id, id(TYPED_PLAN_BLOB_ID));
+    let mut wrong_fence = typed_plan_read.clone();
+    wrong_fence.lease_token_digest = digest('4');
+    assert!(matches!(
+        repository.authorize_object_read(&wrong_fence).await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
     tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    assert!(matches!(
+        repository.authorize_object_read(&typed_plan_read).await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
     let running_recovery = DriveExpiredOrchestrationJobs {
         shard: SafetyScanShard::whole(),
         after: None,
@@ -7389,6 +7434,9 @@ async fn seed_authorities(repository: &PgRepository, pool: &PgPool) {
 }
 
 async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploymentRef) {
+    let plan = runtime_plan();
+    let typed_plan_digest = plan.canonical_digest(plan_limits()).unwrap();
+    let typed_plan_bytes = canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
     let resource_payload = TypedPayload::new(1, &json!({"fixture": "phase2-run"})).unwrap();
     let agent_plan_payload = TypedPayload::new(
         1,
@@ -7396,7 +7444,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             document: ResourceDocument::Agent(AgentResourceSpec {
                 authoring_package: AuthoringPackage {
                     artifact: ArtifactRef::new(
-                        id("art_0198f1c3-9a00-7c3e-b1f3-773c2836702c"),
+                        id(AGENT_AUTHORING_ARTIFACT_ID),
                         digest('d'),
                         1,
                         "application/json",
@@ -7410,8 +7458,8 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 dependency_versions: vec![],
                 policy_versions: vec![],
                 interface_schema_digest: digest('a'),
-                typed_plan_artifact_id: id("art_0198f1c3-9a00-7c3e-b1f3-773c2836702c"),
-                typed_plan_digest: runtime_plan().canonical_digest(plan_limits()).unwrap(),
+                typed_plan_artifact_id: id(TYPED_PLAN_ARTIFACT_ID),
+                typed_plan_digest: typed_plan_digest.clone(),
             }),
             validation: ValidationSummary {
                 validator_digest: digest('1'),
@@ -7540,7 +7588,12 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             "agent_interface_revision",
             digest('6'),
         ),
-        (AGENT_PLAN_ID, AGENT_ID, "agent_plan_revision", digest('7')),
+        (
+            AGENT_PLAN_ID,
+            AGENT_ID,
+            "agent_plan_revision",
+            typed_plan_digest.clone(),
+        ),
         (
             CHILD_AGENT_INTERFACE_ID,
             CHILD_AGENT_ID,
@@ -7583,6 +7636,66 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         .await
         .unwrap();
     }
+    let typed_plan_metadata =
+        TypedPayload::new(1, &json!({"display_name": "typed-plan.json"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest,
+            security_domain_digest, object_reference_ciphertext, object_generation, key_id,
+            encryption_domain_id, content_digest, size_bytes, state, verified_at,
+            created_at, updated_at
+        ) VALUES ($1, $2, 'fixture', $3, $4, $5, 'typed-plan-generation-1',
+                  'fixture-key', $6, $7, $8, 'verified', statement_timestamp(),
+                  statement_timestamp(), statement_timestamp())
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(TYPED_PLAN_BLOB_ID)
+    .bind(digest('c').to_string())
+    .bind(digest('d').to_string())
+    .bind(vec![7_u8, 8, 9])
+    .bind(TYPED_PLAN_ENCRYPTION_DOMAIN_ID)
+    .bind(typed_plan_digest.to_string())
+    .bind(i64::try_from(typed_plan_bytes.len()).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, metadata_schema_version, metadata,
+            metadata_digest, retention_policy_revision_id, retain_until, created_by
+        ) VALUES ($1, $2, $3, 'typed_plan', 'internal', $4, $5,
+                  'application/json', 'application/json', 'ready', $6, $7, $8,
+                  $9, $10, $11)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(TYPED_PLAN_ARTIFACT_ID)
+    .bind(TYPED_PLAN_BLOB_ID)
+    .bind(i64::try_from(typed_plan_bytes.len()).unwrap())
+    .bind(typed_plan_digest.to_string())
+    .bind(typed_plan_metadata.schema_version)
+    .bind(&typed_plan_metadata.value)
+    .bind(&typed_plan_metadata.digest)
+    .bind(POLICY_REVISION_ID)
+    .bind(Utc::now() + Duration::days(30))
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resource_versions SET artifact_id = $3 WHERE tenant_id = $1 AND resource_version_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(AGENT_PLAN_ID)
+    .bind(TYPED_PLAN_ARTIFACT_ID)
+    .execute(pool)
+    .await
+    .unwrap();
     let evidence_metadata = TypedPayload::new(1, &json!({"fixture": "policy-evidence"})).unwrap();
     sqlx::query(
         r#"
@@ -7733,7 +7846,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     .unwrap();
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(AGENT_INTERFACE_ID), digest('6')).unwrap(),
-        plan: ExactVersionRef::new(id(AGENT_PLAN_ID), digest('7')).unwrap(),
+        plan: ExactVersionRef::new(id(AGENT_PLAN_ID), typed_plan_digest).unwrap(),
         entry_node_id: "start".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![FrozenSlotBinding {

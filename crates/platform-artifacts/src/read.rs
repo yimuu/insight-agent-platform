@@ -5,6 +5,8 @@ use insight_platform_contracts::{
 };
 use std::fmt;
 
+pub const MAX_TYPED_PLAN_ARTIFACT_BYTES: usize = 16 * 1_024 * 1_024;
+
 pub const MAX_ARTIFACT_OBJECT_REFERENCE_BYTES: usize = 16_384;
 pub const MAX_ARTIFACT_OBJECT_GENERATION_BYTES: usize = 255;
 pub const MAX_ARTIFACT_STORAGE_BACKEND_BYTES: usize = 64;
@@ -118,6 +120,62 @@ pub trait ArtifactObjectReadAuthority<R>: Send + Sync {
         &self,
         request: &R,
     ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError>;
+}
+
+/// Closed Scheduler request for the immutable Typed Plan bound to one leased orchestration Job.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerTypedPlanReadRequest {
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub orchestration_job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub lease_token_digest: Sha256Digest,
+    pub plan_revision_id: ResourceId,
+    pub artifact: ArtifactRef,
+    pub request_digest: Sha256Digest,
+    pub maximum_bytes: usize,
+    pub deadline: DateTime<Utc>,
+}
+
+impl SchedulerTypedPlanReadRequest {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ArtifactObjectReadAuthorityError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.run_id.kind() != ResourceKind::Run
+            || self.orchestration_job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.plan_revision_id.kind() != ResourceKind::AgentPlanRevision
+            || self.lease_generation == 0
+            || self.artifact.validate().is_err()
+            || self.artifact.media_type() != "application/json"
+            || self.maximum_bytes == 0
+            || self.maximum_bytes > MAX_TYPED_PLAN_ARTIFACT_BYTES
+            || u64::try_from(self.maximum_bytes)
+                .map_or(true, |maximum| maximum < self.artifact.byte_length())
+            || self.deadline <= now
+        {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerTypedPlanReadError {
+    Unavailable,
+    Denied,
+    NotFound,
+    TooLarge,
+    Integrity,
+}
+
+#[async_trait]
+pub trait SchedulerTypedPlanReader: Send + Sync {
+    async fn read_exact(
+        &self,
+        request: SchedulerTypedPlanReadRequest,
+    ) -> Result<Vec<u8>, SchedulerTypedPlanReadError>;
 }
 
 /// Closed public-Gateway request for one exact, bounded Artifact generation.
@@ -379,6 +437,67 @@ mod tests {
         expired.deadline = now;
         assert_eq!(
             expired.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+    }
+
+    #[test]
+    fn scheduler_typed_plan_read_is_exact_json_bounded_and_fenced() {
+        let now = Utc::now();
+        let artifact = ArtifactRef::new(
+            id(ResourceKind::Artifact, 7),
+            digest('a'),
+            7,
+            "application/json".to_owned(),
+            DataClassification::Internal,
+            Some("typed-plan.json".to_owned()),
+        )
+        .unwrap();
+        let request = SchedulerTypedPlanReadRequest {
+            tenant_id: id(ResourceKind::Tenant, 1),
+            run_id: id(ResourceKind::Run, 2),
+            orchestration_job_id: id(ResourceKind::Job, 3),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 4),
+            lease_generation: 2,
+            lease_token_digest: digest('b'),
+            plan_revision_id: id(ResourceKind::AgentPlanRevision, 5),
+            artifact,
+            request_digest: digest('c'),
+            maximum_bytes: 7,
+            deadline: now + chrono::Duration::seconds(1),
+        };
+        request.validate_at(now).unwrap();
+
+        let mut unfenced = request.clone();
+        unfenced.lease_generation = 0;
+        assert_eq!(
+            unfenced.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+        let mut too_small = request.clone();
+        too_small.maximum_bytes = 6;
+        assert_eq!(
+            too_small.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+        let mut wrong_media = request.clone();
+        wrong_media.artifact = ArtifactRef::new(
+            id(ResourceKind::Artifact, 8),
+            digest('d'),
+            7,
+            "application/octet-stream".to_owned(),
+            DataClassification::Internal,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_media.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+        let mut oversized = request;
+        oversized.maximum_bytes = MAX_TYPED_PLAN_ARTIFACT_BYTES + 1;
+        assert_eq!(
+            oversized.validate_at(now),
             Err(ArtifactObjectReadAuthorityError::Denied)
         );
     }

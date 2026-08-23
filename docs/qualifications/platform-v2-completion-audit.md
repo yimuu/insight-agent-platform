@@ -29,7 +29,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 | Rust workspace | workspace all-target/all-feature tests与Clippy `-D warnings`通过 | L1～L3范围内有效 |
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
 | Public API | `/v1` OpenAPI/owner schema、route负向conformance与root public API baseline通过 | public contract实现闭合 |
-| Typed Plan publication | Agent Revision冻结`typed_plan_artifact_id`与digest；发布事务校验typed-plan Artifact/Blob Ready、JSON、digest与size | 闭合Scheduler物化输入身份，不代表Scheduler RPC/handler完成 |
+| Typed Plan materialization | Agent Revision冻结`typed_plan_artifact_id`与digest；发布事务校验Ready JSON Artifact/Verified Blob；Scheduler专用mTLS Data RPC以Run、Job lease、exact Plan Revision和ArtifactRef双重授权读取 | 闭合Scheduler物化输入与传输边界，不代表production Scheduler handler完成 |
 | 已有部署 | Gateway、Callback、MCP cleanup、Model Worker、Artifact三role、Sandbox、Security/Egress Helm静态门禁通过 | 只证明这些checked-in清单的静态边界 |
 | HTTP observability | shared bounded-label owner；Gateway与Callback具备request/outcome、latency、ready、`/metrics`及ServiceMonitor/NetworkPolicy | 闭合两个公网HTTP role，不代表全平台observability |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
@@ -66,8 +66,9 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 1. `insight-platform-runtime`只有library，没有Scheduler/Recovery production binary、process config、startup manifest、
    readiness/drain和Helm Deployment。
-2. `StartedOrchestrationJobHandler`只有test实现；Agent Revision现已冻结exact typed-plan Artifact，但Scheduler专用Artifact
-   Data RPC和驱动真实Plan/Capability/Task/Subagent状态机的production handler仍未实现。
+2. `StartedOrchestrationJobHandler`只有test实现；exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
+   exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure，
+   但把已验证Plan交给真实Plan/Capability/Task/Subagent状态机的production handler仍未实现。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

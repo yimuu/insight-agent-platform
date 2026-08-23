@@ -7,6 +7,9 @@
 
 use async_trait::async_trait;
 use futures::Stream;
+use insight_platform_artifacts::{
+    SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest, SchedulerTypedPlanReader,
+};
 use insight_platform_contracts::{
     parse_strict_json, ArtifactRef, JsonLimits, ResourceKind, Sha256Digest,
 };
@@ -40,7 +43,9 @@ use proto::{
     artifact_gvisor_guest_service_client::ArtifactGvisorGuestServiceClient,
     artifact_gvisor_guest_service_server::ArtifactGvisorGuestService,
     artifact_sandbox_broker_service_client::ArtifactSandboxBrokerServiceClient,
-    artifact_sandbox_broker_service_server::ArtifactSandboxBrokerService, ArtifactReadChunk,
+    artifact_sandbox_broker_service_server::ArtifactSandboxBrokerService,
+    artifact_scheduler_service_client::ArtifactSchedulerServiceClient,
+    artifact_scheduler_service_server::ArtifactSchedulerService, ArtifactReadChunk,
     ClosedArtifactReadRequest, ClosedGvisorGuestPlan,
 };
 
@@ -48,10 +53,13 @@ pub const ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_WORKER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/model-worker";
 pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-controller";
+pub const SCHEDULER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/scheduler";
 pub const MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD: usize = 1_048_576;
 pub const MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD: usize = 262_144;
 const WASI_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.wasi.read/v1";
 const WASI_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.wasi.chunk/v1";
+const SCHEDULER_TYPED_PLAN_READ_OPERATION: &str = "artifact.scheduler.typed-plan.read/v1";
+const SCHEDULER_TYPED_PLAN_CHUNK_OPERATION: &str = "artifact.scheduler.typed-plan.chunk/v1";
 const GVISOR_GUEST_AUTHORIZE_OPERATION: &str = "artifact.gvisor.guest.authorize/v1";
 const GVISOR_GUEST_READ_OPERATION: &str = "artifact.gvisor.guest.read/v1";
 const GVISOR_GUEST_PACKAGE_CHUNK_OPERATION: &str = "artifact.gvisor.guest.package.chunk/v1";
@@ -136,6 +144,22 @@ impl tonic::service::Interceptor for SandboxControllerWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), SANDBOX_CONTROLLER_WORKLOAD_IDENTITY)?;
+        Ok(request)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SchedulerWorkloadIdentity;
+
+impl tonic::service::Interceptor for SchedulerWorkloadIdentity {
+    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        let certificates = request
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        let leaf = certificates
+            .first()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        require_exact_workload_uri(leaf.as_ref(), SCHEDULER_WORKLOAD_IDENTITY)?;
         Ok(request)
     }
 }
@@ -342,6 +366,64 @@ impl WasiArtifactBroker for ArtifactSandboxBrokerGrpcClient {
         )
         .await
         .map_err(map_wasi_client_read_error)
+    }
+}
+
+#[derive(Clone)]
+pub struct ArtifactSchedulerGrpcClient {
+    client: ArtifactSchedulerServiceClient<tonic::transport::Channel>,
+    rpc_limits: ArtifactInternalRpcLimits,
+}
+
+impl ArtifactSchedulerGrpcClient {
+    pub fn new(channel: tonic::transport::Channel, rpc_limits: ArtifactInternalRpcLimits) -> Self {
+        let maximum = rpc_limits.maximum_message_bytes();
+        Self {
+            client: ArtifactSchedulerServiceClient::new(channel)
+                .max_encoding_message_size(maximum)
+                .max_decoding_message_size(maximum),
+            rpc_limits,
+        }
+    }
+}
+
+#[async_trait]
+impl SchedulerTypedPlanReader for ArtifactSchedulerGrpcClient {
+    async fn read_exact(
+        &self,
+        request: SchedulerTypedPlanReadRequest,
+    ) -> Result<Vec<u8>, SchedulerTypedPlanReadError> {
+        request
+            .validate_at(chrono::Utc::now())
+            .map_err(|_| SchedulerTypedPlanReadError::Denied)?;
+        let artifact = request.artifact.clone();
+        let maximum_bytes = request.maximum_bytes;
+        let envelope = encode_request(
+            SCHEDULER_TYPED_PLAN_READ_OPERATION,
+            &request,
+            self.rpc_limits,
+        )
+        .map_err(|_| SchedulerTypedPlanReadError::Integrity)?;
+        let request_digest = envelope.request_digest.clone();
+        let deadline = SystemTime::from(request.deadline);
+        let request = request_with_domain_deadline(envelope, deadline)
+            .map_err(map_scheduler_client_read_error)?;
+        let mut client = self.client.clone();
+        let mut response = await_rpc_before_deadline(deadline, client.read_typed_plan(request))
+            .await
+            .map_err(map_scheduler_client_read_error)?
+            .into_inner();
+        collect_artifact_stream(
+            &mut response,
+            &request_digest,
+            SCHEDULER_TYPED_PLAN_CHUNK_OPERATION,
+            &artifact,
+            maximum_bytes,
+            self.rpc_limits,
+            deadline,
+        )
+        .await
+        .map_err(map_scheduler_client_read_error)
     }
 }
 
@@ -780,6 +862,68 @@ pub trait WasiArtifactResponseBroker: Send + Sync {
     ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError>;
 }
 
+#[async_trait]
+pub trait SchedulerTypedPlanResponseBroker: Send + Sync {
+    async fn read_typed_plan_for_response(
+        &self,
+        request: SchedulerTypedPlanReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerTypedPlanReadError>;
+}
+
+pub struct ArtifactSchedulerGrpcService<B> {
+    broker: Arc<B>,
+    rpc_limits: ArtifactInternalRpcLimits,
+}
+
+impl<B> ArtifactSchedulerGrpcService<B> {
+    pub fn new(broker: Arc<B>, rpc_limits: ArtifactInternalRpcLimits) -> Self {
+        Self { broker, rpc_limits }
+    }
+}
+
+#[tonic::async_trait]
+impl<B> ArtifactSchedulerService for ArtifactSchedulerGrpcService<B>
+where
+    B: SchedulerTypedPlanResponseBroker + 'static,
+{
+    type ReadTypedPlanStream = ArtifactReadStream;
+
+    async fn read_typed_plan(
+        &self,
+        request: Request<ClosedArtifactReadRequest>,
+    ) -> Result<Response<Self::ReadTypedPlanStream>, Status> {
+        let envelope = request.into_inner();
+        let request_digest = envelope.request_digest.clone();
+        let read: SchedulerTypedPlanReadRequest = decode_request(
+            envelope,
+            SCHEDULER_TYPED_PLAN_READ_OPERATION,
+            self.rpc_limits,
+        )
+        .map_err(Status::from)?;
+        read.validate_at(chrono::Utc::now())
+            .map_err(|_| Status::permission_denied("Typed Plan read denied"))?;
+        let artifact = read.artifact.clone();
+        let maximum_bytes = read.maximum_bytes;
+        let deadline = SystemTime::from(read.deadline);
+        let response_read = tokio::time::timeout(
+            server_deadline_budget(deadline)?,
+            self.broker.read_typed_plan_for_response(read),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("Artifact read deadline elapsed"))?
+        .map_err(map_scheduler_server_error)?;
+        require_broker_bytes(response_read.as_bytes(), &artifact, maximum_bytes)?;
+        artifact_read_stream(
+            response_read,
+            &request_digest,
+            SCHEDULER_TYPED_PLAN_CHUNK_OPERATION,
+            &artifact,
+            self.rpc_limits.maximum_chunk_bytes(),
+            deadline,
+        )
+    }
+}
+
 /// Server adapter for the exact Sandbox materialization authority. Endpoint-role
 /// authorization is installed by the process around the generated service and therefore runs
 /// before either method decodes a request or invokes the domain broker.
@@ -1110,6 +1254,32 @@ fn map_wasi_client_read_error(error: ArtifactClientReadError) -> WasiArtifactBro
     }
 }
 
+fn map_scheduler_client_read_error(error: ArtifactClientReadError) -> SchedulerTypedPlanReadError {
+    match error {
+        ArtifactClientReadError::Unavailable => SchedulerTypedPlanReadError::Unavailable,
+        ArtifactClientReadError::Denied => SchedulerTypedPlanReadError::Denied,
+        ArtifactClientReadError::NotFound => SchedulerTypedPlanReadError::NotFound,
+        ArtifactClientReadError::TooLarge => SchedulerTypedPlanReadError::TooLarge,
+        ArtifactClientReadError::Integrity => SchedulerTypedPlanReadError::Integrity,
+    }
+}
+
+fn map_scheduler_server_error(error: SchedulerTypedPlanReadError) -> Status {
+    match error {
+        SchedulerTypedPlanReadError::Unavailable => {
+            Status::unavailable("Artifact Broker unavailable")
+        }
+        SchedulerTypedPlanReadError::Denied => Status::permission_denied("Typed Plan read denied"),
+        SchedulerTypedPlanReadError::NotFound => Status::not_found("Typed Plan Artifact not found"),
+        SchedulerTypedPlanReadError::TooLarge => {
+            Status::resource_exhausted("Typed Plan exceeds the read limit")
+        }
+        SchedulerTypedPlanReadError::Integrity => {
+            Status::data_loss("Typed Plan integrity verification failed")
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactRpcError {
     InvalidConfiguration,
@@ -1187,6 +1357,30 @@ mod tests {
         }
     }
 
+    fn scheduler_request(bytes: &[u8]) -> SchedulerTypedPlanReadRequest {
+        SchedulerTypedPlanReadRequest {
+            tenant_id: id(ResourceKind::Tenant),
+            run_id: id(ResourceKind::Run),
+            orchestration_job_id: id(ResourceKind::Job),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+            lease_generation: 2,
+            lease_token_digest: digest('e'),
+            plan_revision_id: id(ResourceKind::AgentPlanRevision),
+            artifact: ArtifactRef::new(
+                id(ResourceKind::Artifact),
+                digest_bytes(bytes),
+                u64::try_from(bytes.len()).unwrap(),
+                "application/json",
+                DataClassification::Internal,
+                Some("typed-plan.json".to_owned()),
+            )
+            .unwrap(),
+            request_digest: digest('f'),
+            maximum_bytes: bytes.len(),
+            deadline: Utc::now() + Duration::minutes(1),
+        }
+    }
+
     struct RecordingSandboxBroker {
         bytes: Vec<u8>,
         wasi_calls: AtomicUsize,
@@ -1199,6 +1393,22 @@ mod tests {
             _request: WasiArtifactReadRequest,
         ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError> {
             self.wasi_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
+        }
+    }
+
+    struct RecordingSchedulerBroker {
+        bytes: Vec<u8>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SchedulerTypedPlanResponseBroker for RecordingSchedulerBroker {
+        async fn read_typed_plan_for_response(
+            &self,
+            _request: SchedulerTypedPlanReadRequest,
+        ) -> Result<LeasedArtifactBytes, SchedulerTypedPlanReadError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
             Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
         }
     }
@@ -1229,6 +1439,8 @@ mod tests {
         model_key_pem: String,
         sandbox_controller_certificate_pem: String,
         sandbox_controller_key_pem: String,
+        scheduler_certificate_pem: String,
+        scheduler_key_pem: String,
     }
 
     fn mtls_fixture() -> MtlsFixture {
@@ -1265,6 +1477,12 @@ mod tests {
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
+        let (scheduler_certificate_pem, scheduler_key_pem) = issue(
+            vec![SanType::URI(
+                SCHEDULER_WORKLOAD_IDENTITY.try_into().unwrap(),
+            )],
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
         MtlsFixture {
             ca_pem: ca.pem(),
             server_certificate_pem,
@@ -1273,6 +1491,8 @@ mod tests {
             model_key_pem,
             sandbox_controller_certificate_pem,
             sandbox_controller_key_pem,
+            scheduler_certificate_pem,
+            scheduler_key_pem,
         }
     }
 
@@ -1314,6 +1534,19 @@ mod tests {
             limits
         )
         .is_err());
+
+        let plan = scheduler_request(br#"{"schema_version":1}"#);
+        let scheduler_envelope =
+            encode_request(SCHEDULER_TYPED_PLAN_READ_OPERATION, &plan, limits).unwrap();
+        assert_eq!(
+            decode_request::<SchedulerTypedPlanReadRequest>(
+                scheduler_envelope,
+                SCHEDULER_TYPED_PLAN_READ_OPERATION,
+                limits,
+            )
+            .unwrap(),
+            plan
+        );
 
         let mut digest_tamper = envelope.clone();
         digest_tamper.request_digest = digest('9').to_string();
@@ -1555,6 +1788,94 @@ mod tests {
             .unwrap_err();
         assert_eq!(rejected_wasi.code(), tonic::Code::PermissionDenied);
         assert_eq!(broker.wasi_calls.load(Ordering::Acquire), 1);
+
+        drop(client);
+        drop(wrong_client);
+        shutdown_sender.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn scheduler_mtls_streams_typed_plan_and_rejects_other_roles_before_authority() {
+        let fixture = mtls_fixture();
+        let bytes = br#"{"schema_version":1,"nodes":[]}"#.to_vec();
+        let broker = Arc::new(RecordingSchedulerBroker {
+            bytes: bytes.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = incoming.local_addr().unwrap();
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+        let service =
+            proto::artifact_scheduler_service_server::ArtifactSchedulerServiceServer::new(
+                ArtifactSchedulerGrpcService::new(Arc::clone(&broker), rpc_limits),
+            )
+            .max_encoding_message_size(rpc_limits.maximum_message_bytes())
+            .max_decoding_message_size(rpc_limits.maximum_message_bytes());
+        let service = tonic::service::interceptor::InterceptedService::new(
+            service,
+            SchedulerWorkloadIdentity,
+        );
+        let tls = ServerTlsConfig::new()
+            .identity(Identity::from_pem(
+                &fixture.server_certificate_pem,
+                &fixture.server_key_pem,
+            ))
+            .client_ca_root(Certificate::from_pem(&fixture.ca_pem));
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(tls)
+                .unwrap()
+                .add_service(service)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_receiver.await;
+                })
+                .await
+                .unwrap();
+        });
+        let endpoint = format!("https://localhost:{}", address.port());
+
+        let accepted_channel = channel(
+            &endpoint,
+            &fixture,
+            &fixture.scheduler_certificate_pem,
+            &fixture.scheduler_key_pem,
+        )
+        .await;
+        let client = ArtifactSchedulerGrpcClient::new(accepted_channel, rpc_limits);
+        assert_eq!(
+            SchedulerTypedPlanReader::read_exact(&client, scheduler_request(&bytes))
+                .await
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(broker.calls.load(Ordering::Acquire), 1);
+
+        let wrong_channel = channel(
+            &endpoint,
+            &fixture,
+            &fixture.sandbox_controller_certificate_pem,
+            &fixture.sandbox_controller_key_pem,
+        )
+        .await;
+        let mut wrong_client = ArtifactSchedulerServiceClient::new(wrong_channel);
+        let rejected = wrong_client
+            .read_typed_plan(
+                encode_request(
+                    SCHEDULER_TYPED_PLAN_READ_OPERATION,
+                    &scheduler_request(&bytes),
+                    rpc_limits,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
+        assert_eq!(broker.calls.load(Ordering::Acquire), 1);
 
         drop(client);
         drop(wrong_client);

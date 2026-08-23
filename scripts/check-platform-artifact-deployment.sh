@@ -32,6 +32,7 @@ for authority in (
     "ArtifactScanObjectReadAuthority",
     "ArtifactDeleteObjectAuthority",
     "ArtifactObjectReadAuthority<GatewayArtifactReadRequest>",
+    "ArtifactObjectReadAuthority<SchedulerTypedPlanReadRequest>",
     "require_raw_artifact_job_fence",
 ):
     if authority not in artifact_repository:
@@ -145,7 +146,7 @@ failures << "Artifact roles share a storage identity" unless identities.map(&:la
 
 data_policy = policies.find { |doc| doc.dig("metadata", "name") == "insight-platform-artifact-data-worker" }
 data_ports = data_policy.to_h.dig("spec", "ingress").to_a.flat_map { |entry| entry.fetch("ports", []).map { |port| port["port"] } }.sort
-failures << "Data Worker ingress must be split across controller and guest listeners" unless data_ports == [9443, 9444]
+failures << "Data Worker ingress must split Scheduler/Controller and guest listeners" unless data_ports == [9443, 9443, 9444]
 maintenance_policy = policies.find { |doc| doc.dig("metadata", "name") == "insight-platform-artifact-maintenance" }
 failures << "Maintenance must deny all ingress" unless maintenance_policy.to_h.dig("spec", "ingress") == []
 

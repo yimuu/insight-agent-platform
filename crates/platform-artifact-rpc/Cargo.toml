@@ -11,8 +11,10 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 futures.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-artifacts.workspace = true
 insight-platform-sandbox.workspace = true
 prost.workspace = true
 serde.workspace = true
@@ -29,7 +31,6 @@ protoc-bin-vendored.workspace = true
 tonic-prost-build.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }
 tokio-stream.workspace = true
 uuid.workspace = true

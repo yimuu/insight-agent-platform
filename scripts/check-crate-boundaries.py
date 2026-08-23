@@ -70,7 +70,7 @@ ALLOWED_INTERNAL = {
     "api": {"engine", "dsl", "durable", "resources", "runtime", "mcp"},
     "artifacts_domain": {"contracts", "jobs_domain"},
     "artifact_broker": {"artifacts_domain", "contracts", "jobs_domain", "sandbox_domain"},
-    "artifact_rpc": {"contracts", "models_domain", "sandbox_domain"},
+    "artifact_rpc": {"artifacts_domain", "contracts", "models_domain", "sandbox_domain"},
     # The Artifact Gateway binary reuses the public Artifact HTTP DTO/authorization boundary;
     # data and maintenance workers still use their owner/RPC ports and never call public routes.
     "artifact_service": {"artifact_broker", "artifact_rpc", "artifacts_domain", "contracts", "jobs_domain", "platform_api", "platform_postgres", "sandbox_domain"},

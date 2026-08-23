@@ -5,7 +5,7 @@
 
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
-    BrokeredArtifactScannerReader, BrokeredSandboxArtifactBroker,
+    BrokeredArtifactScannerReader, BrokeredSandboxArtifactBroker, BrokeredSchedulerTypedPlanReader,
 };
 mod guest_identity;
 mod scan_worker;
@@ -15,11 +15,14 @@ use insight_platform_artifact_rpc::{
     proto::{
         artifact_gvisor_guest_service_server::ArtifactGvisorGuestServiceServer,
         artifact_sandbox_broker_service_server::ArtifactSandboxBrokerServiceServer,
+        artifact_scheduler_service_server::ArtifactSchedulerServiceServer,
     },
     ArtifactGvisorGuestGrpcService, ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcService,
-    GvisorGuestResponseMaterializer, LeasedArtifactBytes, SandboxControllerWorkloadIdentity,
+    ArtifactSchedulerGrpcService, GvisorGuestResponseMaterializer, LeasedArtifactBytes,
+    SandboxControllerWorkloadIdentity, SchedulerTypedPlanResponseBroker, SchedulerWorkloadIdentity,
     WasiArtifactBrokerError, WasiArtifactReadRequest, WasiArtifactResponseBroker,
 };
+use insight_platform_artifacts::{SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
 };
@@ -51,6 +54,10 @@ struct SandboxRpcArtifactBroker {
     broker: BrokeredSandboxArtifactBroker,
 }
 
+struct SchedulerRpcArtifactBroker {
+    reader: BrokeredSchedulerTypedPlanReader,
+}
+
 struct GvisorGuestMaterializer {
     authority: Arc<PgRepository>,
     broker: Arc<SandboxRpcArtifactBroker>,
@@ -80,6 +87,18 @@ impl WasiArtifactResponseBroker for SandboxRpcArtifactBroker {
         request: WasiArtifactReadRequest,
     ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError> {
         let read = self.broker.read_wasi_for_response(request).await?;
+        let (bytes, permit) = read.into_response_parts();
+        Ok(LeasedArtifactBytes::new(bytes, permit))
+    }
+}
+
+#[async_trait::async_trait]
+impl SchedulerTypedPlanResponseBroker for SchedulerRpcArtifactBroker {
+    async fn read_typed_plan_for_response(
+        &self,
+        request: SchedulerTypedPlanReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerTypedPlanReadError> {
+        let read = self.reader.read(&request).await?;
         let (bytes, permit) = read.into_response_parts();
         Ok(LeasedArtifactBytes::new(bytes, permit))
     }
@@ -295,6 +314,15 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let scanner = IntegrityArtifactScanner::new(scan_reader, &config.scan_worker);
+    let scheduler_reader = Arc::new(SchedulerRpcArtifactBroker {
+        reader: BrokeredSchedulerTypedPlanReader::new(
+            read_repository.clone(),
+            Arc::clone(&unsealer),
+            stores.clone(),
+            broker_limits,
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
+    });
     let broker = BrokeredSandboxArtifactBroker::new(
         read_repository.clone(),
         unsealer,
@@ -315,6 +343,15 @@ async fn run() -> Result<(), ProcessError> {
             service,
             SandboxControllerWorkloadIdentity,
         )
+    };
+    let scheduler_service = {
+        let service = ArtifactSchedulerServiceServer::new(ArtifactSchedulerGrpcService::new(
+            scheduler_reader,
+            rpc_limits,
+        ))
+        .max_encoding_message_size(maximum)
+        .max_decoding_message_size(maximum);
+        tonic::service::interceptor::InterceptedService::new(service, SchedulerWorkloadIdentity)
     };
     let guest_materializer = Arc::new(GvisorGuestMaterializer {
         authority: Arc::clone(&read_repository),
@@ -372,6 +409,7 @@ async fn run() -> Result<(), ProcessError> {
         .tls_config(controller_tls)
         .map_err(|_| ProcessError::InvalidTls)?
         .add_service(sandbox_service)
+        .add_service(scheduler_service)
         .serve_with_shutdown(controller_address, async {
             let _ = controller_shutdown_receiver.await;
         });
