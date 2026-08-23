@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-178）
+# Platform v2 四阶段实现计划（CR-179）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-178 contracts accepted; L4～L6 pending |
-| 日期 | 2026-08-23 |
-| 合同输入 | 00～18、cross-review CR-178/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+| 状态 | In Progress / CR-179 contracts accepted; L4～L6 pending |
+| 日期 | 2026-08-24 |
+| 合同输入 | 00～18、cross-review CR-179/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则
@@ -30,6 +30,9 @@ CR-177冻结expression-derived classification：Phase 2 repository必须从提�
 
 CR-178把Map item port收紧为exact NodeOutput ref并提升未发布Plan wire version 2；Phase 2必须为每个item创建immutable RunValue并与
 MapItem Scope/Node/Job/batch cursor原子提交，wrong producer/schema与批次重放必须fail closed。
+
+CR-179冻结Loop carried Scope生命周期：body settlement原子复制carried RunValue并预建下一iteration Scope，continuation condition与
+body复用该open Scope，false exit原子关闭并回到固定词法父Scope；iteration Scope不得串成父链或读取terminal Scope。
 
 实现遵循以下顺序：
 

@@ -9,7 +9,7 @@
 
 ## 1. 结论
 
-00～18均已完成CR-178影响cross-review（未受影响合同保留CR-173～177语义版本）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
+00～18均已完成CR-179影响cross-review（未受影响合同保留CR-173～178语义版本）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
 实现与真实PostgreSQL门禁已闭合；Phase 2/3已有大量domain/repository/runtime库和L1～L3证据，但缺少若干production
 composition；Phase 4只有public API及部分role清单，完整物理拓扑、observability和L4～L6尚未交付。
 
@@ -24,7 +24,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 | 范围 | 当前证据 | 结论 |
 |---|---|---|
-| 合同 | 00～18 CR-178影响cross-review闭合；05～07、18为`Accepted / CR-178`，其余保留既有CR语义版本；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
+| 合同 | 00～18 CR-179影响cross-review闭合；05～07、18为`Accepted / CR-179`，其余保留既有CR语义版本；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
 | Persistence | schema contract v7、唯一`0001_platform_baseline.sql`；PG16/17 fresh baseline与事务/并发测试 | Phase 1 persistence闭合 |
 | Rust workspace | workspace all-target/all-feature tests与Clippy `-D warnings`通过 | L1～L3范围内有效 |
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
@@ -82,6 +82,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    composition；手工注入`ControllerObservation`仍不计production证据。CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
    CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向、每item RunValue/MapItem Scope原子写及
    L2 batch/replay fixture已实现；process crash/restart的L3 fixture仍待production handler闭合后完成。
+   CR-179已冻结Loop carried的下一Scope预建/复用/关闭和固定root controller父链合同；对应repository rollover、L1/L2/L3 fixture仍待实现。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

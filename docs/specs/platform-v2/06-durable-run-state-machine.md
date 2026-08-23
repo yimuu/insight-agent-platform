@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-178 |
-| 日期 | 2026-08-23 |
+| 状态 | Accepted / CR-179 |
+| 日期 | 2026-08-24 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
 
@@ -268,6 +268,12 @@ Map item admission和Loop iteration rollover在同一事务中创建RunValue并�
 version CAS更新环境。解析按当前Scope→parent Scope逐级执行，深度使用`registry_plan.plan_nodes` effective limit，binding数使用
 `run_scheduler.value_refs_per_run` effective limit；每级payload/digest、Run/tenant、RunValue schema/content均重验。普通写禁止覆盖
 已绑定port；只有Plan声明的Map item/Loop carried shadow规则可以在新child Scope绑定同名port。
+
+Loop iteration Scope不串成父子链：每轮Scope的controller owner固定为首次Loop NodeExecution，该owner的Scope提供稳定词法父环境。
+body settlement在关闭当前Scope的同一事务预建下一轮open Scope、复制并绑定carried RunValue，同时把pending Loop continuation的
+`scope_id`切到该新Scope后才置为Ready。condition为true时body NodeExecution复用continuation当前Scope；condition为false时同一事务
+关闭当前Scope并把exit激活到固定词法父Scope。任何新Scope/RunValue ID冲突、body output缺失、schema/content/classification漂移、
+stale Scope/Node/Job fence都会使rollover整批不可见。
 
 ## 9. Control Token 与 Data Value
 

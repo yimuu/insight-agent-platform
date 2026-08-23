@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-178 |
-| 日期 | 2026-08-23 |
+| 状态 | Accepted / CR-179 |
+| 日期 | 2026-08-24 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
 
@@ -77,6 +77,11 @@ count、Loop condition或Compute output。表达式求值消耗Orchestration本�
 
 Scheduler可携带事务外物化的value正文，但不能决定Compute output classification；repository在提交事务从exact input RunValue rows
 按05 lattice规则重算effective classification，空input闭包使用`Internal`，并把同一结果写入全部Compute output。
+
+Loop body settlement的owner command必须携带bounded rollover mutation slots（下一Scope、每个carried RunValue及Event/Outbox ID），
+但不能携带carried正文、classification或port。repository从exact Plan和当前iteration Scope解析`body_output_port`，复制immutable
+RunValue并绑定`next_iteration_port`；随后以同一事务关闭当前Scope、预建下一Scope并wake continuation。Scheduler不得在进程内缓存
+iteration counter或在condition为true时另建重复Scope。
 
 Worker：
 

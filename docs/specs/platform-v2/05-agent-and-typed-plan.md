@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-178 |
-| 日期 | 2026-08-23 |
+| 状态 | Accepted / CR-179 |
+| 日期 | 2026-08-24 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
 
@@ -394,6 +394,13 @@ item count和cursor，不能重新读取调用方输入或active binding。
 `break`、`continue` lower 为 Loop 的结构化 control port，不形成任意 edge。
 每次iteration的condition从该iteration冻结的loop-carried RunValue求值；iteration number来自durable Scope/Node事实，不能由
 进程内计数器或调用方提供。condition evidence与iteration advancement在同一first-winner事务中验证/提交。
+首轮condition在词法父Scope求值；若为true则创建iteration 0 Scope。此后每轮body settlement先把每个`body_output_port`的
+immutable值复制为新的RunValue，以对应`next_iteration_port`绑定预建的下一iteration open Scope，再唤醒该Scope内的Loop
+continuation。continuation为true时body复用当前iteration Scope，不再创建第二个Scope；为false时关闭当前Scope并从其词法父Scope
+激活exit。所有iteration Scope直接归属首次Loop controller owner，禁止把前一iteration Scope作为下一轮词法父Scope。
+
+每个carried pair必须是两个`NodeOutput` ref、schema digest完全相同，`next_iteration_port.producer_node_id`为当前Loop node；
+`body_output_port`必须由Loop body区域内声明的producer产生。Compiler/publication拒绝RunInput、跨region producer、schema不等或重复pair。
 
 ### 9.5 Error Boundary
 
