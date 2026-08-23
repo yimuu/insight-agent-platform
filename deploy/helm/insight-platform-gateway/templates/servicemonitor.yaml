@@ -1,0 +1,21 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "insight-platform-gateway.name" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "insight-platform-gateway.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ .Values.namespace }}]
+  selector:
+    matchLabels:
+      {{- include "insight-platform-gateway.labels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitoring.interval }}
+      scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}
+      scheme: http
+{{- end }}

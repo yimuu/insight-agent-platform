@@ -41,6 +41,13 @@ networkPolicy:
   dnsPodSelector: {k8s-app: kube-dns}
   postgresCidrs: [10.10.0.0/24]
 
+monitoring:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 5s
+  namespaceSelector: {insight.platform/monitoring-namespace: "true"}
+  podSelector: {app.kubernetes.io/name: prometheus}
+
 resources:
   requests: {cpu: 200m, memory: 256Mi}
   limits: {cpu: "2", memory: 1Gi}

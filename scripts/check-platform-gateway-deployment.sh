@@ -29,6 +29,14 @@ if "/usr/local/bin/platform-gateway" not in dockerfile:
     failures.append("runtime image is missing platform-gateway")
 if "authenticate_public_request" not in source or "read_public_operation" not in source:
     failures.append("Gateway does not compose authentication and Operation authority")
+for metric_contract in (
+    'route("/metrics", get(prometheus_metrics))',
+    "insight_platform_gateway_http_requests_total",
+    "insight_platform_gateway_http_request_duration_seconds",
+    "GatewayHttpOperation::from_path",
+):
+    if metric_contract not in source:
+        failures.append(f"Gateway observability contract is missing {metric_contract}")
 
 try:
     subprocess.run(
@@ -61,6 +69,10 @@ for required in (
     "pathType: Prefix",
     "kind: HorizontalPodAutoscaler",
     "kind: PodDisruptionBudget",
+    "kind: ServiceMonitor",
+    "path: /metrics",
+    "insight.platform/monitoring-namespace: \"true\"",
+    "app.kubernetes.io/name: prometheus",
 ):
     if required not in rendered:
         failures.append(f"Gateway render is missing {required}")

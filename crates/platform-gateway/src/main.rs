@@ -2,8 +2,9 @@
 
 use async_trait::async_trait;
 use axum::{
+    extract::{Extension, Request},
     http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
-    middleware,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -89,9 +90,12 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_GATEWAY_CONFIG";
@@ -109,6 +113,245 @@ const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_RUN_EVENT_CURSOR_KEY_BYTES: usize = 64;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
 const MAX_ARTIFACT_RESPONSE_BYTES: usize = 262_144;
+const GATEWAY_HTTP_OPERATIONS: usize = 10;
+const GATEWAY_HTTP_OUTCOMES: usize = 3;
+const GATEWAY_HTTP_HISTOGRAM_BUCKETS_MILLISECONDS: [u64; 10] =
+    [5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000];
+
+#[derive(Debug, Clone, Copy)]
+#[repr(usize)]
+enum GatewayHttpOperation {
+    Live = 0,
+    Ready = 1,
+    Metrics = 2,
+    Resources = 3,
+    Runs = 4,
+    Tasks = 5,
+    Artifacts = 6,
+    Operations = 7,
+    Mcp = 8,
+    Other = 9,
+}
+
+impl GatewayHttpOperation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Ready => "ready",
+            Self::Metrics => "metrics",
+            Self::Resources => "resources",
+            Self::Runs => "runs",
+            Self::Tasks => "tasks",
+            Self::Artifacts => "artifacts",
+            Self::Operations => "operations",
+            Self::Mcp => "mcp",
+            Self::Other => "other",
+        }
+    }
+
+    const fn all() -> [Self; GATEWAY_HTTP_OPERATIONS] {
+        [
+            Self::Live,
+            Self::Ready,
+            Self::Metrics,
+            Self::Resources,
+            Self::Runs,
+            Self::Tasks,
+            Self::Artifacts,
+            Self::Operations,
+            Self::Mcp,
+            Self::Other,
+        ]
+    }
+
+    fn from_path(path: &str) -> Self {
+        if path == "/livez" {
+            return Self::Live;
+        }
+        if path == "/readyz" {
+            return Self::Ready;
+        }
+        if path == "/metrics" {
+            return Self::Metrics;
+        }
+        let segment = path
+            .strip_prefix("/v1/")
+            .and_then(|suffix| suffix.split('/').next());
+        match segment {
+            Some("resources") => Self::Resources,
+            Some("runs") => Self::Runs,
+            Some("tasks") => Self::Tasks,
+            Some("artifacts") => Self::Artifacts,
+            Some("operations") => Self::Operations,
+            Some("mcp-bindings" | "mcp") => Self::Mcp,
+            _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(usize)]
+enum GatewayHttpOutcome {
+    Success = 0,
+    Rejected = 1,
+    Failure = 2,
+}
+
+impl GatewayHttpOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Rejected => "rejected",
+            Self::Failure => "failure",
+        }
+    }
+
+    const fn all() -> [Self; GATEWAY_HTTP_OUTCOMES] {
+        [Self::Success, Self::Rejected, Self::Failure]
+    }
+
+    fn from_status(status: StatusCode) -> Self {
+        if status.is_server_error() {
+            Self::Failure
+        } else if status.is_client_error() {
+            Self::Rejected
+        } else {
+            Self::Success
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GatewayMetrics {
+    ready: AtomicBool,
+    requests: [AtomicU64; GATEWAY_HTTP_OPERATIONS * GATEWAY_HTTP_OUTCOMES],
+    duration_microseconds: [AtomicU64; GATEWAY_HTTP_OPERATIONS * GATEWAY_HTTP_OUTCOMES],
+    duration_buckets: [AtomicU64;
+        GATEWAY_HTTP_OPERATIONS
+            * GATEWAY_HTTP_OUTCOMES
+            * (GATEWAY_HTTP_HISTOGRAM_BUCKETS_MILLISECONDS.len() + 1)],
+}
+
+impl GatewayMetrics {
+    fn new() -> Self {
+        Self {
+            ready: AtomicBool::new(false),
+            requests: std::array::from_fn(|_| AtomicU64::new(0)),
+            duration_microseconds: std::array::from_fn(|_| AtomicU64::new(0)),
+            duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    fn observe(
+        &self,
+        operation: GatewayHttpOperation,
+        outcome: GatewayHttpOutcome,
+        elapsed: Duration,
+    ) {
+        let series = operation as usize * GATEWAY_HTTP_OUTCOMES + outcome as usize;
+        self.requests[series].fetch_add(1, Ordering::Relaxed);
+        self.duration_microseconds[series].fetch_add(
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        let bucket = GATEWAY_HTTP_HISTOGRAM_BUCKETS_MILLISECONDS
+            .iter()
+            .position(|maximum| elapsed <= Duration::from_millis(*maximum))
+            .unwrap_or(GATEWAY_HTTP_HISTOGRAM_BUCKETS_MILLISECONDS.len());
+        let offset = series * (GATEWAY_HTTP_HISTOGRAM_BUCKETS_MILLISECONDS.len() + 1) + bucket;
+        self.duration_buckets[offset].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn render_prometheus(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut output = String::with_capacity(16_384);
+        output.push_str(
+            "# HELP insight_platform_gateway_ready Whether startup authority checks completed.\n",
+        );
+        output.push_str("# TYPE insight_platform_gateway_ready gauge\n");
+        let _ = writeln!(
+            output,
+            "insight_platform_gateway_ready {}",
+            u8::from(self.is_ready())
+        );
+        output.push_str(
+            "# HELP insight_platform_gateway_build_info Static public protocol identity.\n",
+        );
+        output.push_str("# TYPE insight_platform_gateway_build_info gauge\n");
+        output
+            .push_str("insight_platform_gateway_build_info{protocol=\"insight.platform/v1\"} 1\n");
+        output.push_str("# HELP insight_platform_gateway_http_requests_total Requests by bounded operation and outcome.\n");
+        output.push_str("# TYPE insight_platform_gateway_http_requests_total counter\n");
+        output.push_str("# HELP insight_platform_gateway_http_request_duration_seconds Gateway request latency.\n");
+        output
+            .push_str("# TYPE insight_platform_gateway_http_request_duration_seconds histogram\n");
+        for operation in GatewayHttpOperation::all() {
+            for outcome in GatewayHttpOutcome::all() {
+                let series = operation as usize * GATEWAY_HTTP_OUTCOMES + outcome as usize;
+                let count = self.requests[series].load(Ordering::Relaxed);
+                let _ = writeln!(
+                    output,
+                    "insight_platform_gateway_http_requests_total{{operation=\"{}\",outcome=\"{}\"}} {}",
+                    operation.as_str(),
+                    outcome.as_str(),
+                    count
+                );
+                let mut cumulative = 0_u64;
+                let bucket_width = GATEWAY_HTTP_HISTOGRAM_BUCKETS_MILLISECONDS.len() + 1;
+                for (bucket, maximum) in GATEWAY_HTTP_HISTOGRAM_BUCKETS_MILLISECONDS
+                    .iter()
+                    .enumerate()
+                {
+                    cumulative = cumulative.saturating_add(
+                        self.duration_buckets[series * bucket_width + bucket]
+                            .load(Ordering::Relaxed),
+                    );
+                    let _ = writeln!(
+                        output,
+                        "insight_platform_gateway_http_request_duration_seconds_bucket{{operation=\"{}\",outcome=\"{}\",le=\"{}\"}} {}",
+                        operation.as_str(),
+                        outcome.as_str(),
+                        *maximum as f64 / 1_000.0,
+                        cumulative
+                    );
+                }
+                cumulative = cumulative.saturating_add(
+                    self.duration_buckets[series * bucket_width + bucket_width - 1]
+                        .load(Ordering::Relaxed),
+                );
+                let labels = format!(
+                    "operation=\"{}\",outcome=\"{}\"",
+                    operation.as_str(),
+                    outcome.as_str()
+                );
+                let _ = writeln!(
+                    output,
+                    "insight_platform_gateway_http_request_duration_seconds_bucket{{{labels},le=\"+Inf\"}} {cumulative}"
+                );
+                let sum =
+                    self.duration_microseconds[series].load(Ordering::Relaxed) as f64 / 1_000_000.0;
+                let _ = writeln!(
+                    output,
+                    "insight_platform_gateway_http_request_duration_seconds_sum{{{labels}}} {sum}"
+                );
+                let _ = writeln!(
+                    output,
+                    "insight_platform_gateway_http_request_duration_seconds_count{{{labels}}} {count}"
+                );
+            }
+        }
+        output
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2277,6 +2520,7 @@ fn build_router(
     validator_digest: Sha256Digest,
     validation_profile_digest: Sha256Digest,
     run_event_cursor_codec: Arc<dyn RunEventCursorCodec>,
+    metrics: Arc<GatewayMetrics>,
 ) -> Router {
     let authentication = PublicAuthenticationState::new(
         Arc::new(verifier),
@@ -2324,15 +2568,55 @@ fn build_router(
     Router::new()
         .route("/livez", get(live))
         .route("/readyz", get(ready))
+        .route("/metrics", get(prometheus_metrics))
         .merge(protected)
+        .layer(middleware::from_fn(observe_gateway_request))
+        .layer(Extension(metrics))
 }
 
 async fn live() -> Response {
     health("live")
 }
 
-async fn ready() -> Response {
-    health("ready")
+async fn ready(Extension(metrics): Extension<Arc<GatewayMetrics>>) -> Response {
+    if metrics.is_ready() {
+        health("ready")
+    } else {
+        let mut response = (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response();
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+    }
+}
+
+async fn prometheus_metrics(Extension(metrics): Extension<Arc<GatewayMetrics>>) -> Response {
+    let mut response = metrics.render_prometheus().into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn observe_gateway_request(request: Request, next: Next) -> Response {
+    let metrics = request
+        .extensions()
+        .get::<Arc<GatewayMetrics>>()
+        .cloned()
+        .expect("Gateway metrics Extension is installed by build_router");
+    let operation = GatewayHttpOperation::from_path(request.uri().path());
+    let started = Instant::now();
+    let response = next.run(request).await;
+    metrics.observe(
+        operation,
+        GatewayHttpOutcome::from_status(response.status()),
+        started.elapsed(),
+    );
+    response
 }
 
 fn health(state: &'static str) -> Response {
@@ -2460,6 +2744,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     verify_schema(&pool).await.map_err(ProcessError::Schema)?;
     let repository = Arc::new(PgRepository::new(pool));
     let listener = tokio::net::TcpListener::bind(&config.listen_address).await?;
+    let metrics = Arc::new(GatewayMetrics::new());
+    metrics.mark_ready();
     tracing::info!(listen_address = %config.listen_address, "public gateway ready");
     axum::serve(
         listener,
@@ -2470,6 +2756,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             config.registry_validator_digest,
             config.registry_validation_profile_digest,
             run_event_cursor_codec,
+            metrics,
         ),
     )
     .with_graceful_shutdown(shutdown_signal(Duration::from_millis(
@@ -2604,6 +2891,8 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
+        let metrics = Arc::new(GatewayMetrics::new());
+        metrics.mark_ready();
         let router = build_router(
             Arc::new(PgRepository::new(pool)),
             unavailable_artifact_forwarder(),
@@ -2611,6 +2900,7 @@ mod tests {
             fixed_digest('1'),
             fixed_digest('2'),
             test_run_event_cursor_codec(),
+            Arc::clone(&metrics),
         );
         let live = router
             .clone()
@@ -2626,6 +2916,7 @@ mod tests {
         assert_eq!(live.headers()[CACHE_CONTROL], "no-store");
 
         let operation = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/v1/operations/job_0198f1cc-32e4-75e1-a9e8-d95ca0f80001")
@@ -2636,5 +2927,46 @@ mod tests {
             .unwrap();
         assert_eq!(operation.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(operation.headers()[CACHE_CONTROL], "no-store");
+
+        let metrics_response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        assert_eq!(metrics_response.headers()[CACHE_CONTROL], "no-store");
+        let body = axum::body::to_bytes(metrics_response.into_body(), 65_536)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("insight_platform_gateway_ready 1"));
+        assert!(body.contains(
+            "insight_platform_gateway_http_requests_total{operation=\"operations\",outcome=\"rejected\"} 1"
+        ));
+        assert!(!body.contains("job_0198f1cc"));
+    }
+
+    #[test]
+    fn gateway_metrics_use_only_closed_operation_and_outcome_labels() {
+        let metrics = GatewayMetrics::new();
+        metrics.observe(
+            GatewayHttpOperation::from_path("/v1/runs/run_sensitive"),
+            GatewayHttpOutcome::Success,
+            Duration::from_millis(7),
+        );
+        metrics.observe(
+            GatewayHttpOperation::from_path("/v1/unregistered/tenant_sensitive"),
+            GatewayHttpOutcome::Failure,
+            Duration::from_secs(8),
+        );
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains("operation=\"runs\",outcome=\"success\",le=\"0.01\"} 1"));
+        assert!(rendered.contains("operation=\"other\",outcome=\"failure\",le=\"+Inf\"} 1"));
+        assert!(!rendered.contains("run_sensitive"));
+        assert!(!rendered.contains("tenant_sensitive"));
     }
 }
