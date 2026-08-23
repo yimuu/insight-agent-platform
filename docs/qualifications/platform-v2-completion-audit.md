@@ -78,11 +78,14 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    Compute现已在同一事务写immutable output RunValue、owner-derived classification与Scope environment CAS，再提交既有Node/Job/
    Receipt/Event/Outbox；fresh PostgreSQL同时覆盖output ID冲突整批回滚。Map现在按冻结的batch cursor为每个item写immutable
    RunValue，以owner-derived classification和exact Plan v2 item port绑定新MapItem Scope，并与Scope/Node/Job/Receipt/Event/Outbox
-   原子提交；fresh PostgreSQL覆盖多batch、动态Scope隔离与Receipt replay。尚缺Loop carried rollover及完整production store
+   原子提交；fresh PostgreSQL覆盖多batch、动态Scope隔离与Receipt replay。Loop body settlement现在从当前Scope的exact body output
+   复制immutable carried RunValue，预建下一open Scope并切换continuation；false condition原子关闭该Scope并从固定父Scope激活exit，
+   fresh PostgreSQL覆盖ID冲突整批回滚、classification/value复制、Scope切换和Receipt replay。尚缺完整production store
    composition；手工注入`ControllerObservation`仍不计production证据。CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
    CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向、每item RunValue/MapItem Scope原子写及
    L2 batch/replay fixture已实现；process crash/restart的L3 fixture仍待production handler闭合后完成。
-   CR-179已冻结Loop carried的下一Scope预建/复用/关闭和固定root controller父链合同；对应repository rollover、L1/L2/L3 fixture仍待实现。
+   CR-179的exact pair producer/schema/region L1与单次rollover/false-exit L2已实现；第二轮body复用/不串值的完整L2及process crash/restart L3
+   仍待production handler闭合后完成。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

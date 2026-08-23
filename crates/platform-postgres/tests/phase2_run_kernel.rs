@@ -19,17 +19,17 @@ use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
 use insight_platform_orchestrator::{
     derive_expression_controller, AdmitRun, ChildBudget, ChildCancellationPolicy, ChildOutcome,
     CommittedExpressionInput, ControllerObservation, DataPortKey, ExpressionLimits, JoinPolicy,
-    JoinRemainderPolicy, MapFailurePolicy, ObserveRunTimeout, PlanLimits, PlanNodeKey,
-    RequestRunCancel, RunInputValue, RuntimeNode, RuntimePlan, SetRunPause, TypedExpressionProgram,
-    TypedInstruction,
+    JoinRemainderPolicy, LoopCarriedPort, MapFailurePolicy, ObserveRunTimeout, PlanLimits,
+    PlanNodeKey, PortAssignment, RequestRunCancel, RunInputValue, RuntimeNode, RuntimePlan,
+    SetRunPause, TypedExpressionProgram, TypedInstruction,
 };
 use insight_platform_postgres::{
     repository::{
         ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep,
         ChildRunCancellationSlot, ClaimOrchestrationJobs, ClaimedOrchestrationJob,
-        CompleteOrchestrationRun, ControllerActivationSlot, ControllerPendingNodeSlot,
-        ControllerPendingWakeSlot, ControllerRemainderCancellationSlot, ControllerScopeSlot,
-        ControllerStepMutationIds, ControllerStructuralExitSlot,
+        CompleteOrchestrationRun, ControllerActivationSlot, ControllerLoopRolloverSlot,
+        ControllerPendingNodeSlot, ControllerPendingWakeSlot, ControllerRemainderCancellationSlot,
+        ControllerScopeSlot, ControllerStepMutationIds, ControllerStructuralExitSlot,
         DeferOrchestrationChildMutationIds, DeferOrchestrationTaskMutationIds,
         DeferOrchestrationToChildRun, DeferOrchestrationToTask, DriveChildRunCancellations,
         DriveDueOrchestrationRetries, DriveExpiredOrchestrationJobs,
@@ -139,6 +139,22 @@ fn item_port(node: &str) -> insight_platform_orchestrator::ExactDataPortRef {
     insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
         producer_node_id: PlanNodeKey::new(node.to_owned()).unwrap(),
         port_id: DataPortKey::new("item".to_owned()).unwrap(),
+        schema_digest: digest('1'),
+    }
+}
+
+fn loop_next_port() -> insight_platform_orchestrator::ExactDataPortRef {
+    insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
+        producer_node_id: PlanNodeKey::new("loop".to_owned()).unwrap(),
+        port_id: DataPortKey::new("carried".to_owned()).unwrap(),
+        schema_digest: digest('1'),
+    }
+}
+
+fn loop_body_output_port() -> insight_platform_orchestrator::ExactDataPortRef {
+    insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
+        producer_node_id: PlanNodeKey::new("loop_body".to_owned()).unwrap(),
+        port_id: DataPortKey::new("carried_out".to_owned()).unwrap(),
         schema_digest: digest('1'),
     }
 }
@@ -299,7 +315,10 @@ fn runtime_plan() -> RuntimePlan {
                 loop_node.clone(),
                 RuntimeNode::Loop {
                     condition: literal_program(json!(true)),
-                    carried_ports: vec![],
+                    carried_ports: vec![LoopCarriedPort {
+                        body_output_port: loop_body_output_port(),
+                        next_iteration_port: loop_next_port(),
+                    }],
                     body: loop_body.clone(),
                     exit: finish.clone(),
                     maximum_iterations: 2,
@@ -308,7 +327,10 @@ fn runtime_plan() -> RuntimePlan {
             (
                 loop_body,
                 RuntimeNode::Compute {
-                    assignments: vec![],
+                    assignments: vec![PortAssignment {
+                        output_port: loop_body_output_port(),
+                        expression: literal_program(json!({"iteration": 0})),
+                    }],
                     next: loop_node,
                 },
             ),
@@ -3856,6 +3878,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 scope_terminal_outbox_id: id(
                     "obx_0198f1c3-9a00-7c3e-b1f3-773c28369174",
                 ),
+                loop_rollover: None,
             }),
             pending_wake: Some(ControllerPendingWakeSlot {
                 orchestration_job_id: id(
@@ -4009,6 +4032,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 scope_terminal_outbox_id: id(
                     "obx_0198f1c3-9a00-7c3e-b1f3-773c28369194",
                 ),
+                loop_rollover: None,
             }),
             pending_wake: Some(ControllerPendingWakeSlot {
                 orchestration_job_id: id(
@@ -5243,6 +5267,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 scope_closing_outbox_id: fixture_platform_id("obx", "9598"),
                 scope_terminal_event_id: fixture_platform_id("evt", "9599"),
                 scope_terminal_outbox_id: fixture_platform_id("obx", "9599"),
+                loop_rollover: None,
             }),
             pending_wake: Some(ControllerPendingWakeSlot {
                 orchestration_job_id: fixture_platform_id("job", "959a"),
@@ -5373,6 +5398,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 scope_closing_outbox_id: fixture_platform_id("obx", "95c8"),
                 scope_terminal_event_id: fixture_platform_id("evt", "95c9"),
                 scope_terminal_outbox_id: fixture_platform_id("obx", "95c9"),
+                loop_rollover: None,
             }),
             pending_wake: None,
             remainder_cancellations: Vec::new(),
@@ -5712,6 +5738,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 scope_closing_outbox_id: fixture_platform_id("obx", "9668"),
                 scope_terminal_event_id: fixture_platform_id("evt", "9669"),
                 scope_terminal_outbox_id: fixture_platform_id("obx", "9669"),
+                loop_rollover: None,
             }),
             pending_wake: None,
             remainder_cancellations: Vec::new(),
@@ -6309,13 +6336,34 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Replayed(_) => panic!("Loop body start must apply"),
     };
     scheduler.commit().await.unwrap();
+    let loop_body_fence = JobFence {
+        expected_job_version: loop_body_started.version,
+        ..loop_body_start.fence.clone()
+    };
+    let loop_body_facts = repository
+        .load_expression_controller_facts(&loop_body_fence, &runtime_plan())
+        .await
+        .unwrap();
+    assert!(loop_body_facts.inputs.is_empty());
+    let loop_body_plan = runtime_plan();
+    let loop_body_evaluation = derive_expression_controller(
+        loop_body_plan
+            .node(&loop_body_facts.plan_node_key)
+            .unwrap(),
+        vec![],
+        loop_body_facts.node_execution_id.clone(),
+        loop_body_facts.node_execution_version,
+        loop_body_facts.loop_iteration,
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap();
+    let loop_body_value_id = fixture_platform_id("val", "973e");
+    let rolled_scope_id = fixture_platform_id("scp", "974d");
+    let rolled_value_id = fixture_platform_id("val", "974f");
     let settle_loop_iteration = ApplyOrchestrationControllerStep {
-        fence: JobFence {
-            expected_job_version: loop_body_started.version,
-            ..loop_body_start.fence.clone()
-        },
-        plan: runtime_plan(),
-        observation: ControllerObservation::None,
+        fence: loop_body_fence,
+        plan: loop_body_plan,
+        observation: loop_body_evaluation.observation.clone(),
         idempotency_key_digest: digest('5'),
         request_digest: digest('6'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -6337,6 +6385,14 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 scope_closing_outbox_id: fixture_platform_id("obx", "9748"),
                 scope_terminal_event_id: fixture_platform_id("evt", "9749"),
                 scope_terminal_outbox_id: fixture_platform_id("obx", "9749"),
+                loop_rollover: Some(ControllerLoopRolloverSlot {
+                    scope: ControllerScopeSlot {
+                        scope_instance_id: rolled_scope_id.clone(),
+                        scope_event_id: fixture_platform_id("evt", "974e"),
+                        scope_outbox_id: fixture_platform_id("obx", "974e"),
+                    },
+                    carried_value_ids: vec![rolled_value_id.clone()],
+                }),
             }),
             pending_wake: Some(ControllerPendingWakeSlot {
                 orchestration_job_id: fixture_platform_id("job", "974a"),
@@ -6349,9 +6405,56 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             remainder_cancellations: Vec::new(),
         },
     };
+    let derived_loop_body_settlement = ApplyDerivedExpressionControllerStep {
+        step: settle_loop_iteration,
+        materialized_inputs: vec![],
+        evaluation: loop_body_evaluation,
+        output_value_ids: vec![loop_body_value_id.clone()],
+    };
+    let mut conflicting_rollover = derived_loop_body_settlement.clone();
+    conflicting_rollover
+        .step
+        .mutations
+        .structural_exit
+        .as_mut()
+        .unwrap()
+        .loop_rollover
+        .as_mut()
+        .unwrap()
+        .carried_value_ids = vec![loop_admission.input.value_id.clone()];
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler
+            .apply_derived_expression_controller_step(conflicting_rollover)
+            .await,
+        Err(RepositoryError::Database(_))
+    ));
+    scheduler.rollback().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM insight_platform.run_values WHERE tenant_id = $1 AND run_id = $2",
+        )
+        .bind(TENANT_ID)
+        .bind(loop_admission.run_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+        )
+        .bind(TENANT_ID)
+        .bind(rolled_scope_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let settled_loop = match scheduler
-        .apply_orchestration_controller_step(settle_loop_iteration.clone())
+        .apply_derived_expression_controller_step(derived_loop_body_settlement.clone())
         .await
         .unwrap()
     {
@@ -6360,12 +6463,14 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     assert_eq!(settled_loop.settled_scopes[0].state, "succeeded");
+    assert_eq!(settled_loop.created_scopes.len(), 1);
+    assert_eq!(settled_loop.created_scopes[0].scope_id, rolled_scope_id.to_string());
     assert_eq!(settled_loop.woken_nodes.len(), 1);
     assert_eq!(settled_loop.woken_nodes[0].plan_node_key.as_str(), "loop");
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler
-            .apply_orchestration_controller_step(settle_loop_iteration)
+            .apply_derived_expression_controller_step(derived_loop_body_settlement)
             .await
             .unwrap(),
         CommandOutcome::Replayed(record)
@@ -6373,6 +6478,31 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 && record.woken_nodes.len() == 1
     ));
     scheduler.commit().await.unwrap();
+    let rolled_scope_payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2 AND state = 'open'",
+    )
+    .bind(TENANT_ID)
+    .bind(rolled_scope_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rolled_scope_payload["descriptor"]["iteration"],
+        json!(1)
+    );
+    assert!(rolled_scope_payload
+        .to_string()
+        .contains(&rolled_value_id.to_string()));
+    let rolled_value: (String, Value) = sqlx::query_as(
+        "SELECT classification, inline_value FROM insight_platform.run_values WHERE tenant_id = $1 AND value_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(rolled_value_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rolled_value.0, DataClassification::Internal.as_str());
+    assert_eq!(rolled_value.1, json!({"iteration": 0}));
 
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let loop_continuation_claimed = scheduler
@@ -6407,6 +6537,15 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Replayed(_) => panic!("Loop continuation start must apply"),
     };
     scheduler.commit().await.unwrap();
+    let continuation_scope_id: String = sqlx::query_scalar(
+        "SELECT scope_id FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(loop_continuation_claimed[0].job.node_id.as_ref().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(continuation_scope_id, rolled_scope_id.to_string());
     let exit_loop = ApplyOrchestrationControllerStep {
         fence: JobFence {
             expected_job_version: loop_continuation_started.version,
@@ -6441,7 +6580,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 job_outbox_id: fixture_platform_id("obx", "976b"),
             }],
             pending_nodes: Vec::new(),
-            structural_exit: None,
+            structural_exit: Some(ControllerStructuralExitSlot {
+                scope_closing_event_id: fixture_platform_id("evt", "976c"),
+                scope_closing_outbox_id: fixture_platform_id("obx", "976c"),
+                scope_terminal_event_id: fixture_platform_id("evt", "976d"),
+                scope_terminal_outbox_id: fixture_platform_id("obx", "976d"),
+                loop_rollover: None,
+            }),
             pending_wake: None,
             remainder_cancellations: Vec::new(),
         },
@@ -6457,6 +6602,16 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     assert_eq!(exited_loop.activations[0].plan_node_key.as_str(), "finish");
+    let closed_rolled_scope: (String, i64) = sqlx::query_as(
+        "SELECT state, version FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(rolled_scope_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(closed_rolled_scope.0, "succeeded");
+    assert_eq!(closed_rolled_scope.1, 3);
     let cancelling_loop_run = applied(
         run_command!(
             repository,
@@ -6958,6 +7113,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 scope_closing_outbox_id: fixture_platform_id("obx", scope_events[0]),
                 scope_terminal_event_id: fixture_platform_id("evt", scope_events[1]),
                 scope_terminal_outbox_id: fixture_platform_id("obx", scope_events[1]),
+                loop_rollover: None,
             }),
             pending_wake: Some(ControllerPendingWakeSlot {
                 orchestration_job_id: fixture_platform_id("job", wake_job),
@@ -7430,6 +7586,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 scope_closing_outbox_id: fixture_platform_id("obx", "9958"),
                 scope_terminal_event_id: fixture_platform_id("evt", "9959"),
                 scope_terminal_outbox_id: fixture_platform_id("obx", "9959"),
+                loop_rollover: None,
             }),
             pending_wake: Some(ControllerPendingWakeSlot {
                 orchestration_job_id: fixture_platform_id("job", "995a"),
@@ -7598,6 +7755,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 scope_closing_outbox_id: fixture_platform_id("obx", "9988"),
                 scope_terminal_event_id: fixture_platform_id("evt", "9989"),
                 scope_terminal_outbox_id: fixture_platform_id("obx", "9989"),
+                loop_rollover: None,
             }),
             pending_wake: None,
             remainder_cancellations: Vec::new(),
@@ -7828,6 +7986,7 @@ fn parallel_leg_exit_step(
                 scope_closing_outbox_id: fixture_platform_id("obx", scope_event_suffixes[0]),
                 scope_terminal_event_id: fixture_platform_id("evt", scope_event_suffixes[1]),
                 scope_terminal_outbox_id: fixture_platform_id("obx", scope_event_suffixes[1]),
+                loop_rollover: None,
             }),
             pending_wake: Some(ControllerPendingWakeSlot {
                 orchestration_job_id: fixture_platform_id("job", wake_job_suffix),

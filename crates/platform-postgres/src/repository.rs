@@ -5099,6 +5099,12 @@ impl PgSchedulerTransaction {
                         "scope_closing_outbox_id": slot.scope_closing_outbox_id,
                         "scope_terminal_event_id": slot.scope_terminal_event_id,
                         "scope_terminal_outbox_id": slot.scope_terminal_outbox_id,
+                        "loop_rollover": slot.loop_rollover.as_ref().map(|rollover| serde_json::json!({
+                            "carried_value_ids": rollover.carried_value_ids,
+                            "scope_event_id": rollover.scope.scope_event_id,
+                            "scope_instance_id": rollover.scope.scope_instance_id,
+                            "scope_outbox_id": rollover.scope.scope_outbox_id,
+                        })),
                     })),
             }),
             262_144,
@@ -5183,7 +5189,27 @@ impl PgSchedulerTransaction {
                 | insight_platform_orchestrator::RuntimeNode::ErrorBoundary { .. },
             ) => {
                 if let [target] = activate.as_slice() {
-                    if let Some(exit) = load_parallel_leg_exit(
+                    let loop_context = if matches!(
+                        runtime_node,
+                        insight_platform_orchestrator::RuntimeNode::Loop { .. }
+                    ) {
+                        load_open_loop_iteration_context(
+                            &mut transaction,
+                            &observed,
+                            &parents,
+                            &source_node,
+                            None,
+                        )
+                        .await?
+                    } else {
+                        None
+                    };
+                    if let Some(context) = loop_context {
+                        ControllerStepShape::LoopConditionExit {
+                            target: target.clone(),
+                            context,
+                        }
+                    } else if let Some(exit) = load_parallel_leg_exit(
                         &mut transaction,
                         &observed,
                         &parents,
@@ -5266,6 +5292,14 @@ impl PgSchedulerTransaction {
                 body: body.clone(),
                 loop_plan_node_key: source_node.plan_node_key.clone(),
                 iteration: *iteration,
+                existing_scope: load_open_loop_iteration_context(
+                    &mut transaction,
+                    &observed,
+                    &parents,
+                    &source_node,
+                    Some(*iteration),
+                )
+                .await?,
             },
             (
                 ControllerDecision::FanOut {
@@ -8329,6 +8363,15 @@ struct ControllerSourceNode {
 }
 
 #[derive(Debug, Clone)]
+struct OpenLoopIterationContext {
+    root_loop_node_execution_id: ResourceId,
+    scope_id: ResourceId,
+    lexical_parent_scope_id: ResourceId,
+    iteration: u32,
+    loop_plan_node_key: PlanNodeKey,
+}
+
+#[derive(Debug, Clone)]
 enum ControllerStepShape {
     Sequential {
         targets: Vec<PlanNodeKey>,
@@ -8344,9 +8387,15 @@ enum ControllerStepShape {
         body: PlanNodeKey,
         loop_plan_node_key: PlanNodeKey,
         iteration: u32,
+        existing_scope: Option<OpenLoopIterationContext>,
+    },
+    LoopConditionExit {
+        target: PlanNodeKey,
+        context: OpenLoopIterationContext,
     },
     LoopIterationExit {
         loop_node_execution_id: ResourceId,
+        root_loop_node_execution_id: ResourceId,
         loop_plan_node_key: PlanNodeKey,
         expected_scope_id: ResourceId,
         iteration: u32,
@@ -8390,6 +8439,7 @@ impl ControllerStepShape {
             Self::Sequential { targets } => Ok(targets.clone()),
             Self::Fork { legs, .. } => Ok(legs.clone()),
             Self::LoopIteration { body, .. } => Ok(vec![body.clone()]),
+            Self::LoopConditionExit { target, .. } => Ok(vec![target.clone()]),
             Self::MapBatch {
                 body, batch_size, ..
             } => Ok(vec![
@@ -8434,11 +8484,21 @@ impl ControllerStepShape {
             {
                 Ok(())
             }
-            Self::LoopIteration { .. }
+            Self::LoopIteration { existing_scope, .. }
                 if mutations.activations.len() == 1
                     && mutations.pending_nodes.len() == 1
-                    && mutations.activations[0].scope.is_some()
+                    && mutations.activations[0].scope.is_some() == existing_scope.is_none()
                     && mutations.structural_exit.is_none()
+                    && mutations.pending_wake.is_none()
+                    && mutations.remainder_cancellations.is_empty() =>
+            {
+                Ok(())
+            }
+            Self::LoopConditionExit { .. }
+                if mutations.activations.len() == 1
+                    && mutations.pending_nodes.is_empty()
+                    && mutations.activations[0].scope.is_none()
+                    && mutations.structural_exit.is_some()
                     && mutations.pending_wake.is_none()
                     && mutations.remainder_cancellations.is_empty() =>
             {
@@ -9784,6 +9844,7 @@ async fn load_loop_iteration_exit(
                 RepositoryError::CorruptRow(failure.to_string())
             },
         )?,
+        root_loop_node_execution_id: scope.controller_node_execution_id,
         loop_plan_node_key: loop_plan_node_key.clone(),
         expected_scope_id: source_node.scope_id.parse().map_err(
             |failure: insight_platform_contracts::ResourceIdError| {
@@ -9791,6 +9852,88 @@ async fn load_loop_iteration_exit(
             },
         )?,
         iteration,
+    }))
+}
+
+async fn load_open_loop_iteration_context(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    expected_iteration: Option<u32>,
+) -> Result<Option<OpenLoopIterationContext>, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT parent_node_id, node_kind, state, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'scope_instance'
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&source_node.scope_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Loop source Scope"))?;
+    if row.try_get::<String, _>("node_kind")? != "loop_iteration" {
+        return Ok(None);
+    }
+    if row.try_get::<String, _>("state")? != ScopeState::Open.as_str()
+        || row.try_get::<i64, _>("version")? != parents.scope_version
+    {
+        return Err(RepositoryError::Conflict("Loop iteration Scope fence"));
+    }
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let stored: StoredControllerScopePayload =
+        decode_typed_payload(&payload, "open LoopIteration Scope")?;
+    let StoredControllerScopeDescriptor::LoopIteration {
+        iteration,
+        loop_plan_node_key,
+    } = stored.descriptor
+    else {
+        return Err(RepositoryError::Conflict("Loop iteration Scope descriptor"));
+    };
+    if loop_plan_node_key != source_node.plan_node_key
+        || expected_iteration.is_some_and(|expected| expected != iteration)
+        || row.try_get::<Option<String>, _>("parent_node_id")?
+            != Some(stored.controller_node_execution_id.to_string())
+    {
+        return Err(RepositoryError::Conflict("Loop iteration Scope ownership"));
+    }
+    let lexical_parent_scope_id: ResourceId = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT scope_id
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'node_execution'
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(stored.controller_node_execution_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("root Loop controller"))?
+    .parse()
+    .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+        RepositoryError::CorruptRow(failure.to_string())
+    })?;
+    let scope_id: ResourceId = source_node.scope_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    if lexical_parent_scope_id == scope_id {
+        return Err(RepositoryError::Conflict("Loop Scope lexical self-cycle"));
+    }
+    Ok(Some(OpenLoopIterationContext {
+        root_loop_node_execution_id: stored.controller_node_execution_id,
+        scope_id,
+        lexical_parent_scope_id,
+        iteration,
+        loop_plan_node_key,
     }))
 }
 
@@ -10062,6 +10205,7 @@ async fn mutate_orchestration_controller_step(
                     loop_plan_node_key,
                     ..
                 } => vec![loop_plan_node_key.clone()],
+                ControllerStepShape::LoopConditionExit { .. } => Vec::new(),
                 ControllerStepShape::MapBatch { next, .. }
                 | ControllerStepShape::MapItemExit {
                     next_plan_node_key: next,
@@ -10126,7 +10270,10 @@ async fn mutate_orchestration_controller_step(
     let mut created_scopes = Vec::with_capacity(targets.len());
     for (index, (target, slot)) in targets.iter().zip(slots).enumerate() {
         let target_node = plan.node(target)?;
-        let target_scope_id = if let Some(scope) = &slot.scope {
+        let target_scope_id = if let ControllerStepShape::LoopConditionExit { context, .. } = shape
+        {
+            context.lexical_parent_scope_id.to_string()
+        } else if let Some(scope) = &slot.scope {
             let (
                 scope_kind,
                 scope_parent_node_id,
@@ -10402,24 +10549,35 @@ async fn mutate_orchestration_controller_step(
         ControllerStepShape::LoopIteration {
             loop_plan_node_key,
             iteration,
+            existing_scope,
             ..
         } => Some((
             loop_plan_node_key.clone(),
-            parents.node_id.parse().map_err(
-                |failure: insight_platform_contracts::ResourceIdError| {
-                    RepositoryError::CorruptRow(failure.to_string())
-                },
-            )?,
-            parents.node_id.clone(),
-            vec![slots
-                .first()
-                .and_then(|slot| slot.scope.as_ref())
-                .map(|scope| scope.scope_instance_id.clone())
-                .ok_or_else(|| {
-                    RepositoryError::InvalidInput(
-                        "Loop body is missing its LoopIteration Scope".to_owned(),
-                    )
-                })?],
+            existing_scope
+                .as_ref()
+                .map(|context| context.root_loop_node_execution_id.clone())
+                .unwrap_or(parents.node_id.parse().map_err(
+                    |failure: insight_platform_contracts::ResourceIdError| {
+                        RepositoryError::CorruptRow(failure.to_string())
+                    },
+                )?),
+            existing_scope
+                .as_ref()
+                .map(|context| context.root_loop_node_execution_id.to_string())
+                .unwrap_or_else(|| parents.node_id.clone()),
+            vec![if let Some(context) = existing_scope {
+                context.scope_id.clone()
+            } else {
+                slots
+                    .first()
+                    .and_then(|slot| slot.scope.as_ref())
+                    .map(|scope| scope.scope_instance_id.clone())
+                    .ok_or_else(|| {
+                        RepositoryError::InvalidInput(
+                            "Loop body is missing its LoopIteration Scope".to_owned(),
+                        )
+                    })?
+            }],
             StoredControllerWait::Loop {
                 iteration: iteration.checked_add(1).ok_or_else(|| {
                     RepositoryError::InvalidInput("Loop iteration overflow".to_owned())
@@ -10626,6 +10784,7 @@ async fn mutate_orchestration_controller_step(
                 shape,
                 mutations,
                 plan,
+                scope_environment_limits,
                 database_now,
             )
             .await?
@@ -10641,6 +10800,17 @@ async fn mutate_orchestration_controller_step(
                 ChildOutcome::Succeeded,
                 ScopeState::Succeeded,
                 request_digest,
+                database_now,
+            )
+            .await?
+        }
+        ControllerStepShape::LoopConditionExit { context, .. } => {
+            close_loop_condition_scope(
+                transaction,
+                current_job,
+                parents,
+                context,
+                mutations,
                 database_now,
             )
             .await?
@@ -10661,6 +10831,21 @@ async fn mutate_orchestration_controller_step(
             .await?
         }
     };
+    if matches!(shape, ControllerStepShape::LoopIterationExit { .. }) {
+        let rollover = mutations
+            .structural_exit
+            .as_ref()
+            .and_then(|exit| exit.loop_rollover.as_ref())
+            .ok_or_else(|| {
+                RepositoryError::CorruptRow("Loop rollover Scope slot disappeared".to_owned())
+            })?;
+        created_scopes.push(ControllerScopeRecord {
+            scope_id: rollover.scope.scope_instance_id.to_string(),
+            scope_kind: "loop_iteration".to_owned(),
+            state: ScopeState::Open.as_str().to_owned(),
+            version: 1,
+        });
+    }
     structural.woken_nodes.extend(immediately_woken_nodes);
     let active_work_decrement = i32::try_from(
         1_usize
@@ -10727,6 +10912,104 @@ impl ParallelLegSettlement {
     }
 }
 
+async fn close_loop_condition_scope(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    context: &OpenLoopIterationContext,
+    mutations: &ControllerStepMutationIds,
+    database_now: DateTime<Utc>,
+) -> Result<ParallelLegSettlement, RepositoryError> {
+    let structural = mutations.structural_exit.as_ref().ok_or_else(|| {
+        RepositoryError::InvalidInput("Loop condition exit has no Scope event slot".to_owned())
+    })?;
+    if structural.loop_rollover.is_some()
+        || context.scope_id.to_string() != parents.scope_id
+        || context.iteration == 0
+    {
+        return Err(RepositoryError::InvalidInput(
+            "Loop condition exit mutation shape".to_owned(),
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT parent_node_id, node_kind, state, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'scope_instance'
+        FOR UPDATE
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(context.scope_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Loop condition Scope"))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let stored: StoredControllerScopePayload =
+        decode_typed_payload(&payload, "Loop condition Scope")?;
+    if row.try_get::<String, _>("node_kind")? != "loop_iteration"
+        || row.try_get::<String, _>("state")? != ScopeState::Open.as_str()
+        || row.try_get::<i64, _>("version")? != parents.scope_version
+        || row.try_get::<Option<String>, _>("parent_node_id")?
+            != Some(context.root_loop_node_execution_id.to_string())
+        || stored.controller_node_execution_id != context.root_loop_node_execution_id
+        || stored.descriptor
+            != (StoredControllerScopeDescriptor::LoopIteration {
+                iteration: context.iteration,
+                loop_plan_node_key: context.loop_plan_node_key.clone(),
+            })
+    {
+        return Err(RepositoryError::Conflict("Loop condition Scope fence"));
+    }
+    let closing_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'closing', version = version + 1, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'open' AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(context.scope_id.to_string())
+    .bind(parents.scope_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Loop condition Scope closing"))?;
+    let version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'succeeded', version = version + 1,
+            terminal_at = $4, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'closing'
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(context.scope_id.to_string())
+    .bind(closing_version)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Loop condition Scope terminal"))?;
+    Ok(ParallelLegSettlement {
+        settled_scopes: vec![ControllerScopeRecord {
+            scope_id: context.scope_id.to_string(),
+            scope_kind: "loop_iteration".to_owned(),
+            state: ScopeState::Succeeded.as_str().to_owned(),
+            version,
+        }],
+        woken_nodes: Vec::new(),
+        cancelled_remainders: Vec::new(),
+        cancelled_active_work_count: 0,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn settle_loop_iteration_and_wake_continuation(
     transaction: &mut Transaction<'_, Postgres>,
@@ -10735,10 +11018,12 @@ async fn settle_loop_iteration_and_wake_continuation(
     shape: &ControllerStepShape,
     mutations: &ControllerStepMutationIds,
     plan: &RuntimePlan,
+    scope_environment_limits: ScopeEnvironmentLimits,
     database_now: DateTime<Utc>,
 ) -> Result<ParallelLegSettlement, RepositoryError> {
     let ControllerStepShape::LoopIterationExit {
         loop_node_execution_id,
+        root_loop_node_execution_id,
         loop_plan_node_key,
         expected_scope_id,
         iteration,
@@ -10805,6 +11090,160 @@ async fn settle_loop_iteration_and_wake_continuation(
             "LoopIteration Scope frozen descriptor",
         ));
     }
+    if stored_scope.controller_node_execution_id != *root_loop_node_execution_id {
+        return Err(RepositoryError::Conflict("Loop root controller owner"));
+    }
+    let loop_node = plan.node(loop_plan_node_key)?;
+    let insight_platform_orchestrator::RuntimeNode::Loop { carried_ports, .. } = loop_node else {
+        return Err(RepositoryError::Conflict("Loop continuation Plan node"));
+    };
+    let rollover = mutations
+        .structural_exit
+        .as_ref()
+        .and_then(|exit| exit.loop_rollover.as_ref())
+        .ok_or_else(|| {
+            RepositoryError::InvalidInput("Loop exit is missing its rollover slot".to_owned())
+        })?;
+    if rollover.carried_value_ids.len() != carried_ports.len() {
+        return Err(RepositoryError::InvalidInput(
+            "Loop carried value mutation shape".to_owned(),
+        ));
+    }
+    let tenant_id: ResourceId = current_job.tenant_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let current_scope_id: ResourceId = parents.scope_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let body_ports = carried_ports
+        .iter()
+        .map(|port| port.body_output_port.clone())
+        .collect::<Vec<_>>();
+    let environments = load_scope_environment_chain(
+        transaction,
+        &tenant_id,
+        &run_id,
+        &current_scope_id,
+        scope_environment_limits,
+    )
+    .await?;
+    let references = insight_platform_orchestrator::resolve_scope_inputs(
+        &body_ports,
+        &environments,
+        scope_environment_limits,
+    )?;
+    let resolved =
+        load_resolved_expression_values(transaction, &tenant_id, &run_id, body_ports, references)
+            .await?;
+    let current_value_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.run_values WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let next_value_count = usize::try_from(current_value_count)
+        .ok()
+        .and_then(|count| count.checked_add(carried_ports.len()))
+        .ok_or(RepositoryError::Conflict("RunValue reference bound"))?;
+    if next_value_count > scope_environment_limits.maximum_bindings_per_scope {
+        return Err(RepositoryError::Conflict("RunValue reference bound"));
+    }
+    let mut next_bindings = BTreeMap::new();
+    for ((carried, source), value_id) in carried_ports
+        .iter()
+        .zip(resolved)
+        .zip(&rollover.carried_value_ids)
+    {
+        if source.schema_digest != *carried.next_iteration_port.schema_digest()
+            || source.schema_digest != *carried.body_output_port.schema_digest()
+        {
+            return Err(RepositoryError::Conflict("Loop carried schema evidence"));
+        }
+        let (inline_value, artifact_id) = match source.value {
+            ValueRef::Inline { value } => (Some(value), None),
+            ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_values (
+                tenant_id, value_id, run_id, node_id, value_kind, classification,
+                schema_digest, content_digest, inline_value, artifact_id
+            ) VALUES ($1, $2, $3, $4, 'loop_carried', $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(value_id.to_string())
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .bind(source.classification.as_str())
+        .bind(source.schema_digest.to_string())
+        .bind(source.content_digest.to_string())
+        .bind(inline_value)
+        .bind(artifact_id)
+        .execute(&mut **transaction)
+        .await?;
+        next_bindings.insert(
+            carried.next_iteration_port.clone(),
+            ExactRunValueRef {
+                value_id: value_id.clone(),
+                schema_digest: source.schema_digest,
+                content_digest: source.content_digest,
+            },
+        );
+    }
+    let next_iteration = iteration.checked_add(1).ok_or_else(|| {
+        RepositoryError::CorruptRow("Loop iteration counter overflowed".to_owned())
+    })?;
+    let next_environment =
+        ScopeDataEnvironmentSnapshot::build(next_bindings, scope_environment_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let next_scope_payload = TypedPayload::with_limit(
+        1,
+        &StoredControllerScopePayload {
+            controller_node_execution_id: root_loop_node_execution_id.clone(),
+            descriptor: StoredControllerScopeDescriptor::LoopIteration {
+                iteration: next_iteration,
+                loop_plan_node_key: loop_plan_node_key.clone(),
+            },
+            environment: next_environment,
+        },
+        262_144,
+    )?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, related_run_id, logical_key,
+            node_kind, state, payload_schema_version, payload, payload_digest, deadline
+        ) VALUES (
+            $1, $2, $3, $4, 'scope_instance', $2,
+            NULL, NULL, NULL, $5, 'loop_iteration', 'open', $6, $7, $8, $9
+        )
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(rollover.scope.scope_instance_id.to_string())
+    .bind(&parents.run.run_id)
+    .bind(root_loop_node_execution_id.to_string())
+    .bind(format!(
+        "scope:{root_loop_node_execution_id}:loop_iteration:{next_iteration}"
+    ))
+    .bind(next_scope_payload.schema_version)
+    .bind(&next_scope_payload.value)
+    .bind(&next_scope_payload.digest)
+    .bind(current_job.deadline.min(parents.run.deadline))
+    .execute(&mut **transaction)
+    .await?;
     let closing_version: i64 = sqlx::query_scalar(
         r#"
         UPDATE insight_platform.run_nodes
@@ -10839,13 +11278,6 @@ async fn settle_loop_iteration_and_wake_continuation(
     .await?
     .ok_or(RepositoryError::Conflict("LoopIteration Scope terminal"))?;
 
-    let loop_node = plan.node(loop_plan_node_key)?;
-    if !matches!(
-        loop_node,
-        insight_platform_orchestrator::RuntimeNode::Loop { .. }
-    ) {
-        return Err(RepositoryError::Conflict("Loop continuation Plan node"));
-    }
     let pending_row = sqlx::query(
         r#"
         SELECT parent_node_id, plan_node_key, node_kind, state, version,
@@ -10882,9 +11314,6 @@ async fn settle_loop_iteration_and_wake_continuation(
     )?;
     let stored_pending: StoredPendingControllerNodePayload =
         decode_typed_payload(&pending_payload, "pending Loop continuation")?;
-    let next_iteration = iteration.checked_add(1).ok_or_else(|| {
-        RepositoryError::CorruptRow("Loop iteration counter overflowed".to_owned())
-    })?;
     if stored_pending.controller_node_execution_id != stored_scope.controller_node_execution_id
         || stored_pending.plan_node_key != *loop_plan_node_key
         || stored_pending.expected_scope_ids != vec![expected_scope_id.clone()]
@@ -10900,7 +11329,7 @@ async fn settle_loop_iteration_and_wake_continuation(
     let node_version: i64 = sqlx::query_scalar(
         r#"
         UPDATE insight_platform.run_nodes
-        SET state = 'ready', version = version + 1, enqueue_round = 0,
+        SET state = 'ready', scope_id = $5, version = version + 1, enqueue_round = 0,
             updated_at = $4
         WHERE tenant_id = $1 AND node_id = $2 AND version = $3
           AND record_kind = 'node_execution' AND state = 'pending'
@@ -10912,6 +11341,7 @@ async fn settle_loop_iteration_and_wake_continuation(
     .bind(loop_node_execution_id.to_string())
     .bind(pending_row.try_get::<i64, _>("version")?)
     .bind(database_now)
+    .bind(rollover.scope.scope_instance_id.to_string())
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::Conflict("Loop continuation wake"))?;
@@ -14219,6 +14649,32 @@ async fn append_orchestration_controller_events(
         )
         .await?;
     }
+    if let Some(rollover) = mutations
+        .structural_exit
+        .as_ref()
+        .and_then(|exit| exit.loop_rollover.as_ref())
+    {
+        let scope = applied
+            .created_scopes
+            .iter()
+            .find(|scope| scope.scope_id == rollover.scope.scope_instance_id.to_string())
+            .ok_or_else(|| {
+                RepositoryError::CorruptRow("Loop rollover lost its created Scope".to_owned())
+            })?;
+        append_scheduler_event(
+            transaction,
+            &applied.run.tenant_id,
+            &rollover.scope.scope_event_id,
+            &rollover.scope.scope_outbox_id,
+            "scope_instance",
+            &scope.scope_id,
+            scope.version,
+            Some(run_id),
+            "scope.opened",
+            &common,
+        )
+        .await?;
+    }
     for (pending, slot) in applied.pending_nodes.iter().zip(&mutations.pending_nodes) {
         let pending_payload = TypedPayload::with_limit(
             1,
@@ -16427,6 +16883,49 @@ async fn load_applied_orchestration_controller_step(
                 version: row.try_get("version")?,
             });
         }
+    }
+    if let Some(rollover) = mutations
+        .structural_exit
+        .as_ref()
+        .and_then(|exit| exit.loop_rollover.as_ref())
+    {
+        let row = sqlx::query(
+            r#"
+            SELECT node_kind, state, version, parent_node_id,
+                   payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'scope_instance'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(rollover.scope.scope_instance_id.to_string())
+        .bind(&run.run_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("Loop rollover Scope replay"))?;
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let stored: StoredControllerScopePayload =
+            decode_typed_payload(&payload, "Loop rollover Scope replay")?;
+        let state: String = row.try_get("state")?;
+        let version: i64 = row.try_get("version")?;
+        if row.try_get::<String, _>("node_kind")? != "loop_iteration"
+            || !matches!(state.as_str(), "open" | "succeeded")
+            || version < 1
+            || row.try_get::<Option<String>, _>("parent_node_id")?
+                != Some(stored.controller_node_execution_id.to_string())
+        {
+            return Err(RepositoryError::Conflict(
+                "Loop rollover Scope ownership replay",
+            ));
+        }
+        created_scopes.push(ControllerScopeRecord {
+            scope_id: rollover.scope.scope_instance_id.to_string(),
+            scope_kind: "loop_iteration".to_owned(),
+            state,
+            version,
+        });
     }
     let mut pending_nodes = Vec::with_capacity(pending_slots.len());
     for slot in pending_slots {
@@ -19429,6 +19928,13 @@ pub struct ControllerStructuralExitSlot {
     pub scope_closing_outbox_id: ResourceId,
     pub scope_terminal_event_id: ResourceId,
     pub scope_terminal_outbox_id: ResourceId,
+    pub loop_rollover: Option<ControllerLoopRolloverSlot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerLoopRolloverSlot {
+    pub scope: ControllerScopeSlot,
+    pub carried_value_ids: Vec<ResourceId>,
 }
 
 impl ControllerStructuralExitSlot {
@@ -19446,6 +19952,24 @@ impl ControllerStructuralExitSlot {
             return Err(RepositoryError::InvalidInput(
                 "controller structural-exit identities are invalid".to_owned(),
             ));
+        }
+        if let Some(rollover) = &self.loop_rollover {
+            rollover.scope.validate()?;
+            if rollover
+                .carried_value_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::RunValue)
+                || rollover
+                    .carried_value_ids
+                    .iter()
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    != rollover.carried_value_ids.len()
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "Loop rollover identities are invalid".to_owned(),
+                ));
+            }
         }
         Ok(())
     }
@@ -19660,6 +20184,23 @@ impl ControllerStepMutationIds {
                     return Err(RepositoryError::InvalidInput(
                         "controller step mutation identities must be globally unique".to_owned(),
                     ));
+                }
+            }
+            if let Some(rollover) = &exit.loop_rollover {
+                for id in [
+                    &rollover.scope.scope_instance_id,
+                    &rollover.scope.scope_event_id,
+                    &rollover.scope.scope_outbox_id,
+                ]
+                .into_iter()
+                .chain(rollover.carried_value_ids.iter())
+                {
+                    if !unique.insert(id.to_string()) {
+                        return Err(RepositoryError::InvalidInput(
+                            "controller step mutation identities must be globally unique"
+                                .to_owned(),
+                        ));
+                    }
                 }
             }
         }

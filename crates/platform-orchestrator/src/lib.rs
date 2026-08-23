@@ -315,6 +315,47 @@ impl RuntimePlan {
                 return Err(OrchestratorError::UnknownPlanNodeReference);
             }
         }
+        self.validate_loop_carried_regions()?;
+        Ok(())
+    }
+
+    fn validate_loop_carried_regions(&self) -> Result<(), OrchestratorError> {
+        for (loop_key, node) in &self.nodes {
+            let RuntimeNode::Loop {
+                carried_ports,
+                body,
+                exit,
+                ..
+            } = node
+            else {
+                continue;
+            };
+            if carried_ports.is_empty() {
+                continue;
+            }
+            let mut reachable = std::collections::BTreeSet::new();
+            let mut pending = vec![body.clone()];
+            while let Some(candidate) = pending.pop() {
+                if candidate == *loop_key
+                    || candidate == *exit
+                    || !reachable.insert(candidate.clone())
+                {
+                    continue;
+                }
+                let candidate_node = self
+                    .nodes
+                    .get(&candidate)
+                    .ok_or(OrchestratorError::UnknownPlanNodeReference)?;
+                pending.extend(candidate_node.references().into_iter().cloned());
+            }
+            if carried_ports.iter().any(|port| {
+                port.body_output_port
+                    .producer_node_id()
+                    .is_none_or(|producer| !reachable.contains(producer))
+            }) {
+                return Err(OrchestratorError::InvalidPlan);
+            }
+        }
         Ok(())
     }
 
@@ -422,9 +463,12 @@ fn validate_node(
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 != carried_ports.len()
-            || carried_ports
-                .iter()
-                .any(|port| port.next_iteration_port.producer_node_id() != Some(node_key)) =>
+            || carried_ports.iter().any(|port| {
+                port.next_iteration_port.producer_node_id() != Some(node_key)
+                    || port.body_output_port.producer_node_id().is_none()
+                    || port.body_output_port.schema_digest()
+                        != port.next_iteration_port.schema_digest()
+            }) =>
         {
             Err(OrchestratorError::InvalidPlan)
         }
@@ -2331,6 +2375,72 @@ mod tests {
         let mut value = serde_json::to_value(&plan).unwrap();
         value["unknown"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RuntimePlan>(value).is_err());
+    }
+
+    #[test]
+    fn loop_carried_ports_are_exact_schema_matched_and_body_owned() {
+        let carried = LoopCarriedPort {
+            body_output_port: exact_port("body", "out"),
+            next_iteration_port: exact_port("loop", "carried"),
+        };
+        let plan = RuntimePlan {
+            plan_version: 2,
+            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            entry_node_id: key("loop"),
+            nodes: BTreeMap::from([
+                (
+                    key("loop"),
+                    RuntimeNode::Loop {
+                        condition: literal_program(serde_json::json!(true)),
+                        carried_ports: vec![carried.clone()],
+                        body: key("body"),
+                        exit: key("return"),
+                        maximum_iterations: 2,
+                    },
+                ),
+                (
+                    key("body"),
+                    RuntimeNode::Compute {
+                        assignments: vec![PortAssignment {
+                            output_port: carried.body_output_port.clone(),
+                            expression: literal_program(serde_json::json!({"value": 1})),
+                        }],
+                        next: key("loop"),
+                    },
+                ),
+                (key("outside"), RuntimeNode::Return),
+                (key("return"), RuntimeNode::Return),
+            ]),
+        };
+        plan.validate(limits()).unwrap();
+
+        let mut wrong_schema = plan.clone();
+        let RuntimeNode::Loop { carried_ports, .. } =
+            wrong_schema.nodes.get_mut(&key("loop")).unwrap()
+        else {
+            panic!("fixture Loop disappeared")
+        };
+        carried_ports[0].next_iteration_port = ExactDataPortRef::NodeOutput {
+            producer_node_id: key("loop"),
+            port_id: DataPortKey::new("carried".to_owned()).unwrap(),
+            schema_digest: digest('2'),
+        };
+        assert_eq!(
+            wrong_schema.validate(limits()),
+            Err(OrchestratorError::InvalidPlan)
+        );
+
+        let mut outside_body = plan;
+        let RuntimeNode::Loop { carried_ports, .. } =
+            outside_body.nodes.get_mut(&key("loop")).unwrap()
+        else {
+            panic!("fixture Loop disappeared")
+        };
+        carried_ports[0].body_output_port = exact_port("outside", "out");
+        assert_eq!(
+            outside_body.validate(limits()),
+            Err(OrchestratorError::InvalidPlan)
+        );
     }
 
     #[test]
