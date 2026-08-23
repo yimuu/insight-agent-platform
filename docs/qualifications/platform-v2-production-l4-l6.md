@@ -57,6 +57,12 @@ cargo run --locked -p insight-platform-contracts --bin platform-qualification --
 只有该命令通过、GitOps environment repository收到同一exact digest且人工批准promotion后，才可归档通过报告并更新
 implementation plan。任何missing/failed gate、profile/candidate漂移或evidence digest无法解析都保持Pending。
 
+依赖故障、PITR/Artifact一致性恢复、NATS重建与Secret/KMS轮换按照
+[`platform-v2-dependency-recovery.md`](../runbooks/platform-v2-dependency-recovery.md)执行；signed supply chain、
+upgrade/rollback rehearsal、clean replacement、监视和GitOps回滚按照
+[`platform-v2-clean-cut.md`](../runbooks/platform-v2-clean-cut.md)执行。两个手册都只定义操作与停止边界，不能替代目标环境中的
+实际执行证据。
+
 Launcher RBAC矩阵的执行入口为：
 
 ```bash
