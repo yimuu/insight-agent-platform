@@ -84,8 +84,8 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    composition；手工注入`ControllerObservation`仍不计production证据。CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
    CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向、每item RunValue/MapItem Scope原子写及
    L2 batch/replay fixture已实现；process crash/restart的L3 fixture仍待production handler闭合后完成。
-   CR-179的exact pair producer/schema/region L1与单次rollover/false-exit L2已实现；第二轮body复用/不串值的完整L2及process crash/restart L3
-   仍待production handler闭合后完成。
+   CR-179的exact pair producer/schema/region L1与两轮rollover/Scope复用/不串值/false-exit L2已实现，并证明所有iteration Scope保持
+   同一root controller owner、词法深度不随轮次增长；process crash/restart L3仍待production handler闭合后完成。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

@@ -6546,14 +6546,248 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .await
     .unwrap();
     assert_eq!(continuation_scope_id, rolled_scope_id.to_string());
+    let second_loop_fence = JobFence {
+        expected_job_version: loop_continuation_started.version,
+        ..loop_continuation_start.fence.clone()
+    };
+    let second_loop_facts = repository
+        .load_expression_controller_facts(&second_loop_fence, &runtime_plan())
+        .await
+        .unwrap();
+    assert_eq!(second_loop_facts.loop_iteration, 1);
+    let second_loop_plan = runtime_plan();
+    let second_loop_evaluation = derive_expression_controller(
+        second_loop_plan
+            .node(&second_loop_facts.plan_node_key)
+            .unwrap(),
+        vec![],
+        second_loop_facts.node_execution_id.clone(),
+        second_loop_facts.node_execution_version,
+        second_loop_facts.loop_iteration,
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap();
+    let open_second_loop_body = ApplyDerivedExpressionControllerStep {
+        step: ApplyOrchestrationControllerStep {
+            fence: second_loop_fence,
+            plan: second_loop_plan,
+            observation: second_loop_evaluation.observation.clone(),
+            idempotency_key_digest: digest('1'),
+            request_digest: digest('2'),
+            receipt_expires_at: Utc::now() + Duration::hours(1),
+            mutations: ControllerStepMutationIds {
+                receipt_id: fixture_platform_id("rcp", "ac00"),
+                quota_entry_ids: ["ac01", "ac02", "ac03", "ac04"]
+                    .map(|suffix| fixture_platform_id("qle", suffix))
+                    .to_vec(),
+                run_event_id: fixture_platform_id("evt", "ac05"),
+                run_outbox_id: fixture_platform_id("obx", "ac05"),
+                node_event_id: fixture_platform_id("evt", "ac06"),
+                node_outbox_id: fixture_platform_id("obx", "ac06"),
+                job_event_id: fixture_platform_id("evt", "ac07"),
+                job_outbox_id: fixture_platform_id("obx", "ac07"),
+                activations: vec![ControllerActivationSlot {
+                    node_execution_id: fixture_platform_id("nod", "ac08"),
+                    orchestration_job_id: fixture_platform_id("job", "ac09"),
+                    scope: None,
+                    node_event_id: fixture_platform_id("evt", "ac0a"),
+                    node_outbox_id: fixture_platform_id("obx", "ac0a"),
+                    job_event_id: fixture_platform_id("evt", "ac0b"),
+                    job_outbox_id: fixture_platform_id("obx", "ac0b"),
+                }],
+                pending_nodes: vec![ControllerPendingNodeSlot {
+                    node_execution_id: fixture_platform_id("nod", "ac0c"),
+                    node_event_id: fixture_platform_id("evt", "ac0d"),
+                    node_outbox_id: fixture_platform_id("obx", "ac0d"),
+                }],
+                structural_exit: None,
+                pending_wake: None,
+                remainder_cancellations: vec![],
+            },
+        },
+        materialized_inputs: vec![],
+        evaluation: second_loop_evaluation,
+        output_value_ids: vec![],
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let second_loop_body = match scheduler
+        .apply_derived_expression_controller_step(open_second_loop_body)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("second Loop condition must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    assert!(second_loop_body.created_scopes.is_empty());
+    let second_body_scope: String = sqlx::query_scalar(
+        "SELECT scope_id FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(&second_loop_body.activations[0].node_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(second_body_scope, rolled_scope_id.to_string());
+
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let second_body_claimed = scheduler
+        .claim_orchestration_jobs(orchestration_claim_with_ids(
+            WORKER_D_ID,
+            '3',
+            "ac10",
+            ["ac11", "ac12", "ac13", "ac14"],
+            ["ac15", "ac16", "ac17"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(second_body_claimed.len(), 1);
+    let second_body_start = start_claimed_orchestration(
+        &second_body_claimed[0],
+        WORKER_D_ID,
+        '3',
+        "ac18",
+        "ac19",
+        "ac1a",
+        '4',
+        '5',
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let second_body_started = match scheduler
+        .start_orchestration_job(second_body_start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("second Loop body start must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    let second_body_fence = JobFence {
+        expected_job_version: second_body_started.version,
+        ..second_body_start.fence.clone()
+    };
+    let second_body_facts = repository
+        .load_expression_controller_facts(&second_body_fence, &runtime_plan())
+        .await
+        .unwrap();
+    let second_body_plan = runtime_plan();
+    let second_body_evaluation = derive_expression_controller(
+        second_body_plan
+            .node(&second_body_facts.plan_node_key)
+            .unwrap(),
+        vec![],
+        second_body_facts.node_execution_id.clone(),
+        second_body_facts.node_execution_version,
+        second_body_facts.loop_iteration,
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap();
+    let final_scope_id = fixture_platform_id("scp", "ac2b");
+    let final_carried_value_id = fixture_platform_id("val", "ac2d");
+    let settle_second_body = ApplyDerivedExpressionControllerStep {
+        step: ApplyOrchestrationControllerStep {
+            fence: second_body_fence,
+            plan: second_body_plan,
+            observation: second_body_evaluation.observation.clone(),
+            idempotency_key_digest: digest('6'),
+            request_digest: digest('7'),
+            receipt_expires_at: Utc::now() + Duration::hours(1),
+            mutations: ControllerStepMutationIds {
+                receipt_id: fixture_platform_id("rcp", "ac21"),
+                quota_entry_ids: ["ac22", "ac23", "ac24", "ac25"]
+                    .map(|suffix| fixture_platform_id("qle", suffix))
+                    .to_vec(),
+                run_event_id: fixture_platform_id("evt", "ac26"),
+                run_outbox_id: fixture_platform_id("obx", "ac26"),
+                node_event_id: fixture_platform_id("evt", "ac27"),
+                node_outbox_id: fixture_platform_id("obx", "ac27"),
+                job_event_id: fixture_platform_id("evt", "ac28"),
+                job_outbox_id: fixture_platform_id("obx", "ac28"),
+                activations: vec![],
+                pending_nodes: vec![],
+                structural_exit: Some(ControllerStructuralExitSlot {
+                    scope_closing_event_id: fixture_platform_id("evt", "ac29"),
+                    scope_closing_outbox_id: fixture_platform_id("obx", "ac29"),
+                    scope_terminal_event_id: fixture_platform_id("evt", "ac2a"),
+                    scope_terminal_outbox_id: fixture_platform_id("obx", "ac2a"),
+                    loop_rollover: Some(ControllerLoopRolloverSlot {
+                        scope: ControllerScopeSlot {
+                            scope_instance_id: final_scope_id.clone(),
+                            scope_event_id: fixture_platform_id("evt", "ac2c"),
+                            scope_outbox_id: fixture_platform_id("obx", "ac2c"),
+                        },
+                        carried_value_ids: vec![final_carried_value_id.clone()],
+                    }),
+                }),
+                pending_wake: Some(ControllerPendingWakeSlot {
+                    orchestration_job_id: fixture_platform_id("job", "ac2e"),
+                    request_digest: digest('8'),
+                    node_event_id: fixture_platform_id("evt", "ac2f"),
+                    node_outbox_id: fixture_platform_id("obx", "ac2f"),
+                    job_event_id: fixture_platform_id("evt", "ac30"),
+                    job_outbox_id: fixture_platform_id("obx", "ac30"),
+                }),
+                remainder_cancellations: vec![],
+            },
+        },
+        materialized_inputs: vec![],
+        evaluation: second_body_evaluation,
+        output_value_ids: vec![fixture_platform_id("val", "ac20")],
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let second_settlement = match scheduler
+        .apply_derived_expression_controller_step(settle_second_body)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("second Loop settlement must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    assert_eq!(second_settlement.created_scopes[0].scope_id, final_scope_id.to_string());
+
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let final_continuation_claimed = scheduler
+        .claim_orchestration_jobs(orchestration_claim_with_ids(
+            WORKER_D_ID,
+            '9',
+            "ac31",
+            ["ac32", "ac33", "ac34", "ac35"],
+            ["ac36", "ac37", "ac38"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(final_continuation_claimed.len(), 1);
+    let final_continuation_start = start_claimed_orchestration(
+        &final_continuation_claimed[0],
+        WORKER_D_ID,
+        '9',
+        "ac39",
+        "ac3a",
+        "ac3b",
+        'a',
+        'b',
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let final_continuation_started = match scheduler
+        .start_orchestration_job(final_continuation_start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("final Loop continuation start must apply"),
+    };
+    scheduler.commit().await.unwrap();
     let exit_loop = ApplyOrchestrationControllerStep {
         fence: JobFence {
-            expected_job_version: loop_continuation_started.version,
-            ..loop_continuation_start.fence.clone()
+            expected_job_version: final_continuation_started.version,
+            ..final_continuation_start.fence.clone()
         },
         plan: runtime_plan(),
         observation: ControllerObservation::Loop {
-            iteration: 1,
+            iteration: 2,
             condition: false,
         },
         idempotency_key_digest: digest('b'),
@@ -6611,7 +6845,27 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .await
     .unwrap();
     assert_eq!(closed_rolled_scope.0, "succeeded");
-    assert_eq!(closed_rolled_scope.1, 3);
+    assert_eq!(closed_rolled_scope.1, 4);
+    let final_scope: (String, i64, String) = sqlx::query_as(
+        "SELECT state, version, parent_node_id FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(final_scope_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(final_scope.0, "succeeded");
+    assert_eq!(final_scope.1, 3);
+    let first_scope_parent: String = sqlx::query_scalar(
+        "SELECT parent_node_id FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(rolled_scope_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(final_scope.2, first_scope_parent);
+    assert_ne!(final_scope.2, rolled_scope_id.to_string());
     let cancelling_loop_run = applied(
         run_command!(
             repository,
