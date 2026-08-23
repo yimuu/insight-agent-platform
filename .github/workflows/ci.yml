@@ -45,7 +45,8 @@ jobs:
         run: |
           python3 -m unittest \
             scripts/tests/test_platform_production_topology.py \
-            scripts/tests/test_platform_gvisor_rbac.py
+            scripts/tests/test_platform_gvisor_rbac.py \
+            scripts/tests/test_platform_gvisor_admission.py
           bash -n scripts/preflight-platform-production-qualification.sh
       - name: Check Platform v1 PostgreSQL schema contract
         run: python3 scripts/check-platform-postgres-schema.py && cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract

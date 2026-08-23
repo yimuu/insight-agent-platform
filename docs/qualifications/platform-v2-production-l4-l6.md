@@ -67,3 +67,19 @@ python3 scripts/qualify-platform-gvisor-rbac.py \
 它明确验证允许的`create/get/watch/patch/delete pods`与`get pods/status`，并逐项拒绝list/update、log、
 exec、attach、port-forward、ephemeralcontainers、Secret、ConfigMap、ServiceAccount、RBAC、Node和RuntimeClass。
 任一额外权限或必要权限缺失都写入失败报告并返回非零。
+
+guest admission绕过矩阵必须以Launcher已创建且已通过准入的真实guest Pod为源。探针删除服务器字段、恢复唯一
+`insight.platform/await-fenced-start` scheduling gate，并先以Launcher身份执行一次必须成功的server-side dry-run；随后逐项
+验证runtime、直接node绑定、Pod namespace、ServiceAccount、mutable image、privilege、resource、Secret/ConfigMap环境注入、
+hostPath、mount、annotation、token audience和ephemeral container绕过均被拒绝：
+
+```bash
+python3 scripts/qualify-platform-gvisor-admission.py \
+  --subject system:serviceaccount:platform-sandbox-exec:sandbox-insight-platform-sandbox-executor-gvisor \
+  --namespace platform-sandbox-guests \
+  --source-pod "$ADMITTED_GVISOR_GUEST_POD" \
+  --output "$PLATFORM_QUALIFICATION_OUTPUT_DIR/gvisor-guest-admission.json"
+```
+
+源Pod必须是本次exact candidate运行产生的`insight-gv-<digest>`对象。正向探针失败、任一绕过被接受、源对象不存在或
+输出路径已存在都写入失败证据并返回非零；不得用静态Helm渲染或策略语法检查替代这项L4证据。
