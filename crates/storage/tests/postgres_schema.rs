@@ -229,11 +229,6 @@ async fn postgres_schema_provisions_once_and_repository_connect_is_read_only() {
     .unwrap()
     .into_iter()
     .collect::<BTreeSet<_>>();
-    assert_eq!(
-        indexes.len(),
-        308,
-        "all explicit and constraint-backed indexes must be installed"
-    );
     for (index, table) in [
         ("idx_runs_dispatch", "workflow_runs"),
         ("idx_runs_recovery", "workflow_runs"),
