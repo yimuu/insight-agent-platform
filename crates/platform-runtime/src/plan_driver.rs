@@ -410,6 +410,7 @@ mod tests {
                     inputs: vec![CommittedExpressionInput {
                         run_value_id: id(ResourceKind::RunValue, "9914"),
                         port,
+                        classification: DataClassification::Restricted,
                         value: insight_platform_contracts::ClosedJsonValue::build(
                             digest('1'),
                             json!(true),

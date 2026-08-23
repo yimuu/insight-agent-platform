@@ -513,6 +513,7 @@ pub enum ControllerObservation {
 pub struct CommittedExpressionInput {
     pub run_value_id: ResourceId,
     pub port: ExactDataPortRef,
+    pub classification: DataClassification,
     pub value: ClosedJsonValue,
 }
 
@@ -528,6 +529,7 @@ pub struct ControllerDerivedOutput {
 pub struct ControllerInputEvidence {
     pub run_value_id: ResourceId,
     pub port: ExactDataPortRef,
+    pub classification: DataClassification,
     pub content_digest: Sha256Digest,
 }
 
@@ -549,6 +551,7 @@ pub struct ControllerEvaluation {
     pub observation: ControllerObservation,
     pub outputs: Vec<ControllerDerivedOutput>,
     pub evaluated_results: Vec<ClosedJsonValue>,
+    pub effective_classification: DataClassification,
     pub evidence: ControllerObservationEvidence,
 }
 
@@ -603,9 +606,13 @@ impl ControllerEvaluation {
         {
             return Err(OrchestratorError::InvalidControllerEvidence);
         }
-        let value =
-            serde_json::to_value((&self.observation, &self.outputs, &self.evaluated_results))
-                .map_err(|_| OrchestratorError::Canonicalization)?;
+        let value = serde_json::to_value((
+            &self.observation,
+            &self.outputs,
+            &self.evaluated_results,
+            self.effective_classification,
+        ))
+        .map_err(|_| OrchestratorError::Canonicalization)?;
         let result_digest: Sha256Digest = canonical_digest(&value)
             .map_err(|_| OrchestratorError::Canonicalization)?
             .parse()
@@ -630,6 +637,8 @@ pub fn derive_expression_controller(
     }
     let mut values = BTreeMap::new();
     let mut authorities = BTreeMap::new();
+    let mut classifications = BTreeMap::new();
+    let mut input_classifications = Vec::new();
     for input in committed_inputs {
         if input.run_value_id.kind() != ResourceKind::RunValue
             || &input.value.schema_digest != input.port.schema_digest()
@@ -640,6 +649,8 @@ pub fn derive_expression_controller(
         {
             return Err(OrchestratorError::InvalidControllerEvidence);
         }
+        input_classifications.push(input.classification);
+        classifications.insert(input.port.clone(), input.classification);
         authorities.insert(input.port, input.run_value_id);
     }
 
@@ -677,6 +688,10 @@ pub fn derive_expression_controller(
             Ok(ControllerInputEvidence {
                 run_value_id: run_value_id.clone(),
                 port: port.clone(),
+                classification: classifications
+                    .get(port)
+                    .copied()
+                    .ok_or(OrchestratorError::InvalidControllerEvidence)?,
                 content_digest: value.canonical_digest.clone(),
             })
         })
@@ -754,8 +769,14 @@ pub fn derive_expression_controller(
         _ => unreachable!(),
     };
 
-    let result_value = serde_json::to_value((&observation, &outputs, &evaluated_results))
-        .map_err(|_| OrchestratorError::Canonicalization)?;
+    let effective_classification = derive_expression_classification(&input_classifications);
+    let result_value = serde_json::to_value((
+        &observation,
+        &outputs,
+        &evaluated_results,
+        effective_classification,
+    ))
+    .map_err(|_| OrchestratorError::Canonicalization)?;
     let result_digest = canonical_digest(&result_value)
         .map_err(|_| OrchestratorError::Canonicalization)?
         .parse()
@@ -771,6 +792,7 @@ pub fn derive_expression_controller(
         observation,
         outputs,
         evaluated_results,
+        effective_classification,
         evidence: ControllerObservationEvidence {
             schema_version: 1,
             node_execution_id,
@@ -783,6 +805,16 @@ pub fn derive_expression_controller(
     };
     evaluation.validate()?;
     Ok(evaluation)
+}
+
+pub fn derive_expression_classification(
+    input_classifications: &[DataClassification],
+) -> DataClassification {
+    input_classifications
+        .iter()
+        .copied()
+        .reduce(DataClassification::join)
+        .unwrap_or(DataClassification::Internal)
 }
 
 /// Returns the external data dependencies for one expression controller in deterministic Plan
@@ -2365,6 +2397,7 @@ mod tests {
         let inputs = vec![CommittedExpressionInput {
             run_value_id: id("val_0198f1c5-0787-75e1-a9e8-d95ca0f37020"),
             port: predicate,
+            classification: DataClassification::Confidential,
             value: ClosedJsonValue::build(digest('1'), serde_json::json!(true)).unwrap(),
         }];
         let first = derive_expression_controller(
@@ -2393,6 +2426,10 @@ mod tests {
             }
         );
         assert_eq!(first.evidence.inputs.len(), 1);
+        assert_eq!(
+            first.effective_classification,
+            DataClassification::Confidential
+        );
         assert_eq!(first.evidence.expression_digests.len(), 1);
         assert!(first.validate().is_ok());
         let mut forged = first.clone();
@@ -2405,6 +2442,7 @@ mod tests {
         let injected = vec![CommittedExpressionInput {
             run_value_id: id("val_0198f1c5-0787-75e1-a9e8-d95ca0f37022"),
             port: exact_port("source", "unexpected"),
+            classification: DataClassification::Public,
             value: ClosedJsonValue::build(digest('1'), serde_json::json!(true)).unwrap(),
         }];
         assert_eq!(
@@ -2417,6 +2455,33 @@ mod tests {
                 ExpressionLimits::ABSOLUTE,
             ),
             Err(OrchestratorError::InvalidControllerEvidence)
+        );
+    }
+
+    #[test]
+    fn expression_classification_is_a_closed_lattice_join_with_internal_empty_default() {
+        assert_eq!(
+            derive_expression_classification(&[]),
+            DataClassification::Internal
+        );
+        assert_eq!(
+            derive_expression_classification(&[DataClassification::Public]),
+            DataClassification::Public
+        );
+        assert_eq!(
+            derive_expression_classification(&[
+                DataClassification::Public,
+                DataClassification::Confidential,
+                DataClassification::Internal,
+            ]),
+            DataClassification::Confidential
+        );
+        assert_eq!(
+            derive_expression_classification(&[
+                DataClassification::Confidential,
+                DataClassification::Restricted,
+            ]),
+            DataClassification::Restricted
         );
     }
 
@@ -2461,6 +2526,10 @@ mod tests {
             ExpressionLimits::ABSOLUTE,
         )
         .unwrap();
+        assert_eq!(
+            evaluation.effective_classification,
+            DataClassification::Internal
+        );
         assert_eq!(evaluation.observation, ControllerObservation::None);
         assert_eq!(evaluation.outputs.len(), 2);
         assert_eq!(evaluation.outputs[1].value.value, serde_json::json!(42));
