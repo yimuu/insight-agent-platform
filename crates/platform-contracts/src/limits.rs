@@ -1,8 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
 
-pub const HARD_LIMIT_PROFILE_VERSION: u32 = 4;
+pub const HARD_LIMIT_PROFILE_VERSION: u32 = 5;
 pub const Q1_SANDBOX_RUNTIME_BUNDLE_BYTES: u64 = 33_554_432;
+pub const EXPRESSION_INSTRUCTION_HARD_MAX: u64 = 4_096;
+pub const Q1_EXPRESSION_INSTRUCTIONS: u64 = 2_048;
+pub const EXPRESSION_INPUT_PORT_HARD_MAX: u64 = 64;
+pub const Q1_EXPRESSION_INPUT_PORTS: u64 = 32;
+pub const EXPRESSION_STACK_DEPTH_HARD_MAX: u64 = 256;
+pub const Q1_EXPRESSION_STACK_DEPTH: u64 = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +110,9 @@ limit_family! {
         plan_nodes,
         plan_edges,
         branch_legs,
+        expression_instructions,
+        expression_input_ports,
+        expression_stack_depth,
         map_items,
         loop_iterations,
         model_rounds,
@@ -260,6 +269,46 @@ impl HardLimitProfile {
                 field: "capability_sandbox.runtime_bundle_bytes".to_owned(),
                 message: "runtime bundle limit does not match the current closed contract",
             });
+        }
+        let expression_contracts = [
+            (
+                "registry_plan.expression_instructions",
+                &self.registry_plan.expression_instructions,
+                Limit {
+                    unit: LimitUnit::Count,
+                    hard_max: EXPRESSION_INSTRUCTION_HARD_MAX,
+                    q1_default: Q1_EXPRESSION_INSTRUCTIONS,
+                    overflow_outcome: OverflowOutcome::ContentRejected,
+                },
+            ),
+            (
+                "registry_plan.expression_input_ports",
+                &self.registry_plan.expression_input_ports,
+                Limit {
+                    unit: LimitUnit::Count,
+                    hard_max: EXPRESSION_INPUT_PORT_HARD_MAX,
+                    q1_default: Q1_EXPRESSION_INPUT_PORTS,
+                    overflow_outcome: OverflowOutcome::ContentRejected,
+                },
+            ),
+            (
+                "registry_plan.expression_stack_depth",
+                &self.registry_plan.expression_stack_depth,
+                Limit {
+                    unit: LimitUnit::Depth,
+                    hard_max: EXPRESSION_STACK_DEPTH_HARD_MAX,
+                    q1_default: Q1_EXPRESSION_STACK_DEPTH,
+                    overflow_outcome: OverflowOutcome::ContentRejected,
+                },
+            ),
+        ];
+        for (field, actual, expected) in expression_contracts {
+            if actual != &expected {
+                return Err(LimitProfileError {
+                    field: field.to_owned(),
+                    message: "expression limit does not match the current closed contract",
+                });
+            }
         }
 
         let mut failure = None;
@@ -429,6 +478,51 @@ mod tests {
                 changed.validate().unwrap_err().field,
                 "capability_sandbox.runtime_bundle_bytes"
             );
+        }
+    }
+
+    #[test]
+    fn expression_limits_are_independent_exact_closed_contracts() {
+        let bytes = q1_profile_bytes();
+        let profile: HardLimitProfile = serde_json::from_slice(&bytes).unwrap();
+        let mutations = [
+            (
+                "registry_plan.expression_instructions",
+                Limit {
+                    unit: LimitUnit::Items,
+                    ..profile.registry_plan.expression_instructions.clone()
+                },
+            ),
+            (
+                "registry_plan.expression_input_ports",
+                Limit {
+                    hard_max: EXPRESSION_INPUT_PORT_HARD_MAX + 1,
+                    ..profile.registry_plan.expression_input_ports.clone()
+                },
+            ),
+            (
+                "registry_plan.expression_stack_depth",
+                Limit {
+                    q1_default: 0,
+                    ..profile.registry_plan.expression_stack_depth.clone()
+                },
+            ),
+        ];
+        for (field, mutation) in mutations {
+            let mut changed = profile.clone();
+            match field {
+                "registry_plan.expression_instructions" => {
+                    changed.registry_plan.expression_instructions = mutation;
+                }
+                "registry_plan.expression_input_ports" => {
+                    changed.registry_plan.expression_input_ports = mutation;
+                }
+                "registry_plan.expression_stack_depth" => {
+                    changed.registry_plan.expression_stack_depth = mutation;
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(changed.validate().unwrap_err().field, field);
         }
     }
 

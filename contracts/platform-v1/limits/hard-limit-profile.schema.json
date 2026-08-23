@@ -17,7 +17,7 @@
   ],
   "properties": {
     "profile_id": { "const": "q1-50" },
-    "profile_version": { "const": 4 },
+    "profile_version": { "const": 5 },
     "api": { "$ref": "#/$defs/api" },
     "registry_plan": { "$ref": "#/$defs/registry_plan" },
     "run_scheduler": { "$ref": "#/$defs/run_scheduler" },
@@ -78,7 +78,8 @@
       "additionalProperties": false,
       "required": [
         "draft_bytes", "package_bytes", "schema_bytes", "definitions", "plan_nodes", "plan_edges",
-        "branch_legs", "map_items", "loop_iterations", "model_rounds", "dependency_closure"
+        "branch_legs", "expression_instructions", "expression_input_ports", "expression_stack_depth",
+        "map_items", "loop_iterations", "model_rounds", "dependency_closure"
       ],
       "properties": {
         "draft_bytes": { "$ref": "#/$defs/limit" },
@@ -88,6 +89,30 @@
         "plan_nodes": { "$ref": "#/$defs/limit" },
         "plan_edges": { "$ref": "#/$defs/limit" },
         "branch_legs": { "$ref": "#/$defs/limit" },
+        "expression_instructions": {
+          "type": "object", "additionalProperties": false,
+          "required": ["unit", "hard_max", "q1_default", "overflow_outcome"],
+          "properties": {
+            "unit": { "const": "count" }, "hard_max": { "const": 4096 },
+            "q1_default": { "const": 2048 }, "overflow_outcome": { "const": "content_rejected" }
+          }
+        },
+        "expression_input_ports": {
+          "type": "object", "additionalProperties": false,
+          "required": ["unit", "hard_max", "q1_default", "overflow_outcome"],
+          "properties": {
+            "unit": { "const": "count" }, "hard_max": { "const": 64 },
+            "q1_default": { "const": 32 }, "overflow_outcome": { "const": "content_rejected" }
+          }
+        },
+        "expression_stack_depth": {
+          "type": "object", "additionalProperties": false,
+          "required": ["unit", "hard_max", "q1_default", "overflow_outcome"],
+          "properties": {
+            "unit": { "const": "depth" }, "hard_max": { "const": 256 },
+            "q1_default": { "const": 128 }, "overflow_outcome": { "const": "content_rejected" }
+          }
+        },
         "map_items": { "$ref": "#/$defs/limit" },
         "loop_iterations": { "$ref": "#/$defs/limit" },
         "model_rounds": { "$ref": "#/$defs/limit" },

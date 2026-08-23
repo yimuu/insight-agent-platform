@@ -1,5 +1,5 @@
 use insight_platform_contracts::{
-    canonical_digest, ClosedJsonValue, Sha256Digest, MAX_SAFE_JSON_INTEGER,
+    canonical_digest, ClosedJsonValue, HardLimitProfile, Sha256Digest, MAX_SAFE_JSON_INTEGER,
 };
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
@@ -145,6 +145,25 @@ impl ExpressionLimits {
             && self.maximum_input_ports <= MAX_EXPRESSION_INPUT_PORTS
             && self.maximum_stack_depth > 0
             && self.maximum_stack_depth <= MAX_EXPRESSION_STACK_DEPTH
+    }
+
+    pub fn from_profile(profile: &HardLimitProfile) -> Result<Self, ExpressionError> {
+        profile
+            .validate()
+            .map_err(|_| ExpressionError::InvalidLimitProfile)?;
+        let registry = &profile.registry_plan;
+        let limits = Self {
+            maximum_instructions: usize::try_from(registry.expression_instructions.q1_default)
+                .map_err(|_| ExpressionError::InvalidLimitProfile)?,
+            maximum_input_ports: usize::try_from(registry.expression_input_ports.q1_default)
+                .map_err(|_| ExpressionError::InvalidLimitProfile)?,
+            maximum_stack_depth: u16::try_from(registry.expression_stack_depth.q1_default)
+                .map_err(|_| ExpressionError::InvalidLimitProfile)?,
+        };
+        if !limits.bounded_by_absolute() {
+            return Err(ExpressionError::InvalidLimitProfile);
+        }
+        Ok(limits)
     }
 }
 
@@ -700,6 +719,7 @@ pub enum ExpressionError {
     InvalidIndex,
     MissingField,
     InvalidResult,
+    InvalidLimitProfile,
 }
 
 impl fmt::Display for ExpressionError {
@@ -725,6 +745,9 @@ impl fmt::Display for ExpressionError {
             Self::InvalidIndex => "expression array index is outside the array",
             Self::MissingField => "expression object field is absent",
             Self::InvalidResult => "expression result is not bounded canonical JSON",
+            Self::InvalidLimitProfile => {
+                "expression hard-limit profile is invalid or exceeds the absolute bounds"
+            }
         })
     }
 }
@@ -772,6 +795,26 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<TypedExpressionProgram>(encoded).unwrap(),
             program
+        );
+    }
+
+    #[test]
+    fn expression_limits_use_the_three_independent_profile_fields() {
+        let profile = insight_platform_contracts::checked_in_hard_limit_profile();
+        assert_eq!(
+            ExpressionLimits::from_profile(&profile).unwrap(),
+            ExpressionLimits {
+                maximum_instructions: 2_048,
+                maximum_input_ports: 32,
+                maximum_stack_depth: 128,
+            }
+        );
+
+        let mut old = profile;
+        old.profile_version -= 1;
+        assert_eq!(
+            ExpressionLimits::from_profile(&old),
+            Err(ExpressionError::InvalidLimitProfile)
         );
     }
 

@@ -1,6 +1,6 @@
 {
   "profile_id": "q1-50",
-  "profile_version": 4,
+  "profile_version": 5,
   "api": {
     "header_bytes": {"unit":"bytes","hard_max":65536,"q1_default":32768,"overflow_outcome":"invalid_request"},
     "url_bytes": {"unit":"bytes","hard_max":8192,"q1_default":4096,"overflow_outcome":"invalid_request"},
@@ -22,6 +22,9 @@
     "plan_nodes": {"unit":"count","hard_max":10000,"q1_default":2000,"overflow_outcome":"invalid_request"},
     "plan_edges": {"unit":"count","hard_max":40000,"q1_default":8000,"overflow_outcome":"invalid_request"},
     "branch_legs": {"unit":"count","hard_max":128,"q1_default":32,"overflow_outcome":"invalid_request"},
+    "expression_instructions": {"unit":"count","hard_max":4096,"q1_default":2048,"overflow_outcome":"content_rejected"},
+    "expression_input_ports": {"unit":"count","hard_max":64,"q1_default":32,"overflow_outcome":"content_rejected"},
+    "expression_stack_depth": {"unit":"depth","hard_max":256,"q1_default":128,"overflow_outcome":"content_rejected"},
     "map_items": {"unit":"items","hard_max":10000,"q1_default":1000,"overflow_outcome":"budget_exhausted"},
     "loop_iterations": {"unit":"count","hard_max":10000,"q1_default":1000,"overflow_outcome":"budget_exhausted"},
     "model_rounds": {"unit":"count","hard_max":256,"q1_default":64,"overflow_outcome":"budget_exhausted"},

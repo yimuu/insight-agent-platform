@@ -152,7 +152,7 @@ def check_fixtures(errors):
 
 def check_limits(errors):
     profile = load(CONTRACT_ROOT / "limits" / "q1-50.json")
-    if profile.get("profile_id") != "q1-50" or profile.get("profile_version") != 4:
+    if profile.get("profile_id") != "q1-50" or profile.get("profile_version") != 5:
         errors.append("Q1 limit profile identity/version is invalid")
     expected_families = {
         "api",
@@ -196,10 +196,36 @@ def check_limits(errors):
         "q1_default": 33_554_432,
         "overflow_outcome": "content_rejected",
     }:
-        errors.append("Q1 Sandbox runtime bundle limit differs from the closed v4 contract")
+        errors.append("Q1 Sandbox runtime bundle limit differs from the closed v5 contract")
     schema = load(CONTRACT_ROOT / "limits" / "hard-limit-profile.schema.json")
-    if schema.get("properties", {}).get("profile_version") != {"const": 4}:
-        errors.append("HardLimitProfile schema must accept only profile version 4")
+    if schema.get("properties", {}).get("profile_version") != {"const": 5}:
+        errors.append("HardLimitProfile schema must accept only profile version 5")
+    expression_limits = {
+        "expression_instructions": {
+            "unit": "count", "hard_max": 4_096, "q1_default": 2_048,
+            "overflow_outcome": "content_rejected",
+        },
+        "expression_input_ports": {
+            "unit": "count", "hard_max": 64, "q1_default": 32,
+            "overflow_outcome": "content_rejected",
+        },
+        "expression_stack_depth": {
+            "unit": "depth", "hard_max": 256, "q1_default": 128,
+            "overflow_outcome": "content_rejected",
+        },
+    }
+    registry_schema = schema.get("$defs", {}).get("registry_plan", {})
+    for name, expected in expression_limits.items():
+        if profile.get("registry_plan", {}).get(name) != expected:
+            errors.append(f"Q1 {name} differs from the closed v5 contract")
+        expected_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["unit", "hard_max", "q1_default", "overflow_outcome"],
+            "properties": {key: {"const": value} for key, value in expected.items()},
+        }
+        if registry_schema.get("properties", {}).get(name) != expected_schema:
+            errors.append(f"HardLimitProfile schema does not freeze {name}")
     runtime_bundle_schema = (
         schema.get("$defs", {})
         .get("capability_sandbox", {})
