@@ -50,6 +50,8 @@ const DENIED_PRINCIPAL_ID: &str = "prn_0198f1c3-9a00-7c3e-b1f3-773c28367004";
 const POLICY_ID: &str = "pol_0198f1c3-9a00-7c3e-b1f3-773c28367005";
 const POLICY_REVISION_ID: &str = "prev_0198f1c3-9a00-7c3e-b1f3-773c28367006";
 const POLICY_DEPLOYMENT_ID: &str = "pdep_0198f1c3-9a00-7c3e-b1f3-773c2836700f";
+const POLICY_EVIDENCE_ARTIFACT_ID: &str = "art_0198f1c3-9a00-7c3e-b1f3-773c2836700e";
+const POLICY_EVIDENCE_BLOB_ID: &str = "iblb_0198f1c3-9a00-7c3e-b1f3-773c2836700e";
 const AGENT_ID: &str = "agt_0198f1c3-9a00-7c3e-b1f3-773c28367007";
 const AGENT_INTERFACE_ID: &str = "aif_0198f1c3-9a00-7c3e-b1f3-773c28367008";
 const AGENT_PLAN_ID: &str = "arev_0198f1c3-9a00-7c3e-b1f3-773c28367009";
@@ -7465,7 +7467,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             document: ResourceDocument::Policy(PolicyResourceSpec {
                 authoring_package: AuthoringPackage {
                     artifact: ArtifactRef::new(
-                        id("art_0198f1c3-9a00-7c3e-b1f3-773c2836700e"),
+                        id(POLICY_EVIDENCE_ARTIFACT_ID),
                         digest('4'),
                         1,
                         "application/json",
@@ -7579,6 +7581,54 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         .await
         .unwrap();
     }
+    let evidence_metadata = TypedPayload::new(1, &json!({"fixture": "policy-evidence"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest,
+            security_domain_digest, object_reference_ciphertext, object_generation, key_id,
+            encryption_domain_id, content_digest, size_bytes, state, verified_at,
+            created_at, updated_at
+        ) VALUES ($1, $2, 'fixture', $3, $4, $5, 'fixture-generation-1',
+                  'fixture-key', $6, $7, 1, 'verified', statement_timestamp(),
+                  statement_timestamp(), statement_timestamp())
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(POLICY_EVIDENCE_BLOB_ID)
+    .bind(digest('a').to_string())
+    .bind(digest('b').to_string())
+    .bind(vec![1_u8])
+    .bind("enc_0198f1c3-9a00-7c3e-b1f3-773c2836700e")
+    .bind(digest('4').to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, metadata_schema_version, metadata,
+            metadata_digest, retention_policy_revision_id, retain_until, created_by
+        ) VALUES ($1, $2, $3, 'qualification_evidence', 'internal', 1, $4,
+                  'application/json', 'application/json', 'ready', $5, $6, $7,
+                  $8, $9, $10)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(POLICY_EVIDENCE_ARTIFACT_ID)
+    .bind(POLICY_EVIDENCE_BLOB_ID)
+    .bind(digest('4').to_string())
+    .bind(evidence_metadata.schema_version)
+    .bind(&evidence_metadata.value)
+    .bind(&evidence_metadata.digest)
+    .bind(POLICY_REVISION_ID)
+    .bind(Utc::now() + Duration::days(30))
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
     sqlx::query(
         "UPDATE insight_platform.resources SET active_version_id = $3 WHERE tenant_id = $1 AND resource_id = $2",
     )
@@ -7596,7 +7646,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             policy_revision: policy.clone(),
             applicability_digest: digest('d'),
             qualification_evidence: ArtifactRef::new(
-                id("art_0198f1c3-9a00-7c3e-b1f3-773c2836700e"),
+                id(POLICY_EVIDENCE_ARTIFACT_ID),
                 digest('4'),
                 1,
                 "application/json",
