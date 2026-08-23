@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-174 |
+| 状态 | Accepted / CR-175 |
 | 日期 | 2026-08-23 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -233,7 +233,9 @@ enum TypedInstruction {
 
 该registry是closed machine wire；不得保存源码字符串、动态函数名、脚本、JSONPath/JMESPath或provider表达式。每条
 instruction在publication时完成stack effect、input/output schema、nullable/optional、integer/decimal范围和最大输出bytes验证。
-程序最多4096条instruction、64个input port、stack depth 256，且还受HardLimitProfile更小上限约束。执行只读exact
+程序的绝对上限是4096条instruction、64个input port、stack depth 256；每个deployment还必须读取18的exact
+`HardLimitProfile v5+`中`expression_instructions`、`expression_input_ports`和`expression_stack_depth`，三项有效值必须非零且
+分别不大于绝对上限。缺字段、旧profile version、unit错误或profile值放大绝对上限均fail closed。执行只读exact
 RunValue，不访问时钟、随机数、网络、Secret、文件或active Resource；同一输入bytes与program digest必须产生相同canonical
 JSON或相同typed failure。增加opcode必须提升`expression_version`并同步schema、verifier、Scheduler exhaustive match与fixture。
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-174 |
+| 状态 | Accepted / CR-175 |
 | 日期 | 2026-08-23 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -117,6 +117,18 @@ Broker在最后一跳解析。Secret不进入manifest、Git、DB、log、Event�
 
 HardLimitProfile拥有不可被tenant放大的安全上限，CapacityProfile拥有某一环境的副本、pool、permit、
 queue、lease/heartbeat、scan batch、HPA和SLO target。两者是versioned typed files，受schema、canonical digest、code review和GitOps管理。
+
+首个包含closed expression evaluator的profile版本为`HardLimitProfile v5`。其`registry_plan`必须增加以下closed字段，不能借用
+`plan_nodes`、`plan_edges`或`branch_legs`代替：
+
+| 字段 | unit | hard max | Q1 default | overflow |
+|---|---:|---:|---:|---|
+| `expression_instructions` | `count` | 4096 | 2048 | `content_rejected` |
+| `expression_input_ports` | `count` | 64 | 32 | `content_rejected` |
+| `expression_stack_depth` | `depth` | 256 | 128 | `content_rejected` |
+
+代码内绝对上限与profile `hard_max`必须一致，runtime使用`q1_default`或经deployment选择的不更大值。旧version、缺字段、错误unit、
+零值、`q1_default > hard_max`或任何值超过代码绝对上限都使startup/publication fail closed；tenant policy不得放大这些值。
 
 配置先在CI做cross-field validation，启动时再同样fail closed。重要规则至少包含：
 
