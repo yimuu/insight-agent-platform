@@ -85,6 +85,18 @@ fn conflict() -> RepositoryError {
     )
 }
 
+fn postgres_file_idempotency_lock_key(tenant_id: &str, user_id: &str, key: &str) -> String {
+    format!(
+        "file-create.v1:{}:{}:{}:{}:{}:{}",
+        tenant_id.len(),
+        tenant_id,
+        user_id.len(),
+        user_id,
+        key.len(),
+        key
+    )
+}
+
 fn sqlite_file(row: &sqlx::sqlite::SqliteRow) -> Result<StoredFile, RepositoryError> {
     stored_file(
         row.try_get("file_id"),
@@ -635,9 +647,10 @@ impl FileDurableRepository for PostgresDurableRepository {
         let mut transaction = self.pool.begin().await.map_err(RepositoryError::storage)?;
         if let Some(key) = &command.idempotency_key {
             sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 901176211919::bigint))")
-                .bind(format!(
-                    "{}\0{}\0{}",
-                    command.tenant_id, command.user_id, key
+                .bind(postgres_file_idempotency_lock_key(
+                    &command.tenant_id,
+                    &command.user_id,
+                    key,
                 ))
                 .execute(&mut *transaction)
                 .await
@@ -1062,5 +1075,22 @@ impl FileDurableRepository for PostgresDurableRepository {
         .await
         .map_err(RepositoryError::storage)?;
         Ok(updated.rows_affected() == 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::postgres_file_idempotency_lock_key;
+
+    #[test]
+    fn postgres_file_lock_key_is_nul_free_and_field_boundary_safe() {
+        let first = postgres_file_idempotency_lock_key("tenant-a", "user", "key");
+        let shifted = postgres_file_idempotency_lock_key("tenant", "a-user", "key");
+        assert_ne!(first, shifted);
+        assert!(!first.contains('\0'));
+        assert_eq!(
+            first,
+            postgres_file_idempotency_lock_key("tenant-a", "user", "key")
+        );
     }
 }
