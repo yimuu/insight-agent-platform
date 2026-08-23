@@ -15,6 +15,7 @@
 | 验收 | 状态 | 目标 |
 |---|---|---|
 | [Durable Runtime 24 小时 RC](durable-runtime-24h-rc.md) | Pending / requires always-on runner | 补齐 50 active Run 能力的 release-candidate 级 24 小时稳定性证据 |
+| [Platform v2 Production L4～L6](platform-v2-production-l4-l6.md) | Pending / requires production-equivalent runner | 执行真实runsc拓扑、容量、恢复、供应链与GitOps clean cut门禁 |
 
 ## Platform v2 机器门禁
 

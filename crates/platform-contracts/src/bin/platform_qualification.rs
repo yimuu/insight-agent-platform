@@ -33,6 +33,18 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
             println!("production qualification profile valid ({digest})");
             Ok(())
         }
+        [command, profile_path, candidate_path] if command == "validate-production-candidate" => {
+            let profile: QualificationProfile = read_closed_json(profile_path)?;
+            let candidate: CandidateManifest = read_closed_json(candidate_path)?;
+            candidate
+                .validate_for_production_release(&profile)
+                .map_err(|failure| failure.to_string())?;
+            let digest = candidate
+                .canonical_digest()
+                .map_err(|failure| failure.to_string())?;
+            println!("production candidate closure valid ({digest})");
+            Ok(())
+        }
         [command, profile_path, candidate_path, evidence_path]
             if command == "validate-release-evidence" =>
         {
@@ -41,6 +53,9 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
             let evidence: QualificationEvidenceManifest = read_closed_json(evidence_path)?;
             profile
                 .validate_for_production_release()
+                .map_err(|failure| failure.to_string())?;
+            candidate
+                .validate_for_production_release(&profile)
                 .map_err(|failure| failure.to_string())?;
             evidence
                 .validate_against(&profile, &candidate)
@@ -55,7 +70,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         _ => Err(
-            "usage: platform-qualification validate-profile <profile.json> | validate-production-profile <profile.json> | validate-release-evidence <profile.json> <candidate.json> <evidence.json>"
+            "usage: platform-qualification validate-profile <profile.json> | validate-production-profile <profile.json> | validate-production-candidate <profile.json> <candidate.json> | validate-release-evidence <profile.json> <candidate.json> <evidence.json>"
                 .to_owned(),
         ),
     }

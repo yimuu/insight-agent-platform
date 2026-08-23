@@ -41,6 +41,12 @@ jobs:
           cargo run --locked -p insight-platform-contracts --bin platform-qualification -- \
             validate-production-profile \
             contracts/platform-v1/qualification/production-release-profile.json
+      - name: Check production qualification topology preflight
+        run: |
+          python3 -m unittest \
+            scripts/tests/test_platform_production_topology.py \
+            scripts/tests/test_platform_gvisor_rbac.py
+          bash -n scripts/preflight-platform-production-qualification.sh
       - name: Check Platform v1 PostgreSQL schema contract
         run: python3 scripts/check-platform-postgres-schema.py && cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract
       - name: Check crate boundaries and dependency feature baseline

@@ -175,7 +175,8 @@ spec:
           v.name == 'scratch' && has(v.emptyDir) && v.emptyDir.medium == 'Memory')
       message: guest volumes are limited to one audience token and bounded tmpfs scratch
     - expression: >-
-        request.operation == 'CREATE' ||
+        (request.operation == 'CREATE' &&
+         object.spec.schedulingGates == [{'name': 'insight.platform/await-fenced-start'}]) ||
         (object.metadata.uid == oldObject.metadata.uid &&
          object.metadata.labels == oldObject.metadata.labels &&
          object.metadata.annotations == oldObject.metadata.annotations &&

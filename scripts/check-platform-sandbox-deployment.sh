@@ -110,6 +110,11 @@ expected_admissions.each do |suffix|
   failures << "fail-closed #{suffix} admission policy is missing" unless policy&.dig("spec", "failurePolicy") == "Fail"
   failures << "#{suffix} admission binding does not deny" unless binding&.dig("spec", "validationActions") == ["Deny"]
 end
+guest_admission = admissions.find { |doc| doc.dig("metadata", "name")&.end_with?("gvisor-guests") }
+guest_expressions = guest_admission&.dig("spec", "validations")&.map { |validation| validation["expression"] } || []
+unless guest_expressions.any? { |expression| expression.include?("request.operation == 'CREATE'") && expression.include?("object.spec.schedulingGates == [{'name': 'insight.platform/await-fenced-start'}]") }
+  failures << "gVisor guest CREATE does not require the exact fenced-start scheduling gate"
+end
 
 runtime_class = docs.find { |doc| doc["kind"] == "RuntimeClass" }
 failures << "runsc RuntimeClass is absent or drifted" unless runtime_class&.dig("metadata", "name") == "runsc" && runtime_class["handler"] == "runsc"

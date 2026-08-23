@@ -722,6 +722,42 @@ impl CandidateManifest {
         Ok(())
     }
 
+    pub fn validate_for_production_release(
+        &self,
+        profile: &QualificationProfile,
+    ) -> Result<(), CandidateManifestError> {
+        self.validate()?;
+        profile.validate_for_production_release().map_err(|_| {
+            invalid(
+                "qualification_profile_digest",
+                "production qualification profile is invalid",
+            )
+        })?;
+        let profile_digest = profile.canonical_digest().map_err(|_| {
+            invalid(
+                "qualification_profile_digest",
+                "production qualification profile cannot be digested",
+            )
+        })?;
+        if self.qualification_profile_digest != profile_digest {
+            return Err(invalid(
+                "qualification_profile_digest",
+                "candidate references a different production qualification profile",
+            ));
+        }
+        if self.component_images.len() != ComponentRole::ALL.len()
+            || !ComponentRole::ALL
+                .iter()
+                .all(|role| self.component_images.contains_key(role))
+        {
+            return Err(invalid(
+                "component_images",
+                "production candidate must close every first-release component role",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate_against(
         &self,
         hard_limit_profile: &HardLimitProfile,
@@ -1050,6 +1086,32 @@ mod tests {
         let mut unordered = profile;
         unordered.required_gates.swap(0, 1);
         assert_eq!(unordered.validate().unwrap_err().field, "required_gates");
+    }
+
+    #[test]
+    fn production_candidate_requires_every_first_release_component_image() {
+        let workers = [worker(
+            "orchestration.primary",
+            WorkClass::Orchestration,
+            '1',
+        )];
+        let profile = production_profile();
+        let mut candidate = candidate(&workers);
+        candidate.qualification_profile_digest = profile.canonical_digest().unwrap();
+        assert_eq!(
+            candidate
+                .validate_for_production_release(&profile)
+                .unwrap_err()
+                .field,
+            "component_images"
+        );
+
+        candidate.component_images = ComponentRole::ALL
+            .iter()
+            .copied()
+            .map(|role| (role, sha('c')))
+            .collect();
+        candidate.validate_for_production_release(&profile).unwrap();
     }
 
     #[test]

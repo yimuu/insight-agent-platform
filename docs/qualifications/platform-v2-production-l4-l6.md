@@ -1,0 +1,69 @@
+# Platform v2 Production L4～L6资格运行手册
+
+状态：Pending / requires production-equivalent runner
+
+本手册执行18的外部资格门禁，不改变产品合同，也不把静态Helm检查或development集群冒充为L4证据。
+
+## 前置条件
+
+- always-on、多节点Kubernetes runner；
+- 独立且不重叠的WASI与gVisor节点池，execution node均有NodeRestriction保护的attestor label；
+- `RuntimeClass/runsc`的handler与scheduling selector均为exact `runsc`闭包；
+- v1 `ValidatingAdmissionPolicy`；
+- exact CandidateManifest，包含全部首版component image digest并引用checked-in production QualificationProfile；
+- 独立staging PostgreSQL、NATS、versioned S3/KMS、Secret Manager与workload identity；
+- 新的、不会覆盖历史证据的输出目录。
+
+单节点、`crun`/`runc`替代、重叠执行节点、缺失attestor label、mutable image、占位digest或缺失CandidateManifest
+都必须在测试部署前失败。
+
+## 拓扑预检
+
+```bash
+export PLATFORM_CANDIDATE_MANIFEST=/secure/ci-artifacts/candidate-manifest.json
+export PLATFORM_QUALIFICATION_OUTPUT_DIR=/secure/ci-artifacts/platform-v2-qualification-$CI_RUN_ID
+
+bash scripts/preflight-platform-production-qualification.sh
+```
+
+预检先用`platform-qualification validate-production-candidate`验证Candidate/Profile闭包，再采集Kubernetes version、
+Ready node、runsc RuntimeClass和admission API。输出的`topology.json`只包含版本、计数、architecture、exact selector与
+canonical topology digest；它不保存credential、Secret、Pod环境、外部URL或对象key。失败运行保留其raw preflight输出，
+不得在同一路径覆盖重跑。
+
+## 后续门禁
+
+预检通过后，runner仍须依序完成：
+
+1. 部署exact digest闭包并验证startup manifest、mTLS、NetworkPolicy、PDB/HPA与role-separated DB/storage pool；
+2. 执行gVisor Launcher RBAC逐verb/resource负向矩阵和guest admission绕过矩阵；
+3. 执行真实WASI/runsc ABI、limit、escape、cleanup、process-kill、watch-restart与node-loss；
+4. 执行MCP、Artifact S3/KMS、Model、lane saturation、rolling fault recovery与backup/restore；
+5. 按qualification profile执行不少于86,400秒的持续soak，冻结实测CapacityProfile；
+6. 验证签名image/SBOM/provenance，完成GitOps rollout/rollback rehearsal与人工promotion；
+7. 为每个required gate生成content-addressed artifact，并构造QualificationEvidenceManifest；
+8. 运行：
+
+```bash
+cargo run --locked -p insight-platform-contracts --bin platform-qualification -- \
+  validate-release-evidence \
+  contracts/platform-v1/qualification/production-release-profile.json \
+  "$PLATFORM_CANDIDATE_MANIFEST" \
+  "$PLATFORM_QUALIFICATION_OUTPUT_DIR/qualification-evidence.json"
+```
+
+只有该命令通过、GitOps environment repository收到同一exact digest且人工批准promotion后，才可归档通过报告并更新
+implementation plan。任何missing/failed gate、profile/candidate漂移或evidence digest无法解析都保持Pending。
+
+Launcher RBAC矩阵的执行入口为：
+
+```bash
+python3 scripts/qualify-platform-gvisor-rbac.py \
+  --subject system:serviceaccount:platform-sandbox-exec:sandbox-insight-platform-sandbox-executor-gvisor \
+  --namespace platform-sandbox-guests \
+  --output "$PLATFORM_QUALIFICATION_OUTPUT_DIR/gvisor-launcher-rbac.json"
+```
+
+它明确验证允许的`create/get/watch/patch/delete pods`与`get pods/status`，并逐项拒绝list/update、log、
+exec、attach、port-forward、ephemeralcontainers、Secret、ConfigMap、ServiceAccount、RBAC、Node和RuntimeClass。
+任一额外权限或必要权限缺失都写入失败报告并返回非零。
