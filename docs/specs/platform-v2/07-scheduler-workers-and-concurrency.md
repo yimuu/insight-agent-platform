@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-176 |
+| 状态 | Accepted / CR-177 |
 | 日期 | 2026-08-23 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
@@ -74,6 +74,9 @@ Run、Plan Revision、Artifact/Blob与lease，RPC deadline不得越过lease/job 
 immutable RunValue并生成带evidence digest的controller command。调用方、NATS hint和Worker结果不能直接提供Branch target、Map item
 count、Loop condition或Compute output。表达式求值消耗Orchestration本地CPU/内存permit，不调用Provider/MCP/Context/HTTP/Sandbox，
 也不占leaf WorkClass pool。
+
+Scheduler可携带事务外物化的value正文，但不能决定Compute output classification；repository在提交事务从exact input RunValue rows
+按05 lattice规则重算effective classification，空input闭包使用`Internal`，并把同一结果写入全部Compute output。
 
 Worker：
 

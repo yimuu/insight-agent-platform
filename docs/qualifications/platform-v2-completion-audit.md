@@ -9,7 +9,7 @@
 
 ## 1. 结论
 
-00～18均已完成CR-176影响cross-review（未受影响合同保留CR-173～175语义版本）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
+00～18均已完成CR-177影响cross-review（未受影响合同保留CR-173～176语义版本）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
 实现与真实PostgreSQL门禁已闭合；Phase 2/3已有大量domain/repository/runtime库和L1～L3证据，但缺少若干production
 composition；Phase 4只有public API及部分role清单，完整物理拓扑、observability和L4～L6尚未交付。
 
@@ -24,7 +24,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 | 范围 | 当前证据 | 结论 |
 |---|---|---|
-| 合同 | 00～18 CR-176影响cross-review闭合；03、05～07为`Accepted / CR-176`，18保留CR-175、17保留CR-174；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
+| 合同 | 00～18 CR-177影响cross-review闭合；05～07、18为`Accepted / CR-177`，其余保留既有CR语义版本；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
 | Persistence | schema contract v7、唯一`0001_platform_baseline.sql`；PG16/17 fresh baseline与事务/并发测试 | Phase 1 persistence闭合 |
 | Rust workspace | workspace all-target/all-feature tests与Clippy `-D warnings`通过 | L1～L3范围内有效 |
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
@@ -66,14 +66,16 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 1. `insight-platform-runtime`只有library，没有Scheduler/Recovery production binary、process config、startup manifest、
    readiness/drain和Helm Deployment。
-2. `StartedOrchestrationJobHandler`已有正式materialize→commit/handoff生命周期adapter，但PostgreSQL durable Plan driver仍未实现；
+2. `StartedOrchestrationJobHandler`已有正式materialize→commit/handoff生命周期adapter，但PostgreSQL durable Plan store仍未闭合；
    exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
    exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure；
    Scheduler侧也已用当前fence从PostgreSQL解析descriptor并完成canonical JSON、Plan limits和semantic digest复验，但把该Plan
    交给真实Plan/Capability/Task/Subagent状态机的production handler仍未实现。
    closed expression owner、纯确定性evaluator、Plan节点与HardLimitProfile v5消费现已落地，production driver API也不接受外部
-   observation；CR-176确认Scope data-port environment和RunValue evidence原子事务尚未实现，手工注入`ControllerObservation`
-   仍不计production证据。
+   observation；CR-176 Scope data-port environment owner、root/child binding、bounded lexical lookup、exact Inline/Ready Artifact
+   authority读取与stale fence拒绝已经实现并通过fresh PostgreSQL Phase 2。尚缺commit侧对input/evaluation/classification evidence的事务内
+   重验、Compute RunValue + Scope CAS原子写，以及Map item/Loop carried binding；手工注入`ControllerObservation`仍不计production证据。
+   CR-177已冻结output classification lattice规则，但实现与L1～L3 fixture尚待完成。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-175 |
+| 状态 | Accepted / CR-177 |
 | 日期 | 2026-08-23 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -216,7 +216,8 @@ code/image/schema digest、seed、topology、start/end time、tool version、res
 - 一个隔舱饱和时API/Scheduler/critical-control和其他隔舱仍满足profile SLO；
 - L1/L2覆盖所有expression opcode、type/stack/output bounds与unknown-field；L2真实PostgreSQL覆盖wrong Plan/Artifact/RunValue digest、
   Node version、lease/fence、跨tenant/run和Compute/Scope/Node/Job/Event原子回滚；L3多进程从Artifact Data RPC物化Plan并自行推进
-  Branch/Map/Loop/Compute，禁止fixture注入observation；
+  Branch/Map/Loop/Compute，禁止fixture注入observation；classification fixture覆盖多级input lattice join、空input `Internal`、caller降级、
+  Artifact metadata漂移及整批原子回滚；
 - rolling drain、Pod/Node/DB/NATS/S3/KMS/Egress fault injection和整体recovery；
 - 持续soak中无无界queue/memory/connection/Artifact orphan/recovery lag增长。
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-176 |
+| 状态 | Accepted / CR-177 |
 | 日期 | 2026-08-23 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -250,6 +250,12 @@ struct LoopNode { condition: TypedExpressionProgram, carried_ports: Vec<LoopCarr
 
 `Compute.assignments`必须按拓扑排序且每个output port只写一次；Branch按声明顺序执行并始终有`otherwise`；Map的`items`
 输出必须是有界array；Loop的`condition`输出必须是non-null boolean。表达式所需input port是Node readiness条件的一部分。
+
+表达式classification不是caller输入，也不增加可降级的output annotation。同一expression controller先对全部external input
+RunValue classification做`Public < Internal < Confidential < Restricted` lattice join；Compute的全部派生output继承该join结果。
+Compute assignment在同一node内引用先前assignment时不重复改变classification，因为这些值已经包含在同一external closure中；完全没有
+external input的常量Compute输出固定为`Internal`。Branch/Map/Loop不产生表达式output RunValue，因而不增加observation classification字段；
+其evidence保留exact input RunValue identity即可。任何提交方提供的更低classification都必须在写RunValue前拒绝。
 
 `ExactDataPortRef`是closed source enum：`RunInput { schema_digest }`或
 `NodeOutput { producer_node_id, port_id, schema_digest }`；RunInput不是伪造的Plan node，也不存在自由source kind。它标识Plan级

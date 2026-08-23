@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-176 |
+| 状态 | Accepted / CR-177 |
 | 日期 | 2026-08-23 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
@@ -321,6 +321,10 @@ Job/Run/Node current version，重验所有input `ValueRef` identity/schema/cont
 然后原子写入Compute产生的immutable RunValue、Scope environment CAS、Node/Job转换、Receipt/Event/Outbox。任一输入已改变、缺失、跨run/tenant、
 Artifact正文不匹配或fence丢失时整批不可见。RunValue不可变，因此成功提交后无需另建observation current projection；Receipt/Event
 只保存bounded evidence digest与引用。
+
+Compute output RunValue的classification由05 owner规则计算：external input classification的lattice join，空external closure固定
+`Internal`；同一事务必须从重验后的input rows重算，禁止command、Worker或Artifact metadata选择更低等级。classification计算失败、
+证据与行不一致或任何output尝试降级时，RunValue、Scope CAS及其余Node/Job/Event/Outbox mutation全部回滚。
 
 首次Map求值原子冻结input value ref、item count、batch cursor与failure policy；后续批次只消费该冻结payload。Loop每次iteration
 冻结loop-carried value refs和condition evidence。Branch只为winner创建NodeExecution；未选arm与`otherwise`之外不存在Skipped事实。
