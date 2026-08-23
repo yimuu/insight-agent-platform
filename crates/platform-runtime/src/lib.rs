@@ -6,6 +6,7 @@
 mod execution;
 mod identity;
 mod orchestration;
+mod plan_materialization;
 pub mod postgres;
 mod safety;
 mod sandbox_executor;
@@ -19,6 +20,7 @@ pub use insight_platform_sandbox_rpc::{
     NATS_SANDBOX_CONTROL_SUBJECT_PREFIX,
 };
 pub use orchestration::*;
+pub use plan_materialization::*;
 pub use safety::*;
 pub use sandbox_executor::*;
 pub use sandbox_outcome::*;

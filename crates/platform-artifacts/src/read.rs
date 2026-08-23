@@ -122,6 +122,46 @@ pub trait ArtifactObjectReadAuthority<R>: Send + Sync {
     ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError>;
 }
 
+/// Scheduler-owned lookup key for resolving the exact Typed Plan descriptor frozen by a Run.
+/// It carries no caller-selected Plan or Artifact identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerTypedPlanLease {
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub orchestration_job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub lease_token_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub maximum_bytes: usize,
+    pub deadline: DateTime<Utc>,
+}
+
+impl SchedulerTypedPlanLease {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ArtifactObjectReadAuthorityError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.run_id.kind() != ResourceKind::Run
+            || self.orchestration_job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.lease_generation == 0
+            || self.maximum_bytes == 0
+            || self.maximum_bytes > MAX_TYPED_PLAN_ARTIFACT_BYTES
+            || self.deadline <= now
+        {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+pub trait SchedulerTypedPlanRequestResolver: Send + Sync {
+    async fn resolve_typed_plan_read(
+        &self,
+        lease: SchedulerTypedPlanLease,
+    ) -> Result<SchedulerTypedPlanReadRequest, ArtifactObjectReadAuthorityError>;
+}
+
 /// Closed Scheduler request for the immutable Typed Plan bound to one leased orchestration Job.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -494,10 +534,29 @@ mod tests {
             wrong_media.validate_at(now),
             Err(ArtifactObjectReadAuthorityError::Denied)
         );
-        let mut oversized = request;
+        let mut oversized = request.clone();
         oversized.maximum_bytes = MAX_TYPED_PLAN_ARTIFACT_BYTES + 1;
         assert_eq!(
             oversized.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+
+        let lease = SchedulerTypedPlanLease {
+            tenant_id: request.tenant_id,
+            run_id: request.run_id,
+            orchestration_job_id: request.orchestration_job_id,
+            worker_process_generation_id: request.worker_process_generation_id,
+            lease_generation: 2,
+            lease_token_digest: digest('e'),
+            request_digest: digest('f'),
+            maximum_bytes: MAX_TYPED_PLAN_ARTIFACT_BYTES,
+            deadline: now + chrono::Duration::seconds(1),
+        };
+        lease.validate_at(now).unwrap();
+        let mut expired_lease = lease;
+        expired_lease.deadline = now;
+        assert_eq!(
+            expired_lease.validate_at(now),
             Err(ArtifactObjectReadAuthorityError::Denied)
         );
     }

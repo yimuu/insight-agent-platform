@@ -14,7 +14,9 @@ async-nats.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
+insight-platform-artifacts.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-orchestrator.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-sandbox.workspace = true
 insight-platform-sandbox-rpc.workspace = true
@@ -28,5 +30,4 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-insight-platform-orchestrator.workspace = true
 insight-platform-security.workspace = true

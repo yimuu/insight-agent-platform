@@ -32,8 +32,8 @@ use insight_platform_artifacts::{
     EncryptedArtifactObjectReference, FinalizeArtifact, FinalizedArtifact,
     GatewayArtifactReadRequest, MarkArtifactDeletion, MarkedArtifactDeletion, PlaceArtifactHold,
     PrepareArtifact, PreparedArtifact, ReleaseArtifactHold, ReleaseArtifactReference,
-    ScheduleArtifactRescan, ScheduleInitialArtifactScan, SchedulerTypedPlanReadRequest,
-    UploadGrantSnapshot,
+    ScheduleArtifactRescan, ScheduleInitialArtifactScan, SchedulerTypedPlanLease,
+    SchedulerTypedPlanReadRequest, SchedulerTypedPlanRequestResolver, UploadGrantSnapshot,
 };
 use insight_platform_contracts::{
     ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, BlobIntegrityState,
@@ -550,6 +550,174 @@ impl ArtifactObjectReadAuthority<GatewayArtifactReadRequest> for PgRepository {
 }
 
 #[async_trait::async_trait]
+impl SchedulerTypedPlanRequestResolver for PgRepository {
+    async fn resolve_typed_plan_read(
+        &self,
+        lease: SchedulerTypedPlanLease,
+    ) -> Result<SchedulerTypedPlanReadRequest, ArtifactObjectReadAuthorityError> {
+        lease.validate_at(Utc::now())?;
+        let mut transaction = begin_read_only_repeatable(self.pool())
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        let row = sqlx::query(
+            r#"
+            SELECT run.bindings_schema_version, run.bindings, run.bindings_digest,
+                   version.resource_version_id, version.payload_schema_version,
+                   version.payload, version.payload_digest,
+                   version.content_digest AS version_content_digest,
+                   artifact.artifact_id, artifact.classification,
+                   artifact.verified_media_type, artifact.metadata_schema_version,
+                   artifact.metadata, artifact.metadata_digest,
+                   blob.content_digest, blob.size_bytes
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.runs AS run
+              ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
+            JOIN insight_platform.resource_versions AS version
+              ON version.tenant_id = run.tenant_id
+             AND version.resource_version_id = run.bindings -> 'plan' ->> 'revision_id'
+             AND version.resource_version_kind = 'agent_plan_revision'
+            JOIN insight_platform.artifacts AS artifact
+              ON artifact.tenant_id = version.tenant_id
+             AND artifact.artifact_id = version.artifact_id
+            JOIN insight_platform.artifact_blobs AS blob
+              ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+            WHERE job.tenant_id = $1 AND job.job_id = $2 AND job.run_id = $3
+              AND job.work_class = 'orchestration' AND job.state = 'running'
+              AND job.worker_id = $4 AND job.lease_epoch = $5
+              AND job.lease_token_digest = $6
+              AND job.lease_expires_at >= $7 AND job.deadline >= $7
+              AND run.state IN ('running', 'paused', 'cancelling')
+              AND artifact.state = 'ready' AND artifact.terminal_at IS NULL
+              AND artifact.purpose = 'typed_plan'
+              AND blob.state = 'verified' AND blob.deleted_at IS NULL
+            "#,
+        )
+        .bind(lease.tenant_id.to_string())
+        .bind(lease.orchestration_job_id.to_string())
+        .bind(lease.run_id.to_string())
+        .bind(lease.worker_process_generation_id.to_string())
+        .bind(
+            i64::try_from(lease.lease_generation)
+                .map_err(|_| ArtifactObjectReadAuthorityError::Denied)?,
+        )
+        .bind(lease.lease_token_digest.to_string())
+        .bind(lease.deadline)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?
+        .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
+
+        let bindings = run_bindings_from_row(
+            &row,
+            "bindings_schema_version",
+            "bindings",
+            "bindings_digest",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        let plan_revision_id = parse_id(
+            row.try_get("resource_version_id")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            "Agent Plan revision",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        let version_payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")
+                .map_err(classify_gateway_artifact_read_error)?;
+        let published: PublishedVersionPayload =
+            decode_typed_payload(&version_payload, "Agent Plan revision")
+                .map_err(classify_gateway_artifact_read_error)?;
+        published
+            .validate_for(RegistryResourceKind::Agent, &plan_revision_id)
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let ResourceDocument::Agent(agent) = published.document else {
+            return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
+        };
+        let artifact_id = parse_id(
+            row.try_get("artifact_id")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            "Typed Plan Artifact",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        let content_digest = parse_digest(
+            row.try_get("version_content_digest")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            "Typed Plan",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        let blob_digest = parse_digest(
+            row.try_get::<Option<String>, _>("content_digest")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?
+                .ok_or(ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+            "Typed Plan Blob",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        let byte_length = u64::try_from(
+            row.try_get::<Option<i64>, _>("size_bytes")
+                .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?
+                .ok_or(ArtifactObjectReadAuthorityError::InvalidEvidence)?,
+        )
+        .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let media_type = row
+            .try_get::<Option<String>, _>("verified_media_type")
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?
+            .ok_or(ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let classification = row
+            .try_get::<String, _>("classification")
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?
+            .parse::<DataClassification>()
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let metadata = payload_from_row(
+            &row,
+            "metadata_schema_version",
+            "metadata",
+            "metadata_digest",
+        )
+        .map_err(classify_gateway_artifact_read_error)?;
+        let display_name = metadata
+            .value
+            .get("display_name")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        if bindings.plan.revision_id != plan_revision_id
+            || bindings.plan.semantic_digest != content_digest
+            || agent.typed_plan_artifact_id != artifact_id
+            || agent.typed_plan_digest != content_digest
+            || blob_digest != content_digest
+        {
+            return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
+        }
+        let artifact = ArtifactRef::new(
+            artifact_id,
+            content_digest,
+            byte_length,
+            media_type,
+            classification,
+            display_name,
+        )
+        .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let request = SchedulerTypedPlanReadRequest {
+            tenant_id: lease.tenant_id,
+            run_id: lease.run_id,
+            orchestration_job_id: lease.orchestration_job_id,
+            worker_process_generation_id: lease.worker_process_generation_id,
+            lease_generation: lease.lease_generation,
+            lease_token_digest: lease.lease_token_digest,
+            plan_revision_id,
+            artifact,
+            request_digest: lease.request_digest,
+            maximum_bytes: lease.maximum_bytes,
+            deadline: lease.deadline,
+        };
+        request.validate_at(Utc::now())?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        Ok(request)
+    }
+}
+
+#[async_trait::async_trait]
 impl ArtifactObjectReadAuthority<SchedulerTypedPlanReadRequest> for PgRepository {
     async fn authorize_object_read(
         &self,
@@ -594,7 +762,7 @@ impl ArtifactObjectReadAuthority<SchedulerTypedPlanReadRequest> for PgRepository
             WHERE job.tenant_id = $1 AND job.job_id = $2 AND job.run_id = $3
               AND job.work_class = 'orchestration' AND job.state = 'running'
               AND job.worker_id = $5 AND job.lease_epoch = $6
-              AND job.lease_token_digest = $7 AND job.lease_expires_at > clock_timestamp()
+              AND job.lease_token_digest = $7 AND job.lease_expires_at >= $8
               AND job.deadline >= $8
               AND run.state IN ('running', 'paused', 'cancelling')
               AND artifact.state = 'ready' AND artifact.terminal_at IS NULL

@@ -1,6 +1,7 @@
 use chrono::{Duration, Utc};
 use insight_platform_artifacts::{
-    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, SchedulerTypedPlanReadRequest,
+    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, SchedulerTypedPlanLease,
+    SchedulerTypedPlanRequestResolver,
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, AgentDeploymentClosure,
@@ -699,7 +700,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     scheduler.commit().await.unwrap();
     assert_eq!(running_for_recovery.attempt_no, 1);
     let typed_plan_bytes = canonical_json(&serde_json::to_value(runtime_plan()).unwrap()).unwrap();
-    let typed_plan_artifact = ArtifactRef::new(
+    let expected_typed_plan_artifact = ArtifactRef::new(
         id(TYPED_PLAN_ARTIFACT_ID),
         runtime_plan().canonical_digest(plan_limits()).unwrap(),
         u64::try_from(typed_plan_bytes.len()).unwrap(),
@@ -708,19 +709,22 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         Some("typed-plan.json".to_owned()),
     )
     .unwrap();
-    let typed_plan_read = SchedulerTypedPlanReadRequest {
+    let typed_plan_read = repository
+        .resolve_typed_plan_read(SchedulerTypedPlanLease {
         tenant_id: id(TENANT_ID),
         run_id: id(running_for_recovery.run_id.as_deref().unwrap()),
         orchestration_job_id: id(&running_for_recovery.job_id),
         worker_process_generation_id: id(WORKER_D_ID),
         lease_generation: u64::try_from(running_for_recovery.lease_epoch).unwrap(),
         lease_token_digest: digest('0'),
-        plan_revision_id: id(AGENT_PLAN_ID),
-        artifact: typed_plan_artifact,
         request_digest: digest('3'),
         maximum_bytes: typed_plan_bytes.len(),
         deadline: Utc::now() + Duration::milliseconds(100),
-    };
+    })
+        .await
+        .unwrap();
+    assert_eq!(typed_plan_read.plan_revision_id, id(AGENT_PLAN_ID));
+    assert_eq!(typed_plan_read.artifact, expected_typed_plan_artifact);
     let authorized = repository
         .authorize_object_read(&typed_plan_read)
         .await

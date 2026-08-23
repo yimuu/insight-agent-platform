@@ -104,7 +104,7 @@ ALLOWED_INTERNAL = {
     "security_rpc": {"contracts", "security_domain"},
     "tasks_domain": {"contracts"},
     "platform_postgres": {"artifact_broker", "artifacts_domain", "capability_adapters", "contracts", "context_domain", "invocations_domain", "jobs_domain", "mcp_host", "model_adapters", "models_domain", "orchestrator_domain", "registry_domain", "sandbox_domain", "scheduler_domain", "security_domain", "tasks_domain"},
-    "platform_runtime": {"contracts", "orchestrator_domain", "platform_postgres", "platform_worker", "sandbox_domain", "sandbox_rpc", "security_domain"},
+    "platform_runtime": {"artifacts_domain", "contracts", "orchestrator_domain", "platform_postgres", "platform_worker", "sandbox_domain", "sandbox_rpc", "security_domain"},
     "sandbox_domain": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
     "sandbox_attestor": {"contracts", "sandbox_domain", "sandbox_rpc"},
     "sandbox_controller": {"artifact_rpc", "contracts", "platform_postgres", "sandbox_domain", "sandbox_rpc"},

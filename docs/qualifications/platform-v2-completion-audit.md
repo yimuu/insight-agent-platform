@@ -67,8 +67,9 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 1. `insight-platform-runtime`只有library，没有Scheduler/Recovery production binary、process config、startup manifest、
    readiness/drain和Helm Deployment。
 2. `StartedOrchestrationJobHandler`只有test实现；exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
-   exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure，
-   但把已验证Plan交给真实Plan/Capability/Task/Subagent状态机的production handler仍未实现。
+   exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure；
+   Scheduler侧也已用当前fence从PostgreSQL解析descriptor并完成canonical JSON、Plan limits和semantic digest复验，但把该Plan
+   交给真实Plan/Capability/Task/Subagent状态机的production handler仍未实现。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 
