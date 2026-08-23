@@ -1,6 +1,15 @@
-use insight_platform_contracts::{canonical_digest, ClosedJsonValue, Sha256Digest};
+use insight_platform_contracts::{
+    canonical_digest, ClosedJsonValue, Sha256Digest, MAX_SAFE_JSON_INTEGER,
+};
 use serde::{de, Deserialize, Deserializer, Serialize};
-use std::{collections::BTreeSet, error::Error, fmt};
+use serde_json::{Map, Number, Value};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    str::FromStr,
+};
 
 pub const MAX_EXPRESSION_INSTRUCTIONS: usize = 4_096;
 pub const MAX_EXPRESSION_INPUT_PORTS: usize = 64;
@@ -193,6 +202,371 @@ impl TypedExpressionProgram {
         }
         Ok(())
     }
+
+    pub fn evaluate(
+        &self,
+        inputs: &BTreeMap<ExactDataPortRef, ClosedJsonValue>,
+        limits: ExpressionLimits,
+    ) -> Result<ClosedJsonValue, ExpressionError> {
+        self.validate(limits)?;
+        let declared = self.input_ports.iter().collect::<BTreeSet<_>>();
+        if inputs.keys().any(|port| !declared.contains(port)) {
+            return Err(ExpressionError::UnexpectedInput);
+        }
+        if inputs.len() != declared.len() {
+            return Err(ExpressionError::MissingInput);
+        }
+
+        let mut stack = Vec::with_capacity(usize::from(self.maximum_stack_depth));
+        for instruction in &self.instructions {
+            evaluate_instruction(instruction, inputs, &mut stack)?;
+        }
+        let value = stack.pop().ok_or(ExpressionError::InvalidResultArity)?;
+        if !stack.is_empty() {
+            return Err(ExpressionError::InvalidResultArity);
+        }
+        ClosedJsonValue::build(self.output_schema_digest.clone(), value)
+            .map_err(|_| ExpressionError::InvalidResult)
+    }
+}
+
+fn evaluate_instruction(
+    instruction: &TypedInstruction,
+    inputs: &BTreeMap<ExactDataPortRef, ClosedJsonValue>,
+    stack: &mut Vec<Value>,
+) -> Result<(), ExpressionError> {
+    match instruction {
+        TypedInstruction::LoadPort { port } => {
+            let value = inputs.get(port).ok_or(ExpressionError::MissingInput)?;
+            value
+                .validate()
+                .map_err(|_| ExpressionError::InvalidInput)?;
+            if value.schema_digest != port.schema_digest {
+                return Err(ExpressionError::SchemaMismatch);
+            }
+            stack.push(value.value.clone());
+        }
+        TypedInstruction::Literal { value } => stack.push(value.value.clone()),
+        TypedInstruction::GetField { field } => {
+            let object = pop(stack)?
+                .as_object()
+                .ok_or(ExpressionError::TypeMismatch)?
+                .clone();
+            stack.push(
+                object
+                    .get(field.as_str())
+                    .cloned()
+                    .ok_or(ExpressionError::MissingField)?,
+            );
+        }
+        TypedInstruction::GetIndex => {
+            let index = json_index(pop(stack)?)?;
+            let array = pop(stack)?
+                .as_array()
+                .ok_or(ExpressionError::TypeMismatch)?
+                .clone();
+            stack.push(
+                array
+                    .get(index)
+                    .cloned()
+                    .ok_or(ExpressionError::InvalidIndex)?,
+            );
+        }
+        TypedInstruction::ArrayLength => {
+            let length = pop(stack)?
+                .as_array()
+                .ok_or(ExpressionError::TypeMismatch)?
+                .len();
+            let length = u64::try_from(length).map_err(|_| ExpressionError::ArithmeticOverflow)?;
+            stack.push(Value::Number(Number::from(length)));
+        }
+        TypedInstruction::MakeArray { item_count } => {
+            let start = stack
+                .len()
+                .checked_sub(usize::from(*item_count))
+                .ok_or(ExpressionError::StackUnderflow)?;
+            let values = stack.split_off(start);
+            stack.push(Value::Array(values));
+        }
+        TypedInstruction::MakeObject { ordered_fields } => {
+            let start = stack
+                .len()
+                .checked_sub(ordered_fields.len())
+                .ok_or(ExpressionError::StackUnderflow)?;
+            let values = stack.split_off(start);
+            let object = ordered_fields
+                .iter()
+                .zip(values)
+                .map(|(field, value)| (field.as_str().to_owned(), value))
+                .collect::<Map<_, _>>();
+            stack.push(Value::Object(object));
+        }
+        TypedInstruction::Equal | TypedInstruction::NotEqual => {
+            let right = pop(stack)?;
+            let left = pop(stack)?;
+            let equal = if left.is_number() && right.is_number() {
+                compare_values(&left, &right)? == Ordering::Equal
+            } else {
+                left == right
+            };
+            stack.push(Value::Bool(
+                if matches!(instruction, TypedInstruction::Equal) {
+                    equal
+                } else {
+                    !equal
+                },
+            ));
+        }
+        TypedInstruction::Less
+        | TypedInstruction::LessOrEqual
+        | TypedInstruction::Greater
+        | TypedInstruction::GreaterOrEqual => {
+            let right = pop(stack)?;
+            let left = pop(stack)?;
+            let ordering = compare_values(&left, &right)?;
+            let result = match instruction {
+                TypedInstruction::Less => ordering == Ordering::Less,
+                TypedInstruction::LessOrEqual => ordering != Ordering::Greater,
+                TypedInstruction::Greater => ordering == Ordering::Greater,
+                TypedInstruction::GreaterOrEqual => ordering != Ordering::Less,
+                _ => unreachable!(),
+            };
+            stack.push(Value::Bool(result));
+        }
+        TypedInstruction::BooleanAnd | TypedInstruction::BooleanOr => {
+            let right = pop_bool(stack)?;
+            let left = pop_bool(stack)?;
+            stack.push(Value::Bool(
+                if matches!(instruction, TypedInstruction::BooleanAnd) {
+                    left && right
+                } else {
+                    left || right
+                },
+            ));
+        }
+        TypedInstruction::BooleanNot => {
+            let value = pop_bool(stack)?;
+            stack.push(Value::Bool(!value));
+        }
+        TypedInstruction::IntegerAdd | TypedInstruction::IntegerSubtract => {
+            let right = pop_integer(stack)?;
+            let left = pop_integer(stack)?;
+            let result = if matches!(instruction, TypedInstruction::IntegerAdd) {
+                left.checked_add(right)
+            } else {
+                left.checked_sub(right)
+            }
+            .filter(|value| value.unsigned_abs() <= u128::from(MAX_SAFE_JSON_INTEGER))
+            .ok_or(ExpressionError::ArithmeticOverflow)?;
+            stack.push(Value::Number(Number::from(
+                i64::try_from(result).map_err(|_| ExpressionError::ArithmeticOverflow)?,
+            )));
+        }
+        TypedInstruction::DecimalAdd | TypedInstruction::DecimalSubtract => {
+            let right = ExactDecimal::from_value(pop(stack)?)?;
+            let left = ExactDecimal::from_value(pop(stack)?)?;
+            let result = if matches!(instruction, TypedInstruction::DecimalAdd) {
+                left.checked_add(right)
+            } else {
+                left.checked_sub(right)
+            }?;
+            stack.push(Value::Number(result.into_number()?));
+        }
+        TypedInstruction::StringConcat => {
+            let right = pop(stack)?
+                .as_str()
+                .ok_or(ExpressionError::TypeMismatch)?
+                .to_owned();
+            let mut left = pop(stack)?
+                .as_str()
+                .ok_or(ExpressionError::TypeMismatch)?
+                .to_owned();
+            left.push_str(&right);
+            stack.push(Value::String(left));
+        }
+        TypedInstruction::Coalesce => {
+            let right = pop(stack)?;
+            let left = pop(stack)?;
+            stack.push(if left.is_null() { right } else { left });
+        }
+        TypedInstruction::Select => {
+            let otherwise = pop(stack)?;
+            let selected = pop(stack)?;
+            let condition = pop_bool(stack)?;
+            stack.push(if condition { selected } else { otherwise });
+        }
+    }
+    Ok(())
+}
+
+fn pop(stack: &mut Vec<Value>) -> Result<Value, ExpressionError> {
+    stack.pop().ok_or(ExpressionError::StackUnderflow)
+}
+
+fn pop_bool(stack: &mut Vec<Value>) -> Result<bool, ExpressionError> {
+    pop(stack)?.as_bool().ok_or(ExpressionError::TypeMismatch)
+}
+
+fn pop_integer(stack: &mut Vec<Value>) -> Result<i128, ExpressionError> {
+    let value = pop(stack)?;
+    let value = value.as_i64().ok_or(ExpressionError::TypeMismatch)?;
+    Ok(i128::from(value))
+}
+
+fn json_index(value: Value) -> Result<usize, ExpressionError> {
+    let value = value.as_u64().ok_or(ExpressionError::TypeMismatch)?;
+    usize::try_from(value).map_err(|_| ExpressionError::InvalidIndex)
+}
+
+fn compare_values(left: &Value, right: &Value) -> Result<Ordering, ExpressionError> {
+    match (left, right) {
+        (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
+        (Value::Number(_), Value::Number(_)) => ExactDecimal::from_value(left.clone())?
+            .compare(ExactDecimal::from_value(right.clone())?),
+        _ => Err(ExpressionError::TypeMismatch),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExactDecimal {
+    coefficient: i128,
+    scale: u32,
+}
+
+impl ExactDecimal {
+    const MAX_SCALE: u32 = 28;
+
+    fn from_value(value: Value) -> Result<Self, ExpressionError> {
+        let source = value
+            .as_number()
+            .ok_or(ExpressionError::TypeMismatch)?
+            .to_string();
+        Self::parse(&source)
+    }
+
+    fn parse(source: &str) -> Result<Self, ExpressionError> {
+        let (mantissa, exponent) = if let Some((mantissa, exponent)) = source.split_once(['e', 'E'])
+        {
+            (
+                mantissa,
+                exponent
+                    .parse::<i32>()
+                    .map_err(|_| ExpressionError::ArithmeticOverflow)?,
+            )
+        } else {
+            (source, 0_i32)
+        };
+        let negative = mantissa.starts_with('-');
+        let unsigned = mantissa.strip_prefix('-').unwrap_or(mantissa);
+        let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+        let digits = format!("{whole}{fraction}");
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ExpressionError::TypeMismatch);
+        }
+        let coefficient = digits
+            .parse::<i128>()
+            .map_err(|_| ExpressionError::ArithmeticOverflow)?;
+        let coefficient = if negative { -coefficient } else { coefficient };
+        let scale = i32::try_from(fraction.len())
+            .map_err(|_| ExpressionError::ArithmeticOverflow)?
+            .checked_sub(exponent)
+            .ok_or(ExpressionError::ArithmeticOverflow)?;
+        if scale < 0 {
+            let factor = checked_power_of_ten(scale.unsigned_abs())?;
+            return Ok(Self {
+                coefficient: coefficient
+                    .checked_mul(factor)
+                    .ok_or(ExpressionError::ArithmeticOverflow)?,
+                scale: 0,
+            });
+        }
+        let scale = u32::try_from(scale).map_err(|_| ExpressionError::ArithmeticOverflow)?;
+        if scale > Self::MAX_SCALE {
+            return Err(ExpressionError::ArithmeticOverflow);
+        }
+        Ok(Self { coefficient, scale }.normalized())
+    }
+
+    fn normalized(mut self) -> Self {
+        while self.scale > 0 && self.coefficient % 10 == 0 {
+            self.coefficient /= 10;
+            self.scale -= 1;
+        }
+        self
+    }
+
+    fn aligned(self, other: Self) -> Result<(i128, i128, u32), ExpressionError> {
+        let scale = self.scale.max(other.scale);
+        let left = self
+            .coefficient
+            .checked_mul(checked_power_of_ten(scale - self.scale)?)
+            .ok_or(ExpressionError::ArithmeticOverflow)?;
+        let right = other
+            .coefficient
+            .checked_mul(checked_power_of_ten(scale - other.scale)?)
+            .ok_or(ExpressionError::ArithmeticOverflow)?;
+        Ok((left, right, scale))
+    }
+
+    fn checked_add(self, other: Self) -> Result<Self, ExpressionError> {
+        let (left, right, scale) = self.aligned(other)?;
+        Ok(Self {
+            coefficient: left
+                .checked_add(right)
+                .ok_or(ExpressionError::ArithmeticOverflow)?,
+            scale,
+        }
+        .normalized())
+    }
+
+    fn checked_sub(self, other: Self) -> Result<Self, ExpressionError> {
+        let (left, right, scale) = self.aligned(other)?;
+        Ok(Self {
+            coefficient: left
+                .checked_sub(right)
+                .ok_or(ExpressionError::ArithmeticOverflow)?,
+            scale,
+        }
+        .normalized())
+    }
+
+    fn compare(self, other: Self) -> Result<Ordering, ExpressionError> {
+        let (left, right, _) = self.aligned(other)?;
+        Ok(left.cmp(&right))
+    }
+
+    fn into_number(self) -> Result<Number, ExpressionError> {
+        let negative = self.coefficient < 0;
+        let digits = self.coefficient.unsigned_abs().to_string();
+        let source = if self.scale == 0 {
+            format!("{}{digits}", if negative { "-" } else { "" })
+        } else {
+            let scale =
+                usize::try_from(self.scale).map_err(|_| ExpressionError::ArithmeticOverflow)?;
+            let padded = if digits.len() <= scale {
+                format!("{}{}", "0".repeat(scale + 1 - digits.len()), digits)
+            } else {
+                digits
+            };
+            let split = padded.len() - scale;
+            format!(
+                "{}{}.{}",
+                if negative { "-" } else { "" },
+                &padded[..split],
+                &padded[split..]
+            )
+        };
+        Number::from_str(&source).map_err(|_| ExpressionError::ArithmeticOverflow)
+    }
+}
+
+fn checked_power_of_ten(power: u32) -> Result<i128, ExpressionError> {
+    if power > ExactDecimal::MAX_SCALE {
+        return Err(ExpressionError::ArithmeticOverflow);
+    }
+    10_i128
+        .checked_pow(power)
+        .ok_or(ExpressionError::ArithmeticOverflow)
 }
 
 #[derive(Serialize)]
@@ -317,6 +691,15 @@ pub enum ExpressionError {
     InvalidObjectFields,
     DigestMismatch,
     Canonicalization,
+    MissingInput,
+    UnexpectedInput,
+    InvalidInput,
+    SchemaMismatch,
+    TypeMismatch,
+    ArithmeticOverflow,
+    InvalidIndex,
+    MissingField,
+    InvalidResult,
 }
 
 impl fmt::Display for ExpressionError {
@@ -333,6 +716,15 @@ impl fmt::Display for ExpressionError {
             Self::InvalidObjectFields => "expression object fields are invalid or duplicated",
             Self::DigestMismatch => "expression semantic digest or stack depth mismatches",
             Self::Canonicalization => "expression cannot be canonically serialized",
+            Self::MissingInput => "expression exact input is missing",
+            Self::UnexpectedInput => "expression received an undeclared input",
+            Self::InvalidInput => "expression input is not closed canonical JSON",
+            Self::SchemaMismatch => "expression input schema digest mismatches its exact port",
+            Self::TypeMismatch => "expression opcode received a value of the wrong type",
+            Self::ArithmeticOverflow => "expression arithmetic exceeds its exact bounded domain",
+            Self::InvalidIndex => "expression array index is outside the array",
+            Self::MissingField => "expression object field is absent",
+            Self::InvalidResult => "expression result is not bounded canonical JSON",
         })
     }
 }
@@ -441,6 +833,102 @@ mod tests {
                 ExpressionLimits::ABSOLUTE,
             ),
             Err(ExpressionError::InvalidResultArity)
+        );
+    }
+
+    #[test]
+    fn evaluator_is_pure_exact_and_rejects_input_injection() {
+        let count = port("count");
+        let program = TypedExpressionProgram::build(
+            vec![count.clone()],
+            vec![
+                TypedInstruction::LoadPort {
+                    port: count.clone(),
+                },
+                TypedInstruction::Literal {
+                    value: ClosedJsonValue::build(digest('1'), json!(2)).unwrap(),
+                },
+                TypedInstruction::IntegerAdd,
+            ],
+            digest('1'),
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap();
+        let inputs = BTreeMap::from([(
+            count,
+            ClosedJsonValue::build(digest('1'), json!(40)).unwrap(),
+        )]);
+        let first = program
+            .evaluate(&inputs, ExpressionLimits::ABSOLUTE)
+            .unwrap();
+        let second = program
+            .evaluate(&inputs, ExpressionLimits::ABSOLUTE)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.value, json!(42));
+
+        let injected = BTreeMap::from([(
+            port("other"),
+            ClosedJsonValue::build(digest('1'), json!(40)).unwrap(),
+        )]);
+        assert_eq!(
+            program.evaluate(&injected, ExpressionLimits::ABSOLUTE),
+            Err(ExpressionError::UnexpectedInput)
+        );
+    }
+
+    #[test]
+    fn evaluator_uses_exact_decimal_and_closed_composite_operations() {
+        let program = TypedExpressionProgram::build(
+            vec![],
+            vec![
+                TypedInstruction::Literal {
+                    value: ClosedJsonValue::build(digest('1'), json!(0.1)).unwrap(),
+                },
+                TypedInstruction::Literal {
+                    value: ClosedJsonValue::build(digest('1'), json!(0.2)).unwrap(),
+                },
+                TypedInstruction::DecimalAdd,
+                TypedInstruction::Literal {
+                    value: ClosedJsonValue::build(digest('1'), json!(0.3)).unwrap(),
+                },
+                TypedInstruction::Equal,
+            ],
+            digest('2'),
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap();
+        assert_eq!(
+            program
+                .evaluate(&BTreeMap::new(), ExpressionLimits::ABSOLUTE)
+                .unwrap()
+                .value,
+            json!(true)
+        );
+
+        let object = TypedExpressionProgram::build(
+            vec![],
+            vec![
+                TypedInstruction::Literal {
+                    value: ClosedJsonValue::build(digest('1'), json!("exact")).unwrap(),
+                },
+                TypedInstruction::MakeObject {
+                    ordered_fields: vec![ExpressionFieldName::new("value".to_owned()).unwrap()],
+                },
+                TypedInstruction::GetField {
+                    field: ExpressionFieldName::new("value".to_owned()).unwrap(),
+                },
+            ],
+            digest('1'),
+            ExpressionLimits::ABSOLUTE,
+        )
+        .unwrap();
+        assert_eq!(
+            object
+                .evaluate(&BTreeMap::new(), ExpressionLimits::ABSOLUTE)
+                .unwrap()
+                .value,
+            json!("exact")
         );
     }
 }
