@@ -1963,6 +1963,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         dependency_versions: vec![],
         policy_versions: vec![policy_exact.clone()],
         interface_schema_digest: digest('c'),
+        typed_plan_artifact_id: package.artifact.artifact_id().clone(),
         typed_plan_digest: digest('d'),
     });
     for (exact, revision) in [(&agent_interface_exact, 1), (&agent_plan_exact, 2)] {

@@ -988,6 +988,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         dependency_versions: vec![],
         policy_versions: vec![agent_policy.clone()],
         interface_schema_digest: digest('c'),
+        typed_plan_artifact_id: id(ResourceKind::Artifact, 0xa6),
         typed_plan_digest: digest('d'),
     });
     for (exact, revision_no) in [(&agent_interface, 1), (&agent_plan, 2)] {

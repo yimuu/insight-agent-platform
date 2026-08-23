@@ -31,6 +31,8 @@ const TENANT_B_ID: &str = "ten_0198f1c3-8f49-7c3e-b1f3-773c28367c01";
 const PRINCIPAL_ID: &str = "prn_0198f1c3-8f49-7c3e-b1f3-773c28367c02";
 const DENIED_PRINCIPAL_ID: &str = "prn_0198f1c3-8f49-7c3e-b1f3-773c28367c03";
 const ARTIFACT_ID: &str = "art_0198f1c3-8f49-7c3e-b1f3-773c28367c04";
+const TYPED_PLAN_ARTIFACT_ID: &str = "art_0198f1c3-8f49-7c3e-b1f3-773c28367c09";
+const TYPED_PLAN_BLOB_ID: &str = "iblb_0198f1c3-8f49-7c3e-b1f3-773c28367c0a";
 const ARTIFACT_BLOB_ID: &str = "iblb_0198f1c3-8f49-7c3e-b1f3-773c28367ca1";
 const RETENTION_POLICY_ID: &str = "pol_0198f1c3-8f49-7c3e-b1f3-773c28367ca2";
 const RETENTION_REVISION_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ca3";
@@ -640,6 +642,28 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             security_domain_digest, object_reference_ciphertext, object_generation, key_id,
             encryption_domain_id, content_digest, size_bytes, state, verified_at,
             created_at, updated_at
+        ) SELECT $1, $2, 'fixture', $3, $4, $5, 'generation-plan', 'fixture-key',
+                 $6, $7, 16, 'verified', observed_at, observed_at, observed_at
+          FROM (SELECT clock_timestamp() AS observed_at) AS clock
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(TYPED_PLAN_BLOB_ID)
+    .bind(digest('8').to_string())
+    .bind(digest('9').to_string())
+    .bind(vec![4_u8, 5, 6])
+    .bind(ENCRYPTION_DOMAIN_ID)
+    .bind(digest('b').to_string())
+    .execute(&mut *bootstrap)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest,
+            security_domain_digest, object_reference_ciphertext, object_generation, key_id,
+            encryption_domain_id, content_digest, size_bytes, state, verified_at,
+            created_at, updated_at
         ) SELECT $1, $2, 'fixture', $3, $4, $5, 'generation-1', 'fixture-key',
                  $6, $7, 16, 'verified', observed_at, observed_at, observed_at
           FROM (SELECT clock_timestamp() AS observed_at) AS clock
@@ -652,6 +676,31 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     .bind(vec![1_u8, 2, 3])
     .bind(ENCRYPTION_DOMAIN_ID)
     .bind(digest('5').to_string())
+    .execute(&mut *bootstrap)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, metadata_schema_version, metadata,
+            metadata_digest, retention_policy_revision_id, retain_until, created_by
+        ) VALUES ($1, $2, $3, 'typed_plan', 'internal', 16, $4,
+                  'application/json', 'application/json', 'ready', $5, $6, $7,
+                  $8, $9, $10)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(TYPED_PLAN_ARTIFACT_ID)
+    .bind(TYPED_PLAN_BLOB_ID)
+    .bind(digest('b').to_string())
+    .bind(artifact_metadata.schema_version)
+    .bind(&artifact_metadata.value)
+    .bind(&artifact_metadata.digest)
+    .bind(RETENTION_REVISION_ID)
+    .bind(Utc::now() + Duration::days(30))
+    .bind(PRINCIPAL_ID)
     .execute(&mut *bootstrap)
     .await
     .unwrap();
@@ -1170,7 +1219,8 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         dependency_versions: vec![policy_ref.clone()],
         policy_versions: vec![policy_ref.clone()],
         interface_schema_digest: digest('b'),
-        typed_plan_digest: digest('c'),
+        typed_plan_artifact_id: id(TYPED_PLAN_ARTIFACT_ID),
+        typed_plan_digest: digest('b'),
     });
     let agent_draft = ResourceDraftPayload {
         display_name: "Deployment closure agent".to_owned(),
@@ -1213,6 +1263,45 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     );
     let interface_ref = ExactVersionRef::new(id(AGENT_INTERFACE_ID), digest('a')).unwrap();
     let plan_ref = ExactVersionRef::new(id(AGENT_PLAN_ID), digest('b')).unwrap();
+    let agent_versions = vec![
+        NewPublishedVersion {
+            resource_version_id: id(AGENT_INTERFACE_ID),
+            revision_no: 1,
+            content_digest: digest('a'),
+            artifact_id: None,
+            payload: PublishedVersionPayload {
+                document: agent_document.clone(),
+                validation: agent_validation.clone(),
+            },
+        },
+        NewPublishedVersion {
+            resource_version_id: id(AGENT_PLAN_ID),
+            revision_no: 1,
+            content_digest: digest('b'),
+            artifact_id: Some(id(TYPED_PLAN_ARTIFACT_ID)),
+            payload: PublishedVersionPayload {
+                document: agent_document,
+                validation: agent_validation,
+            },
+        },
+    ];
+    let mut unbound_plan_versions = agent_versions.clone();
+    unbound_plan_versions[1].artifact_id = None;
+    assert!(matches!(
+        registry_command!(
+            repository,
+            publish_resource_versions,
+            PublishResourceVersions {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "7cdf", '0', '1'),
+                resource_id: id(AGENT_ID),
+                expected_resource_version: 2,
+                expected_draft_digest: agent_draft_digest.clone(),
+                versions: unbound_plan_versions,
+            }
+        ),
+        Err(RepositoryError::InvalidInput(message))
+            if message == "Agent Plan revision must bind the exact typed Plan artifact and digest"
+    ));
     let agent_published = applied(
         registry_command!(
             repository,
@@ -1222,28 +1311,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
                 resource_id: id(AGENT_ID),
                 expected_resource_version: 2,
                 expected_draft_digest: agent_draft_digest,
-                versions: vec![
-                    NewPublishedVersion {
-                        resource_version_id: id(AGENT_INTERFACE_ID),
-                        revision_no: 1,
-                        content_digest: digest('a'),
-                        artifact_id: None,
-                        payload: PublishedVersionPayload {
-                            document: agent_document.clone(),
-                            validation: agent_validation.clone(),
-                        },
-                    },
-                    NewPublishedVersion {
-                        resource_version_id: id(AGENT_PLAN_ID),
-                        revision_no: 1,
-                        content_digest: digest('b'),
-                        artifact_id: None,
-                        payload: PublishedVersionPayload {
-                            document: agent_document,
-                            validation: agent_validation,
-                        },
-                    },
-                ],
+                versions: agent_versions,
             }
         )
         .unwrap(),

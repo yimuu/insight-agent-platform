@@ -2096,6 +2096,12 @@ impl PgRegistryTransaction {
             draft.document.authoring_package(),
         )
         .await?;
+        require_ready_typed_plan_artifact(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &draft.document,
+        )
+        .await?;
         require_ready_sandbox_runtime_bundle(
             &mut transaction,
             &command.audit.tenant_id,
@@ -2116,6 +2122,7 @@ impl PgRegistryTransaction {
                 .payload
                 .validate_for(kind, &version.resource_version_id)
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            require_version_content_contract(version)?;
             let published_document = serde_json::to_value(&version.payload.document)
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
             let published_document_digest = canonical_digest(&published_document)
@@ -21616,6 +21623,40 @@ async fn require_ready_authoring_artifact(
     .await
 }
 
+async fn require_ready_typed_plan_artifact(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    document: &ResourceDocument,
+) -> Result<(), RepositoryError> {
+    let Some((artifact_id, content_digest)) = document.typed_plan_artifact() else {
+        return Ok(());
+    };
+    let matched: Option<i32> = sqlx::query_scalar(
+        r#"
+        SELECT 1
+        FROM insight_platform.artifacts AS artifact
+        JOIN insight_platform.artifact_blobs AS blob
+          ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+        WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
+          AND artifact.purpose = 'typed_plan'
+          AND artifact.state = 'ready' AND artifact.terminal_at IS NULL
+          AND artifact.expected_digest = $3 AND artifact.verified_media_type = 'application/json'
+          AND blob.state = 'verified' AND blob.deleted_at IS NULL
+          AND blob.content_digest = $3 AND blob.size_bytes = artifact.expected_size_bytes
+        FOR SHARE OF artifact, blob
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(artifact_id.to_string())
+    .bind(content_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if matched.is_none() {
+        return Err(RepositoryError::NotFound("ready typed Plan artifact"));
+    }
+    Ok(())
+}
+
 async fn require_ready_sandbox_runtime_bundle(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
@@ -22660,6 +22701,21 @@ fn validate_publish_batch(
     if !valid {
         return Err(RepositoryError::InvalidInput(
             "publish batch does not match the resource version matrix".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_version_content_contract(version: &NewPublishedVersion) -> Result<(), RepositoryError> {
+    let ResourceDocument::Agent(agent) = &version.payload.document else {
+        return Ok(());
+    };
+    if version.resource_version_id.kind() == ResourceKind::AgentPlanRevision
+        && (version.content_digest != agent.typed_plan_digest
+            || version.artifact_id.as_ref() != Some(&agent.typed_plan_artifact_id))
+    {
+        return Err(RepositoryError::InvalidInput(
+            "Agent Plan revision must bind the exact typed Plan artifact and digest".to_owned(),
         ));
     }
     Ok(())

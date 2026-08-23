@@ -7410,6 +7410,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 dependency_versions: vec![],
                 policy_versions: vec![],
                 interface_schema_digest: digest('a'),
+                typed_plan_artifact_id: id("art_0198f1c3-9a00-7c3e-b1f3-773c2836702c"),
                 typed_plan_digest: runtime_plan().canonical_digest(plan_limits()).unwrap(),
             }),
             validation: ValidationSummary {
@@ -7442,6 +7443,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 dependency_versions: vec![],
                 policy_versions: vec![],
                 interface_schema_digest: digest('a'),
+                typed_plan_artifact_id: id("art_0198f1c3-9a00-7c3e-b1f3-773c2836701c"),
                 typed_plan_digest: digest('f'),
             }),
             validation: ValidationSummary {

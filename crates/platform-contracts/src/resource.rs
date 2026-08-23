@@ -332,10 +332,26 @@ macro_rules! authoring_spec {
     };
 }
 
-authoring_spec!(AgentResourceSpec {
-    interface_schema_digest: Sha256Digest,
-    typed_plan_digest: Sha256Digest,
-});
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentResourceSpec {
+    pub authoring_package: AuthoringPackage,
+    pub contract_digest: Sha256Digest,
+    pub dependency_versions: Vec<ExactVersionRef>,
+    pub policy_versions: Vec<ExactVersionRef>,
+    pub interface_schema_digest: Sha256Digest,
+    pub typed_plan_artifact_id: ResourceId,
+    pub typed_plan_digest: Sha256Digest,
+}
+
+impl AgentResourceSpec {
+    fn validate(&self) -> Result<(), ResourceContractError> {
+        self.authoring_package.validate()?;
+        validate_exact_versions(&self.dependency_versions, MAX_RESOURCE_DEPENDENCIES)?;
+        validate_policy_versions(&self.policy_versions)?;
+        require_kind(&self.typed_plan_artifact_id, ResourceKind::Artifact)
+    }
+}
 authoring_spec!(SkillResourceSpec {
     instruction_set_digest: Sha256Digest,
     requirement_set_digest: Sha256Digest,
@@ -1168,6 +1184,13 @@ impl ResourceDocument {
             Self::SandboxRuntime(spec) => &spec.authoring_package,
             Self::SandboxPackage(spec) => &spec.authoring_package,
             Self::SandboxProfile(spec) => &spec.authoring_package,
+        }
+    }
+
+    pub fn typed_plan_artifact(&self) -> Option<(&ResourceId, &Sha256Digest)> {
+        match self {
+            Self::Agent(spec) => Some((&spec.typed_plan_artifact_id, &spec.typed_plan_digest)),
+            _ => None,
         }
     }
 
@@ -2905,6 +2928,31 @@ mod tests {
             "validation": null
         });
         assert!(serde_json::from_value::<ResourceDraftPayload>(value).is_err());
+
+        let invalid_agent = ResourceDocument::Agent(AgentResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: ArtifactRef::new(
+                    id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b91"),
+                    digest('a'),
+                    16,
+                    "application/json".to_owned(),
+                    DataClassification::Internal,
+                    None,
+                )
+                .unwrap(),
+                manifest_digest: digest('b'),
+            },
+            contract_digest: digest('c'),
+            dependency_versions: vec![],
+            policy_versions: vec![],
+            interface_schema_digest: digest('d'),
+            typed_plan_artifact_id: id("val_0198f1c3-8f49-7c3e-b1f3-773c28367b92"),
+            typed_plan_digest: digest('e'),
+        });
+        assert_eq!(
+            invalid_agent.validate(),
+            Err(ResourceContractError::WrongResourceIdKind)
+        );
     }
 
     #[test]
