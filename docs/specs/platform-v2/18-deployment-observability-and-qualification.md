@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
-| 日期 | 2026-08-21 |
+| 状态 | Accepted / CR-174 |
+| 日期 | 2026-08-23 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
 
@@ -50,6 +50,10 @@ Draft规范和未通过资格的代码不是current behavior。CI报告只表示
 
 可以在同一Rust workspace编译多个binary，但上表声明的物理隔舱不得因代码复用而合并运行时权限。
 一个role饱和不得使其他role的readiness失败或占用critical-control reserve。
+
+Scheduler到Artifact Data Worker的Typed Plan listener必须有独立mTLS route与NetworkPolicy，只允许Scheduler ServiceAccount/workload
+URI；Sandbox Controller与Model Worker identity不能调用该service。Scheduler表达式求值使用自己的有界CPU/memory/permit和exact
+RunValue读取budget，不获得Provider、MCP、Context、Secret或Sandbox egress。表达式饱和不得占用critical-control连接reserve。
 
 ## 4. Kubernetes 安全基线
 
@@ -198,6 +202,9 @@ code/image/schema digest、seed、topology、start/end time、tool version、res
 - Artifact Gateway/Data Worker/Maintenance三role权限矩阵、S3/KMS fault、retention/GC和饱和测试；
 - Model Inline hard limit、tool loop、budget、provider fault和无Artifact fallback测试；
 - 一个隔舱饱和时API/Scheduler/critical-control和其他隔舱仍满足profile SLO；
+- L1/L2覆盖所有expression opcode、type/stack/output bounds与unknown-field；L2真实PostgreSQL覆盖wrong Plan/Artifact/RunValue digest、
+  Node version、lease/fence、跨tenant/run和Compute/Scope/Node/Job/Event原子回滚；L3多进程从Artifact Data RPC物化Plan并自行推进
+  Branch/Map/Loop/Compute，禁止fixture注入observation；
 - rolling drain、Pod/Node/DB/NATS/S3/KMS/Egress fault injection和整体recovery；
 - 持续soak中无无界queue/memory/connection/Artifact orphan/recovery lag增长。
 

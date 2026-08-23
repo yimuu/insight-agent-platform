@@ -1,13 +1,18 @@
-# Platform v2 00～18 Cross-review（CR-173）
+# Platform v2 00～18 Cross-review（CR-174）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-173 Accepted |
-| 日期 | 2026-08-22 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-173 implementation feedback |
+| 状态 | Closed / CR-174 Accepted |
+| 日期 | 2026-08-23 |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-174 implementation feedback |
 | 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft/Deployment/Run admission authority和fixture闭包 |
 
 ## 1. 结论
+
+CR-174发现的controller observation P1已按05→06→07→17→18关闭：Plan Revision冻结closed typed expression IR与
+exact input ports；Branch/Map/Loop/Compute结果只能由Scheduler从immutable RunValue派生，owner transaction重验
+expression/RunValue/Node/Job evidence并原子提交；public API与generic internal proxy禁止注入observation；qualification加入
+opcode、digest、跨tenant/run、原子回滚和多进程负向矩阵。该修订不增加表、current projection、WorkClass或外部执行后端。
 
 CR-173发现的definition-only Deployment P0已按
 02→04/11/14→05/06/09/10/12/13/15/16→17→18顺序关闭。Skill、Policy、Sandbox现在与其余public noun一样使用
@@ -15,7 +20,7 @@ immutable exact Deployment closure、Resource active binding和AdministrativeGat
 lifecycle、generated owner schema与八类public route保持同一authority。Acceptance 13～17的正负、并发、Receipt/Event/Outbox与
 machine-contract门禁通过，00～18全量复核未发现新的P0/P1合同冲突。
 
-因此CR-173恢复Implementation Authorization并将00～18合同推进为Accepted。Accepted只表示target合同闭合；它不表示target已成为
+因此CR-174恢复Implementation Authorization并将受影响合同推进为Accepted。Accepted只表示target合同闭合；它不表示target已成为
 current production behavior，也不替代18要求的L4～L6、CapacityProfile、restore/soak、signed supply-chain或GitOps cutover证据。
 
 CR-171继承CR-170的public Artifact DTO与可信服务交接结论，并消解实施反馈发现的tenant Artifact default Policy authority缺口。全量审查确认首版目标收敛为：
@@ -60,16 +65,37 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / CR-173 | target协议、authority与current-behavior边界闭合 |
-| 01～10 | Accepted / CR-173 | ID、binding、transaction、Run snapshot与调用模型影响复核完成 |
-| 11 Skill | Accepted / CR-173 | Skill仍是方法包/非进程，并使用exact Deployment requirement closure |
-| 12～18 | Accepted / CR-173 | Dataset例外、Sandbox Deployment、public schema与分层资格合同复核完成 |
+| 00 | Accepted / CR-174 | target协议、authority与current-behavior边界闭合 |
+| 01～04 | Accepted / CR-173（CR-174影响复核） | owner、ID、Resource、事务与Policy authority不变 |
+| 05～07 | Accepted / CR-174 | typed expression、derived observation、RunValue原子提交与Scheduler边界闭合 |
+| 08～16 | Accepted / CR-173（CR-174影响复核） | Subagent/Capability/Skill/Context/MCP/Sandbox/Artifact/Model owner合同不变 |
+| 17～18 | Accepted / CR-174 | public禁止observation注入、物理identity/permit与分层资格闭合 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | In Progress | L1～L3与public contract已恢复；L4～L6、CapacityProfile和GitOps cutover仍待外部资格环境 |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
 18不再是17的Release state上游，因而不存在17→18→17的循环。
+
+### 2.1 CR-174 controller observation cross-review
+
+- **State ownership**：expression program属于immutable Plan Revision；input正文唯一authority仍是immutable RunValue；
+  Run/Node/Job拥有current execution。Observation是command派生evidence，不建表、不成为第二current state。
+- **IDs与schema**：程序只引用exact data port与RunValue ID；closed opcode/unknown-field、stack/type/output bounds进入05 owner schema；
+  public DTO不新增字段。增加opcode提升`expression_version`。
+- **事务与并发**：事务外纯求值允许降低锁时长，但commit必须重验Plan/expression digest、RunValue identity/schema/content、
+  Node version及Job lease fence，并把RunValue/Scope/Node/Job/Receipt/Event/Outbox作为一个first-winner原子批次。
+- **错误**：parse/type/stack/output/digest错误稳定映射Plan/schema/integrity failure；fence/version漂移是first-winner loss；原始表达式正文
+  与值正文不进入public problem、metric label或默认log。
+- **权限与隔舱**：只有Scheduler workload可调用Typed Plan Data RPC和提交controller command；evaluator无Provider/MCP/Context/Secret/
+  Sandbox egress，使用Orchestration permit且不占critical-control reserve。
+- **恢复**：Map首次提交冻结item source/count/cursor，Loop iteration冻结carried refs；重启从这些durable payload恢复，不重复读取active
+  Resource或进程内observation。NATS仍只负责wake。
+- **fixtures**：L1 opcode/property，L2 real PostgreSQL digest/fence/cross-tenant/atomicity，L3多进程自行导出Branch/Map/Loop/Compute；
+  手工构造`ControllerObservation`只保留为repository负向单元输入，不计production handler证据。
+
+00～18其余合同已按state ownership、IDs、JSON schema、errors、transactions、events、permissions、capacity、failure recovery和fixture
+逐项复核：CR-174不改变Artifact/Model Inline、remote MCP、WASI+gVisor、GitOps release、23/22表预算或`/v1` clean-cut结论。
 
 ## 3. 状态所有权
 

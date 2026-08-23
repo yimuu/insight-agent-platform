@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
-| 日期 | 2026-08-20 |
+| 状态 | Accepted / CR-174 |
+| 日期 | 2026-08-23 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
 
@@ -67,6 +67,13 @@ Scheduler：
 - 调用纯Plan transition函数；
 - 提交Node、Job、timer、cancel与outbox command；
 - 不执行leaf I/O。
+
+Scheduler开始每个Orchestration generation后，必须以当前`(JobId, lease_generation, lease_token_digest, worker_process_generation_id)`
+和Run binding向Artifact Data Worker请求exact Typed Plan。Data RPC只接受Scheduler workload identity；PostgreSQL在读取前后重验
+Run、Plan Revision、Artifact/Blob与lease，RPC deadline不得越过lease/job deadline。Scheduler随后用05 closed evaluator读取exact
+immutable RunValue并生成带evidence digest的controller command。调用方、NATS hint和Worker结果不能直接提供Branch target、Map item
+count、Loop condition或Compute output。表达式求值消耗Orchestration本地CPU/内存permit，不调用Provider/MCP/Context/HTTP/Sandbox，
+也不占leaf WorkClass pool。
 
 Worker：
 
@@ -153,6 +160,8 @@ tenant无法生成critical-control work。
 - 单tenant持续backlog不使其他tenant永久饥饿；
 - deferred work不持有常驻future、外部连接或business permit；
 - shutdown不制造假terminal或双commit；
+- wrong Scheduler SPIFFE identity、Plan/Artifact/Run binding drift、lease过期、非canonical Plan、unknown expression opcode、伪造
+  observation/input digest均在任何Node/RunValue mutation前拒绝；
 - manifest/startup视图漂移在claim前fail closed；
 - 容量与公平性测试在fixed seed下可重复。
 

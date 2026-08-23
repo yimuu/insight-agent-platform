@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
-| 日期 | 2026-08-21 |
+| 状态 | Accepted / CR-174 |
+| 日期 | 2026-08-23 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -28,6 +28,12 @@
 > 2026-08-21实施反馈发现Dataset build缺少首个root identity且Context Deployment未冻结chunker/embedding，以及MCP discover
 > 未冻结public authorization input；CR-172按12→13→17→18完成上游到下游修订与00～18影响复核。相关规范已完成Acceptance并进入
 > 实施授权。旧候选不得作为新实现兼容基线。
+
+> 2026-08-23 implementation feedback（CR-174）：production Scheduler接入时确认candidate `RuntimePlan`只保存
+> Branch/Map/Loop目标与上限，却没有冻结可执行表达式或exact RunValue observation evidence；repository fixture因此能手工注入
+> `ControllerObservation`，production handler无法从“exact Plan + committed facts”自行推进。05先冻结closed typed expression IR与
+> node input binding，06冻结派生observation/RunValue原子提交，07冻结Scheduler materialization/evaluator边界，17禁止public注入，
+> 18补资格矩阵；完成00～18影响复核后恢复实施授权。
 
 ## 1. 决策摘要
 
@@ -55,14 +61,14 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Accepted / CR-173 | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | Accepted / CR-174 | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-173 | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-173 | ID、Resource、Version、Deployment、Binding |
 | 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-173 | PostgreSQL、事务、Outbox、Lease、恢复 |
 | 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-173 | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-173 | Agent Interface、Typed Plan、Model Loop |
-| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-173 | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-173 | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-174 | Agent Interface、Typed Plan、Model Loop |
+| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-174 | Run、NodeExecution、暂停、重试、取消 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-174 | Scheduler、Worker、Lease、背压和隔舱并发 |
 | 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-173 | Child Run、父子通信、取消传播和循环限制 |
 | 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / CR-173 | Capability Interface、Implementation、Registry |
 | 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-173 | 调用协议、幂等、同步快路径、异步恢复 |
@@ -72,8 +78,8 @@ Platform v2 采用以下不可逆的架构决定：
 | 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-173 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-173 | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-173 | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-173 | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-173 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-174 | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-174 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得

@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
-| 日期 | 2026-08-20 |
+| 状态 | Accepted / CR-174 |
+| 日期 | 2026-08-23 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
 
@@ -297,6 +297,16 @@ Branch、Fork、Join、Map、Loop、ErrorBoundary、ModelLoop 和 Return/Raise �
 
 Controller 不执行网络 I/O，不持有跨 await transaction，不依赖进程内 continuation。
 
+Branch/Map/Loop/Compute的`ControllerObservation`不是authority或可调用API参数，而是05 closed evaluator对exact Plan程序与
+immutable RunValue的派生结果。执行分两段：Scheduler可在事务外物化/验证Plan和RunValue正文并纯计算；提交事务必须重新锁定
+Job/Run/Node current version，重验所有input `ValueRef` identity/schema/content digest、expression digest与输出canonical digest，
+然后原子写入Compute产生的immutable RunValue、Scope/Node/Job转换、Receipt/Event/Outbox。任一输入已改变、缺失、跨run/tenant、
+Artifact正文不匹配或fence丢失时整批不可见。RunValue不可变，因此成功提交后无需另建observation current projection；Receipt/Event
+只保存bounded evidence digest与引用。
+
+首次Map求值原子冻结input value ref、item count、batch cursor与failure policy；后续批次只消费该冻结payload。Loop每次iteration
+冻结loop-carried value refs和condition evidence。Branch只为winner创建NodeExecution；未选arm与`otherwise`之外不存在Skipped事实。
+
 ## 11. Parallel、Map 与 Join Settlement
 
 - `AllSuccess`：任一 leg failure 触发其他未完成 leg cancel intent，drain 后 join failed；
@@ -309,6 +319,8 @@ Controller 不执行网络 I/O，不持有跨 await transaction，不依赖进�
   settlement 并使其 Ready，后续批次不得创建。并发 item terminal、continuation claim 与重放由 Node/Job CAS 裁决；
 - parent cancellation 传播到所有已接纳 leg/item；
 - join terminal 只有一个 first-winner commit。
+- 并发修改Node/Job、伪造Branch target/Map count/Loop condition、错误RunValue digest或重复Compute output只允许一个winner且不会留下
+  部分RunValue、Scope、Node、Job或Event；
 
 ## 12. Retry
 

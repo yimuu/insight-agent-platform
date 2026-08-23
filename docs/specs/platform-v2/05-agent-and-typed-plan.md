@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
-| 日期 | 2026-08-20 |
+| 状态 | Accepted / CR-174 |
+| 日期 | 2026-08-23 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
 
@@ -199,6 +199,56 @@ struct TypedPlan {
 }
 ```
 
+### 8.1 可执行表达式闭包
+
+Typed Plan不能只保存Branch目标、Map上限或Loop边；否则Scheduler无法从已提交RunValue确定下一步，只能由fixture或
+调用方注入自由`ControllerObservation`。Plan Revision必须为所有纯数据计算冻结可执行、类型验证后的表达式程序：
+
+```rust
+struct TypedExpressionProgram {
+    expression_version: u32,              // 首版固定1
+    input_ports: Vec<ExactDataPortRef>,
+    instructions: Vec<TypedInstruction>,
+    output_schema_digest: Digest,
+    maximum_stack_depth: u16,
+    semantic_digest: Digest,
+}
+
+enum TypedInstruction {
+    LoadPort { port: ExactDataPortRef },
+    Literal { value: BoundedJson, schema_digest: Digest },
+    GetField { field: BoundedName },
+    GetIndex,
+    ArrayLength,
+    MakeArray { item_count: u16 },
+    MakeObject { ordered_fields: Vec<BoundedName> },
+    Equal, NotEqual, Less, LessOrEqual, Greater, GreaterOrEqual,
+    BooleanAnd, BooleanOr, BooleanNot,
+    IntegerAdd, IntegerSubtract, DecimalAdd, DecimalSubtract,
+    StringConcat,
+    Coalesce,
+    Select,
+}
+```
+
+该registry是closed machine wire；不得保存源码字符串、动态函数名、脚本、JSONPath/JMESPath或provider表达式。每条
+instruction在publication时完成stack effect、input/output schema、nullable/optional、integer/decimal范围和最大输出bytes验证。
+程序最多4096条instruction、64个input port、stack depth 256，且还受HardLimitProfile更小上限约束。执行只读exact
+RunValue，不访问时钟、随机数、网络、Secret、文件或active Resource；同一输入bytes与program digest必须产生相同canonical
+JSON或相同typed failure。增加opcode必须提升`expression_version`并同步schema、verifier、Scheduler exhaustive match与fixture。
+
+以下node字段属于Plan semantic digest，不得在运行时补猜：
+
+```rust
+struct ComputeNode { assignments: Vec<PortAssignment>, next: PlanNodeId }
+struct BranchNode { ordered_arms: Vec<{ when: TypedExpressionProgram, target: PlanNodeId }>, otherwise: PlanNodeId }
+struct MapNode { items: TypedExpressionProgram, item_port: DataPortId, body: PlanNodeId, next: PlanNodeId, max_items: u32, failure_policy: MapFailurePolicy }
+struct LoopNode { condition: TypedExpressionProgram, carried_ports: Vec<LoopCarriedPort>, body: PlanNodeId, exit: PlanNodeId, max_iterations: u32 }
+```
+
+`Compute.assignments`必须按拓扑排序且每个output port只写一次；Branch按声明顺序执行并始终有`otherwise`；Map的`items`
+输出必须是有界array；Loop的`condition`输出必须是non-null boolean。表达式所需input port是Node readiness条件的一部分。
+
 ## 9. Agent Deployment
 
 ```rust
@@ -291,6 +341,11 @@ schema 和 conformance fixtures。未知节点必须 fail closed。
 未选择分支不创建 NodeExecution，也不生成伪 `Skipped` 记录。产生值的 branch 每条可继续路径必须 yield
 兼容类型。
 
+Scheduler产生的选择不是外部输入。它必须携带由exact expression program和immutable RunValue导出的
+`ControllerObservationEvidence { source_node_version, expression_digest, ordered_input_value_refs, result_digest }`；提交事务重验
+Job fence、Node version、每个RunValue的tenant/run/schema/content digest及所选target。Evidence只属于command/Receipt/Event低频
+详情，不建立current observation表，也不复制RunValue正文。
+
 ### 9.2 Fork/Join
 
 Fork leg 使用稳定 ID。Join policy 只有：
@@ -311,11 +366,15 @@ item 全部结算且失败计数仍未触发停止条件，下一批才可进入
 关闭 admission barrier、取消仍活动的已准入同级 item，并唤醒 Map settlement；未准入 item 不创建 ScopeInstance、
 NodeExecution 或 Job。`all-settled` 不会因 item 失败停止准入，因此允许有界地流水化后续批次。失败计数、批次 cursor 与
 settlement 都必须从同一组 durable Scope/Node facts 推导，不能依赖进程内计数或 wake hint。
+首轮item count必须由`items`程序对exact输入求值；continuation只能使用首次提交时冻结在Node payload中的input value ref、
+item count和cursor，不能重新读取调用方输入或active binding。
 
 ### 9.4 Loop
 
 任意环只能由 Loop node 表达，必须声明 `max_iterations`、deadline/budget 和 loop-carried typed values。
 `break`、`continue` lower 为 Loop 的结构化 control port，不形成任意 edge。
+每次iteration的condition从该iteration冻结的loop-carried RunValue求值；iteration number来自durable Scope/Node事实，不能由
+进程内计数器或调用方提供。condition evidence与iteration advancement在同一first-winner事务中验证/提交。
 
 ### 9.5 Error Boundary
 
@@ -569,6 +628,10 @@ live observation 丢失不改变结果。
 - v2 code path 不包含 terminal-only/volatile wait 分支；
 - fuzz/property tests 覆盖 schema、expression、scope、graph cycle 和 verifier；
 - PlanNodeKind exhaustive match 由编译器与 architecture test 强制。
+- expression opcode exhaustive match、unknown opcode/unknown field/noncanonical program负向fixture通过；
+- production Scheduler从exact Plan与committed RunValue自行导出Branch/Map/Loop/Compute observation，public/internal调用方均不能
+  直接提交selected target、item count、loop condition或Compute结果；
+- observation提交事务拒绝错误expression digest、RunValue schema/content digest、Node version、Job fence与跨tenant/run引用；
 - root Run admission fixture在Receipt→Tenant→Resource锁序中冻结完整02 binding；active target并发切换只影响未来Run，任一候选不兼容时
   整个admission回滚且没有Run/Receipt成功结果；
 

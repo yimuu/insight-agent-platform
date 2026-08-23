@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-173）
+# Platform v2 四阶段实现计划（CR-174）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-173 contracts accepted; L4～L6 pending |
-| 日期 | 2026-08-22 |
-| 合同输入 | 00～18、cross-review CR-173/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+| 状态 | In Progress / CR-174 contracts accepted; L4～L6 pending |
+| 日期 | 2026-08-23 |
+| 合同输入 | 00～18、cross-review CR-174/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则
@@ -14,6 +14,10 @@
 
 CR-173的恢复顺序已经完成到public route/schema与L1～L3开发门禁：closed Deployment matrix → exact binding/Run snapshot →
 public route/schema。production qualification与cutover仍必须继续执行L4～L6，不能用开发fixture、静态manifest检查或合同Accepted状态替代。
+
+CR-174进一步冻结Scheduler执行Branch/Map/Loop/Compute所需的closed typed expression IR、exact RunValue evidence与
+materialize/evaluate/first-winner提交边界。此前手工注入`ControllerObservation`的fixture不能计为production handler证据；Phase 2
+必须增加expression evaluator、owner transaction和不接受外部observation的多进程fixture。
 
 实现遵循以下顺序：
 
