@@ -98,6 +98,20 @@ fn literal_program(value: Value) -> TypedExpressionProgram {
     .unwrap()
 }
 
+fn run_input_predicate() -> TypedExpressionProgram {
+    TypedExpressionProgram::build(
+        vec![insight_platform_orchestrator::ExactDataPortRef::RunInput {
+            schema_digest: digest('a'),
+        }],
+        vec![TypedInstruction::Literal {
+            value: ClosedJsonValue::build(digest('1'), json!(true)).unwrap(),
+        }],
+        digest('1'),
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap()
+}
+
 fn item_port() -> DataPortKey {
     DataPortKey::new("item".to_owned()).unwrap()
 }
@@ -126,6 +140,8 @@ fn runtime_plan() -> RuntimePlan {
     let map_body = PlanNodeKey::new("map_body".to_owned()).unwrap();
     let fail_fast_map = PlanNodeKey::new("fail_fast_map".to_owned()).unwrap();
     let fail_fast_map_body = PlanNodeKey::new("fail_fast_map_body".to_owned()).unwrap();
+    let input_branch = PlanNodeKey::new("input_branch".to_owned()).unwrap();
+    let input_otherwise = PlanNodeKey::new("input_otherwise".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 1,
         interface_revision_id: id(AGENT_INTERFACE_ID),
@@ -304,6 +320,17 @@ fn runtime_plan() -> RuntimePlan {
                     next: fail_fast_map,
                 },
             ),
+            (
+                input_branch,
+                RuntimeNode::Branch {
+                    ordered_arms: vec![insight_platform_orchestrator::BranchArm {
+                        when: run_input_predicate(),
+                        target: finish.clone(),
+                    }],
+                    otherwise: input_otherwise.clone(),
+                },
+            ),
+            (input_otherwise, RuntimeNode::Return),
             (finish, RuntimeNode::Return),
         ]),
     }
@@ -5675,6 +5702,119 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 && record.run.state == "failed"
     ));
     scheduler.commit().await.unwrap();
+
+    let mut expression_admission = admission(
+        AdmissionIds {
+            run: "run_0198f1c3-9a00-7c3e-b1f3-773c2836aa00",
+            scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c2836aa01",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c2836aa02",
+            job: "job_0198f1c3-9a00-7c3e-b1f3-773c2836aa03",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c2836aa04",
+        },
+        audit(TENANT_ID, PRINCIPAL_ID, "aa05", '1', '2'),
+        bindings.clone(),
+        Utc::now() + Duration::minutes(5),
+    );
+    expression_admission.entry_plan_node_key =
+        PlanNodeKey::new("input_branch".to_owned()).unwrap();
+    expression_admission.entry_node_kind = PlanNodeKind::Branch;
+    applied(
+        run_command!(repository, admit_run, expression_admission.clone()).unwrap(),
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let expression_claimed = scheduler
+        .claim_orchestration_jobs(orchestration_claim_with_ids(
+            WORKER_D_ID,
+            '3',
+            "aa06",
+            ["aa07", "aa08", "aa09", "aa0a"],
+            ["aa0b", "aa0c", "aa0d"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(expression_claimed.len(), 1);
+    let expression_start = start_claimed_orchestration(
+        &expression_claimed[0],
+        WORKER_D_ID,
+        '3',
+        "aa0e",
+        "aa0f",
+        "aa10",
+        '4',
+        '5',
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let expression_started = match scheduler
+        .start_orchestration_job(expression_start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("expression controller start must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    let expression_fence = JobFence {
+        expected_job_version: expression_started.version,
+        ..expression_start.fence.clone()
+    };
+    let expression_facts = repository
+        .load_expression_controller_facts(&expression_fence, &runtime_plan())
+        .await
+        .unwrap();
+    assert_eq!(expression_facts.plan_node_key.as_str(), "input_branch");
+    assert!(expression_facts.node_execution_version > 0);
+    assert_eq!(expression_facts.loop_iteration, 0);
+    assert_eq!(expression_facts.inputs.len(), 1);
+    assert_eq!(
+        expression_facts.inputs[0].run_value_id,
+        expression_admission.input.value_id
+    );
+    assert_eq!(
+        expression_facts.inputs[0].value,
+        expression_admission.input.value
+    );
+    let mut stale_expression_fence = expression_fence;
+    stale_expression_fence.expected_job_version -= 1;
+    assert!(matches!(
+        repository
+            .load_expression_controller_facts(&stale_expression_fence, &runtime_plan())
+            .await,
+        Err(RepositoryError::Conflict("running Job fence"))
+    ));
+    let expression_run_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(expression_admission.run_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    applied(
+        run_command!(
+            repository,
+            request_run_cancel,
+            RequestRunCancel {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "aa11", '6', '7'),
+                run_id: expression_admission.run_id.clone(),
+                expected_run_version: expression_run_version,
+                expected_cancel_generation: 0,
+                reason_code: "fixture_cleanup".to_owned(),
+            }
+        )
+        .unwrap(),
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let expression_cleanup = scheduler
+        .drive_orchestration_convergence(orchestration_convergence(
+            ["aa12", "aa13", "aa14", "aa15"],
+            ["aa16", "aa17", "aa18", "aa19", "aa1a", "aa1b"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(expression_cleanup.len(), 1);
+    assert_eq!(expression_cleanup[0].completed.run.state, "cancelled");
 
     let mut loop_admission = admission(
         AdmissionIds {

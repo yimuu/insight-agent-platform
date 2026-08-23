@@ -643,6 +643,7 @@ pub fn derive_expression_controller(
         authorities.insert(input.port, input.run_value_id);
     }
 
+    let required_ports = required_expression_inputs(node)?;
     let programs = match node {
         RuntimeNode::Compute { assignments, .. } => assignments
             .iter()
@@ -655,22 +656,10 @@ pub fn derive_expression_controller(
         RuntimeNode::Loop { condition, .. } => vec![condition],
         _ => return Err(OrchestratorError::ObservationMismatch),
     };
-    let generated_ports = match node {
-        RuntimeNode::Compute { assignments, .. } => assignments
-            .iter()
-            .map(|assignment| assignment.output_port.clone())
-            .collect::<std::collections::BTreeSet<_>>(),
-        _ => std::collections::BTreeSet::new(),
-    };
-    let mut required_ports = Vec::new();
-    let mut seen_ports = std::collections::BTreeSet::new();
-    for program in &programs {
-        for port in &program.input_ports {
-            if !generated_ports.contains(port) && seen_ports.insert(port.clone()) {
-                required_ports.push(port.clone());
-            }
-        }
-    }
+    let seen_ports = required_ports
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     if authorities.len() != required_ports.len()
         || authorities.keys().any(|port| !seen_ports.contains(port))
     {
@@ -794,6 +783,43 @@ pub fn derive_expression_controller(
     };
     evaluation.validate()?;
     Ok(evaluation)
+}
+
+/// Returns the external data dependencies for one expression controller in deterministic Plan
+/// order. Compute outputs produced earlier in the same node are deliberately excluded because
+/// they are derived in-memory by the closed evaluator, not read from durable Scope authority.
+pub fn required_expression_inputs(
+    node: &RuntimeNode,
+) -> Result<Vec<ExactDataPortRef>, OrchestratorError> {
+    let programs = match node {
+        RuntimeNode::Compute { assignments, .. } => assignments
+            .iter()
+            .map(|assignment| &assignment.expression)
+            .collect::<Vec<_>>(),
+        RuntimeNode::Branch { ordered_arms, .. } => {
+            ordered_arms.iter().map(|arm| &arm.when).collect()
+        }
+        RuntimeNode::Map { items, .. } => vec![items],
+        RuntimeNode::Loop { condition, .. } => vec![condition],
+        _ => return Err(OrchestratorError::ObservationMismatch),
+    };
+    let generated_ports = match node {
+        RuntimeNode::Compute { assignments, .. } => assignments
+            .iter()
+            .map(|assignment| assignment.output_port.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        _ => std::collections::BTreeSet::new(),
+    };
+    let mut required_ports = Vec::new();
+    let mut seen_ports = std::collections::BTreeSet::new();
+    for program in programs {
+        for port in &program.input_ports {
+            if !generated_ports.contains(port) && seen_ports.insert(port.clone()) {
+                required_ports.push(port.clone());
+            }
+        }
+    }
+    Ok(required_ports)
 }
 
 fn evaluate_controller_program(

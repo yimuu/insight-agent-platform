@@ -33,14 +33,15 @@ use insight_platform_mcp_host::McpJobPayload;
 use insight_platform_models::{ModelTurnError as DomainModelTurnError, ModelTurnLimits};
 use insight_platform_orchestrator::{
     decide_cancel, decide_child_link_cancel, decide_child_link_terminal, decide_controller,
-    decide_orchestration_convergence, decide_pause, decide_timeout, prepare_child_run, AdmitRun,
-    ChildBudget, ChildCancellationPolicy, ChildLinkState, ChildOutcome, ChildRunLinkPayload,
-    ChildRunLinkProjection, ControlDecision, ControllerDecision, ControllerObservation,
-    ExactDataPortRef, ExactRunValueRef, JoinPolicy, JoinRemainderPolicy, MapFailurePolicy,
-    ObserveRunTimeout, OrchestrationConvergenceDecision, OrchestrationConvergenceFacts,
-    OrchestrationConvergenceReason, OrchestrationJobPayload, OrchestratorError, PlanLimits,
-    PlanNodeKey, PrepareChildRun, RequestRunCancel, RunCurrentSnapshot, RunInputValue, RunStore,
-    RunTransaction, RuntimePlan, ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits, SetRunPause,
+    decide_orchestration_convergence, decide_pause, decide_timeout, prepare_child_run,
+    required_expression_inputs, AdmitRun, ChildBudget, ChildCancellationPolicy, ChildLinkState,
+    ChildOutcome, ChildRunLinkPayload, ChildRunLinkProjection, ControlDecision, ControllerDecision,
+    ControllerObservation, ExactDataPortRef, ExactRunValueRef, JoinPolicy, JoinRemainderPolicy,
+    MapFailurePolicy, ObserveRunTimeout, OrchestrationConvergenceDecision,
+    OrchestrationConvergenceFacts, OrchestrationConvergenceReason, OrchestrationJobPayload,
+    OrchestratorError, PlanLimits, PlanNodeKey, PrepareChildRun, RequestRunCancel,
+    RunCurrentSnapshot, RunInputValue, RunStore, RunTransaction, RuntimePlan,
+    ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits, SetRunPause,
 };
 use insight_platform_registry::{
     ActivateResource, CreateDeployment, CreateResourceDraft, NewPublishedVersion,
@@ -1331,6 +1332,115 @@ impl PgRepository {
             schema_digest,
             content_digest,
             value,
+        })
+    }
+
+    /// Loads the immutable value authorities needed by one expression controller. The returned
+    /// Artifact references are intentionally not materialized here: object I/O occurs outside the
+    /// database transaction and the eventual controller commit revalidates these exact facts.
+    pub async fn load_expression_controller_facts(
+        &self,
+        fence: &JobFence,
+        plan: &RuntimePlan,
+    ) -> Result<ExpressionControllerFacts, RepositoryError> {
+        fence.validate()?;
+        plan.validate(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let plan_digest = plan
+            .canonical_digest(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let job = load_job_by_text(&mut transaction, &fence.tenant_id, &fence.job_id).await?;
+        require_orchestration_job(&job)?;
+        require_exact_running_job_fence(&job, fence, database_now)?;
+        let run_id: ResourceId = job
+            .run_id
+            .as_deref()
+            .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+        let tenant_id: ResourceId = fence.tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let run = load_run(&mut transaction, &tenant_id, &run_id).await?;
+        require_exact_runtime_plan(&mut transaction, &run, plan, &plan_digest).await?;
+        let node_id = job.node_id.as_deref().ok_or_else(|| {
+            RepositoryError::CorruptRow("orchestration Job has no Node".to_owned())
+        })?;
+        let node_row = sqlx::query(
+            r#"
+            SELECT node_id, plan_node_key, node_kind, scope_id, version,
+                   parent_node_id, payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution' AND state = 'running'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(run_id.to_string())
+        .bind(node_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict(
+            "running expression controller Node",
+        ))?;
+        let plan_node_key = PlanNodeKey::new(node_row.try_get("plan_node_key")?)?;
+        let node = plan.node(&plan_node_key)?;
+        let node_kind: PlanNodeKind = node_row
+            .try_get::<String, _>("node_kind")?
+            .parse::<PlanNodeKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if node.kind() != node_kind {
+            return Err(RepositoryError::Conflict(
+                "expression controller Plan binding",
+            ));
+        }
+        let required_ports = required_expression_inputs(node)?;
+        let scope_id: ResourceId = node_row.try_get::<String, _>("scope_id")?.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let environments = load_scope_environment_chain(
+            &mut transaction,
+            &tenant_id,
+            &run_id,
+            &scope_id,
+            self.scope_environment_limits,
+        )
+        .await?;
+        let value_refs = insight_platform_orchestrator::resolve_scope_inputs(
+            &required_ports,
+            &environments,
+            self.scope_environment_limits,
+        )?;
+        let inputs = load_resolved_expression_values(
+            &mut transaction,
+            &tenant_id,
+            &run_id,
+            required_ports,
+            value_refs,
+        )
+        .await?;
+        let loop_iteration = expression_loop_iteration(node, &node_row)?;
+        transaction.commit().await?;
+        Ok(ExpressionControllerFacts {
+            node_execution_id: node_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?,
+            node_execution_version: node_row.try_get("version")?,
+            plan_node_key,
+            loop_iteration,
+            inputs,
         })
     }
 
@@ -7831,6 +7941,275 @@ fn root_scope_environment(
         limits,
     )
     .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))
+}
+
+fn require_exact_running_job_fence(
+    job: &JobRecord,
+    fence: &JobFence,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let worker_id = fence.worker_id.to_string();
+    if job.tenant_id != fence.tenant_id
+        || job.job_id != fence.job_id
+        || job.state != JobState::Running.as_str()
+        || job.version != fence.expected_job_version
+        || job.lease_epoch != fence.lease_epoch
+        || job.worker_id.as_deref() != Some(worker_id.as_str())
+        || job.lease_token_digest.as_deref() != Some(fence.lease_token_digest.as_str())
+        || job
+            .lease_expires_at
+            .is_none_or(|expires_at| expires_at <= database_now)
+        || job.terminal_at.is_some()
+    {
+        return Err(RepositoryError::Conflict("running Job fence"));
+    }
+    Ok(())
+}
+
+async fn load_scope_environment_chain(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    run_id: &ResourceId,
+    scope_id: &ResourceId,
+    limits: ScopeEnvironmentLimits,
+) -> Result<Vec<ScopeDataEnvironmentSnapshot>, RepositoryError> {
+    let maximum_depth = i32::try_from(limits.maximum_lexical_depth)
+        .map_err(|_| RepositoryError::InvalidInput("Scope depth exceeds integer".to_owned()))?;
+    let rows = sqlx::query(
+        r#"
+        WITH RECURSIVE lexical_scope AS (
+            SELECT scope.node_id, scope.parent_node_id, scope.node_kind, scope.state,
+                   scope.payload_schema_version, scope.payload, scope.payload_digest,
+                   1::integer AS depth, ARRAY[scope.node_id]::text[] AS path
+            FROM insight_platform.run_nodes AS scope
+            WHERE scope.tenant_id = $1 AND scope.run_id = $2 AND scope.node_id = $3
+              AND scope.record_kind = 'scope_instance'
+          UNION ALL
+            SELECT parent_scope.node_id, parent_scope.parent_node_id, parent_scope.node_kind,
+                   parent_scope.state, parent_scope.payload_schema_version,
+                   parent_scope.payload, parent_scope.payload_digest,
+                   current.depth + 1, current.path || parent_scope.node_id
+            FROM lexical_scope AS current
+            JOIN insight_platform.run_nodes AS creator
+              ON creator.tenant_id = $1 AND creator.run_id = $2
+             AND creator.node_id = current.parent_node_id
+             AND creator.record_kind = 'node_execution'
+            JOIN insight_platform.run_nodes AS parent_scope
+              ON parent_scope.tenant_id = creator.tenant_id
+             AND parent_scope.run_id = creator.run_id
+             AND parent_scope.node_id = creator.scope_id
+             AND parent_scope.record_kind = 'scope_instance'
+            WHERE current.parent_node_id IS NOT NULL AND current.depth < $4
+              AND NOT parent_scope.node_id = ANY(current.path)
+        )
+        SELECT node_id, parent_node_id, node_kind, state, payload_schema_version,
+               payload, payload_digest, depth
+        FROM lexical_scope
+        ORDER BY depth
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(run_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(maximum_depth)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.is_empty()
+        || rows.len() > limits.maximum_lexical_depth
+        || rows.last().is_some_and(|row| {
+            row.try_get::<Option<String>, _>("parent_node_id")
+                .ok()
+                .flatten()
+                .is_some()
+        })
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Scope lexical chain is missing, cyclic, or exceeds its bound".to_owned(),
+        ));
+    }
+    let mut environments = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.try_get::<String, _>("state")? != ScopeState::Open.as_str() {
+            return Err(RepositoryError::Conflict("Scope lexical chain is not open"));
+        }
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let kind: String = row.try_get("node_kind")?;
+        let (environment, expected_controller) = match kind.as_str() {
+            "root" => {
+                let root: StoredRootScopePayload = decode_typed_payload(&payload, "root Scope")?;
+                (root.environment, None)
+            }
+            "parallel_leg" | "loop_iteration" | "map_item" => {
+                let nested: StoredControllerScopePayload =
+                    decode_typed_payload(&payload, "controller Scope")?;
+                (
+                    nested.environment,
+                    Some(nested.controller_node_execution_id),
+                )
+            }
+            _ => {
+                return Err(RepositoryError::CorruptRow(
+                    "Scope has an unregistered data-environment kind".to_owned(),
+                ))
+            }
+        };
+        if expected_controller.as_ref().map(ResourceId::to_string)
+            != row.try_get::<Option<String>, _>("parent_node_id")?
+        {
+            return Err(RepositoryError::CorruptRow(
+                "Scope controller owner differs from its payload".to_owned(),
+            ));
+        }
+        environment
+            .validate(limits)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        environments.push(environment);
+    }
+    Ok(environments)
+}
+
+async fn load_resolved_expression_values(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    run_id: &ResourceId,
+    ports: Vec<ExactDataPortRef>,
+    references: Vec<ExactRunValueRef>,
+) -> Result<Vec<ResolvedExpressionInput>, RepositoryError> {
+    if ports.len() != references.len() {
+        return Err(RepositoryError::CorruptRow(
+            "Scope input resolution changed arity".to_owned(),
+        ));
+    }
+    let mut inputs = Vec::with_capacity(ports.len());
+    for (port, reference) in ports.into_iter().zip(references) {
+        let row = sqlx::query(
+            r#"
+            SELECT value.value_id, value.classification, value.schema_digest,
+                   value.content_digest, value.inline_value, value.artifact_id,
+                   artifact.state AS artifact_state, artifact.terminal_at AS artifact_terminal_at,
+                   artifact.verified_media_type, blob.state AS blob_state,
+                   blob.deleted_at AS blob_deleted_at, blob.content_digest AS blob_content_digest,
+                   blob.size_bytes
+            FROM insight_platform.run_values AS value
+            LEFT JOIN insight_platform.artifacts AS artifact
+              ON artifact.tenant_id = value.tenant_id AND artifact.artifact_id = value.artifact_id
+            LEFT JOIN insight_platform.artifact_blobs AS blob
+              ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+            WHERE value.tenant_id = $1 AND value.run_id = $2 AND value.value_id = $3
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(run_id.to_string())
+        .bind(reference.value_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("resolved RunValue"))?;
+        let schema_digest: Sha256Digest = row
+            .try_get::<String, _>("schema_digest")?
+            .parse()
+            .map_err(|_| RepositoryError::CorruptRow("RunValue schema digest".to_owned()))?;
+        let content_digest: Sha256Digest = row
+            .try_get::<String, _>("content_digest")?
+            .parse()
+            .map_err(|_| RepositoryError::CorruptRow("RunValue content digest".to_owned()))?;
+        if schema_digest != reference.schema_digest
+            || content_digest != reference.content_digest
+            || &schema_digest != port.schema_digest()
+        {
+            return Err(RepositoryError::Conflict("resolved RunValue evidence"));
+        }
+        let classification: DataClassification = row
+            .try_get::<String, _>("classification")?
+            .parse::<DataClassification>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let inline_value: Option<Value> = row.try_get("inline_value")?;
+        let artifact_id: Option<String> = row.try_get("artifact_id")?;
+        let value = match (inline_value, artifact_id) {
+            (Some(value), None) => {
+                let observed: Sha256Digest = canonical_digest(&value)
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+                    .parse()
+                    .map_err(|_| RepositoryError::CorruptRow("RunValue digest".to_owned()))?;
+                if observed != content_digest {
+                    return Err(RepositoryError::CorruptRow(
+                        "RunValue content digest differs".to_owned(),
+                    ));
+                }
+                ValueRef::Inline { value }
+            }
+            (None, Some(artifact_id))
+                if row
+                    .try_get::<Option<String>, _>("artifact_state")?
+                    .as_deref()
+                    == Some("ready")
+                    && row
+                        .try_get::<Option<DateTime<Utc>>, _>("artifact_terminal_at")?
+                        .is_none()
+                    && row.try_get::<Option<String>, _>("blob_state")?.as_deref()
+                        == Some("verified")
+                    && row
+                        .try_get::<Option<DateTime<Utc>>, _>("blob_deleted_at")?
+                        .is_none()
+                    && row
+                        .try_get::<Option<String>, _>("blob_content_digest")?
+                        .as_deref()
+                        == Some(content_digest.as_str()) =>
+            {
+                ValueRef::Artifact {
+                    artifact: ArtifactRef::new(
+                        artifact_id.parse().map_err(|_| {
+                            RepositoryError::CorruptRow("Artifact ID is invalid".to_owned())
+                        })?,
+                        content_digest.clone(),
+                        u64::try_from(row.try_get::<i64, _>("size_bytes")?).map_err(|_| {
+                            RepositoryError::CorruptRow("Artifact size is invalid".to_owned())
+                        })?,
+                        row.try_get::<String, _>("verified_media_type")?,
+                        classification,
+                        None,
+                    )
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+                }
+            }
+            _ => {
+                return Err(RepositoryError::CorruptRow(
+                    "RunValue storage shape is invalid".to_owned(),
+                ))
+            }
+        };
+        inputs.push(ResolvedExpressionInput {
+            run_value_id: reference.value_id,
+            port,
+            classification,
+            schema_digest,
+            content_digest,
+            value,
+        });
+    }
+    Ok(inputs)
+}
+
+fn expression_loop_iteration(
+    node: &insight_platform_orchestrator::RuntimeNode,
+    row: &PgRow,
+) -> Result<u32, RepositoryError> {
+    if !matches!(
+        node,
+        insight_platform_orchestrator::RuntimeNode::Loop { .. }
+    ) {
+        return Ok(0);
+    }
+    let payload = payload_from_row(row, "payload_schema_version", "payload", "payload_digest")?;
+    if payload.value.get("wait").is_none() {
+        return Ok(0);
+    }
+    let pending: StoredPendingControllerNodePayload =
+        decode_typed_payload(&payload, "Loop continuation Node")?;
+    match pending.wait {
+        StoredControllerWait::Loop { iteration } => Ok(iteration),
+        _ => Err(RepositoryError::Conflict("Loop continuation wait kind")),
+    }
 }
 
 fn orchestration_job_payload_with_wake(
@@ -18893,6 +19272,25 @@ pub struct AppliedOrchestrationControllerStep {
     pub woken_nodes: Vec<ControllerActivationRecord>,
     pub cancelled_remainders: Vec<ControllerCancelledRemainderRecord>,
     pub settled_quota_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedExpressionInput {
+    pub run_value_id: ResourceId,
+    pub port: ExactDataPortRef,
+    pub classification: DataClassification,
+    pub schema_digest: Sha256Digest,
+    pub content_digest: Sha256Digest,
+    pub value: ValueRef,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpressionControllerFacts {
+    pub node_execution_id: ResourceId,
+    pub node_execution_version: i64,
+    pub plan_node_key: PlanNodeKey,
+    pub loop_iteration: u32,
+    pub inputs: Vec<ResolvedExpressionInput>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
