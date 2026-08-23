@@ -114,6 +114,27 @@ fn run_input_predicate() -> TypedExpressionProgram {
     .unwrap()
 }
 
+fn input_compute_output_port() -> insight_platform_orchestrator::ExactDataPortRef {
+    insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
+        producer_node_id: PlanNodeKey::new("input_compute".to_owned()).unwrap(),
+        port_id: DataPortKey::new("echo".to_owned()).unwrap(),
+        schema_digest: digest('a'),
+    }
+}
+
+fn echo_run_input_program() -> TypedExpressionProgram {
+    let input = insight_platform_orchestrator::ExactDataPortRef::RunInput {
+        schema_digest: digest('a'),
+    };
+    TypedExpressionProgram::build(
+        vec![input.clone()],
+        vec![TypedInstruction::LoadPort { port: input }],
+        digest('a'),
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap()
+}
+
 fn item_port() -> DataPortKey {
     DataPortKey::new("item".to_owned()).unwrap()
 }
@@ -144,6 +165,7 @@ fn runtime_plan() -> RuntimePlan {
     let fail_fast_map_body = PlanNodeKey::new("fail_fast_map_body".to_owned()).unwrap();
     let input_branch = PlanNodeKey::new("input_branch".to_owned()).unwrap();
     let input_otherwise = PlanNodeKey::new("input_otherwise".to_owned()).unwrap();
+    let input_compute = PlanNodeKey::new("input_compute".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 1,
         interface_revision_id: id(AGENT_INTERFACE_ID),
@@ -333,6 +355,16 @@ fn runtime_plan() -> RuntimePlan {
                 },
             ),
             (input_otherwise, RuntimeNode::Return),
+            (
+                input_compute,
+                RuntimeNode::Compute {
+                    assignments: vec![insight_platform_orchestrator::PortAssignment {
+                        output_port: input_compute_output_port(),
+                        expression: echo_run_input_program(),
+                    }],
+                    next: finish.clone(),
+                },
+            ),
             (finish, RuntimeNode::Return),
         ]),
     }
@@ -5860,6 +5892,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 step: expression_step.clone(),
                 materialized_inputs: downgraded_inputs,
                 evaluation: downgraded_evaluation,
+                output_value_ids: vec![],
             })
             .await,
         Err(RepositoryError::Conflict("derived expression input evidence"))
@@ -5871,6 +5904,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             step: expression_step,
             materialized_inputs,
             evaluation,
+            output_value_ids: vec![],
         })
         .await
         .unwrap();
@@ -5909,6 +5943,211 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     scheduler.commit().await.unwrap();
     assert_eq!(expression_cleanup.len(), 1);
     assert_eq!(expression_cleanup[0].completed.run.state, "cancelled");
+
+    let mut compute_admission = admission(
+        AdmissionIds {
+            run: "run_0198f1c3-9a00-7c3e-b1f3-773c2836ab00",
+            scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c2836ab01",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c2836ab02",
+            job: "job_0198f1c3-9a00-7c3e-b1f3-773c2836ab03",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c2836ab04",
+        },
+        audit(TENANT_ID, PRINCIPAL_ID, "ab05", '8', '9'),
+        bindings.clone(),
+        Utc::now() + Duration::minutes(5),
+    );
+    compute_admission.entry_plan_node_key = PlanNodeKey::new("input_compute".to_owned()).unwrap();
+    compute_admission.entry_node_kind = PlanNodeKind::Compute;
+    applied(run_command!(repository, admit_run, compute_admission.clone()).unwrap());
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let compute_claimed = scheduler
+        .claim_orchestration_jobs(orchestration_claim_with_ids(
+            WORKER_D_ID,
+            'a',
+            "ab06",
+            ["ab07", "ab08", "ab09", "ab0a"],
+            ["ab0b", "ab0c", "ab0d"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(compute_claimed.len(), 1);
+    let compute_start = start_claimed_orchestration(
+        &compute_claimed[0],
+        WORKER_D_ID,
+        'a',
+        "ab0e",
+        "ab0f",
+        "ab10",
+        'b',
+        'c',
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let compute_started = match scheduler
+        .start_orchestration_job(compute_start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("Compute start must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    let compute_fence = JobFence {
+        expected_job_version: compute_started.version,
+        ..compute_start.fence.clone()
+    };
+    let compute_facts = repository
+        .load_expression_controller_facts(&compute_fence, &runtime_plan())
+        .await
+        .unwrap();
+    let compute_inputs = compute_facts
+        .inputs
+        .iter()
+        .map(|input| {
+            let ValueRef::Inline { value } = &input.value else {
+                panic!("Compute fixture input must be Inline")
+            };
+            CommittedExpressionInput {
+                run_value_id: input.run_value_id.clone(),
+                port: input.port.clone(),
+                classification: input.classification,
+                value: ClosedJsonValue::build(input.schema_digest.clone(), value.clone()).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let compute_plan = runtime_plan();
+    let compute_evaluation = derive_expression_controller(
+        compute_plan.node(&compute_facts.plan_node_key).unwrap(),
+        compute_inputs.clone(),
+        compute_facts.node_execution_id.clone(),
+        compute_facts.node_execution_version,
+        0,
+        ExpressionLimits::ABSOLUTE,
+    )
+    .unwrap();
+    let compute_output_id = fixture_platform_id("val", "ab20");
+    let compute_step = ApplyOrchestrationControllerStep {
+        fence: compute_fence,
+        plan: compute_plan,
+        observation: compute_evaluation.observation.clone(),
+        idempotency_key_digest: digest('d'),
+        request_digest: digest('e'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        mutations: ControllerStepMutationIds {
+            receipt_id: fixture_platform_id("rcp", "ab21"),
+            quota_entry_ids: ["ab22", "ab23", "ab24", "ab25"]
+                .map(|suffix| fixture_platform_id("qle", suffix))
+                .to_vec(),
+            run_event_id: fixture_platform_id("evt", "ab26"),
+            run_outbox_id: fixture_platform_id("obx", "ab26"),
+            node_event_id: fixture_platform_id("evt", "ab27"),
+            node_outbox_id: fixture_platform_id("obx", "ab27"),
+            job_event_id: fixture_platform_id("evt", "ab28"),
+            job_outbox_id: fixture_platform_id("obx", "ab28"),
+            activations: vec![ControllerActivationSlot {
+                node_execution_id: fixture_platform_id("nod", "ab29"),
+                orchestration_job_id: fixture_platform_id("job", "ab2a"),
+                scope: None,
+                node_event_id: fixture_platform_id("evt", "ab2b"),
+                node_outbox_id: fixture_platform_id("obx", "ab2b"),
+                job_event_id: fixture_platform_id("evt", "ab2c"),
+                job_outbox_id: fixture_platform_id("obx", "ab2c"),
+            }],
+            pending_nodes: vec![],
+            structural_exit: None,
+            pending_wake: None,
+            remainder_cancellations: vec![],
+        },
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler
+            .apply_derived_expression_controller_step(ApplyDerivedExpressionControllerStep {
+                step: compute_step.clone(),
+                materialized_inputs: compute_inputs.clone(),
+                evaluation: compute_evaluation.clone(),
+                output_value_ids: vec![compute_admission.input.value_id.clone()],
+            })
+            .await,
+        Err(RepositoryError::Database(_))
+    ));
+    scheduler.rollback().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM insight_platform.run_values WHERE tenant_id = $1 AND run_id = $2",
+        )
+        .bind(TENANT_ID)
+        .bind(compute_admission.run_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let computed = scheduler
+        .apply_derived_expression_controller_step(ApplyDerivedExpressionControllerStep {
+            step: compute_step,
+            materialized_inputs: compute_inputs,
+            evaluation: compute_evaluation,
+            output_value_ids: vec![compute_output_id.clone()],
+        })
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert!(matches!(computed, CommandOutcome::Applied(_)));
+    let stored_compute: (String, String, Value) = sqlx::query_as(
+        "SELECT classification, schema_digest, inline_value FROM insight_platform.run_values WHERE tenant_id = $1 AND value_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(compute_output_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored_compute.0, DataClassification::Internal.as_str());
+    assert_eq!(stored_compute.1, digest('a').to_string());
+    assert_eq!(stored_compute.2, json!({"question": "select one"}));
+    let stored_scope_payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(compute_admission.root_scope_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(stored_scope_payload.to_string().contains(&compute_output_id.to_string()));
+    let compute_run_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(compute_admission.run_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    applied(
+        run_command!(
+            repository,
+            request_run_cancel,
+            RequestRunCancel {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "ab30", 'f', '0'),
+                run_id: compute_admission.run_id.clone(),
+                expected_run_version: compute_run_version,
+                expected_cancel_generation: 0,
+                reason_code: "fixture_cleanup".to_owned(),
+            }
+        )
+        .unwrap(),
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let compute_cleanup = scheduler
+        .drive_orchestration_convergence(orchestration_convergence(
+            ["ab31", "ab32", "ab33", "ab34"],
+            ["ab35", "ab36", "ab37", "ab38", "ab39", "ab3a"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(compute_cleanup.len(), 1);
+    assert_eq!(compute_cleanup[0].completed.run.state, "cancelled");
 
     let mut loop_admission = admission(
         AdmissionIds {

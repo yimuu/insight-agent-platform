@@ -365,6 +365,7 @@ pub struct PgRepository {
     scheduler_limits: SchedulerHardLimits,
     plan_limits: PlanLimits,
     scope_environment_limits: ScopeEnvironmentLimits,
+    expression_inline_limits: JsonLimits,
     recovery_batch_limit: u16,
     recovery_shard_limit: u16,
 }
@@ -431,6 +432,20 @@ impl PgRepository {
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
             scope_environment_limits: ScopeEnvironmentLimits::from_profile(profile)
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            expression_inline_limits: JsonLimits {
+                max_bytes: usize::try_from(profile.run_scheduler.inline_value_bytes.q1_default)
+                    .map_err(|_| RepositoryError::InvalidInput("inline value limit".to_owned()))?,
+                max_depth: usize::try_from(profile.api.json_depth.q1_default)
+                    .map_err(|_| RepositoryError::InvalidInput("JSON depth limit".to_owned()))?,
+                max_properties_per_object: usize::try_from(profile.api.json_properties.q1_default)
+                    .map_err(|_| RepositoryError::InvalidInput("JSON property limit".to_owned()))?,
+                max_items_per_array: usize::try_from(profile.api.json_items.q1_default)
+                    .map_err(|_| RepositoryError::InvalidInput("JSON item limit".to_owned()))?,
+                max_string_bytes: usize::try_from(
+                    profile.run_scheduler.inline_value_bytes.q1_default,
+                )
+                .map_err(|_| RepositoryError::InvalidInput("inline string limit".to_owned()))?,
+            },
             recovery_batch_limit,
             recovery_shard_limit,
         })
@@ -1786,6 +1801,7 @@ impl PgRepository {
             limits: self.scheduler_limits,
             plan_limits: self.plan_limits,
             scope_environment_limits: self.scope_environment_limits,
+            expression_inline_limits: self.expression_inline_limits,
             recovery_batch_limit: self.recovery_batch_limit,
             recovery_shard_limit: self.recovery_shard_limit,
         })
@@ -4459,6 +4475,7 @@ pub struct PgSchedulerTransaction {
     limits: SchedulerHardLimits,
     plan_limits: PlanLimits,
     scope_environment_limits: ScopeEnvironmentLimits,
+    expression_inline_limits: JsonLimits,
     recovery_batch_limit: u16,
     recovery_shard_limit: u16,
 }
@@ -4970,12 +4987,14 @@ impl PgSchedulerTransaction {
             step,
             materialized_inputs,
             evaluation,
+            output_value_ids,
         } = command;
         self.apply_orchestration_controller_step_internal(
             step,
             Some(DerivedExpressionCommitEvidence {
                 materialized_inputs,
                 evaluation,
+                output_value_ids,
             }),
         )
         .await
@@ -5024,6 +5043,9 @@ impl PgSchedulerTransaction {
                 "observation_evidence_digest": derived
                     .as_ref()
                     .map(|evidence| &evidence.evaluation.evidence.canonical_digest),
+                "output_value_ids": derived
+                    .as_ref()
+                    .map(|evidence| &evidence.output_value_ids),
                 "pending_nodes": command
                     .mutations
                     .pending_nodes
@@ -5117,7 +5139,8 @@ impl PgSchedulerTransaction {
             &command.mutations.quota_entry_ids,
         )
         .await?;
-        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        let mut parents =
+            lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
         require_exact_runtime_plan(&mut transaction, &parents.run, &command.plan, &plan_digest)
             .await?;
         let source_node =
@@ -5143,6 +5166,17 @@ impl PgSchedulerTransaction {
                 &command.observation,
                 derived,
                 self.plan_limits.expression,
+                self.scope_environment_limits,
+            )
+            .await?;
+            parents.scope_version = commit_derived_compute_outputs(
+                &mut transaction,
+                &observed,
+                &parents,
+                &source_node,
+                runtime_node,
+                derived,
+                self.expression_inline_limits,
                 self.scope_environment_limits,
             )
             .await?;
@@ -9113,23 +9147,15 @@ async fn require_exact_derived_expression_evidence(
     expression_limits: insight_platform_orchestrator::ExpressionLimits,
     scope_limits: ScopeEnvironmentLimits,
 ) -> Result<(), RepositoryError> {
-    if matches!(
-        runtime_node,
-        insight_platform_orchestrator::RuntimeNode::Compute { .. }
-    ) {
-        return Err(RepositoryError::InvalidInput(
-            "Compute requires atomic output RunValue mutation slots".to_owned(),
-        ));
-    }
     if !matches!(
         runtime_node,
-        insight_platform_orchestrator::RuntimeNode::Branch { .. }
+        insight_platform_orchestrator::RuntimeNode::Compute { .. }
+            | insight_platform_orchestrator::RuntimeNode::Branch { .. }
             | insight_platform_orchestrator::RuntimeNode::Map { .. }
             | insight_platform_orchestrator::RuntimeNode::Loop { .. }
     ) || &derived.evaluation.observation != observation
         || derived.evaluation.evidence.node_execution_version != source_node.version
         || derived.evaluation.evidence.node_execution_id.to_string() != parents.node_id
-        || !derived.evaluation.outputs.is_empty()
     {
         return Err(RepositoryError::Conflict(
             "derived expression controller evidence",
@@ -9207,6 +9233,188 @@ async fn require_exact_derived_expression_evidence(
         ));
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_derived_compute_outputs(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    runtime_node: &insight_platform_orchestrator::RuntimeNode,
+    derived: &DerivedExpressionCommitEvidence,
+    inline_limits: JsonLimits,
+    scope_limits: ScopeEnvironmentLimits,
+) -> Result<i64, RepositoryError> {
+    if !matches!(
+        runtime_node,
+        insight_platform_orchestrator::RuntimeNode::Compute { .. }
+    ) {
+        if !derived.evaluation.outputs.is_empty() || !derived.output_value_ids.is_empty() {
+            return Err(RepositoryError::Conflict("non-Compute expression outputs"));
+        }
+        return Ok(parents.scope_version);
+    }
+    if derived.evaluation.outputs.len() != derived.output_value_ids.len() {
+        return Err(RepositoryError::InvalidInput(
+            "Compute output mutation arity".to_owned(),
+        ));
+    }
+    let current_value_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.run_values WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let next_value_count = usize::try_from(current_value_count)
+        .ok()
+        .and_then(|count| count.checked_add(derived.output_value_ids.len()))
+        .ok_or_else(|| RepositoryError::Conflict("RunValue reference bound"))?;
+    if next_value_count > scope_limits.maximum_bindings_per_scope {
+        return Err(RepositoryError::Conflict("RunValue reference bound"));
+    }
+    let scope_row = sqlx::query(
+        r#"
+        SELECT parent_node_id, node_kind, state, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'scope_instance'
+        FOR UPDATE
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(&parents.scope_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Compute output Scope"))?;
+    if scope_row.try_get::<String, _>("state")? != ScopeState::Open.as_str()
+        || scope_row.try_get::<i64, _>("version")? != parents.scope_version
+    {
+        return Err(RepositoryError::Conflict("Compute output Scope fence"));
+    }
+    let scope_payload = payload_from_row(
+        &scope_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let scope_kind: String = scope_row.try_get("node_kind")?;
+    let mut root = None;
+    let mut nested = None;
+    let environment = match scope_kind.as_str() {
+        "root" => {
+            let payload: StoredRootScopePayload =
+                decode_typed_payload(&scope_payload, "Compute root Scope")?;
+            root = Some(payload);
+            &mut root
+                .as_mut()
+                .expect("root Scope payload assigned")
+                .environment
+        }
+        "parallel_leg" | "loop_iteration" | "map_item" => {
+            let payload: StoredControllerScopePayload =
+                decode_typed_payload(&scope_payload, "Compute controller Scope")?;
+            if scope_row.try_get::<Option<String>, _>("parent_node_id")?
+                != Some(payload.controller_node_execution_id.to_string())
+            {
+                return Err(RepositoryError::CorruptRow(
+                    "Compute Scope controller owner differs".to_owned(),
+                ));
+            }
+            nested = Some(payload);
+            &mut nested
+                .as_mut()
+                .expect("controller Scope payload assigned")
+                .environment
+        }
+        _ => {
+            return Err(RepositoryError::CorruptRow(
+                "Compute Scope kind is unregistered".to_owned(),
+            ))
+        }
+    };
+    environment
+        .validate(scope_limits)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    for (output, value_id) in derived
+        .evaluation
+        .outputs
+        .iter()
+        .zip(&derived.output_value_ids)
+    {
+        if output.port.producer_node_id() != Some(&source_node.plan_node_key)
+            || (ValueRef::Inline {
+                value: output.value.value.clone(),
+            })
+            .validate(inline_limits)
+            .is_err()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Compute output violates its exact Plan or Inline limit".to_owned(),
+            ));
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_values (
+                tenant_id, value_id, run_id, node_id, value_kind, classification,
+                schema_digest, content_digest, inline_value, artifact_id
+            ) VALUES ($1, $2, $3, $4, 'expression_output', $5, $6, $7, $8, NULL)
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(value_id.to_string())
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .bind(derived.evaluation.effective_classification.as_str())
+        .bind(output.value.schema_digest.to_string())
+        .bind(output.value.canonical_digest.to_string())
+        .bind(&output.value.value)
+        .execute(&mut **transaction)
+        .await?;
+        environment
+            .bind_new(
+                output.port.clone(),
+                ExactRunValueRef {
+                    value_id: value_id.clone(),
+                    schema_digest: output.value.schema_digest.clone(),
+                    content_digest: output.value.canonical_digest.clone(),
+                },
+                scope_limits,
+            )
+            .map_err(|_| RepositoryError::Conflict("Compute output Scope binding"))?;
+    }
+    let next_payload = match (root, nested) {
+        (Some(root), None) => TypedPayload::with_limit(1, &root, 262_144)?,
+        (None, Some(nested)) => TypedPayload::with_limit(1, &nested, 262_144)?,
+        _ => {
+            return Err(RepositoryError::CorruptRow(
+                "Compute Scope payload variant is ambiguous".to_owned(),
+            ))
+        }
+    };
+    let next_scope_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET version = version + 1, payload_schema_version = $4,
+            payload = $5, payload_digest = $6, updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'open' AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.scope_id)
+    .bind(parents.scope_version)
+    .bind(next_payload.schema_version)
+    .bind(&next_payload.value)
+    .bind(&next_payload.digest)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Compute output Scope CAS"))?;
+    Ok(next_scope_version)
 }
 
 async fn load_parallel_leg_exit(
@@ -19326,6 +19534,7 @@ pub struct ApplyDerivedExpressionControllerStep {
     pub step: ApplyOrchestrationControllerStep,
     pub materialized_inputs: Vec<CommittedExpressionInput>,
     pub evaluation: ControllerEvaluation,
+    pub output_value_ids: Vec<ResourceId>,
 }
 
 impl ApplyDerivedExpressionControllerStep {
@@ -19336,6 +19545,13 @@ impl ApplyDerivedExpressionControllerStep {
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         if self.step.observation != self.evaluation.observation
             || self.materialized_inputs.len() > plan_limits.expression.maximum_input_ports
+            || self.output_value_ids.len() != self.evaluation.outputs.len()
+            || self
+                .output_value_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::RunValue)
+            || self.output_value_ids.iter().collect::<BTreeSet<_>>().len()
+                != self.output_value_ids.len()
         {
             return Err(RepositoryError::InvalidInput(
                 "derived expression command is inconsistent".to_owned(),
@@ -19349,6 +19565,7 @@ impl ApplyDerivedExpressionControllerStep {
 struct DerivedExpressionCommitEvidence {
     materialized_inputs: Vec<CommittedExpressionInput>,
     evaluation: ControllerEvaluation,
+    output_value_ids: Vec<ResourceId>,
 }
 
 impl ApplyOrchestrationControllerStep {

@@ -75,8 +75,9 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    observation；CR-176 Scope data-port environment owner、root/child binding、bounded lexical lookup、exact Inline/Ready Artifact
    authority读取与stale fence拒绝已经实现并通过fresh PostgreSQL Phase 2。derived commit现已对Branch/Map/Loop在事务内重验
    input/evaluation/classification evidence并重新执行pure evaluator，fresh PostgreSQL覆盖Branch正向提交和伪造classification整批回滚。
-   尚缺Compute RunValue + Scope CAS原子写，以及Map item/Loop carried binding；手工注入`ControllerObservation`仍不计production证据。
-   CR-177已冻结output classification lattice规则，但实现与L1～L3 fixture尚待完成。
+   Compute现已在同一事务写immutable output RunValue、owner-derived classification与Scope environment CAS，再提交既有Node/Job/
+   Receipt/Event/Outbox；fresh PostgreSQL同时覆盖output ID冲突整批回滚。尚缺Map item value binding、Loop carried rollover及完整production store
+   composition；手工注入`ControllerObservation`仍不计production证据。CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 
