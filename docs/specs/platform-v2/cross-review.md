@@ -1,10 +1,13 @@
-# Platform v2 00～18 Cross-review（CR-181）
+# Platform v2 00～18 Cross-review（CR-182）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-181 Accepted |
+| 状态 | Open / Architecture Revision CR-182 |
 | 日期 | 2026-08-24 |
 | 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-181 external leaf implementation feedback |
+
+> CR-182重新打开04 selection program及05～11/16/18影响复核；CR-181历史结论保留，但在closed selector owner schema、
+> deterministic evaluator、evidence重验和L1～L3 fixture闭合前不授权selection/leaf dispatch实现。
 
 > CR-181重新打开本cross-review。CR-180的历史结论保留为审计记录，但不再授权实现；需按05→06～16→17→18顺序
 > 复核04 candidate selection及Plan v4 external leaf payload的state ownership、IDs、schema、transaction、event、permission、capacity、recovery与fixture后

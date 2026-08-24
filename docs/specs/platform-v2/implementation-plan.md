@@ -2,13 +2,15 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-181 contracts accepted; L3～L6 pending |
+| 状态 | Paused / CR-182 selection policy Architecture Revision |
 | 日期 | 2026-08-24 |
 | 合同输入 | 00～18、cross-review CR-181/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。
+
+> CR-182发现Selection Policy缺少可执行document；Plan v4 wire实现保留，但candidate selection与leaf dispatch暂停，直到cross-review关闭。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-181 |
+| 状态 | Draft / Architecture Revision CR-182 |
 | 日期 | 2026-08-24 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-181 |
+| 状态 | Draft / Architecture Revision CR-182 |
 | 日期 | 2026-08-20 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
@@ -10,6 +10,9 @@
 > 2026-08-24 implementation feedback（CR-181）：05的external leaf允许一个slot冻结多个exact candidate，但此前04只定义
 > Selection Policy identity，没有可执行decision/evidence合同。CR-181冻结候选选择输入、输出和提交时重验边界，禁止Scheduler/
 > Worker自由选择Deployment。
+
+> CR-182：CandidateSelectionEvidence本身不能定义选择语义；Selection Policy Revision必须持有下述closed executable document，
+> 空document或自由表达式均拒绝。
 
 ## 1. 决策摘要
 
@@ -210,6 +213,20 @@ Artifact只有普通staging/ready/physical/grant/traffic quota，无Model Artifa
 Model、Capability、ChildAgent和Skill slot的`selection_policy`是唯一candidate selection语义authority。Policy Revision必须包含
 closed、deterministic selector program；输入只允许RunBindings中该slot的规范排序candidate列表、05 node可选的exact route RunValue、
 已冻结principal/policy snapshot及剩余budget，不得读取active head、网络、Secret、随机数或进程时钟。
+
+```rust
+struct CandidateSelectionPolicyDocument {
+    schema_version: u32, // 固定1
+    mode: OnlyCandidate | OrderedFirst | RouteHash,
+    route_schema_digest: Option<Digest>,
+    semantic_digest: Digest,
+}
+```
+
+`only_candidate`要求exact candidate count为1且没有route；`ordered_first`要求没有route并选择规范排序后的第一个candidate；
+`route_hash`要求route schema digest完全匹配，计算route canonical JSON bytes的SHA-256，将digest作为大端无符号整数对candidate count
+取模。candidate排序键固定为`(resource_kind, deployment_id, deployment_digest)`；不得读取health/active head或在失败时跳到下一项。
+增加mode必须提升Selection Policy document `schema_version`并同步owner schema/evaluator/negative fixture。
 
 ```rust
 struct CandidateSelectionEvidence {
