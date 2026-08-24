@@ -2886,6 +2886,7 @@ dependencies = [
  "insight-platform-sandbox",
  "insight-platform-sandbox-rpc",
  "insight-platform-security",
+ "insight-platform-tasks",
  "insight-platform-worker",
  "serde",
  "serde_json",

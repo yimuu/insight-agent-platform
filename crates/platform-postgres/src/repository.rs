@@ -40,11 +40,12 @@ use insight_platform_orchestrator::{
     CandidateSelectionEvidence, ChildBudget, ChildCancellationPolicy, ChildLinkState, ChildOutcome,
     ChildRunLinkPayload, ChildRunLinkProjection, CommittedExpressionInput, ControlDecision,
     ControllerDecision, ControllerEvaluation, ControllerObservation, ExactDataPortRef,
-    ExactRunValueRef, JoinPolicy, JoinRemainderPolicy, MapFailurePolicy, ObserveRunTimeout,
-    OrchestrationConvergenceDecision, OrchestrationConvergenceFacts,
-    OrchestrationConvergenceReason, OrchestrationJobPayload, OrchestratorError, PlanLimits,
-    PlanNodeKey, PrepareChildRun, RequestRunCancel, RunCurrentSnapshot, RunInputValue, RunStore,
-    RunTransaction, RuntimePlan, ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits, SetRunPause,
+    ExactRunValueRef, HumanTaskDefinition as RuntimeHumanTaskDefinition, JoinPolicy,
+    JoinRemainderPolicy, MapFailurePolicy, ObserveRunTimeout, OrchestrationConvergenceDecision,
+    OrchestrationConvergenceFacts, OrchestrationConvergenceReason, OrchestrationJobPayload,
+    OrchestratorError, PlanLimits, PlanNodeKey, PrepareChildRun, RequestRunCancel,
+    RunCurrentSnapshot, RunInputValue, RunStore, RunTransaction, RuntimeNode, RuntimePlan,
+    ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits, SetRunPause,
 };
 use insight_platform_registry::{
     ActivateResource, CreateDeployment, CreateResourceDraft, NewPublishedVersion,
@@ -5957,6 +5958,7 @@ impl PgSchedulerTransaction {
         command: DeferOrchestrationToTask,
     ) -> Result<CommandOutcome<DeferredOrchestrationTask>, RepositoryError> {
         command.validate()?;
+        let plan_digest = command.plan.canonical_digest(self.plan_limits)?;
         let mut transaction = self.transaction.begin().await?;
         let receipt_payload = TypedPayload::with_limit(
             1,
@@ -6003,6 +6005,30 @@ impl PgSchedulerTransaction {
         )
         .await?;
         let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        require_exact_runtime_plan(&mut transaction, &parents.run, &command.plan, &plan_digest)
+            .await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, &command.plan)
+                .await?;
+        let RuntimeNode::HumanTask {
+            definition,
+            response,
+            timeout_milliseconds,
+            ..
+        } = command.plan.node(&source_node.plan_node_key)?
+        else {
+            return Err(RepositoryError::Conflict(
+                "orchestration Task exact Plan node",
+            ));
+        };
+        let exact_definition = runtime_human_task_definition(definition);
+        if command.definition != exact_definition
+            || command.response_schema_digest.as_ref() != Some(response.schema_digest())
+        {
+            return Err(RepositoryError::Conflict(
+                "orchestration Task exact Plan contract",
+            ));
+        }
         let current = load_job_for_update_by_text(
             &mut transaction,
             &command.fence.tenant_id,
@@ -6022,6 +6048,13 @@ impl PgSchedulerTransaction {
             .await?;
         if command.task_deadline <= database_now {
             return Err(RepositoryError::Conflict("Task deadline"));
+        }
+        let maximum_deadline = database_now
+            + Duration::milliseconds(i64::try_from(*timeout_milliseconds).map_err(|_| {
+                RepositoryError::InvalidInput("Task timeout exceeds i64".to_owned())
+            })?);
+        if command.task_deadline > maximum_deadline {
+            return Err(RepositoryError::Conflict("Task exact Plan deadline"));
         }
         let next_job = decide_job_terminal(
             &job_projection(&current)?,
@@ -22140,6 +22173,7 @@ impl DeferOrchestrationTaskMutationIds {
 #[derive(Debug, Clone)]
 pub struct DeferOrchestrationToTask {
     pub fence: JobFence,
+    pub plan: RuntimePlan,
     pub task_id: ResourceId,
     pub definition: TaskDefinition,
     pub response_schema_digest: Option<Sha256Digest>,
@@ -22148,6 +22182,27 @@ pub struct DeferOrchestrationToTask {
     pub request_digest: Sha256Digest,
     pub receipt_expires_at: DateTime<Utc>,
     pub mutations: DeferOrchestrationTaskMutationIds,
+}
+
+fn runtime_human_task_definition(definition: &RuntimeHumanTaskDefinition) -> TaskDefinition {
+    match definition {
+        RuntimeHumanTaskDefinition::Interaction {
+            interaction_kind,
+            eligible_principal_rule_digest,
+            safe_prompt_key,
+        } => TaskDefinition::Interaction {
+            interaction_kind: *interaction_kind,
+            eligible_principal_rule_digest: eligible_principal_rule_digest.clone(),
+            safe_prompt_key: safe_prompt_key.clone(),
+        },
+        RuntimeHumanTaskDefinition::HumanWork {
+            eligible_principal_rule_digest,
+            safe_prompt_key,
+        } => TaskDefinition::HumanWork {
+            eligible_principal_rule_digest: eligible_principal_rule_digest.clone(),
+            safe_prompt_key: safe_prompt_key.clone(),
+        },
+    }
 }
 
 impl DeferOrchestrationToTask {

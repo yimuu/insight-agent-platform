@@ -20,10 +20,10 @@ use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
 use insight_platform_orchestrator::{
     derive_candidate_selection, derive_expression_controller, AdmitRun, ChildBudget,
     ChildCancellationPolicy, ChildOutcome, CommittedExpressionInput, ControllerObservation,
-    DataPortKey, ExpressionLimits, JoinPolicy, JoinRemainderPolicy, LoopCarriedPort,
-    MapFailurePolicy, ObserveRunTimeout, PlanLimits, PlanNodeKey, PortAssignment, RequestRunCancel,
-    RunInputValue, RuntimeDependencyKind, RuntimeDependencySlot, RuntimeNode, RuntimePlan,
-    SetRunPause, TypedExpressionProgram, TypedInstruction,
+    DataPortKey, ExpressionLimits, HumanTaskDefinition, JoinPolicy, JoinRemainderPolicy,
+    LoopCarriedPort, MapFailurePolicy, ObserveRunTimeout, PlanLimits, PlanNodeKey, PortAssignment,
+    RequestRunCancel, RunInputValue, RuntimeDependencyKind, RuntimeDependencySlot, RuntimeNode,
+    RuntimePlan, SetRunPause, TypedExpressionProgram, TypedInstruction,
 };
 use insight_platform_postgres::{
     repository::{
@@ -232,6 +232,8 @@ fn runtime_plan() -> RuntimePlan {
     let input_otherwise = PlanNodeKey::new("input_otherwise".to_owned()).unwrap();
     let input_compute = PlanNodeKey::new("input_compute".to_owned()).unwrap();
     let child_call = PlanNodeKey::new("child_call".to_owned()).unwrap();
+    let human_task = PlanNodeKey::new("human_task".to_owned()).unwrap();
+    let expiring_task = PlanNodeKey::new("expiring_task".to_owned()).unwrap();
     let raise = PlanNodeKey::new("raise".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 4,
@@ -472,6 +474,40 @@ fn runtime_plan() -> RuntimePlan {
                     cancellation_policy: ChildCancellationPolicy::CascadeAndWait,
                     attempt_limit: 3,
                     retry_backoff_milliseconds: 100,
+                    resume: finish.clone(),
+                },
+            ),
+            (
+                human_task.clone(),
+                RuntimeNode::HumanTask {
+                    definition: HumanTaskDefinition::Interaction {
+                        interaction_kind: InteractionKind::Form,
+                        eligible_principal_rule_digest: digest('6'),
+                        safe_prompt_key: "provide_input".to_owned(),
+                    },
+                    response: insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
+                        producer_node_id: human_task,
+                        port_id: DataPortKey::new("response".to_owned()).unwrap(),
+                        schema_digest: digest('5'),
+                    },
+                    timeout_milliseconds: 60_000,
+                    resume: finish.clone(),
+                },
+            ),
+            (
+                expiring_task.clone(),
+                RuntimeNode::HumanTask {
+                    definition: HumanTaskDefinition::Interaction {
+                        interaction_kind: InteractionKind::Form,
+                        eligible_principal_rule_digest: digest('2'),
+                        safe_prompt_key: "short_lived_input".to_owned(),
+                    },
+                    response: insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
+                        producer_node_id: expiring_task,
+                        port_id: DataPortKey::new("response".to_owned()).unwrap(),
+                        schema_digest: digest('3'),
+                    },
+                    timeout_milliseconds: 4_000,
                     resume: finish.clone(),
                 },
             ),
@@ -2360,6 +2396,19 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .node_id
         .clone()
         .expect("claimed orchestration Job has a Node");
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET plan_node_key = 'human_task', node_kind = 'human_task'
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&selected_node_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT reserved_value FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND quota_account_id = $2",
@@ -2407,6 +2456,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             expected_job_version: task_started.version,
             ..task_start.fence
         },
+        plan: runtime_plan(),
         task_id: task_id.clone(),
         definition: TaskDefinition::Interaction {
             interaction_kind: InteractionKind::Form,
@@ -2628,6 +2678,19 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         0
     );
 
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET plan_node_key = 'expiring_task', node_kind = 'human_task'
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&selected_node_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let expiry_claimed = scheduler
         .claim_orchestration_jobs(orchestration_claim_with_ids(
@@ -2680,6 +2743,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             expected_job_version: expiry_started.version,
             ..expiry_start.fence
         },
+        plan: runtime_plan(),
         task_id: expiring_task_id.clone(),
         definition: TaskDefinition::Interaction {
             interaction_kind: InteractionKind::Form,

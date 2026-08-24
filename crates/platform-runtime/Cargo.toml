@@ -20,6 +20,7 @@ insight-platform-orchestrator.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-sandbox.workspace = true
 insight-platform-sandbox-rpc.workspace = true
+insight-platform-tasks.workspace = true
 insight-platform-worker.workspace = true
 serde.workspace = true
 sha2.workspace = true

@@ -7,7 +7,8 @@ use insight_platform_postgres::repository::{
     ControllerPendingNodeSlot, ControllerPendingWakeSlot, ControllerRemainderCancellationSlot,
     ControllerScopeSlot, ControllerStepMutationIds, ControllerStructuralExitSlot,
     ControllerStructuralRequirement, DeferOrchestrationChildMutationIds,
-    OrchestrationTerminalMutationIds, MAX_ORCHESTRATION_QUOTA_LINES,
+    DeferOrchestrationTaskMutationIds, OrchestrationTerminalMutationIds,
+    MAX_ORCHESTRATION_QUOTA_LINES,
 };
 
 pub fn allocate_orchestration_terminal_mutations(
@@ -57,6 +58,27 @@ pub fn allocate_child_run_mutations(
         child_run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
         child_job_event_id: new_id(identities, ResourceKind::Event)?,
         child_job_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+    })
+}
+
+pub fn allocate_human_task_mutations(
+    identities: &impl CoordinatorIdentityFactory,
+) -> Result<DeferOrchestrationTaskMutationIds, IdentityFactoryError> {
+    Ok(DeferOrchestrationTaskMutationIds {
+        receipt_id: new_id(identities, ResourceKind::Receipt)?,
+        quota_entry_ids: allocate_ids(
+            identities,
+            ResourceKind::QuotaLedgerEntry,
+            MAX_ORCHESTRATION_QUOTA_LINES,
+        )?,
+        run_event_id: new_id(identities, ResourceKind::Event)?,
+        run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        node_event_id: new_id(identities, ResourceKind::Event)?,
+        node_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        task_event_id: new_id(identities, ResourceKind::Event)?,
+        task_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        job_event_id: new_id(identities, ResourceKind::Event)?,
+        job_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
     })
 }
 
@@ -224,6 +246,9 @@ mod tests {
         assert_eq!(child.receipt_id.kind(), ResourceKind::Receipt);
         assert_eq!(child.child_run_event_id.kind(), ResourceKind::Event);
         assert_eq!(child.child_run_outbox_id.kind(), ResourceKind::OutboxEvent);
+        let task = allocate_human_task_mutations(&identities).unwrap();
+        assert_eq!(task.quota_entry_ids.len(), MAX_ORCHESTRATION_QUOTA_LINES);
+        assert_eq!(task.task_event_id.kind(), ResourceKind::Event);
         let map = allocate_controller_step_mutations(
             &identities,
             &ControllerMutationRequirements {

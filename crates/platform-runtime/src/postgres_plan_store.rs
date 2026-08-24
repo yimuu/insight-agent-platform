@@ -2,10 +2,10 @@
 
 use crate::{
     allocate_child_run_mutations, allocate_controller_step_mutations,
-    allocate_orchestration_terminal_mutations, CoordinatorIdentityFactory, DerivedControllerCommit,
-    DurableChildAgentDispatchFacts, DurableControllerFacts, DurableControllerPhase,
-    DurablePlanDriverError, DurablePlanGenerationStore, GenerationHandoffReason,
-    StartedOrchestrationJob,
+    allocate_human_task_mutations, allocate_orchestration_terminal_mutations,
+    CoordinatorIdentityFactory, DerivedControllerCommit, DurableChildAgentDispatchFacts,
+    DurableControllerFacts, DurableControllerPhase, DurablePlanDriverError,
+    DurablePlanGenerationStore, GenerationHandoffReason, StartedOrchestrationJob,
 };
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -18,16 +18,17 @@ use insight_platform_contracts::{
     Sha256Digest, ValueRef, MODEL_JSON_LIMITS,
 };
 use insight_platform_orchestrator::{
-    derive_candidate_selection, ChildBudget, CommittedExpressionInput, ExactRunValueRef,
-    RunInputValue, RuntimeNode, RuntimePlan,
+    derive_candidate_selection, ChildBudget, CommittedExpressionInput, DurableWaitKind,
+    ExactRunValueRef, HumanTaskDefinition, RunInputValue, RuntimeNode, RuntimePlan,
 };
 use insight_platform_postgres::repository::{
     ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep, CommitPlanTerminal,
-    ControllerFacts, DeferOrchestrationToChildRun, DerivedExpressionFailureEvidence,
-    FailOrchestrationJob, JobFence, MaterializedTerminalValue, OrchestrationFailureCause,
-    OrchestrationYield, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
-    ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+    ControllerFacts, DeferOrchestrationToChildRun, DeferOrchestrationToTask,
+    DerivedExpressionFailureEvidence, FailOrchestrationJob, JobFence, MaterializedTerminalValue,
+    OrchestrationFailureCause, OrchestrationYield, OrchestrationYieldMutationIds, PgRepository,
+    RepositoryError, ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
 };
+use insight_platform_tasks::TaskDefinition;
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
@@ -436,6 +437,105 @@ where
             }
         }
     }
+
+    async fn commit_human_task_wait(
+        &self,
+        job: &StartedOrchestrationJob,
+        command: DerivedControllerCommit,
+    ) -> Result<(), DurablePlanDriverError> {
+        if !matches!(
+            command.facts.phase,
+            DurableControllerPhase::CommittedFacts {
+                observation: insight_platform_orchestrator::ControllerObservation::None
+            }
+        ) {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        }
+        let (definition, response_schema_digest, timeout_milliseconds) = match command
+            .materialized
+            .plan
+            .node(&command.facts.plan_node_key)
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        {
+            RuntimeNode::HumanTask {
+                definition,
+                response,
+                timeout_milliseconds,
+                ..
+            } => (
+                match definition {
+                    HumanTaskDefinition::Interaction {
+                        interaction_kind,
+                        eligible_principal_rule_digest,
+                        safe_prompt_key,
+                    } => TaskDefinition::Interaction {
+                        interaction_kind: *interaction_kind,
+                        eligible_principal_rule_digest: eligible_principal_rule_digest.clone(),
+                        safe_prompt_key: safe_prompt_key.clone(),
+                    },
+                    HumanTaskDefinition::HumanWork {
+                        eligible_principal_rule_digest,
+                        safe_prompt_key,
+                    } => TaskDefinition::HumanWork {
+                        eligible_principal_rule_digest: eligible_principal_rule_digest.clone(),
+                        safe_prompt_key: safe_prompt_key.clone(),
+                    },
+                },
+                response.schema_digest().clone(),
+                *timeout_milliseconds,
+            ),
+            _ => return Err(DurablePlanDriverError::InvariantViolation),
+        };
+        let delegated_timeout = timeout_milliseconds.saturating_div(2).max(1);
+        let delegated_timeout = i64::try_from(delegated_timeout)
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let task_deadline = (Utc::now() + ChronoDuration::milliseconds(delegated_timeout))
+            .min(job.started().deadline);
+        let request_digest: Sha256Digest = canonical_digest(&json!({
+            "job_id": command.fence.job_id,
+            "lease_generation": command.fence.lease_epoch,
+            "operation": "orchestration.task.defer",
+            "plan_digest": command.materialized.request.artifact.content_digest(),
+            "task_kind": definition.task_kind().as_str(),
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let task = DeferOrchestrationToTask {
+            fence: command.fence,
+            plan: command.materialized.plan,
+            task_id: self.new_id(definition.task_kind().task_id_kind())?,
+            definition,
+            response_schema_digest: Some(response_schema_digest),
+            task_deadline,
+            idempotency_key_digest: self
+                .identities
+                .new_lease_token_digest()
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            request_digest,
+            receipt_expires_at: job.started().deadline,
+            mutations: allocate_human_task_mutations(self.identities.as_ref())
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+        };
+        let mut transaction = self
+            .repository
+            .begin_scheduler_transaction()
+            .await
+            .map_err(classify_repository_failure)?;
+        match transaction.defer_orchestration_to_task(task).await {
+            Ok(_) => transaction
+                .commit()
+                .await
+                .map_err(classify_repository_failure),
+            Err(failure) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(classify_repository_failure)?;
+                Err(classify_repository_failure(failure))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -548,6 +648,15 @@ where
             insight_platform_orchestrator::ControllerDecision::CreateChildRun { .. }
         ) {
             return self.commit_child_agent_dispatch(job, command).await;
+        }
+        if matches!(
+            command.decision,
+            insight_platform_orchestrator::ControllerDecision::CreateDurableWait {
+                kind: DurableWaitKind::HumanTask,
+                ..
+            }
+        ) {
+            return self.commit_human_task_wait(job, command).await;
         }
         if matches!(
             &command.decision,
