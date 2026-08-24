@@ -536,6 +536,76 @@ where
             }
         }
     }
+
+    async fn commit_timer_wait(
+        &self,
+        job: &StartedOrchestrationJob,
+        command: DerivedControllerCommit,
+    ) -> Result<(), DurablePlanDriverError> {
+        if !matches!(
+            command.facts.phase,
+            DurableControllerPhase::CommittedFacts {
+                observation: insight_platform_orchestrator::ControllerObservation::None
+            }
+        ) || !matches!(
+            command.materialized.plan.node(&command.facts.plan_node_key),
+            Ok(RuntimeNode::TimerWait { .. })
+        ) {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        }
+        let request_digest: Sha256Digest = canonical_digest(&json!({
+            "job_id": command.fence.job_id,
+            "lease_generation": command.fence.lease_epoch,
+            "operation": "orchestration.timer.defer",
+            "plan_digest": command.materialized.request.artifact.content_digest(),
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let mutations = OrchestrationYieldMutationIds {
+            receipt_id: self.new_id(ResourceKind::Receipt)?,
+            quota_entry_ids: (0..MAX_ORCHESTRATION_QUOTA_LINES)
+                .map(|_| self.new_id(ResourceKind::QuotaLedgerEntry))
+                .collect::<Result<Vec<_>, _>>()?,
+            run_event_id: self.new_id(ResourceKind::Event)?,
+            run_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            node_event_id: self.new_id(ResourceKind::Event)?,
+            node_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            job_event_id: self.new_id(ResourceKind::Event)?,
+            job_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+        };
+        let wait = YieldOrchestrationJob {
+            fence: command.fence,
+            outcome: OrchestrationYield::TimerWait {
+                plan: command.materialized.plan,
+            },
+            idempotency_key_digest: self
+                .identities
+                .new_lease_token_digest()
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            request_digest,
+            receipt_expires_at: job.started().deadline,
+            mutations,
+        };
+        let mut transaction = self
+            .repository
+            .begin_scheduler_transaction()
+            .await
+            .map_err(classify_repository_failure)?;
+        match transaction.yield_orchestration_job(wait).await {
+            Ok(_) => transaction
+                .commit()
+                .await
+                .map_err(classify_repository_failure),
+            Err(failure) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(classify_repository_failure)?;
+                Err(classify_repository_failure(failure))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -657,6 +727,15 @@ where
             }
         ) {
             return self.commit_human_task_wait(job, command).await;
+        }
+        if matches!(
+            command.decision,
+            insight_platform_orchestrator::ControllerDecision::CreateDurableWait {
+                kind: DurableWaitKind::Timer,
+                ..
+            }
+        ) {
+            return self.commit_timer_wait(job, command).await;
         }
         if matches!(
             &command.decision,

@@ -16,7 +16,7 @@ use insight_platform_contracts::{
     SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
     ValidationSummary, ValueRef,
 };
-use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
+use insight_platform_jobs::WakeSource;
 use insight_platform_orchestrator::{
     derive_candidate_selection, derive_expression_controller, AdmitRun, ChildBudget,
     ChildCancellationPolicy, ChildOutcome, CommittedExpressionInput, ControllerObservation,
@@ -234,6 +234,7 @@ fn runtime_plan() -> RuntimePlan {
     let child_call = PlanNodeKey::new("child_call".to_owned()).unwrap();
     let human_task = PlanNodeKey::new("human_task".to_owned()).unwrap();
     let expiring_task = PlanNodeKey::new("expiring_task".to_owned()).unwrap();
+    let timer_wait = PlanNodeKey::new("timer_wait".to_owned()).unwrap();
     let raise = PlanNodeKey::new("raise".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 4,
@@ -508,6 +509,13 @@ fn runtime_plan() -> RuntimePlan {
                         schema_digest: digest('3'),
                     },
                     timeout_milliseconds: 4_000,
+                    resume: finish.clone(),
+                },
+            ),
+            (
+                timer_wait,
+                RuntimeNode::TimerWait {
+                    delay_milliseconds: 200,
                     resume: finish.clone(),
                 },
             ),
@@ -1416,6 +1424,19 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         Utc::now() + Duration::minutes(5),
     );
     applied(run_command!(repository, admit_run, wait_command.clone()).unwrap());
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET plan_node_key = 'timer_wait', node_kind = 'timer_wait'
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(wait_command.entry_node_execution_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let wait_claimed = scheduler
         .claim_orchestration_jobs(orchestration_claim_with_ids(
@@ -1467,19 +1488,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             expected_job_version: wait_started.version,
             ..wait_start.fence.clone()
         },
-        outcome: OrchestrationYield::Wait {
-            wake_contract: WakeContract {
-                kind: WakeKind::Timer,
-                generation: u64::try_from(wait_started.lease_epoch).unwrap(),
-                accepted_sources: vec![WakeSource::Timer],
-                expected_response_schema_digest: None,
-                opaque_state_digest: Some(digest('7')),
-                next_poll_at: None,
-                poll_count: 0,
-                poll_limit: 0,
-                callback_binding_digest: None,
-                deadline: Utc::now() + Duration::minutes(2),
-            },
+        outcome: OrchestrationYield::TimerWait {
+            plan: runtime_plan(),
         },
         idempotency_key_digest: digest('8'),
         request_digest: digest('9'),
@@ -1528,6 +1538,27 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap(),
         4
     );
+    let mut forged_timer = wait_yield.clone();
+    let OrchestrationYield::TimerWait { plan } = &mut forged_timer.outcome else {
+        unreachable!("fixture uses a Timer wait")
+    };
+    let RuntimeNode::TimerWait {
+        delay_milliseconds,
+        ..
+    } = plan
+        .nodes
+        .get_mut(&PlanNodeKey::new("timer_wait".to_owned()).unwrap())
+        .unwrap()
+    else {
+        unreachable!("fixture Timer node exists")
+    };
+    *delay_milliseconds += 1;
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler.yield_orchestration_job(forged_timer).await,
+        Err(RepositoryError::Conflict("exact typed Plan digest"))
+    ));
+    scheduler.rollback().await.unwrap();
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let waited = match scheduler
         .yield_orchestration_job(wait_yield.clone())
@@ -1570,6 +1601,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         },
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler.wake_orchestration_job(wake.clone()).await,
+        Err(RepositoryError::Conflict("Timer is not due"))
+    ));
+    scheduler.rollback().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let woken = match scheduler
         .wake_orchestration_job(wake.clone())
         .await
@@ -1581,6 +1619,18 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     scheduler.commit().await.unwrap();
     assert_eq!(woken.job.state, "ready");
     assert!(woken.job.wake_kind.is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+        )
+        .bind(TENANT_ID)
+        .bind(&woken.node_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .pointer("/resolution"),
+        Some(&json!("succeeded"))
+    );
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler.wake_orchestration_job(wake.clone()).await.unwrap(),

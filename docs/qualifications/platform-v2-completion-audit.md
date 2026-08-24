@@ -72,7 +72,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    Start/Compute/Branch/Fork/Join/Map/Loop/ErrorBoundary成功控制路径的durable fact读取、Inline RunValue物化、精确mutation-slot
    规划、通用或derived fenced commit与retry handoff；FailNode现在也从locked facts推导ErrorBoundary/structured-exit/wake/
    sibling-cancellation槽，并在失败owner transaction重验expression evidence。Inline Return/Raise terminal、ChildAgent和HumanTask已接入该store；
-   Model/Capability/Context及Timer/Signal分派尚未接入；Artifact-backed RunValue的Scheduler侧Data RPC materializer、exact leased resolver、Broker reader与读前/读后
+   Timer durable wait现已接入，Model/Capability/Context及Signal分派尚未接入；Artifact-backed RunValue的Scheduler侧Data RPC materializer、exact leased resolver、Broker reader与读前/读后
    authority现已接入，但独立Scheduler/Artifact Data Worker进程边界仍待L3 crash/restart验证，因此完整production composition仍未闭合；
    exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
    exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure；
@@ -87,6 +87,8 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    store消费`CreateDurableWait::HumanTask`并生成共享Task mutations；Task first-winner transaction现把成功response RunValue绑定到当前Scope，并在
    Node payload持久化owner-derived succeeded/declined/timed_out/cancelled事实，恢复controller会重验该事实后resume或稳定失败，不再重复创建Task；
    fresh PostgreSQL r77保持response/expiry/late response/first-winner/replay并验证response Scope binding。尚缺独立Scheduler的完整Task wait/resume L3。
+   Timer owner不再接受caller-supplied WakeContract，而是从exact Plan v4和数据库时间派生due time、generation与仅Timer wake source；过早wake、
+   Plan digest漂移和first-winner均fail closed，runtime store已消费`CreateDurableWait::Timer`。fresh PostgreSQL r79通过，但独立Timer scanner/process L3仍待完成。
    CR-176 Scope data-port environment owner、root/child binding、bounded lexical lookup、exact Inline/Ready Artifact
    authority读取与stale fence拒绝已经实现并通过fresh PostgreSQL Phase 2。derived commit现已对Branch/Map/Loop在事务内重验
    input/evaluation/classification evidence并重新执行pure evaluator，fresh PostgreSQL覆盖Branch正向提交和伪造classification整批回滚。
@@ -168,7 +170,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 按上游到下游执行，且每批通过后提交：
 
-1. Plan v4剩余Model/Capability/Context、Timer/Signal leaf owner dispatch，以及Task/Subagent完整L3 lifecycle；
+1. Plan v4剩余Model/Capability/Context、Signal leaf owner dispatch，以及Timer/Task/Subagent完整L3 lifecycle；
 2. 删除caller-supplied orchestration completion并以真实child terminal/result-link替代；
 3. Scheduler/Recovery binary、真实orchestration handler和独立release chart；
 4. Capability Worker、Context Worker、remote MCP Host production composition与charts；

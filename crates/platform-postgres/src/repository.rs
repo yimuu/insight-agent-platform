@@ -1670,12 +1670,23 @@ impl PgRepository {
                         outcome: resolution.outcome,
                     })
             }
+            insight_platform_orchestrator::RuntimeNode::TimerWait { .. } => {
+                let wait: StoredTimerWaitPayload =
+                    decode_typed_payload(&payload, "running Timer wait Node")?;
+                if wait.plan_node_key != identity.plan_node_key {
+                    return Err(RepositoryError::Conflict("Timer wait observation contract"));
+                }
+                wait.resolution
+                    .map(|outcome| ControllerObservation::DurableWait {
+                        wait_kind: DurableWaitKind::Timer,
+                        outcome,
+                    })
+            }
             insight_platform_orchestrator::RuntimeNode::Start { .. }
             | insight_platform_orchestrator::RuntimeNode::Fork { .. }
             | insight_platform_orchestrator::RuntimeNode::ModelLoop { .. }
             | insight_platform_orchestrator::RuntimeNode::CapabilityCall { .. }
             | insight_platform_orchestrator::RuntimeNode::ContextQuery { .. }
-            | insight_platform_orchestrator::RuntimeNode::TimerWait { .. }
             | insight_platform_orchestrator::RuntimeNode::SignalWait { .. }
             | insight_platform_orchestrator::RuntimeNode::Return { .. }
             | insight_platform_orchestrator::RuntimeNode::Raise { .. } => {
@@ -5365,9 +5376,25 @@ impl PgSchedulerTransaction {
         &mut self,
         command: YieldOrchestrationJob,
     ) -> Result<CommandOutcome<YieldedOrchestrationJob>, RepositoryError> {
-        command.validate()?;
+        command.validate(self.plan_limits)?;
+        let plan_digest = match &command.outcome {
+            OrchestrationYield::TimerWait { plan } => {
+                Some(plan.canonical_digest(self.plan_limits)?)
+            }
+            OrchestrationYield::Retry { .. } => None,
+        };
         let mut transaction = self.transaction.begin().await?;
-        let receipt_payload = TypedPayload::with_limit(1, &command.outcome, 65_536)?;
+        let receipt_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "kind": match &command.outcome {
+                    OrchestrationYield::TimerWait { .. } => "timer_wait",
+                    OrchestrationYield::Retry { .. } => "retry",
+                },
+                "plan_digest": plan_digest,
+            }),
+            65_536,
+        )?;
         if claim_job_mutation_receipt(
             &mut transaction,
             &command.fence,
@@ -5405,6 +5432,25 @@ impl PgSchedulerTransaction {
         )
         .await?;
         let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        let timer_source = if let OrchestrationYield::TimerWait { plan } = &command.outcome {
+            let digest = plan_digest.as_ref().ok_or_else(|| {
+                RepositoryError::CorruptRow("Timer Plan digest missing".to_owned())
+            })?;
+            require_exact_runtime_plan(&mut transaction, &parents.run, plan, digest).await?;
+            let source =
+                load_controller_source_node(&mut transaction, &observed, &parents, plan).await?;
+            let RuntimeNode::TimerWait {
+                delay_milliseconds, ..
+            } = plan.node(&source.plan_node_key)?
+            else {
+                return Err(RepositoryError::Conflict(
+                    "orchestration Timer exact Plan node",
+                ));
+            };
+            Some((source, *delay_milliseconds))
+        } else {
+            None
+        };
         let current = load_job_for_update_by_text(
             &mut transaction,
             &command.fence.tenant_id,
@@ -5420,16 +5466,46 @@ impl PgSchedulerTransaction {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
-        let (next, wake_contract) = match &command.outcome {
-            OrchestrationYield::Wait { wake_contract } => (
-                decide_job_wait(
+        let (next, wake_contract, node_payload) = match &command.outcome {
+            OrchestrationYield::TimerWait { .. } => {
+                let (source, delay_milliseconds) = timer_source.as_ref().ok_or_else(|| {
+                    RepositoryError::CorruptRow("Timer Plan source missing".to_owned())
+                })?;
+                let timer_deadline = database_now
+                    + Duration::milliseconds(i64::try_from(*delay_milliseconds).map_err(|_| {
+                        RepositoryError::InvalidInput("Timer delay exceeds i64".to_owned())
+                    })?);
+                let wake_contract = WakeContract {
+                    kind: insight_platform_jobs::WakeKind::Timer,
+                    generation: u64::try_from(command.fence.lease_epoch).map_err(|_| {
+                        RepositoryError::InvalidInput("Timer wake generation".to_owned())
+                    })?,
+                    accepted_sources: vec![WakeSource::Timer],
+                    expected_response_schema_digest: None,
+                    opaque_state_digest: None,
+                    next_poll_at: None,
+                    poll_count: 0,
+                    poll_limit: 0,
+                    callback_binding_digest: None,
+                    deadline: current.deadline.min(parents.run.deadline),
+                };
+                let next = decide_job_wait(
                     &job_projection(&current)?,
                     &domain_job_fence(&command.fence)?,
                     database_now,
                     wake_contract.clone(),
-                )?,
-                Some(wake_contract.clone()),
-            ),
+                )?;
+                let payload = TypedPayload::with_limit(
+                    1,
+                    &StoredTimerWaitPayload {
+                        plan_node_key: source.plan_node_key.clone(),
+                        due_at: timer_deadline,
+                        resolution: None,
+                    },
+                    262_144,
+                )?;
+                (next, Some(wake_contract), Some(payload))
+            }
             OrchestrationYield::Retry { retry_at } => (
                 decide_job_retry(
                     &job_projection(&current)?,
@@ -5437,6 +5513,7 @@ impl PgSchedulerTransaction {
                     database_now,
                     *retry_at,
                 )?,
+                None,
                 None,
             ),
         };
@@ -5454,6 +5531,7 @@ impl PgSchedulerTransaction {
             &next,
             &parents,
             wake_contract,
+            node_payload.as_ref(),
             database_now,
         )
         .await?;
@@ -7204,6 +7282,35 @@ impl PgSchedulerTransaction {
             return Err(RepositoryError::Conflict("orchestration wake first-winner"));
         }
         let parents = lock_waiting_orchestration_job_parents(&mut transaction, &observed).await?;
+        let node_row = sqlx::query(
+            r#"
+            SELECT plan_node_key, payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution' AND state = 'waiting'
+            FOR UPDATE
+            "#,
+        )
+        .bind(&observed.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("waiting Timer Node"))?;
+        let node_payload = payload_from_row(
+            &node_row,
+            "payload_schema_version",
+            "payload",
+            "payload_digest",
+        )?;
+        let mut timer: StoredTimerWaitPayload =
+            decode_typed_payload(&node_payload, "waiting Timer Node")?;
+        if command.source != WakeSource::Timer
+            || timer.plan_node_key != PlanNodeKey::new(node_row.try_get("plan_node_key")?)?
+            || timer.resolution.is_some()
+        {
+            return Err(RepositoryError::Conflict("Timer wake owner evidence"));
+        }
         let current = load_job_for_update_by_text(&mut transaction, &tenant_id, &job_id).await?;
         if current.version != command.expected_job_version
             || current.version != observed.version
@@ -7214,6 +7321,11 @@ impl PgSchedulerTransaction {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
+        if database_now < timer.due_at {
+            return Err(RepositoryError::Conflict("Timer is not due"));
+        }
+        timer.resolution = Some(DurableWaitOutcome::Succeeded);
+        let resolved_node_payload = TypedPayload::with_limit(1, &timer, 262_144)?;
         let next = decide_job_wake(
             &job_projection(&current)?,
             command.expected_wake_generation,
@@ -7225,6 +7337,7 @@ impl PgSchedulerTransaction {
             &current,
             &next,
             &parents,
+            &resolved_node_payload,
             database_now,
         )
         .await?;
@@ -10052,6 +10165,39 @@ async fn require_exact_controller_observation(
     runtime_node: &insight_platform_orchestrator::RuntimeNode,
     observation: &ControllerObservation,
 ) -> Result<(), RepositoryError> {
+    if matches!(runtime_node, RuntimeNode::TimerWait { .. }) {
+        let ControllerObservation::DurableWait {
+            wait_kind: DurableWaitKind::Timer,
+            outcome,
+        } = observation
+        else {
+            return Ok(());
+        };
+        let row = sqlx::query(
+            r#"
+            SELECT payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution' AND state = 'running'
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("running Timer Node"))?;
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let wait: StoredTimerWaitPayload =
+            decode_typed_payload(&payload, "running Timer wait Node")?;
+        if wait.plan_node_key != source_node.plan_node_key || wait.resolution != Some(*outcome) {
+            return Err(RepositoryError::Conflict(
+                "Timer durable observation evidence",
+            ));
+        }
+        return Ok(());
+    }
     if let RuntimeNode::HumanTask {
         definition,
         response,
@@ -14321,6 +14467,7 @@ async fn mutate_yielded_orchestration_job(
     next_job: &JobProjection,
     parents: &LockedOrchestrationJobParents,
     wake_contract: Option<WakeContract>,
+    node_payload: Option<&TypedPayload>,
     database_now: DateTime<Utc>,
 ) -> Result<YieldedOrchestrationJob, RepositoryError> {
     let target_node_state = match next_job.state {
@@ -14385,7 +14532,10 @@ async fn mutate_yielded_orchestration_job(
     let node_version: i64 = sqlx::query_scalar(
         r#"
         UPDATE insight_platform.run_nodes
-        SET state = $4, version = version + 1, retry_at = $5, updated_at = $6
+        SET state = $4, version = version + 1, retry_at = $5,
+            payload_schema_version = COALESCE($7, payload_schema_version),
+            payload = COALESCE($8, payload), payload_digest = COALESCE($9, payload_digest),
+            updated_at = $6
         WHERE tenant_id = $1 AND node_id = $2 AND version = $3
           AND record_kind = 'node_execution' AND state = 'running'
           AND terminal_at IS NULL
@@ -14398,6 +14548,9 @@ async fn mutate_yielded_orchestration_job(
     .bind(target_node_state.as_str())
     .bind(next_job.retry_at)
     .bind(database_now)
+    .bind(node_payload.map(|payload| payload.schema_version))
+    .bind(node_payload.map(|payload| &payload.value))
+    .bind(node_payload.map(|payload| payload.digest.as_str()))
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::Conflict("orchestration Node"))?;
@@ -16050,6 +16203,7 @@ async fn mutate_woken_orchestration_job(
     current_job: &JobRecord,
     next_job: &JobProjection,
     parents: &LockedOrchestrationJobParents,
+    resolved_node_payload: &TypedPayload,
     database_now: DateTime<Utc>,
 ) -> Result<WokenOrchestrationJob, RepositoryError> {
     if next_job.state != JobState::Ready
@@ -16089,6 +16243,7 @@ async fn mutate_woken_orchestration_job(
         r#"
         UPDATE insight_platform.run_nodes
         SET state = 'ready', version = version + 1, retry_at = NULL,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
             updated_at = $4
         WHERE tenant_id = $1 AND node_id = $2 AND version = $3
           AND record_kind = 'node_execution' AND state = 'waiting'
@@ -16100,6 +16255,9 @@ async fn mutate_woken_orchestration_job(
     .bind(&parents.node_id)
     .bind(parents.node_version)
     .bind(database_now)
+    .bind(resolved_node_payload.schema_version)
+    .bind(&resolved_node_payload.value)
+    .bind(&resolved_node_payload.digest)
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::Conflict("waiting orchestration Node"))?;
@@ -21487,14 +21645,14 @@ impl StartOrchestrationJob {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchestrationYield {
-    Wait { wake_contract: WakeContract },
+    TimerWait { plan: RuntimePlan },
     Retry { retry_at: DateTime<Utc> },
 }
 
 impl OrchestrationYield {
     const fn state(&self) -> JobState {
         match self {
-            Self::Wait { .. } => JobState::Waiting,
+            Self::TimerWait { .. } => JobState::Waiting,
             Self::Retry { .. } => JobState::RetryScheduled,
         }
     }
@@ -21566,17 +21724,14 @@ pub struct YieldOrchestrationJob {
 }
 
 impl YieldOrchestrationJob {
-    fn validate(&self) -> Result<(), RepositoryError> {
+    fn validate(&self, plan_limits: PlanLimits) -> Result<(), RepositoryError> {
         self.fence.validate()?;
         self.mutations.validate()?;
-        if self.receipt_expires_at <= Utc::now()
-            || matches!(
-                &self.outcome,
-                OrchestrationYield::Wait { wake_contract }
-                    if wake_contract.generation != u64::try_from(self.fence.lease_epoch)
-                        .unwrap_or_default()
-            )
-        {
+        if let OrchestrationYield::TimerWait { plan } = &self.outcome {
+            plan.validate(plan_limits)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        }
+        if self.receipt_expires_at <= Utc::now() {
             return Err(RepositoryError::InvalidInput(
                 "orchestration yield command is invalid".to_owned(),
             ));
@@ -22371,6 +22526,14 @@ struct StoredHumanTaskWaitPayload {
 struct StoredHumanTaskResolution {
     outcome: DurableWaitOutcome,
     response: Option<ExactRunValueRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredTimerWaitPayload {
+    plan_node_key: PlanNodeKey,
+    due_at: DateTime<Utc>,
+    resolution: Option<DurableWaitOutcome>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
