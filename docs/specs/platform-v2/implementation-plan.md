@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | In Progress / CR-183 contracts accepted; L3～L6 pending |
-| 日期 | 2026-08-24 |
+| 日期 | 2026-08-25 |
 | 合同输入 | 00～18、cross-review CR-181/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
@@ -14,7 +14,7 @@
 
 > CR-183确认Selection document自身不含digest，publication只接受外层`rules_digest == canonical(document)`。
 
-> CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer wait contract也改由exact Plan与数据库时间的owner事务派生。完整Child/Task/Timer独立进程L3与其余external leaf仍待完成。
+> CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope，first-winner与Receipt replay已在fresh PostgreSQL 16 r84通过。完整Child/Task/Timer/Signal独立进程L3、Signal timeout/ingress safety scan及Model/Capability/Context external leaf仍待完成。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则

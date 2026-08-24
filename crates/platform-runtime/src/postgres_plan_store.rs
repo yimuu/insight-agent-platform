@@ -537,26 +537,40 @@ where
         }
     }
 
-    async fn commit_timer_wait(
+    async fn commit_plan_wait(
         &self,
         job: &StartedOrchestrationJob,
         command: DerivedControllerCommit,
+        wait_kind: DurableWaitKind,
     ) -> Result<(), DurablePlanDriverError> {
         if !matches!(
             command.facts.phase,
             DurableControllerPhase::CommittedFacts {
                 observation: insight_platform_orchestrator::ControllerObservation::None
             }
-        ) || !matches!(
-            command.materialized.plan.node(&command.facts.plan_node_key),
-            Ok(RuntimeNode::TimerWait { .. })
+        ) {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        }
+        let exact_node = command
+            .materialized
+            .plan
+            .node(&command.facts.plan_node_key)
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        if !matches!(
+            (wait_kind, exact_node),
+            (DurableWaitKind::Timer, RuntimeNode::TimerWait { .. })
+                | (DurableWaitKind::Signal, RuntimeNode::SignalWait { .. })
         ) {
             return Err(DurablePlanDriverError::InvariantViolation);
         }
         let request_digest: Sha256Digest = canonical_digest(&json!({
             "job_id": command.fence.job_id,
             "lease_generation": command.fence.lease_epoch,
-            "operation": "orchestration.timer.defer",
+            "operation": match wait_kind {
+                DurableWaitKind::Timer => "orchestration.timer.defer",
+                DurableWaitKind::Signal => "orchestration.signal.defer",
+                DurableWaitKind::HumanTask => return Err(DurablePlanDriverError::InvariantViolation),
+            },
             "plan_digest": command.materialized.request.artifact.content_digest(),
         }))
         .map_err(|_| DurablePlanDriverError::InvariantViolation)?
@@ -576,8 +590,16 @@ where
         };
         let wait = YieldOrchestrationJob {
             fence: command.fence,
-            outcome: OrchestrationYield::TimerWait {
-                plan: command.materialized.plan,
+            outcome: match wait_kind {
+                DurableWaitKind::Timer => OrchestrationYield::TimerWait {
+                    plan: command.materialized.plan,
+                },
+                DurableWaitKind::Signal => OrchestrationYield::SignalWait {
+                    plan: command.materialized.plan,
+                },
+                DurableWaitKind::HumanTask => {
+                    return Err(DurablePlanDriverError::InvariantViolation)
+                }
             },
             idempotency_key_digest: self
                 .identities
@@ -735,7 +757,20 @@ where
                 ..
             }
         ) {
-            return self.commit_timer_wait(job, command).await;
+            return self
+                .commit_plan_wait(job, command, DurableWaitKind::Timer)
+                .await;
+        }
+        if matches!(
+            command.decision,
+            insight_platform_orchestrator::ControllerDecision::CreateDurableWait {
+                kind: DurableWaitKind::Signal,
+                ..
+            }
+        ) {
+            return self
+                .commit_plan_wait(job, command, DurableWaitKind::Signal)
+                .await;
         }
         if matches!(
             &command.decision,

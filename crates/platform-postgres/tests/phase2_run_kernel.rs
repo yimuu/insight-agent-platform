@@ -235,6 +235,7 @@ fn runtime_plan() -> RuntimePlan {
     let human_task = PlanNodeKey::new("human_task".to_owned()).unwrap();
     let expiring_task = PlanNodeKey::new("expiring_task".to_owned()).unwrap();
     let timer_wait = PlanNodeKey::new("timer_wait".to_owned()).unwrap();
+    let signal_wait = PlanNodeKey::new("signal_wait".to_owned()).unwrap();
     let raise = PlanNodeKey::new("raise".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 4,
@@ -516,6 +517,21 @@ fn runtime_plan() -> RuntimePlan {
                 timer_wait,
                 RuntimeNode::TimerWait {
                     delay_milliseconds: 200,
+                    resume: finish.clone(),
+                },
+            ),
+            (
+                signal_wait.clone(),
+                RuntimeNode::SignalWait {
+                    signal_key: "release".to_owned(),
+                    payload: Some(
+                        insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
+                            producer_node_id: signal_wait,
+                            port_id: DataPortKey::new("payload".to_owned()).unwrap(),
+                            schema_digest: digest('7'),
+                        },
+                    ),
+                    timeout_milliseconds: 60_000,
                     resume: finish.clone(),
                 },
             ),
@@ -1589,6 +1605,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         expected_job_version: waited.job.version,
         expected_wake_generation: u64::try_from(waited.job.wake_generation).unwrap(),
         source: WakeSource::Timer,
+        signal_key: None,
+        signal_payload: None,
         idempotency_key_digest: digest('a'),
         request_digest: digest('b'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -1793,6 +1811,295 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap(),
         3
     );
+
+    let signal_command = admission(
+        AdmissionIds {
+            run: "run_0198f1c3-9a00-7c3e-b1f3-773c28368100",
+            scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28368101",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28368102",
+            job: "job_0198f1c3-9a00-7c3e-b1f3-773c28368103",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28368104",
+        },
+        audit(TENANT_ID, PRINCIPAL_ID, "8105", '2', '3'),
+        bindings.clone(),
+        Utc::now() + Duration::minutes(5),
+    );
+    applied(run_command!(repository, admit_run, signal_command.clone()).unwrap());
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET plan_node_key = 'signal_wait', node_kind = 'signal_wait'
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(signal_command.entry_node_execution_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The monolithic fixture keeps earlier ready jobs alive for later assertions. Park them while
+    // this isolated Signal lifecycle claims its own ready work item.
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes AS node
+        SET state = 'retry_scheduled', retry_at = clock_timestamp() + interval '1 hour'
+        WHERE node.tenant_id = $1 AND node.state = 'ready'
+          AND EXISTS (
+              SELECT 1 FROM insight_platform.jobs AS job
+              WHERE job.tenant_id = node.tenant_id AND job.node_id = node.node_id
+                AND job.state = 'ready' AND job.job_id <> $2
+          )
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(signal_command.orchestration_job_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'retry_scheduled', retry_at = clock_timestamp() + interval '1 hour'
+        WHERE tenant_id = $1 AND state = 'ready' AND job_id <> $2
+          AND work_class = 'orchestration'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(signal_command.orchestration_job_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let signal_claimed = scheduler
+        .claim_orchestration_jobs(orchestration_claim_with_ids(
+            WORKER_D_ID,
+            '6',
+            "8106",
+            ["8107", "8108", "8109", "810a"],
+            ["810b", "810c", "810d"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(signal_claimed.len(), 1);
+    let signal_start = StartOrchestrationJob {
+        fence: JobFence {
+            tenant_id: TENANT_ID.to_owned(),
+            job_id: signal_claimed[0].job.job_id.clone(),
+            worker_id: id(WORKER_D_ID),
+            lease_epoch: signal_claimed[0].job.lease_epoch,
+            expected_job_version: signal_claimed[0].job.version,
+            lease_token_digest: digest('6'),
+        },
+        receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c2836810e"),
+        idempotency_key_digest: digest('4'),
+        request_digest: digest('5'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836810f"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836810f"),
+        node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368110"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368110"),
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let signal_started = match scheduler
+        .start_orchestration_job(signal_start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("Signal producer start must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    let signal_yield = YieldOrchestrationJob {
+        fence: JobFence {
+            expected_job_version: signal_started.version,
+            ..signal_start.fence
+        },
+        outcome: OrchestrationYield::SignalWait {
+            plan: runtime_plan(),
+        },
+        idempotency_key_digest: digest('6'),
+        request_digest: digest('7'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        mutations: OrchestrationYieldMutationIds {
+            receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c28368111"),
+            quota_entry_ids: ["8112", "8113", "8114", "8115"]
+                .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
+                .to_vec(),
+            run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368116"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368116"),
+            node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368117"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368117"),
+            job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368118"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368118"),
+        },
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let signal_waited = match scheduler
+        .yield_orchestration_job(signal_yield)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("Signal wait must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    assert_eq!(signal_waited.job.wake_kind.as_deref(), Some("signal"));
+    let signal_body = json!({"released": true});
+    let signal_payload = RunInputValue {
+        value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28368119"),
+        classification: DataClassification::Internal,
+        schema_digest: digest('7'),
+        content_digest: canonical_digest(&signal_body).unwrap().parse().unwrap(),
+        value: ValueRef::Inline { value: signal_body },
+    };
+    let mut signal_wake = WakeOrchestrationJob {
+        tenant_id: id(TENANT_ID),
+        job_id: id(&signal_waited.job.job_id),
+        expected_job_version: signal_waited.job.version,
+        expected_wake_generation: u64::try_from(signal_waited.job.wake_generation).unwrap(),
+        source: WakeSource::Signal,
+        signal_key: Some("forged".to_owned()),
+        signal_payload: Some(signal_payload.clone()),
+        idempotency_key_digest: digest('8'),
+        request_digest: digest('9'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        mutations: OrchestrationWakeMutationIds {
+            receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c2836811a"),
+            node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836811b"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836811b"),
+            job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836811c"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836811c"),
+        },
+    };
+    let mut corrupt_signal_wake = signal_wake.clone();
+    corrupt_signal_wake.signal_key = Some("release".to_owned());
+    corrupt_signal_wake
+        .signal_payload
+        .as_mut()
+        .unwrap()
+        .content_digest = digest('0');
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler
+            .wake_orchestration_job(corrupt_signal_wake)
+            .await,
+        Err(RepositoryError::InvalidInput(_))
+    ));
+    scheduler.rollback().await.unwrap();
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler.wake_orchestration_job(signal_wake.clone()).await,
+        Err(RepositoryError::Conflict("Signal wake owner evidence"))
+    ));
+    scheduler.rollback().await.unwrap();
+    signal_wake.signal_key = Some("release".to_owned());
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let signal_woken = match scheduler
+        .wake_orchestration_job(signal_wake.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("Signal wake must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    assert_eq!(signal_woken.job.state, "ready");
+    let signal_node_payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(&signal_woken.node_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        signal_node_payload.pointer("/resolution/outcome"),
+        Some(&json!("succeeded"))
+    );
+    assert_eq!(
+        signal_node_payload.pointer("/resolution/payload/value_id"),
+        Some(&json!(signal_payload.value_id))
+    );
+    let signal_scope_payload: Value = sqlx::query_scalar(
+        r#"
+        SELECT scope.payload
+        FROM insight_platform.run_nodes AS node
+        JOIN insight_platform.run_nodes AS scope
+          ON scope.tenant_id = node.tenant_id AND scope.node_id = node.scope_id
+        WHERE node.tenant_id = $1 AND node.node_id = $2
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&signal_woken.node_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(signal_scope_payload
+        .pointer("/environment/bindings")
+        .and_then(Value::as_array)
+        .unwrap()
+        .iter()
+        .any(|binding| binding.pointer("/value/value_id") == Some(&json!(signal_payload.value_id))));
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler
+            .wake_orchestration_job(signal_wake)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(record) if record.job.state == "ready"
+    ));
+    scheduler.commit().await.unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'ready', retry_at = NULL
+        WHERE tenant_id = $1 AND state = 'retry_scheduled'
+          AND retry_at > clock_timestamp() + interval '50 minutes'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'ready', retry_at = NULL
+        WHERE tenant_id = $1 AND state = 'retry_scheduled'
+          AND retry_at > clock_timestamp() + interval '50 minutes'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The Signal lifecycle is complete; keep its resumed work out of unrelated later fixtures.
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'retry_scheduled', retry_at = clock_timestamp() + interval '1 hour'
+        WHERE tenant_id = $1 AND job_id = $2 AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&signal_woken.job.job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'retry_scheduled', retry_at = clock_timestamp() + interval '1 hour'
+        WHERE tenant_id = $1 AND node_id = $2 AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&signal_woken.node_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let rollback = admission(
         AdmissionIds {

@@ -1682,12 +1682,32 @@ impl PgRepository {
                         outcome,
                     })
             }
+            insight_platform_orchestrator::RuntimeNode::SignalWait {
+                signal_key,
+                payload: payload_port,
+                ..
+            } => {
+                let wait: StoredSignalWaitPayload =
+                    decode_typed_payload(&payload, "running Signal wait Node")?;
+                if wait.plan_node_key != identity.plan_node_key
+                    || wait.signal_key != *signal_key
+                    || wait.payload_port != *payload_port
+                {
+                    return Err(RepositoryError::Conflict(
+                        "Signal wait observation contract",
+                    ));
+                }
+                wait.resolution
+                    .map(|resolution| ControllerObservation::DurableWait {
+                        wait_kind: DurableWaitKind::Signal,
+                        outcome: resolution.outcome,
+                    })
+            }
             insight_platform_orchestrator::RuntimeNode::Start { .. }
             | insight_platform_orchestrator::RuntimeNode::Fork { .. }
             | insight_platform_orchestrator::RuntimeNode::ModelLoop { .. }
             | insight_platform_orchestrator::RuntimeNode::CapabilityCall { .. }
             | insight_platform_orchestrator::RuntimeNode::ContextQuery { .. }
-            | insight_platform_orchestrator::RuntimeNode::SignalWait { .. }
             | insight_platform_orchestrator::RuntimeNode::Return { .. }
             | insight_platform_orchestrator::RuntimeNode::Raise { .. } => {
                 Some(ControllerObservation::None)
@@ -5378,7 +5398,7 @@ impl PgSchedulerTransaction {
     ) -> Result<CommandOutcome<YieldedOrchestrationJob>, RepositoryError> {
         command.validate(self.plan_limits)?;
         let plan_digest = match &command.outcome {
-            OrchestrationYield::TimerWait { plan } => {
+            OrchestrationYield::TimerWait { plan } | OrchestrationYield::SignalWait { plan } => {
                 Some(plan.canonical_digest(self.plan_limits)?)
             }
             OrchestrationYield::Retry { .. } => None,
@@ -5389,6 +5409,7 @@ impl PgSchedulerTransaction {
             &serde_json::json!({
                 "kind": match &command.outcome {
                     OrchestrationYield::TimerWait { .. } => "timer_wait",
+                    OrchestrationYield::SignalWait { .. } => "signal_wait",
                     OrchestrationYield::Retry { .. } => "retry",
                 },
                 "plan_digest": plan_digest,
@@ -5432,22 +5453,32 @@ impl PgSchedulerTransaction {
         )
         .await?;
         let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
-        let timer_source = if let OrchestrationYield::TimerWait { plan } = &command.outcome {
+        let wait_source = if let OrchestrationYield::TimerWait { plan }
+        | OrchestrationYield::SignalWait { plan } = &command.outcome
+        {
             let digest = plan_digest.as_ref().ok_or_else(|| {
                 RepositoryError::CorruptRow("Timer Plan digest missing".to_owned())
             })?;
             require_exact_runtime_plan(&mut transaction, &parents.run, plan, digest).await?;
             let source =
                 load_controller_source_node(&mut transaction, &observed, &parents, plan).await?;
-            let RuntimeNode::TimerWait {
-                delay_milliseconds, ..
-            } = plan.node(&source.plan_node_key)?
-            else {
+            let node = plan.node(&source.plan_node_key)?.clone();
+            let kind_matches = matches!(
+                (&command.outcome, &node),
+                (
+                    OrchestrationYield::TimerWait { .. },
+                    RuntimeNode::TimerWait { .. }
+                ) | (
+                    OrchestrationYield::SignalWait { .. },
+                    RuntimeNode::SignalWait { .. }
+                )
+            );
+            if !kind_matches {
                 return Err(RepositoryError::Conflict(
-                    "orchestration Timer exact Plan node",
+                    "orchestration durable wait exact Plan node",
                 ));
-            };
-            Some((source, *delay_milliseconds))
+            }
+            Some((source, node))
         } else {
             None
         };
@@ -5468,9 +5499,17 @@ impl PgSchedulerTransaction {
             .await?;
         let (next, wake_contract, node_payload) = match &command.outcome {
             OrchestrationYield::TimerWait { .. } => {
-                let (source, delay_milliseconds) = timer_source.as_ref().ok_or_else(|| {
+                let (source, node) = wait_source.as_ref().ok_or_else(|| {
                     RepositoryError::CorruptRow("Timer Plan source missing".to_owned())
                 })?;
+                let RuntimeNode::TimerWait {
+                    delay_milliseconds, ..
+                } = node
+                else {
+                    return Err(RepositoryError::CorruptRow(
+                        "Timer Plan source kind changed".to_owned(),
+                    ));
+                };
                 let timer_deadline = database_now
                     + Duration::milliseconds(i64::try_from(*delay_milliseconds).map_err(|_| {
                         RepositoryError::InvalidInput("Timer delay exceeds i64".to_owned())
@@ -5500,6 +5539,74 @@ impl PgSchedulerTransaction {
                     &StoredTimerWaitPayload {
                         plan_node_key: source.plan_node_key.clone(),
                         due_at: timer_deadline,
+                        resolution: None,
+                    },
+                    262_144,
+                )?;
+                (next, Some(wake_contract), Some(payload))
+            }
+            OrchestrationYield::SignalWait { .. } => {
+                let (source, node) = wait_source.as_ref().ok_or_else(|| {
+                    RepositoryError::CorruptRow("Signal Plan source missing".to_owned())
+                })?;
+                let RuntimeNode::SignalWait {
+                    signal_key,
+                    payload,
+                    timeout_milliseconds,
+                    ..
+                } = node
+                else {
+                    return Err(RepositoryError::CorruptRow(
+                        "Signal Plan source kind changed".to_owned(),
+                    ));
+                };
+                let signal_key_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+                    "signal_key": signal_key,
+                }))
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+                .parse()
+                .map_err(
+                    |failure: insight_platform_contracts::NominalTypeError| {
+                        RepositoryError::InvalidInput(failure.to_string())
+                    },
+                )?;
+                let wake_contract = WakeContract {
+                    kind: insight_platform_jobs::WakeKind::Signal,
+                    generation: u64::try_from(command.fence.lease_epoch).map_err(|_| {
+                        RepositoryError::InvalidInput("Signal wake generation".to_owned())
+                    })?,
+                    accepted_sources: vec![WakeSource::Signal],
+                    expected_response_schema_digest: payload
+                        .as_ref()
+                        .map(|port| port.schema_digest().clone()),
+                    opaque_state_digest: Some(signal_key_digest),
+                    next_poll_at: None,
+                    poll_count: 0,
+                    poll_limit: 0,
+                    callback_binding_digest: None,
+                    deadline: (database_now
+                        + Duration::milliseconds(i64::try_from(*timeout_milliseconds).map_err(
+                            |_| {
+                                RepositoryError::InvalidInput(
+                                    "Signal timeout exceeds i64".to_owned(),
+                                )
+                            },
+                        )?))
+                    .min(current.deadline)
+                    .min(parents.run.deadline),
+                };
+                let next = decide_job_wait(
+                    &job_projection(&current)?,
+                    &domain_job_fence(&command.fence)?,
+                    database_now,
+                    wake_contract.clone(),
+                )?;
+                let payload = TypedPayload::with_limit(
+                    1,
+                    &StoredSignalWaitPayload {
+                        plan_node_key: source.plan_node_key.clone(),
+                        signal_key: signal_key.clone(),
+                        payload_port: payload.clone(),
                         resolution: None,
                     },
                     262_144,
@@ -7012,7 +7119,7 @@ impl PgSchedulerTransaction {
         }
         if let Some(response) = &command.response {
             insert_task_response_value(&mut transaction, &current, &run, node_id, response).await?;
-            bind_human_task_response_to_scope(
+            bind_run_value_to_scope(
                 &mut transaction,
                 &current.tenant_id,
                 &run.run_id,
@@ -7253,10 +7360,18 @@ impl PgSchedulerTransaction {
         &mut self,
         command: WakeOrchestrationJob,
     ) -> Result<CommandOutcome<WokenOrchestrationJob>, RepositoryError> {
-        command.validate()?;
+        command.validate(self.expression_inline_limits)?;
         let tenant_id = command.tenant_id.to_string();
         let job_id = command.job_id.to_string();
         let mut transaction = self.transaction.begin().await?;
+        let signal_payload_evidence = command.signal_payload.as_ref().map(|payload| {
+            serde_json::json!({
+                "classification": payload.classification.as_str(),
+                "content_digest": payload.content_digest,
+                "schema_digest": payload.schema_digest,
+                "value_id": payload.value_id,
+            })
+        });
         let receipt_payload = TypedPayload::with_limit(
             1,
             &serde_json::json!({
@@ -7264,6 +7379,8 @@ impl PgSchedulerTransaction {
                 "expected_wake_generation": command.expected_wake_generation,
                 "job_id": command.job_id,
                 "source": command.source.as_str(),
+                "signal_key": command.signal_key,
+                "signal_payload_evidence": signal_payload_evidence,
             }),
             65_536,
         )?;
@@ -7282,9 +7399,16 @@ impl PgSchedulerTransaction {
             return Err(RepositoryError::Conflict("orchestration wake first-winner"));
         }
         let parents = lock_waiting_orchestration_job_parents(&mut transaction, &observed).await?;
+        let current = load_job_for_update_by_text(&mut transaction, &tenant_id, &job_id).await?;
+        if current.version != command.expected_job_version
+            || current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+        {
+            return Err(RepositoryError::Conflict("waiting orchestration Job"));
+        }
         let node_row = sqlx::query(
             r#"
-            SELECT plan_node_key, payload_schema_version, payload, payload_digest
+            SELECT plan_node_key, scope_id, payload_schema_version, payload, payload_digest
             FROM insight_platform.run_nodes
             WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
               AND record_kind = 'node_execution' AND state = 'waiting'
@@ -7296,36 +7420,99 @@ impl PgSchedulerTransaction {
         .bind(&parents.node_id)
         .fetch_optional(&mut *transaction)
         .await?
-        .ok_or(RepositoryError::Conflict("waiting Timer Node"))?;
+        .ok_or(RepositoryError::Conflict("waiting durable-wait Node"))?;
         let node_payload = payload_from_row(
             &node_row,
             "payload_schema_version",
             "payload",
             "payload_digest",
         )?;
-        let mut timer: StoredTimerWaitPayload =
-            decode_typed_payload(&node_payload, "waiting Timer Node")?;
-        if command.source != WakeSource::Timer
-            || timer.plan_node_key != PlanNodeKey::new(node_row.try_get("plan_node_key")?)?
-            || timer.resolution.is_some()
-        {
-            return Err(RepositoryError::Conflict("Timer wake owner evidence"));
-        }
-        let current = load_job_for_update_by_text(&mut transaction, &tenant_id, &job_id).await?;
-        if current.version != command.expected_job_version
-            || current.version != observed.version
-            || current.payload.digest != observed.payload.digest
-        {
-            return Err(RepositoryError::Conflict("waiting orchestration Job"));
-        }
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
-        if database_now < timer.due_at {
-            return Err(RepositoryError::Conflict("Timer is not due"));
-        }
-        timer.resolution = Some(DurableWaitOutcome::Succeeded);
-        let resolved_node_payload = TypedPayload::with_limit(1, &timer, 262_144)?;
+        let stored_plan_node_key = PlanNodeKey::new(node_row.try_get("plan_node_key")?)?;
+        let resolved_node_payload = match current.wake_kind.as_deref() {
+            Some("timer") => {
+                let mut timer: StoredTimerWaitPayload =
+                    decode_typed_payload(&node_payload, "waiting Timer Node")?;
+                if command.source != WakeSource::Timer
+                    || command.signal_key.is_some()
+                    || command.signal_payload.is_some()
+                    || timer.plan_node_key != stored_plan_node_key
+                    || timer.resolution.is_some()
+                {
+                    return Err(RepositoryError::Conflict("Timer wake owner evidence"));
+                }
+                if database_now < timer.due_at {
+                    return Err(RepositoryError::Conflict("Timer is not due"));
+                }
+                timer.resolution = Some(DurableWaitOutcome::Succeeded);
+                TypedPayload::with_limit(1, &timer, 262_144)?
+            }
+            Some("signal") => {
+                let mut signal: StoredSignalWaitPayload =
+                    decode_typed_payload(&node_payload, "waiting Signal Node")?;
+                if command.source != WakeSource::Signal
+                    || command.signal_key.as_deref() != Some(signal.signal_key.as_str())
+                    || signal.plan_node_key != stored_plan_node_key
+                    || signal.resolution.is_some()
+                    || signal.payload_port.is_some() != command.signal_payload.is_some()
+                {
+                    return Err(RepositoryError::Conflict("Signal wake owner evidence"));
+                }
+                let payload_reference =
+                    command
+                        .signal_payload
+                        .as_ref()
+                        .map(|payload| ExactRunValueRef {
+                            value_id: payload.value_id.clone(),
+                            schema_digest: payload.schema_digest.clone(),
+                            content_digest: payload.content_digest.clone(),
+                        });
+                if signal
+                    .payload_port
+                    .as_ref()
+                    .zip(payload_reference.as_ref())
+                    .is_some_and(|(port, payload)| payload.schema_digest != *port.schema_digest())
+                {
+                    return Err(RepositoryError::Conflict("Signal payload schema evidence"));
+                }
+                if let (Some(port), Some(payload), Some(reference)) = (
+                    signal.payload_port.as_ref(),
+                    command.signal_payload.as_ref(),
+                    payload_reference.as_ref(),
+                ) {
+                    insert_signal_payload_value(
+                        &mut transaction,
+                        &current.tenant_id,
+                        &parents.run.run_id,
+                        &parents.node_id,
+                        payload,
+                    )
+                    .await?;
+                    bind_run_value_to_scope(
+                        &mut transaction,
+                        &current.tenant_id,
+                        &parents.run.run_id,
+                        node_row.try_get("scope_id")?,
+                        port,
+                        reference,
+                        self.scope_environment_limits,
+                    )
+                    .await?;
+                }
+                signal.resolution = Some(StoredSignalResolution {
+                    outcome: DurableWaitOutcome::Succeeded,
+                    payload: payload_reference,
+                });
+                TypedPayload::with_limit(1, &signal, 262_144)?
+            }
+            _ => {
+                return Err(RepositoryError::Conflict(
+                    "unsupported orchestration wake kind",
+                ))
+            }
+        };
         let next = decide_job_wake(
             &job_projection(&current)?,
             command.expected_wake_generation,
@@ -10165,6 +10352,52 @@ async fn require_exact_controller_observation(
     runtime_node: &insight_platform_orchestrator::RuntimeNode,
     observation: &ControllerObservation,
 ) -> Result<(), RepositoryError> {
+    if let RuntimeNode::SignalWait {
+        signal_key,
+        payload: payload_port,
+        ..
+    } = runtime_node
+    {
+        let ControllerObservation::DurableWait {
+            wait_kind: DurableWaitKind::Signal,
+            outcome,
+        } = observation
+        else {
+            return Ok(());
+        };
+        let row = sqlx::query(
+            r#"
+            SELECT payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution' AND state = 'running'
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("running Signal Node"))?;
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let wait: StoredSignalWaitPayload =
+            decode_typed_payload(&payload, "running Signal wait Node")?;
+        let resolution = wait
+            .resolution
+            .ok_or(RepositoryError::Conflict("unresolved Signal observation"))?;
+        if wait.plan_node_key != source_node.plan_node_key
+            || wait.signal_key != *signal_key
+            || wait.payload_port != *payload_port
+            || resolution.outcome != *outcome
+            || wait.payload_port.is_some() != resolution.payload.is_some()
+        {
+            return Err(RepositoryError::Conflict(
+                "Signal durable observation evidence",
+            ));
+        }
+        return Ok(());
+    }
     if matches!(runtime_node, RuntimeNode::TimerWait { .. }) {
         let ControllerObservation::DurableWait {
             wait_kind: DurableWaitKind::Timer,
@@ -15950,7 +16183,49 @@ async fn insert_task_response_value(
     Ok(())
 }
 
-async fn bind_human_task_response_to_scope(
+async fn insert_signal_payload_value(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    run_id: &str,
+    node_id: &str,
+    payload: &RunInputValue,
+) -> Result<(), RepositoryError> {
+    let tenant: ResourceId =
+        tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    if let ValueRef::Artifact { artifact } = &payload.value {
+        require_ready_run_artifact(transaction, &tenant, artifact).await?;
+    }
+    let (inline_value, artifact_id) = match &payload.value {
+        ValueRef::Inline { value } => (Some(value), None),
+        ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_values (
+            tenant_id, value_id, run_id, node_id, value_kind, classification,
+            schema_digest, content_digest, inline_value, artifact_id
+        ) VALUES ($1, $2, $3, $4, 'signal_payload', $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(payload.value_id.to_string())
+    .bind(run_id)
+    .bind(node_id)
+    .bind(payload.classification.as_str())
+    .bind(payload.schema_digest.to_string())
+    .bind(payload.content_digest.to_string())
+    .bind(inline_value)
+    .bind(artifact_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn bind_run_value_to_scope(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     run_id: &str,
@@ -15975,7 +16250,7 @@ async fn bind_human_task_response_to_scope(
     .bind(scope_id)
     .fetch_optional(&mut **transaction)
     .await?
-    .ok_or(RepositoryError::Conflict("HumanTask response Scope"))?;
+    .ok_or(RepositoryError::Conflict("durable-wait value Scope"))?;
     let payload = payload_from_row(
         &scope,
         "payload_schema_version",
@@ -15989,20 +16264,20 @@ async fn bind_human_task_response_to_scope(
         "root" => {
             root = Some(decode_typed_payload::<StoredRootScopePayload>(
                 &payload,
-                "HumanTask root Scope",
+                "durable-wait root Scope",
             )?);
             &mut root.as_mut().expect("root Scope assigned").environment
         }
         "parallel_leg" | "loop_iteration" | "map_item" => {
             let value = decode_typed_payload::<StoredControllerScopePayload>(
                 &payload,
-                "HumanTask controller Scope",
+                "durable-wait controller Scope",
             )?;
             if scope.try_get::<Option<String>, _>("parent_node_id")?
                 != Some(value.controller_node_execution_id.to_string())
             {
                 return Err(RepositoryError::CorruptRow(
-                    "HumanTask Scope controller owner differs".to_owned(),
+                    "durable-wait Scope controller owner differs".to_owned(),
                 ));
             }
             nested = Some(value);
@@ -16013,19 +16288,19 @@ async fn bind_human_task_response_to_scope(
         }
         _ => {
             return Err(RepositoryError::CorruptRow(
-                "HumanTask Scope kind is unregistered".to_owned(),
+                "durable-wait Scope kind is unregistered".to_owned(),
             ))
         }
     };
     environment
         .bind_new(response_port.clone(), response.clone(), limits)
-        .map_err(|_| RepositoryError::Conflict("HumanTask response Scope binding"))?;
+        .map_err(|_| RepositoryError::Conflict("durable-wait value Scope binding"))?;
     let next_payload = match (root, nested) {
         (Some(root), None) => TypedPayload::with_limit(1, &root, 262_144)?,
         (None, Some(nested)) => TypedPayload::with_limit(1, &nested, 262_144)?,
         _ => {
             return Err(RepositoryError::CorruptRow(
-                "HumanTask Scope payload variant is ambiguous".to_owned(),
+                "durable-wait Scope payload variant is ambiguous".to_owned(),
             ))
         }
     };
@@ -16048,7 +16323,7 @@ async fn bind_human_task_response_to_scope(
     .execute(&mut **transaction)
     .await?;
     if updated.rows_affected() != 1 {
-        return Err(RepositoryError::Conflict("HumanTask response Scope CAS"));
+        return Err(RepositoryError::Conflict("durable-wait value Scope CAS"));
     }
     Ok(())
 }
@@ -21646,13 +21921,14 @@ impl StartOrchestrationJob {
 #[serde(rename_all = "snake_case")]
 pub enum OrchestrationYield {
     TimerWait { plan: RuntimePlan },
+    SignalWait { plan: RuntimePlan },
     Retry { retry_at: DateTime<Utc> },
 }
 
 impl OrchestrationYield {
     const fn state(&self) -> JobState {
         match self {
-            Self::TimerWait { .. } => JobState::Waiting,
+            Self::TimerWait { .. } | Self::SignalWait { .. } => JobState::Waiting,
             Self::Retry { .. } => JobState::RetryScheduled,
         }
     }
@@ -21727,7 +22003,9 @@ impl YieldOrchestrationJob {
     fn validate(&self, plan_limits: PlanLimits) -> Result<(), RepositoryError> {
         self.fence.validate()?;
         self.mutations.validate()?;
-        if let OrchestrationYield::TimerWait { plan } = &self.outcome {
+        if let OrchestrationYield::TimerWait { plan } | OrchestrationYield::SignalWait { plan } =
+            &self.outcome
+        {
             plan.validate(plan_limits)
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         }
@@ -22534,6 +22812,22 @@ struct StoredTimerWaitPayload {
     plan_node_key: PlanNodeKey,
     due_at: DateTime<Utc>,
     resolution: Option<DurableWaitOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSignalWaitPayload {
+    plan_node_key: PlanNodeKey,
+    signal_key: String,
+    payload_port: Option<ExactDataPortRef>,
+    resolution: Option<StoredSignalResolution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSignalResolution {
+    outcome: DurableWaitOutcome,
+    payload: Option<ExactRunValueRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -23455,6 +23749,8 @@ pub struct WakeOrchestrationJob {
     pub expected_job_version: i64,
     pub expected_wake_generation: u64,
     pub source: WakeSource,
+    pub signal_key: Option<String>,
+    pub signal_payload: Option<RunInputValue>,
     pub idempotency_key_digest: Sha256Digest,
     pub request_digest: Sha256Digest,
     pub receipt_expires_at: DateTime<Utc>,
@@ -23769,17 +24065,22 @@ pub struct ConvergedOrchestrationRun {
 }
 
 impl WakeOrchestrationJob {
-    fn validate(&self) -> Result<(), RepositoryError> {
+    fn validate(&self, inline_limits: JsonLimits) -> Result<(), RepositoryError> {
         self.mutations.validate()?;
         if self.tenant_id.kind() != ResourceKind::Tenant
             || self.job_id.kind() != ResourceKind::Job
             || self.expected_job_version <= 0
             || self.expected_wake_generation == 0
             || self.receipt_expires_at <= Utc::now()
+            || (self.source == WakeSource::Signal) != (self.signal_key.is_some())
+            || (self.source != WakeSource::Signal && self.signal_payload.is_some())
         {
             return Err(RepositoryError::InvalidInput(
                 "orchestration wake command is invalid".to_owned(),
             ));
+        }
+        if let Some(payload) = &self.signal_payload {
+            payload.validate(inline_limits)?;
         }
         Ok(())
     }
