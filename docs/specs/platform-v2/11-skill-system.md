@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
+| 状态 | Draft / Architecture Revision CR-181 |
 | 日期 | 2026-08-07 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) |
 | 直接下游 | 12、17、18 |

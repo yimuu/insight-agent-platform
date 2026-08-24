@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-180 |
+| 状态 | Draft / Architecture Revision CR-181 |
 | 日期 | 2026-08-24 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |

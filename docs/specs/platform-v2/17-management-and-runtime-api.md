@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-180 |
+| 状态 | Draft / Architecture Revision CR-181 |
 | 日期 | 2026-08-23 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |

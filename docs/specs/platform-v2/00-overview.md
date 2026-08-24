@@ -2,10 +2,15 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-180 |
+| 状态 | Draft / Architecture Revision CR-181 |
 | 日期 | 2026-08-24 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
+
+> 2026-08-24 implementation feedback（CR-181）：production Scheduler接入外部叶节点时确认Plan v3仅为
+> `ModelLoop/CapabilityCall/ContextQuery/ChildAgentCall/HumanTask/TimerWait/SignalWait`保存`resume`，无法从冻结Plan
+> 推导exact slot、输入输出port、预算、deadline或durable wait合同。CR-181按05→06～18顺序补齐closed node payload并将
+> 未发布Typed Plan wire提升为version 4；在00～18 cross-review关闭前暂停Implementation Authorization。
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
 
 > `Platform v2` 是架构代号，不是公共 API 版本。目标系统会在 clean replacement 后直接占用 `/v1` 和

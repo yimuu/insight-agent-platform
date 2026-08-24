@@ -1,10 +1,14 @@
-# Platform v2 四阶段实现计划（CR-180）
+# Platform v2 四阶段实现计划（CR-181）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-180 contracts accepted; L4～L6 pending |
+| 状态 | Paused / CR-181 Architecture Revision; implementation authorization withdrawn |
 | 日期 | 2026-08-24 |
-| 合同输入 | 00～18、cross-review CR-180/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-181/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+
+> 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload，CR-181已重新打开05～18与cross-review。
+> 在受影响合同恢复Reviewed/Accepted前，本计划不授权继续实现Leaf/Task/Subagent dispatch；已通过的CR-180 terminal
+> authority实现和证据保留，不回退。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则

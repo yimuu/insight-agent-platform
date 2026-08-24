@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-180 |
+| 状态 | Draft / Architecture Revision CR-181 |
 | 日期 | 2026-08-24 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -13,6 +13,10 @@
 > 2026-08-24 implementation feedback（CR-180）：Run terminal接线时确认无字段的`Return`/`Raise`无法从冻结Plan确定
 > final value或safe Failure，而06要求Succeeded/Failed各自拥有typed terminal authority。CR-180将两者收紧为exact data-port
 > consumer并把未发布Plan wire提升为version 3；调用方和Worker不得提交自由terminal正文或schema。
+
+> 2026-08-24 implementation feedback（CR-181）：外部叶节点接线时确认Plan v3只保存`resume`，不能确定exact dependency
+> slot、输入输出port、预算、deadline或等待合同。CR-181补齐全部external leaf payload，并把未发布Plan wire提升为version 4；
+> Scheduler只可从exact Plan、RunBindings和已提交RunValue构造下游命令。
 
 ## 1. 决策摘要
 
@@ -254,11 +258,99 @@ struct ReturnNode { value: ExactDataPortRef }
 struct RaiseNode { failure: ExactDataPortRef }
 ```
 
+External leaf使用同一条exact data contract：`input`引用当前词法Scope中已经提交的RunValue，`output`必须是producer等于
+当前node的`NodeOutput`。`output`的schema在publication时与slot所绑定Interface的output/response schema完全一致；下游
+terminal result只授权owner transaction写该port，Worker、provider callback和API均不能另选port、schema或classification。
+
+```rust
+struct ModelLoopNode {
+    model_slot_id: SlotId,
+    skill_slot_ids: Vec<SlotId>,
+    capability_slot_ids: Vec<SlotId>,
+    input: ExactDataPortRef,
+    output: ExactDataPortRef,
+    max_rounds: u16,
+    max_capability_calls: u32,
+    max_parallel_calls_per_round: u16,
+    token_budget: u64,
+    resume: PlanNodeId,
+}
+
+struct CapabilityCallNode {
+    capability_slot_id: SlotId,
+    input: ExactDataPortRef,
+    output: ExactDataPortRef,
+    attempt_limit: u16,
+    retry_backoff_milliseconds: u64,
+    resume: PlanNodeId,
+}
+
+struct ContextQueryNode {
+    context_slot_id: SlotId,
+    request: ExactDataPortRef,
+    result: ExactDataPortRef,
+    maximum_items: u32,
+    resume: PlanNodeId,
+}
+
+struct ChildAgentCallNode {
+    child_agent_slot_id: SlotId,
+    input: ExactDataPortRef,
+    output: ExactDataPortRef,
+    budget: ChildBudgetLimit,
+    cancellation_policy: CascadeAndWait | CascadeWithDeadline,
+    attempt_limit: u16,
+    retry_backoff_milliseconds: u64,
+    resume: PlanNodeId,
+}
+
+struct ChildBudgetLimit {
+    maximum_duration_milliseconds: u64,
+    maximum_model_tokens: u64,
+    maximum_capability_calls: u32,
+    maximum_artifact_bytes: u64,
+    maximum_descendant_runs: u32,
+}
+
+struct HumanTaskNode {
+    definition: HumanTaskDefinition,
+    prompt: ExactDataPortRef,
+    response: ExactDataPortRef,
+    timeout_milliseconds: u64,
+    resume: PlanNodeId,
+}
+
+struct TimerWaitNode {
+    delay_milliseconds: u64,
+    resume: PlanNodeId,
+}
+
+struct SignalWaitNode {
+    signal_key: BoundedName,
+    payload: Option<ExactDataPortRef>,
+    timeout_milliseconds: u64,
+    resume: PlanNodeId,
+}
+```
+
+`HumanTaskDefinition`是06/Task owner的closed、versioned definition snapshot，至少冻结`TaskKind`、safe prompt key、assignment/
+claim policy和response schema digest；不得把自由prompt正文、principal discovery或opaque assignment JSON塞进Plan。`ChildBudgetLimit`
+冻结duration、model token、Capability call、Artifact bytes与descendant Run上限；实际child deadline取parent remaining deadline与node首次
+Running数据库时间加`maximum_duration_milliseconds`的较小值，随后形成08的absolute `ChildBudget.deadline`；
+Timer/Task/Signal timeout从node首次Running的数据库时间计算且不得越过Run deadline。Signal无payload时不声明output；
+有payload时该port必须由当前Signal node产生并由signal owner transaction按schema写入。
+
+所有slot ID必须存在于同一Plan的`dependency_slots`且variant匹配；ModelLoop的skill/capability slot规范排序且不重复。所有数值预算
+必须非零、不超过18的effective HardLimitProfile；`output/result/response/payload` producer必须是当前node；所有input schema必须与
+exact bound Interface input schema一致。publication同时验证输入port在node路径可达、output port只声明一次、resume可达且不会越过
+结构化region。运行时selection只能在RunBindings对应slot已冻结的candidate集合中执行其exact Selection Policy，并在owner transaction
+重验选择；没有candidate、policy不确定或binding漂移均稳定失败，不能追随active head。
+
 `Compute.assignments`必须按拓扑排序且每个output port只写一次；Branch按声明顺序执行并始终有`otherwise`；Map的`items`
 输出必须是有界array；Loop的`condition`输出必须是non-null boolean。表达式所需input port是Node readiness条件的一部分。
 Map `item_port`必须是producer等于当前Map node的`NodeOutput` ref并冻结element schema digest；Compiler/publication必须从items
 array schema验证其element schema完全一致，不能在runtime从array digest猜测、复用array schema或接受caller声明。该wire变更将未发布
-Typed Plan `plan_version`提升为3，version 1/2不进入clean-cut target。`Return.value`必须在其词法Scope可达，schema digest必须等于
+Typed Plan `plan_version`提升为4，version 1/2/3不进入clean-cut target。`Return.value`必须在其词法Scope可达，schema digest必须等于
 exact Agent Interface Revision的`output_schema.canonical_digest`；`Raise.failure`同样必须可达并等于该Interface的
 `error_schema` canonical digest，且物化正文必须能解码为平台safe `Failure` nominal type。Compiler/publication拒绝RunInput/NodeOutput
 owner不合法、schema不等、跨结构化region或无法在该terminal路径到达的port。
