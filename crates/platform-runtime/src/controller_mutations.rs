@@ -6,8 +6,32 @@ use insight_platform_postgres::repository::{
     ControllerActivationSlot, ControllerLoopRolloverSlot, ControllerMutationRequirements,
     ControllerPendingNodeSlot, ControllerPendingWakeSlot, ControllerRemainderCancellationSlot,
     ControllerScopeSlot, ControllerStepMutationIds, ControllerStructuralExitSlot,
-    ControllerStructuralRequirement, MAX_ORCHESTRATION_QUOTA_LINES,
+    ControllerStructuralRequirement, OrchestrationTerminalMutationIds,
+    MAX_ORCHESTRATION_QUOTA_LINES,
 };
+
+pub fn allocate_orchestration_terminal_mutations(
+    identities: &impl CoordinatorIdentityFactory,
+) -> Result<OrchestrationTerminalMutationIds, IdentityFactoryError> {
+    Ok(OrchestrationTerminalMutationIds {
+        receipt_id: new_id(identities, ResourceKind::Receipt)?,
+        quota_entry_ids: allocate_ids(
+            identities,
+            ResourceKind::QuotaLedgerEntry,
+            MAX_ORCHESTRATION_QUOTA_LINES,
+        )?,
+        run_event_id: new_id(identities, ResourceKind::Event)?,
+        run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        node_event_id: new_id(identities, ResourceKind::Event)?,
+        node_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        scope_closing_event_id: new_id(identities, ResourceKind::Event)?,
+        scope_closing_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        scope_terminal_event_id: new_id(identities, ResourceKind::Event)?,
+        scope_terminal_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        job_event_id: new_id(identities, ResourceKind::Event)?,
+        job_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+    })
+}
 
 pub fn allocate_controller_step_mutations(
     identities: &impl CoordinatorIdentityFactory,

@@ -98,8 +98,9 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    CR-180的Plan version 3 wire、Return/Raise exact terminal port、producer/reachability负向，以及Agent Revision完整input/output/error
    `ClosedJsonSchema` authority已经实现；runtime Plan绑定重验terminal port与exact output/error schema digest。Plan terminal owner transaction
    现已从open lexical Scope重解析existing RunValue并重验value/schema/content/classification与正文，以同一事务提交Run/Node/Scope/Job、
-   quota、Receipt/Event/Outbox；fresh PostgreSQL覆盖Inline Return、wrong value整批回滚和Receipt replay。Artifact Data RPC materializer、
-   Raise safe Failure正负fixture及production handler接线仍未完成，因此不能计入完整Phase 2 terminal证据。
+   quota、Receipt/Event/Outbox；fresh PostgreSQL覆盖Inline Return、wrong value整批回滚和Receipt replay。正式PostgreSQL durable store与
+   coordinator现已把claim/start、Plan materialization、Start commit、Return RunValue materialization和Run Succeeded串成同一链。
+   Artifact Data RPC terminal materializer及Raise safe Failure正负fixture仍未完成，因此不能计入完整Phase 2 terminal证据。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

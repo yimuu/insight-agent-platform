@@ -85,8 +85,15 @@ fn agent_schema() -> ClosedJsonSchema {
     ClosedJsonSchema::build(json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "properties": {},
-        "required": [],
+        "properties": {
+            "question": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 1024,
+                "x-platform-max-bytes": 4096
+            }
+        },
+        "required": ["question"],
         "additionalProperties": false
     }))
     .unwrap()
@@ -676,7 +683,15 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                 .fetch_one(bulkheads.critical_control_pool())
                 .await
                 .unwrap();
-                if source_state == "succeeded" {
+                let run_state: String = sqlx::query_scalar(
+                    "SELECT state FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+                )
+                .bind(TENANT_ID)
+                .bind(RUN_ID)
+                .fetch_one(bulkheads.critical_control_pool())
+                .await
+                .unwrap();
+                if source_state == "succeeded" && run_state == "succeeded" {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -698,10 +713,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         .await
         .unwrap();
         assert_eq!(activated.0, "finish");
-        assert!(matches!(
-            activated.1.as_str(),
-            "ready" | "leased" | "running" | "retry_scheduled"
-        ));
+        assert_eq!(activated.1, "succeeded");
         let materializing_exit = materializing_coordinator.shutdown().await.unwrap();
         assert!(materializing_exit.snapshot.settled_generations >= 1);
         bulkheads.close().await;
@@ -865,7 +877,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
             INTERFACE_ID,
             "agent_interface_revision",
             digest('b'),
-            &empty,
+            &agent_plan_payload,
         ),
         (
             PLAN_ID,
@@ -1067,7 +1079,7 @@ async fn admit_run(repository: &PgRepository, bindings: RunBindingsSnapshot) -> 
         input: RunInputValue {
             value_id: id(VALUE_ID),
             classification: DataClassification::Internal,
-            schema_digest: digest('d'),
+            schema_digest: agent_schema().canonical_digest,
             content_digest: canonical_digest(&input).unwrap().parse().unwrap(),
             value: ValueRef::Inline { value: input },
         },

@@ -1,19 +1,21 @@
 //! PostgreSQL-backed durable Plan-generation store.
 
 use crate::{
-    allocate_controller_step_mutations, CoordinatorIdentityFactory, DerivedControllerCommit,
-    DurableControllerFacts, DurableControllerPhase, DurablePlanDriverError,
-    DurablePlanGenerationStore, GenerationHandoffReason, StartedOrchestrationJob,
+    allocate_controller_step_mutations, allocate_orchestration_terminal_mutations,
+    CoordinatorIdentityFactory, DerivedControllerCommit, DurableControllerFacts,
+    DurableControllerPhase, DurablePlanDriverError, DurablePlanGenerationStore,
+    GenerationHandoffReason, StartedOrchestrationJob,
 };
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{canonical_digest, ClosedJsonValue, ResourceKind, ValueRef};
 use insight_platform_orchestrator::{CommittedExpressionInput, RuntimeNode, RuntimePlan};
 use insight_platform_postgres::repository::{
-    ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep, ControllerFacts,
-    DerivedExpressionFailureEvidence, FailOrchestrationJob, JobFence, OrchestrationFailureCause,
-    OrchestrationYield, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
-    ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+    ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep, CommitPlanTerminal,
+    ControllerFacts, DerivedExpressionFailureEvidence, FailOrchestrationJob, JobFence,
+    MaterializedTerminalValue, OrchestrationFailureCause, OrchestrationYield,
+    OrchestrationYieldMutationIds, PgRepository, RepositoryError, ResolvedExpressionInput,
+    YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -166,6 +168,79 @@ where
             (DurableControllerPhase::CommittedFacts { .. }, None) => None,
             _ => return Err(DurablePlanDriverError::InvariantViolation),
         };
+        if matches!(
+            &command.decision,
+            insight_platform_orchestrator::ControllerDecision::CompleteRun { .. }
+                | insight_platform_orchestrator::ControllerDecision::FailRun { .. }
+        ) {
+            if derived.is_some() {
+                return Err(DurablePlanDriverError::InvariantViolation);
+            }
+            let resolved = self
+                .repository
+                .load_plan_terminal_value(&command.fence, &command.materialized.plan)
+                .await
+                .map_err(classify_repository_failure)?;
+            let materialized = self.materializer.materialize(&resolved).await.map_err(
+                |failure| match failure {
+                    RunValueMaterializationError::Unavailable => {
+                        DurablePlanDriverError::Unavailable
+                    }
+                    RunValueMaterializationError::Integrity => {
+                        DurablePlanDriverError::InvariantViolation
+                    }
+                },
+            )?;
+            let request_digest = canonical_digest(&json!({
+                "content_digest": resolved.content_digest,
+                "job_id": command.fence.job_id,
+                "lease_generation": command.fence.lease_epoch,
+                "operation": "orchestration.plan_terminal.commit",
+                "plan_digest": command.materialized.request.artifact.content_digest(),
+                "schema_digest": resolved.schema_digest,
+                "value_id": resolved.run_value_id,
+            }))
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+            .parse()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+            let terminal = CommitPlanTerminal {
+                fence: command.fence,
+                plan: command.materialized.plan,
+                value: MaterializedTerminalValue {
+                    value_id: resolved.run_value_id,
+                    classification: resolved.classification,
+                    schema_digest: resolved.schema_digest,
+                    content_digest: resolved.content_digest,
+                    body: materialized.value,
+                },
+                idempotency_key_digest: self
+                    .identities
+                    .new_lease_token_digest()
+                    .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+                request_digest,
+                receipt_expires_at: job.started().deadline,
+                mutations: allocate_orchestration_terminal_mutations(self.identities.as_ref())
+                    .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            };
+            let mut transaction = self
+                .repository
+                .begin_scheduler_transaction()
+                .await
+                .map_err(classify_repository_failure)?;
+            return match transaction.commit_plan_terminal(terminal).await {
+                Ok(_) => transaction
+                    .commit()
+                    .await
+                    .map_err(classify_repository_failure),
+                Err(failure) => {
+                    transaction
+                        .rollback()
+                        .await
+                        .map_err(classify_repository_failure)?;
+                    Err(classify_repository_failure(failure))
+                }
+            };
+        }
         let controller_failure = matches!(
             command.decision,
             insight_platform_orchestrator::ControllerDecision::FailNode { .. }

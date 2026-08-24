@@ -1593,6 +1593,106 @@ impl PgRepository {
         }
     }
 
+    /// Resolves the one immutable RunValue selected by the currently running Return/Raise node.
+    /// Artifact-backed values remain references here so the Scheduler can materialize them outside
+    /// the database transaction; `commit_plan_terminal` repeats every authority check.
+    pub async fn load_plan_terminal_value(
+        &self,
+        fence: &JobFence,
+        plan: &RuntimePlan,
+    ) -> Result<ResolvedExpressionInput, RepositoryError> {
+        fence.validate()?;
+        plan.validate(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let plan_digest = plan
+            .canonical_digest(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let job = load_job_by_text(&mut transaction, &fence.tenant_id, &fence.job_id).await?;
+        require_orchestration_job(&job)?;
+        require_exact_running_job_fence(&job, fence, database_now)?;
+        let run_id: ResourceId = job
+            .run_id
+            .as_deref()
+            .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+        let tenant_id: ResourceId = fence.tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let run = load_run(&mut transaction, &tenant_id, &run_id).await?;
+        require_exact_runtime_plan(&mut transaction, &run, plan, &plan_digest).await?;
+        let node_id = job.node_id.as_deref().ok_or_else(|| {
+            RepositoryError::CorruptRow("orchestration Job has no Node".to_owned())
+        })?;
+        let row = sqlx::query(
+            r#"
+            SELECT plan_node_key, node_kind, scope_id
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution' AND state = 'running'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(run_id.to_string())
+        .bind(node_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("running terminal Node"))?;
+        let plan_node_key = PlanNodeKey::new(row.try_get("plan_node_key")?)?;
+        let node = plan.node(&plan_node_key)?;
+        let node_kind: PlanNodeKind = row
+            .try_get::<String, _>("node_kind")?
+            .parse::<PlanNodeKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if node.kind() != node_kind {
+            return Err(RepositoryError::Conflict("terminal Plan binding"));
+        }
+        let port = match node {
+            insight_platform_orchestrator::RuntimeNode::Return { value } => value.clone(),
+            insight_platform_orchestrator::RuntimeNode::Raise { failure } => failure.clone(),
+            _ => return Err(RepositoryError::Conflict("running Node is not terminal")),
+        };
+        let scope_id: ResourceId = row.try_get::<String, _>("scope_id")?.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let environments = load_scope_environment_chain(
+            &mut transaction,
+            &tenant_id,
+            &run_id,
+            &scope_id,
+            self.scope_environment_limits,
+        )
+        .await?;
+        let references = insight_platform_orchestrator::resolve_scope_inputs(
+            std::slice::from_ref(&port),
+            &environments,
+            self.scope_environment_limits,
+        )?;
+        let mut values = load_resolved_expression_values(
+            &mut transaction,
+            &tenant_id,
+            &run_id,
+            vec![port],
+            references,
+        )
+        .await?;
+        let value = values
+            .pop()
+            .ok_or_else(|| RepositoryError::CorruptRow("terminal RunValue missing".to_owned()))?;
+        transaction.commit().await?;
+        Ok(value)
+    }
+
     /// Plans the exact identity-slot shape for one controller commit from the same durable facts
     /// that the owner transaction will revalidate. This method never allocates identities and
     /// never mutates business state; callers may only use the returned bounded shape to allocate
