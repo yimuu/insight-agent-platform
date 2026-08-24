@@ -7,12 +7,13 @@ use insight_platform_postgres::artifact_repository::{
     ArtifactRecoverySlot, DriveExpiredArtifactJobs, RecoveredArtifactJob,
 };
 use insight_platform_postgres::repository::{
-    ConvergedOrchestrationRun, DriveDueOrchestrationRetries, DriveExpiredOrchestrationJobs,
-    DriveExpiredOrchestrationTasks, DriveOrchestrationConvergence, DueOrchestrationRetrySlot,
-    ExpiredOrchestrationRecoverySlot, ExpiredOrchestrationTaskSlot, OrchestrationConvergenceSlot,
+    ConvergedOrchestrationRun, DriveDueOrchestrationRetries, DriveDueOrchestrationWaits,
+    DriveExpiredOrchestrationJobs, DriveExpiredOrchestrationTasks, DriveOrchestrationConvergence,
+    DueOrchestrationRetrySlot, DueOrchestrationWaitSlot, ExpiredOrchestrationRecoverySlot,
+    ExpiredOrchestrationTaskSlot, OrchestrationConvergenceSlot, OrchestrationWakeMutationIds,
     PgRepository, PromotedOrchestrationRetry, RecoveredOrchestrationJob, RepositoryError,
     ResolvedOrchestrationTask, SafetyScanCursor, SafetyScanPage, SafetyScanShard,
-    MAX_ORCHESTRATION_QUOTA_LINES,
+    WokenOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use insight_platform_worker::{LocalWorkerPoolError, LocalWorkerPools};
 use std::{
@@ -43,6 +44,11 @@ pub trait OrchestrationSafetyStore: Send + Sync + 'static {
         &self,
         command: DriveDueOrchestrationRetries,
     ) -> Result<SafetyScanPage<PromotedOrchestrationRetry>, Self::Error>;
+
+    async fn drive_due_waits(
+        &self,
+        command: DriveDueOrchestrationWaits,
+    ) -> Result<SafetyScanPage<WokenOrchestrationJob>, Self::Error>;
 
     async fn drive_convergence(
         &self,
@@ -77,6 +83,16 @@ impl OrchestrationSafetyStore for PgRepository {
     ) -> Result<SafetyScanPage<PromotedOrchestrationRetry>, Self::Error> {
         let mut transaction = self.begin_scheduler_transaction().await?;
         let page = transaction.drive_due_orchestration_retries(command).await?;
+        transaction.commit().await?;
+        Ok(page)
+    }
+
+    async fn drive_due_waits(
+        &self,
+        command: DriveDueOrchestrationWaits,
+    ) -> Result<SafetyScanPage<WokenOrchestrationJob>, Self::Error> {
+        let mut transaction = self.begin_scheduler_transaction().await?;
+        let page = transaction.drive_due_orchestration_waits(command).await?;
         transaction.commit().await?;
         Ok(page)
     }
@@ -320,6 +336,7 @@ impl SafetyMetrics {
 struct SafetyCursors {
     expired_jobs: Option<SafetyScanCursor>,
     due_retries: Option<SafetyScanCursor>,
+    due_waits: Option<SafetyScanCursor>,
     convergence: Option<SafetyScanCursor>,
     expired_tasks: Option<SafetyScanCursor>,
 }
@@ -423,6 +440,7 @@ where
     ) -> Result<(), SafetyDriveFailure> {
         self.drive_expired_jobs(cursors, metrics).await?;
         self.drive_due_retries(cursors, metrics).await?;
+        self.drive_due_waits(cursors, metrics).await?;
         self.drive_convergence(cursors, metrics).await?;
         self.drive_expired_tasks(cursors, metrics).await?;
         Ok(())
@@ -494,6 +512,33 @@ where
             .await
             .map_err(|_| SafetyDriveFailure::StoreUnavailable)?;
         observe_page(&page, &mut cursors.due_retries, metrics);
+        Ok(())
+    }
+
+    async fn drive_due_waits(
+        &self,
+        cursors: &mut SafetyCursors,
+        metrics: &SafetyMetrics,
+    ) -> Result<(), SafetyDriveFailure> {
+        let Some(_permit) = self.try_control_permit(metrics)? else {
+            return Ok(());
+        };
+        let command = DriveDueOrchestrationWaits {
+            shard: self.config.shard,
+            after: cursors.due_waits.clone(),
+            limit: self.config.batch_size,
+            slots: (0..self.config.batch_size)
+                .map(|_| due_wait_slot(self.identities.as_ref()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(identity_failure)?,
+        };
+        metrics.scan_attempts.fetch_add(1, Ordering::Relaxed);
+        let page = self
+            .store
+            .drive_due_waits(command)
+            .await
+            .map_err(|_| SafetyDriveFailure::StoreUnavailable)?;
+        observe_page(&page, &mut cursors.due_waits, metrics);
         Ok(())
     }
 
@@ -737,6 +782,22 @@ fn due_retry_slot(
     })
 }
 
+fn due_wait_slot(
+    identities: &impl CoordinatorIdentityFactory,
+) -> Result<DueOrchestrationWaitSlot, IdentityFactoryError> {
+    Ok(DueOrchestrationWaitSlot {
+        idempotency_key_digest: identities.new_lease_token_digest()?,
+        request_digest: identities.new_lease_token_digest()?,
+        mutations: OrchestrationWakeMutationIds {
+            receipt_id: new_id(identities, ResourceKind::Receipt)?,
+            node_event_id: new_id(identities, ResourceKind::Event)?,
+            node_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+            job_event_id: new_id(identities, ResourceKind::Event)?,
+            job_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        },
+    })
+}
+
 fn convergence_slot(
     identities: &impl CoordinatorIdentityFactory,
 ) -> Result<OrchestrationConvergenceSlot, IdentityFactoryError> {
@@ -952,6 +1013,13 @@ mod tests {
             &self,
             _command: DriveDueOrchestrationRetries,
         ) -> Result<SafetyScanPage<PromotedOrchestrationRetry>, Self::Error> {
+            Ok(empty_page())
+        }
+
+        async fn drive_due_waits(
+            &self,
+            _command: DriveDueOrchestrationWaits,
+        ) -> Result<SafetyScanPage<WokenOrchestrationJob>, Self::Error> {
             Ok(empty_page())
         }
 

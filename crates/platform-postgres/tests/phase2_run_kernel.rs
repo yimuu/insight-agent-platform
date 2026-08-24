@@ -34,9 +34,10 @@ use insight_platform_postgres::{
         ControllerRemainderCancellationSlot, ControllerScopeSlot, ControllerStepMutationIds,
         ControllerStructuralExitSlot, DeferOrchestrationChildMutationIds,
         DeferOrchestrationTaskMutationIds, DeferOrchestrationToChildRun, DeferOrchestrationToTask,
-        DriveChildRunCancellations, DriveDueOrchestrationRetries, DriveExpiredOrchestrationJobs,
-        DriveExpiredOrchestrationTasks, DriveOrchestrationConvergence, DriveTerminalChildRuns,
-        DueOrchestrationRetrySlot, ExpiredOrchestrationRecoverySlot, ExpiredOrchestrationTaskSlot,
+        DriveChildRunCancellations, DriveDueOrchestrationRetries, DriveDueOrchestrationWaits,
+        DriveExpiredOrchestrationJobs, DriveExpiredOrchestrationTasks,
+        DriveOrchestrationConvergence, DriveTerminalChildRuns, DueOrchestrationRetrySlot,
+        DueOrchestrationWaitSlot, ExpiredOrchestrationRecoverySlot, ExpiredOrchestrationTaskSlot,
         FailOrchestrationJob, HeartbeatJob, JobFence, MaterializedTerminalValue, NewPrincipal,
         NewQuotaAccount, NewTenant, NewTenantPrincipal, OrchestrationClaimSlot,
         OrchestrationConvergenceSlot, OrchestrationFailureCause, OrchestrationRunTerminalState,
@@ -236,6 +237,7 @@ fn runtime_plan() -> RuntimePlan {
     let expiring_task = PlanNodeKey::new("expiring_task".to_owned()).unwrap();
     let timer_wait = PlanNodeKey::new("timer_wait".to_owned()).unwrap();
     let signal_wait = PlanNodeKey::new("signal_wait".to_owned()).unwrap();
+    let signal_timeout = PlanNodeKey::new("signal_timeout".to_owned()).unwrap();
     let raise = PlanNodeKey::new("raise".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 4,
@@ -532,6 +534,15 @@ fn runtime_plan() -> RuntimePlan {
                         },
                     ),
                     timeout_milliseconds: 60_000,
+                    resume: finish.clone(),
+                },
+            ),
+            (
+                signal_timeout,
+                RuntimeNode::SignalWait {
+                    signal_key: "short_lived_release".to_owned(),
+                    payload: None,
+                    timeout_milliseconds: 200,
                     resume: finish.clone(),
                 },
             ),
@@ -1625,16 +1636,30 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     ));
     scheduler.rollback().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
-    let woken = match scheduler
-        .wake_orchestration_job(wake.clone())
-        .await
-        .unwrap()
-    {
-        CommandOutcome::Applied(record) => record,
-        CommandOutcome::Replayed(_) => panic!("first wake must apply"),
+    let due_wait = DriveDueOrchestrationWaits {
+        shard: SafetyScanShard::whole(),
+        after: None,
+        limit: 1,
+        slots: vec![DueOrchestrationWaitSlot {
+            idempotency_key_digest: digest('a'),
+            request_digest: digest('b'),
+            mutations: OrchestrationWakeMutationIds {
+                receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c28367940"),
+                node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367941"),
+                node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367941"),
+                job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367942"),
+                job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367942"),
+            },
+        }],
     };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let due_woken = scheduler
+        .drive_due_orchestration_waits(due_wait.clone())
+        .await
+        .unwrap();
     scheduler.commit().await.unwrap();
+    assert_eq!(due_woken.len(), 1);
+    let woken = &due_woken[0];
     assert_eq!(woken.job.state, "ready");
     assert!(woken.job.wake_kind.is_none());
     assert_eq!(
@@ -1650,10 +1675,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         Some(&json!("succeeded"))
     );
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
-    assert!(matches!(
-        scheduler.wake_orchestration_job(wake.clone()).await.unwrap(),
-        CommandOutcome::Replayed(record) if record.job.state == "ready"
-    ));
+    assert!(scheduler
+        .drive_due_orchestration_waits(due_wait)
+        .await
+        .unwrap()
+        .is_empty());
     scheduler.commit().await.unwrap();
     let mut losing_wake = wake;
     losing_wake.idempotency_key_digest = digest('c');
@@ -2051,31 +2077,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Replayed(record) if record.job.state == "ready"
     ));
     scheduler.commit().await.unwrap();
-    sqlx::query(
-        r#"
-        UPDATE insight_platform.jobs
-        SET state = 'ready', retry_at = NULL
-        WHERE tenant_id = $1 AND state = 'retry_scheduled'
-          AND retry_at > clock_timestamp() + interval '50 minutes'
-        "#,
-    )
-    .bind(TENANT_ID)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        UPDATE insight_platform.run_nodes
-        SET state = 'ready', retry_at = NULL
-        WHERE tenant_id = $1 AND state = 'retry_scheduled'
-          AND retry_at > clock_timestamp() + interval '50 minutes'
-        "#,
-    )
-    .bind(TENANT_ID)
-    .execute(&pool)
-    .await
-    .unwrap();
-    // The Signal lifecycle is complete; keep its resumed work out of unrelated later fixtures.
+    // Keep the completed Signal callback work out of the timeout fixture's claim.
     sqlx::query(
         r#"
         UPDATE insight_platform.jobs
@@ -2097,6 +2099,211 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     )
     .bind(TENANT_ID)
     .bind(&signal_woken.node_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let timeout_command = admission(
+        AdmissionIds {
+            run: "run_0198f1c3-9a00-7c3e-b1f3-773c28368200",
+            scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28368201",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c28368202",
+            job: "job_0198f1c3-9a00-7c3e-b1f3-773c28368203",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c28368204",
+        },
+        audit(TENANT_ID, PRINCIPAL_ID, "8205", '3', '4'),
+        bindings.clone(),
+        Utc::now() + Duration::minutes(5),
+    );
+    applied(run_command!(repository, admit_run, timeout_command.clone()).unwrap());
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET plan_node_key = 'signal_timeout', node_kind = 'signal_wait'
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(timeout_command.entry_node_execution_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let timeout_claimed = scheduler
+        .claim_orchestration_jobs(orchestration_claim_with_ids(
+            WORKER_D_ID,
+            '7',
+            "8206",
+            ["8207", "8208", "8209", "820a"],
+            ["820b", "820c", "820d"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(timeout_claimed.len(), 1);
+    assert_eq!(
+        timeout_claimed[0].job.job_id,
+        timeout_command.orchestration_job_id.to_string()
+    );
+    let timeout_start = StartOrchestrationJob {
+        fence: JobFence {
+            tenant_id: TENANT_ID.to_owned(),
+            job_id: timeout_claimed[0].job.job_id.clone(),
+            worker_id: id(WORKER_D_ID),
+            lease_epoch: timeout_claimed[0].job.lease_epoch,
+            expected_job_version: timeout_claimed[0].job.version,
+            lease_token_digest: digest('7'),
+        },
+        receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c2836820e"),
+        idempotency_key_digest: digest('8'),
+        request_digest: digest('9'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836820f"),
+        job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836820f"),
+        node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368210"),
+        node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368210"),
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let timeout_started = match scheduler
+        .start_orchestration_job(timeout_start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("Signal timeout start must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    let timeout_yield = YieldOrchestrationJob {
+        fence: JobFence {
+            expected_job_version: timeout_started.version,
+            ..timeout_start.fence
+        },
+        outcome: OrchestrationYield::SignalWait {
+            plan: runtime_plan(),
+        },
+        idempotency_key_digest: digest('a'),
+        request_digest: digest('b'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        mutations: OrchestrationYieldMutationIds {
+            receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c28368211"),
+            quota_entry_ids: ["8212", "8213", "8214", "8215"]
+                .map(|suffix| id(&format!("qle_0198f1c3-9a00-7c3e-b1f3-773c2836{suffix}")))
+                .to_vec(),
+            run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368216"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368216"),
+            node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368217"),
+            node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368217"),
+            job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368218"),
+            job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368218"),
+        },
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let timeout_waited = match scheduler
+        .yield_orchestration_job(timeout_yield)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("Signal timeout wait must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    let due_timeout = DriveDueOrchestrationWaits {
+        shard: SafetyScanShard::whole(),
+        after: None,
+        limit: 1,
+        slots: vec![DueOrchestrationWaitSlot {
+            idempotency_key_digest: digest('c'),
+            request_digest: digest('d'),
+            mutations: OrchestrationWakeMutationIds {
+                receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c28368219"),
+                node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836821a"),
+                node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836821a"),
+                job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836821b"),
+                job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836821b"),
+            },
+        }],
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(scheduler
+        .drive_due_orchestration_waits(due_timeout.clone())
+        .await
+        .unwrap()
+        .is_empty());
+    scheduler.commit().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let timeout_woken = scheduler
+        .drive_due_orchestration_waits(due_timeout)
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(timeout_woken.len(), 1);
+    assert_eq!(timeout_woken[0].job.job_id, timeout_waited.job.job_id);
+    let timeout_node_payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(&timeout_woken[0].node_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        timeout_node_payload.pointer("/resolution/outcome"),
+        Some(&json!("timed_out"))
+    );
+    assert_eq!(
+        timeout_node_payload.pointer("/resolution/payload"),
+        Some(&Value::Null)
+    );
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'ready', retry_at = NULL
+        WHERE tenant_id = $1 AND state = 'retry_scheduled'
+          AND retry_at > clock_timestamp() + interval '50 minutes'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'ready', retry_at = NULL
+        WHERE tenant_id = $1 AND state = 'retry_scheduled'
+          AND retry_at > clock_timestamp() + interval '50 minutes'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The Signal lifecycles are complete; keep resumed work out of unrelated later fixtures.
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'retry_scheduled', retry_at = clock_timestamp() + interval '1 hour'
+        WHERE tenant_id = $1 AND job_id IN ($2, $3) AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&signal_woken.job.job_id)
+    .bind(&timeout_woken[0].job.job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'retry_scheduled', retry_at = clock_timestamp() + interval '1 hour'
+        WHERE tenant_id = $1 AND node_id IN ($2, $3) AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&signal_woken.node_id)
+    .bind(&timeout_woken[0].node_id)
     .execute(&pool)
     .await
     .unwrap();

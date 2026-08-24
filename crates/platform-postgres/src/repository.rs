@@ -5497,7 +5497,7 @@ impl PgSchedulerTransaction {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
-        let (next, wake_contract, node_payload) = match &command.outcome {
+        let (next, wake_contract, wait_due_at, node_payload) = match &command.outcome {
             OrchestrationYield::TimerWait { .. } => {
                 let (source, node) = wait_source.as_ref().ok_or_else(|| {
                     RepositoryError::CorruptRow("Timer Plan source missing".to_owned())
@@ -5543,7 +5543,10 @@ impl PgSchedulerTransaction {
                     },
                     262_144,
                 )?;
-                (next, Some(wake_contract), Some(payload))
+                let wait_due_at = timer_deadline
+                    .min(current.deadline)
+                    .min(parents.run.deadline);
+                (next, Some(wake_contract), Some(wait_due_at), Some(payload))
             }
             OrchestrationYield::SignalWait { .. } => {
                 let (source, node) = wait_source.as_ref().ok_or_else(|| {
@@ -5575,7 +5578,7 @@ impl PgSchedulerTransaction {
                     generation: u64::try_from(command.fence.lease_epoch).map_err(|_| {
                         RepositoryError::InvalidInput("Signal wake generation".to_owned())
                     })?,
-                    accepted_sources: vec![WakeSource::Signal],
+                    accepted_sources: vec![WakeSource::Signal, WakeSource::Timeout],
                     expected_response_schema_digest: payload
                         .as_ref()
                         .map(|port| port.schema_digest().clone()),
@@ -5611,7 +5614,8 @@ impl PgSchedulerTransaction {
                     },
                     262_144,
                 )?;
-                (next, Some(wake_contract), Some(payload))
+                let wait_due_at = wake_contract.deadline;
+                (next, Some(wake_contract), Some(wait_due_at), Some(payload))
             }
             OrchestrationYield::Retry { retry_at } => (
                 decide_job_retry(
@@ -5620,6 +5624,7 @@ impl PgSchedulerTransaction {
                     database_now,
                     *retry_at,
                 )?,
+                None,
                 None,
                 None,
             ),
@@ -5638,6 +5643,7 @@ impl PgSchedulerTransaction {
             &next,
             &parents,
             wake_contract,
+            wait_due_at,
             node_payload.as_ref(),
             database_now,
         )
@@ -7431,6 +7437,9 @@ impl PgSchedulerTransaction {
             .fetch_one(&mut *transaction)
             .await?;
         let stored_plan_node_key = PlanNodeKey::new(node_row.try_get("plan_node_key")?)?;
+        let current_wake = job_projection(&current)?.wake.ok_or_else(|| {
+            RepositoryError::CorruptRow("waiting Job has no WakeContract".to_owned())
+        })?;
         let resolved_node_payload = match current.wake_kind.as_deref() {
             Some("timer") => {
                 let mut timer: StoredTimerWaitPayload =
@@ -7452,11 +7461,17 @@ impl PgSchedulerTransaction {
             Some("signal") => {
                 let mut signal: StoredSignalWaitPayload =
                     decode_typed_payload(&node_payload, "waiting Signal Node")?;
-                if command.source != WakeSource::Signal
-                    || command.signal_key.as_deref() != Some(signal.signal_key.as_str())
+                let signal_arrived = command.source == WakeSource::Signal
+                    && command.signal_key.as_deref() == Some(signal.signal_key.as_str());
+                let signal_timed_out = command.source == WakeSource::Timeout
+                    && command.signal_key.is_none()
+                    && command.signal_payload.is_none()
+                    && database_now >= current_wake.deadline;
+                if (!signal_arrived && !signal_timed_out)
                     || signal.plan_node_key != stored_plan_node_key
                     || signal.resolution.is_some()
-                    || signal.payload_port.is_some() != command.signal_payload.is_some()
+                    || (signal_arrived
+                        && signal.payload_port.is_some() != command.signal_payload.is_some())
                 {
                     return Err(RepositoryError::Conflict("Signal wake owner evidence"));
                 }
@@ -7502,7 +7517,11 @@ impl PgSchedulerTransaction {
                     .await?;
                 }
                 signal.resolution = Some(StoredSignalResolution {
-                    outcome: DurableWaitOutcome::Succeeded,
+                    outcome: if signal_timed_out {
+                        DurableWaitOutcome::TimedOut
+                    } else {
+                        DurableWaitOutcome::Succeeded
+                    },
                     payload: payload_reference,
                 });
                 TypedPayload::with_limit(1, &signal, 262_144)?
@@ -7872,6 +7891,129 @@ impl PgSchedulerTransaction {
         transaction.commit().await?;
         Ok(safety_scan_page(
             recovered,
+            scanned_count,
+            command.limit,
+            last_cursor,
+        ))
+    }
+
+    pub async fn drive_due_orchestration_waits(
+        &mut self,
+        command: DriveDueOrchestrationWaits,
+    ) -> Result<SafetyScanPage<WokenOrchestrationJob>, RepositoryError> {
+        command.validate(self.recovery_batch_limit, self.recovery_shard_limit)?;
+        let mut scan = self.transaction.begin().await?;
+        let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *scan)
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT job.*, job.scheduled_at AS scan_sort_at
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.runs AS run
+              ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
+            JOIN insight_platform.run_nodes AS node
+              ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+            JOIN insight_platform.run_nodes AS scope
+              ON scope.tenant_id = node.tenant_id AND scope.node_id = node.scope_id
+            WHERE job.work_class = 'orchestration'
+              AND job.owner_kind = 'node_execution' AND job.owner_id = node.node_id
+              AND job.state = 'waiting' AND job.terminal_at IS NULL
+              AND job.worker_id IS NULL AND job.wake_state = 'pending'
+              AND job.wake_kind IN ('timer', 'signal')
+              AND job.scheduled_at <= $1 AND job.deadline > $1
+              AND run.state IN ('running', 'waiting') AND run.terminal_at IS NULL
+              AND run.deadline > $1
+              AND run.current_payload #> '{control,cancel_requested_at}' = 'null'::jsonb
+              AND run.current_payload #> '{control,timeout_requested_at}' = 'null'::jsonb
+              AND node.record_kind = 'node_execution' AND node.state = 'waiting'
+              AND node.terminal_at IS NULL
+              AND scope.record_kind = 'scope_instance' AND scope.state = 'open'
+              AND scope.terminal_at IS NULL
+              AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
+              AND (
+                  $5::timestamptz IS NULL OR
+                  (job.scheduled_at, job.tenant_id, job.job_id) >
+                      ($5::timestamptz, $6::text, $7::text)
+              )
+            ORDER BY job.scheduled_at, job.tenant_id, job.job_id
+            LIMIT $2
+            "#,
+        )
+        .bind(scan_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard.index))
+        .bind(i64::from(command.shard.count))
+        .bind(command.after.as_ref().map(|cursor| cursor.sort_at))
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.tenant_id.to_string()),
+        )
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.item_id.to_string()),
+        )
+        .fetch_all(&mut *scan)
+        .await?;
+        let scanned_count = rows.len();
+        let last_cursor = rows
+            .last()
+            .map(|row| safety_scan_cursor_from_row(row, "job_id", ResourceKind::Job))
+            .transpose()?;
+        let candidates = rows
+            .into_iter()
+            .map(job_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        scan.commit().await?;
+
+        let mut woken = Vec::with_capacity(candidates.len());
+        for (candidate, slot) in candidates.into_iter().zip(command.slots.into_iter()) {
+            let tenant_id: ResourceId = candidate.tenant_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let job_id: ResourceId = candidate.job_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let source = match candidate.wake_kind.as_deref() {
+                Some("timer") => WakeSource::Timer,
+                Some("signal") => WakeSource::Timeout,
+                _ => {
+                    return Err(RepositoryError::CorruptRow(
+                        "due orchestration wait kind changed".to_owned(),
+                    ))
+                }
+            };
+            let outcome = self
+                .wake_orchestration_job(WakeOrchestrationJob {
+                    tenant_id,
+                    job_id,
+                    expected_job_version: candidate.version,
+                    expected_wake_generation: u64::try_from(candidate.wake_generation).map_err(
+                        |_| RepositoryError::CorruptRow("negative wake generation".to_owned()),
+                    )?,
+                    source,
+                    signal_key: None,
+                    signal_payload: None,
+                    idempotency_key_digest: slot.idempotency_key_digest,
+                    request_digest: slot.request_digest,
+                    receipt_expires_at: scan_now + Duration::hours(1),
+                    mutations: slot.mutations,
+                })
+                .await?;
+            woken.push(match outcome {
+                CommandOutcome::Applied(record) | CommandOutcome::Replayed(record) => record,
+            });
+        }
+        Ok(safety_scan_page(
+            woken,
             scanned_count,
             command.limit,
             last_cursor,
@@ -14694,12 +14836,14 @@ async fn cancel_structured_remainders(
     Ok((cancelled, cancelled_active_work_count))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn mutate_yielded_orchestration_job(
     transaction: &mut Transaction<'_, Postgres>,
     current_job: &JobRecord,
     next_job: &JobProjection,
     parents: &LockedOrchestrationJobParents,
     wake_contract: Option<WakeContract>,
+    wait_due_at: Option<DateTime<Utc>>,
     node_payload: Option<&TypedPayload>,
     database_now: DateTime<Utc>,
 ) -> Result<YieldedOrchestrationJob, RepositoryError> {
@@ -14734,9 +14878,10 @@ async fn mutate_yielded_orchestration_job(
         UPDATE insight_platform.jobs
         SET state = $4, version = $5, worker_id = NULL, lease_token_digest = NULL,
             lease_expires_at = NULL, heartbeat_at = NULL, retry_at = $6,
-            wake_kind = $7, wake_state = $8, wake_generation = $9,
-            payload_schema_version = $10, payload = $11, payload_digest = $12,
-            started_at = NULL, updated_at = $13
+            scheduled_at = COALESCE($7, scheduled_at),
+            wake_kind = $8, wake_state = $9, wake_generation = $10,
+            payload_schema_version = $11, payload = $12, payload_digest = $13,
+            started_at = NULL, updated_at = $14
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
         RETURNING *
         "#,
@@ -14750,6 +14895,7 @@ async fn mutate_yielded_orchestration_job(
             .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
     )
     .bind(next_job.retry_at)
+    .bind(wait_due_at)
     .bind(wake_kind)
     .bind(wake_state)
     .bind(wake_generation)
@@ -23765,6 +23911,59 @@ pub struct WokenOrchestrationJob {
 }
 
 #[derive(Debug, Clone)]
+pub struct DueOrchestrationWaitSlot {
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub mutations: OrchestrationWakeMutationIds,
+}
+
+impl DueOrchestrationWaitSlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.mutations.validate()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveDueOrchestrationWaits {
+    pub shard: SafetyScanShard,
+    pub after: Option<SafetyScanCursor>,
+    pub limit: u16,
+    pub slots: Vec<DueOrchestrationWaitSlot>,
+}
+
+impl DriveDueOrchestrationWaits {
+    fn validate(&self, maximum_batch: u16, maximum_shards: u16) -> Result<(), RepositoryError> {
+        validate_safety_scan_request(
+            self.shard,
+            self.after.as_ref(),
+            ResourceKind::Job,
+            self.limit,
+            self.slots.len(),
+            maximum_batch,
+            maximum_shards,
+        )?;
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for identity in [
+                &slot.mutations.receipt_id,
+                &slot.mutations.node_event_id,
+                &slot.mutations.node_outbox_id,
+                &slot.mutations.job_event_id,
+                &slot.mutations.job_outbox_id,
+            ] {
+                if !unique.insert(identity.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "due wait mutation identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DueOrchestrationRetrySlot {
     pub node_event_id: ResourceId,
     pub node_outbox_id: ResourceId,
@@ -24072,7 +24271,7 @@ impl WakeOrchestrationJob {
             || self.expected_job_version <= 0
             || self.expected_wake_generation == 0
             || self.receipt_expires_at <= Utc::now()
-            || (self.source == WakeSource::Signal) != (self.signal_key.is_some())
+            || (self.source == WakeSource::Signal) != self.signal_key.is_some()
             || (self.source != WakeSource::Signal && self.signal_payload.is_some())
         {
             return Err(RepositoryError::InvalidInput(

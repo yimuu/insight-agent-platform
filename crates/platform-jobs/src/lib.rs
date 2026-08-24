@@ -594,10 +594,15 @@ pub fn decide_wake(
 ) -> Result<JobProjection, JobError> {
     current.validate()?;
     let wake = current.wake.as_ref().ok_or(JobError::InvalidWakeContract)?;
+    let outside_source_window = if source == WakeSource::Timeout {
+        database_now < wake.deadline
+    } else {
+        database_now >= wake.deadline
+    };
     if current.state != JobState::Waiting
         || wake.generation != expected_generation
         || !wake.accepted_sources.contains(&source)
-        || database_now > wake.deadline
+        || outside_source_window
         || (source == WakeSource::Poll
             && (wake.poll_count >= wake.poll_limit
                 || wake
@@ -1023,6 +1028,30 @@ mod tests {
                 now + Duration::seconds(10),
             ),
             Err(JobError::WakeLostFirstWinner)
+        );
+
+        let mut timeout_waiting = waiting;
+        timeout_waiting.wake.as_mut().unwrap().accepted_sources =
+            vec![WakeSource::Callback, WakeSource::Poll, WakeSource::Timeout];
+        assert_eq!(
+            decide_wake(
+                &timeout_waiting,
+                timeout_waiting.lease_generation,
+                WakeSource::Timeout,
+                now + Duration::seconds(30),
+            ),
+            Err(JobError::WakeLostFirstWinner)
+        );
+        assert_eq!(
+            decide_wake(
+                &timeout_waiting,
+                timeout_waiting.lease_generation,
+                WakeSource::Timeout,
+                now + Duration::minutes(2),
+            )
+            .unwrap()
+            .state,
+            JobState::Ready
         );
     }
 
