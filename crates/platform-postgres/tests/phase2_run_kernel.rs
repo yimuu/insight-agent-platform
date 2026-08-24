@@ -5,22 +5,24 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, pinned_nominal_reference,
-    AgentDeploymentClosure, AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonSchema,
-    ClosedJsonValue, CommandAudit, CommandOutcome, DataClassification, DeploymentClosure,
-    ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, Failure, FailureClass, FailureCode,
-    FailureSource, FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission,
-    PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublicRunEventType, PublishedVersionPayload, ResourceDocument, ResourceId, Retryability,
-    RunBindingsSnapshot, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef,
+    AgentDeploymentClosure, AgentResourceSpec, ArtifactRef, AuthoringPackage,
+    CandidateSelectionMode, CandidateSelectionPolicyDocument, ClosedJsonSchema, ClosedJsonValue,
+    CommandAudit, CommandOutcome, DataClassification, DeploymentClosure, ExactDeploymentRef,
+    ExactPolicyBinding, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
+    FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission, PermissionSet,
+    PlanNodeKind, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
+    PublishedVersionPayload, ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot,
+    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef,
 };
 use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
 use insight_platform_orchestrator::{
-    derive_expression_controller, AdmitRun, ChildBudget, ChildCancellationPolicy, ChildOutcome,
-    CommittedExpressionInput, ControllerObservation, DataPortKey, ExpressionLimits, JoinPolicy,
-    JoinRemainderPolicy, LoopCarriedPort, MapFailurePolicy, ObserveRunTimeout, PlanLimits,
-    PlanNodeKey, PortAssignment, RequestRunCancel, RunInputValue, RuntimeNode, RuntimePlan,
+    derive_candidate_selection, derive_expression_controller, AdmitRun, ChildBudget,
+    ChildCancellationPolicy, ChildOutcome, CommittedExpressionInput, ControllerObservation,
+    DataPortKey, ExpressionLimits, JoinPolicy, JoinRemainderPolicy, LoopCarriedPort,
+    MapFailurePolicy, ObserveRunTimeout, PlanLimits, PlanNodeKey, PortAssignment, RequestRunCancel,
+    RunInputValue, RuntimeDependencyKind, RuntimeDependencySlot, RuntimeNode, RuntimePlan,
     SetRunPause, TypedExpressionProgram, TypedInstruction,
 };
 use insight_platform_postgres::{
@@ -58,6 +60,9 @@ const DENIED_PRINCIPAL_ID: &str = "prn_0198f1c3-9a00-7c3e-b1f3-773c28367004";
 const POLICY_ID: &str = "pol_0198f1c3-9a00-7c3e-b1f3-773c28367005";
 const POLICY_REVISION_ID: &str = "prev_0198f1c3-9a00-7c3e-b1f3-773c28367006";
 const POLICY_DEPLOYMENT_ID: &str = "pdep_0198f1c3-9a00-7c3e-b1f3-773c2836700f";
+const SELECTION_POLICY_ID: &str = "pol_0198f1c3-9a00-7c3e-b1f3-773c28367105";
+const SELECTION_POLICY_REVISION_ID: &str = "prev_0198f1c3-9a00-7c3e-b1f3-773c28367106";
+const SELECTION_POLICY_DEPLOYMENT_ID: &str = "pdep_0198f1c3-9a00-7c3e-b1f3-773c2836710f";
 const POLICY_EVIDENCE_ARTIFACT_ID: &str = "art_0198f1c3-9a00-7c3e-b1f3-773c2836700e";
 const POLICY_EVIDENCE_BLOB_ID: &str = "iblb_0198f1c3-9a00-7c3e-b1f3-773c2836700e";
 const AGENT_ID: &str = "agt_0198f1c3-9a00-7c3e-b1f3-773c28367007";
@@ -226,12 +231,19 @@ fn runtime_plan() -> RuntimePlan {
     let input_branch = PlanNodeKey::new("input_branch".to_owned()).unwrap();
     let input_otherwise = PlanNodeKey::new("input_otherwise".to_owned()).unwrap();
     let input_compute = PlanNodeKey::new("input_compute".to_owned()).unwrap();
+    let child_call = PlanNodeKey::new("child_call".to_owned()).unwrap();
     let raise = PlanNodeKey::new("raise".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 4,
         interface_revision_id: id(AGENT_INTERFACE_ID),
         entry_node_id: entry.clone(),
-        dependency_slots: BTreeMap::new(),
+        dependency_slots: BTreeMap::from([(
+            "child_worker".to_owned(),
+            RuntimeDependencySlot {
+                kind: RuntimeDependencyKind::ChildAgent,
+                requirement_digest: digest('b'),
+            },
+        )]),
         nodes: BTreeMap::from([
             (
                 entry,
@@ -435,6 +447,32 @@ fn runtime_plan() -> RuntimePlan {
                         expression: echo_run_input_program(),
                     }],
                     next: finish.clone(),
+                },
+            ),
+            (
+                child_call.clone(),
+                RuntimeNode::ChildAgentCall {
+                    child_agent_slot_id: "child_worker".to_owned(),
+                    input: insight_platform_orchestrator::ExactDataPortRef::RunInput {
+                        schema_digest: agent_schema().canonical_digest,
+                    },
+                    candidate_route: None,
+                    output: insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
+                        producer_node_id: child_call,
+                        port_id: DataPortKey::new("response".to_owned()).unwrap(),
+                        schema_digest: agent_schema().canonical_digest,
+                    },
+                    budget: insight_platform_orchestrator::ChildBudgetLimit {
+                        maximum_duration_milliseconds: 60_000,
+                        maximum_model_tokens: 1_000,
+                        maximum_capability_calls: 10,
+                        maximum_artifact_bytes: 1_048_576,
+                        maximum_descendant_runs: 8,
+                    },
+                    cancellation_policy: ChildCancellationPolicy::CascadeAndWait,
+                    attempt_limit: 3,
+                    retry_backoff_milliseconds: 100,
+                    resume: finish.clone(),
                 },
             ),
             (finish, return_compute_output()),
@@ -2770,6 +2808,23 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     ));
     scheduler.commit().await.unwrap();
 
+    // This repository test exercises the child owner transaction in isolation. Production Plan
+    // driving creates a distinct ChildAgentCall Node; move the recycled fixture Node onto that
+    // exact Plan identity before claiming its next orchestration Job.
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET plan_node_key = 'child_call', node_kind = 'child_agent_call'
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&expiry_node_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let reserved_before_child: i64 = sqlx::query_scalar(
         "SELECT reserved_value FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND quota_account_id = $2",
     )
@@ -2831,6 +2886,36 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .unwrap();
     let child_input: Value = json!({"question": "delegate exactly once"});
     let child_input_digest = canonical_digest(&child_input).unwrap().parse().unwrap();
+    let (selection_policy, selection_candidates) = match &bindings
+        .slots
+        .iter()
+        .find(|slot| slot.slot_id == "child_worker")
+        .unwrap()
+        .target
+    {
+        FrozenSlotTarget::ChildAgent {
+            candidates,
+            selection_policy,
+        } => (selection_policy, candidates),
+        _ => panic!("child_worker must be a child Agent slot"),
+    };
+    let selected_child_deployment = ExactDeploymentRef::new(
+        id(CHILD_AGENT_DEPLOYMENT_ID),
+        child_deployment_digest.parse().unwrap(),
+    )
+    .unwrap();
+    let selection_evidence = derive_candidate_selection(
+        "child_worker",
+        selection_policy,
+        &CandidateSelectionPolicyDocument {
+            schema_version: 1,
+            mode: CandidateSelectionMode::OnlyCandidate,
+            route_schema_digest: None,
+        },
+        selection_candidates,
+        None,
+    )
+    .unwrap();
     let parent_input_value_id: ResourceId = expired[0]
         .run
         .input_value_id
@@ -2872,18 +2957,17 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             expected_job_version: child_started.version,
             ..child_start.fence
         },
+        plan: runtime_plan(),
         slot_id: "child_worker".to_owned(),
-        selected_child_deployment: ExactDeploymentRef::new(
-            id(CHILD_AGENT_DEPLOYMENT_ID),
-            child_deployment_digest.parse().unwrap(),
-        )
-        .unwrap(),
+        selected_child_deployment,
+        selection_evidence,
+        materialized_route: None,
         child_link_id: id("crun_0198f1c3-9a00-7c3e-b1f3-773c28367e01"),
         child_run_id: id("run_0198f1c3-9a00-7c3e-b1f3-773c28367e02"),
         child_root_scope_id: id("scp_0198f1c3-9a00-7c3e-b1f3-773c28367e03"),
         child_entry_node_execution_id: id("nod_0198f1c3-9a00-7c3e-b1f3-773c28367e04"),
         child_orchestration_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c28367e05"),
-        child_entry_plan_node_key: PlanNodeKey::new("entry".to_owned()).unwrap(),
+        child_entry_plan_node_key: PlanNodeKey::new("start".to_owned()).unwrap(),
         child_entry_node_kind: PlanNodeKind::Start,
         input: RunInputValue {
             value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367e06"),
@@ -2926,12 +3010,14 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     invalid_child.request_digest = digest('0');
     let invalid_receipt_id = invalid_child.mutations.receipt_id.to_string();
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
-    assert!(matches!(
-        scheduler
-            .defer_orchestration_to_child_run(invalid_child)
-            .await,
-        Err(RepositoryError::InvalidInput(_))
-    ));
+    let invalid_child_error = scheduler
+        .defer_orchestration_to_child_run(invalid_child)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(invalid_child_error, RepositoryError::InvalidInput(_)),
+        "unexpected invalid child error: {invalid_child_error:?}"
+    );
     scheduler.rollback().await.unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -2959,6 +3045,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         parent_deployment_digest.parse().unwrap(),
     )
     .unwrap();
+    invalid_candidate.selection_evidence.selected_deployment =
+        invalid_candidate.selected_child_deployment.clone();
     invalid_candidate.idempotency_key_digest = digest('1');
     invalid_candidate.request_digest = digest('2');
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -2966,9 +3054,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         scheduler
             .defer_orchestration_to_child_run(invalid_candidate)
             .await,
-        Err(RepositoryError::Conflict(
-            "selected child Deployment is outside the frozen slot"
-        ))
+        Err(RepositoryError::Conflict("exact child candidate selection"))
     ));
     scheduler.rollback().await.unwrap();
 
@@ -9185,8 +9271,59 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         },
     )
     .unwrap();
+    let selection_document = CandidateSelectionPolicyDocument {
+        schema_version: 1,
+        mode: CandidateSelectionMode::OnlyCandidate,
+        route_schema_digest: None,
+    };
+    let selection_policy_payload = TypedPayload::new(
+        1,
+        &PublishedVersionPayload {
+            document: ResourceDocument::Policy(PolicyResourceSpec {
+                authoring_package: AuthoringPackage {
+                    artifact: ArtifactRef::new(
+                        id(POLICY_EVIDENCE_ARTIFACT_ID),
+                        digest('4'),
+                        1,
+                        "application/json",
+                        DataClassification::Internal,
+                        Some("selection-policy.json".to_owned()),
+                    )
+                    .unwrap(),
+                    manifest_digest: digest('3'),
+                },
+                contract_digest: digest('2'),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                policy_kind: PolicyKind::Selection,
+                rules_digest: canonical_digest(&serde_json::to_value(&selection_document).unwrap())
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+                selection: Some(selection_document.clone()),
+                scheduling: None,
+                retention: None,
+                mcp_protocol: None,
+                mcp_auth: None,
+                sandbox_isolation: None,
+                sandbox_resource: None,
+                sandbox_network: None,
+                sandbox_artifact_io: None,
+                sandbox_secret_resolution: None,
+            }),
+            validation: ValidationSummary {
+                validator_digest: digest('1'),
+                validated_draft_digest: digest('0'),
+                dependency_closure_digest: digest('a'),
+                security_evidence_digest: digest('b'),
+                warnings: vec![],
+            },
+        },
+    )
+    .unwrap();
     for (resource_id, resource_kind) in [
         (POLICY_ID, "policy"),
+        (SELECTION_POLICY_ID, "policy"),
         (AGENT_ID, "agent"),
         (CHILD_AGENT_ID, "agent"),
     ] {
@@ -9216,6 +9353,12 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             digest('5'),
         ),
         (
+            SELECTION_POLICY_REVISION_ID,
+            SELECTION_POLICY_ID,
+            "policy_revision",
+            digest('7'),
+        ),
+        (
             AGENT_INTERFACE_ID,
             AGENT_ID,
             "agent_interface_revision",
@@ -9243,6 +9386,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     for (version_id, resource_id, kind, content_digest) in &versions {
         let version_payload = match *version_id {
             POLICY_REVISION_ID => &policy_payload,
+            SELECTION_POLICY_REVISION_ID => &selection_policy_payload,
             AGENT_INTERFACE_ID | AGENT_PLAN_ID => &agent_plan_payload,
             CHILD_AGENT_INTERFACE_ID => &child_interface_payload,
             _ => &resource_payload,
@@ -9442,6 +9586,52 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         deployment: policy_deployment.clone(),
         revision: policy.clone(),
     };
+    let selection_revision =
+        ExactVersionRef::new(id(SELECTION_POLICY_REVISION_ID), digest('7')).unwrap();
+    let selection_deployment_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: selection_revision.clone(),
+            applicability_digest: digest('e'),
+            qualification_evidence: ArtifactRef::new(
+                id(POLICY_EVIDENCE_ARTIFACT_ID),
+                digest('4'),
+                1,
+                "application/json",
+                DataClassification::Internal,
+                Some("selection-policy.json".to_owned()),
+            )
+            .unwrap(),
+        }),
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.deployments (
+            tenant_id, deployment_id, resource_id, resource_version_id, environment,
+            bindings_digest, payload_schema_version, bindings, created_by
+        ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(SELECTION_POLICY_DEPLOYMENT_ID)
+    .bind(SELECTION_POLICY_ID)
+    .bind(SELECTION_POLICY_REVISION_ID)
+    .bind(&selection_deployment_payload.digest)
+    .bind(selection_deployment_payload.schema_version)
+    .bind(&selection_deployment_payload.value)
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    let selection_policy_binding = ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(
+            id(SELECTION_POLICY_DEPLOYMENT_ID),
+            selection_deployment_payload.digest.parse().unwrap(),
+        )
+        .unwrap(),
+        revision: selection_revision,
+    };
     let child_closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(CHILD_AGENT_INTERFACE_ID), digest('8')).unwrap(),
         plan: ExactVersionRef::new(id(CHILD_AGENT_PLAN_ID), digest('9')).unwrap(),
@@ -9487,7 +9677,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             requirement_digest: digest('b'),
             target: FrozenSlotTarget::ChildAgent {
                 candidates: vec![child_deployment],
-                selection_policy: policy_binding.clone(),
+                selection_policy: selection_policy_binding,
             },
             binding_digest: digest('c'),
         }],

@@ -13,6 +13,8 @@
 > CR-182 cross-review已关闭并恢复实现授权；candidate selection必须使用04 schema v1三种closed mode与共享纯evaluator。
 
 > CR-183确认Selection document自身不含digest，publication只接受外层`rules_digest == canonical(document)`。
+
+> CR-183首个owner批次已实现ChildAgent exact Selection Policy加载与SERIALIZABLE事务重算；Model/Capability选择及production leaf driver仍待完成。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则

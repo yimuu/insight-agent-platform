@@ -6,16 +6,17 @@ use insight_platform_context::{
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, is_execution_work_owner_pair, ActiveTarget,
-    AdministrativeGate, AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonSchema,
-    ClosedJsonValue, CommandAudit, CommandOutcome, DataClassification, DeploymentClosure,
-    EntityLifecycle, ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef,
-    ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource, FrozenSlotTarget,
-    HardLimitProfile, InstallationPrincipalBinding, JobState, JsonLimits, NodeExecutionState,
-    Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
-    PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublicRunEventType, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
-    ResourceDraftPayload, ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState,
-    SchedulerPriority, ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
+    AdministrativeGate, AgentResourceSpec, ArtifactRef, AuthoringPackage,
+    CandidateSelectionPolicyDocument, ClosedJsonSchema, ClosedJsonValue, CommandAudit,
+    CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle,
+    ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure,
+    FailureClass, FailureCode, FailureSource, FrozenSlotTarget, HardLimitProfile,
+    InstallationPrincipalBinding, JobState, JsonLimits, NodeExecutionState, Permission,
+    PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind, PrincipalBindingState,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
+    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
+    ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState, SchedulerPriority,
+    ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
     TenantPrincipalPayload, ValueRef, WorkClass, MAX_RESOURCE_DEPENDENCIES,
 };
 use insight_platform_invocations::{
@@ -34,16 +35,16 @@ use insight_platform_mcp_host::McpJobPayload;
 use insight_platform_models::{ModelTurnError as DomainModelTurnError, ModelTurnLimits};
 use insight_platform_orchestrator::{
     decide_cancel, decide_child_link_cancel, decide_child_link_terminal, decide_controller,
-    decide_orchestration_convergence, decide_pause, decide_timeout, derive_expression_controller,
-    prepare_child_run, required_expression_inputs, AdmitRun, ChildBudget, ChildCancellationPolicy,
-    ChildLinkState, ChildOutcome, ChildRunLinkPayload, ChildRunLinkProjection,
-    CommittedExpressionInput, ControlDecision, ControllerDecision, ControllerEvaluation,
-    ControllerObservation, ExactDataPortRef, ExactRunValueRef, JoinPolicy, JoinRemainderPolicy,
-    MapFailurePolicy, ObserveRunTimeout, OrchestrationConvergenceDecision,
-    OrchestrationConvergenceFacts, OrchestrationConvergenceReason, OrchestrationJobPayload,
-    OrchestratorError, PlanLimits, PlanNodeKey, PrepareChildRun, RequestRunCancel,
-    RunCurrentSnapshot, RunInputValue, RunStore, RunTransaction, RuntimePlan,
-    ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits, SetRunPause,
+    decide_orchestration_convergence, decide_pause, decide_timeout, derive_candidate_selection,
+    derive_expression_controller, prepare_child_run, required_expression_inputs, AdmitRun,
+    CandidateSelectionEvidence, ChildBudget, ChildCancellationPolicy, ChildLinkState, ChildOutcome,
+    ChildRunLinkPayload, ChildRunLinkProjection, CommittedExpressionInput, ControlDecision,
+    ControllerDecision, ControllerEvaluation, ControllerObservation, ExactDataPortRef,
+    ExactRunValueRef, JoinPolicy, JoinRemainderPolicy, MapFailurePolicy, ObserveRunTimeout,
+    OrchestrationConvergenceDecision, OrchestrationConvergenceFacts,
+    OrchestrationConvergenceReason, OrchestrationJobPayload, OrchestratorError, PlanLimits,
+    PlanNodeKey, PrepareChildRun, RequestRunCancel, RunCurrentSnapshot, RunInputValue, RunStore,
+    RunTransaction, RuntimePlan, ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits, SetRunPause,
 };
 use insight_platform_registry::{
     ActivateResource, CreateDeployment, CreateResourceDraft, NewPublishedVersion,
@@ -6006,6 +6007,7 @@ impl PgSchedulerTransaction {
         command: DeferOrchestrationToChildRun,
     ) -> Result<CommandOutcome<DeferredOrchestrationChildRun>, RepositoryError> {
         command.validate()?;
+        let plan_digest = command.plan.canonical_digest(self.plan_limits)?;
         let mut transaction = self.transaction.begin().await?;
         let receipt_payload = TypedPayload::with_limit(
             1,
@@ -6014,6 +6016,7 @@ impl PgSchedulerTransaction {
                 "child_run_id": command.child_run_id,
                 "input_digest": command.input.content_digest,
                 "selected_child_deployment": command.selected_child_deployment,
+                "selection_evidence_digest": command.selection_evidence.canonical_digest,
                 "slot_id": command.slot_id,
             }),
             65_536,
@@ -6137,6 +6140,12 @@ impl PgSchedulerTransaction {
         {
             return Err(RepositoryError::Conflict("orchestration child deferral"));
         }
+        require_exact_runtime_plan(&mut transaction, &parents.run, &command.plan, &plan_digest)
+            .await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, &command.plan)
+                .await?;
+        let runtime_node = command.plan.node(&source_node.plan_node_key)?;
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
@@ -6161,7 +6170,15 @@ impl PgSchedulerTransaction {
             return Err(RepositoryError::Conflict("orchestration child deadline"));
         }
 
-        require_frozen_child_candidate(&parents.run.bindings, &command)?;
+        require_exact_child_candidate_selection(
+            &mut transaction,
+            &parents,
+            runtime_node,
+            &command,
+            database_now,
+            self.scope_environment_limits,
+        )
+        .await?;
         let child_deployment = require_enabled_exact_agent_deployment(
             &mut transaction,
             &tenant_id,
@@ -6176,6 +6193,11 @@ impl PgSchedulerTransaction {
                 ))
             }
         };
+        if child_closure.entry_node_id != command.child_entry_plan_node_key.as_str()
+            || child_closure.entry_node_kind != command.child_entry_node_kind
+        {
+            return Err(RepositoryError::Conflict("child Agent exact entry node"));
+        }
         validate_deployment_closure_exists(
             &mut transaction,
             &tenant_id,
@@ -14288,26 +14310,230 @@ async fn mutate_deferred_orchestration_task(
     })
 }
 
-fn require_frozen_child_candidate(
-    bindings: &RunBindingsSnapshot,
+async fn require_exact_child_candidate_selection(
+    transaction: &mut Transaction<'_, Postgres>,
+    parents: &LockedOrchestrationJobParents,
+    runtime_node: &insight_platform_orchestrator::RuntimeNode,
     command: &DeferOrchestrationToChildRun,
+    database_now: DateTime<Utc>,
+    scope_limits: ScopeEnvironmentLimits,
 ) -> Result<(), RepositoryError> {
-    let slot = bindings
+    let insight_platform_orchestrator::RuntimeNode::ChildAgentCall {
+        child_agent_slot_id,
+        candidate_route,
+        budget,
+        cancellation_policy,
+        attempt_limit,
+        retry_backoff_milliseconds,
+        ..
+    } = runtime_node
+    else {
+        return Err(RepositoryError::Conflict(
+            "orchestration child exact Plan node",
+        ));
+    };
+    let maximum_deadline =
+        database_now
+            + Duration::milliseconds(i64::try_from(budget.maximum_duration_milliseconds).map_err(
+                |_| RepositoryError::InvalidInput("child duration exceeds i64".to_owned()),
+            )?);
+    if child_agent_slot_id != &command.slot_id
+        || command.budget.deadline > maximum_deadline
+        || command.budget.maximum_model_tokens > budget.maximum_model_tokens
+        || command.budget.maximum_capability_calls > budget.maximum_capability_calls
+        || command.budget.maximum_artifact_bytes > budget.maximum_artifact_bytes
+        || command.budget.maximum_descendant_runs > budget.maximum_descendant_runs
+        || cancellation_policy != &command.cancellation_policy
+        || attempt_limit != &command.child_attempt_limit
+        || retry_backoff_milliseconds != &command.child_retry_backoff_milliseconds
+    {
+        return Err(RepositoryError::Conflict(
+            "orchestration child exact Plan contract",
+        ));
+    }
+
+    let slot = parents
+        .run
+        .bindings
         .slots
         .iter()
         .find(|slot| slot.slot_id == command.slot_id)
         .ok_or(RepositoryError::NotFound("frozen child Agent slot"))?;
-    let FrozenSlotTarget::ChildAgent { candidates, .. } = &slot.target else {
+    let FrozenSlotTarget::ChildAgent {
+        candidates,
+        selection_policy,
+    } = &slot.target
+    else {
         return Err(RepositoryError::InvalidInput(
             "selected slot is not a child Agent slot".to_owned(),
         ));
     };
-    if !candidates.contains(&command.selected_child_deployment) {
-        return Err(RepositoryError::Conflict(
-            "selected child Deployment is outside the frozen slot",
-        ));
+    let policy =
+        load_exact_frozen_selection_policy(transaction, &parents.run, selection_policy).await?;
+
+    let route = match (
+        candidate_route,
+        command.selection_evidence.route_value.as_ref(),
+        command.materialized_route.as_ref(),
+    ) {
+        (None, None, None) => None,
+        (Some(port), Some(reference), Some(materialized)) => {
+            let tenant_id: ResourceId = parents.run.tenant_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let run_id: ResourceId = parents.run.run_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let scope_id: ResourceId = parents.scope_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let environments = load_scope_environment_chain(
+                transaction,
+                &tenant_id,
+                &run_id,
+                &scope_id,
+                scope_limits,
+            )
+            .await?;
+            let references = insight_platform_orchestrator::resolve_scope_inputs(
+                std::slice::from_ref(port),
+                &environments,
+                scope_limits,
+            )?;
+            let mut resolved = load_resolved_expression_values(
+                transaction,
+                &tenant_id,
+                &run_id,
+                vec![port.clone()],
+                references,
+            )
+            .await?;
+            let value = resolved.pop().ok_or_else(|| {
+                RepositoryError::CorruptRow("selection route RunValue missing".to_owned())
+            })?;
+            if value.run_value_id != reference.value_id
+                || value.schema_digest != reference.schema_digest
+                || value.content_digest != reference.content_digest
+                || materialized.schema_digest != reference.schema_digest
+                || materialized.canonical_digest != reference.content_digest
+                || matches!(&value.value, ValueRef::Inline { value } if value != &materialized.value)
+            {
+                return Err(RepositoryError::Conflict(
+                    "selection route RunValue evidence",
+                ));
+            }
+            Some((reference, materialized))
+        }
+        _ => {
+            return Err(RepositoryError::Conflict(
+                "selection route exact Plan contract",
+            ))
+        }
+    };
+    let exact = derive_candidate_selection(
+        &command.slot_id,
+        selection_policy,
+        &policy,
+        candidates,
+        route,
+    )?;
+    if exact != command.selection_evidence
+        || exact.selected_deployment != command.selected_child_deployment
+    {
+        return Err(RepositoryError::Conflict("exact child candidate selection"));
     }
     Ok(())
+}
+
+async fn load_exact_frozen_selection_policy(
+    transaction: &mut Transaction<'_, Postgres>,
+    run: &RunRecord,
+    binding: &insight_platform_contracts::ExactPolicyBinding,
+) -> Result<CandidateSelectionPolicyDocument, RepositoryError> {
+    binding
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let row = sqlx::query(
+        r#"
+        SELECT deployment.resource_version_id,
+               deployment.payload_schema_version AS bindings_schema_version,
+               deployment.bindings, deployment.bindings_digest,
+               version.content_digest,
+               version.payload_schema_version AS version_schema_version,
+               version.payload AS version_payload, version.payload_digest AS version_payload_digest
+        FROM insight_platform.deployments AS deployment
+        JOIN insight_platform.resources AS resource
+          ON resource.tenant_id = deployment.tenant_id
+         AND resource.resource_id = deployment.resource_id
+        JOIN insight_platform.resource_versions AS version
+          ON version.tenant_id = deployment.tenant_id
+         AND version.resource_version_id = deployment.resource_version_id
+         AND version.resource_id = deployment.resource_id
+        WHERE deployment.tenant_id = $1 AND deployment.deployment_id = $2
+          AND deployment.bindings_digest = $3
+          AND deployment.resource_version_id = $4
+          AND version.content_digest = $5
+          AND resource.resource_kind = 'policy'
+          AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
+          AND version.resource_version_kind = 'policy_revision'
+        FOR SHARE OF deployment, resource, version
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(binding.deployment.deployment_id.to_string())
+    .bind(binding.deployment.deployment_digest.to_string())
+    .bind(binding.revision.revision_id.to_string())
+    .bind(binding.revision.semantic_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound(
+        "frozen Selection Policy Deployment",
+    ))?;
+    let bindings = payload_from_row(
+        &row,
+        "bindings_schema_version",
+        "bindings",
+        "bindings_digest",
+    )?;
+    let DeploymentClosure::Policy(closure) = decode_deployment_closure(&bindings)? else {
+        return Err(RepositoryError::CorruptRow(
+            "Selection Policy Deployment contains the wrong closure".to_owned(),
+        ));
+    };
+    if closure.policy_revision != binding.revision {
+        return Err(RepositoryError::Conflict(
+            "frozen Selection Policy Revision",
+        ));
+    }
+    let version_payload = payload_from_row(
+        &row,
+        "version_schema_version",
+        "version_payload",
+        "version_payload_digest",
+    )?;
+    let published = decode_published_version_payload(&version_payload)?;
+    published
+        .validate_for(RegistryResourceKind::Policy, &binding.revision.revision_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let ResourceDocument::Policy(policy) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Selection Policy Revision contains the wrong document".to_owned(),
+        ));
+    };
+    if policy.policy_kind != PolicyKind::Selection {
+        return Err(RepositoryError::Conflict(
+            "frozen Policy is not a Selection Policy",
+        ));
+    }
+    policy.selection.ok_or_else(|| {
+        RepositoryError::CorruptRow("Selection Policy document is missing".to_owned())
+    })
 }
 
 async fn require_enabled_exact_agent_deployment(
@@ -21880,8 +22106,11 @@ impl DeferOrchestrationChildMutationIds {
 #[derive(Debug, Clone)]
 pub struct DeferOrchestrationToChildRun {
     pub fence: JobFence,
+    pub plan: RuntimePlan,
     pub slot_id: String,
     pub selected_child_deployment: ExactDeploymentRef,
+    pub selection_evidence: CandidateSelectionEvidence,
+    pub materialized_route: Option<ClosedJsonValue>,
     pub child_link_id: ResourceId,
     pub child_run_id: ResourceId,
     pub child_root_scope_id: ResourceId,
@@ -21916,6 +22145,11 @@ impl DeferOrchestrationToChildRun {
         self.budget
             .validate()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if let Some(route) = &self.materialized_route {
+            route
+                .validate()
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        }
         let mut source_ids = BTreeSet::new();
         if self.selected_child_deployment.resource_kind != ResourceKind::AgentDeployment
             || self.child_link_id.kind() != ResourceKind::ChildRunLink
@@ -21930,6 +22164,9 @@ impl DeferOrchestrationToChildRun {
                 .any(|id| id.kind() != ResourceKind::RunValue || !source_ids.insert(id.to_string()))
             || self.slot_id.is_empty()
             || self.slot_id.len() > 128
+            || self.selection_evidence.slot_id != self.slot_id
+            || self.selection_evidence.selected_deployment != self.selected_child_deployment
+            || self.selection_evidence.route_value.is_some() != self.materialized_route.is_some()
             || self.logical_key.is_empty()
             || self.logical_key.len() > 255
             || self.child_attempt_limit == 0
