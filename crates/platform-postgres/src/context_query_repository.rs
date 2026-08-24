@@ -142,12 +142,24 @@ impl PgContextQueryTransaction {
         &mut self,
         command: CreateContextQuery,
     ) -> Result<CommandOutcome<ContextQueryRecord>, RepositoryError> {
-        command.validate_at(Utc::now(), self.limits)?;
         let mut transaction = self.transaction.begin().await?;
-        let database_now = database_now(&mut transaction).await?;
-        command.validate_at(database_now, self.limits)?;
+        let outcome =
+            Self::create_context_query_in_transaction(&mut transaction, command, self.limits)
+                .await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    pub(crate) async fn create_context_query_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
+        command: CreateContextQuery,
+        limits: ContextQueryLimits,
+    ) -> Result<CommandOutcome<ContextQueryRecord>, RepositoryError> {
+        command.validate_at(Utc::now(), limits)?;
+        let database_now = database_now(transaction).await?;
+        command.validate_at(database_now, limits)?;
         if claim_command_receipt(
-            &mut transaction,
+            transaction,
             &command.audit,
             "context_query",
             &command.context_query_id.to_string(),
@@ -156,25 +168,24 @@ impl PgContextQueryTransaction {
         .await?
         {
             let query = load_context_query(
-                &mut transaction,
+                transaction,
                 &command.audit.tenant_id,
                 &command.context_query_id,
                 false,
-                self.limits,
+                limits,
             )
             .await?;
             require_context_create_replay(&query, &command)?;
-            transaction.commit().await?;
             return Ok(CommandOutcome::Replayed(query));
         }
 
-        let run = load_run_for_update(&mut transaction, &command.audit.tenant_id, &command.run_id)
-            .await?;
+        let run =
+            load_run_for_update(transaction, &command.audit.tenant_id, &command.run_id).await?;
         let principal =
-            require_tenant_permission(&mut transaction, &command.audit, Permission::ContextQuery)
+            require_tenant_permission(transaction, &command.audit, Permission::ContextQuery)
                 .await?;
         let node = load_context_node_for_update(
-            &mut transaction,
+            transaction,
             &command.audit.tenant_id,
             &command.node_execution_id,
         )
@@ -197,18 +208,14 @@ impl PgContextQueryTransaction {
             })
             .ok_or(RepositoryError::NotFound("Context binding"))?;
         let context_deployment = load_exact_context_deployment(
-            &mut transaction,
+            transaction,
             &command.audit.tenant_id,
             &binding.context_deployment,
         )
         .await?;
         let context_resource_id = parse_id(&context_deployment.resource_id, "Context resource")?;
-        let context_resource = load_resource(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &context_resource_id,
-        )
-        .await?;
+        let context_resource =
+            load_resource(transaction, &command.audit.tenant_id, &context_resource_id).await?;
         let context_closure = match decode_deployment_closure(&context_deployment.bindings)? {
             DeploymentClosure::ContextSourceInterface(closure) => closure,
             _ => {
@@ -225,7 +232,7 @@ impl PgContextQueryTransaction {
             ));
         }
         let interface_payload = load_enabled_exact_published_version(
-            &mut transaction,
+            transaction,
             &command.audit.tenant_id,
             &context_closure.interface,
             RegistryResourceKind::ContextSourceInterface,
@@ -237,7 +244,7 @@ impl PgContextQueryTransaction {
             ));
         };
         let implementation_payload = load_enabled_exact_published_version(
-            &mut transaction,
+            transaction,
             &command.audit.tenant_id,
             &context_closure.implementation,
             RegistryResourceKind::ContextSourceImplementation,
@@ -258,7 +265,7 @@ impl PgContextQueryTransaction {
             ));
         }
         let (dataset_view, dataset_generation) = resolve_context_dataset_view(
-            &mut transaction,
+            transaction,
             &command.audit.tenant_id,
             &run,
             &binding,
@@ -266,7 +273,7 @@ impl PgContextQueryTransaction {
         )
         .await?;
         lock_context_input(
-            &mut transaction,
+            transaction,
             &command.audit.tenant_id,
             &command.run_id,
             &command.request,
@@ -301,17 +308,17 @@ impl PgContextQueryTransaction {
             policy_generation: run.bindings.principal.binding_generation,
             database_now,
         };
-        let query = decide_context_query_admission(&command, facts, self.limits)?;
-        insert_context_query(&mut transaction, &query).await?;
+        let query = decide_context_query_admission(&command, facts, limits)?;
+        insert_context_query(transaction, &query).await?;
         insert_context_input_artifact_reference(
-            &mut transaction,
+            transaction,
             &query,
             &command.request,
             database_now,
         )
         .await?;
         append_command_event(
-            &mut transaction,
+            transaction,
             &command.audit,
             "context_query",
             &query.context_query_id.to_string(),
@@ -330,13 +337,12 @@ impl PgContextQueryTransaction {
         )
         .await?;
         terminalize_command_receipt(
-            &mut transaction,
+            transaction,
             &command.audit,
             &query.context_query_id.to_string(),
             "created",
         )
         .await?;
-        transaction.commit().await?;
         Ok(CommandOutcome::Applied(query))
     }
 
@@ -345,9 +351,21 @@ impl PgContextQueryTransaction {
         command: PrepareContextDispatch,
     ) -> Result<CommandOutcome<PreparedContextExecution>, RepositoryError> {
         let mut transaction = self.transaction.begin().await?;
-        let database_now = database_now(&mut transaction).await?;
+        let outcome =
+            Self::prepare_context_dispatch_in_transaction(&mut transaction, command, self.limits)
+                .await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    pub(crate) async fn prepare_context_dispatch_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
+        command: PrepareContextDispatch,
+        limits: ContextQueryLimits,
+    ) -> Result<CommandOutcome<PreparedContextExecution>, RepositoryError> {
+        let database_now = database_now(transaction).await?;
         if claim_command_receipt(
-            &mut transaction,
+            transaction,
             &command.audit,
             "context_query",
             &command.context_query_id.to_string(),
@@ -356,42 +374,39 @@ impl PgContextQueryTransaction {
         .await?
         {
             let query = load_context_query(
-                &mut transaction,
+                transaction,
                 &command.audit.tenant_id,
                 &command.context_query_id,
                 false,
-                self.limits,
+                limits,
             )
             .await?;
             let job = load_context_job(
-                &mut transaction,
+                transaction,
                 &command.audit.tenant_id,
                 &command.job_id,
                 false,
             )
             .await?;
-            transaction.commit().await?;
             return Ok(CommandOutcome::Replayed(PreparedContextExecution {
                 query,
                 job,
             }));
         }
-        require_tenant_permission(&mut transaction, &command.audit, Permission::ContextQuery)
-            .await?;
+        require_tenant_permission(transaction, &command.audit, Permission::ContextQuery).await?;
         let current = load_context_query(
-            &mut transaction,
+            transaction,
             &command.audit.tenant_id,
             &command.context_query_id,
             true,
-            self.limits,
+            limits,
         )
         .await?;
-        let prepared =
-            decide_prepare_context_dispatch(&current, &command, database_now, self.limits)?;
-        insert_context_job(&mut transaction, &prepared).await?;
-        update_context_query(&mut transaction, &current, &prepared.query, self.limits).await?;
+        let prepared = decide_prepare_context_dispatch(&current, &command, database_now, limits)?;
+        insert_context_job(transaction, &prepared).await?;
+        update_context_query(transaction, &current, &prepared.query, limits).await?;
         append_command_event(
-            &mut transaction,
+            transaction,
             &command.audit,
             "context_query",
             &command.context_query_id.to_string(),
@@ -408,20 +423,19 @@ impl PgContextQueryTransaction {
         )
         .await?;
         terminalize_command_receipt(
-            &mut transaction,
+            transaction,
             &command.audit,
             &command.context_query_id.to_string(),
             "ready",
         )
         .await?;
         let job = load_context_job(
-            &mut transaction,
+            transaction,
             &command.audit.tenant_id,
             &command.job_id,
             false,
         )
         .await?;
-        transaction.commit().await?;
         Ok(CommandOutcome::Applied(PreparedContextExecution {
             query: prepared.query,
             job,
