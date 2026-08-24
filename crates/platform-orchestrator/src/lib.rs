@@ -1035,16 +1035,50 @@ impl ChildOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableWaitKind {
+    HumanTask,
+    Timer,
+    Signal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableWaitOutcome {
+    Succeeded,
+    Declined,
+    TimedOut,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControllerObservation {
     None,
-    Branch { selected: PlanNodeKey },
-    Join { children: Vec<ChildOutcome> },
-    Map { item_count: u32 },
-    MapSettlement { children: Vec<ChildOutcome> },
-    Loop { iteration: u32, condition: bool },
-    ErrorBoundary { failure_code: Option<String> },
+    Branch {
+        selected: PlanNodeKey,
+    },
+    Join {
+        children: Vec<ChildOutcome>,
+    },
+    Map {
+        item_count: u32,
+    },
+    MapSettlement {
+        children: Vec<ChildOutcome>,
+    },
+    Loop {
+        iteration: u32,
+        condition: bool,
+    },
+    ErrorBoundary {
+        failure_code: Option<String>,
+    },
+    DurableWait {
+        wait_kind: DurableWaitKind,
+        outcome: DurableWaitOutcome,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1450,14 +1484,6 @@ pub enum LeafKind {
     Context,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DurableWaitKind {
-    HumanTask,
-    Timer,
-    Signal,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum ControllerDecision {
@@ -1627,6 +1653,80 @@ pub fn decide_controller(
                 resume: resume.clone(),
             })
         }
+        (
+            RuntimeNode::HumanTask { resume, .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::HumanTask,
+                outcome: DurableWaitOutcome::Succeeded,
+            },
+        )
+        | (
+            RuntimeNode::TimerWait { resume, .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::Timer,
+                outcome: DurableWaitOutcome::Succeeded,
+            },
+        )
+        | (
+            RuntimeNode::SignalWait { resume, .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::Signal,
+                outcome: DurableWaitOutcome::Succeeded,
+            },
+        ) => Ok(ControllerDecision::CompleteNode {
+            activate: vec![resume.clone()],
+        }),
+        (
+            RuntimeNode::HumanTask { .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::HumanTask,
+                outcome: DurableWaitOutcome::TimedOut,
+            },
+        )
+        | (
+            RuntimeNode::TimerWait { .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::Timer,
+                outcome: DurableWaitOutcome::TimedOut,
+            },
+        )
+        | (
+            RuntimeNode::SignalWait { .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::Signal,
+                outcome: DurableWaitOutcome::TimedOut,
+            },
+        ) => Ok(ControllerDecision::FailNode { code: "timeout" }),
+        (
+            RuntimeNode::HumanTask { .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::HumanTask,
+                outcome: DurableWaitOutcome::Declined,
+            },
+        ) => Ok(ControllerDecision::FailNode {
+            code: "interaction_declined",
+        }),
+        (
+            RuntimeNode::HumanTask { .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::HumanTask,
+                outcome: DurableWaitOutcome::Cancelled,
+            },
+        )
+        | (
+            RuntimeNode::TimerWait { .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::Timer,
+                outcome: DurableWaitOutcome::Cancelled,
+            },
+        )
+        | (
+            RuntimeNode::SignalWait { .. },
+            ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::Signal,
+                outcome: DurableWaitOutcome::Cancelled,
+            },
+        ) => Ok(ControllerDecision::FailNode { code: "cancelled" }),
         (RuntimeNode::HumanTask { resume, .. }, ControllerObservation::None) => {
             Ok(ControllerDecision::CreateDurableWait {
                 kind: DurableWaitKind::HumanTask,
@@ -3427,6 +3527,56 @@ mod tests {
             Ok(ControllerDecision::CompleteNode {
                 activate: vec![key("right")],
             })
+        );
+    }
+
+    #[test]
+    fn durable_wait_resolution_resumes_or_fails_closed() {
+        let response = ExactDataPortRef::NodeOutput {
+            producer_node_id: key("task"),
+            port_id: DataPortKey::new("response".to_owned()).unwrap(),
+            schema_digest: digest('a'),
+        };
+        let task = RuntimeNode::HumanTask {
+            definition: HumanTaskDefinition::HumanWork {
+                eligible_principal_rule_digest: digest('b'),
+                safe_prompt_key: "review".to_owned(),
+            },
+            response,
+            timeout_milliseconds: 1_000,
+            resume: key("next"),
+        };
+        assert_eq!(
+            decide_controller(
+                &task,
+                &ControllerObservation::DurableWait {
+                    wait_kind: DurableWaitKind::HumanTask,
+                    outcome: DurableWaitOutcome::Succeeded,
+                },
+            ),
+            Ok(ControllerDecision::CompleteNode {
+                activate: vec![key("next")],
+            })
+        );
+        assert_eq!(
+            decide_controller(
+                &task,
+                &ControllerObservation::DurableWait {
+                    wait_kind: DurableWaitKind::HumanTask,
+                    outcome: DurableWaitOutcome::TimedOut,
+                },
+            ),
+            Ok(ControllerDecision::FailNode { code: "timeout" })
+        );
+        assert_eq!(
+            decide_controller(
+                &task,
+                &ControllerObservation::DurableWait {
+                    wait_kind: DurableWaitKind::Signal,
+                    outcome: DurableWaitOutcome::Succeeded,
+                },
+            ),
+            Err(OrchestratorError::ObservationMismatch)
         );
     }
 

@@ -39,9 +39,10 @@ use insight_platform_orchestrator::{
     derive_expression_controller, prepare_child_run, required_expression_inputs, AdmitRun,
     CandidateSelectionEvidence, ChildBudget, ChildCancellationPolicy, ChildLinkState, ChildOutcome,
     ChildRunLinkPayload, ChildRunLinkProjection, CommittedExpressionInput, ControlDecision,
-    ControllerDecision, ControllerEvaluation, ControllerObservation, ExactDataPortRef,
-    ExactRunValueRef, HumanTaskDefinition as RuntimeHumanTaskDefinition, JoinPolicy,
-    JoinRemainderPolicy, MapFailurePolicy, ObserveRunTimeout, OrchestrationConvergenceDecision,
+    ControllerDecision, ControllerEvaluation, ControllerObservation, DurableWaitKind,
+    DurableWaitOutcome, ExactDataPortRef, ExactRunValueRef,
+    HumanTaskDefinition as RuntimeHumanTaskDefinition, JoinPolicy, JoinRemainderPolicy,
+    MapFailurePolicy, ObserveRunTimeout, OrchestrationConvergenceDecision,
     OrchestrationConvergenceFacts, OrchestrationConvergenceReason, OrchestrationJobPayload,
     OrchestratorError, PlanLimits, PlanNodeKey, PrepareChildRun, RequestRunCancel,
     RunCurrentSnapshot, RunInputValue, RunStore, RunTransaction, RuntimeNode, RuntimePlan,
@@ -1645,12 +1646,35 @@ impl PgRepository {
             insight_platform_orchestrator::RuntimeNode::ErrorBoundary { .. } => {
                 Some(ControllerObservation::ErrorBoundary { failure_code: None })
             }
+            insight_platform_orchestrator::RuntimeNode::HumanTask {
+                definition,
+                response,
+                ..
+            } => {
+                let wait: StoredHumanTaskWaitPayload =
+                    decode_typed_payload(&payload, "running HumanTask wait Node")?;
+                if wait.plan_node_key != identity.plan_node_key
+                    || wait.response_port != *response
+                    || wait.task_id.kind()
+                        != runtime_human_task_definition(definition)
+                            .task_kind()
+                            .task_id_kind()
+                {
+                    return Err(RepositoryError::Conflict(
+                        "HumanTask wait observation contract",
+                    ));
+                }
+                wait.resolution
+                    .map(|resolution| ControllerObservation::DurableWait {
+                        wait_kind: DurableWaitKind::HumanTask,
+                        outcome: resolution.outcome,
+                    })
+            }
             insight_platform_orchestrator::RuntimeNode::Start { .. }
             | insight_platform_orchestrator::RuntimeNode::Fork { .. }
             | insight_platform_orchestrator::RuntimeNode::ModelLoop { .. }
             | insight_platform_orchestrator::RuntimeNode::CapabilityCall { .. }
             | insight_platform_orchestrator::RuntimeNode::ContextQuery { .. }
-            | insight_platform_orchestrator::RuntimeNode::HumanTask { .. }
             | insight_platform_orchestrator::RuntimeNode::TimerWait { .. }
             | insight_platform_orchestrator::RuntimeNode::SignalWait { .. }
             | insight_platform_orchestrator::RuntimeNode::Return { .. }
@@ -6084,6 +6108,7 @@ impl PgSchedulerTransaction {
             &current,
             &next_job,
             &parents,
+            &source_node,
             &command,
             &task_payload,
             database_now,
@@ -6814,7 +6839,9 @@ impl PgSchedulerTransaction {
         let run = load_run_for_update(&mut transaction, &command.audit.tenant_id, &run_id).await?;
         let node = sqlx::query(
             r#"
-            SELECT version, state FROM insight_platform.run_nodes
+            SELECT version, state, scope_id, plan_node_key,
+                   payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
             WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
               AND record_kind = 'node_execution'
             FOR UPDATE
@@ -6873,9 +6900,58 @@ impl PgSchedulerTransaction {
             },
             database_now,
         )?;
+        let node_payload =
+            payload_from_row(&node, "payload_schema_version", "payload", "payload_digest")?;
+        let mut stored_wait: StoredHumanTaskWaitPayload =
+            decode_typed_payload(&node_payload, "HumanTask wait Node")?;
+        let stored_plan_node_key = PlanNodeKey::new(node.try_get("plan_node_key")?)?;
+        if stored_wait.task_id != command.task_id
+            || stored_wait.plan_node_key != stored_plan_node_key
+            || stored_wait.resolution.is_some()
+        {
+            return Err(RepositoryError::Conflict("HumanTask wait owner evidence"));
+        }
+        let outcome = match next.state {
+            TaskState::Responded => DurableWaitOutcome::Succeeded,
+            TaskState::Declined => DurableWaitOutcome::Declined,
+            TaskState::Cancelled => DurableWaitOutcome::Cancelled,
+            TaskState::Expired => DurableWaitOutcome::TimedOut,
+            _ => return Err(RepositoryError::Conflict("HumanTask resolution state")),
+        };
+        let response_reference = command.response.as_ref().map(|response| ExactRunValueRef {
+            value_id: response.value_id.clone(),
+            schema_digest: response.schema_digest.clone(),
+            content_digest: response.content_digest.clone(),
+        });
+        if matches!(outcome, DurableWaitOutcome::Succeeded) != response_reference.is_some()
+            || response_reference.as_ref().is_some_and(|response| {
+                response.schema_digest != *stored_wait.response_port.schema_digest()
+            })
+        {
+            return Err(RepositoryError::Conflict(
+                "HumanTask response owner evidence",
+            ));
+        }
         if let Some(response) = &command.response {
             insert_task_response_value(&mut transaction, &current, &run, node_id, response).await?;
+            bind_human_task_response_to_scope(
+                &mut transaction,
+                &current.tenant_id,
+                &run.run_id,
+                node.try_get("scope_id")?,
+                &stored_wait.response_port,
+                response_reference
+                    .as_ref()
+                    .expect("response reference exists after response insertion"),
+                self.scope_environment_limits,
+            )
+            .await?;
         }
+        stored_wait.resolution = Some(StoredHumanTaskResolution {
+            outcome,
+            response: response_reference,
+        });
+        let resolved_node_payload = TypedPayload::with_limit(1, &stored_wait, 262_144)?;
         let source_job =
             load_task_source_orchestration_job(&mut transaction, &current.tenant_id, node_id)
                 .await?;
@@ -6889,6 +6965,7 @@ impl PgSchedulerTransaction {
             &run,
             node.try_get("version")?,
             &source_job,
+            &resolved_node_payload,
             &command.resume_job_id,
             &command.resume_request_digest,
             database_now,
@@ -6994,7 +7071,9 @@ impl PgSchedulerTransaction {
             let run = load_run_for_update(&mut transaction, &tenant_id, &run_id).await?;
             let node = sqlx::query(
                 r#"
-                SELECT version, state FROM insight_platform.run_nodes
+                SELECT version, state, plan_node_key,
+                       payload_schema_version, payload, payload_digest
+                FROM insight_platform.run_nodes
                 WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
                   AND record_kind = 'node_execution'
                 FOR UPDATE
@@ -7050,6 +7129,23 @@ impl PgSchedulerTransaction {
             if source_job.deadline <= database_now || source_job.deadline != run.deadline {
                 continue;
             }
+            let node_payload =
+                payload_from_row(&node, "payload_schema_version", "payload", "payload_digest")?;
+            let mut stored_wait: StoredHumanTaskWaitPayload =
+                decode_typed_payload(&node_payload, "expiring HumanTask wait Node")?;
+            if stored_wait.task_id != task_id
+                || stored_wait.plan_node_key != PlanNodeKey::new(node.try_get("plan_node_key")?)?
+                || stored_wait.resolution.is_some()
+            {
+                return Err(RepositoryError::Conflict(
+                    "expiring HumanTask wait owner evidence",
+                ));
+            }
+            stored_wait.resolution = Some(StoredHumanTaskResolution {
+                outcome: DurableWaitOutcome::TimedOut,
+                response: None,
+            });
+            let resolved_node_payload = TypedPayload::with_limit(1, &stored_wait, 262_144)?;
             let resolved = mutate_resolved_orchestration_task(
                 &mut transaction,
                 &task,
@@ -7057,6 +7153,7 @@ impl PgSchedulerTransaction {
                 &run,
                 node.try_get("version")?,
                 &source_job,
+                &resolved_node_payload,
                 &slot.resume_job_id,
                 &slot.resume_request_digest,
                 database_now,
@@ -9955,6 +10052,55 @@ async fn require_exact_controller_observation(
     runtime_node: &insight_platform_orchestrator::RuntimeNode,
     observation: &ControllerObservation,
 ) -> Result<(), RepositoryError> {
+    if let RuntimeNode::HumanTask {
+        definition,
+        response,
+        ..
+    } = runtime_node
+    {
+        let ControllerObservation::DurableWait {
+            wait_kind: DurableWaitKind::HumanTask,
+            outcome,
+        } = observation
+        else {
+            return Ok(());
+        };
+        let row = sqlx::query(
+            r#"
+            SELECT payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution' AND state = 'running'
+            "#,
+        )
+        .bind(&current_job.tenant_id)
+        .bind(&parents.run.run_id)
+        .bind(&parents.node_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("running HumanTask Node"))?;
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let wait: StoredHumanTaskWaitPayload =
+            decode_typed_payload(&payload, "running HumanTask wait Node")?;
+        let resolution = wait.resolution.ok_or(RepositoryError::Conflict(
+            "unresolved HumanTask observation",
+        ))?;
+        if wait.plan_node_key != source_node.plan_node_key
+            || wait.response_port != *response
+            || wait.task_id.kind()
+                != runtime_human_task_definition(definition)
+                    .task_kind()
+                    .task_id_kind()
+            || resolution.outcome != *outcome
+            || matches!(outcome, DurableWaitOutcome::Succeeded) != resolution.response.is_some()
+        {
+            return Err(RepositoryError::Conflict(
+                "HumanTask durable observation evidence",
+            ));
+        }
+        return Ok(());
+    }
     if let insight_platform_orchestrator::RuntimeNode::Map {
         body,
         next,
@@ -14289,6 +14435,7 @@ async fn mutate_deferred_orchestration_task(
     current_job: &JobRecord,
     next_job: &JobProjection,
     parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
     command: &DeferOrchestrationToTask,
     task_payload: &TypedPayload,
     database_now: DateTime<Utc>,
@@ -14298,6 +14445,20 @@ async fn mutate_deferred_orchestration_task(
             "orchestration Task wait transition",
         ));
     }
+    let RuntimeNode::HumanTask { response, .. } = command.plan.node(&source_node.plan_node_key)?
+    else {
+        return Err(RepositoryError::Conflict("orchestration Task Plan node"));
+    };
+    let node_payload = TypedPayload::with_limit(
+        1,
+        &StoredHumanTaskWaitPayload {
+            plan_node_key: source_node.plan_node_key.clone(),
+            task_id: command.task_id.clone(),
+            response_port: response.clone(),
+            resolution: None,
+        },
+        262_144,
+    )?;
     let job = sqlx::query(
         r#"
         UPDATE insight_platform.jobs
@@ -14358,7 +14519,9 @@ async fn mutate_deferred_orchestration_task(
     let node_version: i64 = sqlx::query_scalar(
         r#"
         UPDATE insight_platform.run_nodes
-        SET state = 'waiting', version = version + 1, updated_at = $4
+        SET state = 'waiting', version = version + 1,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            updated_at = $4
         WHERE tenant_id = $1 AND node_id = $2 AND version = $3
           AND record_kind = 'node_execution' AND state = 'running'
           AND terminal_at IS NULL
@@ -14369,6 +14532,9 @@ async fn mutate_deferred_orchestration_task(
     .bind(&parents.node_id)
     .bind(parents.node_version)
     .bind(database_now)
+    .bind(node_payload.schema_version)
+    .bind(&node_payload.value)
+    .bind(&node_payload.digest)
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::Conflict(
@@ -15631,6 +15797,109 @@ async fn insert_task_response_value(
     Ok(())
 }
 
+async fn bind_human_task_response_to_scope(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    run_id: &str,
+    scope_id: &str,
+    response_port: &ExactDataPortRef,
+    response: &ExactRunValueRef,
+    limits: ScopeEnvironmentLimits,
+) -> Result<(), RepositoryError> {
+    let scope = sqlx::query(
+        r#"
+        SELECT parent_node_id, node_kind, version,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+          AND record_kind = 'scope_instance' AND state = 'open'
+          AND terminal_at IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(run_id)
+    .bind(scope_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("HumanTask response Scope"))?;
+    let payload = payload_from_row(
+        &scope,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let scope_kind: String = scope.try_get("node_kind")?;
+    let mut root = None;
+    let mut nested = None;
+    let environment = match scope_kind.as_str() {
+        "root" => {
+            root = Some(decode_typed_payload::<StoredRootScopePayload>(
+                &payload,
+                "HumanTask root Scope",
+            )?);
+            &mut root.as_mut().expect("root Scope assigned").environment
+        }
+        "parallel_leg" | "loop_iteration" | "map_item" => {
+            let value = decode_typed_payload::<StoredControllerScopePayload>(
+                &payload,
+                "HumanTask controller Scope",
+            )?;
+            if scope.try_get::<Option<String>, _>("parent_node_id")?
+                != Some(value.controller_node_execution_id.to_string())
+            {
+                return Err(RepositoryError::CorruptRow(
+                    "HumanTask Scope controller owner differs".to_owned(),
+                ));
+            }
+            nested = Some(value);
+            &mut nested
+                .as_mut()
+                .expect("controller Scope assigned")
+                .environment
+        }
+        _ => {
+            return Err(RepositoryError::CorruptRow(
+                "HumanTask Scope kind is unregistered".to_owned(),
+            ))
+        }
+    };
+    environment
+        .bind_new(response_port.clone(), response.clone(), limits)
+        .map_err(|_| RepositoryError::Conflict("HumanTask response Scope binding"))?;
+    let next_payload = match (root, nested) {
+        (Some(root), None) => TypedPayload::with_limit(1, &root, 262_144)?,
+        (None, Some(nested)) => TypedPayload::with_limit(1, &nested, 262_144)?,
+        _ => {
+            return Err(RepositoryError::CorruptRow(
+                "HumanTask Scope payload variant is ambiguous".to_owned(),
+            ))
+        }
+    };
+    let updated = sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET version = version + 1, payload_schema_version = $5,
+            payload = $6, payload_digest = $7, updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3 AND version = $4
+          AND record_kind = 'scope_instance' AND state = 'open' AND terminal_at IS NULL
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(run_id)
+    .bind(scope_id)
+    .bind(scope.try_get::<i64, _>("version")?)
+    .bind(next_payload.schema_version)
+    .bind(&next_payload.value)
+    .bind(&next_payload.digest)
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(RepositoryError::Conflict("HumanTask response Scope CAS"));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn mutate_resolved_orchestration_task(
     transaction: &mut Transaction<'_, Postgres>,
@@ -15639,6 +15908,7 @@ async fn mutate_resolved_orchestration_task(
     current_run: &RunRecord,
     current_node_version: i64,
     source_job: &JobRecord,
+    resolved_node_payload: &TypedPayload,
     resume_job_id: &ResourceId,
     resume_request_digest: &Sha256Digest,
     database_now: DateTime<Utc>,
@@ -15685,7 +15955,9 @@ async fn mutate_resolved_orchestration_task(
     let node_version: i64 = sqlx::query_scalar(
         r#"
         UPDATE insight_platform.run_nodes
-        SET state = 'ready', version = version + 1, updated_at = $4
+        SET state = 'ready', version = version + 1,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            updated_at = $4
         WHERE tenant_id = $1 AND node_id = $2 AND version = $3
           AND record_kind = 'node_execution' AND state = 'waiting'
           AND terminal_at IS NULL
@@ -15696,6 +15968,9 @@ async fn mutate_resolved_orchestration_task(
     .bind(node_id)
     .bind(current_node_version)
     .bind(database_now)
+    .bind(resolved_node_payload.schema_version)
+    .bind(&resolved_node_payload.value)
+    .bind(&resolved_node_payload.digest)
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::Conflict("Task owner Node wake"))?;
@@ -22080,6 +22355,22 @@ struct StoredPendingControllerNodePayload {
     expected_scope_ids: Vec<ResourceId>,
     plan_node_key: PlanNodeKey,
     wait: StoredControllerWait,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredHumanTaskWaitPayload {
+    plan_node_key: PlanNodeKey,
+    task_id: ResourceId,
+    response_port: ExactDataPortRef,
+    resolution: Option<StoredHumanTaskResolution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredHumanTaskResolution {
+    outcome: DurableWaitOutcome,
+    response: Option<ExactRunValueRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]

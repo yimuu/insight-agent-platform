@@ -84,8 +84,10 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    覆盖dispatch facts、only-candidate正向、伪造input/classification/selected Deployment整批回滚。PostgreSQL durable Plan store现已消费
    `CreateChildRun`，在事务外仅物化可选route正文、生成typed child identities/evidence并调用上述owner command；该路径仍缺独立Scheduler
    进程的完整parent→child→parent terminal L3 fixture。HumanTask owner现从exact Plan v4重验definition、response schema与timeout，runtime
-   store消费`CreateDurableWait::HumanTask`并生成共享Task mutations；fresh PostgreSQL r74保持response/expiry/late response/first-winner/replay
-   全部通过，但尚缺独立Scheduler的Task wait/resume L3。CR-176 Scope data-port environment owner、root/child binding、bounded lexical lookup、exact Inline/Ready Artifact
+   store消费`CreateDurableWait::HumanTask`并生成共享Task mutations；Task first-winner transaction现把成功response RunValue绑定到当前Scope，并在
+   Node payload持久化owner-derived succeeded/declined/timed_out/cancelled事实，恢复controller会重验该事实后resume或稳定失败，不再重复创建Task；
+   fresh PostgreSQL r77保持response/expiry/late response/first-winner/replay并验证response Scope binding。尚缺独立Scheduler的完整Task wait/resume L3。
+   CR-176 Scope data-port environment owner、root/child binding、bounded lexical lookup、exact Inline/Ready Artifact
    authority读取与stale fence拒绝已经实现并通过fresh PostgreSQL Phase 2。derived commit现已对Branch/Map/Loop在事务内重验
    input/evaluation/classification evidence并重新执行pure evaluator，fresh PostgreSQL覆盖Branch正向提交和伪造classification整批回滚。
    Compute现已在同一事务写immutable output RunValue、owner-derived classification与Scope environment CAS，再提交既有Node/Job/

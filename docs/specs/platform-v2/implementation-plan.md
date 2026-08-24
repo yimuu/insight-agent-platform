@@ -14,7 +14,7 @@
 
 > CR-183确认Selection document自身不含digest，publication只接受外层`rules_digest == canonical(document)`。
 
-> CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store亦已接线。完整Child/Task L3与其余external leaf仍待完成。
+> CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实亦已接线。完整Child/Task独立进程L3与其余external leaf仍待完成。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则

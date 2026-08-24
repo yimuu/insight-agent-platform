@@ -2620,6 +2620,42 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap(),
         "ready"
     );
+    let resolved_node_payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(&selected_node_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        resolved_node_payload.pointer("/resolution/outcome"),
+        Some(&json!("succeeded"))
+    );
+    assert_eq!(
+        resolved_node_payload.pointer("/resolution/response/value_id"),
+        Some(&json!(response.value_id))
+    );
+    let resolved_scope_payload: Value = sqlx::query_scalar(
+        r#"
+        SELECT scope.payload
+        FROM insight_platform.run_nodes AS node
+        JOIN insight_platform.run_nodes AS scope
+          ON scope.tenant_id = node.tenant_id AND scope.node_id = node.scope_id
+        WHERE node.tenant_id = $1 AND node.node_id = $2
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&selected_node_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(resolved_scope_payload
+        .pointer("/environment/bindings")
+        .and_then(Value::as_array)
+        .unwrap()
+        .iter()
+        .any(|binding| binding.pointer("/value/value_id") == Some(&json!(response.value_id))));
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler
