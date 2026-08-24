@@ -14,7 +14,8 @@ use insight_platform_contracts::{
     ValidationSummary, ValueRef, WorkClass, WorkerManifest,
 };
 use insight_platform_orchestrator::{
-    AdmitRun, ExpressionLimits, PlanLimits, PlanNodeKey, RunInputValue, RuntimeNode, RuntimePlan,
+    AdmitRun, ExactDataPortRef, ExpressionLimits, PlanLimits, PlanNodeKey, RunInputValue,
+    RuntimeNode, RuntimePlan,
 };
 use insight_platform_postgres::{
     repository::{
@@ -84,7 +85,7 @@ fn fixture_plan() -> RuntimePlan {
     let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     RuntimePlan {
-        plan_version: 2,
+        plan_version: 3,
         interface_revision_id: id(INTERFACE_ID),
         entry_node_id: entry.clone(),
         nodes: BTreeMap::from([
@@ -94,7 +95,14 @@ fn fixture_plan() -> RuntimePlan {
                     next: finish.clone(),
                 },
             ),
-            (finish, RuntimeNode::Return),
+            (
+                finish,
+                RuntimeNode::Return {
+                    value: ExactDataPortRef::RunInput {
+                        schema_digest: digest('a'),
+                    },
+                },
+            ),
         ]),
     }
 }

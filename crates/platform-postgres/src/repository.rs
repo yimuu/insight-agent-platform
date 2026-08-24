@@ -1573,8 +1573,8 @@ impl PgRepository {
             | insight_platform_orchestrator::RuntimeNode::HumanTask { .. }
             | insight_platform_orchestrator::RuntimeNode::TimerWait { .. }
             | insight_platform_orchestrator::RuntimeNode::SignalWait { .. }
-            | insight_platform_orchestrator::RuntimeNode::Return
-            | insight_platform_orchestrator::RuntimeNode::Raise => {
+            | insight_platform_orchestrator::RuntimeNode::Return { .. }
+            | insight_platform_orchestrator::RuntimeNode::Raise { .. } => {
                 Some(ControllerObservation::None)
             }
             _ => None,

@@ -170,8 +170,12 @@ pub enum RuntimeNode {
     SignalWait {
         resume: PlanNodeKey,
     },
-    Return,
-    Raise,
+    Return {
+        value: ExactDataPortRef,
+    },
+    Raise {
+        failure: ExactDataPortRef,
+    },
 }
 
 impl RuntimeNode {
@@ -192,8 +196,8 @@ impl RuntimeNode {
             Self::HumanTask { .. } => PlanNodeKind::HumanTask,
             Self::TimerWait { .. } => PlanNodeKind::TimerWait,
             Self::SignalWait { .. } => PlanNodeKind::SignalWait,
-            Self::Return => PlanNodeKind::Return,
-            Self::Raise => PlanNodeKind::Raise,
+            Self::Return { .. } => PlanNodeKind::Return,
+            Self::Raise { .. } => PlanNodeKind::Raise,
         }
     }
 
@@ -223,7 +227,7 @@ impl RuntimeNode {
             Self::ErrorBoundary { body, handlers } => {
                 std::iter::once(body).chain(handlers.values()).collect()
             }
-            Self::Return | Self::Raise => Vec::new(),
+            Self::Return { .. } | Self::Raise { .. } => Vec::new(),
         }
     }
 }
@@ -284,7 +288,7 @@ pub struct RuntimePlan {
 
 impl RuntimePlan {
     pub fn validate(&self, limits: PlanLimits) -> Result<(), OrchestratorError> {
-        if self.plan_version != 2
+        if self.plan_version != 3
             || self.interface_revision_id.kind() != ResourceKind::AgentInterfaceRevision
             || limits.maximum_nodes == 0
             || limits.maximum_edges == 0
@@ -316,7 +320,55 @@ impl RuntimePlan {
             }
         }
         self.validate_loop_carried_regions()?;
+        self.validate_terminal_ports()?;
         Ok(())
+    }
+
+    fn validate_terminal_ports(&self) -> Result<(), OrchestratorError> {
+        for (terminal_key, node) in &self.nodes {
+            let port = match node {
+                RuntimeNode::Return { value } => value,
+                RuntimeNode::Raise { failure } => failure,
+                _ => continue,
+            };
+            let Some(producer_key) = port.producer_node_id() else {
+                continue;
+            };
+            let producer = self
+                .nodes
+                .get(producer_key)
+                .ok_or(OrchestratorError::InvalidPlan)?;
+            if producer_key == terminal_key
+                || !node_declares_output(producer, port)
+                || !self.node_reaches(producer_key, terminal_key)?
+            {
+                return Err(OrchestratorError::InvalidPlan);
+            }
+        }
+        Ok(())
+    }
+
+    fn node_reaches(
+        &self,
+        source: &PlanNodeKey,
+        target: &PlanNodeKey,
+    ) -> Result<bool, OrchestratorError> {
+        let mut visited = std::collections::BTreeSet::new();
+        let mut pending = vec![source.clone()];
+        while let Some(candidate) = pending.pop() {
+            if candidate == *target {
+                return Ok(true);
+            }
+            if !visited.insert(candidate.clone()) {
+                continue;
+            }
+            let node = self
+                .nodes
+                .get(&candidate)
+                .ok_or(OrchestratorError::UnknownPlanNodeReference)?;
+            pending.extend(node.references().into_iter().cloned());
+        }
+        Ok(false)
     }
 
     fn validate_loop_carried_regions(&self) -> Result<(), OrchestratorError> {
@@ -372,6 +424,19 @@ impl RuntimePlan {
         self.nodes
             .get(key)
             .ok_or(OrchestratorError::UnknownPlanNodeReference)
+    }
+}
+
+fn node_declares_output(node: &RuntimeNode, port: &ExactDataPortRef) -> bool {
+    match node {
+        RuntimeNode::Compute { assignments, .. } => assignments
+            .iter()
+            .any(|assignment| &assignment.output_port == port),
+        RuntimeNode::Map { item_port, .. } => item_port == port,
+        RuntimeNode::Loop { carried_ports, .. } => carried_ports
+            .iter()
+            .any(|carried| &carried.next_iteration_port == port),
+        _ => false,
     }
 }
 
@@ -1000,11 +1065,15 @@ pub enum ControllerDecision {
         kind: DurableWaitKind,
         resume: PlanNodeKey,
     },
-    CompleteRun,
+    CompleteRun {
+        value: ExactDataPortRef,
+    },
     FailNode {
         code: &'static str,
     },
-    FailRun,
+    FailRun {
+        failure: ExactDataPortRef,
+    },
 }
 
 pub fn decide_controller(
@@ -1148,8 +1217,16 @@ pub fn decide_controller(
                 resume: resume.clone(),
             })
         }
-        (RuntimeNode::Return, ControllerObservation::None) => Ok(ControllerDecision::CompleteRun),
-        (RuntimeNode::Raise, ControllerObservation::None) => Ok(ControllerDecision::FailRun),
+        (RuntimeNode::Return { value }, ControllerObservation::None) => {
+            Ok(ControllerDecision::CompleteRun {
+                value: value.clone(),
+            })
+        }
+        (RuntimeNode::Raise { failure }, ControllerObservation::None) => {
+            Ok(ControllerDecision::FailRun {
+                failure: failure.clone(),
+            })
+        }
         _ => Err(OrchestratorError::ObservationMismatch),
     }
 }
@@ -2327,6 +2404,14 @@ mod tests {
         exact_port(node, "item")
     }
 
+    fn return_input() -> RuntimeNode {
+        RuntimeNode::Return {
+            value: ExactDataPortRef::RunInput {
+                schema_digest: digest('1'),
+            },
+        }
+    }
+
     fn exact_port(node: &str, port: &str) -> ExactDataPortRef {
         ExactDataPortRef::NodeOutput {
             producer_node_id: key(node),
@@ -2348,7 +2433,7 @@ mod tests {
     #[test]
     fn runtime_plan_is_closed_bounded_and_digestible() {
         let plan = RuntimePlan {
-            plan_version: 2,
+            plan_version: 3,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("start"),
             nodes: BTreeMap::from([
@@ -2358,12 +2443,17 @@ mod tests {
                         next: key("return"),
                     },
                 ),
-                (key("return"), RuntimeNode::Return),
+                (key("return"), return_input()),
             ]),
         };
         plan.validate(limits()).unwrap();
         let mut obsolete = plan.clone();
         obsolete.plan_version = 1;
+        assert_eq!(
+            obsolete.validate(limits()),
+            Err(OrchestratorError::InvalidPlan)
+        );
+        obsolete.plan_version = 2;
         assert_eq!(
             obsolete.validate(limits()),
             Err(OrchestratorError::InvalidPlan)
@@ -2378,13 +2468,65 @@ mod tests {
     }
 
     #[test]
+    fn terminal_ports_are_exact_declared_and_reachable() {
+        let output = exact_port("compute", "result");
+        let plan = RuntimePlan {
+            plan_version: 3,
+            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            entry_node_id: key("compute"),
+            nodes: BTreeMap::from([
+                (
+                    key("compute"),
+                    RuntimeNode::Compute {
+                        assignments: vec![PortAssignment {
+                            output_port: output.clone(),
+                            expression: literal_program(serde_json::json!({"answer": 42})),
+                        }],
+                        next: key("return"),
+                    },
+                ),
+                (
+                    key("return"),
+                    RuntimeNode::Return {
+                        value: output.clone(),
+                    },
+                ),
+                (key("other"), return_input()),
+            ]),
+        };
+        plan.validate(limits()).unwrap();
+
+        let mut undeclared = plan.clone();
+        let RuntimeNode::Return { value } = undeclared.nodes.get_mut(&key("return")).unwrap()
+        else {
+            panic!("fixture Return disappeared")
+        };
+        *value = exact_port("compute", "forged");
+        assert_eq!(
+            undeclared.validate(limits()),
+            Err(OrchestratorError::InvalidPlan)
+        );
+
+        let mut unreachable = plan;
+        let RuntimeNode::Compute { next, .. } = unreachable.nodes.get_mut(&key("compute")).unwrap()
+        else {
+            panic!("fixture Compute disappeared")
+        };
+        *next = key("other");
+        assert_eq!(
+            unreachable.validate(limits()),
+            Err(OrchestratorError::InvalidPlan)
+        );
+    }
+
+    #[test]
     fn loop_carried_ports_are_exact_schema_matched_and_body_owned() {
         let carried = LoopCarriedPort {
             body_output_port: exact_port("body", "out"),
             next_iteration_port: exact_port("loop", "carried"),
         };
         let plan = RuntimePlan {
-            plan_version: 2,
+            plan_version: 3,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("loop"),
             nodes: BTreeMap::from([
@@ -2408,8 +2550,8 @@ mod tests {
                         next: key("loop"),
                     },
                 ),
-                (key("outside"), RuntimeNode::Return),
-                (key("return"), RuntimeNode::Return),
+                (key("outside"), return_input()),
+                (key("return"), return_input()),
             ]),
         };
         plan.validate(limits()).unwrap();
@@ -2456,7 +2598,7 @@ mod tests {
         )
         .unwrap();
         let plan = RuntimePlan {
-            plan_version: 2,
+            plan_version: 3,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("compute"),
             nodes: BTreeMap::from([
@@ -2470,7 +2612,7 @@ mod tests {
                         next: key("return"),
                     },
                 ),
-                (key("return"), RuntimeNode::Return),
+                (key("return"), return_input()),
             ]),
         };
         assert_eq!(plan.validate(limits()), Err(OrchestratorError::InvalidPlan));
@@ -2478,7 +2620,7 @@ mod tests {
         let mut forged = literal_program(serde_json::json!(true));
         forged.semantic_digest = digest('f');
         let branch = RuntimePlan {
-            plan_version: 2,
+            plan_version: 3,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("branch"),
             nodes: BTreeMap::from([
@@ -2492,8 +2634,8 @@ mod tests {
                         otherwise: key("right"),
                     },
                 ),
-                (key("left"), RuntimeNode::Return),
-                (key("right"), RuntimeNode::Return),
+                (key("left"), return_input()),
+                (key("right"), return_input()),
             ]),
         };
         assert_eq!(
@@ -2667,7 +2809,7 @@ mod tests {
         let start = key("start");
         let finish = key("finish");
         let plan = RuntimePlan {
-            plan_version: 2,
+            plan_version: 3,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: start.clone(),
             nodes: BTreeMap::from([
@@ -2677,7 +2819,7 @@ mod tests {
                         next: finish.clone(),
                     },
                 ),
-                (finish, RuntimeNode::Return),
+                (finish, return_input()),
             ]),
         };
         assert_eq!(

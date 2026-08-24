@@ -122,6 +122,14 @@ fn input_compute_output_port() -> insight_platform_orchestrator::ExactDataPortRe
     }
 }
 
+fn return_run_input() -> RuntimeNode {
+    RuntimeNode::Return {
+        value: insight_platform_orchestrator::ExactDataPortRef::RunInput {
+            schema_digest: digest('a'),
+        },
+    }
+}
+
 fn echo_run_input_program() -> TypedExpressionProgram {
     let input = insight_platform_orchestrator::ExactDataPortRef::RunInput {
         schema_digest: digest('a'),
@@ -187,7 +195,7 @@ fn runtime_plan() -> RuntimePlan {
     let input_otherwise = PlanNodeKey::new("input_otherwise".to_owned()).unwrap();
     let input_compute = PlanNodeKey::new("input_compute".to_owned()).unwrap();
     RuntimePlan {
-        plan_version: 2,
+        plan_version: 3,
         interface_revision_id: id(AGENT_INTERFACE_ID),
         entry_node_id: entry.clone(),
         nodes: BTreeMap::from([
@@ -384,7 +392,7 @@ fn runtime_plan() -> RuntimePlan {
                     otherwise: input_otherwise.clone(),
                 },
             ),
-            (input_otherwise, RuntimeNode::Return),
+            (input_otherwise, return_run_input()),
             (
                 input_compute,
                 RuntimeNode::Compute {
@@ -395,7 +403,7 @@ fn runtime_plan() -> RuntimePlan {
                     next: finish.clone(),
                 },
             ),
-            (finish, RuntimeNode::Return),
+            (finish, return_run_input()),
         ]),
     }
 }
@@ -3395,7 +3403,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     let plan = runtime_plan();
     let mut forged_plan = plan.clone();
     let alternate = PlanNodeKey::new("alternate".to_owned()).unwrap();
-    forged_plan.nodes.insert(alternate.clone(), RuntimeNode::Return);
+    forged_plan.nodes.insert(alternate.clone(), return_run_input());
     forged_plan.nodes.insert(
         forged_plan.entry_node_id.clone(),
         RuntimeNode::Start { next: alternate },

@@ -198,8 +198,8 @@ fn committed_observation_is_allowed(
                     | RuntimeNode::HumanTask { .. }
                     | RuntimeNode::TimerWait { .. }
                     | RuntimeNode::SignalWait { .. }
-                    | RuntimeNode::Return
-                    | RuntimeNode::Raise,
+                    | RuntimeNode::Return { .. }
+                    | RuntimeNode::Raise { .. },
                 ControllerObservation::None,
             )
     )
@@ -308,7 +308,7 @@ mod tests {
         )
         .unwrap();
         let plan = RuntimePlan {
-            plan_version: 2,
+            plan_version: 3,
             interface_revision_id: id(ResourceKind::AgentInterfaceRevision, "9910"),
             entry_node_id: key("branch"),
             nodes: BTreeMap::from([
@@ -322,8 +322,22 @@ mod tests {
                         otherwise: key("otherwise"),
                     },
                 ),
-                (key("selected"), RuntimeNode::Return),
-                (key("otherwise"), RuntimeNode::Return),
+                (
+                    key("selected"),
+                    RuntimeNode::Return {
+                        value: ExactDataPortRef::RunInput {
+                            schema_digest: digest('1'),
+                        },
+                    },
+                ),
+                (
+                    key("otherwise"),
+                    RuntimeNode::Return {
+                        value: ExactDataPortRef::RunInput {
+                            schema_digest: digest('1'),
+                        },
+                    },
+                ),
             ]),
         };
         let artifact = ArtifactRef::new(

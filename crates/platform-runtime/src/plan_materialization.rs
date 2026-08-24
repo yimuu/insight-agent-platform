@@ -247,7 +247,7 @@ mod tests {
         checked_in_hard_limit_profile, ArtifactRef, DataClassification, SchedulerPriority,
         Sha256Digest, WorkClass,
     };
-    use insight_platform_orchestrator::{PlanNodeKey, RuntimeNode};
+    use insight_platform_orchestrator::{ExactDataPortRef, PlanNodeKey, RuntimeNode};
     use insight_platform_postgres::repository::TypedPayload;
     use std::{collections::BTreeMap, sync::Mutex};
 
@@ -271,7 +271,7 @@ mod tests {
         let start = PlanNodeKey::new("start".to_owned()).unwrap();
         let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
         RuntimePlan {
-            plan_version: 2,
+            plan_version: 3,
             interface_revision_id: id(ResourceKind::AgentInterfaceRevision, "7701"),
             entry_node_id: start.clone(),
             nodes: BTreeMap::from([
@@ -281,7 +281,14 @@ mod tests {
                         next: finish.clone(),
                     },
                 ),
-                (finish, RuntimeNode::Return),
+                (
+                    finish,
+                    RuntimeNode::Return {
+                        value: ExactDataPortRef::RunInput {
+                            schema_digest: digest('1'),
+                        },
+                    },
+                ),
             ]),
         }
     }
