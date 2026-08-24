@@ -6,8 +6,8 @@ use insight_platform_postgres::repository::{
     ControllerActivationSlot, ControllerLoopRolloverSlot, ControllerMutationRequirements,
     ControllerPendingNodeSlot, ControllerPendingWakeSlot, ControllerRemainderCancellationSlot,
     ControllerScopeSlot, ControllerStepMutationIds, ControllerStructuralExitSlot,
-    ControllerStructuralRequirement, OrchestrationTerminalMutationIds,
-    MAX_ORCHESTRATION_QUOTA_LINES,
+    ControllerStructuralRequirement, DeferOrchestrationChildMutationIds,
+    OrchestrationTerminalMutationIds, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 
 pub fn allocate_orchestration_terminal_mutations(
@@ -30,6 +30,33 @@ pub fn allocate_orchestration_terminal_mutations(
         scope_terminal_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
         job_event_id: new_id(identities, ResourceKind::Event)?,
         job_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+    })
+}
+
+pub fn allocate_child_run_mutations(
+    identities: &impl CoordinatorIdentityFactory,
+) -> Result<DeferOrchestrationChildMutationIds, IdentityFactoryError> {
+    Ok(DeferOrchestrationChildMutationIds {
+        receipt_id: new_id(identities, ResourceKind::Receipt)?,
+        quota_entry_ids: allocate_ids(
+            identities,
+            ResourceKind::QuotaLedgerEntry,
+            MAX_ORCHESTRATION_QUOTA_LINES,
+        )?,
+        root_run_event_id: new_id(identities, ResourceKind::Event)?,
+        root_run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        parent_run_event_id: new_id(identities, ResourceKind::Event)?,
+        parent_run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        parent_node_event_id: new_id(identities, ResourceKind::Event)?,
+        parent_node_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        parent_job_event_id: new_id(identities, ResourceKind::Event)?,
+        parent_job_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        child_link_event_id: new_id(identities, ResourceKind::Event)?,
+        child_link_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        child_run_event_id: new_id(identities, ResourceKind::Event)?,
+        child_run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        child_job_event_id: new_id(identities, ResourceKind::Event)?,
+        child_job_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
     })
 }
 
@@ -192,6 +219,11 @@ mod tests {
     #[test]
     fn allocator_matches_map_and_loop_rollover_shapes() {
         let identities = UuidCoordinatorIdentityFactory;
+        let child = allocate_child_run_mutations(&identities).unwrap();
+        assert_eq!(child.quota_entry_ids.len(), MAX_ORCHESTRATION_QUOTA_LINES);
+        assert_eq!(child.receipt_id.kind(), ResourceKind::Receipt);
+        assert_eq!(child.child_run_event_id.kind(), ResourceKind::Event);
+        assert_eq!(child.child_run_outbox_id.kind(), ResourceKind::OutboxEvent);
         let map = allocate_controller_step_mutations(
             &identities,
             &ControllerMutationRequirements {

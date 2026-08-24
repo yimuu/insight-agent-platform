@@ -1,10 +1,11 @@
 //! PostgreSQL-backed durable Plan-generation store.
 
 use crate::{
-    allocate_controller_step_mutations, allocate_orchestration_terminal_mutations,
-    CoordinatorIdentityFactory, DerivedControllerCommit, DurableControllerFacts,
-    DurableControllerPhase, DurablePlanDriverError, DurablePlanGenerationStore,
-    GenerationHandoffReason, StartedOrchestrationJob,
+    allocate_child_run_mutations, allocate_controller_step_mutations,
+    allocate_orchestration_terminal_mutations, CoordinatorIdentityFactory, DerivedControllerCommit,
+    DurableChildAgentDispatchFacts, DurableControllerFacts, DurableControllerPhase,
+    DurablePlanDriverError, DurablePlanGenerationStore, GenerationHandoffReason,
+    StartedOrchestrationJob,
 };
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -16,13 +17,16 @@ use insight_platform_contracts::{
     canonical_digest, canonical_json, parse_strict_json, ClosedJsonValue, ResourceId, ResourceKind,
     Sha256Digest, ValueRef, MODEL_JSON_LIMITS,
 };
-use insight_platform_orchestrator::{CommittedExpressionInput, RuntimeNode, RuntimePlan};
+use insight_platform_orchestrator::{
+    derive_candidate_selection, ChildBudget, CommittedExpressionInput, ExactRunValueRef,
+    RunInputValue, RuntimeNode, RuntimePlan,
+};
 use insight_platform_postgres::repository::{
     ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep, CommitPlanTerminal,
-    ControllerFacts, DerivedExpressionFailureEvidence, FailOrchestrationJob, JobFence,
-    MaterializedTerminalValue, OrchestrationFailureCause, OrchestrationYield,
-    OrchestrationYieldMutationIds, PgRepository, RepositoryError, ResolvedExpressionInput,
-    YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+    ControllerFacts, DeferOrchestrationToChildRun, DerivedExpressionFailureEvidence,
+    FailOrchestrationJob, JobFence, MaterializedTerminalValue, OrchestrationFailureCause,
+    OrchestrationYield, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
+    ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -290,6 +294,148 @@ where
             .new_resource_id(kind)
             .map_err(|_| DurablePlanDriverError::InvariantViolation)
     }
+
+    async fn commit_child_agent_dispatch(
+        &self,
+        job: &StartedOrchestrationJob,
+        command: DerivedControllerCommit,
+    ) -> Result<(), DurablePlanDriverError> {
+        let DurableControllerPhase::ChildAgentDispatch(facts) = command.facts.phase else {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        };
+        let DurableChildAgentDispatchFacts {
+            input,
+            route,
+            selection_policy,
+            selection_document,
+            candidates,
+        } = *facts;
+        let (
+            child_agent_slot_id,
+            budget,
+            cancellation_policy,
+            attempt_limit,
+            retry_backoff_milliseconds,
+        ) = match command
+            .materialized
+            .plan
+            .node(&command.facts.plan_node_key)
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        {
+            RuntimeNode::ChildAgentCall {
+                child_agent_slot_id,
+                budget,
+                cancellation_policy,
+                attempt_limit,
+                retry_backoff_milliseconds,
+                ..
+            } => (
+                child_agent_slot_id.clone(),
+                budget.clone(),
+                *cancellation_policy,
+                *attempt_limit,
+                *retry_backoff_milliseconds,
+            ),
+            _ => return Err(DurablePlanDriverError::InvariantViolation),
+        };
+        let route_reference = route.as_ref().map(|(resolved, _)| ExactRunValueRef {
+            value_id: resolved.run_value_id.clone(),
+            schema_digest: resolved.schema_digest.clone(),
+            content_digest: resolved.content_digest.clone(),
+        });
+        let route_for_selection = route_reference
+            .as_ref()
+            .zip(route.as_ref().map(|(_, value)| value));
+        let selection_evidence = derive_candidate_selection(
+            &child_agent_slot_id,
+            &selection_policy,
+            &selection_document,
+            &candidates,
+            route_for_selection,
+        )
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let maximum_duration = budget.maximum_duration_milliseconds;
+        let delegated_duration = maximum_duration.saturating_div(2).max(1);
+        let delegated_duration = i64::try_from(delegated_duration)
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let deadline = (Utc::now() + ChronoDuration::milliseconds(delegated_duration))
+            .min(job.started().deadline);
+        let child_budget = ChildBudget {
+            deadline,
+            maximum_model_tokens: budget.maximum_model_tokens,
+            maximum_capability_calls: budget.maximum_capability_calls,
+            maximum_artifact_bytes: budget.maximum_artifact_bytes,
+            maximum_descendant_runs: budget.maximum_descendant_runs,
+        };
+        let child_input_value_id = self.new_id(ResourceKind::RunValue)?;
+        let request_digest: Sha256Digest = canonical_digest(&json!({
+            "input_content_digest": input.content_digest,
+            "job_id": command.fence.job_id,
+            "lease_generation": command.fence.lease_epoch,
+            "operation": "orchestration.child.defer",
+            "plan_digest": command.materialized.request.artifact.content_digest(),
+            "selection_evidence_digest": selection_evidence.canonical_digest,
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let child = DeferOrchestrationToChildRun {
+            fence: command.fence,
+            plan: command.materialized.plan,
+            slot_id: child_agent_slot_id,
+            selected_child_deployment: selection_evidence.selected_deployment.clone(),
+            selection_evidence,
+            materialized_route: route.map(|(_, value)| value),
+            child_link_id: self.new_id(ResourceKind::ChildRunLink)?,
+            child_run_id: self.new_id(ResourceKind::Run)?,
+            child_root_scope_id: self.new_id(ResourceKind::ScopeInstance)?,
+            child_entry_node_execution_id: self.new_id(ResourceKind::NodeExecution)?,
+            child_orchestration_job_id: self.new_id(ResourceKind::Job)?,
+            input: RunInputValue {
+                value_id: child_input_value_id,
+                classification: input.classification,
+                schema_digest: input.schema_digest,
+                content_digest: input.content_digest,
+                value: input.value,
+            },
+            source_value_ids: vec![input.run_value_id],
+            budget: child_budget,
+            cancellation_policy,
+            logical_key: format!(
+                "{}:{}",
+                command.facts.node_execution_id,
+                job.started().attempt_no
+            ),
+            child_attempt_limit: attempt_limit,
+            child_retry_backoff_milliseconds: retry_backoff_milliseconds,
+            idempotency_key_digest: self
+                .identities
+                .new_lease_token_digest()
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            request_digest,
+            receipt_expires_at: job.started().deadline,
+            mutations: allocate_child_run_mutations(self.identities.as_ref())
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+        };
+        let mut transaction = self
+            .repository
+            .begin_scheduler_transaction()
+            .await
+            .map_err(classify_repository_failure)?;
+        match transaction.defer_orchestration_to_child_run(child).await {
+            Ok(_) => transaction
+                .commit()
+                .await
+                .map_err(classify_repository_failure),
+            Err(failure) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(classify_repository_failure)?;
+                Err(classify_repository_failure(failure))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -355,6 +501,32 @@ where
                 plan_node_key: identity.plan_node_key,
                 phase: DurableControllerPhase::CommittedFacts { observation },
             }),
+            ControllerFacts::ChildAgentDispatch(facts) => {
+                let route = if let Some(route) = facts.route {
+                    let value = self
+                        .materializer
+                        .materialize(&context, &route)
+                        .await
+                        .map_err(map_materialization_failure)?;
+                    Some((route, value))
+                } else {
+                    None
+                };
+                Ok(DurableControllerFacts {
+                    node_execution_id: facts.identity.node_execution_id,
+                    node_execution_version: facts.identity.node_execution_version,
+                    plan_node_key: facts.identity.plan_node_key,
+                    phase: DurableControllerPhase::ChildAgentDispatch(Box::new(
+                        DurableChildAgentDispatchFacts {
+                            input: facts.input,
+                            route,
+                            selection_policy: facts.selection_policy,
+                            selection_document: facts.selection_document,
+                            candidates: facts.candidates,
+                        },
+                    )),
+                })
+            }
         }
     }
 
@@ -368,8 +540,15 @@ where
                 Some((inputs, evaluation))
             }
             (DurableControllerPhase::CommittedFacts { .. }, None) => None,
+            (DurableControllerPhase::ChildAgentDispatch(_), None) => None,
             _ => return Err(DurablePlanDriverError::InvariantViolation),
         };
+        if matches!(
+            command.decision,
+            insight_platform_orchestrator::ControllerDecision::CreateChildRun { .. }
+        ) {
+            return self.commit_child_agent_dispatch(job, command).await;
+        }
         if matches!(
             &command.decision,
             insight_platform_orchestrator::ControllerDecision::CompleteRun { .. }
@@ -665,6 +844,14 @@ fn classify_repository_failure(failure: RepositoryError) -> DurablePlanDriverErr
         | RepositoryError::PermissionDenied
         | RepositoryError::IdempotencyConflict
         | RepositoryError::CorruptRow(_) => DurablePlanDriverError::InvariantViolation,
+    }
+}
+
+fn map_materialization_failure(failure: RunValueMaterializationError) -> DurablePlanDriverError {
+    match failure {
+        RunValueMaterializationError::Unavailable => DurablePlanDriverError::Unavailable,
+        RunValueMaterializationError::FenceLost => DurablePlanDriverError::FenceLost,
+        RunValueMaterializationError::Integrity => DurablePlanDriverError::InvariantViolation,
     }
 }
 

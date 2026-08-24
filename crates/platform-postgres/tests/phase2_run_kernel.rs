@@ -134,7 +134,7 @@ fn literal_program(value: Value) -> TypedExpressionProgram {
 fn run_input_predicate() -> TypedExpressionProgram {
     TypedExpressionProgram::build(
         vec![insight_platform_orchestrator::ExactDataPortRef::RunInput {
-            schema_digest: digest('a'),
+            schema_digest: agent_schema().canonical_digest,
         }],
         vec![TypedInstruction::Literal {
             value: ClosedJsonValue::build(digest('1'), json!(true)).unwrap(),
@@ -169,7 +169,7 @@ fn return_compute_output() -> RuntimeNode {
 
 fn echo_run_input_program() -> TypedExpressionProgram {
     let input = insight_platform_orchestrator::ExactDataPortRef::RunInput {
-        schema_digest: digest('a'),
+        schema_digest: agent_schema().canonical_digest,
     };
     TypedExpressionProgram::build(
         vec![input.clone()],
@@ -2876,6 +2876,23 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
 
+    let child_facts_fence = JobFence {
+        expected_job_version: child_started.version,
+        ..child_start.fence.clone()
+    };
+    let child_dispatch_facts = repository
+        .load_controller_facts(&child_facts_fence, &runtime_plan())
+        .await
+        .unwrap();
+    assert!(matches!(
+        child_dispatch_facts,
+        ControllerFacts::ChildAgentDispatch(ref facts)
+            if facts.input.run_value_id.to_string()
+                == expired[0].run.input_value_id.as_deref().unwrap()
+                && facts.route.is_none()
+                && facts.candidates.len() == 1
+    ));
+
     let child_deployment_digest: String = sqlx::query_scalar(
         "SELECT bindings_digest FROM insight_platform.deployments WHERE tenant_id = $1 AND deployment_id = $2",
     )
@@ -2884,7 +2901,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let child_input: Value = json!({"question": "delegate exactly once"});
+    let child_input: Value = json!({"question": "select one"});
     let child_input_digest = canonical_digest(&child_input).unwrap().parse().unwrap();
     let (selection_policy, selection_candidates) = match &bindings
         .slots
@@ -2967,8 +2984,6 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         child_root_scope_id: id("scp_0198f1c3-9a00-7c3e-b1f3-773c28367e03"),
         child_entry_node_execution_id: id("nod_0198f1c3-9a00-7c3e-b1f3-773c28367e04"),
         child_orchestration_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c28367e05"),
-        child_entry_plan_node_key: PlanNodeKey::new("start".to_owned()).unwrap(),
-        child_entry_node_kind: PlanNodeKind::Start,
         input: RunInputValue {
             value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367e06"),
             classification: DataClassification::Internal,
@@ -2988,7 +3003,6 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         logical_key: "child:expiry-node:attempt-1".to_owned(),
         child_attempt_limit: 3,
         child_retry_backoff_milliseconds: 100,
-        inline_limits: JsonLimits::CONTRACT_FIXTURE,
         idempotency_key_digest: digest('d'),
         request_digest: digest('e'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -3015,7 +3029,10 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .await
         .unwrap_err();
     assert!(
-        matches!(invalid_child_error, RepositoryError::InvalidInput(_)),
+        matches!(
+            invalid_child_error,
+            RepositoryError::Conflict("child input RunValue evidence")
+        ),
         "unexpected invalid child error: {invalid_child_error:?}"
     );
     scheduler.rollback().await.unwrap();
@@ -3050,12 +3067,17 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     invalid_candidate.idempotency_key_digest = digest('1');
     invalid_candidate.request_digest = digest('2');
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
-    assert!(matches!(
-        scheduler
-            .defer_orchestration_to_child_run(invalid_candidate)
-            .await,
-        Err(RepositoryError::Conflict("exact child candidate selection"))
-    ));
+    let invalid_candidate_error = scheduler
+        .defer_orchestration_to_child_run(invalid_candidate)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            invalid_candidate_error,
+            RepositoryError::Conflict("exact child candidate selection")
+        ),
+        "unexpected invalid candidate error: {invalid_candidate_error:?}"
+    );
     scheduler.rollback().await.unwrap();
 
     let mut declassified_child = defer_child.clone();
@@ -3067,7 +3089,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         scheduler
             .defer_orchestration_to_child_run(declassified_child)
             .await,
-        Err(RepositoryError::PermissionDenied)
+        Err(RepositoryError::Conflict("child input RunValue evidence"))
     ));
     scheduler.rollback().await.unwrap();
 
@@ -3249,7 +3271,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         output: Some(RunInputValue {
             value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367f0b"),
             classification: DataClassification::Internal,
-            schema_digest: digest('a'),
+            schema_digest: agent_schema().canonical_digest,
             content_digest: child_output_digest,
             value: ValueRef::Inline {
                 value: child_output,
@@ -8755,7 +8777,7 @@ fn admission(
         input: RunInputValue {
             value_id: id(ids.value),
             classification: DataClassification::Internal,
-            schema_digest: digest('a'),
+            schema_digest: agent_schema().canonical_digest,
             content_digest,
             value: ValueRef::Inline { value: input },
         },

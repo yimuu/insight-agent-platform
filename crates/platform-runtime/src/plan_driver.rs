@@ -5,16 +5,19 @@ use crate::{
     MaterializedTypedPlan, StartedOrchestrationJob,
 };
 use async_trait::async_trait;
-use insight_platform_contracts::ResourceId;
+use insight_platform_contracts::{
+    CandidateSelectionPolicyDocument, ClosedJsonValue, ExactDeploymentRef, ExactPolicyBinding,
+    ResourceId,
+};
 use insight_platform_orchestrator::{
     decide_controller, derive_expression_controller, CommittedExpressionInput, ControllerDecision,
     ControllerEvaluation, ControllerObservation, ExpressionLimits, PlanNodeKey, RuntimeNode,
     RuntimePlan,
 };
-use insight_platform_postgres::repository::JobFence;
+use insight_platform_postgres::repository::{JobFence, ResolvedExpressionInput};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DurableControllerPhase {
     Expression {
         inputs: Vec<CommittedExpressionInput>,
@@ -23,9 +26,19 @@ pub enum DurableControllerPhase {
     CommittedFacts {
         observation: ControllerObservation,
     },
+    ChildAgentDispatch(Box<DurableChildAgentDispatchFacts>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct DurableChildAgentDispatchFacts {
+    pub input: ResolvedExpressionInput,
+    pub route: Option<(ResolvedExpressionInput, ClosedJsonValue)>,
+    pub selection_policy: ExactPolicyBinding,
+    pub selection_document: CandidateSelectionPolicyDocument,
+    pub candidates: Vec<ExactDeploymentRef>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct DurableControllerFacts {
     pub node_execution_id: ResourceId,
     pub node_execution_version: i64,
@@ -145,6 +158,14 @@ where
                     return Err(DurablePlanDriverError::InvariantViolation);
                 }
                 (observation, None)
+            }
+            DurableControllerPhase::ChildAgentDispatch(_)
+                if matches!(node, RuntimeNode::ChildAgentCall { .. }) =>
+            {
+                (ControllerObservation::None, None)
+            }
+            DurableControllerPhase::ChildAgentDispatch(_) => {
+                return Err(DurablePlanDriverError::InvariantViolation)
             }
         };
         let decision = decide_controller(node, &observation)
