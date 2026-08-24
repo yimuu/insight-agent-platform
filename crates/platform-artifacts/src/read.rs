@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    ArtifactRef, PrincipalKind, ResourceId, ResourceKind, Sha256Digest,
+    ArtifactRef, DataClassification, PrincipalKind, ResourceId, ResourceKind, Sha256Digest,
 };
 use std::fmt;
 
 pub const MAX_TYPED_PLAN_ARTIFACT_BYTES: usize = 16 * 1_024 * 1_024;
+pub const MAX_SCHEDULER_RUN_VALUE_BYTES: usize = 1_048_576;
 
 pub const MAX_ARTIFACT_OBJECT_REFERENCE_BYTES: usize = 16_384;
 pub const MAX_ARTIFACT_OBJECT_GENERATION_BYTES: usize = 255;
@@ -216,6 +217,109 @@ pub trait SchedulerTypedPlanReader: Send + Sync {
         &self,
         request: SchedulerTypedPlanReadRequest,
     ) -> Result<Vec<u8>, SchedulerTypedPlanReadError>;
+}
+
+/// Scheduler-owned lookup key for one immutable Artifact-backed RunValue already resolved by the
+/// durable controller authority. The resolver rechecks the value under the current Job fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerRunValueLease {
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub orchestration_job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub lease_token_digest: Sha256Digest,
+    pub run_value_id: ResourceId,
+    pub request_digest: Sha256Digest,
+    pub maximum_bytes: usize,
+    pub deadline: DateTime<Utc>,
+}
+
+impl SchedulerRunValueLease {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ArtifactObjectReadAuthorityError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.run_id.kind() != ResourceKind::Run
+            || self.orchestration_job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.run_value_id.kind() != ResourceKind::RunValue
+            || self.lease_generation == 0
+            || self.maximum_bytes == 0
+            || self.maximum_bytes > MAX_SCHEDULER_RUN_VALUE_BYTES
+            || self.deadline <= now
+        {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+pub trait SchedulerRunValueRequestResolver: Send + Sync {
+    async fn resolve_run_value_read(
+        &self,
+        lease: SchedulerRunValueLease,
+    ) -> Result<SchedulerRunValueReadRequest, ArtifactObjectReadAuthorityError>;
+}
+
+/// Closed Scheduler request for the exact Artifact generation referenced by one immutable
+/// RunValue. It never contains a physical object locator or storage credential.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerRunValueReadRequest {
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub orchestration_job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub lease_token_digest: Sha256Digest,
+    pub run_value_id: ResourceId,
+    pub schema_digest: Sha256Digest,
+    pub classification: DataClassification,
+    pub artifact: ArtifactRef,
+    pub request_digest: Sha256Digest,
+    pub maximum_bytes: usize,
+    pub deadline: DateTime<Utc>,
+}
+
+impl SchedulerRunValueReadRequest {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ArtifactObjectReadAuthorityError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.run_id.kind() != ResourceKind::Run
+            || self.orchestration_job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.run_value_id.kind() != ResourceKind::RunValue
+            || self.lease_generation == 0
+            || self.artifact.validate().is_err()
+            || (self.artifact.media_type() != "application/json"
+                && !self.artifact.media_type().ends_with("+json"))
+            || self.artifact.classification() != self.classification
+            || self.maximum_bytes == 0
+            || self.maximum_bytes > MAX_SCHEDULER_RUN_VALUE_BYTES
+            || u64::try_from(self.maximum_bytes)
+                .map_or(true, |maximum| maximum < self.artifact.byte_length())
+            || self.deadline <= now
+        {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerRunValueReadError {
+    Unavailable,
+    Denied,
+    NotFound,
+    TooLarge,
+    Integrity,
+}
+
+#[async_trait]
+pub trait SchedulerRunValueReader: Send + Sync {
+    async fn read_exact(
+        &self,
+        request: SchedulerRunValueReadRequest,
+    ) -> Result<Vec<u8>, SchedulerRunValueReadError>;
 }
 
 /// Closed public-Gateway request for one exact, bounded Artifact generation.
@@ -557,6 +661,69 @@ mod tests {
         expired_lease.deadline = now;
         assert_eq!(
             expired_lease.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+    }
+
+    #[test]
+    fn scheduler_run_value_read_binds_value_classification_and_json_limit() {
+        let now = Utc::now();
+        let artifact = ArtifactRef::new(
+            id(ResourceKind::Artifact, 9),
+            digest('a'),
+            7,
+            "application/problem+json".to_owned(),
+            DataClassification::Confidential,
+            Some("terminal.json".to_owned()),
+        )
+        .unwrap();
+        let request = SchedulerRunValueReadRequest {
+            tenant_id: id(ResourceKind::Tenant, 1),
+            run_id: id(ResourceKind::Run, 2),
+            orchestration_job_id: id(ResourceKind::Job, 3),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 4),
+            lease_generation: 2,
+            lease_token_digest: digest('b'),
+            run_value_id: id(ResourceKind::RunValue, 5),
+            schema_digest: digest('c'),
+            classification: DataClassification::Confidential,
+            artifact,
+            request_digest: digest('d'),
+            maximum_bytes: 7,
+            deadline: now + chrono::Duration::seconds(1),
+        };
+        request.validate_at(now).unwrap();
+
+        let mut mismatched = request.clone();
+        mismatched.classification = DataClassification::Internal;
+        assert_eq!(
+            mismatched.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+        let mut oversized = request.clone();
+        oversized.maximum_bytes = MAX_SCHEDULER_RUN_VALUE_BYTES + 1;
+        assert_eq!(
+            oversized.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+
+        let lease = SchedulerRunValueLease {
+            tenant_id: request.tenant_id,
+            run_id: request.run_id,
+            orchestration_job_id: request.orchestration_job_id,
+            worker_process_generation_id: request.worker_process_generation_id,
+            lease_generation: request.lease_generation,
+            lease_token_digest: request.lease_token_digest,
+            run_value_id: request.run_value_id,
+            request_digest: request.request_digest,
+            maximum_bytes: MAX_SCHEDULER_RUN_VALUE_BYTES,
+            deadline: request.deadline,
+        };
+        lease.validate_at(now).unwrap();
+        let mut wrong_kind = lease;
+        wrong_kind.run_value_id = id(ResourceKind::Artifact, 6);
+        assert_eq!(
+            wrong_kind.validate_at(now),
             Err(ArtifactObjectReadAuthorityError::Denied)
         );
     }
