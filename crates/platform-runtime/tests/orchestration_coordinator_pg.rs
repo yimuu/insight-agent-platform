@@ -113,8 +113,9 @@ fn fixture_plan() -> RuntimePlan {
         nodes: BTreeMap::from([
             (
                 entry,
-                RuntimeNode::Start {
-                    next: finish.clone(),
+                RuntimeNode::TimerWait {
+                    delay_milliseconds: 100,
+                    resume: finish.clone(),
                 },
             ),
             (
@@ -450,15 +451,15 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         };
         let _fixture_lock = acquire_phase2_fixture_lock(&database_url).await;
         let mut profile = checked_in_hard_limit_profile();
-        profile.run_scheduler.heartbeat_milliseconds.q1_default = 100;
-        profile.run_scheduler.lease_milliseconds.q1_default = 500;
+        profile.run_scheduler.heartbeat_milliseconds.q1_default = 500;
+        profile.run_scheduler.lease_milliseconds.q1_default = 3_000;
         profile.control_data.recovery_batch.q1_default = 1;
         profile.validate().unwrap();
         let connection_config = PostgresConnectionBulkheadConfig {
             worker_role: "orchestration.pg-fixture".to_owned(),
             business_max_connections: 1,
-            critical_control_reserved_connections: 1,
-            process_connection_budget: 2,
+            critical_control_reserved_connections: 2,
+            process_connection_budget: 3,
             acquire_timeout: Duration::from_secs(2),
             statement_timeout: Duration::from_secs(30),
             idle_timeout: Some(Duration::from_secs(30)),
@@ -526,7 +527,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         tokio::time::timeout(Duration::from_secs(2), handler.wait_running())
             .await
             .expect("real PostgreSQL Job was not started");
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(650)).await;
         assert_eq!(running.snapshot().jobs_claimed, 1);
         assert_eq!(running.snapshot().active_jobs, 1);
 
@@ -666,9 +667,8 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         })
         .await
         .expect("critical-control safety driver did not promote the handed-off retry");
-        let safety_exit = safety.shutdown().await.unwrap();
-        assert!(safety_exit.mutations >= 1);
-        assert!(safety_exit.scan_attempts >= 4);
+        assert!(safety.snapshot().mutations >= 1);
+        assert!(safety.snapshot().scan_attempts >= 2);
         drop(local_business_saturation);
         drop(_business_saturation);
 
@@ -679,7 +679,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                 Arc::new(bulkheads.critical_control_repository()),
                 Arc::new(StaticTypedPlanReader { bytes: plan_bytes }),
                 SchedulerPlanMaterializerConfig {
-                    request_timeout: Duration::from_millis(100),
+                    request_timeout: Duration::from_secs(1),
                     maximum_bytes: 64 * 1024,
                     json_limits: JsonLimits::CONTRACT_FIXTURE,
                     plan_limits: PlanLimits::from_profile(&profile).unwrap(),
@@ -705,7 +705,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                         bytes: canonical_json(&json!({"question": "coordinator"})).unwrap(),
                         calls: Arc::clone(&run_value_reader_calls),
                     }),
-                    Duration::from_millis(100),
+                    Duration::from_secs(1),
                 )
                 .unwrap()),
                 Arc::new(UuidCoordinatorIdentityFactory),
@@ -745,7 +745,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         )
         .unwrap()
         .spawn();
-        let terminal_result = tokio::time::timeout(Duration::from_secs(3), async {
+        let terminal_result = tokio::time::timeout(Duration::from_secs(8), async {
             loop {
                 let source_state: String = sqlx::query_scalar(
                     "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
@@ -809,6 +809,9 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         );
         let materializing_exit = materializing_coordinator.shutdown().await.unwrap();
         assert!(materializing_exit.snapshot.settled_generations >= 1);
+        let safety_exit = safety.shutdown().await.unwrap();
+        assert!(safety_exit.mutations >= 2);
+        assert!(safety_exit.scan_attempts >= 10);
         bulkheads.close().await;
     });
 }
@@ -1071,7 +1074,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         interface: ExactVersionRef::new(id(INTERFACE_ID), digest('b')).unwrap(),
         plan: ExactVersionRef::new(id(PLAN_ID), typed_plan_digest).unwrap(),
         entry_node_id: "entry".to_owned(),
-        entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
+        entry_node_kind: insight_platform_contracts::PlanNodeKind::TimerWait,
         slots: vec![],
         policies: vec![policy_binding.clone()],
         execution_profile: policy_binding,
@@ -1188,7 +1191,7 @@ async fn admit_run(repository: &PgRepository, bindings: RunBindingsSnapshot) -> 
         entry_node_execution_id: id(NODE_ID),
         orchestration_job_id: id(JOB_ID),
         entry_plan_node_key: PlanNodeKey::new("entry".to_owned()).unwrap(),
-        entry_node_kind: PlanNodeKind::Start,
+        entry_node_kind: PlanNodeKind::TimerWait,
         bindings,
         input: RunInputValue {
             value_id: id(VALUE_ID),

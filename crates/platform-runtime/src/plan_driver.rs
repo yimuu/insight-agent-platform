@@ -11,8 +11,8 @@ use insight_platform_contracts::{
 };
 use insight_platform_orchestrator::{
     decide_controller, derive_expression_controller, CommittedExpressionInput, ControllerDecision,
-    ControllerEvaluation, ControllerObservation, ExpressionLimits, PlanNodeKey, RuntimeNode,
-    RuntimePlan,
+    ControllerEvaluation, ControllerObservation, DurableWaitKind, ExpressionLimits, PlanNodeKey,
+    RuntimeNode, RuntimePlan,
 };
 use insight_platform_postgres::repository::{JobFence, ResolvedExpressionInput};
 use std::sync::Arc;
@@ -222,6 +222,27 @@ fn committed_observation_is_allowed(
                     | RuntimeNode::Return { .. }
                     | RuntimeNode::Raise { .. },
                 ControllerObservation::None,
+            )
+            | (
+                RuntimeNode::HumanTask { .. },
+                ControllerObservation::DurableWait {
+                    wait_kind: DurableWaitKind::HumanTask,
+                    ..
+                },
+            )
+            | (
+                RuntimeNode::TimerWait { .. },
+                ControllerObservation::DurableWait {
+                    wait_kind: DurableWaitKind::Timer,
+                    ..
+                },
+            )
+            | (
+                RuntimeNode::SignalWait { .. },
+                ControllerObservation::DurableWait {
+                    wait_kind: DurableWaitKind::Signal,
+                    ..
+                },
             )
     )
 }
@@ -487,5 +508,27 @@ mod tests {
             }
         );
         assert!(command.evaluation.as_ref().unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn durable_wait_observations_are_accepted_only_for_the_matching_wait_kind() {
+        let timer = RuntimeNode::TimerWait {
+            delay_milliseconds: 100,
+            resume: key("finish"),
+        };
+        assert!(committed_observation_is_allowed(
+            &timer,
+            &ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::Timer,
+                outcome: insight_platform_orchestrator::DurableWaitOutcome::Succeeded,
+            },
+        ));
+        assert!(!committed_observation_is_allowed(
+            &timer,
+            &ControllerObservation::DurableWait {
+                wait_kind: DurableWaitKind::Signal,
+                outcome: insight_platform_orchestrator::DurableWaitOutcome::Succeeded,
+            },
+        ));
     }
 }

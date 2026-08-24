@@ -1651,57 +1651,78 @@ impl PgRepository {
                 response,
                 ..
             } => {
-                let wait: StoredHumanTaskWaitPayload =
-                    decode_typed_payload(&payload, "running HumanTask wait Node")?;
-                if wait.plan_node_key != identity.plan_node_key
-                    || wait.response_port != *response
-                    || wait.task_id.kind()
-                        != runtime_human_task_definition(definition)
-                            .task_kind()
-                            .task_id_kind()
-                {
-                    return Err(RepositoryError::Conflict(
-                        "HumanTask wait observation contract",
-                    ));
-                }
-                wait.resolution
-                    .map(|resolution| ControllerObservation::DurableWait {
+                if payload.value.get("task_id").is_none() {
+                    Some(ControllerObservation::None)
+                } else {
+                    let wait: StoredHumanTaskWaitPayload =
+                        decode_typed_payload(&payload, "running HumanTask wait Node")?;
+                    if wait.plan_node_key != identity.plan_node_key
+                        || wait.response_port != *response
+                        || wait.task_id.kind()
+                            != runtime_human_task_definition(definition)
+                                .task_kind()
+                                .task_id_kind()
+                    {
+                        return Err(RepositoryError::Conflict(
+                            "HumanTask wait observation contract",
+                        ));
+                    }
+                    Some(ControllerObservation::DurableWait {
                         wait_kind: DurableWaitKind::HumanTask,
-                        outcome: resolution.outcome,
+                        outcome: wait
+                            .resolution
+                            .ok_or(RepositoryError::Conflict(
+                                "unresolved HumanTask wait was claimed",
+                            ))?
+                            .outcome,
                     })
+                }
             }
             insight_platform_orchestrator::RuntimeNode::TimerWait { .. } => {
-                let wait: StoredTimerWaitPayload =
-                    decode_typed_payload(&payload, "running Timer wait Node")?;
-                if wait.plan_node_key != identity.plan_node_key {
-                    return Err(RepositoryError::Conflict("Timer wait observation contract"));
-                }
-                wait.resolution
-                    .map(|outcome| ControllerObservation::DurableWait {
+                if payload.value.get("due_at").is_none() {
+                    Some(ControllerObservation::None)
+                } else {
+                    let wait: StoredTimerWaitPayload =
+                        decode_typed_payload(&payload, "running Timer wait Node")?;
+                    if wait.plan_node_key != identity.plan_node_key {
+                        return Err(RepositoryError::Conflict("Timer wait observation contract"));
+                    }
+                    Some(ControllerObservation::DurableWait {
                         wait_kind: DurableWaitKind::Timer,
-                        outcome,
+                        outcome: wait.resolution.ok_or(RepositoryError::Conflict(
+                            "unresolved Timer wait was claimed",
+                        ))?,
                     })
+                }
             }
             insight_platform_orchestrator::RuntimeNode::SignalWait {
                 signal_key,
                 payload: payload_port,
                 ..
             } => {
-                let wait: StoredSignalWaitPayload =
-                    decode_typed_payload(&payload, "running Signal wait Node")?;
-                if wait.plan_node_key != identity.plan_node_key
-                    || wait.signal_key != *signal_key
-                    || wait.payload_port != *payload_port
-                {
-                    return Err(RepositoryError::Conflict(
-                        "Signal wait observation contract",
-                    ));
-                }
-                wait.resolution
-                    .map(|resolution| ControllerObservation::DurableWait {
+                if payload.value.get("signal_key").is_none() {
+                    Some(ControllerObservation::None)
+                } else {
+                    let wait: StoredSignalWaitPayload =
+                        decode_typed_payload(&payload, "running Signal wait Node")?;
+                    if wait.plan_node_key != identity.plan_node_key
+                        || wait.signal_key != *signal_key
+                        || wait.payload_port != *payload_port
+                    {
+                        return Err(RepositoryError::Conflict(
+                            "Signal wait observation contract",
+                        ));
+                    }
+                    Some(ControllerObservation::DurableWait {
                         wait_kind: DurableWaitKind::Signal,
-                        outcome: resolution.outcome,
+                        outcome: wait
+                            .resolution
+                            .ok_or(RepositoryError::Conflict(
+                                "unresolved Signal wait was claimed",
+                            ))?
+                            .outcome,
                     })
+                }
             }
             insight_platform_orchestrator::RuntimeNode::Start { .. }
             | insight_platform_orchestrator::RuntimeNode::Fork { .. }
@@ -9529,7 +9550,10 @@ async fn derive_controller_step_shape(
             | insight_platform_orchestrator::RuntimeNode::Join { .. }
             | insight_platform_orchestrator::RuntimeNode::Map { .. }
             | insight_platform_orchestrator::RuntimeNode::Loop { .. }
-            | insight_platform_orchestrator::RuntimeNode::ErrorBoundary { .. },
+            | insight_platform_orchestrator::RuntimeNode::ErrorBoundary { .. }
+            | insight_platform_orchestrator::RuntimeNode::HumanTask { .. }
+            | insight_platform_orchestrator::RuntimeNode::TimerWait { .. }
+            | insight_platform_orchestrator::RuntimeNode::SignalWait { .. },
         ) => {
             if let [target] = activate.as_slice() {
                 let loop_context = if matches!(
