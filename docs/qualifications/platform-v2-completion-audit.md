@@ -9,7 +9,7 @@
 
 ## 1. 结论
 
-00～18均已完成CR-180影响cross-review（未受影响合同保留CR-173～179语义版本）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
+00～18均已完成CR-181影响cross-review（历史CR-173～180结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
 实现与真实PostgreSQL门禁已闭合；Phase 2/3已有大量domain/repository/runtime库和L1～L3证据，但缺少若干production
 composition；Phase 4只有public API及部分role清单，完整物理拓扑、observability和L4～L6尚未交付。
 
@@ -24,12 +24,13 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 | 范围 | 当前证据 | 结论 |
 |---|---|---|
-| 合同 | 00～18 CR-180影响cross-review闭合；00、05～07、17～18为`Accepted / CR-180`，其余保留既有CR语义版本；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
+| 合同 | 00～18 CR-181 cross-review闭合；Plan v4冻结external leaf payload与exact candidate selection/owner transaction；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
 | Persistence | schema contract v7、唯一`0001_platform_baseline.sql`；PG16/17 fresh baseline与事务/并发测试 | Phase 1 persistence闭合 |
 | Rust workspace | workspace all-target/all-feature tests与Clippy `-D warnings`通过 | L1～L3范围内有效 |
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
 | Public API | `/v1` OpenAPI/owner schema、route负向conformance与root public API baseline通过 | public contract实现闭合 |
 | Typed Plan materialization | Agent Revision冻结`typed_plan_artifact_id`与digest；发布事务校验Ready JSON Artifact/Verified Blob；Scheduler专用mTLS Data RPC以Run、Job lease、exact Plan Revision和ArtifactRef双重授权读取 | 闭合Scheduler物化输入与传输边界，不代表production Scheduler handler完成 |
+| Typed Plan v4 wire | RuntimePlan保存closed dependency slots及全部external leaf payload，拒绝v1/v2/v3并验证slot kind、output producer、input reachability与bounded budget；fresh PG r65的phase2 Run kernel和真实coordinator通过 | L1/L2 wire与既有controller未回归；selection evidence和production leaf owner dispatch仍待实现 |
 | 已有部署 | Gateway、Callback、MCP cleanup、Model Worker、Artifact三role、Sandbox、Security/Egress Helm静态门禁通过 | 只证明这些checked-in清单的静态边界 |
 | HTTP observability | shared bounded-label owner；Gateway与Callback具备request/outcome、latency、ready、`/metrics`及ServiceMonitor/NetworkPolicy | 闭合两个公网HTTP role，不代表全平台observability |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
@@ -158,13 +159,13 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 按上游到下游执行，且每批通过后提交：
 
-1. Plan v3 Return/Raise publication validation、terminal RunValue物化与owner transaction；
-2. Scheduler/Recovery binary、真实orchestration handler和独立release chart；
-3. Capability Worker、Context Worker、remote MCP Host production composition与charts；
-4. 将已闭合的shared low-cardinality HTTP observability boundary逐role接入，并补queue/dependency metrics、trace/redaction；
-5. ServiceMonitor/dashboard/alerts/runbooks和完整topology静态checker；
-6. reproducible signed candidate pipeline与production runner入口；
-7. 外部L4～L6、GitOps clean cut、current文档与规范归档。
+1. Plan v4 external leaf exact selection、RunValue materialization与Task/Subagent/Invocation owner dispatch；
+2. 删除caller-supplied orchestration completion并以真实child terminal/result-link替代；
+3. Scheduler/Recovery binary、真实orchestration handler和独立release chart；
+4. Capability Worker、Context Worker、remote MCP Host production composition与charts；
+5. 将已闭合的shared low-cardinality HTTP observability boundary逐role接入，并补queue/dependency metrics、trace/redaction；
+6. ServiceMonitor/dashboard/alerts/runbooks和完整topology静态checker；
+7. reproducible signed candidate pipeline、外部L4～L6、GitOps clean cut、current文档与规范归档。
 
 如果实现发现domain port不足以支持production handler，必须先按02→06/07/09/10→17/18修订合同并重新cross-review，
 不得在binary中以自由JSON、in-memory authority或host process execution绕过缺口。

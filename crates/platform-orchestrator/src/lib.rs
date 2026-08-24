@@ -21,8 +21,8 @@ pub use scope_environment::{
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, ClosedJsonValue, CommandAudit, CommandOutcome, DataClassification,
-    ExactDeploymentRef, Failure, HardLimitProfile, JobState, JsonLimits, LimitUnit,
-    NodeExecutionState, PlanNodeKind, PrincipalSnapshot, ResourceId, ResourceKind,
+    ExactDeploymentRef, Failure, HardLimitProfile, InteractionKind, JobState, JsonLimits,
+    LimitUnit, NodeExecutionState, PlanNodeKind, PrincipalSnapshot, ResourceId, ResourceKind,
     RunBindingsSnapshot, RunState, Sha256Digest, ValueRef,
 };
 use insight_platform_jobs::WakeContract;
@@ -106,6 +106,47 @@ pub struct LoopCarriedPort {
     pub next_iteration_port: ExactDataPortRef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDependencyKind {
+    Model,
+    Capability,
+    Context,
+    ChildAgent,
+    Skill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDependencySlot {
+    pub kind: RuntimeDependencyKind,
+    pub requirement_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildBudgetLimit {
+    pub maximum_duration_milliseconds: u64,
+    pub maximum_model_tokens: u64,
+    pub maximum_capability_calls: u32,
+    pub maximum_artifact_bytes: u64,
+    pub maximum_descendant_runs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HumanTaskDefinition {
+    Interaction {
+        interaction_kind: InteractionKind,
+        eligible_principal_rule_digest: Sha256Digest,
+        safe_prompt_key: String,
+    },
+    HumanWork {
+        eligible_principal_rule_digest: Sha256Digest,
+        safe_prompt_key: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeNode {
@@ -150,24 +191,59 @@ pub enum RuntimeNode {
         handlers: BTreeMap<String, PlanNodeKey>,
     },
     ModelLoop {
+        model_slot_id: String,
+        skill_slot_ids: Vec<String>,
+        capability_slot_ids: Vec<String>,
+        input: ExactDataPortRef,
+        model_route: Option<ExactDataPortRef>,
+        output: ExactDataPortRef,
+        maximum_rounds: u16,
+        maximum_capability_calls: u32,
+        maximum_parallel_calls_per_round: u16,
+        token_budget: u64,
         resume: PlanNodeKey,
     },
     CapabilityCall {
+        capability_slot_id: String,
+        input: ExactDataPortRef,
+        candidate_route: Option<ExactDataPortRef>,
+        output: ExactDataPortRef,
+        attempt_limit: u16,
+        retry_backoff_milliseconds: u64,
         resume: PlanNodeKey,
     },
     ContextQuery {
+        context_slot_id: String,
+        request: ExactDataPortRef,
+        result: ExactDataPortRef,
+        maximum_items: u32,
         resume: PlanNodeKey,
     },
     ChildAgentCall {
+        child_agent_slot_id: String,
+        input: ExactDataPortRef,
+        candidate_route: Option<ExactDataPortRef>,
+        output: ExactDataPortRef,
+        budget: ChildBudgetLimit,
+        cancellation_policy: ChildCancellationPolicy,
+        attempt_limit: u16,
+        retry_backoff_milliseconds: u64,
         resume: PlanNodeKey,
     },
     HumanTask {
+        definition: HumanTaskDefinition,
+        response: ExactDataPortRef,
+        timeout_milliseconds: u64,
         resume: PlanNodeKey,
     },
     TimerWait {
+        delay_milliseconds: u64,
         resume: PlanNodeKey,
     },
     SignalWait {
+        signal_key: String,
+        payload: Option<ExactDataPortRef>,
+        timeout_milliseconds: u64,
         resume: PlanNodeKey,
     },
     Return {
@@ -205,13 +281,13 @@ impl RuntimeNode {
         match self {
             Self::Start { next }
             | Self::Compute { next, .. }
-            | Self::ModelLoop { resume: next }
-            | Self::CapabilityCall { resume: next }
-            | Self::ContextQuery { resume: next }
-            | Self::ChildAgentCall { resume: next }
-            | Self::HumanTask { resume: next }
-            | Self::TimerWait { resume: next }
-            | Self::SignalWait { resume: next } => vec![next],
+            | Self::ModelLoop { resume: next, .. }
+            | Self::CapabilityCall { resume: next, .. }
+            | Self::ContextQuery { resume: next, .. }
+            | Self::ChildAgentCall { resume: next, .. }
+            | Self::HumanTask { resume: next, .. }
+            | Self::TimerWait { resume: next, .. }
+            | Self::SignalWait { resume: next, .. } => vec![next],
             Self::Branch {
                 ordered_arms,
                 otherwise,
@@ -283,12 +359,13 @@ pub struct RuntimePlan {
     pub plan_version: u32,
     pub interface_revision_id: ResourceId,
     pub entry_node_id: PlanNodeKey,
+    pub dependency_slots: BTreeMap<String, RuntimeDependencySlot>,
     pub nodes: BTreeMap<PlanNodeKey, RuntimeNode>,
 }
 
 impl RuntimePlan {
     pub fn validate(&self, limits: PlanLimits) -> Result<(), OrchestratorError> {
-        if self.plan_version != 3
+        if self.plan_version != 4
             || self.interface_revision_id.kind() != ResourceKind::AgentInterfaceRevision
             || limits.maximum_nodes == 0
             || limits.maximum_edges == 0
@@ -299,6 +376,10 @@ impl RuntimePlan {
             || self.nodes.is_empty()
             || self.nodes.len() > limits.maximum_nodes
             || !self.nodes.contains_key(&self.entry_node_id)
+            || self
+                .dependency_slots
+                .keys()
+                .any(|slot_id| !is_stable_code(slot_id))
         {
             return Err(OrchestratorError::InvalidPlan);
         }
@@ -320,7 +401,34 @@ impl RuntimePlan {
             }
         }
         self.validate_loop_carried_regions()?;
+        self.validate_external_leaf_contracts()?;
         self.validate_terminal_ports()?;
+        Ok(())
+    }
+
+    fn validate_external_leaf_contracts(&self) -> Result<(), OrchestratorError> {
+        for (node_key, node) in &self.nodes {
+            for (slot_id, expected_kind) in node_dependency_slots(node) {
+                if self.dependency_slots.get(slot_id).map(|slot| slot.kind) != Some(expected_kind) {
+                    return Err(OrchestratorError::InvalidPlan);
+                }
+            }
+            for port in external_leaf_inputs(node) {
+                let Some(producer_key) = port.producer_node_id() else {
+                    continue;
+                };
+                let producer = self
+                    .nodes
+                    .get(producer_key)
+                    .ok_or(OrchestratorError::InvalidPlan)?;
+                if producer_key == node_key
+                    || !node_declares_output(producer, port)
+                    || !self.node_reaches(producer_key, node_key)?
+                {
+                    return Err(OrchestratorError::InvalidPlan);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -451,7 +559,100 @@ fn node_declares_output(node: &RuntimeNode, port: &ExactDataPortRef) -> bool {
         RuntimeNode::Loop { carried_ports, .. } => carried_ports
             .iter()
             .any(|carried| &carried.next_iteration_port == port),
+        RuntimeNode::ModelLoop { output, .. }
+        | RuntimeNode::CapabilityCall { output, .. }
+        | RuntimeNode::ChildAgentCall { output, .. } => output == port,
+        RuntimeNode::ContextQuery { result, .. } => result == port,
+        RuntimeNode::HumanTask { response, .. } => response == port,
+        RuntimeNode::SignalWait {
+            payload: Some(payload),
+            ..
+        } => payload == port,
         _ => false,
+    }
+}
+
+fn node_dependency_slots(node: &RuntimeNode) -> Vec<(&str, RuntimeDependencyKind)> {
+    match node {
+        RuntimeNode::ModelLoop {
+            model_slot_id,
+            skill_slot_ids,
+            capability_slot_ids,
+            ..
+        } => std::iter::once((model_slot_id.as_str(), RuntimeDependencyKind::Model))
+            .chain(
+                skill_slot_ids
+                    .iter()
+                    .map(|slot| (slot.as_str(), RuntimeDependencyKind::Skill)),
+            )
+            .chain(
+                capability_slot_ids
+                    .iter()
+                    .map(|slot| (slot.as_str(), RuntimeDependencyKind::Capability)),
+            )
+            .collect(),
+        RuntimeNode::CapabilityCall {
+            capability_slot_id, ..
+        } => vec![(capability_slot_id, RuntimeDependencyKind::Capability)],
+        RuntimeNode::ContextQuery {
+            context_slot_id, ..
+        } => vec![(context_slot_id, RuntimeDependencyKind::Context)],
+        RuntimeNode::ChildAgentCall {
+            child_agent_slot_id,
+            ..
+        } => vec![(child_agent_slot_id, RuntimeDependencyKind::ChildAgent)],
+        _ => Vec::new(),
+    }
+}
+
+fn external_leaf_inputs(node: &RuntimeNode) -> Vec<&ExactDataPortRef> {
+    match node {
+        RuntimeNode::ModelLoop {
+            input, model_route, ..
+        } => std::iter::once(input).chain(model_route.iter()).collect(),
+        RuntimeNode::CapabilityCall {
+            input,
+            candidate_route,
+            ..
+        }
+        | RuntimeNode::ChildAgentCall {
+            input,
+            candidate_route,
+            ..
+        } => std::iter::once(input)
+            .chain(candidate_route.iter())
+            .collect(),
+        RuntimeNode::ContextQuery { request, .. } => vec![request],
+        _ => Vec::new(),
+    }
+}
+
+fn validate_leaf_output(
+    node_key: &PlanNodeKey,
+    output: &ExactDataPortRef,
+) -> Result<(), OrchestratorError> {
+    if output.producer_node_id() != Some(node_key) {
+        Err(OrchestratorError::InvalidPlan)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_human_task_definition(
+    definition: &HumanTaskDefinition,
+) -> Result<(), OrchestratorError> {
+    let safe_prompt_key = match definition {
+        HumanTaskDefinition::Interaction {
+            safe_prompt_key, ..
+        }
+        | HumanTaskDefinition::HumanWork {
+            safe_prompt_key, ..
+        } => safe_prompt_key,
+    };
+    if is_stable_code(safe_prompt_key) {
+        Ok(())
+    } else {
+        Err(OrchestratorError::InvalidPlan)
     }
 }
 
@@ -555,6 +756,103 @@ fn validate_node(
         RuntimeNode::ErrorBoundary { handlers, .. }
             if handlers.len() > limits.maximum_error_handlers
                 || handlers.keys().any(|code| !is_stable_code(code)) =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::ModelLoop {
+            skill_slot_ids,
+            capability_slot_ids,
+            output,
+            maximum_rounds,
+            maximum_capability_calls,
+            maximum_parallel_calls_per_round,
+            token_budget,
+            ..
+        } if *maximum_rounds == 0
+            || *maximum_capability_calls == 0
+            || *maximum_parallel_calls_per_round == 0
+            || *maximum_parallel_calls_per_round as u32 > *maximum_capability_calls
+            || *token_budget == 0
+            || skill_slot_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != skill_slot_ids.len()
+            || capability_slot_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != capability_slot_ids.len()
+            || validate_leaf_output(node_key, output).is_err() =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::CapabilityCall {
+            output,
+            attempt_limit,
+            retry_backoff_milliseconds,
+            ..
+        } if *attempt_limit == 0
+            || *attempt_limit > 32
+            || *retry_backoff_milliseconds == 0
+            || *retry_backoff_milliseconds > 60_000
+            || validate_leaf_output(node_key, output).is_err() =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::ContextQuery {
+            result,
+            maximum_items,
+            ..
+        } if *maximum_items == 0
+            || *maximum_items > limits.maximum_map_items
+            || validate_leaf_output(node_key, result).is_err() =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::ChildAgentCall {
+            output,
+            budget,
+            attempt_limit,
+            retry_backoff_milliseconds,
+            ..
+        } if budget.maximum_duration_milliseconds == 0
+            || budget.maximum_model_tokens == 0
+            || budget.maximum_capability_calls == 0
+            || budget.maximum_artifact_bytes == 0
+            || budget.maximum_descendant_runs == 0
+            || *attempt_limit == 0
+            || *attempt_limit > 32
+            || *retry_backoff_milliseconds == 0
+            || *retry_backoff_milliseconds > 60_000
+            || validate_leaf_output(node_key, output).is_err() =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::HumanTask {
+            definition,
+            response,
+            timeout_milliseconds,
+            ..
+        } if *timeout_milliseconds == 0
+            || validate_human_task_definition(definition).is_err()
+            || validate_leaf_output(node_key, response).is_err() =>
+        {
+            Err(OrchestratorError::InvalidPlan)
+        }
+        RuntimeNode::TimerWait {
+            delay_milliseconds, ..
+        } if *delay_milliseconds == 0 => Err(OrchestratorError::InvalidPlan),
+        RuntimeNode::SignalWait {
+            signal_key,
+            payload,
+            timeout_milliseconds,
+            ..
+        } if *timeout_milliseconds == 0
+            || !is_stable_code(signal_key)
+            || payload
+                .as_ref()
+                .is_some_and(|port| validate_leaf_output(node_key, port).is_err()) =>
         {
             Err(OrchestratorError::InvalidPlan)
         }
@@ -1191,42 +1489,42 @@ pub fn decide_controller(
                 .map(|target| ControllerDecision::EnterErrorHandler { target })
                 .ok_or(OrchestratorError::UnhandledFailure),
         },
-        (RuntimeNode::ModelLoop { resume }, ControllerObservation::None) => {
+        (RuntimeNode::ModelLoop { resume, .. }, ControllerObservation::None) => {
             Ok(ControllerDecision::DispatchLeaf {
                 kind: LeafKind::ModelLoop,
                 resume: resume.clone(),
             })
         }
-        (RuntimeNode::CapabilityCall { resume }, ControllerObservation::None) => {
+        (RuntimeNode::CapabilityCall { resume, .. }, ControllerObservation::None) => {
             Ok(ControllerDecision::DispatchLeaf {
                 kind: LeafKind::Capability,
                 resume: resume.clone(),
             })
         }
-        (RuntimeNode::ContextQuery { resume }, ControllerObservation::None) => {
+        (RuntimeNode::ContextQuery { resume, .. }, ControllerObservation::None) => {
             Ok(ControllerDecision::DispatchLeaf {
                 kind: LeafKind::Context,
                 resume: resume.clone(),
             })
         }
-        (RuntimeNode::ChildAgentCall { resume }, ControllerObservation::None) => {
+        (RuntimeNode::ChildAgentCall { resume, .. }, ControllerObservation::None) => {
             Ok(ControllerDecision::CreateChildRun {
                 resume: resume.clone(),
             })
         }
-        (RuntimeNode::HumanTask { resume }, ControllerObservation::None) => {
+        (RuntimeNode::HumanTask { resume, .. }, ControllerObservation::None) => {
             Ok(ControllerDecision::CreateDurableWait {
                 kind: DurableWaitKind::HumanTask,
                 resume: resume.clone(),
             })
         }
-        (RuntimeNode::TimerWait { resume }, ControllerObservation::None) => {
+        (RuntimeNode::TimerWait { resume, .. }, ControllerObservation::None) => {
             Ok(ControllerDecision::CreateDurableWait {
                 kind: DurableWaitKind::Timer,
                 resume: resume.clone(),
             })
         }
-        (RuntimeNode::SignalWait { resume }, ControllerObservation::None) => {
+        (RuntimeNode::SignalWait { resume, .. }, ControllerObservation::None) => {
             Ok(ControllerDecision::CreateDurableWait {
                 kind: DurableWaitKind::Signal,
                 resume: resume.clone(),
@@ -2448,9 +2746,10 @@ mod tests {
     #[test]
     fn runtime_plan_is_closed_bounded_and_digestible() {
         let plan = RuntimePlan {
-            plan_version: 3,
+            plan_version: 4,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("start"),
+            dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
                 (
                     key("start"),
@@ -2473,6 +2772,11 @@ mod tests {
             obsolete.validate(limits()),
             Err(OrchestratorError::InvalidPlan)
         );
+        obsolete.plan_version = 3;
+        assert_eq!(
+            obsolete.validate(limits()),
+            Err(OrchestratorError::InvalidPlan)
+        );
         assert_eq!(
             plan.canonical_digest(limits()),
             plan.canonical_digest(limits())
@@ -2483,12 +2787,58 @@ mod tests {
     }
 
     #[test]
+    fn external_leaf_contracts_are_exact_closed_and_bounded() {
+        let input = ExactDataPortRef::RunInput {
+            schema_digest: digest('1'),
+        };
+        let output = exact_port("call", "result");
+        let mut plan = RuntimePlan {
+            plan_version: 4,
+            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            entry_node_id: key("call"),
+            dependency_slots: BTreeMap::from([(
+                "primary_capability".to_owned(),
+                RuntimeDependencySlot {
+                    kind: RuntimeDependencyKind::Capability,
+                    requirement_digest: digest('2'),
+                },
+            )]),
+            nodes: BTreeMap::from([
+                (
+                    key("call"),
+                    RuntimeNode::CapabilityCall {
+                        capability_slot_id: "primary_capability".to_owned(),
+                        input,
+                        candidate_route: None,
+                        output: output.clone(),
+                        attempt_limit: 3,
+                        retry_backoff_milliseconds: 100,
+                        resume: key("return"),
+                    },
+                ),
+                (key("return"), RuntimeNode::Return { value: output }),
+            ]),
+        };
+        plan.validate(limits()).unwrap();
+
+        let RuntimeNode::CapabilityCall {
+            capability_slot_id, ..
+        } = plan.nodes.get_mut(&key("call")).unwrap()
+        else {
+            panic!("fixture must remain a CapabilityCall")
+        };
+        *capability_slot_id = "missing".to_owned();
+        assert_eq!(plan.validate(limits()), Err(OrchestratorError::InvalidPlan));
+    }
+
+    #[test]
     fn terminal_ports_are_exact_declared_and_reachable() {
         let output = exact_port("compute", "result");
         let plan = RuntimePlan {
-            plan_version: 3,
+            plan_version: 4,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("compute"),
+            dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
                 (
                     key("compute"),
@@ -2561,9 +2911,10 @@ mod tests {
             next_iteration_port: exact_port("loop", "carried"),
         };
         let plan = RuntimePlan {
-            plan_version: 3,
+            plan_version: 4,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("loop"),
+            dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
                 (
                     key("loop"),
@@ -2633,9 +2984,10 @@ mod tests {
         )
         .unwrap();
         let plan = RuntimePlan {
-            plan_version: 3,
+            plan_version: 4,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("compute"),
+            dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
                 (
                     key("compute"),
@@ -2655,9 +3007,10 @@ mod tests {
         let mut forged = literal_program(serde_json::json!(true));
         forged.semantic_digest = digest('f');
         let branch = RuntimePlan {
-            plan_version: 3,
+            plan_version: 4,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: key("branch"),
+            dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
                 (
                     key("branch"),
@@ -2844,9 +3197,10 @@ mod tests {
         let start = key("start");
         let finish = key("finish");
         let plan = RuntimePlan {
-            plan_version: 3,
+            plan_version: 4,
             interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
             entry_node_id: start.clone(),
+            dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
                 (
                     start,

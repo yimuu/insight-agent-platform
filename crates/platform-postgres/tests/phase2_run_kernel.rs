@@ -228,9 +228,10 @@ fn runtime_plan() -> RuntimePlan {
     let input_compute = PlanNodeKey::new("input_compute".to_owned()).unwrap();
     let raise = PlanNodeKey::new("raise".to_owned()).unwrap();
     RuntimePlan {
-        plan_version: 3,
+        plan_version: 4,
         interface_revision_id: id(AGENT_INTERFACE_ID),
         entry_node_id: entry.clone(),
+        dependency_slots: BTreeMap::new(),
         nodes: BTreeMap::from([
             (
                 entry,

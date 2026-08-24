@@ -106,9 +106,10 @@ fn fixture_plan() -> RuntimePlan {
     let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     RuntimePlan {
-        plan_version: 3,
+        plan_version: 4,
         interface_revision_id: id(INTERFACE_ID),
         entry_node_id: entry.clone(),
+        dependency_slots: BTreeMap::new(),
         nodes: BTreeMap::from([
             (
                 entry,
