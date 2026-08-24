@@ -27,12 +27,12 @@ use insight_platform_postgres::{
     repository::{
         ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep,
         ChildRunCancellationSlot, ClaimOrchestrationJobs, ClaimedOrchestrationJob,
-        CompleteOrchestrationRun, ControllerActivationSlot, ControllerLoopRolloverSlot,
-        ControllerPendingNodeSlot, ControllerPendingWakeSlot, ControllerRemainderCancellationSlot,
-        ControllerScopeSlot, ControllerStepMutationIds, ControllerStructuralExitSlot,
-        DeferOrchestrationChildMutationIds, DeferOrchestrationTaskMutationIds,
-        DeferOrchestrationToChildRun, DeferOrchestrationToTask, DriveChildRunCancellations,
-        DriveDueOrchestrationRetries, DriveExpiredOrchestrationJobs,
+        CompleteOrchestrationRun, ControllerActivationSlot, ControllerFacts,
+        ControllerLoopRolloverSlot, ControllerPendingNodeSlot, ControllerPendingWakeSlot,
+        ControllerRemainderCancellationSlot, ControllerScopeSlot, ControllerStepMutationIds,
+        ControllerStructuralExitSlot, DeferOrchestrationChildMutationIds,
+        DeferOrchestrationTaskMutationIds, DeferOrchestrationToChildRun, DeferOrchestrationToTask,
+        DriveChildRunCancellations, DriveDueOrchestrationRetries, DriveExpiredOrchestrationJobs,
         DriveExpiredOrchestrationTasks, DriveOrchestrationConvergence, DriveTerminalChildRuns,
         DueOrchestrationRetrySlot, ExpiredOrchestrationRecoverySlot, ExpiredOrchestrationTaskSlot,
         FailOrchestrationJob, HeartbeatJob, JobFence, NewPrincipal, NewQuotaAccount, NewTenant,
@@ -4609,6 +4609,17 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             remainder_cancellations: Vec::new(),
         },
     };
+    let loaded_quorum_facts = repository
+        .load_controller_facts(&quorum_join_step.fence, &quorum_join_step.plan)
+        .await
+        .unwrap();
+    assert!(matches!(
+        loaded_quorum_facts,
+        ControllerFacts::Committed {
+            observation: ControllerObservation::Join { ref children },
+            ..
+        } if children == &vec![ChildOutcome::Succeeded, ChildOutcome::Active]
+    ));
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let quorum_joined = match scheduler
         .apply_orchestration_controller_step(quorum_join_step)
@@ -4862,6 +4873,18 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         ["949d", "949e", "949f", "94a0"],
         ["94a1", "94a2", "94a3", "94a4", "94a5"],
     )];
+    let cancel_requirements = repository
+        .load_controller_mutation_requirements(
+            &cancel_left_exit.fence,
+            &cancel_left_exit.plan,
+            &cancel_left_exit.observation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cancel_requirements.remainder_cancellation_scope_ids,
+        vec![id(&opened_cancel.created_scopes[1].scope_id)]
+    );
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let cancelled_remainder = match scheduler
         .apply_orchestration_controller_step(cancel_left_exit.clone())
@@ -5876,6 +5899,16 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         ExpressionLimits::ABSOLUTE,
     )
     .unwrap();
+    let branch_requirements = repository
+        .load_controller_mutation_requirements(
+            &expression_fence,
+            &plan,
+            &evaluation.observation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(branch_requirements.activation_scopes, vec![false]);
+    assert_eq!(branch_requirements.pending_node_count, 0);
     let expression_step = ApplyOrchestrationControllerStep {
         fence: expression_fence.clone(),
         plan: plan.clone(),
@@ -7043,6 +7076,17 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         evaluation: first_map_evaluation,
         output_value_ids: first_map_value_ids.to_vec(),
     };
+    let first_map_requirements = map_repository
+        .load_controller_mutation_requirements(
+            &first_map_derived.step.fence,
+            &first_map_derived.step.plan,
+            &first_map_derived.step.observation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_map_requirements.activation_scopes, vec![true, true]);
+    assert_eq!(first_map_requirements.pending_node_count, 1);
+    assert!(first_map_requirements.pending_wake);
     let mut scheduler = map_repository.begin_scheduler_transaction().await.unwrap();
     let first_map_batch = match scheduler
         .apply_derived_expression_controller_step(first_map_derived.clone())

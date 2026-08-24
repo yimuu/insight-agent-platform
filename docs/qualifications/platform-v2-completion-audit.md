@@ -66,7 +66,10 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 1. `insight-platform-runtime`只有library，没有Scheduler/Recovery production binary、process config、startup manifest、
    readiness/drain和Helm Deployment。
-2. `StartedOrchestrationJobHandler`已有正式materialize→commit/handoff生命周期adapter，但PostgreSQL durable Plan store仍未闭合；
+2. `StartedOrchestrationJobHandler`已有正式materialize→commit/handoff生命周期adapter；PostgreSQL durable Plan store已闭合
+   Start/Compute/Branch/Fork/Join/Map/Loop/ErrorBoundary成功控制路径的durable fact读取、Inline RunValue物化、精确mutation-slot
+   规划、通用或derived fenced commit与retry handoff，但controller failure/Run terminal及Leaf/Task/Subagent分派尚未接入该store，
+   Artifact-backed RunValue仍缺Scheduler侧Artifact Data RPC materializer，因此完整production composition仍未闭合；
    exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
    exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure；
    Scheduler侧也已用当前fence从PostgreSQL解析descriptor并完成canonical JSON、Plan limits和semantic digest复验，但把该Plan
@@ -80,8 +83,10 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    RunValue，以owner-derived classification和exact Plan v2 item port绑定新MapItem Scope，并与Scope/Node/Job/Receipt/Event/Outbox
    原子提交；fresh PostgreSQL覆盖多batch、动态Scope隔离与Receipt replay。Loop body settlement现在从当前Scope的exact body output
    复制immutable carried RunValue，预建下一open Scope并切换continuation；false condition原子关闭该Scope并从固定父Scope激活exit，
-   fresh PostgreSQL覆盖ID冲突整批回滚、classification/value复制、Scope切换和Receipt replay。尚缺完整production store
-   composition；手工注入`ControllerObservation`仍不计production证据。CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
+   fresh PostgreSQL覆盖ID冲突整批回滚、classification/value复制、Scope切换和Receipt replay。数据库现在还能从冻结pending
+   payload与exact Scope集合重建Map settlement/Join observation，并从与commit共用的shape推导精确activation、pending、Scope、wake、
+   rollover及active-remainder cancellation槽；fresh PostgreSQL覆盖Quorum cancel集合与已提交Join facts。手工注入
+   `ControllerObservation`仍不计production证据。CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
    CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向、每item RunValue/MapItem Scope原子写及
    L2 batch/replay fixture已实现；process crash/restart的L3 fixture仍待production handler闭合后完成。
    CR-179的exact pair producer/schema/region L1与两轮rollover/Scope复用/不串值/false-exit L2已实现，并证明所有iteration Scope保持

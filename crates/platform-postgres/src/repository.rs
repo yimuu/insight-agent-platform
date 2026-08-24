@@ -1460,6 +1460,214 @@ impl PgRepository {
         })
     }
 
+    /// Loads either immutable expression inputs or a controller observation reconstructed from
+    /// committed scope state. Callers never choose the phase: the frozen Node payload and Plan do.
+    pub async fn load_controller_facts(
+        &self,
+        fence: &JobFence,
+        plan: &RuntimePlan,
+    ) -> Result<ControllerFacts, RepositoryError> {
+        fence.validate()?;
+        plan.validate(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let plan_digest = plan
+            .canonical_digest(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let job = load_job_by_text(&mut transaction, &fence.tenant_id, &fence.job_id).await?;
+        require_orchestration_job(&job)?;
+        require_exact_running_job_fence(&job, fence, database_now)?;
+        let run_id: ResourceId = job
+            .run_id
+            .as_deref()
+            .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+        let tenant_id: ResourceId = fence.tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let run = load_run(&mut transaction, &tenant_id, &run_id).await?;
+        require_exact_runtime_plan(&mut transaction, &run, plan, &plan_digest).await?;
+        let node_id = job.node_id.as_deref().ok_or_else(|| {
+            RepositoryError::CorruptRow("orchestration Job has no Node".to_owned())
+        })?;
+        let row = sqlx::query(
+            r#"
+            SELECT node_id, plan_node_key, node_kind, scope_id, version,
+                   parent_node_id, payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND node_id = $3
+              AND record_kind = 'node_execution' AND state = 'running'
+            "#,
+        )
+        .bind(&fence.tenant_id)
+        .bind(run_id.to_string())
+        .bind(node_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("running controller Node"))?;
+        let plan_node_key = PlanNodeKey::new(row.try_get("plan_node_key")?)?;
+        let runtime_node = plan.node(&plan_node_key)?;
+        let node_kind = row
+            .try_get::<String, _>("node_kind")?
+            .parse::<PlanNodeKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if runtime_node.kind() != node_kind {
+            return Err(RepositoryError::Conflict("controller Plan binding"));
+        }
+        let identity = ControllerFactIdentity {
+            node_execution_id: node_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?,
+            node_execution_version: row.try_get("version")?,
+            plan_node_key,
+        };
+        let payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let observation = match runtime_node {
+            insight_platform_orchestrator::RuntimeNode::Map { .. }
+                if payload.value.get("wait").is_some() =>
+            {
+                let pending: StoredPendingControllerNodePayload =
+                    decode_typed_payload(&payload, "running Map controller")?;
+                match &pending.wait {
+                    StoredControllerWait::MapSettlement {
+                        admitted_item_count,
+                        ..
+                    } => Some(
+                        load_map_settlement_observation(
+                            &mut transaction,
+                            &job.tenant_id,
+                            &run.run_id,
+                            &pending,
+                            *admitted_item_count,
+                        )
+                        .await?,
+                    ),
+                    StoredControllerWait::MapAdmission { .. } => None,
+                    _ => return Err(RepositoryError::Conflict("Map controller wait kind")),
+                }
+            }
+            insight_platform_orchestrator::RuntimeNode::Join { .. } => Some(
+                load_join_observation(&mut transaction, &job.tenant_id, &run.run_id, &payload)
+                    .await?,
+            ),
+            insight_platform_orchestrator::RuntimeNode::ErrorBoundary { .. } => {
+                Some(ControllerObservation::ErrorBoundary { failure_code: None })
+            }
+            insight_platform_orchestrator::RuntimeNode::Start { .. }
+            | insight_platform_orchestrator::RuntimeNode::Fork { .. }
+            | insight_platform_orchestrator::RuntimeNode::ModelLoop { .. }
+            | insight_platform_orchestrator::RuntimeNode::CapabilityCall { .. }
+            | insight_platform_orchestrator::RuntimeNode::ContextQuery { .. }
+            | insight_platform_orchestrator::RuntimeNode::ChildAgentCall { .. }
+            | insight_platform_orchestrator::RuntimeNode::HumanTask { .. }
+            | insight_platform_orchestrator::RuntimeNode::TimerWait { .. }
+            | insight_platform_orchestrator::RuntimeNode::SignalWait { .. }
+            | insight_platform_orchestrator::RuntimeNode::Return
+            | insight_platform_orchestrator::RuntimeNode::Raise => {
+                Some(ControllerObservation::None)
+            }
+            _ => None,
+        };
+        transaction.rollback().await?;
+        if let Some(observation) = observation {
+            Ok(ControllerFacts::Committed {
+                identity,
+                observation,
+            })
+        } else {
+            Ok(ControllerFacts::Expression(
+                self.load_expression_controller_facts(fence, plan).await?,
+            ))
+        }
+    }
+
+    /// Plans the exact identity-slot shape for one controller commit from the same durable facts
+    /// that the owner transaction will revalidate. This method never allocates identities and
+    /// never mutates business state; callers may only use the returned bounded shape to allocate
+    /// opaque IDs before calling the fenced commit API.
+    pub async fn load_controller_mutation_requirements(
+        &self,
+        fence: &JobFence,
+        plan: &RuntimePlan,
+        observation: &ControllerObservation,
+    ) -> Result<ControllerMutationRequirements, RepositoryError> {
+        fence.validate()?;
+        plan.validate(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let plan_digest = plan
+            .canonical_digest(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let mut transaction = self.pool.begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let observed =
+            load_job_for_update_by_text(&mut transaction, &fence.tenant_id, &fence.job_id).await?;
+        require_orchestration_job(&observed)?;
+        require_exact_running_job_fence(&observed, fence, database_now)?;
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        require_exact_runtime_plan(&mut transaction, &parents.run, plan, &plan_digest).await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, plan).await?;
+        let runtime_node = plan.node(&source_node.plan_node_key)?;
+        require_exact_controller_observation(
+            &mut transaction,
+            &observed,
+            &parents,
+            &source_node,
+            runtime_node,
+            observation,
+        )
+        .await?;
+        let decision = decide_controller(runtime_node, observation)?;
+        let shape = derive_controller_step_shape(
+            &mut transaction,
+            &observed,
+            &parents,
+            &source_node,
+            plan,
+            runtime_node,
+            &decision,
+            self.plan_limits.maximum_fan_out,
+        )
+        .await?;
+        let mut requirements = shape.mutation_requirements(runtime_node)?;
+        if let ControllerStepShape::LoopIterationExit {
+            loop_plan_node_key, ..
+        } = &shape
+        {
+            let insight_platform_orchestrator::RuntimeNode::Loop { carried_ports, .. } =
+                plan.node(loop_plan_node_key)?
+            else {
+                return Err(RepositoryError::Conflict("Loop continuation Plan node"));
+            };
+            requirements.structural_exit = ControllerStructuralRequirement::LoopRollover {
+                carried_value_count: carried_ports.len(),
+            };
+        }
+        requirements.remainder_cancellation_scope_ids = load_controller_remainder_requirements(
+            &mut transaction,
+            &observed,
+            &parents,
+            plan,
+            &shape,
+        )
+        .await?;
+        transaction.rollback().await?;
+        Ok(requirements)
+    }
+
     pub async fn read_task_for_principal(
         &self,
         tenant_id: &ResourceId,
@@ -5177,166 +5385,17 @@ impl PgSchedulerTransaction {
             .await?;
         }
         let decision = decide_controller(runtime_node, &command.observation)?;
-        let shape = match (&decision, runtime_node) {
-            (
-                ControllerDecision::CompleteNode { activate },
-                insight_platform_orchestrator::RuntimeNode::Start { .. }
-                | insight_platform_orchestrator::RuntimeNode::Compute { .. }
-                | insight_platform_orchestrator::RuntimeNode::Branch { .. }
-                | insight_platform_orchestrator::RuntimeNode::Join { .. }
-                | insight_platform_orchestrator::RuntimeNode::Map { .. }
-                | insight_platform_orchestrator::RuntimeNode::Loop { .. }
-                | insight_platform_orchestrator::RuntimeNode::ErrorBoundary { .. },
-            ) => {
-                if let [target] = activate.as_slice() {
-                    let loop_context = if matches!(
-                        runtime_node,
-                        insight_platform_orchestrator::RuntimeNode::Loop { .. }
-                    ) {
-                        load_open_loop_iteration_context(
-                            &mut transaction,
-                            &observed,
-                            &parents,
-                            &source_node,
-                            None,
-                        )
-                        .await?
-                    } else {
-                        None
-                    };
-                    if let Some(context) = loop_context {
-                        ControllerStepShape::LoopConditionExit {
-                            target: target.clone(),
-                            context,
-                        }
-                    } else if let Some(exit) = load_parallel_leg_exit(
-                        &mut transaction,
-                        &observed,
-                        &parents,
-                        &source_node,
-                        Some(target),
-                    )
-                    .await?
-                    {
-                        exit
-                    } else if let Some(exit) = load_loop_iteration_exit(
-                        &mut transaction,
-                        &observed,
-                        &parents,
-                        &source_node,
-                        target,
-                    )
-                    .await?
-                    {
-                        exit
-                    } else if let Some(exit) = load_map_item_exit(
-                        &mut transaction,
-                        &observed,
-                        &parents,
-                        &source_node,
-                        Some(target),
-                    )
-                    .await?
-                    {
-                        exit
-                    } else {
-                        ControllerStepShape::Sequential {
-                            targets: activate.clone(),
-                        }
-                    }
-                } else {
-                    ControllerStepShape::Sequential {
-                        targets: activate.clone(),
-                    }
-                }
-            }
-            (
-                ControllerDecision::OpenMapItems {
-                    body: _,
-                    next,
-                    item_count,
-                    failure_policy: _,
-                },
-                insight_platform_orchestrator::RuntimeNode::Map { .. },
-            ) if *item_count == 0 => ControllerStepShape::Sequential {
-                targets: vec![next.clone()],
-            },
-            (
-                ControllerDecision::OpenMapItems {
-                    body,
-                    next,
-                    item_count,
-                    failure_policy,
-                },
-                insight_platform_orchestrator::RuntimeNode::Map { .. },
-            ) => {
-                load_map_batch_shape(
-                    &mut transaction,
-                    &observed,
-                    &parents,
-                    &source_node,
-                    body,
-                    next,
-                    *failure_policy,
-                    *item_count,
-                    self.plan_limits.maximum_fan_out,
-                )
-                .await?
-            }
-            (
-                ControllerDecision::OpenLoopIteration { body, iteration },
-                insight_platform_orchestrator::RuntimeNode::Loop {
-                    body: plan_body, ..
-                },
-            ) if body == plan_body => ControllerStepShape::LoopIteration {
-                body: body.clone(),
-                loop_plan_node_key: source_node.plan_node_key.clone(),
-                iteration: *iteration,
-                existing_scope: load_open_loop_iteration_context(
-                    &mut transaction,
-                    &observed,
-                    &parents,
-                    &source_node,
-                    Some(*iteration),
-                )
-                .await?,
-            },
-            (
-                ControllerDecision::FanOut {
-                    activate,
-                    create_pending,
-                },
-                insight_platform_orchestrator::RuntimeNode::Fork { join, .. },
-            ) if create_pending == std::slice::from_ref(join) => {
-                let insight_platform_orchestrator::RuntimeNode::Join {
-                    policy,
-                    quorum,
-                    remainder,
-                    ..
-                } = command.plan.node(join)?
-                else {
-                    return Err(RepositoryError::InvalidInput(
-                        "Fork pending target is not a Join node".to_owned(),
-                    ));
-                };
-                if quorum.is_some_and(|required| usize::from(required) > activate.len()) {
-                    return Err(RepositoryError::InvalidInput(
-                        "Join quorum exceeds Fork leg count".to_owned(),
-                    ));
-                }
-                ControllerStepShape::Fork {
-                    legs: activate.clone(),
-                    join: join.clone(),
-                    policy: *policy,
-                    quorum: *quorum,
-                    remainder: *remainder,
-                }
-            }
-            _ => return Err(RepositoryError::InvalidInput(
-                "controller decision requires its typed fan-out, wait, leaf, or terminal adapter"
-                    .to_owned(),
-            )),
-        };
+        let shape = derive_controller_step_shape(
+            &mut transaction,
+            &observed,
+            &parents,
+            &source_node,
+            &command.plan,
+            runtime_node,
+            &decision,
+            self.plan_limits.maximum_fan_out,
+        )
+        .await?;
         shape.validate_slots(&command.mutations)?;
         let derived_scope_bindings = if let Some(derived) = &derived {
             let committed = commit_derived_expression_values(
@@ -8371,6 +8430,166 @@ struct OpenLoopIterationContext {
     loop_plan_node_key: PlanNodeKey,
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn derive_controller_step_shape(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    source_node: &ControllerSourceNode,
+    plan: &RuntimePlan,
+    runtime_node: &insight_platform_orchestrator::RuntimeNode,
+    decision: &ControllerDecision,
+    maximum_fan_out: usize,
+) -> Result<ControllerStepShape, RepositoryError> {
+    match (decision, runtime_node) {
+        (
+            ControllerDecision::CompleteNode { activate },
+            insight_platform_orchestrator::RuntimeNode::Start { .. }
+            | insight_platform_orchestrator::RuntimeNode::Compute { .. }
+            | insight_platform_orchestrator::RuntimeNode::Branch { .. }
+            | insight_platform_orchestrator::RuntimeNode::Join { .. }
+            | insight_platform_orchestrator::RuntimeNode::Map { .. }
+            | insight_platform_orchestrator::RuntimeNode::Loop { .. }
+            | insight_platform_orchestrator::RuntimeNode::ErrorBoundary { .. },
+        ) => {
+            if let [target] = activate.as_slice() {
+                let loop_context = if matches!(
+                    runtime_node,
+                    insight_platform_orchestrator::RuntimeNode::Loop { .. }
+                ) {
+                    load_open_loop_iteration_context(
+                        transaction,
+                        current_job,
+                        parents,
+                        source_node,
+                        None,
+                    )
+                    .await?
+                } else {
+                    None
+                };
+                if let Some(context) = loop_context {
+                    Ok(ControllerStepShape::LoopConditionExit {
+                        target: target.clone(),
+                        context,
+                    })
+                } else if let Some(exit) = load_parallel_leg_exit(
+                    transaction,
+                    current_job,
+                    parents,
+                    source_node,
+                    Some(target),
+                )
+                .await?
+                {
+                    Ok(exit)
+                } else if let Some(exit) =
+                    load_loop_iteration_exit(transaction, current_job, parents, source_node, target)
+                        .await?
+                {
+                    Ok(exit)
+                } else if let Some(exit) =
+                    load_map_item_exit(transaction, current_job, parents, source_node, Some(target))
+                        .await?
+                {
+                    Ok(exit)
+                } else {
+                    Ok(ControllerStepShape::Sequential {
+                        targets: activate.clone(),
+                    })
+                }
+            } else {
+                Ok(ControllerStepShape::Sequential {
+                    targets: activate.clone(),
+                })
+            }
+        }
+        (
+            ControllerDecision::OpenMapItems {
+                next, item_count, ..
+            },
+            insight_platform_orchestrator::RuntimeNode::Map { .. },
+        ) if *item_count == 0 => Ok(ControllerStepShape::Sequential {
+            targets: vec![next.clone()],
+        }),
+        (
+            ControllerDecision::OpenMapItems {
+                body,
+                next,
+                item_count,
+                failure_policy,
+            },
+            insight_platform_orchestrator::RuntimeNode::Map { .. },
+        ) => {
+            load_map_batch_shape(
+                transaction,
+                current_job,
+                parents,
+                source_node,
+                body,
+                next,
+                *failure_policy,
+                *item_count,
+                maximum_fan_out,
+            )
+            .await
+        }
+        (
+            ControllerDecision::OpenLoopIteration { body, iteration },
+            insight_platform_orchestrator::RuntimeNode::Loop {
+                body: plan_body, ..
+            },
+        ) if body == plan_body => Ok(ControllerStepShape::LoopIteration {
+            body: body.clone(),
+            loop_plan_node_key: source_node.plan_node_key.clone(),
+            iteration: *iteration,
+            existing_scope: load_open_loop_iteration_context(
+                transaction,
+                current_job,
+                parents,
+                source_node,
+                Some(*iteration),
+            )
+            .await?,
+        }),
+        (
+            ControllerDecision::FanOut {
+                activate,
+                create_pending,
+            },
+            insight_platform_orchestrator::RuntimeNode::Fork { join, .. },
+        ) if create_pending == std::slice::from_ref(join) => {
+            let insight_platform_orchestrator::RuntimeNode::Join {
+                policy,
+                quorum,
+                remainder,
+                ..
+            } = plan.node(join)?
+            else {
+                return Err(RepositoryError::InvalidInput(
+                    "Fork pending target is not a Join node".to_owned(),
+                ));
+            };
+            if quorum.is_some_and(|required| usize::from(required) > activate.len()) {
+                return Err(RepositoryError::InvalidInput(
+                    "Join quorum exceeds Fork leg count".to_owned(),
+                ));
+            }
+            Ok(ControllerStepShape::Fork {
+                legs: activate.clone(),
+                join: join.clone(),
+                policy: *policy,
+                quorum: *quorum,
+                remainder: *remainder,
+            })
+        }
+        _ => Err(RepositoryError::InvalidInput(
+            "controller decision requires its typed fan-out, wait, leaf, or terminal adapter"
+                .to_owned(),
+        )),
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ControllerStepShape {
     Sequential {
@@ -8559,6 +8778,210 @@ impl ControllerStepShape {
             )),
         }
     }
+
+    fn mutation_requirements(
+        &self,
+        runtime_node: &insight_platform_orchestrator::RuntimeNode,
+    ) -> Result<ControllerMutationRequirements, RepositoryError> {
+        let activation_scopes = match self {
+            Self::Sequential { targets } => vec![false; targets.len()],
+            Self::Fork { legs, .. } => vec![true; legs.len()],
+            Self::LoopIteration { existing_scope, .. } => vec![existing_scope.is_none()],
+            Self::LoopConditionExit { .. } => vec![false],
+            Self::MapBatch { batch_size, .. } => {
+                vec![
+                    true;
+                    usize::try_from(*batch_size).map_err(|_| {
+                        RepositoryError::InvalidInput(
+                            "Map batch size exceeds platform representation".to_owned(),
+                        )
+                    })?
+                ]
+            }
+            Self::LoopIterationExit { .. }
+            | Self::MapItemExit { .. }
+            | Self::ParallelLegExit { .. } => Vec::new(),
+        };
+        let pending_node_count = usize::from(matches!(
+            self,
+            Self::Fork { .. } | Self::LoopIteration { .. } | Self::MapBatch { .. }
+        ));
+        let structural_exit = match self {
+            Self::LoopIterationExit { .. } => {
+                let insight_platform_orchestrator::RuntimeNode::Compute { .. } = runtime_node
+                else {
+                    return Err(RepositoryError::Conflict("Loop body Plan node"));
+                };
+                // The carried arity belongs to the Loop node, not the body Compute. It is loaded
+                // from the frozen continuation descriptor by the dedicated requirement loader.
+                ControllerStructuralRequirement::LoopRollover {
+                    carried_value_count: 0,
+                }
+            }
+            Self::LoopConditionExit { .. }
+            | Self::MapItemExit { .. }
+            | Self::ParallelLegExit { .. } => ControllerStructuralRequirement::Close,
+            _ => ControllerStructuralRequirement::None,
+        };
+        let pending_wake = match self {
+            Self::LoopIterationExit { .. }
+            | Self::MapItemExit { .. }
+            | Self::ParallelLegExit { .. } => true,
+            Self::MapBatch {
+                failure_policy,
+                has_more,
+                ..
+            } => *has_more && !map_policy_requires_admission_barrier(*failure_policy),
+            _ => false,
+        };
+        Ok(ControllerMutationRequirements {
+            activation_scopes,
+            pending_node_count,
+            structural_exit,
+            pending_wake,
+            remainder_cancellation_scope_ids: Vec::new(),
+        })
+    }
+}
+
+async fn load_controller_remainder_requirements(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    parents: &LockedOrchestrationJobParents,
+    plan: &RuntimePlan,
+    shape: &ControllerStepShape,
+) -> Result<Vec<ResourceId>, RepositoryError> {
+    let (active_scope_ids, cancel_active) = match shape {
+        ControllerStepShape::MapItemExit {
+            map_plan_node_key,
+            root_map_node_execution_id,
+            ..
+        } => {
+            let rows = sqlx::query(
+                r#"
+                SELECT node_id, state, payload_schema_version, payload, payload_digest
+                FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'scope_instance'
+                  AND parent_node_id = $3 AND node_kind = 'map_item'
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(&parents.run.run_id)
+            .bind(root_map_node_execution_id.to_string())
+            .fetch_all(&mut **transaction)
+            .await?;
+            let mut outcomes = BTreeMap::new();
+            let mut active = Vec::new();
+            for row in rows {
+                let scope_id: String = row.try_get("node_id")?;
+                let payload =
+                    payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+                let stored: StoredControllerScopePayload =
+                    decode_typed_payload(&payload, "Map cancellation Scope")?;
+                let StoredControllerScopeDescriptor::MapItem { item_index, .. } = stored.descriptor
+                else {
+                    return Err(RepositoryError::Conflict("Map cancellation Scope kind"));
+                };
+                if stored.controller_node_execution_id != *root_map_node_execution_id {
+                    return Err(RepositoryError::Conflict("Map cancellation Scope owner"));
+                }
+                let outcome = if scope_id == parents.scope_id {
+                    ChildOutcome::Succeeded
+                } else {
+                    let outcome = child_outcome_from_scope_state(row.try_get("state")?)?;
+                    if outcome == ChildOutcome::Active {
+                        active.push(scope_id);
+                    }
+                    outcome
+                };
+                if outcomes.insert(item_index, outcome).is_some() {
+                    return Err(RepositoryError::Conflict(
+                        "duplicate Map cancellation index",
+                    ));
+                }
+            }
+            let children = outcomes.into_values().collect::<Vec<_>>();
+            let map_node = plan.node(map_plan_node_key)?;
+            let decision =
+                decide_controller(map_node, &ControllerObservation::MapSettlement { children })?;
+            (
+                active,
+                matches!(decision, ControllerDecision::FailNode { .. }),
+            )
+        }
+        ControllerStepShape::ParallelLegExit {
+            join_plan_node_key,
+            expected_scope_ids,
+            remainder,
+            ..
+        } => {
+            let expected_ids = expected_scope_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            let rows = sqlx::query(
+                r#"
+                SELECT node_id, state
+                FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'scope_instance'
+                  AND node_id = ANY($3::text[]) AND node_kind = 'parallel_leg'
+                "#,
+            )
+            .bind(&current_job.tenant_id)
+            .bind(&parents.run.run_id)
+            .bind(&expected_ids)
+            .fetch_all(&mut **transaction)
+            .await?;
+            if rows.len() != expected_ids.len() {
+                return Err(RepositoryError::Conflict("Join cancellation Scope set"));
+            }
+            let mut outcomes = BTreeMap::new();
+            let mut active = Vec::new();
+            for row in rows {
+                let scope_id: String = row.try_get("node_id")?;
+                let outcome = if scope_id == parents.scope_id {
+                    ChildOutcome::Succeeded
+                } else {
+                    let outcome = child_outcome_from_scope_state(row.try_get("state")?)?;
+                    if outcome == ChildOutcome::Active {
+                        active.push(scope_id.clone());
+                    }
+                    outcome
+                };
+                outcomes.insert(scope_id, outcome);
+            }
+            let children = expected_ids
+                .iter()
+                .map(|scope_id| {
+                    outcomes.get(scope_id).copied().ok_or_else(|| {
+                        RepositoryError::CorruptRow("Join cancellation lost a Scope".to_owned())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let decision = decide_controller(
+                plan.node(join_plan_node_key)?,
+                &ControllerObservation::Join { children },
+            )?;
+            let cancel = matches!(decision, ControllerDecision::FailNode { .. })
+                || matches!(decision, ControllerDecision::CompleteNode { .. })
+                    && *remainder == Some(JoinRemainderPolicy::Cancel);
+            (active, cancel)
+        }
+        _ => return Ok(Vec::new()),
+    };
+    if !cancel_active {
+        return Ok(Vec::new());
+    }
+    active_scope_ids
+        .into_iter()
+        .map(|scope_id| {
+            scope_id
+                .parse()
+                .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                })
+        })
+        .collect()
 }
 
 fn validate_failure_mutation_shape(
@@ -9202,6 +9625,135 @@ async fn require_exact_controller_observation(
         return Err(RepositoryError::Conflict("exact Join observation"));
     }
     Ok(())
+}
+
+async fn load_map_settlement_observation(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    run_id: &str,
+    pending: &StoredPendingControllerNodePayload,
+    admitted_item_count: u32,
+) -> Result<ControllerObservation, RepositoryError> {
+    let root_map_node_id = pending.controller_node_execution_id.to_string();
+    let rows = sqlx::query(
+        r#"
+        SELECT state, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'scope_instance'
+          AND parent_node_id = $3 AND node_kind = 'map_item'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(run_id)
+    .bind(&root_map_node_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != usize::try_from(admitted_item_count).unwrap_or(usize::MAX) {
+        return Err(RepositoryError::Conflict("Map observed Scope set"));
+    }
+    let mut outcomes = BTreeMap::new();
+    for row in rows {
+        let scope_payload =
+            payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let stored: StoredControllerScopePayload =
+            decode_typed_payload(&scope_payload, "MapItem Scope observation")?;
+        let StoredControllerScopeDescriptor::MapItem { item_index, .. } = stored.descriptor else {
+            return Err(RepositoryError::Conflict("MapItem Scope descriptor"));
+        };
+        if stored.controller_node_execution_id != pending.controller_node_execution_id
+            || item_index >= admitted_item_count
+        {
+            return Err(RepositoryError::Conflict(
+                "MapItem Scope observation contract",
+            ));
+        }
+        let outcome = child_outcome_from_scope_state(row.try_get("state")?)?;
+        if outcomes.insert(item_index, outcome).is_some() {
+            return Err(RepositoryError::Conflict("duplicate Map item index"));
+        }
+    }
+    Ok(ControllerObservation::MapSettlement {
+        children: (0..admitted_item_count)
+            .map(|index| {
+                outcomes.get(&index).copied().ok_or_else(|| {
+                    RepositoryError::CorruptRow("Map lost an item outcome".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+async fn load_join_observation(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    run_id: &str,
+    payload: &TypedPayload,
+) -> Result<ControllerObservation, RepositoryError> {
+    let pending: StoredPendingControllerNodePayload =
+        decode_typed_payload(payload, "running Join Node")?;
+    if !matches!(pending.wait, StoredControllerWait::Join { .. })
+        || pending.expected_scope_ids.is_empty()
+    {
+        return Err(RepositoryError::Conflict(
+            "Join frozen observation contract",
+        ));
+    }
+    let expected_ids = pending
+        .expected_scope_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if expected_ids.iter().collect::<BTreeSet<_>>().len() != expected_ids.len() {
+        return Err(RepositoryError::Conflict("Join frozen Scope set"));
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT node_id, state
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'scope_instance'
+          AND node_id = ANY($3::text[]) AND node_kind = 'parallel_leg'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(run_id)
+    .bind(&expected_ids)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != expected_ids.len() {
+        return Err(RepositoryError::Conflict("Join observed Scope set"));
+    }
+    let outcomes = rows
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<String, _>("node_id")?,
+                child_outcome_from_scope_state(row.try_get("state")?)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, RepositoryError>>()?;
+    Ok(ControllerObservation::Join {
+        children: expected_ids
+            .iter()
+            .map(|scope_id| {
+                outcomes.get(scope_id).copied().ok_or_else(|| {
+                    RepositoryError::CorruptRow("Join lost an observed Scope".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn child_outcome_from_scope_state(state: String) -> Result<ChildOutcome, RepositoryError> {
+    match state
+        .parse::<ScopeState>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+    {
+        ScopeState::Open => Ok(ChildOutcome::Active),
+        ScopeState::Succeeded => Ok(ChildOutcome::Succeeded),
+        ScopeState::Failed => Ok(ChildOutcome::Failed),
+        ScopeState::Cancelled => Ok(ChildOutcome::Cancelled),
+        ScopeState::Closing => Err(RepositoryError::Conflict("observed closing Scope")),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -20270,6 +20822,23 @@ pub struct ApplyDerivedExpressionControllerStep {
     pub output_value_ids: Vec<ResourceId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControllerStructuralRequirement {
+    None,
+    Close,
+    LoopRollover { carried_value_count: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerMutationRequirements {
+    /// One entry per activation; true means the activation must allocate a new Scope.
+    pub activation_scopes: Vec<bool>,
+    pub pending_node_count: usize,
+    pub structural_exit: ControllerStructuralRequirement,
+    pub pending_wake: bool,
+    pub remainder_cancellation_scope_ids: Vec<ResourceId>,
+}
+
 impl ApplyDerivedExpressionControllerStep {
     fn validate(&self, plan_limits: PlanLimits) -> Result<(), RepositoryError> {
         self.step.validate(plan_limits)?;
@@ -20443,6 +21012,22 @@ pub struct ExpressionControllerFacts {
     pub plan_node_key: PlanNodeKey,
     pub loop_iteration: u32,
     pub inputs: Vec<ResolvedExpressionInput>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControllerFactIdentity {
+    pub node_execution_id: ResourceId,
+    pub node_execution_version: i64,
+    pub plan_node_key: PlanNodeKey,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ControllerFacts {
+    Expression(ExpressionControllerFacts),
+    Committed {
+        identity: ControllerFactIdentity,
+        observation: ControllerObservation,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
