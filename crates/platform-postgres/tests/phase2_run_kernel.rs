@@ -27,7 +27,7 @@ use insight_platform_postgres::{
     repository::{
         ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep,
         ChildRunCancellationSlot, ClaimOrchestrationJobs, ClaimedOrchestrationJob,
-        CompleteOrchestrationRun, ControllerActivationSlot, ControllerFacts,
+        CommitPlanTerminal, CompleteOrchestrationRun, ControllerActivationSlot, ControllerFacts,
         ControllerLoopRolloverSlot, ControllerPendingNodeSlot, ControllerPendingWakeSlot,
         ControllerRemainderCancellationSlot, ControllerScopeSlot, ControllerStepMutationIds,
         ControllerStructuralExitSlot, DeferOrchestrationChildMutationIds,
@@ -35,11 +35,11 @@ use insight_platform_postgres::{
         DriveChildRunCancellations, DriveDueOrchestrationRetries, DriveExpiredOrchestrationJobs,
         DriveExpiredOrchestrationTasks, DriveOrchestrationConvergence, DriveTerminalChildRuns,
         DueOrchestrationRetrySlot, ExpiredOrchestrationRecoverySlot, ExpiredOrchestrationTaskSlot,
-        FailOrchestrationJob, HeartbeatJob, JobFence, NewPrincipal, NewQuotaAccount, NewTenant,
-        NewTenantPrincipal, OrchestrationClaimSlot, OrchestrationConvergenceSlot,
-        OrchestrationFailureCause, OrchestrationRunTerminalState, OrchestrationTerminalMutationIds,
-        OrchestrationWakeMutationIds, OrchestrationYield, OrchestrationYieldMutationIds,
-        PgRepository, RepositoryError, ResolveOrchestrationTask,
+        FailOrchestrationJob, HeartbeatJob, JobFence, MaterializedTerminalValue, NewPrincipal,
+        NewQuotaAccount, NewTenant, NewTenantPrincipal, OrchestrationClaimSlot,
+        OrchestrationConvergenceSlot, OrchestrationFailureCause, OrchestrationRunTerminalState,
+        OrchestrationTerminalMutationIds, OrchestrationWakeMutationIds, OrchestrationYield,
+        OrchestrationYieldMutationIds, PgRepository, RepositoryError, ResolveOrchestrationTask,
         ResolveOrchestrationTaskMutationIds, RunRecord, SafetyScanShard, StartOrchestrationJob,
         TerminalChildRunSlot, TypedPayload, WakeOrchestrationJob, YieldOrchestrationJob,
     },
@@ -92,8 +92,15 @@ fn agent_schema() -> ClosedJsonSchema {
     ClosedJsonSchema::build(json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "properties": {},
-        "required": [],
+        "properties": {
+            "question": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 1024,
+                "x-platform-max-bytes": 4096
+            }
+        },
+        "required": ["question"],
         "additionalProperties": false
     }))
     .unwrap()
@@ -129,7 +136,7 @@ fn input_compute_output_port() -> insight_platform_orchestrator::ExactDataPortRe
     insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
         producer_node_id: PlanNodeKey::new("input_compute".to_owned()).unwrap(),
         port_id: DataPortKey::new("echo".to_owned()).unwrap(),
-        schema_digest: digest('a'),
+        schema_digest: agent_schema().canonical_digest,
     }
 }
 
@@ -141,6 +148,12 @@ fn return_run_input() -> RuntimeNode {
     }
 }
 
+fn return_compute_output() -> RuntimeNode {
+    RuntimeNode::Return {
+        value: input_compute_output_port(),
+    }
+}
+
 fn echo_run_input_program() -> TypedExpressionProgram {
     let input = insight_platform_orchestrator::ExactDataPortRef::RunInput {
         schema_digest: digest('a'),
@@ -148,7 +161,7 @@ fn echo_run_input_program() -> TypedExpressionProgram {
     TypedExpressionProgram::build(
         vec![input.clone()],
         vec![TypedInstruction::LoadPort { port: input }],
-        digest('a'),
+        agent_schema().canonical_digest,
         ExpressionLimits::ABSOLUTE,
     )
     .unwrap()
@@ -414,7 +427,7 @@ fn runtime_plan() -> RuntimePlan {
                     next: finish.clone(),
                 },
             ),
-            (finish, return_run_input()),
+            (finish, return_compute_output()),
         ]),
     }
 }
@@ -6216,7 +6229,10 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .await
     .unwrap();
     assert_eq!(stored_compute.0, DataClassification::Internal.as_str());
-    assert_eq!(stored_compute.1, digest('a').to_string());
+    assert_eq!(
+        stored_compute.1,
+        agent_schema().canonical_digest.to_string()
+    );
     assert_eq!(stored_compute.2, json!({"question": "select one"}));
     let stored_scope_payload: Value = sqlx::query_scalar(
         "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
@@ -6227,39 +6243,98 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .await
     .unwrap();
     assert!(stored_scope_payload.to_string().contains(&compute_output_id.to_string()));
-    let compute_run_version: i64 = sqlx::query_scalar(
-        "SELECT version FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
-    )
-    .bind(TENANT_ID)
-    .bind(compute_admission.run_id.to_string())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    applied(
-        run_command!(
-            repository,
-            request_run_cancel,
-            RequestRunCancel {
-                audit: audit(TENANT_ID, PRINCIPAL_ID, "ab30", 'f', '0'),
-                run_id: compute_admission.run_id.clone(),
-                expected_run_version: compute_run_version,
-                expected_cancel_generation: 0,
-                reason_code: "fixture_cleanup".to_owned(),
-            }
-        )
-        .unwrap(),
-    );
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
-    let compute_cleanup = scheduler
-        .drive_orchestration_convergence(orchestration_convergence(
+    let terminal_claimed = scheduler
+        .claim_orchestration_jobs(orchestration_claim_with_ids(
+            WORKER_D_ID,
+            'f',
+            "ab30",
             ["ab31", "ab32", "ab33", "ab34"],
-            ["ab35", "ab36", "ab37", "ab38", "ab39", "ab3a"],
+            ["ab35", "ab36", "ab37"],
         ))
         .await
         .unwrap();
     scheduler.commit().await.unwrap();
-    assert_eq!(compute_cleanup.len(), 1);
-    assert_eq!(compute_cleanup[0].completed.run.state, "cancelled");
+    assert_eq!(terminal_claimed.len(), 1);
+    let terminal_start = start_claimed_orchestration(
+        &terminal_claimed[0],
+        WORKER_D_ID,
+        'f',
+        "ab38",
+        "ab39",
+        "ab3a",
+        '0',
+        '1',
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let terminal_started = match scheduler
+        .start_orchestration_job(terminal_start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("Return start must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    let terminal_body = json!({"question": "select one"});
+    let terminal_content_digest = canonical_digest(&terminal_body).unwrap().parse().unwrap();
+    let terminal = CommitPlanTerminal {
+        fence: JobFence {
+            expected_job_version: terminal_started.version,
+            ..terminal_start.fence
+        },
+        plan: runtime_plan(),
+        value: MaterializedTerminalValue {
+            value_id: compute_output_id.clone(),
+            classification: DataClassification::Internal,
+            schema_digest: agent_schema().canonical_digest,
+            content_digest: terminal_content_digest,
+            body: terminal_body,
+        },
+        idempotency_key_digest: digest('2'),
+        request_digest: digest('3'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        mutations: OrchestrationTerminalMutationIds {
+            receipt_id: fixture_platform_id("rcp", "ab3b"),
+            quota_entry_ids: ["ab3c", "ab3d", "ab3e", "ab3f"]
+                .map(|suffix| fixture_platform_id("qle", suffix))
+                .to_vec(),
+            run_event_id: fixture_platform_id("evt", "ab40"),
+            run_outbox_id: fixture_platform_id("obx", "ab40"),
+            node_event_id: fixture_platform_id("evt", "ab41"),
+            node_outbox_id: fixture_platform_id("obx", "ab41"),
+            scope_closing_event_id: fixture_platform_id("evt", "ab42"),
+            scope_closing_outbox_id: fixture_platform_id("obx", "ab42"),
+            scope_terminal_event_id: fixture_platform_id("evt", "ab43"),
+            scope_terminal_outbox_id: fixture_platform_id("obx", "ab43"),
+            job_event_id: fixture_platform_id("evt", "ab44"),
+            job_outbox_id: fixture_platform_id("obx", "ab44"),
+        },
+    };
+    let mut wrong_value = terminal.clone();
+    wrong_value.value.value_id = fixture_platform_id("val", "ab45");
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let wrong_value_error = scheduler.commit_plan_terminal(wrong_value).await.unwrap_err();
+    assert!(matches!(
+        &wrong_value_error,
+        RepositoryError::Conflict("terminal RunValue evidence")
+    ), "unexpected terminal rejection: {wrong_value_error:?}");
+    scheduler.rollback().await.unwrap();
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let completed = scheduler.commit_plan_terminal(terminal.clone()).await.unwrap();
+    scheduler.commit().await.unwrap();
+    assert!(matches!(
+        completed,
+        CommandOutcome::Applied(ref record)
+            if record.run.state == "succeeded"
+                && record.run.output_value_id.as_deref() == Some(compute_output_id.to_string().as_str())
+    ));
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler.commit_plan_terminal(terminal).await.unwrap(),
+        CommandOutcome::Replayed(record) if record.run.state == "succeeded"
+    ));
+    scheduler.commit().await.unwrap();
 
     let mut loop_admission = admission(
         AdmissionIds {
@@ -8772,7 +8847,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     for (version_id, resource_id, kind, content_digest) in &versions {
         let version_payload = match *version_id {
             POLICY_REVISION_ID => &policy_payload,
-            AGENT_PLAN_ID => &agent_plan_payload,
+            AGENT_INTERFACE_ID | AGENT_PLAN_ID => &agent_plan_payload,
             CHILD_AGENT_INTERFACE_ID => &child_interface_payload,
             _ => &resource_payload,
         };

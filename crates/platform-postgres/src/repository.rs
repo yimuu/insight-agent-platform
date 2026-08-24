@@ -6,12 +6,13 @@ use insight_platform_context::{
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, is_execution_work_owner_pair, ActiveTarget,
-    AdministrativeGate, ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome,
-    DataClassification, DeploymentClosure, EntityLifecycle, ExactDatasetGenerationRef,
-    ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure, FailureClass, FailureCode,
-    FailureSource, FrozenSlotTarget, HardLimitProfile, InstallationPrincipalBinding, JobState,
-    JsonLimits, NodeExecutionState, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode,
-    PolicyKind, PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    AdministrativeGate, AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonSchema,
+    ClosedJsonValue, CommandAudit, CommandOutcome, DataClassification, DeploymentClosure,
+    EntityLifecycle, ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef,
+    ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource, FrozenSlotTarget,
+    HardLimitProfile, InstallationPrincipalBinding, JobState, JsonLimits, NodeExecutionState,
+    Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
+    PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
     PublicRunEventType, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
     ResourceDraftPayload, ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState,
     SchedulerPriority, ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
@@ -5596,7 +5597,6 @@ impl PgSchedulerTransaction {
             1,
             &serde_json::json!({
                 "cause": command.cause,
-                "mutations": command.mutations,
                 "plan_digest": plan_digest,
             }),
             262_144,
@@ -7611,6 +7611,199 @@ impl PgSchedulerTransaction {
         Ok(CommandOutcome::Applied(completed))
     }
 
+    /// Commits a Return or Raise only from the exact terminal port frozen in the bound Plan.
+    /// The supplied body is materialization evidence, never terminal authority: the transaction
+    /// re-resolves the current lexical Scope and revalidates the immutable RunValue and Interface.
+    pub async fn commit_plan_terminal(
+        &mut self,
+        command: CommitPlanTerminal,
+    ) -> Result<CommandOutcome<CompletedOrchestrationRun>, RepositoryError> {
+        command.validate(self.plan_limits)?;
+        let plan_digest = command
+            .plan
+            .canonical_digest(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let receipt_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "classification": command.value.classification,
+                "content_digest": command.value.content_digest,
+                "plan_digest": plan_digest,
+                "schema_digest": command.value.schema_digest,
+                "value_id": command.value.value_id,
+            }),
+            65_536,
+        )?;
+        let mut transaction = self.transaction.begin().await?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            "orchestration.plan_terminal.commit",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let completed = load_completed_orchestration_run(
+                &mut transaction,
+                &command.fence.tenant_id,
+                &command.fence.job_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(completed));
+        }
+
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let quota_accounts = lock_job_quota_bundle(
+            &mut transaction,
+            &observed,
+            &command.mutations.quota_entry_ids,
+        )
+        .await?;
+        let parents = lock_terminal_orchestration_parents(&mut transaction, &observed).await?;
+        require_exact_runtime_plan(&mut transaction, &parents.run, &command.plan, &plan_digest)
+            .await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, &command.plan)
+                .await?;
+        let runtime_node = command.plan.node(&source_node.plan_node_key)?;
+        let interface = load_exact_agent_interface_spec(&mut transaction, &parents.run).await?;
+        let (terminal_state, terminal_port, schema, terminal_failure) = match runtime_node {
+            insight_platform_orchestrator::RuntimeNode::Return { value } => (
+                OrchestrationRunTerminalState::Succeeded,
+                value,
+                &interface.output_schema,
+                None,
+            ),
+            insight_platform_orchestrator::RuntimeNode::Raise { failure } => {
+                let failure_value: Failure = serde_json::from_value(command.value.body.clone())
+                    .map_err(|_| {
+                        RepositoryError::InvalidInput(
+                            "Raise terminal body is not a safe Failure".to_owned(),
+                        )
+                    })?;
+                failure_value
+                    .validate(1_024)
+                    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+                require_failure_references(&mut transaction, &parents.run, &failure_value).await?;
+                (
+                    OrchestrationRunTerminalState::Failed,
+                    failure,
+                    &interface.error_schema,
+                    Some(failure_value),
+                )
+            }
+            _ => {
+                return Err(RepositoryError::Conflict(
+                    "running orchestration Node is not a Plan terminal",
+                ))
+            }
+        };
+        let terminal_value_id = require_exact_terminal_value(
+            &mut transaction,
+            &parents.run,
+            &parents.scope_id,
+            terminal_port,
+            schema,
+            &command.value,
+            self.scope_environment_limits,
+        )
+        .await?;
+        let result_payload = if let Some(failure) = &terminal_failure {
+            TypedPayload::with_limit(1, failure, 65_536)?
+        } else {
+            TypedPayload::with_limit(
+                1,
+                &serde_json::json!({
+                    "classification": command.value.classification,
+                    "content_digest": command.value.content_digest,
+                    "schema_digest": command.value.schema_digest,
+                    "value_id": terminal_value_id,
+                }),
+                65_536,
+            )?
+        };
+        let result_digest: Sha256Digest = result_payload
+            .digest
+            .parse()
+            .map_err(|_| RepositoryError::CorruptRow("terminal result digest".to_owned()))?;
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+        {
+            return Err(RepositoryError::Conflict("orchestration Job"));
+        }
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            terminal_state.job_state(),
+        )?;
+        settle_locked_job_quota_bundle(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &command.mutations.quota_entry_ids,
+            &command.request_digest,
+        )
+        .await?;
+        let output_value_id = (terminal_state == OrchestrationRunTerminalState::Succeeded)
+            .then_some(terminal_value_id.as_str());
+        let mut completed = mutate_terminal_orchestration_run(
+            &mut transaction,
+            &current,
+            &next,
+            &parents,
+            terminal_state,
+            &result_digest,
+            output_value_id,
+            terminal_failure.as_ref(),
+            database_now,
+        )
+        .await?;
+        completed.settled_quota_account_ids = quota_accounts
+            .iter()
+            .map(|account| account.quota_account_id.clone())
+            .collect();
+        append_orchestration_terminal_events(
+            &mut transaction,
+            &completed,
+            terminal_state,
+            &command.mutations,
+            &result_payload,
+        )
+        .await?;
+        terminalize_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.receipt_id,
+            &command.request_digest,
+            terminal_state.as_str(),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(completed))
+    }
+
     pub async fn commit(self) -> Result<(), RepositoryError> {
         self.transaction.commit().await?;
         Ok(())
@@ -9181,6 +9374,123 @@ async fn require_exact_runtime_plan(
         return Err(RepositoryError::Conflict("exact typed Plan digest"));
     }
     Ok(())
+}
+
+async fn load_exact_agent_interface_spec(
+    transaction: &mut Transaction<'_, Postgres>,
+    run: &RunRecord,
+) -> Result<AgentResourceSpec, RepositoryError> {
+    let exact = &run.bindings.agent_interface;
+    let row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.resource_versions
+        WHERE tenant_id = $1 AND resource_version_id = $2
+          AND resource_version_kind = 'agent_interface_revision' AND content_digest = $3
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(exact.revision_id.to_string())
+    .bind(exact.semantic_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("exact Agent interface revision"))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let published = decode_published_version_payload(&payload)?;
+    published
+        .validate_for(RegistryResourceKind::Agent, &exact.revision_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let ResourceDocument::Agent(agent) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Agent interface revision contains a non-Agent document".to_owned(),
+        ));
+    };
+    Ok(agent)
+}
+
+async fn require_exact_terminal_value(
+    transaction: &mut Transaction<'_, Postgres>,
+    run: &RunRecord,
+    scope_id: &str,
+    port: &ExactDataPortRef,
+    schema: &ClosedJsonSchema,
+    evidence: &MaterializedTerminalValue,
+    limits: ScopeEnvironmentLimits,
+) -> Result<String, RepositoryError> {
+    if schema.canonical_digest != *port.schema_digest()
+        || schema.canonical_digest != evidence.schema_digest
+    {
+        return Err(RepositoryError::Conflict(
+            "terminal port Interface schema binding",
+        ));
+    }
+    let tenant_id: ResourceId =
+        run.tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let run_id: ResourceId =
+        run.run_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let scope_id: ResourceId =
+        scope_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let environments =
+        load_scope_environment_chain(transaction, &tenant_id, &run_id, &scope_id, limits).await?;
+    let references = insight_platform_orchestrator::resolve_scope_inputs(
+        std::slice::from_ref(port),
+        &environments,
+        limits,
+    )?;
+    let mut resolved = load_resolved_expression_values(
+        transaction,
+        &tenant_id,
+        &run_id,
+        vec![port.clone()],
+        references,
+    )
+    .await?;
+    let value = resolved
+        .pop()
+        .ok_or_else(|| RepositoryError::CorruptRow("terminal RunValue missing".to_owned()))?;
+    if value.run_value_id != evidence.value_id
+        || value.classification != evidence.classification
+        || value.schema_digest != evidence.schema_digest
+        || value.content_digest != evidence.content_digest
+    {
+        return Err(RepositoryError::Conflict("terminal RunValue evidence"));
+    }
+    match &value.value {
+        ValueRef::Inline { value } if value == &evidence.body => {}
+        ValueRef::Artifact { artifact }
+            if artifact.media_type() == "application/json"
+                || artifact.media_type().ends_with("+json") => {}
+        _ => {
+            return Err(RepositoryError::Conflict(
+                "terminal RunValue materialization",
+            ))
+        }
+    }
+    let materialized_digest: Sha256Digest = canonical_digest(&evidence.body)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|_| RepositoryError::InvalidInput("terminal body digest".to_owned()))?;
+    if materialized_digest != evidence.content_digest {
+        return Err(RepositoryError::Conflict(
+            "terminal RunValue content digest",
+        ));
+    }
+    schema
+        .validate_instance(&evidence.body)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    Ok(value.run_value_id.to_string())
 }
 
 async fn load_controller_source_node(
@@ -22578,6 +22888,61 @@ impl OrchestrationTerminalMutationIds {
                     "orchestration terminal mutation identities must be unique".to_owned(),
                 ));
             }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterializedTerminalValue {
+    pub value_id: ResourceId,
+    pub classification: DataClassification,
+    pub schema_digest: Sha256Digest,
+    pub content_digest: Sha256Digest,
+    pub body: Value,
+}
+
+impl MaterializedTerminalValue {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.value_id.kind() != ResourceKind::RunValue {
+            return Err(RepositoryError::InvalidInput(
+                "terminal value ID has the wrong kind".to_owned(),
+            ));
+        }
+        let value = ClosedJsonValue::build(self.schema_digest.clone(), self.body.clone())
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if value.canonical_digest != self.content_digest {
+            return Err(RepositoryError::InvalidInput(
+                "terminal value content digest differs".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitPlanTerminal {
+    pub fence: JobFence,
+    pub plan: RuntimePlan,
+    pub value: MaterializedTerminalValue,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: OrchestrationTerminalMutationIds,
+}
+
+impl CommitPlanTerminal {
+    fn validate(&self, limits: PlanLimits) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        self.plan
+            .validate(limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        self.value.validate()?;
+        self.mutations.validate()?;
+        if self.receipt_expires_at <= Utc::now() {
+            return Err(RepositoryError::InvalidInput(
+                "Plan terminal receipt has expired".to_owned(),
+            ));
         }
         Ok(())
     }
