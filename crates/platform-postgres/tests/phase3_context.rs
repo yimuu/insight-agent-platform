@@ -10,26 +10,27 @@ use insight_platform_context::{
     SqlSource, WakeContextDispatch, READONLY_DATABASE_CAPABILITY, TEXT2SQL_PLAN_VALUE_KIND,
 };
 use insight_platform_contracts::{
-    canonical_digest, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
-    AuthoringPackage, CapabilityArtifactContract, CapabilityBackendBinding,
-    CapabilityBackendContract, CapabilityBackendFeatures, CapabilityBackendKind,
-    CapabilityBackendLimits, CapabilityCancellationKind, CapabilityDataFlowPolicy,
-    CapabilityDeploymentClosure, CapabilityIdempotencyKind, CapabilityImplementationResourceSpec,
-    CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
-    CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
-    CommandAudit, CommandOutcome, ContextBackendBinding, ContextBackendContract,
-    ContextBackendKind, ContextBackendLimits, ContextBindingSnapshot, ContextCitationContract,
-    ContextCitationStrength, ContextConsistencyMode, ContextConsistencyPolicy,
-    ContextDataPolicyContract, ContextDatasetGenerationSpec, ContextDeploymentClosure,
-    ContextImplementationContract, ContextImplementationResourceSpec, ContextInterfaceLimits,
-    ContextInterfaceResourceSpec, ContextLocatorKind, ContextPaginationContract, ContextQueryState,
-    ContextRankingContract, DataClassification, DataRegion, DeploymentClosure, Effect,
-    EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, FrozenSlotBinding,
-    FrozenSlotTarget, JobState, NativeCapabilityContract, Permission, PermissionSet, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
-    ResourceKind, RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    canonical_digest, checked_in_hard_limit_profile, AdministrativeGate, AgentDeploymentClosure,
+    AgentResourceSpec, ArtifactRef, AuthoringPackage, CapabilityArtifactContract,
+    CapabilityBackendBinding, CapabilityBackendContract, CapabilityBackendFeatures,
+    CapabilityBackendKind, CapabilityBackendLimits, CapabilityCancellationKind,
+    CapabilityDataFlowPolicy, CapabilityDeploymentClosure, CapabilityIdempotencyKind,
+    CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
+    CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
+    CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue, CommandAudit, CommandOutcome,
+    ContextBackendBinding, ContextBackendContract, ContextBackendKind, ContextBackendLimits,
+    ContextBindingSnapshot, ContextCitationContract, ContextCitationStrength,
+    ContextConsistencyMode, ContextConsistencyPolicy, ContextDataPolicyContract,
+    ContextDatasetGenerationSpec, ContextDeploymentClosure, ContextImplementationContract,
+    ContextImplementationResourceSpec, ContextInterfaceLimits, ContextInterfaceResourceSpec,
+    ContextLocatorKind, ContextPaginationContract, ContextQueryState, ContextRankingContract,
+    DataClassification, DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
+    ExactPolicyBinding, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, JobState,
+    NativeCapabilityContract, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
+    ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, ExactInvocationValueRef, InvocationOrigin, InvocationPolicyDecision,
@@ -37,18 +38,25 @@ use insight_platform_invocations::{
     InvocationValueStorage,
 };
 use insight_platform_jobs::{JobFence, LeasePolicy, WakeContract, WakeKind, WakeSource};
-use insight_platform_orchestrator::RunCurrentSnapshot;
+use insight_platform_orchestrator::{
+    DataPortKey, ExactDataPortRef, ExactRunValueRef, OrchestrationJobPayload, PlanLimits,
+    PlanNodeKey, RunCurrentSnapshot, RuntimeDependencyKind, RuntimeDependencySlot, RuntimeNode,
+    RuntimePlan, ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits,
+};
 use insight_platform_postgres::{
     context_query_repository::{ClaimedContextExecution, PreparedContextExecution},
     repository::{
-        ClaimJobs, JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewTenant,
-        NewTenantPrincipal, PgRepository, RepositoryError, TypedPayload,
+        ClaimJobs, DeferOrchestrationContextMutationIds, DeferOrchestrationToContextQuery,
+        JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewTenant,
+        NewTenantPrincipal, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
+        ResolvedExpressionInput, TypedPayload,
     },
     verify_schema,
 };
 use serde::Serialize;
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use std::collections::BTreeMap;
 
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     format!(
@@ -500,6 +508,62 @@ struct Fixture {
     invocation_policies: Vec<ExactVersionRef>,
     score_domain_digest: Sha256Digest,
     deadline: DateTime<Utc>,
+    runtime_plan: RuntimePlan,
+}
+
+fn context_runtime_plan(interface_revision_id: ResourceId) -> RuntimePlan {
+    let start = PlanNodeKey::new("start".to_owned()).unwrap();
+    let catalog = PlanNodeKey::new("catalog".to_owned()).unwrap();
+    let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
+    let request = ExactDataPortRef::RunInput {
+        schema_digest: named_digest("query-schema"),
+    };
+    let result = ExactDataPortRef::NodeOutput {
+        producer_node_id: catalog.clone(),
+        port_id: DataPortKey::new("items".to_owned()).unwrap(),
+        schema_digest: named_digest("item-schema"),
+    };
+    let plan = RuntimePlan {
+        plan_version: 4,
+        interface_revision_id,
+        entry_node_id: start.clone(),
+        dependency_slots: BTreeMap::from([(
+            "catalog".to_owned(),
+            RuntimeDependencySlot {
+                kind: RuntimeDependencyKind::Context,
+                requirement_digest: named_digest("slot-requirement"),
+            },
+        )]),
+        nodes: BTreeMap::from([
+            (
+                start,
+                RuntimeNode::Start {
+                    next: catalog.clone(),
+                },
+            ),
+            (
+                catalog,
+                RuntimeNode::ContextQuery {
+                    context_slot_id: "catalog".to_owned(),
+                    request,
+                    result,
+                    maximum_items: 20,
+                    resume: finish.clone(),
+                },
+            ),
+            (
+                finish,
+                RuntimeNode::Return {
+                    value: ExactDataPortRef::RunInput {
+                        schema_digest: agent_schema().canonical_digest,
+                    },
+                },
+            ),
+        ]),
+    };
+    plan.validate(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
+        .unwrap();
+    plan
 }
 
 async fn seed_policy_versions(
@@ -925,6 +989,10 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
 
     let agent_interface = version(ResourceKind::AgentInterfaceRevision, 0x40);
     let agent_plan = version(ResourceKind::AgentPlanRevision, 0x41);
+    let runtime_plan = context_runtime_plan(agent_interface.revision_id.clone());
+    let runtime_plan_digest = runtime_plan
+        .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
+        .unwrap();
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_package: authoring(0xa5),
         contract_digest: named_digest("agent-contract"),
@@ -934,7 +1002,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         output_schema: agent_schema(),
         error_schema: agent_schema(),
         typed_plan_artifact_id: id(ResourceKind::Artifact, 0xa5),
-        typed_plan_digest: named_digest("typed-plan"),
+        typed_plan_digest: runtime_plan_digest,
     });
     for (exact, revision_no) in [(&agent_interface, 1), (&agent_plan, 2)] {
         insert_version(
@@ -1227,6 +1295,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             .collect(),
         score_domain_digest,
         deadline,
+        runtime_plan,
     }
 }
 
@@ -1290,6 +1359,248 @@ impl ClaimEvidence {
             token_digest: self.lease_token.clone(),
         }
     }
+}
+
+async fn seed_running_context_orchestration(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+) -> (RepositoryJobFence, DeferOrchestrationToContextQuery) {
+    let input_value = json!({"question": "top customers"});
+    let input_digest: Sha256Digest = canonical_digest(&input_value).unwrap().parse().unwrap();
+    let input_port = ExactDataPortRef::RunInput {
+        schema_digest: named_digest("query-schema"),
+    };
+    let environment = ScopeDataEnvironmentSnapshot::build(
+        BTreeMap::from([(
+            input_port.clone(),
+            ExactRunValueRef {
+                value_id: id(ResourceKind::RunValue, 0x63),
+                schema_digest: named_digest("query-schema"),
+                content_digest: input_digest.clone(),
+            },
+        )]),
+        ScopeEnvironmentLimits::from_profile(&checked_in_hard_limit_profile()).unwrap(),
+    )
+    .unwrap();
+    let scope_payload = TypedPayload::new(
+        1,
+        &json!({
+            "root_run_id": fixture.run_id,
+            "environment": environment,
+        }),
+    )
+    .unwrap();
+    let scope_id = id(ResourceKind::ScopeInstance, 0x61);
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET payload_schema_version = $3, payload = $4, payload_digest = $5
+        WHERE tenant_id = $1 AND node_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(scope_payload.schema_version)
+    .bind(&scope_payload.value)
+    .bind(&scope_payload.digest)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.runs SET active_work_count = 1 WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let owner_node_id = id(ResourceKind::NodeExecution, 0x804);
+    let owner_node_payload = TypedPayload::new(1, &json!({"fixture": "context-owner"})).unwrap();
+    let owner_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, logical_key, node_kind, state,
+            generation, version, payload_schema_version, payload, payload_digest,
+            deadline, started_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, $4, 'node_execution', $4,
+            'catalog', 3, 'catalog-owner', 'context_query', 'running',
+            1, 1, $5, $6, $7, $8, $9, $9, $9
+        )
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(owner_node_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(owner_node_payload.schema_version)
+    .bind(&owner_node_payload.value)
+    .bind(&owner_node_payload.digest)
+    .bind(fixture.deadline)
+    .bind(owner_now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let quota_account_id = id(ResourceKind::QuotaAccount, 0x800);
+    repository
+        .create_quota_account(NewQuotaAccount {
+            tenant_id: fixture.tenant_id.to_string(),
+            quota_account_id: quota_account_id.to_string(),
+            scope_kind: "tenant".to_owned(),
+            scope_id: fixture.tenant_id.to_string(),
+            work_class: WorkClass::Orchestration.as_str().to_owned(),
+            metric: "concurrent_jobs".to_owned(),
+            limit_value: 4,
+            payload: TypedPayload::new(1, &json!({"fixture": "context-owner"})).unwrap(),
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.quota_accounts SET reserved_value = 1 WHERE tenant_id = $1 AND quota_account_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(quota_account_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let reservation_id = "ures_0198f1c9-32e4-75e1-a9e8-d95ca0f60801";
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.quota_ledger (
+            tenant_id, quota_entry_id, quota_account_id, correlation_id, entry_kind,
+            reserved_amount, used_amount, account_version, request_digest
+        ) VALUES ($1, $2, $3, $4, 'reserve', 1, 0, 1, $5)
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(id(ResourceKind::QuotaLedgerEntry, 0x801).to_string())
+    .bind(quota_account_id.to_string())
+    .bind(reservation_id)
+    .bind(named_digest("context-owner-reserve").to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let source_job_id = id(ResourceKind::Job, 0x802);
+    let worker_id = id(ResourceKind::WorkerProcessGeneration, 0x803);
+    let lease_token_digest = named_digest("context-owner-lease");
+    let job_payload = TypedPayload::new(
+        1,
+        &OrchestrationJobPayload {
+            bindings_digest: sqlx::query_scalar::<_, String>(
+                "SELECT bindings_digest FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+            )
+            .bind(fixture.tenant_id.to_string())
+            .bind(fixture.run_id.to_string())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .parse()
+            .unwrap(),
+            node_execution_id: owner_node_id.clone(),
+            root_scope_id: scope_id,
+            retry_backoff_milliseconds: 100,
+            wake_contract: None,
+        },
+    )
+    .unwrap();
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            state, version, attempt_no, attempt_limit, lease_epoch, worker_id,
+            lease_token_digest, lease_expires_at, heartbeat_at, scheduled_at, deadline,
+            request_digest, quota_reservation_id, payload_schema_version, payload,
+            payload_digest, started_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            'running', 2, 1, 3, 1, $5, $6, $7, $8, $8, $9,
+            $10, $11, $12, $13, $14, $8, $8, $8
+        )
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(source_job_id.to_string())
+    .bind(owner_node_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .bind(worker_id.to_string())
+    .bind(lease_token_digest.to_string())
+    .bind(now + Duration::minutes(10))
+    .bind(now)
+    .bind(fixture.deadline)
+    .bind(named_digest("context-owner-source-job").to_string())
+    .bind(reservation_id)
+    .bind(job_payload.schema_version)
+    .bind(&job_payload.value)
+    .bind(&job_payload.digest)
+    .execute(pool)
+    .await
+    .unwrap();
+    let fence = RepositoryJobFence {
+        tenant_id: fixture.tenant_id.to_string(),
+        job_id: source_job_id.to_string(),
+        worker_id,
+        lease_epoch: 1,
+        expected_job_version: 2,
+        lease_token_digest,
+    };
+    let mutations = DeferOrchestrationContextMutationIds {
+        source: OrchestrationYieldMutationIds {
+            receipt_id: id(ResourceKind::Receipt, 0x810),
+            quota_entry_ids: (0x811..=0x814)
+                .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                .collect(),
+            run_event_id: id(ResourceKind::Event, 0x815),
+            run_outbox_id: id(ResourceKind::OutboxEvent, 0x816),
+            node_event_id: id(ResourceKind::Event, 0x817),
+            node_outbox_id: id(ResourceKind::OutboxEvent, 0x818),
+            job_event_id: id(ResourceKind::Event, 0x819),
+            job_outbox_id: id(ResourceKind::OutboxEvent, 0x81a),
+        },
+        context_create_receipt_id: id(ResourceKind::Receipt, 0x81b),
+        context_create_event_id: id(ResourceKind::Event, 0x81c),
+        context_create_outbox_id: id(ResourceKind::OutboxEvent, 0x81d),
+        context_prepare_receipt_id: id(ResourceKind::Receipt, 0x81e),
+        context_prepare_event_id: id(ResourceKind::Event, 0x81f),
+        context_prepare_outbox_id: id(ResourceKind::OutboxEvent, 0x820),
+    };
+    let command = DeferOrchestrationToContextQuery {
+        fence: fence.clone(),
+        plan: fixture.runtime_plan.clone(),
+        context_query_id: id(ResourceKind::ContextQuery, 0x821),
+        context_job_id: id(ResourceKind::Job, 0x822),
+        input: ResolvedExpressionInput {
+            run_value_id: id(ResourceKind::RunValue, 0x63),
+            producing_node_id: Some(fixture.node_id.clone()),
+            value_kind: "context_query".to_owned(),
+            port: input_port,
+            classification: DataClassification::Internal,
+            schema_digest: named_digest("query-schema"),
+            content_digest: input_digest.clone(),
+            value: ValueRef::Inline {
+                value: input_value.clone(),
+            },
+        },
+        materialized_input: ClosedJsonValue::build(named_digest("query-schema"), input_value)
+            .unwrap(),
+        input_artifact_link_id: None,
+        idempotency_key_digest: named_digest("context-owner-idempotency"),
+        request_digest: named_digest("context-owner-request"),
+        receipt_expires_at: fixture.deadline,
+        mutations,
+    };
+    (fence, command)
 }
 
 async fn claim(
@@ -1563,8 +1874,16 @@ fn text2sql_invocation_command(
     }
 }
 
-#[tokio::test]
-async fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
+#[test]
+fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(runtime.spawn(async {
     let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
         eprintln!("PLATFORM_TEST_DATABASE_URL is unset; real PostgreSQL fixture skipped");
         return;
@@ -2276,4 +2595,90 @@ async fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     .await
     .unwrap();
     assert!(durable_pairs >= 6);
+
+    let (_fence, owner_command) =
+        seed_running_context_orchestration(&pool, &repository, &fixture).await;
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let rolled_back = scheduler
+        .defer_orchestration_to_context_query(owner_command.clone())
+        .await
+        .unwrap();
+    assert!(matches!(rolled_back, CommandOutcome::Applied(_)));
+    scheduler.rollback().await.unwrap();
+    let rolled_back_queries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.invocations WHERE tenant_id = $1 AND invocation_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(owner_command.context_query_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rolled_back_queries, 0);
+
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let applied = scheduler
+        .defer_orchestration_to_context_query(owner_command.clone())
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    let CommandOutcome::Applied(applied) = applied else {
+        panic!("first orchestration-owned Context dispatch replayed");
+    };
+    assert_eq!(applied.run.state, "waiting");
+    assert_eq!(applied.run.active_work_count, 0);
+    assert_eq!(applied.source_job.state, "succeeded");
+    assert_eq!(applied.context_job.state, "ready");
+    assert_eq!(applied.query.state, ContextQueryState::Ready);
+    assert_eq!(applied.settled_quota_account_ids.len(), 1);
+
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let replayed = scheduler
+        .defer_orchestration_to_context_query(owner_command)
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert!(matches!(
+        replayed,
+        CommandOutcome::Replayed(record)
+            if record.query.context_query_id == applied.query.context_query_id
+                && record.context_job.job_id == applied.context_job.job_id
+    ));
+    let owner_atomic: (String, String, String, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT run.state, node.state, source.state,
+               (SELECT count(*) FROM insight_platform.invocations
+                WHERE tenant_id = $1 AND invocation_id = $5),
+               (SELECT count(*) FROM insight_platform.receipts
+                WHERE tenant_id = $1 AND receipt_id IN ($6, $7, $8) AND state = 'succeeded')
+        FROM insight_platform.runs AS run
+        JOIN insight_platform.run_nodes AS node
+          ON node.tenant_id = run.tenant_id AND node.node_id = $3
+        JOIN insight_platform.jobs AS source
+          ON source.tenant_id = run.tenant_id AND source.job_id = $4
+        WHERE run.tenant_id = $1 AND run.run_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .bind(id(ResourceKind::NodeExecution, 0x804).to_string())
+    .bind(id(ResourceKind::Job, 0x802).to_string())
+    .bind(id(ResourceKind::ContextQuery, 0x821).to_string())
+    .bind(id(ResourceKind::Receipt, 0x810).to_string())
+    .bind(id(ResourceKind::Receipt, 0x81b).to_string())
+    .bind(id(ResourceKind::Receipt, 0x81e).to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        owner_atomic,
+        (
+            "waiting".to_owned(),
+            "waiting".to_owned(),
+            "succeeded".to_owned(),
+            1,
+            3
+        )
+    );
+        }))
+        .unwrap();
 }

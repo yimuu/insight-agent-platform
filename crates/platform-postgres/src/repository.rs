@@ -2,11 +2,11 @@ use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{ArtifactCommandLimits, ArtifactJobPayload};
 use insight_platform_context::{
     ContextDatasetBuildJobPayload, ContextJobPayload, ContextQueryError as DomainContextQueryError,
-    ContextQueryLimits,
+    ContextQueryLimits, ContextQueryRequest, CreateContextQuery, PrepareContextDispatch,
 };
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, is_execution_work_owner_pair, ActiveTarget,
-    AdministrativeGate, AgentResourceSpec, ArtifactRef, AuthoringPackage,
+    canonical_digest, canonical_json, checked_in_hard_limit_profile, is_execution_work_owner_pair,
+    ActiveTarget, AdministrativeGate, AgentResourceSpec, ArtifactRef, AuthoringPackage,
     CandidateSelectionPolicyDocument, ClosedJsonSchema, ClosedJsonValue, CommandAudit,
     CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle,
     ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure,
@@ -20,7 +20,8 @@ use insight_platform_contracts::{
     TenantPrincipalPayload, ValueRef, WorkClass, MAX_RESOURCE_DEPENDENCIES,
 };
 use insight_platform_invocations::{
-    CapabilityJobPayload, InvocationCommandLimits, InvocationError as DomainInvocationError,
+    CapabilityJobPayload, ExactInvocationValueRef, InvocationCommandLimits,
+    InvocationError as DomainInvocationError, InvocationValueStorage,
 };
 use insight_platform_jobs::{
     decide_claim as decide_job_claim, decide_expired_lease as decide_expired_job_lease,
@@ -2418,6 +2419,7 @@ impl PgRepository {
         Ok(PgSchedulerTransaction {
             transaction,
             limits: self.scheduler_limits,
+            context_query_limits: self.context_query_limits,
             plan_limits: self.plan_limits,
             scope_environment_limits: self.scope_environment_limits,
             expression_inline_limits: self.expression_inline_limits,
@@ -5092,6 +5094,7 @@ fn map_prepared_secret_binding_registration_error(
 pub struct PgSchedulerTransaction {
     transaction: Transaction<'static, Postgres>,
     limits: SchedulerHardLimits,
+    context_query_limits: ContextQueryLimits,
     plan_limits: PlanLimits,
     scope_environment_limits: ScopeEnvironmentLimits,
     expression_inline_limits: JsonLimits,
@@ -6400,6 +6403,342 @@ impl PgSchedulerTransaction {
             &command.mutations.receipt_id,
             &command.request_digest,
             "task_pending",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(deferred))
+    }
+
+    pub async fn defer_orchestration_to_context_query(
+        &mut self,
+        command: DeferOrchestrationToContextQuery,
+    ) -> Result<CommandOutcome<DeferredOrchestrationContextQuery>, RepositoryError> {
+        use crate::context_query_repository::PgContextQueryTransaction;
+
+        command.validate(self.expression_inline_limits)?;
+        let plan_digest = command.plan.canonical_digest(self.plan_limits)?;
+        let mut transaction = self.transaction.begin().await?;
+        let receipt_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "context_job_id": command.context_job_id,
+                "context_query_id": command.context_query_id,
+                "input_value_id": command.input.run_value_id,
+            }),
+            65_536,
+        )?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.source.receipt_id,
+            "orchestration.context.defer",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let deferred = load_deferred_orchestration_context_query(
+                &mut transaction,
+                &command.fence,
+                &command.context_query_id,
+                &command.context_job_id,
+                self.context_query_limits,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(deferred));
+        }
+
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let quota_accounts = lock_job_quota_bundle(
+            &mut transaction,
+            &observed,
+            &command.mutations.source.quota_entry_ids,
+        )
+        .await?;
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        require_exact_runtime_plan(&mut transaction, &parents.run, &command.plan, &plan_digest)
+            .await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, &command.plan)
+                .await?;
+        let RuntimeNode::ContextQuery {
+            context_slot_id,
+            request,
+            result,
+            maximum_items,
+            resume,
+        } = command.plan.node(&source_node.plan_node_key)?
+        else {
+            return Err(RepositoryError::Conflict(
+                "orchestration Context exact Plan node",
+            ));
+        };
+        let tenant_id: ResourceId = parents.run.tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let run_id: ResourceId = parents.run.run_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let scope_id: ResourceId = source_node.scope_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let environments = load_scope_environment_chain(
+            &mut transaction,
+            &tenant_id,
+            &run_id,
+            &scope_id,
+            self.scope_environment_limits,
+        )
+        .await?;
+        let references = insight_platform_orchestrator::resolve_scope_inputs(
+            std::slice::from_ref(request),
+            &environments,
+            self.scope_environment_limits,
+        )?;
+        let mut resolved = load_resolved_expression_values(
+            &mut transaction,
+            &tenant_id,
+            &run_id,
+            vec![request.clone()],
+            references,
+        )
+        .await?;
+        let exact_input = resolved.pop().ok_or_else(|| {
+            RepositoryError::CorruptRow("Context input RunValue missing".to_owned())
+        })?;
+        if exact_input != command.input
+            || command.materialized_input.schema_digest != exact_input.schema_digest
+            || command.materialized_input.canonical_digest != exact_input.content_digest
+            || matches!(&exact_input.value, ValueRef::Inline { value } if value != &command.materialized_input.value)
+        {
+            return Err(RepositoryError::Conflict(
+                "Context materialized input evidence",
+            ));
+        }
+        let slot = parents
+            .run
+            .bindings
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == *context_slot_id)
+            .ok_or(RepositoryError::NotFound("frozen Context slot"))?;
+        if command
+            .plan
+            .dependency_slots
+            .get(context_slot_id)
+            .is_none_or(|plan_slot| plan_slot.requirement_digest != slot.requirement_digest)
+            || !matches!(slot.target, FrozenSlotTarget::Context { .. })
+        {
+            return Err(RepositoryError::Conflict("Context Plan frozen requirement"));
+        }
+        let canonical_input = canonical_json(&command.materialized_input.value)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let query_bytes = u32::try_from(canonical_input.len()).map_err(|_| {
+            RepositoryError::InvalidInput("Context query bytes exceed u32".to_owned())
+        })?;
+        let normalized_filter_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "schema_version": 1,
+            "filter": null,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|_| RepositoryError::InvalidInput("Context filter digest".to_owned()))?;
+        let storage = match &exact_input.value {
+            ValueRef::Inline { .. } => InvocationValueStorage::Inline,
+            ValueRef::Artifact { artifact } => InvocationValueStorage::Artifact {
+                artifact: artifact.clone(),
+            },
+        };
+        let exact_reference = ExactInvocationValueRef {
+            schema_version: 1,
+            value_id: exact_input.run_value_id.clone(),
+            run_id: run_id.clone(),
+            producing_node_id: exact_input.producing_node_id.clone(),
+            value_kind: exact_input.value_kind.clone(),
+            classification: exact_input.classification,
+            schema_digest: exact_input.schema_digest.clone(),
+            content_digest: exact_input.content_digest.clone(),
+            storage,
+        };
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let principal = &parents.run.bindings.principal;
+        let create_request_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "context_query_id": command.context_query_id,
+            "input_content_digest": exact_reference.content_digest,
+            "node_execution_id": parents.node_id,
+            "operation": "context.create",
+            "plan_digest": plan_digest,
+            "slot_id": context_slot_id,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|_| RepositoryError::InvalidInput("Context create digest".to_owned()))?;
+        let create_audit = CommandAudit {
+            tenant_id: tenant_id.clone(),
+            principal_id: principal.principal_id.clone(),
+            principal_kind: principal.principal_kind,
+            receipt_id: command.mutations.context_create_receipt_id.clone(),
+            event_id: command.mutations.context_create_event_id.clone(),
+            outbox_id: command.mutations.context_create_outbox_id.clone(),
+            idempotency_key_digest: command.idempotency_key_digest.clone(),
+            request_digest: create_request_digest,
+            receipt_expires_at: command.receipt_expires_at,
+        };
+        let create = CreateContextQuery {
+            audit: create_audit,
+            context_query_id: command.context_query_id.clone(),
+            run_id: run_id.clone(),
+            node_execution_id: parents.node_id.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?,
+            expected_run_version: u64::try_from(parents.run.version)
+                .map_err(|_| RepositoryError::CorruptRow("Run version is negative".to_owned()))?,
+            expected_node_version: u64::try_from(parents.node_version)
+                .map_err(|_| RepositoryError::CorruptRow("Node version is negative".to_owned()))?,
+            slot_id: context_slot_id.clone(),
+            request: ContextQueryRequest {
+                schema_version: 1,
+                input: exact_reference,
+                input_artifact_link_id: command.input_artifact_link_id.clone(),
+                normalized_query_digest: command.materialized_input.canonical_digest.clone(),
+                normalized_filter_digest,
+                requested_projection: Vec::new(),
+                query_bytes,
+                filter_bytes: 0,
+                page_size: *maximum_items,
+                page_ordinal: 0,
+                cursor_digest: None,
+            },
+            requested_attempt_limit: self.context_query_limits.maximum_attempts(),
+            result_byte_ceiling: self.context_query_limits.maximum_result_bytes(),
+        };
+        let query = match PgContextQueryTransaction::create_context_query_in_transaction(
+            &mut transaction,
+            create,
+            self.context_query_limits,
+        )
+        .await?
+        {
+            CommandOutcome::Applied(query) | CommandOutcome::Replayed(query) => query,
+        };
+        let prepare_request_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "context_job_id": command.context_job_id,
+            "context_query_id": command.context_query_id,
+            "expected_query_version": query.version,
+            "operation": "context.dispatch.prepare",
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|_| RepositoryError::InvalidInput("Context prepare digest".to_owned()))?;
+        let prepare = PrepareContextDispatch {
+            audit: CommandAudit {
+                tenant_id: tenant_id.clone(),
+                principal_id: principal.principal_id.clone(),
+                principal_kind: principal.principal_kind,
+                receipt_id: command.mutations.context_prepare_receipt_id.clone(),
+                event_id: command.mutations.context_prepare_event_id.clone(),
+                outbox_id: command.mutations.context_prepare_outbox_id.clone(),
+                idempotency_key_digest: command.idempotency_key_digest.clone(),
+                request_digest: prepare_request_digest,
+                receipt_expires_at: command.receipt_expires_at,
+            },
+            context_query_id: command.context_query_id.clone(),
+            expected_query_version: query.version,
+            job_id: command.context_job_id.clone(),
+            scheduled_at: database_now,
+        };
+        let prepared = match PgContextQueryTransaction::prepare_context_dispatch_in_transaction(
+            &mut transaction,
+            prepare,
+            self.context_query_limits,
+        )
+        .await?
+        {
+            CommandOutcome::Applied(prepared) | CommandOutcome::Replayed(prepared) => prepared,
+        };
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+        {
+            return Err(RepositoryError::Conflict("Context source Job"));
+        }
+        let next_job = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            JobState::Succeeded,
+        )?;
+        settle_locked_job_quota_bundle(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &command.mutations.source.quota_entry_ids,
+            &command.request_digest,
+        )
+        .await?;
+        let wait_payload = TypedPayload::with_limit(
+            1,
+            &StoredContextQueryWaitPayload {
+                plan_node_key: source_node.plan_node_key,
+                context_query_id: command.context_query_id.clone(),
+                context_job_id: command.context_job_id.clone(),
+                result_port: result.clone(),
+                resume_plan_node_key: resume.clone(),
+            },
+            262_144,
+        )?;
+        let mut deferred = mutate_deferred_orchestration_context_query(
+            &mut transaction,
+            &current,
+            &next_job,
+            &parents,
+            &prepared.query,
+            &prepared.job,
+            &wait_payload,
+            database_now,
+        )
+        .await?;
+        deferred.settled_quota_account_ids = quota_accounts
+            .iter()
+            .map(|account| account.quota_account_id.clone())
+            .collect();
+        append_deferred_orchestration_context_events(
+            &mut transaction,
+            &deferred,
+            &command.mutations.source,
+        )
+        .await?;
+        terminalize_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.source.receipt_id,
+            &command.request_digest,
+            "context_ready",
         )
         .await?;
         transaction.commit().await?;
@@ -9425,7 +9764,8 @@ async fn load_resolved_expression_values(
     for (port, reference) in ports.into_iter().zip(references) {
         let row = sqlx::query(
             r#"
-            SELECT value.value_id, value.classification, value.schema_digest,
+            SELECT value.value_id, value.node_id, value.value_kind,
+                   value.classification, value.schema_digest,
                    value.content_digest, value.inline_value, value.artifact_id,
                    artifact.state AS artifact_state, artifact.terminal_at AS artifact_terminal_at,
                    artifact.classification AS artifact_classification,
@@ -15204,6 +15544,120 @@ async fn mutate_deferred_orchestration_task(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn mutate_deferred_orchestration_context_query(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    query: &insight_platform_context::ContextQueryRecord,
+    context_job: &JobRecord,
+    node_payload: &TypedPayload,
+    database_now: DateTime<Utc>,
+) -> Result<DeferredOrchestrationContextQuery, RepositoryError> {
+    if !NodeExecutionState::Running.can_transition_to(NodeExecutionState::Waiting) {
+        return Err(RepositoryError::Conflict(
+            "orchestration Context wait transition",
+        ));
+    }
+    let source_job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'succeeded', version = $4, result_digest = $5,
+            worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL,
+            terminal_at = $6, updated_at = $6
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(
+        i64::try_from(next_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(&node_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Context deferral Job",
+    ))?;
+    let source_job = job_from_row(source_job)?;
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'waiting', version = version + 1,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'running'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(parents.node_version)
+    .bind(database_now)
+    .bind(node_payload.schema_version)
+    .bind(&node_payload.value)
+    .bind(&node_payload.digest)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Context deferral Node",
+    ))?;
+    let mut current_snapshot = parents.run.current.clone();
+    if parents.run.active_work_count == 1 {
+        current_snapshot.waiting_reason = Some("context_query".to_owned());
+    }
+    let run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    current_snapshot
+        .validate(&run_id)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let current_payload = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN active_work_count = 1 THEN 'waiting' ELSE state END,
+            version = version + 1, active_work_count = active_work_count - 1,
+            current_schema_version = $4, current_payload = $5,
+            current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state = 'running' AND active_work_count > 0 AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Context deferral Run",
+    ))?;
+    Ok(DeferredOrchestrationContextQuery {
+        run: run_from_row(run)?,
+        node_id: parents.node_id.clone(),
+        node_version,
+        source_job,
+        query: query.clone(),
+        context_job: context_job.clone(),
+        settled_quota_account_ids: Vec::new(),
+    })
+}
+
 async fn require_exact_child_candidate_selection(
     transaction: &mut Transaction<'_, Postgres>,
     parents: &LockedOrchestrationJobParents,
@@ -17674,6 +18128,64 @@ async fn append_deferred_orchestration_task_events(
     Ok(())
 }
 
+async fn append_deferred_orchestration_context_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    deferred: &DeferredOrchestrationContextQuery,
+    mutations: &OrchestrationYieldMutationIds,
+) -> Result<(), RepositoryError> {
+    let run_id = deferred.run.run_id.as_str();
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "context_job_id": deferred.context_job.job_id,
+            "context_query_id": deferred.query.context_query_id,
+            "source_job_id": deferred.source_job.job_id,
+            "settled_quota_account_ids": deferred.settled_quota_account_ids,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        run_id,
+        deferred.run.version,
+        Some(run_id),
+        "run.context_waiting",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.node_event_id,
+        &mutations.node_outbox_id,
+        "node_execution",
+        &deferred.node_id,
+        deferred.node_version,
+        Some(run_id),
+        "node.context_waiting",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.job_event_id,
+        &mutations.job_outbox_id,
+        "job",
+        &deferred.source_job.job_id,
+        deferred.source_job.version,
+        Some(run_id),
+        "job.context_deferred",
+        &common,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn append_deferred_orchestration_child_events(
     transaction: &mut Transaction<'_, Postgres>,
     deferred: &DeferredOrchestrationChildRun,
@@ -19702,6 +20214,80 @@ async fn load_deferred_orchestration_task(
         node_version,
         job,
         task,
+        settled_quota_account_ids,
+    })
+}
+
+async fn load_deferred_orchestration_context_query(
+    transaction: &mut Transaction<'_, Postgres>,
+    fence: &JobFence,
+    context_query_id: &ResourceId,
+    context_job_id: &ResourceId,
+    limits: ContextQueryLimits,
+) -> Result<DeferredOrchestrationContextQuery, RepositoryError> {
+    use crate::context_query_repository::{load_context_job, load_context_query};
+
+    let source_job = load_job_by_text(transaction, &fence.tenant_id, &fence.job_id).await?;
+    require_orchestration_job(&source_job)?;
+    if source_job.state != JobState::Succeeded.as_str() || source_job.terminal_at.is_none() {
+        return Err(RepositoryError::Conflict(
+            "orchestration Context deferral replay",
+        ));
+    }
+    let tenant_id: ResourceId = fence.tenant_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let query =
+        load_context_query(transaction, &tenant_id, context_query_id, false, limits).await?;
+    let context_job = load_context_job(transaction, &tenant_id, context_job_id, false).await?;
+    if query.node_execution_id.to_string() != source_job.owner_id
+        || query.run_id.to_string() != source_job.run_id.as_deref().unwrap_or_default()
+        || query.payload.current_job_id.as_ref() != Some(context_job_id)
+        || context_job.owner_id != context_query_id.to_string()
+    {
+        return Err(RepositoryError::Conflict(
+            "orchestration Context deferral replay",
+        ));
+    }
+    let run = load_run(transaction, &tenant_id, &query.run_id).await?;
+    let node_id = query.node_execution_id.to_string();
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        SELECT version FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'waiting'
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(&node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Context deferral replay",
+    ))?;
+    let reservation_id = source_job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("deferred orchestration Job lost quota evidence".to_owned())
+    })?;
+    let settled_quota_account_ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT quota_account_id FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        ORDER BY quota_account_id
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(DeferredOrchestrationContextQuery {
+        run,
+        node_id,
+        node_version,
+        source_job,
+        query,
+        context_job,
         settled_quota_account_ids,
     })
 }
@@ -23072,6 +23658,16 @@ struct StoredSignalResolution {
     payload: Option<ExactRunValueRef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredContextQueryWaitPayload {
+    plan_node_key: PlanNodeKey,
+    context_query_id: ResourceId,
+    context_job_id: ResourceId,
+    result_port: ExactDataPortRef,
+    resume_plan_node_key: PlanNodeKey,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StoredControllerPort {
@@ -23172,6 +23768,115 @@ pub struct DeferOrchestrationToTask {
     pub request_digest: Sha256Digest,
     pub receipt_expires_at: DateTime<Utc>,
     pub mutations: DeferOrchestrationTaskMutationIds,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferOrchestrationContextMutationIds {
+    pub source: OrchestrationYieldMutationIds,
+    pub context_create_receipt_id: ResourceId,
+    pub context_create_event_id: ResourceId,
+    pub context_create_outbox_id: ResourceId,
+    pub context_prepare_receipt_id: ResourceId,
+    pub context_prepare_event_id: ResourceId,
+    pub context_prepare_outbox_id: ResourceId,
+}
+
+impl DeferOrchestrationContextMutationIds {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.source.validate()?;
+        let expected = [
+            (&self.context_create_receipt_id, ResourceKind::Receipt),
+            (&self.context_create_event_id, ResourceKind::Event),
+            (&self.context_create_outbox_id, ResourceKind::OutboxEvent),
+            (&self.context_prepare_receipt_id, ResourceKind::Receipt),
+            (&self.context_prepare_event_id, ResourceKind::Event),
+            (&self.context_prepare_outbox_id, ResourceKind::OutboxEvent),
+        ];
+        if expected.iter().any(|(id, kind)| id.kind() != *kind) {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration Context mutation identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in self.source.quota_entry_ids.iter().chain([
+            &self.source.receipt_id,
+            &self.source.run_event_id,
+            &self.source.run_outbox_id,
+            &self.source.node_event_id,
+            &self.source.node_outbox_id,
+            &self.source.job_event_id,
+            &self.source.job_outbox_id,
+            &self.context_create_receipt_id,
+            &self.context_create_event_id,
+            &self.context_create_outbox_id,
+            &self.context_prepare_receipt_id,
+            &self.context_prepare_event_id,
+            &self.context_prepare_outbox_id,
+        ]) {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration Context mutation identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferOrchestrationToContextQuery {
+    pub fence: JobFence,
+    pub plan: RuntimePlan,
+    pub context_query_id: ResourceId,
+    pub context_job_id: ResourceId,
+    pub input: ResolvedExpressionInput,
+    pub materialized_input: ClosedJsonValue,
+    pub input_artifact_link_id: Option<ResourceId>,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: DeferOrchestrationContextMutationIds,
+}
+
+impl DeferOrchestrationToContextQuery {
+    fn validate(&self, inline_limits: JsonLimits) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        self.mutations.validate()?;
+        self.materialized_input
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        self.input
+            .value
+            .validate(inline_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if self.context_query_id.kind() != ResourceKind::ContextQuery
+            || self.context_job_id.kind() != ResourceKind::Job
+            || self.input.run_value_id.kind() != ResourceKind::RunValue
+            || self
+                .input_artifact_link_id
+                .as_ref()
+                .is_some_and(|id| id.kind() != ResourceKind::ArtifactLink)
+            || self.input_artifact_link_id.is_some()
+                != matches!(self.input.value, ValueRef::Artifact { .. })
+            || self.receipt_expires_at <= Utc::now()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration Context deferral is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeferredOrchestrationContextQuery {
+    pub run: RunRecord,
+    pub node_id: String,
+    pub node_version: i64,
+    pub source_job: JobRecord,
+    pub query: insight_platform_context::ContextQueryRecord,
+    pub context_job: JobRecord,
+    pub settled_quota_account_ids: Vec<String>,
 }
 
 fn runtime_human_task_definition(definition: &RuntimeHumanTaskDefinition) -> TaskDefinition {

@@ -1182,7 +1182,7 @@ fn context_query_from_row(
     Ok(record)
 }
 
-async fn load_context_job(
+pub(crate) async fn load_context_job(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
     job_id: &ResourceId,

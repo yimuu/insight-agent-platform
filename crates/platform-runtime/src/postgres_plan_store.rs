@@ -1,12 +1,12 @@
 //! PostgreSQL-backed durable Plan-generation store.
 
 use crate::{
-    allocate_child_run_mutations, allocate_controller_step_mutations,
-    allocate_human_task_mutations, allocate_orchestration_terminal_mutations,
-    CoordinatorIdentityFactory, DerivedControllerCommit, DurableChildAgentDispatchFacts,
-    DurableContextDispatchFacts, DurableControllerFacts, DurableControllerPhase,
-    DurablePlanDriverError, DurablePlanGenerationStore, GenerationHandoffReason,
-    StartedOrchestrationJob,
+    allocate_child_run_mutations, allocate_context_query_mutations,
+    allocate_controller_step_mutations, allocate_human_task_mutations,
+    allocate_orchestration_terminal_mutations, CoordinatorIdentityFactory, DerivedControllerCommit,
+    DurableChildAgentDispatchFacts, DurableContextDispatchFacts, DurableControllerFacts,
+    DurableControllerPhase, DurablePlanDriverError, DurablePlanGenerationStore,
+    GenerationHandoffReason, StartedOrchestrationJob,
 };
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -24,10 +24,11 @@ use insight_platform_orchestrator::{
 };
 use insight_platform_postgres::repository::{
     ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep, CommitPlanTerminal,
-    ControllerFacts, DeferOrchestrationToChildRun, DeferOrchestrationToTask,
-    DerivedExpressionFailureEvidence, FailOrchestrationJob, JobFence, MaterializedTerminalValue,
-    OrchestrationFailureCause, OrchestrationYield, OrchestrationYieldMutationIds, PgRepository,
-    RepositoryError, ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+    ControllerFacts, DeferOrchestrationToChildRun, DeferOrchestrationToContextQuery,
+    DeferOrchestrationToTask, DerivedExpressionFailureEvidence, FailOrchestrationJob, JobFence,
+    MaterializedTerminalValue, OrchestrationFailureCause, OrchestrationYield,
+    OrchestrationYieldMutationIds, PgRepository, RepositoryError, ResolvedExpressionInput,
+    YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use insight_platform_tasks::TaskDefinition;
 use serde_json::json;
@@ -295,6 +296,76 @@ where
         self.identities
             .new_resource_id(kind)
             .map_err(|_| DurablePlanDriverError::InvariantViolation)
+    }
+
+    async fn commit_context_dispatch(
+        &self,
+        job: &StartedOrchestrationJob,
+        command: DerivedControllerCommit,
+    ) -> Result<(), DurablePlanDriverError> {
+        let DurableControllerPhase::ContextDispatch(facts) = command.facts.phase else {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        };
+        let DurableContextDispatchFacts { input, value } = *facts;
+        let RuntimeNode::ContextQuery { .. } = command
+            .materialized
+            .plan
+            .node(&command.facts.plan_node_key)
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        else {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        };
+        let request_digest: Sha256Digest = canonical_digest(&json!({
+            "input_content_digest": input.content_digest,
+            "job_id": command.fence.job_id,
+            "lease_generation": command.fence.lease_epoch,
+            "operation": "orchestration.context.defer",
+            "plan_digest": command.materialized.request.artifact.content_digest(),
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let input_artifact_link_id = matches!(input.value, ValueRef::Artifact { .. })
+            .then(|| self.new_id(ResourceKind::ArtifactLink))
+            .transpose()?;
+        let context = DeferOrchestrationToContextQuery {
+            fence: command.fence,
+            plan: command.materialized.plan,
+            context_query_id: self.new_id(ResourceKind::ContextQuery)?,
+            context_job_id: self.new_id(ResourceKind::Job)?,
+            input,
+            materialized_input: value,
+            input_artifact_link_id,
+            idempotency_key_digest: self
+                .identities
+                .new_lease_token_digest()
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            request_digest,
+            receipt_expires_at: job.started().deadline,
+            mutations: allocate_context_query_mutations(self.identities.as_ref())
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+        };
+        let mut transaction = self
+            .repository
+            .begin_scheduler_transaction()
+            .await
+            .map_err(classify_repository_failure)?;
+        match transaction
+            .defer_orchestration_to_context_query(context)
+            .await
+        {
+            Ok(_) => transaction
+                .commit()
+                .await
+                .map_err(classify_repository_failure),
+            Err(failure) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(classify_repository_failure)?;
+                Err(classify_repository_failure(failure))
+            }
+        }
     }
 
     async fn commit_child_agent_dispatch(
@@ -760,6 +831,15 @@ where
             insight_platform_orchestrator::ControllerDecision::CreateChildRun { .. }
         ) {
             return self.commit_child_agent_dispatch(job, command).await;
+        }
+        if matches!(
+            command.decision,
+            insight_platform_orchestrator::ControllerDecision::DispatchLeaf {
+                kind: insight_platform_orchestrator::LeafKind::Context,
+                ..
+            }
+        ) {
+            return self.commit_context_dispatch(job, command).await;
         }
         if matches!(
             command.decision,
