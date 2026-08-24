@@ -210,6 +210,7 @@ fn sandbox_policy_resource(
         policy_versions: vec![],
         policy_kind: kind,
         rules_digest: sha('0'),
+        selection: None,
         scheduling: None,
         retention: None,
         mcp_protocol: None,
@@ -751,6 +752,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
                     }
                     .canonical_digest()
                     .unwrap(),
+                    selection: None,
                     scheduling: None,
                     retention: Some(ArtifactRetentionPolicy {
                         version: 1,

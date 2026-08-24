@@ -530,6 +530,44 @@ pub struct SchedulingPolicyDocument {
     pub aging_rounds: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateSelectionMode {
+    OnlyCandidate,
+    OrderedFirst,
+    RouteHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateSelectionPolicyDocument {
+    pub schema_version: u32,
+    pub mode: CandidateSelectionMode,
+    pub route_schema_digest: Option<Sha256Digest>,
+}
+
+impl CandidateSelectionPolicyDocument {
+    pub fn validate(&self) -> Result<(), ResourceContractError> {
+        if self.schema_version != 1
+            || (self.mode == CandidateSelectionMode::RouteHash)
+                != self.route_schema_digest.is_some()
+        {
+            return Err(ResourceContractError::InvalidPolicyDocument);
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, ResourceContractError> {
+        self.validate()?;
+        let value =
+            serde_json::to_value(self).map_err(|_| ResourceContractError::Canonicalization)?;
+        canonical_digest(&value)
+            .map_err(|_| ResourceContractError::Canonicalization)?
+            .parse()
+            .map_err(|_| ResourceContractError::Canonicalization)
+    }
+}
+
 impl SchedulingPolicyDocument {
     pub fn validate(&self) -> Result<(), ResourceContractError> {
         if self.version != 1 || self.weight == 0 || self.burst == 0 || self.aging_rounds == 0 {
@@ -591,6 +629,7 @@ pub struct PolicyResourceSpec {
     pub policy_versions: Vec<ExactVersionRef>,
     pub policy_kind: PolicyKind,
     pub rules_digest: Sha256Digest,
+    pub selection: Option<CandidateSelectionPolicyDocument>,
     pub scheduling: Option<SchedulingPolicyDocument>,
     pub retention: Option<ArtifactRetentionPolicy>,
     pub mcp_protocol: Option<McpProtocolPolicyDocument>,
@@ -608,6 +647,7 @@ impl PolicyResourceSpec {
         validate_exact_versions(&self.dependency_versions, MAX_RESOURCE_DEPENDENCIES)?;
         validate_policy_versions(&self.policy_versions)?;
         let document_count = [
+            self.selection.is_some(),
             self.scheduling.is_some(),
             self.retention.is_some(),
             self.mcp_protocol.is_some(),
@@ -622,6 +662,14 @@ impl PolicyResourceSpec {
         .filter(|present| *present)
         .count();
         match self.policy_kind {
+            PolicyKind::Selection if document_count == 1 && self.selection.is_some() => {
+                let document = self.selection.as_ref().expect("guarded above");
+                document.validate()?;
+                if document.canonical_digest()? != self.rules_digest {
+                    return Err(ResourceContractError::InvalidPolicyDocument);
+                }
+                Ok(())
+            }
             PolicyKind::Scheduling if document_count == 1 && self.scheduling.is_some() => {
                 let document = self.scheduling.as_ref().expect("guarded above");
                 document.validate()?;
@@ -702,6 +750,7 @@ impl PolicyResourceSpec {
             }
             PolicyKind::Protocol | PolicyKind::Network if document_count == 0 => Ok(()),
             PolicyKind::Scheduling
+            | PolicyKind::Selection
             | PolicyKind::Retention
             | PolicyKind::McpAuth
             | PolicyKind::Isolation
@@ -3027,6 +3076,7 @@ mod tests {
             policy_versions: vec![],
             policy_kind: PolicyKind::Retention,
             rules_digest,
+            selection: None,
             scheduling: None,
             retention: Some(retention.clone()),
             mcp_protocol: None,
@@ -3052,6 +3102,30 @@ mod tests {
             unbounded.validate(),
             Err(ResourceContractError::InvalidPolicyDocument)
         );
+
+        let selection = CandidateSelectionPolicyDocument {
+            schema_version: 1,
+            mode: CandidateSelectionMode::RouteHash,
+            route_schema_digest: Some(digest('9')),
+        };
+        let mut selection_spec = spec;
+        selection_spec.policy_kind = PolicyKind::Selection;
+        selection_spec.rules_digest = selection.canonical_digest().unwrap();
+        selection_spec.selection = Some(selection.clone());
+        selection_spec.retention = None;
+        selection_spec.validate().unwrap();
+
+        selection_spec.rules_digest = digest('0');
+        assert_eq!(
+            selection_spec.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+        let mut missing_route_schema = selection;
+        missing_route_schema.route_schema_digest = None;
+        assert_eq!(
+            missing_route_schema.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
     }
 
     #[test]
@@ -3074,6 +3148,7 @@ mod tests {
             policy_versions: vec![],
             policy_kind: PolicyKind::Network,
             rules_digest: digest('d'),
+            selection: None,
             scheduling: None,
             retention: None,
             mcp_protocol: None,

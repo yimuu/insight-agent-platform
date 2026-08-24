@@ -514,6 +514,7 @@ async fn seed_policy_versions(
                     policy_versions: vec![],
                     policy_kind: PolicyKind::Retry,
                     rules_digest: digest('e'),
+                    selection: None,
                     scheduling: None,
                     retention: None,
                     mcp_protocol: None,

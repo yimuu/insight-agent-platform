@@ -20,9 +20,10 @@ pub use scope_environment::{
 
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    canonical_digest, ClosedJsonValue, CommandAudit, CommandOutcome, DataClassification,
-    ExactDeploymentRef, Failure, HardLimitProfile, InteractionKind, JobState, JsonLimits,
-    LimitUnit, NodeExecutionState, PlanNodeKind, PrincipalSnapshot, ResourceId, ResourceKind,
+    canonical_digest, CandidateSelectionMode, CandidateSelectionPolicyDocument, ClosedJsonValue,
+    CommandAudit, CommandOutcome, DataClassification, ExactDeploymentRef, ExactPolicyBinding,
+    Failure, HardLimitProfile, InteractionKind, JobState, JsonLimits, LimitUnit,
+    NodeExecutionState, PlanNodeKind, PrincipalSnapshot, ResourceId, ResourceKind,
     RunBindingsSnapshot, RunState, Sha256Digest, ValueRef,
 };
 use insight_platform_jobs::WakeContract;
@@ -145,6 +146,120 @@ pub enum HumanTaskDefinition {
         eligible_principal_rule_digest: Sha256Digest,
         safe_prompt_key: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateSelectionEvidence {
+    pub schema_version: u32,
+    pub slot_id: String,
+    pub policy_revision_id: ResourceId,
+    pub policy_semantic_digest: Sha256Digest,
+    pub ordered_candidate_deployment_digests: Vec<Sha256Digest>,
+    pub route_value: Option<ExactRunValueRef>,
+    pub selected_deployment: ExactDeploymentRef,
+    pub result_digest: Sha256Digest,
+    pub canonical_digest: Sha256Digest,
+}
+
+pub fn derive_candidate_selection(
+    slot_id: &str,
+    policy: &ExactPolicyBinding,
+    document: &CandidateSelectionPolicyDocument,
+    candidates: &[ExactDeploymentRef],
+    route: Option<(&ExactRunValueRef, &ClosedJsonValue)>,
+) -> Result<CandidateSelectionEvidence, OrchestratorError> {
+    policy
+        .validate()
+        .map_err(|_| OrchestratorError::InvalidCandidateSelection)?;
+    document
+        .validate()
+        .map_err(|_| OrchestratorError::InvalidCandidateSelection)?;
+    if !is_stable_code(slot_id)
+        || candidates.is_empty()
+        || candidates.len() > 512
+        || candidates.iter().any(|candidate| {
+            candidate.validate().is_err() || candidate.resource_kind != candidates[0].resource_kind
+        })
+        || candidates
+            .windows(2)
+            .any(|pair| candidate_ordering_key(&pair[0]) >= candidate_ordering_key(&pair[1]))
+    {
+        return Err(OrchestratorError::InvalidCandidateSelection);
+    }
+    let selected_index = match (document.mode, route) {
+        (CandidateSelectionMode::OnlyCandidate, None) if candidates.len() == 1 => 0,
+        (CandidateSelectionMode::OrderedFirst, None) => 0,
+        (CandidateSelectionMode::RouteHash, Some((reference, value)))
+            if reference.value_id.kind() == ResourceKind::RunValue
+                && reference.schema_digest == value.schema_digest
+                && reference.content_digest == value.canonical_digest
+                && document.route_schema_digest.as_ref() == Some(&value.schema_digest)
+                && value.validate().is_ok() =>
+        {
+            digest_modulo(&value.canonical_digest, candidates.len())?
+        }
+        _ => return Err(OrchestratorError::InvalidCandidateSelection),
+    };
+    let selected_deployment = candidates[selected_index].clone();
+    let result_value = serde_json::to_value(&selected_deployment)
+        .map_err(|_| OrchestratorError::Canonicalization)?;
+    let result_digest = canonical_digest(&result_value)
+        .map_err(|_| OrchestratorError::Canonicalization)?
+        .parse()
+        .map_err(|_| OrchestratorError::Canonicalization)?;
+    let ordered_candidate_deployment_digests = candidates
+        .iter()
+        .map(|candidate| candidate.deployment_digest.clone())
+        .collect::<Vec<_>>();
+    let route_value = route.map(|(reference, _)| reference.clone());
+    let canonical_value = serde_json::to_value((
+        1_u32,
+        slot_id,
+        &policy.revision.revision_id,
+        &policy.revision.semantic_digest,
+        &ordered_candidate_deployment_digests,
+        &route_value,
+        &selected_deployment,
+        &result_digest,
+    ))
+    .map_err(|_| OrchestratorError::Canonicalization)?;
+    let evidence_digest = canonical_digest(&canonical_value)
+        .map_err(|_| OrchestratorError::Canonicalization)?
+        .parse()
+        .map_err(|_| OrchestratorError::Canonicalization)?;
+    Ok(CandidateSelectionEvidence {
+        schema_version: 1,
+        slot_id: slot_id.to_owned(),
+        policy_revision_id: policy.revision.revision_id.clone(),
+        policy_semantic_digest: policy.revision.semantic_digest.clone(),
+        ordered_candidate_deployment_digests,
+        route_value,
+        selected_deployment,
+        result_digest,
+        canonical_digest: evidence_digest,
+    })
+}
+
+fn candidate_ordering_key(candidate: &ExactDeploymentRef) -> (String, String) {
+    (
+        candidate.deployment_id.to_string(),
+        candidate.deployment_digest.to_string(),
+    )
+}
+
+fn digest_modulo(digest: &Sha256Digest, modulus: usize) -> Result<usize, OrchestratorError> {
+    let hexadecimal = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or(OrchestratorError::InvalidCandidateSelection)?;
+    let mut remainder = 0_usize;
+    for index in (0..hexadecimal.len()).step_by(2) {
+        let byte = u8::from_str_radix(&hexadecimal[index..index + 2], 16)
+            .map_err(|_| OrchestratorError::InvalidCandidateSelection)?;
+        remainder = (remainder * 256 + usize::from(byte)) % modulus;
+    }
+    Ok(remainder)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2607,6 +2722,7 @@ pub enum OrchestratorError {
     ObservationMismatch,
     ExpressionEvaluation,
     InvalidControllerEvidence,
+    InvalidCandidateSelection,
     InvalidScopeEnvironment,
     ScopePortConflict,
     ScopePortUnbound,
@@ -2639,6 +2755,9 @@ impl fmt::Display for OrchestratorError {
             }
             Self::InvalidControllerEvidence => {
                 "controller expression evidence identity or content is invalid"
+            }
+            Self::InvalidCandidateSelection => {
+                "candidate selection policy, inputs, result, or evidence is invalid"
             }
             Self::InvalidScopeEnvironment => {
                 "Scope data-port environment is invalid or outside its hard limits"
@@ -2829,6 +2948,75 @@ mod tests {
         };
         *capability_slot_id = "missing".to_owned();
         assert_eq!(plan.validate(limits()), Err(OrchestratorError::InvalidPlan));
+    }
+
+    #[test]
+    fn candidate_selection_is_closed_deterministic_and_evidence_bound() {
+        let policy = ExactPolicyBinding {
+            deployment: ExactDeploymentRef::new(
+                id("pdep_0198f1c5-0787-75e1-a9e8-d95ca0f37010"),
+                digest('a'),
+            )
+            .unwrap(),
+            revision: insight_platform_contracts::ExactVersionRef::new(
+                id("prev_0198f1c5-0787-75e1-a9e8-d95ca0f37011"),
+                digest('b'),
+            )
+            .unwrap(),
+        };
+        let candidates = vec![
+            ExactDeploymentRef::new(id("cdep_0198f1c5-0787-75e1-a9e8-d95ca0f37012"), digest('c'))
+                .unwrap(),
+            ExactDeploymentRef::new(id("cdep_0198f1c5-0787-75e1-a9e8-d95ca0f37013"), digest('d'))
+                .unwrap(),
+        ];
+        let route =
+            ClosedJsonValue::build(digest('e'), serde_json::json!({"route": "blue"})).unwrap();
+        let route_ref = ExactRunValueRef {
+            value_id: id("val_0198f1c5-0787-75e1-a9e8-d95ca0f37014"),
+            schema_digest: route.schema_digest.clone(),
+            content_digest: route.canonical_digest.clone(),
+        };
+        let document = CandidateSelectionPolicyDocument {
+            schema_version: 1,
+            mode: CandidateSelectionMode::RouteHash,
+            route_schema_digest: Some(route.schema_digest.clone()),
+        };
+        let first = derive_candidate_selection(
+            "primary_capability",
+            &policy,
+            &document,
+            &candidates,
+            Some((&route_ref, &route)),
+        )
+        .unwrap();
+        let replay = derive_candidate_selection(
+            "primary_capability",
+            &policy,
+            &document,
+            &candidates,
+            Some((&route_ref, &route)),
+        )
+        .unwrap();
+        assert_eq!(first, replay);
+        assert!(candidates.contains(&first.selected_deployment));
+
+        let mut reversed = candidates.clone();
+        reversed.reverse();
+        assert_eq!(
+            derive_candidate_selection(
+                "primary_capability",
+                &policy,
+                &document,
+                &reversed,
+                Some((&route_ref, &route)),
+            ),
+            Err(OrchestratorError::InvalidCandidateSelection)
+        );
+        assert_eq!(
+            derive_candidate_selection("primary_capability", &policy, &document, &candidates, None,),
+            Err(OrchestratorError::InvalidCandidateSelection)
+        );
     }
 
     #[test]

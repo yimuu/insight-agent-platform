@@ -526,6 +526,7 @@ async fn seed_policy_versions(
                     policy_versions: vec![],
                     policy_kind: PolicyKind::Authorization,
                     rules_digest: named_digest(&format!("policy-rules-{index}")),
+                    selection: None,
                     scheduling: None,
                     retention: None,
                     mcp_protocol: None,

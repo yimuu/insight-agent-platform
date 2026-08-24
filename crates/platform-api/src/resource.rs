@@ -1780,6 +1780,7 @@ mod tests {
                 policy_versions: Vec::new(),
                 policy_kind: PolicyKind::Protocol,
                 rules_digest: fixed_digest('e'),
+                selection: None,
                 scheduling: None,
                 retention: None,
                 mcp_protocol: None,

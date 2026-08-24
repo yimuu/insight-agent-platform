@@ -9164,6 +9164,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 policy_versions: vec![],
                 policy_kind: PolicyKind::Scheduling,
                 rules_digest,
+                selection: None,
                 scheduling: Some(scheduling),
                 retention: None,
                 mcp_protocol: None,

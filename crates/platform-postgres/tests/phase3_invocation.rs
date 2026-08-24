@@ -1941,6 +1941,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 policy_versions: vec![],
                 policy_kind: PolicyKind::Retry,
                 rules_digest: digest('8'),
+                selection: None,
                 scheduling: None,
                 retention: None,
                 mcp_protocol: None,

@@ -171,6 +171,7 @@ fn policy_document(
         policy_versions: vec![],
         policy_kind: kind,
         rules_digest,
+        selection: None,
         scheduling: None,
         retention: None,
         mcp_protocol: protocol,
