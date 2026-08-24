@@ -1201,6 +1201,8 @@ mod tests {
         };
         let input = ResolvedExpressionInput {
             run_value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367006"),
+            producing_node_id: None,
+            value_kind: "run_input".to_owned(),
             port: ExactDataPortRef::RunInput {
                 schema_digest: schema_digest.clone(),
             },

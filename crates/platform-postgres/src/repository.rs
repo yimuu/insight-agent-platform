@@ -1262,7 +1262,8 @@ impl PgRepository {
             .ok_or(RepositoryError::NotFound("run output value"))?;
         let row = sqlx::query(
             r#"
-            SELECT value.value_id, value.classification, value.schema_digest,
+            SELECT value.value_id, value.node_id, value.value_kind,
+                   value.classification, value.schema_digest,
                    value.content_digest, value.inline_value, value.artifact_id,
                    artifact.state AS artifact_state,
                    artifact.verified_media_type, blob.size_bytes
@@ -9524,6 +9525,12 @@ async fn load_resolved_expression_values(
         };
         inputs.push(ResolvedExpressionInput {
             run_value_id: reference.value_id,
+            producing_node_id: row
+                .try_get::<Option<String>, _>("node_id")?
+                .map(|value| value.parse())
+                .transpose()
+                .map_err(|_| RepositoryError::CorruptRow("RunValue Node ID".to_owned()))?,
+            value_kind: row.try_get("value_kind")?,
             port,
             classification,
             schema_digest,
@@ -22887,6 +22894,8 @@ pub struct AppliedOrchestrationControllerStep {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedExpressionInput {
     pub run_value_id: ResourceId,
+    pub producing_node_id: Option<ResourceId>,
+    pub value_kind: String,
     pub port: ExactDataPortRef,
     pub classification: DataClassification,
     pub schema_digest: Sha256Digest,
