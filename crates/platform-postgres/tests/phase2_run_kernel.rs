@@ -4,16 +4,16 @@ use insight_platform_artifacts::{
     SchedulerTypedPlanRequestResolver,
 };
 use insight_platform_contracts::{
-    canonical_digest, canonical_json, checked_in_hard_limit_profile, AgentDeploymentClosure,
-    AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonSchema, ClosedJsonValue,
-    CommandAudit, CommandOutcome, DataClassification, DeploymentClosure, ExactDeploymentRef,
-    ExactPolicyBinding, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
-    FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission, PermissionSet,
-    PlanNodeKind, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
-    PublishedVersionPayload, ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot,
-    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef,
+    canonical_digest, canonical_json, checked_in_hard_limit_profile, pinned_nominal_reference,
+    AgentDeploymentClosure, AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonSchema,
+    ClosedJsonValue, CommandAudit, CommandOutcome, DataClassification, DeploymentClosure,
+    ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, Failure, FailureClass, FailureCode,
+    FailureSource, FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission,
+    PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublicRunEventType, PublishedVersionPayload, ResourceDocument, ResourceId, Retryability,
+    RunBindingsSnapshot, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, ValueRef,
 };
 use insight_platform_jobs::{WakeContract, WakeKind, WakeSource};
 use insight_platform_orchestrator::{
@@ -102,6 +102,14 @@ fn agent_schema() -> ClosedJsonSchema {
         },
         "required": ["question"],
         "additionalProperties": false
+    }))
+    .unwrap()
+}
+
+fn agent_error_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": pinned_nominal_reference("Failure").unwrap()
     }))
     .unwrap()
 }
@@ -218,6 +226,7 @@ fn runtime_plan() -> RuntimePlan {
     let input_branch = PlanNodeKey::new("input_branch".to_owned()).unwrap();
     let input_otherwise = PlanNodeKey::new("input_otherwise".to_owned()).unwrap();
     let input_compute = PlanNodeKey::new("input_compute".to_owned()).unwrap();
+    let raise = PlanNodeKey::new("raise".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 3,
         interface_revision_id: id(AGENT_INTERFACE_ID),
@@ -428,6 +437,14 @@ fn runtime_plan() -> RuntimePlan {
                 },
             ),
             (finish, return_compute_output()),
+            (
+                raise,
+                RuntimeNode::Raise {
+                    failure: insight_platform_orchestrator::ExactDataPortRef::RunInput {
+                        schema_digest: agent_error_schema().canonical_digest,
+                    },
+                },
+            ),
         ]),
     }
 }
@@ -6336,6 +6353,269 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     ));
     scheduler.commit().await.unwrap();
 
+    let raised_failure = Failure {
+        code: FailureCode::Platform {
+            code: PlatformFailureCode::AgentOutputInvalid,
+        },
+        class: FailureClass::Validation,
+        retryability: Retryability::Never,
+        safe_message: Some("declared terminal failure".to_owned()),
+        details_ref: None,
+        source: FailureSource::Agent,
+    };
+    let raised_body = serde_json::to_value(&raised_failure).unwrap();
+    let mut raise_admission = admission(
+        AdmissionIds {
+            run: "run_0198f1c3-9a00-7c3e-b1f3-773c2836ab50",
+            scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c2836ab51",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c2836ab52",
+            job: "job_0198f1c3-9a00-7c3e-b1f3-773c2836ab53",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c2836ab54",
+        },
+        audit(TENANT_ID, PRINCIPAL_ID, "ab55", '4', '5'),
+        bindings.clone(),
+        Utc::now() + Duration::minutes(5),
+    );
+    raise_admission.entry_plan_node_key = PlanNodeKey::new("raise".to_owned()).unwrap();
+    raise_admission.entry_node_kind = PlanNodeKind::Raise;
+    raise_admission.input.schema_digest = agent_error_schema().canonical_digest;
+    raise_admission.input.content_digest = canonical_digest(&raised_body).unwrap().parse().unwrap();
+    raise_admission.input.value = ValueRef::Inline {
+        value: raised_body.clone(),
+    };
+    applied(run_command!(repository, admit_run, raise_admission.clone()).unwrap());
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let raise_claimed = scheduler
+        .claim_orchestration_jobs(orchestration_claim_with_ids(
+            WORKER_D_ID,
+            '6',
+            "ab56",
+            ["ab57", "ab58", "ab59", "ab5a"],
+            ["ab5b", "ab5c", "ab5d"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(raise_claimed.len(), 1);
+    let raise_start = start_claimed_orchestration(
+        &raise_claimed[0],
+        WORKER_D_ID,
+        '6',
+        "ab5e",
+        "ab5f",
+        "ab60",
+        '7',
+        '8',
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let raise_started = match scheduler
+        .start_orchestration_job(raise_start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("Raise start must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    let raise_terminal = CommitPlanTerminal {
+        fence: JobFence {
+            expected_job_version: raise_started.version,
+            ..raise_start.fence
+        },
+        plan: runtime_plan(),
+        value: MaterializedTerminalValue {
+            value_id: raise_admission.input.value_id,
+            classification: raise_admission.input.classification,
+            schema_digest: raise_admission.input.schema_digest,
+            content_digest: raise_admission.input.content_digest,
+            body: raised_body,
+        },
+        idempotency_key_digest: digest('9'),
+        request_digest: digest('a'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        mutations: OrchestrationTerminalMutationIds {
+            receipt_id: fixture_platform_id("rcp", "ab61"),
+            quota_entry_ids: ["ab62", "ab63", "ab64", "ab65"]
+                .map(|suffix| fixture_platform_id("qle", suffix))
+                .to_vec(),
+            run_event_id: fixture_platform_id("evt", "ab66"),
+            run_outbox_id: fixture_platform_id("obx", "ab66"),
+            node_event_id: fixture_platform_id("evt", "ab67"),
+            node_outbox_id: fixture_platform_id("obx", "ab67"),
+            scope_closing_event_id: fixture_platform_id("evt", "ab68"),
+            scope_closing_outbox_id: fixture_platform_id("obx", "ab68"),
+            scope_terminal_event_id: fixture_platform_id("evt", "ab69"),
+            scope_terminal_outbox_id: fixture_platform_id("obx", "ab69"),
+            job_event_id: fixture_platform_id("evt", "ab6a"),
+            job_outbox_id: fixture_platform_id("obx", "ab6a"),
+        },
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let raised = scheduler
+        .commit_plan_terminal(raise_terminal)
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert!(matches!(
+        raised,
+        CommandOutcome::Applied(record)
+            if record.run.state == "failed"
+                && record.run.current.failure.as_ref() == Some(&raised_failure)
+                && record.run.output_value_id.is_none()
+    ));
+
+    let unsafe_failure = Failure {
+        safe_message: Some("unsafe\u{0007}message".to_owned()),
+        ..raised_failure
+    };
+    let unsafe_body = serde_json::to_value(&unsafe_failure).unwrap();
+    let mut unsafe_raise_admission = admission(
+        AdmissionIds {
+            run: "run_0198f1c3-9a00-7c3e-b1f3-773c2836af00",
+            scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c2836af01",
+            node: "nod_0198f1c3-9a00-7c3e-b1f3-773c2836af02",
+            job: "job_0198f1c3-9a00-7c3e-b1f3-773c2836af03",
+            value: "val_0198f1c3-9a00-7c3e-b1f3-773c2836af04",
+        },
+        audit(TENANT_ID, PRINCIPAL_ID, "af05", 'b', 'c'),
+        bindings.clone(),
+        Utc::now() + Duration::minutes(5),
+    );
+    unsafe_raise_admission.entry_plan_node_key = PlanNodeKey::new("raise".to_owned()).unwrap();
+    unsafe_raise_admission.entry_node_kind = PlanNodeKind::Raise;
+    unsafe_raise_admission.input.schema_digest = agent_error_schema().canonical_digest;
+    unsafe_raise_admission.input.content_digest =
+        canonical_digest(&unsafe_body).unwrap().parse().unwrap();
+    unsafe_raise_admission.input.value = ValueRef::Inline {
+        value: unsafe_body.clone(),
+    };
+    applied(run_command!(
+        repository,
+        admit_run,
+        unsafe_raise_admission.clone()
+    )
+    .unwrap());
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let unsafe_raise_claimed = scheduler
+        .claim_orchestration_jobs(orchestration_claim_with_ids(
+            WORKER_D_ID,
+            'd',
+            "af06",
+            ["af07", "af08", "af09", "af0a"],
+            ["af0b", "af0c", "af0d"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(unsafe_raise_claimed.len(), 1);
+    let unsafe_raise_start = start_claimed_orchestration(
+        &unsafe_raise_claimed[0],
+        WORKER_D_ID,
+        'd',
+        "af0e",
+        "af0f",
+        "af10",
+        'e',
+        'f',
+    );
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let unsafe_raise_started = match scheduler
+        .start_orchestration_job(unsafe_raise_start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("unsafe Raise start must apply"),
+    };
+    scheduler.commit().await.unwrap();
+    let unsafe_raise_terminal = CommitPlanTerminal {
+        fence: JobFence {
+            expected_job_version: unsafe_raise_started.version,
+            ..unsafe_raise_start.fence
+        },
+        plan: runtime_plan(),
+        value: MaterializedTerminalValue {
+            value_id: unsafe_raise_admission.input.value_id,
+            classification: unsafe_raise_admission.input.classification,
+            schema_digest: unsafe_raise_admission.input.schema_digest,
+            content_digest: unsafe_raise_admission.input.content_digest,
+            body: unsafe_body,
+        },
+        idempotency_key_digest: digest('0'),
+        request_digest: digest('1'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
+        mutations: OrchestrationTerminalMutationIds {
+            receipt_id: fixture_platform_id("rcp", "af11"),
+            quota_entry_ids: ["af12", "af13", "af14", "af15"]
+                .map(|suffix| fixture_platform_id("qle", suffix))
+                .to_vec(),
+            run_event_id: fixture_platform_id("evt", "af16"),
+            run_outbox_id: fixture_platform_id("obx", "af16"),
+            node_event_id: fixture_platform_id("evt", "af17"),
+            node_outbox_id: fixture_platform_id("obx", "af17"),
+            scope_closing_event_id: fixture_platform_id("evt", "af18"),
+            scope_closing_outbox_id: fixture_platform_id("obx", "af18"),
+            scope_terminal_event_id: fixture_platform_id("evt", "af19"),
+            scope_terminal_outbox_id: fixture_platform_id("obx", "af19"),
+            job_event_id: fixture_platform_id("evt", "af1a"),
+            job_outbox_id: fixture_platform_id("obx", "af1a"),
+        },
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let unsafe_raise_error = scheduler
+        .commit_plan_terminal(unsafe_raise_terminal)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&unsafe_raise_error, RepositoryError::InvalidInput(_)),
+        "unexpected unsafe Failure rejection: {unsafe_raise_error:?}"
+    );
+    scheduler.rollback().await.unwrap();
+    let unsafe_run_state: (String, Option<String>) = sqlx::query_as(
+        "SELECT state, current_payload ->> 'failure' FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(unsafe_raise_admission.run_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unsafe_run_state, ("running".to_owned(), None));
+    let unsafe_run_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(unsafe_raise_admission.run_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let unsafe_cancelled = applied(
+        run_command!(
+            repository,
+            request_run_cancel,
+            RequestRunCancel {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "af1b", '2', '3'),
+                run_id: unsafe_raise_admission.run_id,
+                expected_run_version: unsafe_run_version,
+                expected_cancel_generation: 0,
+                reason_code: "invalid_terminal_fixture_cleanup".to_owned(),
+            }
+        )
+        .unwrap(),
+    );
+    assert_eq!(unsafe_cancelled.state, "cancelling");
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let unsafe_converged = scheduler
+        .drive_orchestration_convergence(orchestration_convergence(
+            ["af1c", "af1d", "af1e", "af1f"],
+            ["af20", "af21", "af22", "af23", "af24", "af25"],
+        ))
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    assert_eq!(unsafe_converged.len(), 1);
+    assert_eq!(unsafe_converged[0].completed.run.state, "cancelled");
+    assert_eq!(unsafe_converged[0].completed.job.state, "cancelled");
+
     let mut loop_admission = admission(
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28369700",
@@ -8692,7 +8972,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 policy_versions: vec![],
                 input_schema: agent_schema(),
                 output_schema: agent_schema(),
-                error_schema: agent_schema(),
+                error_schema: agent_error_schema(),
                 typed_plan_artifact_id: id(TYPED_PLAN_ARTIFACT_ID),
                 typed_plan_digest: typed_plan_digest.clone(),
             }),
@@ -8727,7 +9007,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 policy_versions: vec![],
                 input_schema: agent_schema(),
                 output_schema: agent_schema(),
-                error_schema: agent_schema(),
+                error_schema: agent_error_schema(),
                 typed_plan_artifact_id: id("art_0198f1c3-9a00-7c3e-b1f3-773c2836701c"),
                 typed_plan_digest: digest('f'),
             }),

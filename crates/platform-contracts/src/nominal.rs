@@ -108,15 +108,17 @@ pub fn pinned_nominal_reference(name: &str) -> Option<String> {
 }
 
 pub fn is_known_pinned_nominal_reference(reference: &str) -> bool {
-    let Some((name, supplied_digest)) = reference
+    schema_for_pinned_nominal_reference(reference).is_some()
+}
+
+pub(crate) fn schema_for_pinned_nominal_reference(reference: &str) -> Option<Value> {
+    let (name, supplied_digest) = reference
         .strip_prefix(NOMINAL_REFERENCE_PREFIX)
-        .and_then(|rest| rest.rsplit_once('@'))
-    else {
-        return false;
-    };
+        .and_then(|rest| rest.rsplit_once('@'))?;
     nominal_schemas()
         .get(name)
-        .is_some_and(|schema| canonical_schema_digest(schema) == supplied_digest)
+        .filter(|schema| canonical_schema_digest(schema) == supplied_digest)
+        .cloned()
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {

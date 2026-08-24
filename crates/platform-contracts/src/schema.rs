@@ -61,9 +61,15 @@ impl ClosedJsonSchema {
 
     pub fn validate_instance(&self, value: &Value) -> Result<(), SchemaProfileError> {
         self.validate()?;
+        let nominal_schema = self
+            .schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(crate::nominal::schema_for_pinned_nominal_reference);
+        let validation_schema = nominal_schema.as_ref().unwrap_or(&self.schema);
         let validator = jsonschema::options()
             .with_draft(jsonschema::Draft::Draft202012)
-            .build(&self.schema)
+            .build(validation_schema)
             .map_err(|_| {
                 SchemaProfileError::new(
                     "$",
@@ -909,11 +915,16 @@ pub fn validate_closed_schema(schema: &Value) -> Result<(), SchemaProfileError> 
             "schema root must be an object",
         )
     })?;
-    if root.get("type") != Some(&Value::String("object".to_owned())) {
+    let object_root = root.get("type") == Some(&Value::String("object".to_owned()));
+    let nominal_root = root
+        .get("$ref")
+        .and_then(Value::as_str)
+        .is_some_and(crate::nominal::is_known_pinned_nominal_reference);
+    if !object_root && !nominal_root {
         return Err(SchemaProfileError::new(
             "$",
             "schema_root_type",
-            "Interface input/output/error root must declare type object",
+            "schema root must declare type object or an exact pinned platform nominal reference",
         ));
     }
     if root.get("$schema")
@@ -1640,5 +1651,20 @@ mod tests {
             validate_closed_schema(&schema).unwrap_err().code,
             "schema_ref_forbidden"
         );
+    }
+
+    #[test]
+    fn root_nominal_schema_resolves_and_validates_exact_instances() {
+        let schema = ClosedJsonSchema::build(json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": crate::nominal::pinned_nominal_reference("Digest").unwrap()
+        }))
+        .unwrap();
+        assert!(schema
+            .validate_instance(&json!(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            ))
+            .is_ok());
+        assert!(schema.validate_instance(&json!("sha256:short")).is_err());
     }
 }

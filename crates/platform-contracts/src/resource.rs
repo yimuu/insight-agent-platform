@@ -351,23 +351,32 @@ impl AgentResourceSpec {
         self.authoring_package.validate()?;
         validate_exact_versions(&self.dependency_versions, MAX_RESOURCE_DEPENDENCIES)?;
         validate_policy_versions(&self.policy_versions)?;
-        validate_agent_interface_schema(&self.input_schema)?;
-        validate_agent_interface_schema(&self.output_schema)?;
-        validate_agent_interface_schema(&self.error_schema)?;
+        validate_agent_interface_schema(&self.input_schema, false)?;
+        validate_agent_interface_schema(&self.output_schema, false)?;
+        validate_agent_interface_schema(&self.error_schema, true)?;
         require_kind(&self.typed_plan_artifact_id, ResourceKind::Artifact)
     }
 }
 
-fn validate_agent_interface_schema(schema: &ClosedJsonSchema) -> Result<(), ResourceContractError> {
+fn validate_agent_interface_schema(
+    schema: &ClosedJsonSchema,
+    allow_failure_nominal: bool,
+) -> Result<(), ResourceContractError> {
     schema
         .validate()
         .map_err(|_| ResourceContractError::InvalidAgentContract)?;
-    if schema
+    let object_root = schema
         .schema
         .get("type")
         .and_then(serde_json::Value::as_str)
-        != Some("object")
-    {
+        == Some("object");
+    let failure_root = allow_failure_nominal
+        && schema
+            .schema
+            .get("$ref")
+            .and_then(serde_json::Value::as_str)
+            == crate::pinned_nominal_reference("Failure").as_deref();
+    if !object_root && !failure_root {
         return Err(ResourceContractError::InvalidAgentContract);
     }
     Ok(())
