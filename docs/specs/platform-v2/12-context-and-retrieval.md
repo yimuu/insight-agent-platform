@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-20 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
+
+> CR-181 impact：ContextQuery由05 Plan v4冻结Context slot、request/result port、item limit与resume；Scheduler、Context Worker和
+> public API不得另行提供dataset head、schema、classification或continuation。
 
 > Persistence ruling：Context registry 使用共享 Resource；查询是共享 Invocation，物理工作是 Job，结果进入 run_values/
 > Artifact/Event。Dataset 只是 ResourceVersion 内容，不建立专用 query/observation/continuation 表族。
@@ -20,6 +23,10 @@ CapabilityInvocation。
 Agent Deployment 固定 exact Context Deployment 和一致性策略；Run 或每次 ContextQuery 再固定实际 dataset
 generation/observation。外部动态来源无法保证可重读时，平台持久化 bounded observation 与来源证据，而不是伪造
 可重现性。
+
+Plan node创建事务从RunBindings exact ContextBinding解析一致性对象，按Scope解析`request`，并以node maximum与Interface/tenant
+limit的最小值创建只读query owner/Job。terminal owner验证Observation schema、citation/provenance与classification，写node声明的
+`result` RunValue并创建唯一resume Orchestration Job；`LatestAtQueryStart` generation只能在该创建事务冻结，Worker不能追随更晚head。
 
 ## 2. 目标与非目标
 
@@ -593,6 +600,8 @@ public `/v1`或18的L4～L6资格。
 - 对所有外部来源提供强 snapshot guarantee。
 
 ## 25. 未决问题
+
+CR-181 cross-review已确认Plan v4 Context dispatch/result binding并恢复Accepted；实现与L2/L3 evidence仍待完成。
 
 CR-166已将CanonicalRegion和Context binding exact-match统一到02/12，Dataset build直接使用shared Job。本规范已
 Accepted；Context backend、SQL adapter、Artifact与public API的分层fixture仍待实现。具体索引引擎、embedding provider

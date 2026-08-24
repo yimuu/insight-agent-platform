@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-24 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
@@ -423,26 +423,27 @@ HumanTask节点、Capability BackendInputRequest、MCP Elicitation 和 Approval 
 
 ```rust
 struct Task {
-    interaction_id: InteractionId,
+    task_id: TaskId, // ApprovalTaskId或InteractionId，由TaskKind唯一决定
     tenant_id: TenantId,
     run_id: RunId,
     owner_node_execution_id: NodeExecutionId,
-    kind: InteractionKind,
-    state: InteractionState,
-    safe_prompt_key: SafePromptKey,
+    kind: TaskKind,
+    state: TaskState,
+    definition: TaskDefinition,
     response_schema_digest: Option<Digest>,
     deadline: DateTime<Utc>,
     generation: u64,
     projection_version: u64,
 }
 
-enum InteractionKind { Form, UrlConsent, BusinessInput }
-enum InteractionState { Pending, Responded, Declined, Cancelled, Expired }
+enum TaskKind { Approval, InteractionForm, InteractionUrlConsent, InteractionBusinessInput, ExternalAuthorization, HumanWork }
+enum TaskState { Pending, Responded, Declined, Approved, Rejected, Cancelled, Expired }
 ```
 
-InteractionKind machine wire固定为`form | url_consent | business_input`。
+TaskKind machine wire固定为`approval | interaction_form | interaction_url_consent | interaction_business_input |
+external_authorization | human_work`；05 HumanTask只允许Interaction/HumanWork definition，其他variant由其owning domain创建。
 
-唯一转换是`Pending -> Responded | Declined | Cancelled | Expired`。cancel/expiry与response按generation/version
+唯一转换按kind为`Pending -> Responded | Declined | Approved | Rejected | Cancelled | Expired`的合法子集。cancel/expiry与response按generation/version
 first-winner。response正文进入bounded ValueRef/Artifact，Task 和 public Event 只保存 schema digest 与 safe projection。
 respond/decline由caller-owned serializable transaction固定拥有`interaction.respond`的 PrincipalSnapshot，并在同一事务提交
 Task terminal、response Receipt 与 owner NodeExecution `Waiting -> Ready`。schema digest不匹配、权限generation漂移或
@@ -575,7 +576,7 @@ Run/node ID 不进入 metric label。Trace span 可以携带 opaque IDs，但不
 
 ## 22. 未决问题
 
-CR-166已统一root current与child inherited exact binding合同，无installation/release中间层。CR-181 external leaf owner
-transaction与Plan v4 cross-review关闭前，本规范保持Architecture Revision；
+CR-166已统一root current与child inherited exact binding合同，无installation/release中间层。CR-181 cross-review已确认external
+leaf owner transaction与Plan v4闭合并恢复Accepted；
 durable state、崩溃恢复与parent/child fixture仍待实现。public status的精简映射与SSE schema由17定义，
 不能改变这里的durable first-winner状态机。

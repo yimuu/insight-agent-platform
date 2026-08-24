@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-20 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 10、11、13、14、15、17、18 |
+
+> CR-181 impact：05 Plan v4的CapabilityCall冻结slot、input/output、candidate route与retry limit；Capability Interface/
+> Deployment必须为publication和owner transaction提供exact input/output schema及04 selector closure，不能由Invocation caller补充。
 
 > Persistence ruling：Capability Interface、Implementation 与 Deployment 使用 02 的共享 Resource 模型；validation、
 > conformance、selection 与 suspension 保存为 typed snapshot/event，不建立专用 lifecycle/evidence/head 表族。
@@ -468,6 +471,9 @@ Effect/idempotency failure与stale exact cancel；不增加表或migration。
 - capability composition DSL。
 
 ## 23. 未决问题
+
+CR-181要求Capability publication证明Plan node input/output schema compatibility、candidate route Policy schema及所有candidate的Effect/
+backend/retry约束交集；任一candidate不兼容时Deployment失败，不能在runtime删减集合。CR-181 cross-review已确认该合同并恢复Accepted。
 
 CR-166已将region nominal统一到02，并删除Model/release installation compatibility合同。本规范已Accepted；
 Capability registry、backend resolution和publication fixture仍待实现。具体HTTP/gRPC wire envelope与Sandbox protocol

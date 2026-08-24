@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-20 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
@@ -272,4 +272,4 @@ metric label只使用low-cardinality role/operation/outcome/reason class，tenan
 
 ## 15. 未决问题
 
-CR-181 candidate selection cross-review关闭前，本规范仍处于Architecture Revision。
+CR-181 cross-review已确认candidate selection无第二current authority并恢复Accepted；实现与L2/L3 evidence仍待完成。

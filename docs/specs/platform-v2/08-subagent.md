@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-20 |
 | 依赖 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`10-capability-invocation.md`](10-capability-invocation.md) |
 | 直接下游 | 17、18 |
@@ -306,6 +306,6 @@ span 中。
 ## 20. 未决问题
 
 CR-166已确认child Run只继承parent允许的exact Deployment/ResourceVersion closure，不读取installation或release candidate。
-CR-181 Plan v4 selection/dispatch/terminal-link cross-review关闭前，本规范保持Architecture Revision；parent/child transaction、quota、
+CR-181 cross-review已确认Plan v4 selection/dispatch/terminal-link闭合并恢复Accepted；parent/child transaction、quota、
 cancel/recovery和schema fixture仍待实现。Detached background Agent
 尚未进入本合同，也没有隐藏发布开关。

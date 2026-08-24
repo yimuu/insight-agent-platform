@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Open / Architecture Revision CR-181 |
+| 状态 | Closed / CR-181 Accepted |
 | 日期 | 2026-08-24 |
 | 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-181 external leaf implementation feedback |
 
@@ -96,12 +96,13 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / CR-180 | target协议、authority与current-behavior边界闭合 |
-| 01～04 | Accepted / CR-173（CR-180影响复核） | owner、ID、Resource、Policy、persistence authority不变 |
-| 05～07 | Accepted / CR-180 | Plan v3 terminal ports、Map/Loop Scope binding与Scheduler边界闭合 |
-| 08～16 | Accepted / CR-173/174（CR-180影响复核） | domain owner与leaf协议不变 |
-| 17 | Accepted / CR-180 | public/internal generic proxy禁止terminal authority注入 |
-| 18 | Accepted / CR-180 | profile v5不变；terminal/Map/Loop原子性与重放资格矩阵闭合 |
+| 00 | Accepted / CR-181 | target协议、authority与current-behavior边界闭合 |
+| 01～03 | Accepted / CR-173/176（CR-181影响复核） | owner、ID、Resource与persistence authority不变 |
+| 04 | Accepted / CR-181 | exact candidate selection program/evidence与owner重验闭合 |
+| 05～07 | Accepted / CR-181 | Plan v4 leaf/terminal ports、Scope binding与Scheduler边界闭合 |
+| 08～16 | Accepted / CR-181 | domain owner只消费exact dispatch/result snapshot，无第二authority |
+| 17 | Accepted / CR-181 | public/internal generic proxy禁止leaf与terminal authority注入 |
+| 18 | Accepted / CR-181 | profile v5不变；Plan v4 L1～L6资格矩阵闭合 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | In Progress | L1～L3与public contract已恢复；L4～L6、CapacityProfile和GitOps cutover仍待外部资格环境 |
@@ -212,6 +213,27 @@ CR-179全量影响复核确认不改变baseline表、Plan wire/profile版本、0
 
 CR-180逐份复核00～18的state ownership、IDs、JSON schema、errors、transactions、events、permissions、capacity、failure recovery和fixtures；
 01～04、08～16无需新字段，baseline仍为23/22表，HardLimitProfile仍为v5，Artifact/Model/MCP/Sandbox/GitOps与`/v1` clean-cut不变。
+
+### 2.8 CR-181 executable external leaf cross-review
+
+- **State ownership**：Plan v4只拥有immutable leaf intent；Capability/Context/Model/Task/ChildRunLink/Wake各自拥有business current state，
+  shared Job拥有物理work，RunValue/Scope拥有typed data；Selection Evidence、Receipt/Event不成为第二current authority。
+- **IDs与schema**：external node冻结exact slot、input/output/route port、budget/deadline/retry/wait字段；HumanTask使用shared
+  `TaskDefinition::Interaction | HumanWork`子集与唯一TaskKind wire；Plan提升v4并拒绝v1/v2/v3。04 evidence绑定exact Policy Revision、
+  ordered candidate digests、route ExactRunValueRef和selected ExactDeploymentRef。
+- **事务与并发**：Scheduler可执行closed selector但owner transaction重放Plan/Policy/Scope验证；dispatch原子关闭Orchestration Job并创建
+  一个Invocation/Query/ModelTurn/Task/Wake/Child，terminal owner原子写声明output RunValue和唯一resume Job。stale fence、ID冲突、并发
+  callback/terminal/recovery均first-winner，无partial owner/value/resume。
+- **错误与权限**：零candidate、ambiguous selector、集合外selection、wrong route/input/output/schema/classification、caller-supplied child
+  entry/Task/Wake/result/resume均fail closed；public/internal generic proxy、Worker、MCP、Sandbox、Artifact和Model provider不能解释Plan或扩大bindings。
+- **容量与恢复**：dispatch不占leaf I/O lane；各owner Job仍进入既有WorkClass隔舱，waiting释放permit；Outbox/NATS丢失和进程kill由bounded
+  safety scan从owner current state恢复，不增加表、queue authority或HardLimitProfile版本。
+- **fixtures**：L1覆盖Plan旧版和closed payload/schema/selector；L2 fresh PostgreSQL覆盖selection/dispatch/result first-winner与回滚；L3独立
+  Scheduler/leaf/Artifact Data/critical-control进程覆盖全部leaf和kill window；L4～L6继续覆盖identity、topology、saturation、chaos/soak/restore。
+
+逐份影响结论：00恢复实现授权；01～03 owner/persistence不变；04增加closed selection evidence；05使用Plan v4；06～08冻结dispatch/
+subagent事务；09～16只允许domain owner消费exact snapshot且无新authority；17拒绝内部字段；18增加分层资格。baseline保持23/22表，
+公开协议仍为`insight.platform/v1`与`/v1`，无兼容层、dynamic installer、managed stdio、microVM或Model Artifact路径。
 
 ## 3. 状态所有权
 
@@ -448,10 +470,12 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
     复用该Scope，false exit关闭并返回固定词法父Scope；两轮不串值、不读terminal Scope、不形成父链自环，冲突与crash/replay无部分rollover。
 23. Typed Plan version 3的Return/Raise冻结exact terminal port并分别对齐Agent output/error schema；v1/v2、wrong producer/schema、
     missing/cross-run/closed Scope value、正文或Artifact digest漂移、stale fence与ID冲突fail closed，terminal提交/replay无部分状态。
+24. Typed Plan version 4冻结全部external leaf payload，04 selector与owner transaction双重重验exact candidate/input/route；各leaf terminal只写
+    node声明output并创建唯一resume Job，Plan v1/v2/v3及caller-supplied dispatch/result字段fail closed，L1～L3覆盖crash/replay。
 
 ## 16. 未决项
 
-CR-180合同范围没有未关闭P0/P1。Acceptance 23与既有13～22形成单一闭包，00～18状态为Accepted。
+CR-181合同范围没有未关闭P0/P1。Acceptance 24与既有13～23形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-20 |
 | 依赖 | 02、03、04、06、07、09、10、15 |
 | 直接下游 | 17、18 |
+
+> CR-181 impact：ModelLoop由05 Plan v4冻结model/skill/capability slots、input/output、route和全部budget；Model Worker不能从
+> prompt/tool intent扩大bindings、budget或选择另一个output port。
 
 ## 1. 决策摘要
 
@@ -135,6 +138,10 @@ enum ModelOutcome {
 terminal winner事务必须验证ModelTurn/Job当前fence、response digest/schema/safety、usage/budget和Receipt，然后
 创建RunValue、推进ModelTurn、关闭Job、settle quota、追加Event/Outbox并唤醒Node。不涉及Artifact Ready或Link。
 
+当ModelTurn属于Plan v4 ModelLoop时，创建事务重验model route的04 selection evidence，并只装配node列出的exact Skill/Capability
+slots。最终structured output只能写node声明的`output` RunValue并创建唯一resume Orchestration Job；tool intent仍经10创建Invocation。
+Model Worker不能扩大tool集合、修改budget/output port或把ModelTurn terminal直接当Run terminal。
+
 ## 8. Usage、budget 与cost
 
 usage以provider-reported与platform-observed两个有界来源保存，并标记confidence。budget至少覆盖input/output/total
@@ -209,5 +216,7 @@ production-equivalent saturation/fault qualification分层运行。开发fixture
 - 无法在Inline hard limit内表示的直接多模态正文。
 
 ## 17. 未决问题
+
+CR-181 cross-review已确认Plan v4 ModelLoop dispatch/tool/result并恢复Accepted；实现与L2/L3 evidence仍待完成。
 
 首版Inline-only Model合同无未决设计问题。具体provider adapter与model catalog作为发布Resource增量增加。

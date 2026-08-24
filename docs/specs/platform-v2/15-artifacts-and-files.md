@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-20 |
 | 依赖 | 02、03、04、07、09、10、12、13 |
 | 直接下游 | 16、17、18 |
+
+> CR-181 impact：Plan v4 input/route/result为Artifact-backed ValueRef时仍走Artifact Data Worker的brokered exact RunValue read/write；
+> Artifact metadata不能替代RunValue schema/content/classification authority，也不能决定selected candidate或resume target。
 
 ## 1. 决策摘要
 
@@ -305,5 +308,8 @@ production-equivalent saturation/fault qualification分层运行。不以表数�
 - microVM专用Artifact protocol。
 
 ## 19. 未决问题
+
+CR-181要求Artifact-backed leaf输入在dispatch前后重验Scheduler lease与Run binding，leaf output在owner transaction只绑定Plan声明port；
+wrong Artifact/Blob/grant/generation或读取中lease过期均fail closed。
 
 首版Artifact状态、三role与static storage binding合同无未决设计问题。

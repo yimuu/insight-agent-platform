@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-24 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
+
+> CR-181 impact：资格矩阵增加Plan v4 external leaf dispatch、candidate selection、result binding与crash recovery；静态manifest或
+> repository单元fixture不能替代多进程owner-boundary证据。
 
 ## 1. 决策摘要
 
@@ -202,6 +205,11 @@ code/image/schema digest、seed、topology、start/end time、tool version、res
 
 ## 13. 必须资格矩阵
 
+CR-181新增：L1验证Plan v1/v2/v3、wrong slot/port/schema/budget/route；L2 fresh PostgreSQL验证伪造selection evidence、集合外candidate、
+caller-supplied child entry/Task/Wake/result/resume、并发terminal first-winner；L3以独立Scheduler和Capability/Context/Model/Artifact Data/
+critical-control进程贯通Run→各leaf→resume→Return，并在dispatch提交前后及leaf terminal前后kill进程，证明不重复创建owner/child/Task/
+Invocation/RunValue/resume Job。L4～L6再覆盖NATS全丢、lane饱和、DB pool隔舱、安全identity、chaos/soak/restore与GitOps rollout。
+
 每个production release至少覆盖：
 
 - clean baseline migration、upgrade/rollback rehearsal和backup/restore；
@@ -259,6 +267,8 @@ Git、container registry、CI artifact store和Kubernetes rollout history是发�
 - service mesh、multi-cluster scheduler和全自动无人值promotion。
 
 ## 17. 未决问题
+
+CR-181已确认L1～L3 executable qualification定义与04～17一致并恢复Accepted；证据尚未全部通过，L4～L6仍是release blocker。
 
 基础部署与资格流程无未决设计问题。首个production CapacityProfile的数值需要在实现完成后通过
 L4～L6测量冻结，Draft期间不声明为current capacity。

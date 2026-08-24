@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-07 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) |
 | 直接下游 | 12、17、18 |
+
+> CR-181 impact：ModelLoop的`skill_slot_ids`来自Plan v4并按04 exact selector解析；Skill仍只是immutable method package，
+> selection结果不能把Skill变成Invocation、script runner或execution owner。
 
 > Persistence ruling：Skill 使用 02 的共享 Resource/ResourceVersion；activation/selection 是 Run 或 Invocation 的 typed
 > snapshot/event，不建立 Skill 专用 lifecycle、activation 或 receipt 表族。
@@ -445,6 +448,9 @@ suspend 和 selection override。
 - 基于用户行为的个性化推荐。
 
 ## 23. 未决问题
+
+CR-181只增加Plan-driven exact Skill selection与evidence复核，不改变Skill无执行状态、脚本必须发布为Sandbox Capability的authority。
+CR-181 cross-review已确认相关边界并恢复Accepted。
 
 没有阻止 Context、MCP、Sandbox 或 API 设计的未决问题。Skill authoring UI 可以提供目录、预览和 constraint
 辅助，但发布产物必须收敛为本规范的 exact closure、canonical package 和固定 candidate binding。

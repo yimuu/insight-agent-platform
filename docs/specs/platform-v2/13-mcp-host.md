@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-20 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
+
+> CR-181 impact：MCP Tool作为Capability backend只消费10已冻结Invocation snapshot；Host不得读取Plan slot、重新选择Deployment、
+> 改写node output port或直接创建resume Job。MCP Resource作为Context backend同样只消费12的exact query snapshot。
 
 ## 1. 决策摘要
 
@@ -158,5 +161,7 @@ production-equivalent mTLS/NetworkPolicy/saturation tests分层运行。开发fi
 - 跨region session migration和exactly-once notification delivery。
 
 ## 15. 未决问题
+
+CR-181不增加MCP current-state authority；wrong Invocation/Context owner、Plan/binding digest或output schema必须fail closed。
 
 首版remote Streamable HTTP合同无未决设计问题。

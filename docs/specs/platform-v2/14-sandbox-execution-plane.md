@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-21 |
 | 依赖 | 03、04、07、09、10、15 |
 | 直接下游 | 17、18 |
+
+> CR-181 impact：Sandbox只执行10已准入的exact Capability Invocation Job；Controller/Executor不得解释Plan、选择candidate、
+> 绑定RunValue port或创建Run continuation。
 
 ## 1. 决策摘要
 
@@ -244,5 +247,7 @@ image/module必须签名、SBOM、provenance和scan验证；node/runtime policy�
 - cross-region execution和tenant-warm sandbox复用。
 
 ## 16. 未决问题
+
+CR-181不改变Sandbox隔离与Job authority；Executor outcome必须回到Invocation owner，由10完成Plan v4 output binding。
 
 首版WASI + gVisor合同无未决设计问题。gVisor具体版本与运行参数由发布profile按供应链证据固定。

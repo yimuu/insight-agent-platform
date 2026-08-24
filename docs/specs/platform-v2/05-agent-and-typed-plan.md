@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-24 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -258,8 +258,9 @@ struct ReturnNode { value: ExactDataPortRef }
 struct RaiseNode { failure: ExactDataPortRef }
 ```
 
-External leaf使用同一条exact data contract：`input`引用当前词法Scope中已经提交的RunValue，`output`必须是producer等于
-当前node的`NodeOutput`。`output`的schema在publication时与slot所绑定Interface的output/response schema完全一致；下游
+产生值的external leaf使用同一条exact data contract：`input/request`引用当前词法Scope中已经提交的RunValue，`output/result/
+response/payload`必须是producer等于当前node的`NodeOutput`。其schema在publication时与slot所绑定Interface或Task/Signal response
+schema完全一致；下游
 terminal result只授权owner transaction写该port，Worker、provider callback和API均不能另选port、schema或classification。
 
 ```rust
@@ -317,10 +318,21 @@ struct ChildBudgetLimit {
 
 struct HumanTaskNode {
     definition: HumanTaskDefinition,
-    prompt: ExactDataPortRef,
     response: ExactDataPortRef,
     timeout_milliseconds: u64,
     resume: PlanNodeId,
+}
+
+enum HumanTaskDefinition {
+    Interaction {
+        interaction_kind: Form | UrlConsent | BusinessInput,
+        eligible_principal_rule_digest: Digest,
+        safe_prompt_key: BoundedName,
+    },
+    HumanWork {
+        eligible_principal_rule_digest: Digest,
+        safe_prompt_key: BoundedName,
+    },
 }
 
 struct TimerWaitNode {
@@ -336,8 +348,9 @@ struct SignalWaitNode {
 }
 ```
 
-`HumanTaskDefinition`是06/Task owner的closed、versioned definition snapshot，至少冻结`TaskKind`、safe prompt key、assignment/
-claim policy和response schema digest；不得把自由prompt正文、principal discovery或opaque assignment JSON塞进Plan。`ChildBudgetLimit`
+`HumanTaskDefinition`是06 shared `TaskDefinition::Interaction | HumanWork`的Plan-safe closed子集；TaskKind由variant/interaction kind
+唯一推导，response schema digest来自`response` port，assignment/claim由exact eligible-principal Policy rule冻结。不得把Approval、
+CapabilityInput、MCP OAuth、自由prompt正文、principal discovery或opaque assignment JSON塞进HumanTask node。`ChildBudgetLimit`
 冻结duration、model token、Capability call、Artifact bytes与descendant Run上限；实际child deadline取parent remaining deadline与node首次
 Running数据库时间加`maximum_duration_milliseconds`的较小值，随后形成08的absolute `ChildBudget.deadline`；
 Timer/Task/Signal timeout从node首次Running的数据库时间计算且不得越过Run deadline。Signal无payload时不声明output；

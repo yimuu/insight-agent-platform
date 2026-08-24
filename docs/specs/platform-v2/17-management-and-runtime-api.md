@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-23 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-181 impact：public/internal API不暴露Plan leaf dispatch命令，也不接受selected Deployment、slot、port、schema、Task/Wake
+> definition、child entry、retry/deadline或resume target；这些字段只由Scheduler到owner repository的closed internal command承载并重验。
 
 ## 1. 决策摘要
 
@@ -340,6 +343,8 @@ operation age/outcome、internal RPC latency/denial和DB pool utilization。tena
 
 ## 17. 验收标准
 
+- `/v1`与generic internal proxy提交任一external leaf内部字段均按unknown/forbidden field拒绝；不能借Operation、callback、Task或SSE
+  endpoint伪造candidate selection、leaf result binding或resume Job；
 - OpenAPI路由只使用`/v1`，没有`/v2`、双写或legacy fallback；
 - 同Receipt key/digest重放返回同status/body/ETag/Location，异digest stable conflict；
 - 所有mutation缺If-Match、旧ETag、错tenant/owner和unknown schema field均fail closed；
@@ -366,4 +371,4 @@ production-equivalent load/fault qualification分层运行。不在每层重复�
 
 ## 20. 未决问题
 
-首版minimal `/v1`、Job Operation projection与internal service边界无未决设计问题。
+CR-181 cross-review已确认public/internal negative schema与authorization边界并恢复Accepted；fixture仍待实现。

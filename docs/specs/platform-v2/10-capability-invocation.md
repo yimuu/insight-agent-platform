@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-181 |
+| 状态 | Accepted / CR-181 |
 | 日期 | 2026-08-20 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
+
+> CR-181 impact：Agent Plan发起的Invocation只能由05 Plan v4 CapabilityCall owner mutation创建；public/internal caller不得提交
+> selected Deployment、input/output port、schema、deadline、retry或resume target。
 
 ## 1. 决策摘要
 
@@ -68,6 +71,11 @@ input/output、approval与terminal business result。
 - deadline、quota、HardLimitProfile version和trace identity。
 
 snapshot是closed、canonical、有size limit的immutable JSONB合同。执行时active head变化不改写它。
+
+当owner是Plan node时，创建事务重新加载exact Plan/RunBindings，解析`input`与可选`candidate_route`，重验04
+`CandidateSelectionEvidence`，并从node与selected Capability Deployment交集推导deadline/retry/Effect/approval/backend。terminal
+Invocation只提交backend result；owner transaction验证result并写入node声明的`output` RunValue，然后创建06唯一resume Orchestration Job。
+backend不能把自己的output直接绑定任意Scope port，也不能把Invocation terminal直接当Run terminal。
 
 ## 4. 创建与审批
 
@@ -176,4 +184,4 @@ fault/isolated-capacity tests分层运行。一个低层fixture不同时声明�
 
 ## 14. 未决问题
 
-首版Invocation合同无未决设计问题。
+CR-181 cross-review已确认Plan v4 dispatch/result binding并恢复Accepted；实现与L2/L3 evidence仍待完成。
