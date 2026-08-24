@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-181 |
-| 日期 | 2026-08-20 |
+| 状态 | Accepted / CR-184 |
+| 日期 | 2026-08-25 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
 
@@ -26,7 +26,8 @@ generation/observation。外部动态来源无法保证可重读时，平台持�
 
 Plan node创建事务从RunBindings exact ContextBinding解析一致性对象，按Scope解析`request`，并以node maximum与Interface/tenant
 limit的最小值创建只读query owner/Job。terminal owner验证Observation schema、citation/provenance与classification，写node声明的
-`result` RunValue并创建唯一resume Orchestration Job；`LatestAtQueryStart` generation只能在该创建事务冻结，Worker不能追随更晚head。
+`result` RunValue、终结当前ContextQuery Node并按Plan `resume`创建目标NodeExecution及唯一Orchestration Job；不得重新执行同一query Node。
+`LatestAtQueryStart` generation只能在该创建事务冻结，Worker不能追随更晚head。
 
 ## 2. 目标与非目标
 
@@ -356,7 +357,7 @@ validate query
  -> normalize and deduplicate within binding policy
  -> rerank authorized candidates only
  -> assemble citation and bounded content
- -> commit Observation + wake Run
+ -> commit Observation + complete leaf Node + activate exact Plan resume
 ```
 
 禁止把未授权 candidate 发送到共享 reranker、embedding API 或模型后再过滤。远程 backend 无法证明 server-side

@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
-| 日期 | 2026-08-24 |
+| 状态 | Accepted / CR-184 |
+| 日期 | 2026-08-25 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
 
@@ -17,6 +17,10 @@
 > 2026-08-24 implementation feedback（CR-181）：外部叶节点接线时确认Plan v3只保存`resume`，不能确定exact dependency
 > slot、输入输出port、预算、deadline或等待合同。CR-181补齐全部external leaf payload，并把未发布Plan wire提升为version 4；
 > Scheduler只可从exact Plan、RunBindings和已提交RunValue构造下游命令。
+
+> 2026-08-25 implementation feedback（CR-184）：external leaf terminal不重新把同一leaf Node置为Ready。唯一terminal owner
+> 在写入声明output/result port的同一事务将当前leaf Node终结，并按Plan `resume`创建目标NodeExecution及其唯一Orchestration Job；
+> 否则`None` observation会再次dispatch同一leaf。retry/deferred仍由leaf owner/current Job处理，不激活Plan resume。
 
 ## 1. 决策摘要
 

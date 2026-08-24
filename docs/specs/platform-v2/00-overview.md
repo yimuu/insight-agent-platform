@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-183 |
-| 日期 | 2026-08-24 |
+| 状态 | Accepted / CR-184 |
+| 日期 | 2026-08-25 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 
@@ -17,6 +17,9 @@
 
 > CR-183 implementation feedback：CR-182示例误把`semantic_digest`放进自身canonical document。Selection Policy沿用02/09
 > `PolicyResourceSpec.rules_digest`作为唯一外部digest，document不保存自引用digest。
+
+> CR-184 implementation feedback：Model/Capability/Context terminal若重新Ready同一leaf Node，`None` observation会再次dispatch。
+> 05→06→07→10/12/16→18已复核为terminal owner原子终结leaf Node并激活exact Plan `resume`目标；不新增observation wire或current authority。
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
 
 > `Platform v2` 是架构代号，不是公共 API 版本。目标系统会在 clean replacement 后直接占用 `/v1` 和

@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
-| 日期 | 2026-08-24 |
+| 状态 | Accepted / CR-184 |
+| 日期 | 2026-08-25 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
 
@@ -87,7 +87,8 @@ External leaf使用05 Plan v4。Scheduler读取node的exact input/route port，�
 candidate selector并生成`CandidateSelectionEvidence`，再调用06按leaf kind区分的owner command。Scheduler只负责纯选择和command transport；
 repository重新加载exact Plan/Policy/binding并重验evidence。Task definition、child budget、retry、timeout、output port与resume target不得由
 Scheduler配置文件、NATS payload或Worker outcome补充。dispatch提交后原Orchestration Job已terminal，Scheduler crash/replay只能得到同一
-Invocation/Task/Wake/ChildRunLink；leaf terminal由对应WorkClass owner及critical-control recovery创建新的resume Orchestration Job。
+Invocation/Task/Wake/ChildRunLink；external leaf terminal由对应WorkClass owner及critical-control recovery终结当前leaf Node，并按exact
+Plan `resume`创建目标NodeExecution和新的Orchestration Job，不重新claim同一leaf Node。
 
 CR-182 selector evaluator是Scheduler与repository共享的纯Rust owner library：canonical candidate ordering与route hashing只能实现一次，
 两侧消费同一nominal type；不得在SQL、Worker或adapter中各写一套近似算法。

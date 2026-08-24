@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
-| 日期 | 2026-08-20 |
+| 状态 | Accepted / CR-184 |
+| 日期 | 2026-08-25 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
 
@@ -74,7 +74,8 @@ snapshot是closed、canonical、有size limit的immutable JSONB合同。执行�
 
 当owner是Plan node时，创建事务重新加载exact Plan/RunBindings，解析`input`与可选`candidate_route`，重验04
 `CandidateSelectionEvidence`，并从node与selected Capability Deployment交集推导deadline/retry/Effect/approval/backend。terminal
-Invocation只提交backend result；owner transaction验证result并写入node声明的`output` RunValue，然后创建06唯一resume Orchestration Job。
+Invocation只提交backend result；owner transaction验证result并写入node声明的`output` RunValue，终结当前CapabilityCall Node，然后按
+Plan `resume`创建目标NodeExecution及06唯一Orchestration Job；不得把同一CapabilityCall Node置回Ready并再次dispatch。
 backend不能把自己的output直接绑定任意Scope port，也不能把Invocation terminal直接当Run terminal。
 
 CR-182不允许Capability backend health触发candidate failover；Invocation一旦由closed selector选定exact Deployment就冻结该对象，

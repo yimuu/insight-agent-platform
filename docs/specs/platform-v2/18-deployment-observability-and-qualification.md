@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
-| 日期 | 2026-08-24 |
+| 状态 | Accepted / CR-184 |
+| 日期 | 2026-08-25 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
 
@@ -208,7 +208,8 @@ code/image/schema digest、seed、topology、start/end time、tool version、res
 CR-181新增：L1验证Plan v1/v2/v3、wrong slot/port/schema/budget/route；L2 fresh PostgreSQL验证伪造selection evidence、集合外candidate、
 caller-supplied child entry/Task/Wake/result/resume、并发terminal first-winner；L3以独立Scheduler和Capability/Context/Model/Artifact Data/
 critical-control进程贯通Run→各leaf→resume→Return，并在dispatch提交前后及leaf terminal前后kill进程，证明不重复创建owner/child/Task/
-Invocation/RunValue/resume Job。L4～L6再覆盖NATS全丢、lane饱和、DB pool隔舱、安全identity、chaos/soak/restore与GitOps rollout。
+Invocation/RunValue/resume Node/Job，且external leaf terminal后不会重新claim/dispatch已终结leaf Node。L4～L6再覆盖NATS全丢、lane饱和、
+DB pool隔舱、安全identity、chaos/soak/restore与GitOps rollout。
 
 CR-182 L1覆盖三个mode、canonical candidate ordering、route canonical hash/modulo、unknown mode/version与empty document；L2覆盖
 Scheduler/repository重算一致、route/candidate/policy漂移和整批回滚；L3覆盖多Scheduler进程对相同inputs始终选择同一Deployment。

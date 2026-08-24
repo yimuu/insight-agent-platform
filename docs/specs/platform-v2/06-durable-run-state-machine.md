@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
-| 日期 | 2026-08-24 |
+| 状态 | Accepted / CR-184 |
+| 日期 | 2026-08-25 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
 
@@ -18,6 +18,9 @@
 > CR-181：05 Plan v4冻结external leaf的slot、input/output、budget/deadline与wait payload。Scheduler不得用fixture常量或
 > caller-supplied selected Deployment推进leaf；下述owner transaction必须重验exact Plan、RunBindings、Scope RunValue与04
 > CandidateSelectionEvidence。
+
+> CR-184：Model/Capability/Context terminal winner不会唤醒并重新执行同一leaf Node；它原子终结leaf Node并激活Plan冻结的
+> `resume`目标。这样首次dispatch仍由`ControllerObservation::None`唯一触发，terminal结果不会形成第二次dispatch。
 
 ## 1. 决策摘要
 
@@ -406,8 +409,9 @@ CR-182要求owner transaction使用04同一`CandidateSelectionPolicyDocument`纯
 Policy document不存在、schema version错误、route presence/schema不匹配或重算结果不同均在创建任何leaf owner前整批回滚。
 
 leaf terminal owner transaction验证自己的Job fence和result schema，写immutable output RunValue并绑定Plan node声明的output port，随后
-把同一Node从Waiting置Ready并创建唯一resume Orchestration Job。Child terminal先由08 linker结算Link，再复制child final ValueRef到parent
-output port；Task response与Signal payload同理。任何terminal failure写typed Failure并唤醒同一Node的error/cancel convergence，不得直接
+把当前leaf Node从Waiting置Succeeded，并从Plan冻结的`resume`原子创建目标NodeExecution及其唯一Orchestration Job；不得把同一leaf Node
+置回Ready。Child terminal先由08 linker结算Link，再复制child final ValueRef到parent output port；Task response与Signal payload仍由同一
+wait Node的typed resolution observation消费，因为它们不是external leaf dispatch。任何terminal failure写typed Failure并进入error/cancel convergence，不得直接
 提交Run terminal。callback/outbox丢失由对Invocation/Task/Wake/ChildRunLink的bounded safety scan恢复；同一leaf generation最多创建一个
 resume Job。
 

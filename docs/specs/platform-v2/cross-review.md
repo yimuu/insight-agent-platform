@@ -1,10 +1,22 @@
-# Platform v2 00～18 Cross-review（CR-183）
+# Platform v2 00～18 Cross-review（CR-184）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-183 Accepted |
-| 日期 | 2026-08-24 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-183 selection digest implementation feedback |
+| 状态 | Closed / CR-184 Accepted |
+| 日期 | 2026-08-25 |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-184 external leaf terminal implementation feedback |
+
+### CR-184 external leaf terminal continuation cross-review
+
+实现反馈确认Model/Capability/Context若在terminal时把同一leaf Node从Waiting置回Ready，05现有`None` observation会再次dispatch，
+形成重复副作用和不可闭合恢复窗口。05→06→07→10/12/16→18已统一为：terminal owner以自己的Job fence first-winner写声明output
+RunValue，终结当前leaf Node，并按exact Plan `resume`原子创建目标NodeExecution与唯一Orchestration Job。retry/deferred不激活resume；
+terminal failure进入既有typed failure/error-cancel convergence。Task/Signal仍在原wait Node消费typed resolution，不受此变更影响。
+
+00～04、08～09、11、13～15、17的authority、ID、public schema、permission、table与topology无变化；shared Job、Invocation/ContextQuery/
+ModelTurn、RunValue/Scope仍是唯一current authority，不新增表、WorkClass、queue、profile字段或兼容层。L2必须证明owner/value/resume原子
+first-winner与错误schema整批回滚；L3必须在terminal前后kill并证明同一leaf不重派。Acceptance 27：external leaf terminal只激活exact
+resume目标，永不重新Ready同一leaf Node。00～18影响复核无未关闭P0/P1，恢复实现授权。
 
 > CR-182重新打开04 selection program及05～11/16/18影响复核；CR-181历史结论保留，但在closed selector owner schema、
 > deterministic evaluator、evidence重验和L1～L3 fixture闭合前不授权selection/leaf dispatch实现。
@@ -244,7 +256,8 @@ CR-180逐份复核00～18的state ownership、IDs、JSON schema、errors、trans
   `TaskDefinition::Interaction | HumanWork`子集与唯一TaskKind wire；Plan提升v4并拒绝v1/v2/v3。04 evidence绑定exact Policy Revision、
   ordered candidate digests、route ExactRunValueRef和selected ExactDeploymentRef。
 - **事务与并发**：Scheduler可执行closed selector但owner transaction重放Plan/Policy/Scope验证；dispatch原子关闭Orchestration Job并创建
-  一个Invocation/Query/ModelTurn/Task/Wake/Child，terminal owner原子写声明output RunValue和唯一resume Job。stale fence、ID冲突、并发
+  一个Invocation/Query/ModelTurn/Task/Wake/Child，external leaf terminal owner原子写声明output RunValue、终结leaf Node并创建exact resume
+  目标Node及唯一Job。stale fence、ID冲突、并发
   callback/terminal/recovery均first-winner，无partial owner/value/resume。
 - **错误与权限**：零candidate、ambiguous selector、集合外selection、wrong route/input/output/schema/classification、caller-supplied child
   entry/Task/Wake/result/resume均fail closed；public/internal generic proxy、Worker、MCP、Sandbox、Artifact和Model provider不能解释Plan或扩大bindings。
