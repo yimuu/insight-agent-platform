@@ -70,7 +70,8 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    Start/Compute/Branch/Fork/Join/Map/Loop/ErrorBoundary成功控制路径的durable fact读取、Inline RunValue物化、精确mutation-slot
    规划、通用或derived fenced commit与retry handoff；FailNode现在也从locked facts推导ErrorBoundary/structured-exit/wake/
    sibling-cancellation槽，并在失败owner transaction重验expression evidence。Inline Return/Raise terminal已接入该store；Leaf/Task/
-   Subagent分派尚未接入，Artifact-backed RunValue仍缺Scheduler侧Artifact Data RPC materializer，因此完整production composition仍未闭合；
+   Subagent分派尚未接入；Artifact-backed RunValue的Scheduler侧Data RPC materializer、exact leased resolver、Broker reader与读前/读后
+   authority现已接入，但独立Scheduler/Artifact Data Worker进程边界仍待L3 crash/restart验证，因此完整production composition仍未闭合；
    exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
    exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure；
    Scheduler侧也已用当前fence从PostgreSQL解析descriptor并完成canonical JSON、Plan limits和semantic digest复验，但把该Plan
@@ -99,9 +100,10 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    `ClosedJsonSchema` authority已经实现；runtime Plan绑定重验terminal port与exact output/error schema digest。Plan terminal owner transaction
    现已从open lexical Scope重解析existing RunValue并重验value/schema/content/classification与正文，以同一事务提交Run/Node/Scope/Job、
    quota、Receipt/Event/Outbox；fresh PostgreSQL覆盖Inline Return、wrong value整批回滚和Receipt replay。正式PostgreSQL durable store与
-   coordinator现已把claim/start、Plan materialization、Start commit、Return RunValue materialization和Run Succeeded串成同一链。
-   Raise safe Failure正向提交及不安全Failure拒绝/整批回滚fixture也已在fresh PostgreSQL通过；Artifact Data RPC terminal materializer
-   仍未完成，因此Artifact-backed terminal尚不能计入完整Phase 2 terminal证据。
+   coordinator现已把claim/start、Plan materialization、Start commit、Artifact-backed Return RunValue的leased resolver/reader/canonical
+   materialization和Run Succeeded串成同一链，并断言exact output value。Raise safe Failure正向提交及不安全Failure拒绝/整批回滚
+   fixture也已在fresh PostgreSQL通过。CR-180 L1/L2 terminal证据已闭合；独立Scheduler与Artifact Data Worker之间的L3 kill/restart
+   fixture仍未完成，因此尚不能计入完整Phase 2 production terminal证据。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

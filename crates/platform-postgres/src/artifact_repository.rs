@@ -1025,7 +1025,7 @@ impl SchedulerRunValueRequestResolver for PgRepository {
             .try_get::<Option<String>, _>("verified_media_type")
             .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?
             .ok_or(ArtifactObjectReadAuthorityError::InvalidEvidence)?;
-        let metadata = payload_from_row(
+        payload_from_row(
             &row,
             "metadata_schema_version",
             "metadata",
@@ -1038,11 +1038,7 @@ impl SchedulerRunValueRequestResolver for PgRepository {
             byte_length,
             media_type,
             artifact_classification,
-            metadata
-                .value
-                .get("display_name")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned),
+            None,
         )
         .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
         let request = SchedulerRunValueReadRequest {
@@ -1164,21 +1160,13 @@ impl ArtifactObjectReadAuthority<SchedulerRunValueReadRequest> for PgRepository 
         {
             return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
         }
-        let metadata = payload_from_row(
+        payload_from_row(
             &row,
             "metadata_schema_version",
             "metadata",
             "metadata_digest",
         )
         .map_err(classify_gateway_artifact_read_error)?;
-        if metadata
-            .value
-            .get("display_name")
-            .and_then(serde_json::Value::as_str)
-            != request.artifact.display_name()
-        {
-            return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
-        }
         let blob_id = parse_id(
             row.try_get("blob_id")
                 .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?,

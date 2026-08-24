@@ -293,6 +293,7 @@ impl SchedulerRunValueReadRequest {
             || (self.artifact.media_type() != "application/json"
                 && !self.artifact.media_type().ends_with("+json"))
             || self.artifact.classification() != self.classification
+            || self.artifact.display_name().is_some()
             || self.maximum_bytes == 0
             || self.maximum_bytes > MAX_SCHEDULER_RUN_VALUE_BYTES
             || u64::try_from(self.maximum_bytes)
@@ -674,7 +675,7 @@ mod tests {
             7,
             "application/problem+json".to_owned(),
             DataClassification::Confidential,
-            Some("terminal.json".to_owned()),
+            None,
         )
         .unwrap();
         let request = SchedulerRunValueReadRequest {
@@ -698,6 +699,20 @@ mod tests {
         mismatched.classification = DataClassification::Internal;
         assert_eq!(
             mismatched.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+        let mut display_bearing = request.clone();
+        display_bearing.artifact = ArtifactRef::new(
+            id(ResourceKind::Artifact, 9),
+            digest('a'),
+            7,
+            "application/problem+json",
+            DataClassification::Confidential,
+            Some("terminal.json".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            display_bearing.validate_at(now),
             Err(ArtifactObjectReadAuthorityError::Denied)
         );
         let mut oversized = request.clone();

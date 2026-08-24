@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_artifacts::{
+    ArtifactObjectReadAuthorityError, SchedulerRunValueLease, SchedulerRunValueReadError,
+    SchedulerRunValueReadRequest, SchedulerRunValueReader, SchedulerRunValueRequestResolver,
     SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest, SchedulerTypedPlanReader,
 };
 use insight_platform_contracts::{
@@ -31,11 +33,11 @@ use insight_platform_runtime::postgres::{
 use insight_platform_runtime::{
     ActiveOrchestrationJob, CoordinatorIdentityFactory, CoordinatorTiming,
     ExactPlanGenerationDriver, ExecutionDisposition, GenerationHandlerDisposition,
-    GenerationHandlerError, GenerationHandoffReason, InlineControllerRunValueMaterializer,
-    LeaseFencedOrchestrationExecutor, MaterializingOrchestrationJobHandler,
-    OrchestrationCoordinatorConfig, OrchestrationExecutorConfig, OrchestrationExecutorTiming,
-    OrchestrationJobExecutor, OrchestrationSafetyConfig, OrchestrationSafetyDriver,
-    PostgresDurablePlanGenerationStore, SafetyDriverTiming, SchedulerPlanMaterializer,
+    GenerationHandlerError, GenerationHandoffReason, LeaseFencedOrchestrationExecutor,
+    MaterializingOrchestrationJobHandler, OrchestrationCoordinatorConfig,
+    OrchestrationExecutorConfig, OrchestrationExecutorTiming, OrchestrationJobExecutor,
+    OrchestrationSafetyConfig, OrchestrationSafetyDriver, PostgresDurablePlanGenerationStore,
+    SafetyDriverTiming, SchedulerControllerRunValueMaterializer, SchedulerPlanMaterializer,
     SchedulerPlanMaterializerConfig, StartedOrchestrationJob, StartedOrchestrationJobHandler,
     UuidCoordinatorIdentityFactory, WorkCoordinator,
 };
@@ -48,7 +50,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -70,6 +72,7 @@ const NODE_ID: &str = "nod_0198f1c5-0787-75e1-a9e8-d95ca0f3600d";
 const JOB_ID: &str = "job_0198f1c5-0787-75e1-a9e8-d95ca0f3600e";
 const VALUE_ID: &str = "val_0198f1c5-0787-75e1-a9e8-d95ca0f3600f";
 const TYPED_PLAN_ARTIFACT_ID: &str = "art_0198f1c5-0787-75e1-a9e8-d95ca0f36012";
+const INPUT_ARTIFACT_ID: &str = "art_0198f1c5-0787-75e1-a9e8-d95ca0f36013";
 
 fn id(value: &str) -> ResourceId {
     value.parse().unwrap()
@@ -147,6 +150,57 @@ impl SchedulerTypedPlanReader for StaticTypedPlanReader {
             return Err(SchedulerTypedPlanReadError::Integrity);
         }
         Ok(self.bytes.clone())
+    }
+}
+
+struct StaticRunValueReader {
+    bytes: Vec<u8>,
+    calls: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl SchedulerRunValueReader for StaticRunValueReader {
+    async fn read_exact(
+        &self,
+        request: SchedulerRunValueReadRequest,
+    ) -> Result<Vec<u8>, SchedulerRunValueReadError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if request.run_value_id != id(VALUE_ID)
+            || request.schema_digest != agent_schema().canonical_digest
+            || request.artifact.artifact_id() != &id(INPUT_ARTIFACT_ID)
+            || request.artifact.byte_length() != u64::try_from(self.bytes.len()).unwrap()
+            || request.artifact.content_digest()
+                != &canonical_digest(
+                    &serde_json::from_slice::<serde_json::Value>(&self.bytes).unwrap(),
+                )
+                .unwrap()
+                .parse()
+                .unwrap()
+        {
+            return Err(SchedulerRunValueReadError::Integrity);
+        }
+        Ok(self.bytes.clone())
+    }
+}
+
+struct RecordingRunValueResolver {
+    repository: PgRepository,
+    calls: Arc<AtomicU64>,
+    last_error: Arc<Mutex<Option<ArtifactObjectReadAuthorityError>>>,
+    last_request: Arc<Mutex<Option<SchedulerRunValueReadRequest>>>,
+}
+
+#[async_trait]
+impl SchedulerRunValueRequestResolver for RecordingRunValueResolver {
+    async fn resolve_run_value_read(
+        &self,
+        lease: SchedulerRunValueLease,
+    ) -> Result<SchedulerRunValueReadRequest, ArtifactObjectReadAuthorityError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let result = self.repository.resolve_run_value_read(lease).await;
+        *self.last_error.lock().unwrap() = result.as_ref().err().copied();
+        *self.last_request.lock().unwrap() = result.as_ref().ok().cloned();
+        result
     }
 }
 
@@ -632,10 +686,27 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
             )
             .unwrap(),
         );
+        let run_value_resolver_calls = Arc::new(AtomicU64::new(0));
+        let run_value_reader_calls = Arc::new(AtomicU64::new(0));
+        let run_value_resolver_error = Arc::new(Mutex::new(None));
+        let run_value_resolver_request = Arc::new(Mutex::new(None));
         let durable_store = Arc::new(
             PostgresDurablePlanGenerationStore::new(
                 bulkheads.critical_control_repository(),
-                Arc::new(InlineControllerRunValueMaterializer),
+                Arc::new(SchedulerControllerRunValueMaterializer::new(
+                    Arc::new(RecordingRunValueResolver {
+                        repository: bulkheads.critical_control_repository(),
+                            calls: Arc::clone(&run_value_resolver_calls),
+                            last_error: Arc::clone(&run_value_resolver_error),
+                            last_request: Arc::clone(&run_value_resolver_request),
+                    }),
+                    Arc::new(StaticRunValueReader {
+                        bytes: canonical_json(&json!({"question": "coordinator"})).unwrap(),
+                        calls: Arc::clone(&run_value_reader_calls),
+                    }),
+                    Duration::from_millis(100),
+                )
+                .unwrap()),
                 Arc::new(UuidCoordinatorIdentityFactory),
                 Duration::from_millis(50),
             )
@@ -673,7 +744,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         )
         .unwrap()
         .spawn();
-        tokio::time::timeout(Duration::from_secs(3), async {
+        let terminal_result = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let source_state: String = sqlx::query_scalar(
                     "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
@@ -697,8 +768,17 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
-        .await
-        .expect("materialized Start controller did not commit");
+        .await;
+        assert!(
+            terminal_result.is_ok(),
+            "materialized terminal did not commit: resolver_calls={}, reader_calls={}, resolver_error={:?}, resolver_request={:?}",
+            run_value_resolver_calls.load(Ordering::Relaxed),
+            run_value_reader_calls.load(Ordering::Relaxed),
+            *run_value_resolver_error.lock().unwrap(),
+            *run_value_resolver_request.lock().unwrap(),
+        );
+        assert!(run_value_resolver_calls.load(Ordering::Relaxed) >= 1);
+        assert!(run_value_reader_calls.load(Ordering::Relaxed) >= 1);
         let activated = sqlx::query_as::<_, (String, String)>(
             r#"
             SELECT plan_node_key, state
@@ -714,6 +794,18 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         .unwrap();
         assert_eq!(activated.0, "finish");
         assert_eq!(activated.1, "succeeded");
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT output_value_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+            )
+            .bind(TENANT_ID)
+            .bind(RUN_ID)
+            .fetch_one(bulkheads.critical_control_pool())
+            .await
+            .unwrap()
+            .as_deref(),
+            Some(VALUE_ID)
+        );
         let materializing_exit = materializing_coordinator.shutdown().await.unwrap();
         assert!(materializing_exit.snapshot.settled_generations >= 1);
         bulkheads.close().await;
@@ -1065,6 +1157,26 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
 
 async fn admit_run(repository: &PgRepository, bindings: RunBindingsSnapshot) -> RunRecord {
     let input = json!({"question": "coordinator"});
+    let input_bytes = canonical_json(&input).unwrap();
+    let input_digest: Sha256Digest = canonical_digest(&input).unwrap().parse().unwrap();
+    let input_artifact = ArtifactRef::new(
+        id(INPUT_ARTIFACT_ID),
+        input_digest.clone(),
+        u64::try_from(input_bytes.len()).unwrap(),
+        "application/json",
+        DataClassification::Internal,
+        None,
+    )
+    .unwrap();
+    insert_ready_artifact(
+        repository.pool(),
+        &id(TENANT_ID),
+        &id(PRINCIPAL_ID),
+        &id(POLICY_REVISION_ID),
+        &input_artifact,
+        "run_input",
+    )
+    .await;
     let command = AdmitRun {
         audit: audit("6021"),
         admission_scope_id: id(DEPLOYMENT_ID),
@@ -1080,8 +1192,10 @@ async fn admit_run(repository: &PgRepository, bindings: RunBindingsSnapshot) -> 
             value_id: id(VALUE_ID),
             classification: DataClassification::Internal,
             schema_digest: agent_schema().canonical_digest,
-            content_digest: canonical_digest(&input).unwrap().parse().unwrap(),
-            value: ValueRef::Inline { value: input },
+            content_digest: input_digest,
+            value: ValueRef::Artifact {
+                artifact: input_artifact,
+            },
         },
         deadline: Utc::now() + ChronoDuration::minutes(5),
         inline_limits: JsonLimits::CONTRACT_FIXTURE,

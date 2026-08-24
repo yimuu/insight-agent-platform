@@ -8,7 +8,14 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use insight_platform_contracts::{canonical_digest, ClosedJsonValue, ResourceKind, ValueRef};
+use insight_platform_artifacts::{
+    ArtifactObjectReadAuthorityError, SchedulerRunValueLease, SchedulerRunValueReadError,
+    SchedulerRunValueReader, SchedulerRunValueRequestResolver, MAX_SCHEDULER_RUN_VALUE_BYTES,
+};
+use insight_platform_contracts::{
+    canonical_digest, canonical_json, parse_strict_json, ClosedJsonValue, ResourceId, ResourceKind,
+    Sha256Digest, ValueRef, MODEL_JSON_LIMITS,
+};
 use insight_platform_orchestrator::{CommittedExpressionInput, RuntimeNode, RuntimePlan};
 use insight_platform_postgres::repository::{
     ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep, CommitPlanTerminal,
@@ -23,13 +30,68 @@ use std::{sync::Arc, time::Duration};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunValueMaterializationError {
     Unavailable,
+    FenceLost,
     Integrity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerRunValueReadContext {
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub orchestration_job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub lease_token_digest: Sha256Digest,
+    pub deadline: chrono::DateTime<Utc>,
+}
+
+impl ControllerRunValueReadContext {
+    fn from_started(
+        job: &StartedOrchestrationJob,
+        fence: &JobFence,
+    ) -> Result<Self, DurablePlanDriverError> {
+        let started = job.started();
+        let run_id = started
+            .run_id
+            .as_deref()
+            .ok_or(DurablePlanDriverError::InvariantViolation)?
+            .parse()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let tenant_id = started
+            .tenant_id
+            .parse()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let orchestration_job_id = started
+            .job_id
+            .parse()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        if fence.tenant_id != started.tenant_id
+            || fence.job_id != started.job_id
+            || fence.worker_id.to_string() != started.worker_id.as_deref().unwrap_or_default()
+            || fence.lease_epoch != started.lease_epoch
+            || fence.lease_token_digest.as_str()
+                != started.lease_token_digest.as_deref().unwrap_or_default()
+        {
+            return Err(DurablePlanDriverError::FenceLost);
+        }
+        Ok(Self {
+            tenant_id,
+            run_id,
+            orchestration_job_id,
+            worker_process_generation_id: fence.worker_id.clone(),
+            lease_generation: u64::try_from(fence.lease_epoch)
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            lease_token_digest: fence.lease_token_digest.clone(),
+            deadline: started.deadline,
+        })
+    }
 }
 
 #[async_trait]
 pub trait ControllerRunValueMaterializer: Send + Sync + 'static {
     async fn materialize(
         &self,
+        context: &ControllerRunValueReadContext,
         input: &ResolvedExpressionInput,
     ) -> Result<ClosedJsonValue, RunValueMaterializationError>;
 }
@@ -41,6 +103,7 @@ pub struct InlineControllerRunValueMaterializer;
 impl ControllerRunValueMaterializer for InlineControllerRunValueMaterializer {
     async fn materialize(
         &self,
+        _context: &ControllerRunValueReadContext,
         input: &ResolvedExpressionInput,
     ) -> Result<ClosedJsonValue, RunValueMaterializationError> {
         let ValueRef::Inline { value } = &input.value else {
@@ -52,6 +115,140 @@ impl ControllerRunValueMaterializer for InlineControllerRunValueMaterializer {
             return Err(RunValueMaterializationError::Integrity);
         }
         Ok(materialized)
+    }
+}
+
+pub struct SchedulerControllerRunValueMaterializer<A, R> {
+    resolver: Arc<A>,
+    reader: Arc<R>,
+    request_timeout: Duration,
+}
+
+impl<A, R> SchedulerControllerRunValueMaterializer<A, R>
+where
+    A: SchedulerRunValueRequestResolver,
+    R: SchedulerRunValueReader,
+{
+    pub fn new(
+        resolver: Arc<A>,
+        reader: Arc<R>,
+        request_timeout: Duration,
+    ) -> Result<Self, RunValueMaterializationError> {
+        if request_timeout.is_zero() {
+            return Err(RunValueMaterializationError::Integrity);
+        }
+        Ok(Self {
+            resolver,
+            reader,
+            request_timeout,
+        })
+    }
+}
+
+#[async_trait]
+impl<A, R> ControllerRunValueMaterializer for SchedulerControllerRunValueMaterializer<A, R>
+where
+    A: SchedulerRunValueRequestResolver + 'static,
+    R: SchedulerRunValueReader + 'static,
+{
+    async fn materialize(
+        &self,
+        context: &ControllerRunValueReadContext,
+        input: &ResolvedExpressionInput,
+    ) -> Result<ClosedJsonValue, RunValueMaterializationError> {
+        if matches!(input.value, ValueRef::Inline { .. }) {
+            return InlineControllerRunValueMaterializer
+                .materialize(context, input)
+                .await;
+        }
+        let ValueRef::Artifact { artifact } = &input.value else {
+            return Err(RunValueMaterializationError::Integrity);
+        };
+        let maximum_bytes = usize::try_from(artifact.byte_length())
+            .ok()
+            .filter(|bytes| *bytes > 0 && *bytes <= MAX_SCHEDULER_RUN_VALUE_BYTES)
+            .ok_or(RunValueMaterializationError::Integrity)?;
+        let request_deadline = Utc::now()
+            + ChronoDuration::from_std(self.request_timeout)
+                .map_err(|_| RunValueMaterializationError::Integrity)?;
+        let request_deadline = request_deadline.min(context.deadline);
+        let request_digest: Sha256Digest = canonical_digest(&json!({
+            "artifact": artifact,
+            "job_id": context.orchestration_job_id,
+            "lease_generation": context.lease_generation,
+            "operation": "scheduler.run-value.materialize",
+            "run_id": context.run_id,
+            "run_value_id": input.run_value_id,
+            "schema_digest": input.schema_digest,
+        }))
+        .map_err(|_| RunValueMaterializationError::Integrity)?
+        .parse()
+        .map_err(|_| RunValueMaterializationError::Integrity)?;
+        let request = self
+            .resolver
+            .resolve_run_value_read(SchedulerRunValueLease {
+                tenant_id: context.tenant_id.clone(),
+                run_id: context.run_id.clone(),
+                orchestration_job_id: context.orchestration_job_id.clone(),
+                worker_process_generation_id: context.worker_process_generation_id.clone(),
+                lease_generation: context.lease_generation,
+                lease_token_digest: context.lease_token_digest.clone(),
+                run_value_id: input.run_value_id.clone(),
+                request_digest,
+                maximum_bytes,
+                deadline: request_deadline,
+            })
+            .await
+            .map_err(map_run_value_authority_error)?;
+        if request.run_value_id != input.run_value_id
+            || request.schema_digest != input.schema_digest
+            || request.classification != input.classification
+            || request.artifact != *artifact
+        {
+            return Err(RunValueMaterializationError::Integrity);
+        }
+        let bytes = self
+            .reader
+            .read_exact(request)
+            .await
+            .map_err(map_run_value_read_error)?;
+        let value = parse_strict_json(&bytes, MODEL_JSON_LIMITS)
+            .map_err(|_| RunValueMaterializationError::Integrity)?;
+        if canonical_json(&value).as_deref() != Ok(bytes.as_slice()) {
+            return Err(RunValueMaterializationError::Integrity);
+        }
+        let materialized = ClosedJsonValue::build(input.schema_digest.clone(), value)
+            .map_err(|_| RunValueMaterializationError::Integrity)?;
+        if materialized.canonical_digest != input.content_digest {
+            return Err(RunValueMaterializationError::Integrity);
+        }
+        Ok(materialized)
+    }
+}
+
+fn map_run_value_authority_error(
+    error: ArtifactObjectReadAuthorityError,
+) -> RunValueMaterializationError {
+    match error {
+        ArtifactObjectReadAuthorityError::Unavailable => RunValueMaterializationError::Unavailable,
+        ArtifactObjectReadAuthorityError::Denied | ArtifactObjectReadAuthorityError::NotFound => {
+            RunValueMaterializationError::FenceLost
+        }
+        ArtifactObjectReadAuthorityError::InvalidEvidence => {
+            RunValueMaterializationError::Integrity
+        }
+    }
+}
+
+fn map_run_value_read_error(error: SchedulerRunValueReadError) -> RunValueMaterializationError {
+    match error {
+        SchedulerRunValueReadError::Unavailable => RunValueMaterializationError::Unavailable,
+        SchedulerRunValueReadError::Denied | SchedulerRunValueReadError::NotFound => {
+            RunValueMaterializationError::FenceLost
+        }
+        SchedulerRunValueReadError::TooLarge | SchedulerRunValueReadError::Integrity => {
+            RunValueMaterializationError::Integrity
+        }
     }
 }
 
@@ -103,10 +300,11 @@ where
 {
     async fn load_controller_facts(
         &self,
-        _job: &StartedOrchestrationJob,
+        job: &StartedOrchestrationJob,
         fence: &JobFence,
         plan: &RuntimePlan,
     ) -> Result<DurableControllerFacts, DurablePlanDriverError> {
+        let context = ControllerRunValueReadContext::from_started(job, fence)?;
         match self
             .repository
             .load_controller_facts(fence, plan)
@@ -116,17 +314,21 @@ where
             ControllerFacts::Expression(facts) => {
                 let mut inputs = Vec::with_capacity(facts.inputs.len());
                 for input in facts.inputs {
-                    let value =
-                        self.materializer.materialize(&input).await.map_err(
-                            |failure| match failure {
-                                RunValueMaterializationError::Unavailable => {
-                                    DurablePlanDriverError::Unavailable
-                                }
-                                RunValueMaterializationError::Integrity => {
-                                    DurablePlanDriverError::InvariantViolation
-                                }
-                            },
-                        )?;
+                    let value = self
+                        .materializer
+                        .materialize(&context, &input)
+                        .await
+                        .map_err(|failure| match failure {
+                            RunValueMaterializationError::Unavailable => {
+                                DurablePlanDriverError::Unavailable
+                            }
+                            RunValueMaterializationError::FenceLost => {
+                                DurablePlanDriverError::FenceLost
+                            }
+                            RunValueMaterializationError::Integrity => {
+                                DurablePlanDriverError::InvariantViolation
+                            }
+                        })?;
                     inputs.push(CommittedExpressionInput {
                         run_value_id: input.run_value_id,
                         port: input.port,
@@ -181,16 +383,20 @@ where
                 .load_plan_terminal_value(&command.fence, &command.materialized.plan)
                 .await
                 .map_err(classify_repository_failure)?;
-            let materialized = self.materializer.materialize(&resolved).await.map_err(
-                |failure| match failure {
+            let context = ControllerRunValueReadContext::from_started(job, &command.fence)?;
+            let materialized = self
+                .materializer
+                .materialize(&context, &resolved)
+                .await
+                .map_err(|failure| match failure {
                     RunValueMaterializationError::Unavailable => {
                         DurablePlanDriverError::Unavailable
                     }
+                    RunValueMaterializationError::FenceLost => DurablePlanDriverError::FenceLost,
                     RunValueMaterializationError::Integrity => {
                         DurablePlanDriverError::InvariantViolation
                     }
-                },
-            )?;
+                })?;
             let request_digest = canonical_digest(&json!({
                 "content_digest": resolved.content_digest,
                 "job_id": command.fence.job_id,
@@ -459,5 +665,148 @@ fn classify_repository_failure(failure: RepositoryError) -> DurablePlanDriverErr
         | RepositoryError::PermissionDenied
         | RepositoryError::IdempotencyConflict
         | RepositoryError::CorruptRow(_) => DurablePlanDriverError::InvariantViolation,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insight_platform_artifacts::SchedulerRunValueReadRequest;
+    use insight_platform_contracts::{ArtifactRef, DataClassification};
+    use insight_platform_orchestrator::ExactDataPortRef;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    fn id(value: &str) -> ResourceId {
+        value.parse().unwrap()
+    }
+
+    fn digest(character: char) -> Sha256Digest {
+        format!("sha256:{}", character.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    struct Resolver {
+        artifact: ArtifactRef,
+        schema_digest: Sha256Digest,
+        observed: Mutex<Option<SchedulerRunValueLease>>,
+    }
+
+    #[async_trait]
+    impl SchedulerRunValueRequestResolver for Resolver {
+        async fn resolve_run_value_read(
+            &self,
+            lease: SchedulerRunValueLease,
+        ) -> Result<SchedulerRunValueReadRequest, ArtifactObjectReadAuthorityError> {
+            *self.observed.lock().unwrap() = Some(lease.clone());
+            Ok(SchedulerRunValueReadRequest {
+                tenant_id: lease.tenant_id,
+                run_id: lease.run_id,
+                orchestration_job_id: lease.orchestration_job_id,
+                worker_process_generation_id: lease.worker_process_generation_id,
+                lease_generation: lease.lease_generation,
+                lease_token_digest: lease.lease_token_digest,
+                run_value_id: lease.run_value_id,
+                schema_digest: self.schema_digest.clone(),
+                classification: DataClassification::Confidential,
+                artifact: self.artifact.clone(),
+                request_digest: lease.request_digest,
+                maximum_bytes: lease.maximum_bytes,
+                deadline: lease.deadline,
+            })
+        }
+    }
+
+    struct Reader(Vec<u8>);
+
+    #[async_trait]
+    impl SchedulerRunValueReader for Reader {
+        async fn read_exact(
+            &self,
+            _request: SchedulerRunValueReadRequest,
+        ) -> Result<Vec<u8>, SchedulerRunValueReadError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn fixture(
+        bytes: Vec<u8>,
+    ) -> (
+        SchedulerControllerRunValueMaterializer<Resolver, Reader>,
+        ControllerRunValueReadContext,
+        ResolvedExpressionInput,
+    ) {
+        let schema_digest = digest('a');
+        let body = json!({"question": "artifact terminal"});
+        let content_digest: Sha256Digest = canonical_digest(&body).unwrap().parse().unwrap();
+        let artifact = ArtifactRef::new(
+            id("art_0198f1c3-9a00-7c3e-b1f3-773c28367001"),
+            content_digest.clone(),
+            u64::try_from(canonical_json(&body).unwrap().len()).unwrap(),
+            "application/json",
+            DataClassification::Confidential,
+            None,
+        )
+        .unwrap();
+        let resolver = Arc::new(Resolver {
+            artifact: artifact.clone(),
+            schema_digest: schema_digest.clone(),
+            observed: Mutex::new(None),
+        });
+        let materializer = SchedulerControllerRunValueMaterializer::new(
+            resolver,
+            Arc::new(Reader(bytes)),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let context = ControllerRunValueReadContext {
+            tenant_id: id("ten_0198f1c3-9a00-7c3e-b1f3-773c28367002"),
+            run_id: id("run_0198f1c3-9a00-7c3e-b1f3-773c28367003"),
+            orchestration_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c28367004"),
+            worker_process_generation_id: id("wrk_0198f1c3-9a00-7c3e-b1f3-773c28367005"),
+            lease_generation: 2,
+            lease_token_digest: digest('b'),
+            deadline: Utc::now() + ChronoDuration::seconds(1),
+        };
+        let input = ResolvedExpressionInput {
+            run_value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367006"),
+            port: ExactDataPortRef::RunInput {
+                schema_digest: schema_digest.clone(),
+            },
+            classification: DataClassification::Confidential,
+            schema_digest,
+            content_digest,
+            value: ValueRef::Artifact { artifact },
+        };
+        (materializer, context, input)
+    }
+
+    #[tokio::test]
+    async fn artifact_run_value_is_exact_canonical_and_fenced() {
+        let body = json!({"question": "artifact terminal"});
+        let (materializer, context, input) = fixture(canonical_json(&body).unwrap());
+        let value = materializer.materialize(&context, &input).await.unwrap();
+        assert_eq!(value.value, body);
+        let lease = materializer
+            .resolver
+            .observed
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
+        assert_eq!(lease.run_value_id, input.run_value_id);
+        assert_eq!(lease.run_id, context.run_id);
+        assert_eq!(lease.lease_generation, context.lease_generation);
+    }
+
+    #[tokio::test]
+    async fn noncanonical_artifact_json_fails_closed() {
+        let (materializer, context, input) =
+            fixture(br#"{ "question": "artifact terminal" }"#.to_vec());
+        assert_eq!(
+            materializer.materialize(&context, &input).await,
+            Err(RunValueMaterializationError::Integrity)
+        );
     }
 }
