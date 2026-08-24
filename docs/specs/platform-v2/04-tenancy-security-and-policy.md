@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
+| 状态 | Draft / Architecture Revision CR-181 |
 | 日期 | 2026-08-20 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
+
+> 2026-08-24 implementation feedback（CR-181）：05的external leaf允许一个slot冻结多个exact candidate，但此前04只定义
+> Selection Policy identity，没有可执行decision/evidence合同。CR-181冻结候选选择输入、输出和提交时重验边界，禁止Scheduler/
+> Worker自由选择Deployment。
 
 ## 1. 决策摘要
 
@@ -201,7 +205,33 @@ consume/release。调用方只携带reservation identity/fence，不重述或删
 
 Artifact只有普通staging/ready/physical/grant/traffic quota，无Model Artifact Producer专用bundle。
 
-## 10. Audit 与隐私
+## 10. Exact candidate selection
+
+Model、Capability、ChildAgent和Skill slot的`selection_policy`是唯一candidate selection语义authority。Policy Revision必须包含
+closed、deterministic selector program；输入只允许RunBindings中该slot的规范排序candidate列表、05 node可选的exact route RunValue、
+已冻结principal/policy snapshot及剩余budget，不得读取active head、网络、Secret、随机数或进程时钟。
+
+```rust
+struct CandidateSelectionEvidence {
+    schema_version: u32,
+    slot_id: SlotId,
+    policy_revision_id: ResourceVersionId,
+    policy_semantic_digest: Digest,
+    ordered_candidate_deployment_digests: Vec<Digest>,
+    route_value: Option<ExactRunValueRef>,
+    selected_deployment: ExactDeploymentRef,
+    result_digest: Digest,
+    canonical_digest: Digest,
+}
+```
+
+零candidate在publication/admission拒绝；单candidate仍产生可重验evidence，多candidate必须执行exact Policy Revision。相同inputs必须
+产生相同selected deployment与digest；selector无法唯一决定、选择集合外对象、route schema不匹配或policy/binding漂移均fail closed。
+Scheduler可以在事务外执行closed selector，但创建Invocation/ContextQuery/child Run的owner transaction必须锁定Run/Node/Job，重新加载
+exact slot与Policy Revision，重验route RunValue identity/schema/content digest和evidence，再接受selected deployment。Evidence只进入
+Receipt/Event bounded detail，不建立selection current-state aggregate或表。
+
+## 11. Audit 与隐私
 
 安全相关Event至少记录principal/workload、tenant、action、target kind/ID/version、decision/reason、policy/evidence digest、
 auth strength、occurred/committed time和trace ID。不记录Secret/token、prompt/response、tool arguments、code/file body、URL query、
@@ -210,7 +240,7 @@ object key或raw provider/runtime error。
 metric label只使用low-cardinality role/operation/outcome/reason class，tenant/principal/resource ID不进label。受控diagnostic Artifact
 有额外authorization、retention、encryption和audit，不与普通Run result权限自动等同。
 
-## 11. 安全与恢复不变量
+## 12. 安全与恢复不变量
 
 - tenant只能通过typed binding访问自身对象，无cross-tenant generic admin API；
 - active policy/Deployment变化不改写已存Run snapshot，emergency gate只阻止未开始工作/撤销grant；
@@ -219,7 +249,7 @@ metric label只使用low-cardinality role/operation/outcome/reason class，tenan
 - external dependency不确定时保存Unknown/Reconcile，不降级security或伪造success；
 - break-glass不依赖应用内的永久超级tenant role。
 
-## 12. 验收标准
+## 13. 验收标准
 
 - cross-tenant get/list/mutation、ID prefix/kind、tenant header/body spoof全部fail closed且不泄漏存在性；
 - revoked/suspended principal/policy/deployment/Secret/grant在current gate后不能新准入；
@@ -230,15 +260,16 @@ metric label只使用low-cardinality role/operation/outcome/reason class，tenan
 - WASI/gVisor选择不能由调用方降级，runc/host/microVM不在首版runtime composition；
 - quota concurrent reserve/settle/recovery不超卖、不泄漏、不重复consume；
 - Artifact static binding在新旧object上可读/删，公开API无dynamic binding；
+- single/multiple candidate selection均从exact frozen Policy确定；伪造route、乱序candidate、集合外结果和旧policy digest全部拒绝；
 - security log/metric/Event脱敏和high-cardinality门禁通过。
 
-## 13. 明确推迟
+## 14. 明确推迟
 
 - tenant self-service KMS/storage/Secret Provider plugin；
 - cross-tenant collaboration/federation和cross-region active-active；
 - microVM/Firecracker/KVM、confidential computing和heavy compute；
 - 应用内永久platform super-admin或Installation Release权限模型。
 
-## 14. 未决问题
+## 15. 未决问题
 
-首版tenant/security/policy/Secret/quota合同无未决设计问题。
+CR-181 candidate selection cross-review关闭前，本规范仍处于Architecture Revision。

@@ -6,7 +6,7 @@
 | 日期 | 2026-08-24 |
 | 合同输入 | 00～18、cross-review CR-181/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 
-> 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload，CR-181已重新打开05～18与cross-review。
+> 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > 在受影响合同恢复Reviewed/Accepted前，本计划不授权继续实现Leaf/Task/Subagent dispatch；已通过的CR-180 terminal
 > authority实现和证据保留，不回退。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |

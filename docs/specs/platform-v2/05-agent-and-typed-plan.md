@@ -268,6 +268,7 @@ struct ModelLoopNode {
     skill_slot_ids: Vec<SlotId>,
     capability_slot_ids: Vec<SlotId>,
     input: ExactDataPortRef,
+    model_route: Option<ExactDataPortRef>,
     output: ExactDataPortRef,
     max_rounds: u16,
     max_capability_calls: u32,
@@ -279,6 +280,7 @@ struct ModelLoopNode {
 struct CapabilityCallNode {
     capability_slot_id: SlotId,
     input: ExactDataPortRef,
+    candidate_route: Option<ExactDataPortRef>,
     output: ExactDataPortRef,
     attempt_limit: u16,
     retry_backoff_milliseconds: u64,
@@ -296,6 +298,7 @@ struct ContextQueryNode {
 struct ChildAgentCallNode {
     child_agent_slot_id: SlotId,
     input: ExactDataPortRef,
+    candidate_route: Option<ExactDataPortRef>,
     output: ExactDataPortRef,
     budget: ChildBudgetLimit,
     cancellation_policy: CascadeAndWait | CascadeWithDeadline,
@@ -340,7 +343,8 @@ Running数据库时间加`maximum_duration_milliseconds`的较小值，随后形
 Timer/Task/Signal timeout从node首次Running的数据库时间计算且不得越过Run deadline。Signal无payload时不声明output；
 有payload时该port必须由当前Signal node产生并由signal owner transaction按schema写入。
 
-所有slot ID必须存在于同一Plan的`dependency_slots`且variant匹配；ModelLoop的skill/capability slot规范排序且不重复。所有数值预算
+所有slot ID必须存在于同一Plan的`dependency_slots`且variant匹配；ModelLoop的skill/capability slot规范排序且不重复。可选route
+port是04 exact candidate selector的唯一动态输入，也必须在当前Scope可达并与Policy Revision声明的route schema一致。所有数值预算
 必须非零、不超过18的effective HardLimitProfile；`output/result/response/payload` producer必须是当前node；所有input schema必须与
 exact bound Interface input schema一致。publication同时验证输入port在node路径可达、output port只声明一次、resume可达且不会越过
 结构化region。运行时selection只能在RunBindings对应slot已冻结的candidate集合中执行其exact Selection Policy，并在owner transaction

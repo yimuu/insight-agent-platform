@@ -10,6 +10,9 @@
 > Persistence ruling：ChildRunLink 是 Run/Node 的 typed relation 与 snapshot，不建立独立 lifecycle、transition、budget
 > 或 interaction 表族；历史关系写入共享 Run/Node/Event/Task/Quota 聚合。
 
+> CR-181：ChildAgentCall由05 Plan v4冻结slot、input/output、candidate route、budget limit、cancel/retry与resume；Scheduler
+> 不能从测试fixture或caller body补充这些字段。04 exact selector决定候选，创建事务重验全部evidence。
+
 ## 1. 决策摘要
 
 Subagent 是父 Agent 通过 ChildAgentCall 创建的独立 durable child Run，不是 Capability、Skill、线程或
@@ -54,8 +57,9 @@ struct AgentRequirement {
 ```
 
 父Agent Deployment将候选解析为exact child Agent Deployment，并验证输入输出兼容、安全策略、
-Capability/Model/Context 闭包、区域和 suspension。RunBindings 固定候选集合。运行时可以从集合中按 Plan
-表达式或模型产生的受限 route key 选择，但不能 discovery、使用名称 `latest` 或扩大集合。
+Capability/Model/Context 闭包、区域和 suspension。RunBindings 固定候选集合。运行时只可使用05 node的可选
+`candidate_route` RunValue作为04 exact Selection Policy输入；没有route时policy必须仅从冻结snapshot唯一决定。
+不能使用模型临时字符串、discovery、名称`latest`或扩大集合。
 
 ## 4. ChildRunLink
 
@@ -98,6 +102,11 @@ ChildAgentCall drive 在一个 PostgreSQL transaction 中：
 4. 从parent RunBindings逐字段继承同一exact ResourceVersion/Deployment closure，再创建child Run；
 5. 写 parent NodeExecution Waiting continuation；
 6. 写 parent/child transitions 和 outbox。
+
+事务还必须重新加载Plan v4 node，确认slot/input/output/budget/cancel/retry/resume完全一致，按Scope词法链解析input与route，并重验04
+`CandidateSelectionEvidence`。child input正文和classification复制自已解析parent RunValue，command不得降低classification或提交另一份
+自由JSON。`logical child key`固定由`parent_node_execution_id + attempt_ordinal + selected_deployment_digest + input_content_digest`
+规范计算；caller不能选择。child entry node/key/interface来自selected exact Deployment closure，不能由Scheduler声明。
 
 同一 parent node/attempt/logical child key 并发重放只返回同一个 child Run。不得先创建 child 再异步补 link，
 也不得让 parent 在 link 未提交时等待进程内 future。
@@ -297,5 +306,6 @@ span 中。
 ## 20. 未决问题
 
 CR-166已确认child Run只继承parent允许的exact Deployment/ResourceVersion closure，不读取installation或release candidate。
-本规范已Accepted；parent/child transaction、quota、cancel/recovery和schema fixture仍待实现。Detached background Agent
+CR-181 Plan v4 selection/dispatch/terminal-link cross-review关闭前，本规范保持Architecture Revision；parent/child transaction、quota、
+cancel/recovery和schema fixture仍待实现。Detached background Agent
 尚未进入本合同，也没有隐藏发布开关。

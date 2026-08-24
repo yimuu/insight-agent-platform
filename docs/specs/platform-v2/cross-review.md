@@ -7,7 +7,7 @@
 | 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-181 external leaf implementation feedback |
 
 > CR-181重新打开本cross-review。CR-180的历史结论保留为审计记录，但不再授权实现；需按05→06～16→17→18顺序
-> 复核Plan v4 external leaf payload的state ownership、IDs、schema、transaction、event、permission、capacity、recovery与fixture后
+> 复核04 candidate selection及Plan v4 external leaf payload的state ownership、IDs、schema、transaction、event、permission、capacity、recovery与fixture后
 > 才能关闭。
 | 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft/Deployment/Run admission authority和fixture闭包 |
 
