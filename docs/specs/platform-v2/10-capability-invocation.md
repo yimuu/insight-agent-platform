@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-182 |
+| 状态 | Accepted / CR-182 |
 | 日期 | 2026-08-20 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
@@ -76,6 +76,9 @@ snapshot是closed、canonical、有size limit的immutable JSONB合同。执行�
 `CandidateSelectionEvidence`，并从node与selected Capability Deployment交集推导deadline/retry/Effect/approval/backend。terminal
 Invocation只提交backend result；owner transaction验证result并写入node声明的`output` RunValue，然后创建06唯一resume Orchestration Job。
 backend不能把自己的output直接绑定任意Scope port，也不能把Invocation terminal直接当Run terminal。
+
+CR-182不允许Capability backend health触发candidate failover；Invocation一旦由closed selector选定exact Deployment就冻结该对象，
+后续retry仍使用同一Deployment，除非未来breaking contract明确建模新selection generation。
 
 ## 4. 创建与审批
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-182 |
+| 状态 | Accepted / CR-182 |
 | 日期 | 2026-08-24 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -362,6 +362,10 @@ port是04 exact candidate selector的唯一动态输入，也必须在当前Scop
 exact bound Interface input schema一致。publication同时验证输入port在node路径可达、output port只声明一次、resume可达且不会越过
 结构化region。运行时selection只能在RunBindings对应slot已冻结的candidate集合中执行其exact Selection Policy，并在owner transaction
 重验选择；没有candidate、policy不确定或binding漂移均稳定失败，不能追随active head。
+
+CR-182 mode约束：`route_hash`必须且只能对应一个route port；`only_candidate/ordered_first`禁止route port。ModelLoop的Skill与
+Capability tool slots没有逐slot route字段，因此这些slot首版只允许`only_candidate | ordered_first`；Model/CapabilityCall/ChildAgentCall
+的route分别只作用于其主slot，不能复用一次hash为其他slot选candidate。
 
 `Compute.assignments`必须按拓扑排序且每个output port只写一次；Branch按声明顺序执行并始终有`otherwise`；Map的`items`
 输出必须是有界array；Loop的`condition`输出必须是non-null boolean。表达式所需input port是Node readiness条件的一部分。

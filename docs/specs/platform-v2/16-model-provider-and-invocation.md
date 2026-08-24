@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-182 |
+| 状态 | Accepted / CR-182 |
 | 日期 | 2026-08-20 |
 | 依赖 | 02、03、04、06、07、09、10、15 |
 | 直接下游 | 17、18 |
@@ -141,6 +141,9 @@ terminal winner事务必须验证ModelTurn/Job当前fence、response digest/sche
 当ModelTurn属于Plan v4 ModelLoop时，创建事务重验model route的04 selection evidence，并只装配node列出的exact Skill/Capability
 slots。最终structured output只能写node声明的`output` RunValue并创建唯一resume Orchestration Job；tool intent仍经10创建Invocation。
 Model Worker不能扩大tool集合、修改budget/output port或把ModelTurn terminal直接当Run terminal。
+
+CR-182 model slot可以用ModelLoop `model_route`执行`route_hash`；Skill/Capability tool slots只能按各自`only_candidate | ordered_first`
+选择并在ModelTurn snapshot中冻结，provider error不触发隐式candidate切换。
 
 ## 8. Usage、budget 与cost
 

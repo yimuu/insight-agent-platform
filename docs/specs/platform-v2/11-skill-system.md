@@ -2,13 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-182 |
+| 状态 | Accepted / CR-182 |
 | 日期 | 2026-08-07 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) |
 | 直接下游 | 12、17、18 |
 
 > CR-181 impact：ModelLoop的`skill_slot_ids`来自Plan v4并按04 exact selector解析；Skill仍只是immutable method package，
 > selection结果不能把Skill变成Invocation、script runner或execution owner。
+
+> CR-182：ModelLoop没有Skill route port，故Skill slot首版只接受`only_candidate | ordered_first` Selection Policy；`route_hash`在
+> Agent Deployment publication拒绝。
 
 > Persistence ruling：Skill 使用 02 的共享 Resource/ResourceVersion；activation/selection 是 Run 或 Invocation 的 typed
 > snapshot/event，不建立 Skill 专用 lifecycle、activation 或 receipt 表族。

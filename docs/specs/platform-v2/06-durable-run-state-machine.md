@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-182 |
+| 状态 | Accepted / CR-182 |
 | 日期 | 2026-08-24 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
@@ -401,6 +401,9 @@ Plan v4 external leaf的首次dispatch只有以下owner mutation：
 然后以同一first-winner事务把当前Orchestration Job terminal、释放其quota、把Node/Run置Waiting并写Receipt/Event/Outbox。mutation ID可以
 由Scheduler预分配，但slot、port、schema、classification、deadline、selected candidate、Task/Wake kind和resume target都必须从owner
 authority推导并重验，command不能自由声明。
+
+CR-182要求owner transaction使用04同一`CandidateSelectionPolicyDocument`纯函数重新求值；不能只比较Scheduler提交的evidence digest。
+Policy document不存在、schema version错误、route presence/schema不匹配或重算结果不同均在创建任何leaf owner前整批回滚。
 
 leaf terminal owner transaction验证自己的Job fence和result schema，写immutable output RunValue并绑定Plan node声明的output port，随后
 把同一Node从Waiting置Ready并创建唯一resume Orchestration Job。Child terminal先由08 linker结算Link，再复制child final ValueRef到parent

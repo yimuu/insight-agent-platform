@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision CR-182 |
+| 状态 | Accepted / CR-182 |
 | 日期 | 2026-08-20 |
 | 依赖 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`10-capability-invocation.md`](10-capability-invocation.md) |
 | 直接下游 | 17、18 |
@@ -107,6 +107,9 @@ ChildAgentCall drive 在一个 PostgreSQL transaction 中：
 `CandidateSelectionEvidence`。child input正文和classification复制自已解析parent RunValue，command不得降低classification或提交另一份
 自由JSON。`logical child key`固定由`parent_node_execution_id + attempt_ordinal + selected_deployment_digest + input_content_digest`
 规范计算；caller不能选择。child entry node/key/interface来自selected exact Deployment closure，不能由Scheduler声明。
+
+CR-182下ChildAgent selector只允许`only_candidate | ordered_first | route_hash`；不存在health fallback。selected child随后不健康或gate
+关闭时本次dispatch稳定失败，不能跳到candidate列表下一项。
 
 同一 parent node/attempt/logical child key 并发重放只返回同一个 child Run。不得先创建 child 再异步补 link，
 也不得让 parent 在 link 未提交时等待进程内 future。
