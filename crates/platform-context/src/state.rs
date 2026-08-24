@@ -293,9 +293,7 @@ pub fn decide_context_query_admission(
     command
         .request
         .validate_for(&facts.interface, &facts.binding, limits)?;
-    if command.request.input.run_id != command.run_id
-        || command.request.input.producing_node_id.as_ref() != Some(&command.node_execution_id)
-    {
+    if command.request.input.run_id != command.run_id {
         return Err(ContextQueryError::InvalidRequest);
     }
     let grant = DataAccessGrant::build(
@@ -1440,7 +1438,7 @@ mod tests {
             schema_version: 1,
             value_id: id(ResourceKind::RunValue, 50),
             run_id: run_id.clone(),
-            producing_node_id: Some(node_id.clone()),
+            producing_node_id: None,
             value_kind: "context_query".to_owned(),
             classification: DataClassification::Internal,
             schema_digest: query_schema_digest,
