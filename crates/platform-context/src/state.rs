@@ -7,9 +7,10 @@ use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     CommandAudit, CommandOutcome, ContextBackendOutcomeKind, ContextBindingSnapshot,
     ContextConsistencyPolicy, ContextDeploymentClosure, ContextImplementationResourceSpec,
-    ContextInterfaceResourceSpec, ContextQueryState, ExactVersionRef, Failure, FrozenSlotTarget,
-    JobState, NodeExecutionState, Permission, PlanNodeKind, PrincipalSnapshot, ResourceId,
-    ResourceKind, RunBindingsSnapshot, RunState, Sha256Digest, ValueRef, WorkClass,
+    ContextInterfaceResourceSpec, ContextQueryState, ExactVersionRef,
+    ExternalLeafResumeMutationIds, Failure, FrozenSlotTarget, JobState, NodeExecutionState,
+    Permission, PlanNodeKind, PrincipalSnapshot, ResourceId, ResourceKind, RunBindingsSnapshot,
+    RunState, Sha256Digest, ValueRef, WorkClass,
 };
 use insight_platform_invocations::{ExactInvocationValueRef, InvocationValueStorage};
 use insight_platform_jobs::{
@@ -1113,6 +1114,7 @@ pub struct CommitContextOutcome {
     pub fence: JobFence,
     pub outcome: ContextBackendOutcome,
     pub quota_entry_ids: [ResourceId; CONTEXT_QUOTA_LINES],
+    pub resume_mutations: Option<ExternalLeafResumeMutationIds>,
 }
 
 impl CommitContextOutcome {
@@ -1134,6 +1136,12 @@ impl CommitContextOutcome {
                 .len()
                 != CONTEXT_QUOTA_LINES
             || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
+            || (self.outcome.kind() == ContextBackendOutcomeKind::Completed)
+                != self.resume_mutations.is_some()
+            || self
+                .resume_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
         {
             return Err(ContextQueryError::InvalidIdentity);
         }

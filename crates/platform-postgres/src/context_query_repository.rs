@@ -5,8 +5,9 @@ use crate::{
         decode_deployment_closure, decode_typed_payload, decode_versioned_payload, job_from_row,
         job_projection, load_deployment, load_job_for_update_by_text, load_resource,
         load_run_for_update, payload_from_row, require_ready_run_artifact,
-        require_tenant_permission, terminalize_command_receipt, DeploymentRecord, JobRecord,
-        PgRepository, RepositoryError, RunRecord, TypedPayload,
+        require_tenant_permission, settle_context_leaf_success_in_transaction,
+        terminalize_command_receipt, DeploymentRecord, JobRecord, PgRepository, RepositoryError,
+        RunRecord, TypedPayload,
     },
 };
 use chrono::{DateTime, Utc};
@@ -28,6 +29,7 @@ use insight_platform_contracts::{
     ResourceKind, RunState, Sha256Digest, ValueRef, WorkClass,
 };
 use insight_platform_jobs::JobProjection;
+use insight_platform_orchestrator::ScopeEnvironmentLimits;
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,6 +49,7 @@ pub struct ClaimedContextExecution {
 pub struct PgContextQueryTransaction {
     transaction: Transaction<'static, Postgres>,
     limits: ContextQueryLimits,
+    scope_environment_limits: ScopeEnvironmentLimits,
 }
 
 #[derive(Debug)]
@@ -85,6 +88,7 @@ impl PgRepository {
         Ok(PgContextQueryTransaction {
             transaction: self.pool().begin().await?,
             limits: self.context_query_limits(),
+            scope_environment_limits: self.scope_environment_limits(),
         })
     }
 }
@@ -535,6 +539,27 @@ impl PgContextQueryTransaction {
         .await?;
         if let Some(output) = decision.output.as_ref() {
             insert_context_output(&mut transaction, &decision.query, output, database_now).await?;
+            let exact = decision
+                .query
+                .payload
+                .result
+                .as_ref()
+                .ok_or(RepositoryError::Conflict("Context terminal result"))?
+                .output
+                .clone();
+            settle_context_leaf_success_in_transaction(
+                &mut transaction,
+                &decision.query,
+                &command.job_id,
+                &exact,
+                command
+                    .resume_mutations
+                    .as_ref()
+                    .ok_or(RepositoryError::Conflict("Context resume mutations"))?,
+                self.scope_environment_limits,
+                database_now,
+            )
+            .await?;
         }
         let job = update_context_job(
             &mut transaction,
@@ -2036,7 +2061,7 @@ async fn insert_context_output(
             .payload
             .admission
             .interface
-            .item_schema_digest
+            .observation_schema_digest
             .to_string(),
     )
     .bind(output.observation.canonical_digest.to_string())

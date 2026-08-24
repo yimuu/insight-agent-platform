@@ -2,7 +2,8 @@ use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{ArtifactCommandLimits, ArtifactJobPayload};
 use insight_platform_context::{
     ContextDatasetBuildJobPayload, ContextJobPayload, ContextQueryError as DomainContextQueryError,
-    ContextQueryLimits, ContextQueryRequest, CreateContextQuery, PrepareContextDispatch,
+    ContextQueryLimits, ContextQueryRecord, ContextQueryRequest, CreateContextQuery,
+    PrepareContextDispatch,
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, is_execution_work_owner_pair,
@@ -482,6 +483,10 @@ impl PgRepository {
 
     pub(crate) const fn context_query_limits(&self) -> ContextQueryLimits {
         self.context_query_limits
+    }
+
+    pub(crate) const fn scope_environment_limits(&self) -> ScopeEnvironmentLimits {
+        self.scope_environment_limits
     }
 
     pub(crate) const fn sandbox_limits(&self) -> SandboxCommandLimits {
@@ -6705,10 +6710,30 @@ impl PgSchedulerTransaction {
             1,
             &StoredContextQueryWaitPayload {
                 plan_node_key: source_node.plan_node_key,
+                plan_digest,
+                source_orchestration_job_id: command.fence.job_id.parse().map_err(
+                    |failure: insight_platform_contracts::ResourceIdError| {
+                        RepositoryError::CorruptRow(failure.to_string())
+                    },
+                )?,
                 context_query_id: command.context_query_id.clone(),
                 context_job_id: command.context_job_id.clone(),
                 result_port: result.clone(),
                 resume_plan_node_key: resume.clone(),
+                resume_node_kind: command.plan.node(resume)?.kind(),
+                root_scope_id: decode_typed_payload::<OrchestrationJobPayload>(
+                    &current.payload,
+                    "orchestration Job",
+                )?
+                .root_scope_id,
+                continuation_attempt_limit: current.attempt_limit,
+                retry_backoff_milliseconds: decode_typed_payload::<OrchestrationJobPayload>(
+                    &current.payload,
+                    "orchestration Job",
+                )?
+                .retry_backoff_milliseconds,
+                priority: current.priority,
+                deadline: current.deadline.min(parents.run.deadline),
             },
             262_144,
         )?;
@@ -10570,6 +10595,385 @@ async fn require_exact_runtime_plan(
     if &agent.typed_plan_digest != plan_digest {
         return Err(RepositoryError::Conflict("exact typed Plan digest"));
     }
+    Ok(())
+}
+
+pub(crate) async fn settle_context_leaf_success_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    query: &ContextQueryRecord,
+    context_job_id: &ResourceId,
+    output: &ExactInvocationValueRef,
+    mutations: &insight_platform_contracts::ExternalLeafResumeMutationIds,
+    scope_limits: ScopeEnvironmentLimits,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    mutations
+        .validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let run = load_run_for_update(transaction, &query.tenant_id, &query.run_id).await?;
+    let node_row = sqlx::query(
+        r#"
+        SELECT scope_id, state, version, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'node_execution'
+        FOR UPDATE
+        "#,
+    )
+    .bind(query.tenant_id.to_string())
+    .bind(query.node_execution_id.to_string())
+    .bind(query.run_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Context leaf Node"))?;
+    if node_row.try_get::<String, _>("state")? != NodeExecutionState::Waiting.as_str() {
+        return Err(RepositoryError::Conflict("Context leaf terminal state"));
+    }
+    let wait_payload = payload_from_row(
+        &node_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let wait: StoredContextQueryWaitPayload =
+        decode_typed_payload(&wait_payload, "Context leaf wait")?;
+    if wait.context_query_id != query.context_query_id
+        || &wait.context_job_id != context_job_id
+        || wait.source_orchestration_job_id.kind() != ResourceKind::Job
+        || wait.result_port.schema_digest() != &output.schema_digest
+        || output.run_id != query.run_id
+        || output.producing_node_id.as_ref() != Some(&query.node_execution_id)
+        || query.output_value_id.as_ref() != Some(&output.value_id)
+    {
+        return Err(RepositoryError::Conflict("Context leaf terminal contract"));
+    }
+    let plan_row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.resource_versions
+        WHERE tenant_id = $1 AND resource_version_id = $2
+          AND resource_version_kind = 'agent_plan_revision' AND content_digest = $3
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(run.bindings.plan.revision_id.to_string())
+    .bind(run.bindings.plan.semantic_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("exact Agent Plan revision"))?;
+    let plan_payload = payload_from_row(
+        &plan_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let published = decode_published_version_payload(&plan_payload)?;
+    let ResourceDocument::Agent(agent) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Agent Plan revision contains a non-Agent document".to_owned(),
+        ));
+    };
+    if agent.typed_plan_digest != wait.plan_digest {
+        return Err(RepositoryError::Conflict("Context leaf exact Plan"));
+    }
+    let source_job = load_job_by_text(
+        transaction,
+        &run.tenant_id,
+        &wait.source_orchestration_job_id.to_string(),
+    )
+    .await?;
+    require_orchestration_job(&source_job)?;
+    let source_payload: OrchestrationJobPayload =
+        decode_typed_payload(&source_job.payload, "Context source orchestration Job")?;
+    if source_job.state != JobState::Succeeded.as_str()
+        || source_job.terminal_at.is_none()
+        || source_job.owner_id != query.node_execution_id.to_string()
+        || source_job.run_id.as_deref() != Some(run.run_id.as_str())
+        || source_job.attempt_limit != wait.continuation_attempt_limit
+        || source_job.priority != wait.priority
+        || source_job.deadline.min(run.deadline) != wait.deadline
+        || source_payload.root_scope_id != wait.root_scope_id
+        || source_payload.retry_backoff_milliseconds != wait.retry_backoff_milliseconds
+        || source_payload.bindings_digest != run.bindings.canonical_digest
+    {
+        return Err(RepositoryError::Conflict(
+            "Context source orchestration Job contract",
+        ));
+    }
+
+    let scope_id: ResourceId = node_row.try_get::<String, _>("scope_id")?.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let scope_row = sqlx::query(
+        r#"
+        SELECT node_kind, state, version, parent_node_id,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'scope_instance'
+        FOR UPDATE
+        "#,
+    )
+    .bind(query.tenant_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(query.run_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Context leaf Scope"))?;
+    if scope_row.try_get::<String, _>("state")? != ScopeState::Open.as_str() {
+        return Err(RepositoryError::Conflict("Context leaf open Scope"));
+    }
+    let scope_payload = payload_from_row(
+        &scope_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let binding = ExactRunValueRef {
+        value_id: output.value_id.clone(),
+        schema_digest: output.schema_digest.clone(),
+        content_digest: output.content_digest.clone(),
+    };
+    let next_scope_payload = match scope_row.try_get::<String, _>("node_kind")?.as_str() {
+        "root" => {
+            let mut root: StoredRootScopePayload =
+                decode_typed_payload(&scope_payload, "root Scope")?;
+            root.environment
+                .bind_new(wait.result_port.clone(), binding, scope_limits)?;
+            TypedPayload::with_limit(1, &root, 262_144)?
+        }
+        "parallel_leg" | "loop_iteration" | "map_item" => {
+            let mut nested: StoredControllerScopePayload =
+                decode_typed_payload(&scope_payload, "controller Scope")?;
+            nested
+                .environment
+                .bind_new(wait.result_port.clone(), binding, scope_limits)?;
+            TypedPayload::with_limit(1, &nested, 262_144)?
+        }
+        _ => return Err(RepositoryError::Conflict("Context leaf Scope kind")),
+    };
+    let scope_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET version = version + 1, payload_schema_version = $4,
+            payload = $5, payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'open'
+        RETURNING version
+        "#,
+    )
+    .bind(query.tenant_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(scope_row.try_get::<i64, _>("version")?)
+    .bind(next_scope_payload.schema_version)
+    .bind(&next_scope_payload.value)
+    .bind(&next_scope_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Context leaf Scope binding"))?;
+    let leaf_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'succeeded', version = version + 1,
+            terminal_at = $4, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'waiting'
+        RETURNING version
+        "#,
+    )
+    .bind(query.tenant_id.to_string())
+    .bind(query.node_execution_id.to_string())
+    .bind(node_row.try_get::<i64, _>("version")?)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Context leaf Node terminal"))?;
+    let activation_ordinal: i32 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(max(activation_ordinal), 0) + 1
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2
+          AND record_kind = 'node_execution' AND plan_node_key = $3
+        "#,
+    )
+    .bind(query.tenant_id.to_string())
+    .bind(query.run_id.to_string())
+    .bind(wait.resume_plan_node_key.as_str())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let continuation_payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "plan_node_key": wait.resume_plan_node_key,
+            "plan_source_digest": wait.plan_digest,
+            "required_control_tokens": [{
+                "source_node_execution_id": query.node_execution_id,
+                "source_port": "success",
+            }],
+        }),
+        262_144,
+    )?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, logical_key, node_kind, state,
+            enqueue_round, payload_schema_version, payload, payload_digest, deadline
+        ) VALUES (
+            $1, $2, $3, $4, 'node_execution', $5,
+            $6, $7, $8, $9, 'ready', 0, $10, $11, $12, $13
+        )
+        "#,
+    )
+    .bind(query.tenant_id.to_string())
+    .bind(mutations.continuation_node_execution_id.to_string())
+    .bind(query.run_id.to_string())
+    .bind(query.node_execution_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(wait.resume_plan_node_key.as_str())
+    .bind(activation_ordinal)
+    .bind(format!(
+        "external_leaf:{}:{}",
+        query.node_execution_id,
+        wait.resume_plan_node_key.as_str()
+    ))
+    .bind(wait.resume_node_kind.as_str())
+    .bind(continuation_payload.schema_version)
+    .bind(&continuation_payload.value)
+    .bind(&continuation_payload.digest)
+    .bind(wait.deadline)
+    .execute(&mut **transaction)
+    .await?;
+    let job_payload = OrchestrationJobPayload {
+        bindings_digest: run.bindings.canonical_digest.clone(),
+        node_execution_id: mutations.continuation_node_execution_id.clone(),
+        root_scope_id: wait.root_scope_id,
+        retry_backoff_milliseconds: wait.retry_backoff_milliseconds,
+        wake_contract: None,
+    };
+    let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
+    let continuation_job = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+            payload_schema_version, payload, payload_digest
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            'ready', $5, $6, $7, $8, $9, $10, $11, $12
+        ) RETURNING *
+        "#,
+    )
+    .bind(query.tenant_id.to_string())
+    .bind(mutations.continuation_job_id.to_string())
+    .bind(mutations.continuation_node_execution_id.to_string())
+    .bind(query.run_id.to_string())
+    .bind(wait.continuation_attempt_limit)
+    .bind(database_now)
+    .bind(wait.deadline)
+    .bind(scheduler_priority_to_database(wait.priority))
+    .bind(&job_payload.digest)
+    .bind(job_payload.schema_version)
+    .bind(&job_payload.value)
+    .bind(&job_payload.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let continuation_job = job_from_row(continuation_job)?;
+    let mut current = run.current.clone();
+    if run.state == RunState::Waiting.as_str() {
+        current.waiting_reason = None;
+    }
+    current.validate(&query.run_id)?;
+    let current_payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+    let run_row = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN state = 'waiting' THEN 'running' ELSE state END,
+            version = version + 1, current_schema_version = $4,
+            current_payload = $5, current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state IN ('running', 'waiting') AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(&run.run_id)
+    .bind(run.version)
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Context leaf Run resume"))?;
+    let resumed_run = run_from_row(run_row)?;
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "context_job_id": context_job_id,
+            "context_query_id": query.context_query_id,
+            "continuation_job_id": continuation_job.job_id,
+            "continuation_node_execution_id": mutations.continuation_node_execution_id,
+            "output_value_id": output.value_id,
+            "scope_version": scope_version,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        &run.run_id,
+        resumed_run.version,
+        Some(&run.run_id),
+        "run.external_leaf_resumed",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.leaf_node_event_id,
+        &mutations.leaf_node_outbox_id,
+        "node_execution",
+        &query.node_execution_id.to_string(),
+        leaf_version,
+        Some(&run.run_id),
+        "node.external_leaf_succeeded",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.continuation_node_event_id,
+        &mutations.continuation_node_outbox_id,
+        "node_execution",
+        &mutations.continuation_node_execution_id.to_string(),
+        1,
+        Some(&run.run_id),
+        "node.ready",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.continuation_job_event_id,
+        &mutations.continuation_job_outbox_id,
+        "job",
+        &continuation_job.job_id,
+        continuation_job.version,
+        Some(&run.run_id),
+        "job.ready",
+        &common,
+    )
+    .await?;
     Ok(())
 }
 
@@ -23662,10 +24066,18 @@ struct StoredSignalResolution {
 #[serde(deny_unknown_fields)]
 struct StoredContextQueryWaitPayload {
     plan_node_key: PlanNodeKey,
+    plan_digest: Sha256Digest,
+    source_orchestration_job_id: ResourceId,
     context_query_id: ResourceId,
     context_job_id: ResourceId,
     result_port: ExactDataPortRef,
     resume_plan_node_key: PlanNodeKey,
+    resume_node_kind: PlanNodeKind,
+    root_scope_id: ResourceId,
+    continuation_attempt_limit: i32,
+    retry_backoff_milliseconds: u64,
+    priority: SchedulerPriority,
+    deadline: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]

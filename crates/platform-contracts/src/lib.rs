@@ -28,7 +28,9 @@ pub mod types;
 pub mod worker;
 
 pub use capability::*;
-pub use command::{CommandAudit, CommandContractError, CommandOutcome};
+pub use command::{
+    CommandAudit, CommandContractError, CommandOutcome, ExternalLeafResumeMutationIds,
+};
 pub use context::*;
 pub use id::{ResourceId, ResourceIdError, ResourceKind};
 pub use json::{

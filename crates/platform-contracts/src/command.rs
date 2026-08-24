@@ -44,9 +44,57 @@ pub enum CommandOutcome<T> {
     Replayed(T),
 }
 
+/// Opaque identities preallocated for one external-leaf success continuation.
+/// The owner repository derives every semantic field from the frozen Run/Plan closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalLeafResumeMutationIds {
+    pub continuation_node_execution_id: ResourceId,
+    pub continuation_job_id: ResourceId,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub leaf_node_event_id: ResourceId,
+    pub leaf_node_outbox_id: ResourceId,
+    pub continuation_node_event_id: ResourceId,
+    pub continuation_node_outbox_id: ResourceId,
+    pub continuation_job_event_id: ResourceId,
+    pub continuation_job_outbox_id: ResourceId,
+}
+
+impl ExternalLeafResumeMutationIds {
+    pub fn validate(&self) -> Result<(), CommandContractError> {
+        let expected = [
+            (
+                &self.continuation_node_execution_id,
+                ResourceKind::NodeExecution,
+            ),
+            (&self.continuation_job_id, ResourceKind::Job),
+            (&self.run_event_id, ResourceKind::Event),
+            (&self.run_outbox_id, ResourceKind::OutboxEvent),
+            (&self.leaf_node_event_id, ResourceKind::Event),
+            (&self.leaf_node_outbox_id, ResourceKind::OutboxEvent),
+            (&self.continuation_node_event_id, ResourceKind::Event),
+            (&self.continuation_node_outbox_id, ResourceKind::OutboxEvent),
+            (&self.continuation_job_event_id, ResourceKind::Event),
+            (&self.continuation_job_outbox_id, ResourceKind::OutboxEvent),
+        ];
+        if expected.iter().any(|(id, kind)| id.kind() != *kind) {
+            return Err(CommandContractError::InvalidMutationIds);
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        if expected
+            .iter()
+            .any(|(id, _)| !unique.insert(id.to_string()))
+        {
+            return Err(CommandContractError::InvalidMutationIds);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandContractError {
     InvalidAudit,
+    InvalidMutationIds,
 }
 
 impl fmt::Display for CommandContractError {
@@ -55,6 +103,7 @@ impl fmt::Display for CommandContractError {
             Self::InvalidAudit => {
                 formatter.write_str("command audit identity or expiry is invalid")
             }
+            Self::InvalidMutationIds => formatter.write_str("command mutation IDs are invalid"),
         }
     }
 }
