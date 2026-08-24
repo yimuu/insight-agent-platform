@@ -86,7 +86,10 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    fresh PostgreSQL覆盖ID冲突整批回滚、classification/value复制、Scope切换和Receipt replay。数据库现在还能从冻结pending
    payload与exact Scope集合重建Map settlement/Join observation，并从与commit共用的shape推导精确activation、pending、Scope、wake、
    rollover及active-remainder cancellation槽；fresh PostgreSQL覆盖Quorum cancel集合与已提交Join facts。手工注入
-   `ControllerObservation`仍不计production证据。CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
+   `ControllerObservation`仍不计production证据。fresh PostgreSQL runtime fixture现已把真实claim/start、lease heartbeat/handoff/recovery、
+   exact Typed Plan authority读取与canonical materialization、数据库派生Start facts及fenced Start→Return activation串成同一条
+   coordinator链；它证明正式adapter/store的进程内组合，但仍不是独立Scheduler binary或多进程crash/restart证据。
+   CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
    CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向、每item RunValue/MapItem Scope原子写及
    L2 batch/replay fixture已实现；process crash/restart的L3 fixture仍待production handler闭合后完成。
    CR-179的exact pair producer/schema/region L1与两轮rollover/Scope复用/不串值/false-exit L2已实现，并证明所有iteration Scope保持

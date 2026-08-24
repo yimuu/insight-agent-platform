@@ -1,16 +1,21 @@
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, AgentDeploymentClosure, ArtifactRef,
-    AuthoringPackage, CommandAudit, CommandOutcome, DataClassification, DeploymentClosure,
-    ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, JsonLimits, Permission, PermissionSet,
-    PlanNodeKind, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, SchedulingPolicyDocument,
-    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass,
-    WorkerManifest,
+use insight_platform_artifacts::{
+    SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest, SchedulerTypedPlanReader,
 };
-use insight_platform_orchestrator::{AdmitRun, PlanNodeKey, RunInputValue};
+use insight_platform_contracts::{
+    canonical_digest, canonical_json, checked_in_hard_limit_profile, AgentDeploymentClosure,
+    AgentResourceSpec, ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome,
+    DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
+    JsonLimits, Permission, PermissionSet, PlanNodeKind, PolicyDeploymentClosure, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot,
+    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef, WorkClass, WorkerManifest,
+};
+use insight_platform_orchestrator::{
+    AdmitRun, ExpressionLimits, PlanLimits, PlanNodeKey, RunInputValue, RuntimeNode, RuntimePlan,
+};
 use insight_platform_postgres::{
     repository::{
         NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal, OrchestrationYield,
@@ -23,19 +28,22 @@ use insight_platform_runtime::postgres::{
     PostgresConnectionBulkheadConfig, PostgresConnectionBulkheads,
 };
 use insight_platform_runtime::{
-    ActiveOrchestrationJob, CoordinatorIdentityFactory, CoordinatorTiming, ExecutionDisposition,
-    GenerationHandlerDisposition, GenerationHandlerError, GenerationHandoffReason,
-    LeaseFencedOrchestrationExecutor, OrchestrationCoordinatorConfig, OrchestrationExecutorConfig,
-    OrchestrationExecutorTiming, OrchestrationJobExecutor, OrchestrationSafetyConfig,
-    OrchestrationSafetyDriver, SafetyDriverTiming, StartedOrchestrationJob,
-    StartedOrchestrationJobHandler, UuidCoordinatorIdentityFactory, WorkCoordinator,
+    ActiveOrchestrationJob, CoordinatorIdentityFactory, CoordinatorTiming,
+    ExactPlanGenerationDriver, ExecutionDisposition, GenerationHandlerDisposition,
+    GenerationHandlerError, GenerationHandoffReason, InlineControllerRunValueMaterializer,
+    LeaseFencedOrchestrationExecutor, MaterializingOrchestrationJobHandler,
+    OrchestrationCoordinatorConfig, OrchestrationExecutorConfig, OrchestrationExecutorTiming,
+    OrchestrationJobExecutor, OrchestrationSafetyConfig, OrchestrationSafetyDriver,
+    PostgresDurablePlanGenerationStore, SafetyDriverTiming, SchedulerPlanMaterializer,
+    SchedulerPlanMaterializerConfig, StartedOrchestrationJob, StartedOrchestrationJobHandler,
+    UuidCoordinatorIdentityFactory, WorkCoordinator,
 };
 use insight_platform_security::BindTenantSchedulingPolicy;
 use insight_platform_worker::{ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPools};
 use serde_json::json;
 use sqlx::{pool::PoolConnection, postgres::PgPoolOptions, Postgres, Row};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -60,6 +68,7 @@ const SCOPE_ID: &str = "scp_0198f1c5-0787-75e1-a9e8-d95ca0f3600c";
 const NODE_ID: &str = "nod_0198f1c5-0787-75e1-a9e8-d95ca0f3600d";
 const JOB_ID: &str = "job_0198f1c5-0787-75e1-a9e8-d95ca0f3600e";
 const VALUE_ID: &str = "val_0198f1c5-0787-75e1-a9e8-d95ca0f3600f";
+const TYPED_PLAN_ARTIFACT_ID: &str = "art_0198f1c5-0787-75e1-a9e8-d95ca0f36012";
 
 fn id(value: &str) -> ResourceId {
     value.parse().unwrap()
@@ -69,6 +78,50 @@ fn digest(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
         .unwrap()
+}
+
+fn fixture_plan() -> RuntimePlan {
+    let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
+    let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
+    RuntimePlan {
+        plan_version: 2,
+        interface_revision_id: id(INTERFACE_ID),
+        entry_node_id: entry.clone(),
+        nodes: BTreeMap::from([
+            (
+                entry,
+                RuntimeNode::Start {
+                    next: finish.clone(),
+                },
+            ),
+            (finish, RuntimeNode::Return),
+        ]),
+    }
+}
+
+struct StaticTypedPlanReader {
+    bytes: Vec<u8>,
+}
+
+#[async_trait]
+impl SchedulerTypedPlanReader for StaticTypedPlanReader {
+    async fn read_exact(
+        &self,
+        request: SchedulerTypedPlanReadRequest,
+    ) -> Result<Vec<u8>, SchedulerTypedPlanReadError> {
+        if request.artifact.byte_length() != u64::try_from(self.bytes.len()).unwrap()
+            || request.artifact.content_digest()
+                != &canonical_digest(
+                    &serde_json::from_slice::<serde_json::Value>(&self.bytes).unwrap(),
+                )
+                .unwrap()
+                .parse()
+                .unwrap()
+        {
+            return Err(SchedulerTypedPlanReadError::Integrity);
+        }
+        Ok(self.bytes.clone())
+    }
 }
 
 async fn seed_policy_deployment(
@@ -126,6 +179,7 @@ async fn insert_ready_artifact(
     principal_id: &ResourceId,
     retention_policy_revision_id: &ResourceId,
     artifact: &ArtifactRef,
+    purpose: &str,
 ) {
     let now: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT statement_timestamp()")
         .fetch_one(pool)
@@ -154,7 +208,14 @@ async fn insert_ready_artifact(
     .execute(pool)
     .await
     .unwrap();
-    let metadata = TypedPayload::new(1, &json!({"fixture": "orchestration-capacity"})).unwrap();
+    let metadata = TypedPayload::new(
+        1,
+        &json!({
+            "display_name": artifact.display_name(),
+            "fixture": "orchestration-capacity"
+        }),
+    )
+    .unwrap();
     sqlx::query(
         r#"
         INSERT INTO insight_platform.artifacts (
@@ -162,13 +223,14 @@ async fn insert_ready_artifact(
             expected_digest, declared_media_type, verified_media_type, state, version,
             metadata_schema_version, metadata, metadata_digest, retention_policy_revision_id,
             retain_until, created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, 'qualification', $4, $5, $6, $7, $7, 'ready', 1,
-                  $8, $9, $10, $11, $12, $13, $14, $14)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, 'ready', 1,
+                  $9, $10, $11, $12, $13, $14, $15, $15)
         "#,
     )
     .bind(tenant_id.to_string())
     .bind(artifact.artifact_id().to_string())
     .bind(blob_id.to_string())
+    .bind(purpose)
     .bind(artifact.classification().as_str())
     .bind(i64::try_from(artifact.byte_length()).unwrap())
     .bind(artifact.content_digest().to_string())
@@ -528,6 +590,101 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         assert!(safety_exit.scan_attempts >= 4);
         drop(local_business_saturation);
         drop(_business_saturation);
+
+        let plan = fixture_plan();
+        let plan_bytes = canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
+        let plan_materializer = Arc::new(
+            SchedulerPlanMaterializer::new(
+                Arc::new(bulkheads.critical_control_repository()),
+                Arc::new(StaticTypedPlanReader { bytes: plan_bytes }),
+                SchedulerPlanMaterializerConfig {
+                    request_timeout: Duration::from_millis(100),
+                    maximum_bytes: 64 * 1024,
+                    json_limits: JsonLimits::CONTRACT_FIXTURE,
+                    plan_limits: PlanLimits::from_profile(&profile).unwrap(),
+                },
+            )
+            .unwrap(),
+        );
+        let durable_store = Arc::new(
+            PostgresDurablePlanGenerationStore::new(
+                bulkheads.critical_control_repository(),
+                Arc::new(InlineControllerRunValueMaterializer),
+                Arc::new(UuidCoordinatorIdentityFactory),
+                Duration::from_millis(50),
+            )
+            .unwrap(),
+        );
+        let plan_driver = Arc::new(
+            ExactPlanGenerationDriver::new(durable_store, ExpressionLimits::ABSOLUTE).unwrap(),
+        );
+        let materializing_handler = Arc::new(MaterializingOrchestrationJobHandler::new(
+            plan_materializer,
+            plan_driver,
+        ));
+        let materializing_executor = Arc::new(
+            LeaseFencedOrchestrationExecutor::new(
+                Arc::new(bulkheads.business_repository()),
+                materializing_handler,
+                Arc::new(UuidCoordinatorIdentityFactory),
+                OrchestrationExecutorConfig::from_profile(
+                    &profile,
+                    OrchestrationExecutorTiming {
+                        heartbeat_jitter: Duration::from_millis(10),
+                        store_retry_backoff: Duration::from_millis(10),
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let materializing_coordinator = WorkCoordinator::new(
+            Arc::new(bulkheads.business_repository()),
+            materializing_executor,
+            Arc::new(UuidCoordinatorIdentityFactory),
+            pools,
+            coordinator_config,
+        )
+        .unwrap()
+        .spawn();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let source_state: String = sqlx::query_scalar(
+                    "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+                )
+                .bind(TENANT_ID)
+                .bind(JOB_ID)
+                .fetch_one(bulkheads.critical_control_pool())
+                .await
+                .unwrap();
+                if source_state == "succeeded" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("materialized Start controller did not commit");
+        let activated = sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT plan_node_key, state
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND plan_node_key = 'finish'
+              AND record_kind = 'node_execution'
+            "#,
+        )
+        .bind(TENANT_ID)
+        .bind(RUN_ID)
+        .fetch_one(bulkheads.critical_control_pool())
+        .await
+        .unwrap();
+        assert_eq!(activated.0, "finish");
+        assert!(matches!(
+            activated.1.as_str(),
+            "ready" | "leased" | "running" | "retry_scheduled"
+        ));
+        let materializing_exit = materializing_coordinator.shutdown().await.unwrap();
+        assert!(materializing_exit.snapshot.settled_generations >= 1);
         bulkheads.close().await;
     });
 }
@@ -638,6 +795,44 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         },
     )
     .unwrap();
+    let plan = fixture_plan();
+    let plan_limits = PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+    let typed_plan_bytes = canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
+    let typed_plan_digest = plan.canonical_digest(plan_limits).unwrap();
+    let typed_plan_artifact = ArtifactRef::new(
+        id(TYPED_PLAN_ARTIFACT_ID),
+        typed_plan_digest.clone(),
+        u64::try_from(typed_plan_bytes.len()).unwrap(),
+        "application/json",
+        DataClassification::Internal,
+        Some("typed-plan.json".to_owned()),
+    )
+    .unwrap();
+    let agent_plan_payload = TypedPayload::new(
+        1,
+        &PublishedVersionPayload {
+            document: ResourceDocument::Agent(AgentResourceSpec {
+                authoring_package: AuthoringPackage {
+                    artifact: typed_plan_artifact.clone(),
+                    manifest_digest: digest('4'),
+                },
+                contract_digest: digest('5'),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                interface_schema_digest: digest('b'),
+                typed_plan_artifact_id: id(TYPED_PLAN_ARTIFACT_ID),
+                typed_plan_digest: typed_plan_digest.clone(),
+            }),
+            validation: ValidationSummary {
+                validator_digest: digest('6'),
+                validated_draft_digest: digest('7'),
+                dependency_closure_digest: digest('8'),
+                security_evidence_digest: digest('9'),
+                warnings: vec![],
+            },
+        },
+    )
+    .unwrap();
     for (version_id, kind, content_digest, payload) in [
         (
             POLICY_REVISION_ID,
@@ -651,7 +846,12 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
             digest('b'),
             &empty,
         ),
-        (PLAN_ID, "agent_plan_revision", digest('c'), &empty),
+        (
+            PLAN_ID,
+            "agent_plan_revision",
+            typed_plan_digest.clone(),
+            &agent_plan_payload,
+        ),
     ] {
         let resource_id = if version_id == POLICY_REVISION_ID {
             POLICY_ID
@@ -689,7 +889,6 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
     .execute(pool)
     .await
     .unwrap();
-
     let qualification_evidence = ArtifactRef::new(
         id("art_0198f1c5-0787-75e1-a9e8-d95ca0f36010"),
         digest('3'),
@@ -705,8 +904,27 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         &id(PRINCIPAL_ID),
         &id(POLICY_REVISION_ID),
         &qualification_evidence,
+        "qualification",
     )
     .await;
+    insert_ready_artifact(
+        pool,
+        &id(TENANT_ID),
+        &id(PRINCIPAL_ID),
+        &id(POLICY_REVISION_ID),
+        &typed_plan_artifact,
+        "typed_plan",
+    )
+    .await;
+    sqlx::query(
+        "UPDATE insight_platform.resource_versions SET artifact_id = $3 WHERE tenant_id = $1 AND resource_version_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(PLAN_ID)
+    .bind(TYPED_PLAN_ARTIFACT_ID)
+    .execute(pool)
+    .await
+    .unwrap();
     let policy = ExactVersionRef::new(id(POLICY_REVISION_ID), digest('a')).unwrap();
     let policy_deployment = seed_policy_deployment(
         pool,
@@ -724,8 +942,8 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
     };
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(INTERFACE_ID), digest('b')).unwrap(),
-        plan: ExactVersionRef::new(id(PLAN_ID), digest('c')).unwrap(),
-        entry_node_id: "start".to_owned(),
+        plan: ExactVersionRef::new(id(PLAN_ID), typed_plan_digest).unwrap(),
+        entry_node_id: "entry".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
         policies: vec![policy_binding.clone()],
@@ -1452,6 +1670,7 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
         &principal_id,
         &policy_revision_id,
         &qualification_evidence,
+        "qualification",
     )
     .await;
 
