@@ -86,6 +86,17 @@ fn closed_object_schema(property: &str) -> ClosedJsonSchema {
     .unwrap()
 }
 
+fn agent_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
+
 fn readonly_sql_plan_schema() -> ClosedJsonSchema {
     let properties = [
         "schema_version",
@@ -918,7 +929,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         contract_digest: named_digest("agent-contract"),
         dependency_versions: vec![],
         policy_versions: vec![authorization_policy.clone()],
-        interface_schema_digest: named_digest("agent-interface-schema"),
+        input_schema: agent_schema(),
+        output_schema: agent_schema(),
+        error_schema: agent_schema(),
         typed_plan_artifact_id: id(ResourceKind::Artifact, 0xa5),
         typed_plan_digest: named_digest("typed-plan"),
     });

@@ -339,7 +339,9 @@ pub struct AgentResourceSpec {
     pub contract_digest: Sha256Digest,
     pub dependency_versions: Vec<ExactVersionRef>,
     pub policy_versions: Vec<ExactVersionRef>,
-    pub interface_schema_digest: Sha256Digest,
+    pub input_schema: ClosedJsonSchema,
+    pub output_schema: ClosedJsonSchema,
+    pub error_schema: ClosedJsonSchema,
     pub typed_plan_artifact_id: ResourceId,
     pub typed_plan_digest: Sha256Digest,
 }
@@ -349,8 +351,26 @@ impl AgentResourceSpec {
         self.authoring_package.validate()?;
         validate_exact_versions(&self.dependency_versions, MAX_RESOURCE_DEPENDENCIES)?;
         validate_policy_versions(&self.policy_versions)?;
+        validate_agent_interface_schema(&self.input_schema)?;
+        validate_agent_interface_schema(&self.output_schema)?;
+        validate_agent_interface_schema(&self.error_schema)?;
         require_kind(&self.typed_plan_artifact_id, ResourceKind::Artifact)
     }
+}
+
+fn validate_agent_interface_schema(schema: &ClosedJsonSchema) -> Result<(), ResourceContractError> {
+    schema
+        .validate()
+        .map_err(|_| ResourceContractError::InvalidAgentContract)?;
+    if schema
+        .schema
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        != Some("object")
+    {
+        return Err(ResourceContractError::InvalidAgentContract);
+    }
+    Ok(())
 }
 authoring_spec!(SkillResourceSpec {
     instruction_set_digest: Sha256Digest,
@@ -2236,6 +2256,7 @@ pub enum ResourceContractError {
     WrongResourceIdKind,
     KindMismatch,
     InvalidArtifact,
+    InvalidAgentContract,
     InvalidCode,
     InvalidEntrypoint,
     InvalidCapabilityContract,
@@ -2260,6 +2281,9 @@ impl fmt::Display for ResourceContractError {
                 formatter.write_str("resource, document, version, or deployment kind mismatch")
             }
             Self::InvalidArtifact => formatter.write_str("authoring artifact is invalid"),
+            Self::InvalidAgentContract => {
+                formatter.write_str("Agent interface contract has an invalid closed shape")
+            }
             Self::InvalidCode => formatter.write_str("bounded code is invalid"),
             Self::InvalidEntrypoint => {
                 formatter.write_str("sandbox entrypoint is not a safe relative path")
@@ -2929,6 +2953,14 @@ mod tests {
         });
         assert!(serde_json::from_value::<ResourceDraftPayload>(value).is_err());
 
+        let agent_schema = ClosedJsonSchema::build(json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+        }))
+        .unwrap();
         let invalid_agent = ResourceDocument::Agent(AgentResourceSpec {
             authoring_package: AuthoringPackage {
                 artifact: ArtifactRef::new(
@@ -2945,7 +2977,9 @@ mod tests {
             contract_digest: digest('c'),
             dependency_versions: vec![],
             policy_versions: vec![],
-            interface_schema_digest: digest('d'),
+            input_schema: agent_schema.clone(),
+            output_schema: agent_schema.clone(),
+            error_schema: agent_schema,
             typed_plan_artifact_id: id("val_0198f1c3-8f49-7c3e-b1f3-773c28367b92"),
             typed_plan_digest: digest('e'),
         });

@@ -420,6 +420,21 @@ impl RuntimePlan {
             .map_err(|_| OrchestratorError::Canonicalization)
     }
 
+    pub fn validate_terminal_schema_digests(
+        &self,
+        output_schema_digest: &Sha256Digest,
+        error_schema_digest: &Sha256Digest,
+    ) -> Result<(), OrchestratorError> {
+        if self.nodes.values().any(|node| match node {
+            RuntimeNode::Return { value } => value.schema_digest() != output_schema_digest,
+            RuntimeNode::Raise { failure } => failure.schema_digest() != error_schema_digest,
+            _ => false,
+        }) {
+            return Err(OrchestratorError::InvalidPlan);
+        }
+        Ok(())
+    }
+
     pub fn node(&self, key: &PlanNodeKey) -> Result<&RuntimeNode, OrchestratorError> {
         self.nodes
             .get(key)
@@ -2495,6 +2510,26 @@ mod tests {
             ]),
         };
         plan.validate(limits()).unwrap();
+        plan.validate_terminal_schema_digests(&digest('1'), &digest('2'))
+            .unwrap();
+        assert_eq!(
+            plan.validate_terminal_schema_digests(&digest('2'), &digest('2')),
+            Err(OrchestratorError::InvalidPlan)
+        );
+
+        let mut raised = plan.clone();
+        raised.nodes.insert(
+            key("return"),
+            RuntimeNode::Raise {
+                failure: ExactDataPortRef::RunInput {
+                    schema_digest: digest('2'),
+                },
+            },
+        );
+        raised.validate(limits()).unwrap();
+        raised
+            .validate_terminal_schema_digests(&digest('1'), &digest('2'))
+            .unwrap();
 
         let mut undeclared = plan.clone();
         let RuntimeNode::Return { value } = undeclared.nodes.get_mut(&key("return")).unwrap()

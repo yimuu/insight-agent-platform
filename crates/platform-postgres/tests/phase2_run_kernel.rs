@@ -5,11 +5,11 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, AgentDeploymentClosure,
-    AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonValue, CommandAudit,
-    CommandOutcome, DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding,
-    ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource, FrozenSlotBinding,
-    FrozenSlotTarget, InteractionKind, JsonLimits, Permission, PermissionSet, PlanNodeKind,
-    PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonSchema, ClosedJsonValue,
+    CommandAudit, CommandOutcome, DataClassification, DeploymentClosure, ExactDeploymentRef,
+    ExactPolicyBinding, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
+    FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission, PermissionSet,
+    PlanNodeKind, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
     PublishedVersionPayload, ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot,
     SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
@@ -88,6 +88,17 @@ fn digest(character: char) -> Sha256Digest {
         .unwrap()
 }
 
+fn agent_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
+
 fn literal_program(value: Value) -> TypedExpressionProgram {
     TypedExpressionProgram::build(
         vec![],
@@ -125,7 +136,7 @@ fn input_compute_output_port() -> insight_platform_orchestrator::ExactDataPortRe
 fn return_run_input() -> RuntimeNode {
     RuntimeNode::Return {
         value: insight_platform_orchestrator::ExactDataPortRef::RunInput {
-            schema_digest: digest('a'),
+            schema_digest: agent_schema().canonical_digest,
         },
     }
 }
@@ -2732,7 +2743,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         input: RunInputValue {
             value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367e06"),
             classification: DataClassification::Internal,
-            schema_digest: digest('a'),
+            schema_digest: agent_schema().canonical_digest,
             content_digest: child_input_digest,
             value: ValueRef::Inline { value: child_input },
         },
@@ -8604,7 +8615,9 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 contract_digest: digest('f'),
                 dependency_versions: vec![],
                 policy_versions: vec![],
-                interface_schema_digest: digest('a'),
+                input_schema: agent_schema(),
+                output_schema: agent_schema(),
+                error_schema: agent_schema(),
                 typed_plan_artifact_id: id(TYPED_PLAN_ARTIFACT_ID),
                 typed_plan_digest: typed_plan_digest.clone(),
             }),
@@ -8637,7 +8650,9 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 contract_digest: digest('e'),
                 dependency_versions: vec![],
                 policy_versions: vec![],
-                interface_schema_digest: digest('a'),
+                input_schema: agent_schema(),
+                output_schema: agent_schema(),
+                error_schema: agent_schema(),
                 typed_plan_artifact_id: id("art_0198f1c3-9a00-7c3e-b1f3-773c2836701c"),
                 typed_plan_digest: digest('f'),
             }),

@@ -1,15 +1,15 @@
 use chrono::{Duration, Utc};
 use insight_platform_contracts::{
     ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
-    ArtifactRetentionPolicy, AuthoringPackage, CodeTrustClass, DataClassification,
-    DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
-    Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
-    RunBindingsSnapshot, SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass,
-    SandboxPackageResourceSpec, SandboxProfileDeploymentClosure, SandboxProfileResourceSpec,
-    SandboxRuntimeFamily, Sha256Digest, SkillDeploymentClosure, SkillResourceSpec, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary,
+    ArtifactRetentionPolicy, AuthoringPackage, ClosedJsonSchema, CodeTrustClass,
+    DataClassification, DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
+    ExactVersionRef, Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
+    ResourceId, ResourceKind, RunBindingsSnapshot, SandboxCleanupPolicy, SandboxEntrypointKind,
+    SandboxIsolationClass, SandboxPackageResourceSpec, SandboxProfileDeploymentClosure,
+    SandboxProfileResourceSpec, SandboxRuntimeFamily, Sha256Digest, SkillDeploymentClosure,
+    SkillResourceSpec, TenantConfig, TenantPrincipalPayload, ValidationSummary,
 };
 use insight_platform_postgres::{
     repository::{
@@ -25,6 +25,17 @@ use insight_platform_registry::{
 };
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
+
+fn agent_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
 
 const TENANT_ID: &str = "ten_0198f1c3-8f49-7c3e-b1f3-773c28367c00";
 const TENANT_B_ID: &str = "ten_0198f1c3-8f49-7c3e-b1f3-773c28367c01";
@@ -1218,7 +1229,9 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         contract_digest: digest('a'),
         dependency_versions: vec![policy_ref.clone()],
         policy_versions: vec![policy_ref.clone()],
-        interface_schema_digest: digest('b'),
+        input_schema: agent_schema(),
+        output_schema: agent_schema(),
+        error_schema: agent_schema(),
         typed_plan_artifact_id: id(TYPED_PLAN_ARTIFACT_ID),
         typed_plan_digest: digest('b'),
     });

@@ -9172,6 +9172,11 @@ async fn require_exact_runtime_plan(
             "Agent Plan revision contains a non-Agent document".to_owned(),
         ));
     };
+    plan.validate_terminal_schema_digests(
+        &agent.output_schema.canonical_digest,
+        &agent.error_schema.canonical_digest,
+    )
+    .map_err(|_| RepositoryError::Conflict("runtime Plan terminal interface binding"))?;
     if &agent.typed_plan_digest != plan_digest {
         return Err(RepositoryError::Conflict("exact typed Plan digest"));
     }
@@ -13952,7 +13957,7 @@ async fn require_child_input_schema(
             "child Agent interface contains a non-Agent document".to_owned(),
         ));
     };
-    if &spec.interface_schema_digest != input_schema_digest {
+    if &spec.input_schema.canonical_digest != input_schema_digest {
         return Err(RepositoryError::InvalidInput(
             "child input does not match the exact Agent interface schema".to_owned(),
         ));

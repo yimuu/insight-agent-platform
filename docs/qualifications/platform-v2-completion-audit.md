@@ -95,8 +95,9 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    L2 batch/replay fixture已实现；process crash/restart的L3 fixture仍待production handler闭合后完成。
    CR-179的exact pair producer/schema/region L1与两轮rollover/Scope复用/不串值/false-exit L2已实现，并证明所有iteration Scope保持
    同一root controller owner、词法深度不随轮次增长；process crash/restart L3仍待production handler闭合后完成。
-   CR-180已冻结Plan version 3的Return/Raise exact terminal port与Agent output/error schema authority；当前代码仍是无字段terminal的
-   Plan version 2，因此Plan v3 publication validation、terminal RunValue物化及owner transaction尚未实现，不能计入Phase 2完成证据。
+   CR-180的Plan version 3 wire、Return/Raise exact terminal port、producer/reachability负向，以及Agent Revision完整input/output/error
+   `ClosedJsonSchema` authority已经实现；runtime Plan绑定重验terminal port与exact output/error schema digest。terminal RunValue正文物化、
+   safe Failure解码及owner transaction尚未实现，不能计入Phase 2 terminal完成证据。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
 4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
 

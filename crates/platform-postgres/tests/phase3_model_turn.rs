@@ -6,16 +6,16 @@ use insight_platform_contracts::{
     CapabilityBackendLimits, CapabilityCancellationKind, CapabilityDataFlowPolicy,
     CapabilityDeploymentClosure, CapabilityIdempotencyKind, CapabilityImplementationResourceSpec,
     CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
-    CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonValue, CommandAudit,
-    CommandOutcome, ContextWindowContract, DataClassification, DataRegion, DecimalMoney,
-    DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
-    ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
-    InstalledModelAdapter, JobState, ModelCatalogEvidence, ModelDeploymentClosure,
-    ModelIdentityStability, ModelLimits, ModelModalities, ModelProfileResourceSpec,
-    ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelToolContract, ModelTurnState,
-    ModelUsageContract, NativeCapabilityContract, Permission, PermissionSet, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
+    CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
+    CommandAudit, CommandOutcome, ContextWindowContract, DataClassification, DataRegion,
+    DecimalMoney, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
+    ExactPolicyBinding, ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding,
+    FrozenSlotTarget, InstalledModelAdapter, JobState, ModelCatalogEvidence,
+    ModelDeploymentClosure, ModelIdentityStability, ModelLimits, ModelModalities,
+    ModelProfileResourceSpec, ModelProviderDeploymentClosure, ModelProviderResourceSpec,
+    ModelToolContract, ModelTurnState, ModelUsageContract, NativeCapabilityContract, Permission,
+    PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind,
+    PrincipalSnapshot, ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
     ProviderTrainingPolicy, PublishedVersionPayload, QuotaDimension, RegistryResourceKind,
     ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, SecretBindingPayload,
     SecretPurpose, SecretResolutionPolicy, Sha256Digest, StructuredOutputContract, TenantConfig,
@@ -151,6 +151,17 @@ fn closed_object_schema(property: &str) -> insight_platform_models::ClosedSchema
             }
         },
         "required": [property]
+    }))
+    .unwrap()
+}
+
+fn agent_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
     }))
     .unwrap()
 }
@@ -987,7 +998,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         contract_digest: digest('b'),
         dependency_versions: vec![],
         policy_versions: vec![agent_policy.clone()],
-        interface_schema_digest: digest('c'),
+        input_schema: agent_schema(),
+        output_schema: agent_schema(),
+        error_schema: agent_schema(),
         typed_plan_artifact_id: id(ResourceKind::Artifact, 0xa6),
         typed_plan_digest: digest('d'),
     });

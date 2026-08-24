@@ -5,10 +5,10 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, AgentDeploymentClosure,
-    AgentResourceSpec, ArtifactRef, AuthoringPackage, CommandAudit, CommandOutcome,
-    DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
-    JsonLimits, Permission, PermissionSet, PlanNodeKind, PolicyDeploymentClosure, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonSchema, CommandAudit,
+    CommandOutcome, DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding,
+    ExactVersionRef, JsonLimits, Permission, PermissionSet, PlanNodeKind, PolicyDeploymentClosure,
+    PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
     PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot,
     SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
     ValidationSummary, ValueRef, WorkClass, WorkerManifest,
@@ -81,6 +81,17 @@ fn digest(character: char) -> Sha256Digest {
         .unwrap()
 }
 
+fn agent_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
+
 fn fixture_plan() -> RuntimePlan {
     let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
@@ -99,7 +110,7 @@ fn fixture_plan() -> RuntimePlan {
                 finish,
                 RuntimeNode::Return {
                     value: ExactDataPortRef::RunInput {
-                        schema_digest: digest('a'),
+                        schema_digest: agent_schema().canonical_digest,
                     },
                 },
             ),
@@ -827,7 +838,9 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
                 contract_digest: digest('5'),
                 dependency_versions: vec![],
                 policy_versions: vec![],
-                interface_schema_digest: digest('b'),
+                input_schema: agent_schema(),
+                output_schema: agent_schema(),
+                error_schema: agent_schema(),
                 typed_plan_artifact_id: id(TYPED_PLAN_ARTIFACT_ID),
                 typed_plan_digest: typed_plan_digest.clone(),
             }),

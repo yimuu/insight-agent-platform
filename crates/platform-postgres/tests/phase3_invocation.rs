@@ -167,6 +167,17 @@ fn capability_error_schema() -> ClosedJsonSchema {
     .unwrap()
 }
 
+fn agent_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
+
 fn capability_artifacts() -> CapabilityArtifactContract {
     CapabilityArtifactContract {
         ports: vec![CapabilityArtifactPort {
@@ -1962,7 +1973,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         contract_digest: digest('b'),
         dependency_versions: vec![],
         policy_versions: vec![policy_exact.clone()],
-        interface_schema_digest: digest('c'),
+        input_schema: agent_schema(),
+        output_schema: agent_schema(),
+        error_schema: agent_schema(),
         typed_plan_artifact_id: package.artifact.artifact_id().clone(),
         typed_plan_digest: digest('d'),
     });
