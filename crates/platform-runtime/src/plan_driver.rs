@@ -27,6 +27,7 @@ pub enum DurableControllerPhase {
         observation: ControllerObservation,
     },
     ChildAgentDispatch(Box<DurableChildAgentDispatchFacts>),
+    ContextDispatch(Box<DurableContextDispatchFacts>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +37,12 @@ pub struct DurableChildAgentDispatchFacts {
     pub selection_policy: ExactPolicyBinding,
     pub selection_document: CandidateSelectionPolicyDocument,
     pub candidates: Vec<ExactDeploymentRef>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DurableContextDispatchFacts {
+    pub input: ResolvedExpressionInput,
+    pub value: ClosedJsonValue,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -165,6 +172,14 @@ where
                 (ControllerObservation::None, None)
             }
             DurableControllerPhase::ChildAgentDispatch(_) => {
+                return Err(DurablePlanDriverError::InvariantViolation)
+            }
+            DurableControllerPhase::ContextDispatch(_)
+                if matches!(node, RuntimeNode::ContextQuery { .. }) =>
+            {
+                (ControllerObservation::None, None)
+            }
+            DurableControllerPhase::ContextDispatch(_) => {
                 return Err(DurablePlanDriverError::InvariantViolation)
             }
         };

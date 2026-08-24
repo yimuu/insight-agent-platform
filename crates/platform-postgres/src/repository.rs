@@ -1615,6 +1615,62 @@ impl PgRepository {
                 },
             )));
         }
+        if let insight_platform_orchestrator::RuntimeNode::ContextQuery {
+            context_slot_id,
+            request,
+            ..
+        } = runtime_node
+        {
+            let plan_slot = plan
+                .dependency_slots
+                .get(context_slot_id)
+                .ok_or(RepositoryError::Conflict("Context Plan dependency slot"))?;
+            let frozen_slot = run
+                .bindings
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == *context_slot_id)
+                .ok_or(RepositoryError::NotFound("frozen Context slot"))?;
+            if plan_slot.requirement_digest != frozen_slot.requirement_digest {
+                return Err(RepositoryError::Conflict("Context Plan frozen requirement"));
+            }
+            if !matches!(frozen_slot.target, FrozenSlotTarget::Context { .. }) {
+                return Err(RepositoryError::Conflict("frozen Context slot kind"));
+            }
+            let scope_id: ResourceId = row.try_get::<String, _>("scope_id")?.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let environments = load_scope_environment_chain(
+                &mut transaction,
+                &tenant_id,
+                &run_id,
+                &scope_id,
+                self.scope_environment_limits,
+            )
+            .await?;
+            let references = insight_platform_orchestrator::resolve_scope_inputs(
+                std::slice::from_ref(request),
+                &environments,
+                self.scope_environment_limits,
+            )?;
+            let mut values = load_resolved_expression_values(
+                &mut transaction,
+                &tenant_id,
+                &run_id,
+                vec![request.clone()],
+                references,
+            )
+            .await?;
+            let input = values.pop().ok_or_else(|| {
+                RepositoryError::CorruptRow("Context dispatch input missing".to_owned())
+            })?;
+            transaction.commit().await?;
+            return Ok(ControllerFacts::ContextDispatch(Box::new(
+                ContextDispatchFacts { identity, input },
+            )));
+        }
         let observation = match runtime_node {
             insight_platform_orchestrator::RuntimeNode::Map { .. }
                 if payload.value.get("wait").is_some() =>
@@ -22865,9 +22921,16 @@ pub struct ChildAgentDispatchFacts {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ContextDispatchFacts {
+    pub identity: ControllerFactIdentity,
+    pub input: ResolvedExpressionInput,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ControllerFacts {
     Expression(ExpressionControllerFacts),
     ChildAgentDispatch(Box<ChildAgentDispatchFacts>),
+    ContextDispatch(Box<ContextDispatchFacts>),
     Committed {
         identity: ControllerFactIdentity,
         observation: ControllerObservation,

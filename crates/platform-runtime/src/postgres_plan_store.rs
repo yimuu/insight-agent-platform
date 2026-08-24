@@ -4,8 +4,9 @@ use crate::{
     allocate_child_run_mutations, allocate_controller_step_mutations,
     allocate_human_task_mutations, allocate_orchestration_terminal_mutations,
     CoordinatorIdentityFactory, DerivedControllerCommit, DurableChildAgentDispatchFacts,
-    DurableControllerFacts, DurableControllerPhase, DurablePlanDriverError,
-    DurablePlanGenerationStore, GenerationHandoffReason, StartedOrchestrationJob,
+    DurableContextDispatchFacts, DurableControllerFacts, DurableControllerPhase,
+    DurablePlanDriverError, DurablePlanGenerationStore, GenerationHandoffReason,
+    StartedOrchestrationJob,
 };
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -719,6 +720,24 @@ where
                     )),
                 })
             }
+            ControllerFacts::ContextDispatch(facts) => {
+                let value = self
+                    .materializer
+                    .materialize(&context, &facts.input)
+                    .await
+                    .map_err(map_materialization_failure)?;
+                Ok(DurableControllerFacts {
+                    node_execution_id: facts.identity.node_execution_id,
+                    node_execution_version: facts.identity.node_execution_version,
+                    plan_node_key: facts.identity.plan_node_key,
+                    phase: DurableControllerPhase::ContextDispatch(Box::new(
+                        DurableContextDispatchFacts {
+                            input: facts.input,
+                            value,
+                        },
+                    )),
+                })
+            }
         }
     }
 
@@ -733,6 +752,7 @@ where
             }
             (DurableControllerPhase::CommittedFacts { .. }, None) => None,
             (DurableControllerPhase::ChildAgentDispatch(_), None) => None,
+            (DurableControllerPhase::ContextDispatch(_), None) => None,
             _ => return Err(DurablePlanDriverError::InvariantViolation),
         };
         if matches!(
