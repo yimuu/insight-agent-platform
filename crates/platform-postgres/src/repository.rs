@@ -1662,8 +1662,106 @@ impl PgRepository {
             &parents,
             plan,
             &shape,
+            ChildOutcome::Succeeded,
         )
         .await?;
+        transaction.rollback().await?;
+        Ok(requirements)
+    }
+
+    /// Plans the exact bounded mutation shape for a controller-derived terminal failure. The
+    /// failure decision, ErrorBoundary route, structured exit and active sibling set all come
+    /// from the same locked durable facts that the owner transaction revalidates.
+    pub async fn load_controller_failure_mutation_requirements(
+        &self,
+        fence: &JobFence,
+        plan: &RuntimePlan,
+        observation: &ControllerObservation,
+    ) -> Result<ControllerMutationRequirements, RepositoryError> {
+        fence.validate()?;
+        plan.validate(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let plan_digest = plan
+            .canonical_digest(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let mut transaction = self.pool.begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let observed =
+            load_job_for_update_by_text(&mut transaction, &fence.tenant_id, &fence.job_id).await?;
+        require_orchestration_job(&observed)?;
+        require_exact_running_job_fence(&observed, fence, database_now)?;
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        require_exact_runtime_plan(&mut transaction, &parents.run, plan, &plan_digest).await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, plan).await?;
+        let runtime_node = plan.node(&source_node.plan_node_key)?;
+        require_exact_controller_observation(
+            &mut transaction,
+            &observed,
+            &parents,
+            &source_node,
+            runtime_node,
+            observation,
+        )
+        .await?;
+        let cause = OrchestrationFailureCause::Controller {
+            observation: observation.clone(),
+        };
+        let (failure, _) = derive_orchestration_failure(&cause, runtime_node)?;
+        let error_route = find_matching_error_boundary(
+            &mut transaction,
+            &parents.run,
+            &parents.node_id,
+            plan,
+            &failure,
+            self.plan_limits.maximum_nodes,
+        )
+        .await?;
+        let shape = if error_route.is_none() {
+            if let Some(exit) =
+                load_parallel_leg_exit(&mut transaction, &observed, &parents, &source_node, None)
+                    .await?
+            {
+                Some(exit)
+            } else {
+                load_map_item_exit(&mut transaction, &observed, &parents, &source_node, None)
+                    .await?
+            }
+        } else {
+            None
+        };
+        let remainder_cancellation_scope_ids = if let Some(shape) = &shape {
+            load_controller_remainder_requirements(
+                &mut transaction,
+                &observed,
+                &parents,
+                plan,
+                shape,
+                ChildOutcome::Failed,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        let requirements = if error_route.is_some() {
+            ControllerMutationRequirements {
+                activation_scopes: vec![false],
+                pending_node_count: 0,
+                structural_exit: ControllerStructuralRequirement::None,
+                pending_wake: false,
+                remainder_cancellation_scope_ids,
+            }
+        } else {
+            ControllerMutationRequirements {
+                activation_scopes: Vec::new(),
+                pending_node_count: 0,
+                structural_exit: ControllerStructuralRequirement::Close,
+                pending_wake: shape.is_some(),
+                remainder_cancellation_scope_ids,
+            }
+        };
         transaction.rollback().await?;
         Ok(requirements)
     }
@@ -5559,6 +5657,24 @@ impl PgSchedulerTransaction {
                 observation,
             )
             .await?;
+            if let Some(derived) = &command.derived_expression {
+                require_exact_derived_expression_evidence(
+                    &mut transaction,
+                    &observed,
+                    &parents,
+                    &source_node,
+                    runtime_node,
+                    observation,
+                    &DerivedExpressionCommitEvidence {
+                        materialized_inputs: derived.materialized_inputs.clone(),
+                        evaluation: derived.evaluation.clone(),
+                        output_value_ids: Vec::new(),
+                    },
+                    self.plan_limits.expression,
+                    self.scope_environment_limits,
+                )
+                .await?;
+            }
         }
         let (failure, controller_code) =
             derive_orchestration_failure(&command.cause, runtime_node)?;
@@ -8850,6 +8966,7 @@ async fn load_controller_remainder_requirements(
     parents: &LockedOrchestrationJobParents,
     plan: &RuntimePlan,
     shape: &ControllerStepShape,
+    source_outcome: ChildOutcome,
 ) -> Result<Vec<ResourceId>, RepositoryError> {
     let (active_scope_ids, cancel_active) = match shape {
         ControllerStepShape::MapItemExit {
@@ -8886,7 +9003,7 @@ async fn load_controller_remainder_requirements(
                     return Err(RepositoryError::Conflict("Map cancellation Scope owner"));
                 }
                 let outcome = if scope_id == parents.scope_id {
-                    ChildOutcome::Succeeded
+                    source_outcome
                 } else {
                     let outcome = child_outcome_from_scope_state(row.try_get("state")?)?;
                     if outcome == ChildOutcome::Active {
@@ -8940,7 +9057,7 @@ async fn load_controller_remainder_requirements(
             for row in rows {
                 let scope_id: String = row.try_get("node_id")?;
                 let outcome = if scope_id == parents.scope_id {
-                    ChildOutcome::Succeeded
+                    source_outcome
                 } else {
                     let outcome = child_outcome_from_scope_state(row.try_get("state")?)?;
                     if outcome == ChildOutcome::Active {
@@ -20921,10 +21038,17 @@ pub struct FailOrchestrationJob {
     pub fence: JobFence,
     pub plan: RuntimePlan,
     pub cause: OrchestrationFailureCause,
+    pub derived_expression: Option<DerivedExpressionFailureEvidence>,
     pub idempotency_key_digest: Sha256Digest,
     pub request_digest: Sha256Digest,
     pub receipt_expires_at: DateTime<Utc>,
     pub mutations: ControllerStepMutationIds,
+}
+
+#[derive(Debug, Clone)]
+pub struct DerivedExpressionFailureEvidence {
+    pub materialized_inputs: Vec<CommittedExpressionInput>,
+    pub evaluation: ControllerEvaluation,
 }
 
 impl FailOrchestrationJob {
@@ -20935,6 +21059,22 @@ impl FailOrchestrationJob {
         self.plan
             .validate(plan_limits)
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if let Some(derived) = &self.derived_expression {
+            derived
+                .evaluation
+                .validate()
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            if !matches!(
+                &self.cause,
+                OrchestrationFailureCause::Controller { observation }
+                    if observation == &derived.evaluation.observation
+            ) || derived.materialized_inputs.len() > plan_limits.expression.maximum_input_ports
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "derived expression failure evidence is inconsistent".to_owned(),
+                ));
+            }
+        }
         if self.receipt_expires_at <= Utc::now() {
             return Err(RepositoryError::InvalidInput(
                 "orchestration failure receipt deadline is invalid".to_owned(),

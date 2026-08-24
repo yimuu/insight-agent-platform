@@ -11,7 +11,8 @@ use insight_platform_contracts::{canonical_digest, ClosedJsonValue, ResourceKind
 use insight_platform_orchestrator::{CommittedExpressionInput, RuntimeNode, RuntimePlan};
 use insight_platform_postgres::repository::{
     ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep, ControllerFacts,
-    JobFence, OrchestrationYield, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
+    DerivedExpressionFailureEvidence, FailOrchestrationJob, JobFence, OrchestrationFailureCause,
+    OrchestrationYield, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
     ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use serde_json::json;
@@ -165,20 +166,33 @@ where
             (DurableControllerPhase::CommittedFacts { .. }, None) => None,
             _ => return Err(DurablePlanDriverError::InvariantViolation),
         };
-        let requirements = self
-            .repository
-            .load_controller_mutation_requirements(
-                &command.fence,
-                &command.materialized.plan,
-                &command.observation,
-            )
-            .await
-            .map_err(classify_repository_failure)?;
-        let request_digest = canonical_digest(&json!({
+        let controller_failure = matches!(
+            command.decision,
+            insight_platform_orchestrator::ControllerDecision::FailNode { .. }
+        );
+        let requirements = if controller_failure {
+            self.repository
+                .load_controller_failure_mutation_requirements(
+                    &command.fence,
+                    &command.materialized.plan,
+                    &command.observation,
+                )
+                .await
+        } else {
+            self.repository
+                .load_controller_mutation_requirements(
+                    &command.fence,
+                    &command.materialized.plan,
+                    &command.observation,
+                )
+                .await
+        }
+        .map_err(classify_repository_failure)?;
+        let request_digest: insight_platform_contracts::Sha256Digest = canonical_digest(&json!({
             "evidence_digest": derived.as_ref().map(|(_, evaluation)| &evaluation.evidence.canonical_digest),
             "job_id": command.fence.job_id,
             "lease_generation": command.fence.lease_epoch,
-            "operation": "orchestration.controller.derived.commit",
+            "operation": if controller_failure { "orchestration.controller.fail" } else { "orchestration.controller.commit" },
             "plan_digest": command.materialized.request.artifact.content_digest(),
         }))
         .map_err(|_| DurablePlanDriverError::InvariantViolation)?
@@ -214,23 +228,60 @@ where
         let output_value_ids = (0..output_value_count)
             .map(|_| self.new_id(ResourceKind::RunValue))
             .collect::<Result<Vec<_>, _>>()?;
+        let idempotency_key_digest = self
+            .identities
+            .new_lease_token_digest()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
         let step = ApplyOrchestrationControllerStep {
-            fence: command.fence,
-            plan: command.materialized.plan,
-            observation: command.observation,
-            idempotency_key_digest: self
-                .identities
-                .new_lease_token_digest()
-                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
-            request_digest,
+            fence: command.fence.clone(),
+            plan: command.materialized.plan.clone(),
+            observation: command.observation.clone(),
+            idempotency_key_digest: idempotency_key_digest.clone(),
+            request_digest: request_digest.clone(),
             receipt_expires_at: job.started().deadline,
-            mutations,
+            mutations: mutations.clone(),
         };
         let mut transaction = self
             .repository
             .begin_scheduler_transaction()
             .await
             .map_err(classify_repository_failure)?;
+        if controller_failure {
+            let derived_expression =
+                derived.map(
+                    |(materialized_inputs, evaluation)| DerivedExpressionFailureEvidence {
+                        materialized_inputs,
+                        evaluation,
+                    },
+                );
+            let failure = transaction
+                .fail_orchestration_job(FailOrchestrationJob {
+                    fence: command.fence,
+                    plan: command.materialized.plan,
+                    cause: OrchestrationFailureCause::Controller {
+                        observation: command.observation,
+                    },
+                    derived_expression,
+                    idempotency_key_digest,
+                    request_digest,
+                    receipt_expires_at: job.started().deadline,
+                    mutations,
+                })
+                .await;
+            return match failure {
+                Ok(_) => transaction
+                    .commit()
+                    .await
+                    .map_err(classify_repository_failure),
+                Err(failure) => {
+                    transaction
+                        .rollback()
+                        .await
+                        .map_err(classify_repository_failure)?;
+                    Err(classify_repository_failure(failure))
+                }
+            };
+        }
         let applied = if let Some((inputs, evaluation)) = derived {
             transaction
                 .apply_derived_expression_controller_step(ApplyDerivedExpressionControllerStep {

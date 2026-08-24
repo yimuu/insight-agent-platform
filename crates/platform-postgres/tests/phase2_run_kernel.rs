@@ -5269,6 +5269,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         cause: OrchestrationFailureCause::Committed {
             failure: committed_failure.clone(),
         },
+        derived_expression: None,
         idempotency_key_digest: digest('2'),
         request_digest: digest('3'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -5400,6 +5401,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         cause: OrchestrationFailureCause::Controller {
             observation: join_observation,
         },
+        derived_expression: None,
         idempotency_key_digest: digest('8'),
         request_digest: digest('9'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -5427,6 +5429,27 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             remainder_cancellations: Vec::new(),
         },
     };
+    let failure_requirements = repository
+        .load_controller_failure_mutation_requirements(
+            &fail_join.fence,
+            &fail_join.plan,
+            match &fail_join.cause {
+                OrchestrationFailureCause::Controller { observation } => observation,
+                _ => unreachable!(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(failure_requirements.activation_scopes.is_empty());
+    assert_eq!(failure_requirements.pending_node_count, 0);
+    assert!(matches!(
+        failure_requirements.structural_exit,
+        insight_platform_postgres::repository::ControllerStructuralRequirement::Close
+    ));
+    assert!(!failure_requirements.pending_wake);
+    assert!(failure_requirements
+        .remainder_cancellation_scope_ids
+        .is_empty());
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let failed_run = match scheduler
         .fail_orchestration_job(fail_join.clone())
@@ -5603,6 +5626,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         cause: OrchestrationFailureCause::Committed {
             failure: committed_failure.clone(),
         },
+        derived_expression: None,
         idempotency_key_digest: digest('4'),
         request_digest: digest('5'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -5740,6 +5764,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         cause: OrchestrationFailureCause::Committed {
             failure: handler_failure.clone(),
         },
+        derived_expression: None,
         idempotency_key_digest: digest('9'),
         request_digest: digest('a'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -7448,6 +7473,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 cause: OrchestrationFailureCause::Committed {
                     failure: committed_failure.clone(),
                 },
+                derived_expression: None,
                 idempotency_key_digest: settle.idempotency_key_digest.clone(),
                 request_digest: settle.request_digest.clone(),
                 receipt_expires_at: settle.receipt_expires_at,
@@ -7863,6 +7889,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         cause: OrchestrationFailureCause::Committed {
             failure: committed_failure.clone(),
         },
+        derived_expression: None,
         idempotency_key_digest: digest('b'),
         request_digest: digest('c'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -8032,6 +8059,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 children: vec![ChildOutcome::Failed, ChildOutcome::Cancelled],
             },
         },
+        derived_expression: None,
         idempotency_key_digest: digest('1'),
         request_digest: digest('2'),
         receipt_expires_at: Utc::now() + Duration::hours(1),

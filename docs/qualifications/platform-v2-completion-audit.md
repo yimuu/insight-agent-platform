@@ -68,7 +68,8 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    readiness/drain和Helm Deployment。
 2. `StartedOrchestrationJobHandler`已有正式materialize→commit/handoff生命周期adapter；PostgreSQL durable Plan store已闭合
    Start/Compute/Branch/Fork/Join/Map/Loop/ErrorBoundary成功控制路径的durable fact读取、Inline RunValue物化、精确mutation-slot
-   规划、通用或derived fenced commit与retry handoff，但controller failure/Run terminal及Leaf/Task/Subagent分派尚未接入该store，
+   规划、通用或derived fenced commit与retry handoff；FailNode现在也从locked facts推导ErrorBoundary/structured-exit/wake/
+   sibling-cancellation槽，并在失败owner transaction重验expression evidence。Run terminal及Leaf/Task/Subagent分派尚未接入该store，
    Artifact-backed RunValue仍缺Scheduler侧Artifact Data RPC materializer，因此完整production composition仍未闭合；
    exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
    exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure；
