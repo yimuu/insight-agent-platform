@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-179 |
+| 状态 | Accepted / CR-180 |
 | 日期 | 2026-08-24 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
@@ -10,6 +10,10 @@
 > Persistence ruling：逻辑 work 及其 current execution 统一由 03 的 `Job` 表达，Attempt 仅是
 > `(JobId, lease_generation)` 标识的历史观测；Continuation 统一为 Job 内的 `WakeContract`，HumanTask
 > 与 Approval 统一为 `Task`。历史 `execution_attempts`、`continuations` 与 transition 表不再是目标结构。
+
+> CR-180：Return/Raise terminal source由05 Plan v3的exact port冻结。Scheduler不能构造final正文；terminal owner transaction
+> 必须从当前Scope词法环境解析immutable RunValue，重验tenant/run/value/schema/content/classification并在可见正文上执行exact
+> Agent output/error schema校验后，才可提交Run terminal、Node/Job、Receipt/Event/Outbox与output引用。
 
 ## 1. 决策摘要
 
@@ -450,6 +454,10 @@ intent；`TimedOut`存在不早于deadline的timeout intent；冻结的Run proje
 
 - `Succeeded` 必须有通过 Agent output schema 的 final ValueRef；
 - `Failed` 必须有 safe Failure；
+- `Return.value`和`Raise.failure`只选择已提交RunValue，不复制第二份current value；Inline正文在terminal事务内直接校验，
+  Artifact-backed正文必须在事务外经Artifact Data Worker物化并携带exact evidence，事务内重新锁定同一RunValue与Ready Artifact authority；
+- terminal source缺失、Scope已关闭、schema/content digest漂移、正文校验失败或classification与RunValue不一致时，Run/Node/Job/
+  Receipt/Event/Outbox及Artifact Reference全部不可见；
 - `Cancelled` 保存发起 principal/reason code，不保存自由文本正文；
 - `TimedOut` 保存 deadline 与 unresolved effect summary；
 - terminal transaction 同时写 Run snapshot、transition、Artifact references、public terminal outbox；

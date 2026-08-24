@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-179 |
+| 状态 | Accepted / CR-180 |
 | 日期 | 2026-08-24 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
@@ -77,6 +77,11 @@ count、Loop condition或Compute output。表达式求值消耗Orchestration本�
 
 Scheduler可携带事务外物化的value正文，但不能决定Compute output classification；repository在提交事务从exact input RunValue rows
 按05 lattice规则重算effective classification，空input闭包使用`Internal`，并把同一结果写入全部Compute output。
+
+Return/Raise使用05 Plan v3冻结的exact terminal port。Scheduler只能请求物化该port解析出的immutable RunValue正文并生成bounded
+terminal evidence；不能选择另一个value、声明schema/classification或把Worker outcome直接当Run terminal。owner transaction必须重新解析
+当前Scope环境、重验RunValue及Interface schema，并以同一提交关闭Node/Job/root Scope/Run及写Receipt/Event/Outbox。Artifact Data RPC
+deadline不得越过Job/Run deadline，读取前后沿用exact lease与Run binding双重授权。
 
 Loop body settlement的owner command必须携带bounded rollover mutation slots（下一Scope、每个carried RunValue及Event/Outbox ID），
 但不能携带carried正文、classification或port。repository从exact Plan和当前iteration Scope解析`body_output_port`，复制immutable

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-179 |
+| 状态 | Accepted / CR-180 |
 | 日期 | 2026-08-24 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -219,7 +219,9 @@ code/image/schema digest、seed、topology、start/end time、tool version、res
   Branch/Map/Loop/Compute，禁止fixture注入observation；classification fixture覆盖多级input lattice join、空input `Internal`、caller降级、
   Artifact metadata漂移及整批原子回滚；Map fixture覆盖wrong producer/item schema、每item独立RunValue、动态Scope隔离和批次重放；
   Loop fixture覆盖carried pair producer/schema负向、body output缺失、rollover ID冲突整批回滚、下一Scope condition/body复用、false exit
-  关闭Scope、两个iteration不串值及crash/replay不重复RunValue；
+  关闭Scope、两个iteration不串值及crash/replay不重复RunValue；Return/Raise fixture覆盖Plan v1/v2拒绝、wrong producer/schema、
+  lexical Scope shadow、缺失/跨Run/terminal Scope value、Inline正文或Artifact digest漂移、Agent output/error schema失败、stale fence、
+  ID冲突整批回滚及Receipt replay；L3从Artifact Data RPC物化terminal正文后kill/restart仍由owner transaction产生唯一Run terminal；
 - rolling drain、Pod/Node/DB/NATS/S3/KMS/Egress fault injection和整体recovery；
 - 持续soak中无无界queue/memory/connection/Artifact orphan/recovery lag增长。
 

@@ -2,13 +2,17 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-179 |
+| 状态 | Accepted / CR-180 |
 | 日期 | 2026-08-24 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
 
 > Persistence ruling：Agent、Revision 与 Deployment 复用 02 的共享 Resource 模型；运行事实复用 03 的共享聚合。
 > 本规范不再定义 Agent 专用 lifecycle/evidence/head/suspension 表。
+
+> 2026-08-24 implementation feedback（CR-180）：Run terminal接线时确认无字段的`Return`/`Raise`无法从冻结Plan确定
+> final value或safe Failure，而06要求Succeeded/Failed各自拥有typed terminal authority。CR-180将两者收紧为exact data-port
+> consumer并把未发布Plan wire提升为version 3；调用方和Worker不得提交自由terminal正文或schema。
 
 ## 1. 决策摘要
 
@@ -246,13 +250,18 @@ struct ComputeNode { assignments: Vec<PortAssignment>, next: PlanNodeId }
 struct BranchNode { ordered_arms: Vec<{ when: TypedExpressionProgram, target: PlanNodeId }>, otherwise: PlanNodeId }
 struct MapNode { items: TypedExpressionProgram, item_port: ExactDataPortRef, body: PlanNodeId, next: PlanNodeId, max_items: u32, failure_policy: MapFailurePolicy }
 struct LoopNode { condition: TypedExpressionProgram, carried_ports: Vec<LoopCarriedPort>, body: PlanNodeId, exit: PlanNodeId, max_iterations: u32 }
+struct ReturnNode { value: ExactDataPortRef }
+struct RaiseNode { failure: ExactDataPortRef }
 ```
 
 `Compute.assignments`必须按拓扑排序且每个output port只写一次；Branch按声明顺序执行并始终有`otherwise`；Map的`items`
 输出必须是有界array；Loop的`condition`输出必须是non-null boolean。表达式所需input port是Node readiness条件的一部分。
 Map `item_port`必须是producer等于当前Map node的`NodeOutput` ref并冻结element schema digest；Compiler/publication必须从items
 array schema验证其element schema完全一致，不能在runtime从array digest猜测、复用array schema或接受caller声明。该wire变更将未发布
-Typed Plan `plan_version`提升为2，version 1不进入clean-cut target。
+Typed Plan `plan_version`提升为3，version 1/2不进入clean-cut target。`Return.value`必须在其词法Scope可达，schema digest必须等于
+exact Agent Interface Revision的`output_schema.canonical_digest`；`Raise.failure`同样必须可达并等于该Interface的
+`error_schema` canonical digest，且物化正文必须能解码为平台safe `Failure` nominal type。Compiler/publication拒绝RunInput/NodeOutput
+owner不合法、schema不等、跨结构化region或无法在该terminal路径到达的port。
 
 表达式classification不是caller输入，也不增加可降级的output annotation。同一expression controller先对全部external input
 RunValue classification做`Public < Internal < Confidential < Restricted` lattice join；Compute的全部派生output继承该join结果。

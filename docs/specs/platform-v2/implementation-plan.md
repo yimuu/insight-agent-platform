@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-179）
+# Platform v2 四阶段实现计划（CR-180）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-179 contracts accepted; L4～L6 pending |
+| 状态 | In Progress / CR-180 contracts accepted; L4～L6 pending |
 | 日期 | 2026-08-24 |
-| 合同输入 | 00～18、cross-review CR-179/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-180/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则
@@ -33,6 +33,10 @@ MapItem Scope/Node/Job/batch cursor原子提交，wrong producer/schema与批次
 
 CR-179冻结Loop carried Scope生命周期：body settlement原子复制carried RunValue并预建下一iteration Scope，continuation condition与
 body复用该open Scope，false exit原子关闭并回到固定词法父Scope；iteration Scope不得串成父链或读取terminal Scope。
+
+CR-180冻结Run terminal authority：Plan v3的Return/Raise分别引用exact final value/failure port，publication对齐Agent
+output/error schema；Phase 2必须实现bounded Scope解析、Inline/Artifact正文物化与owner transaction重验，证明terminal RunValue/
+Reference、Scope/Node/Job/Run、quota、Receipt/Event/Outbox为单一first-winner原子提交，并拒绝Plan v1/v2与外部terminal注入。
 
 实现遵循以下顺序：
 

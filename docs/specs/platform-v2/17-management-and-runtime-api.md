@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-174 |
+| 状态 | Accepted / CR-180 |
 | 日期 | 2026-08-23 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
@@ -185,7 +185,8 @@ Run admission在一个事务中解析所选Agent Resource的tenant-scoped active
 Idempotency-Key按tenant/principal/agent collection scope绑定，重放返回第一次生成的Run及其原始投影。
 
 public DTO、query/header与任何public/internal generic proxy都不得接受`ControllerObservation`、Branch selected target、Map item
-count/cursor、Loop condition/iteration、Compute assignment、expression result/evidence或Plan/Node/Job内部ID。这些字段仅由05/06的
+count/cursor、Loop condition/iteration、Compute assignment、expression result/evidence、Return/Raise terminal value/failure、
+terminal schema/classification或Plan/Node/Job内部ID。这些字段仅由05/06的
 closed evaluator和Scheduler生成，并在owner transaction按exact RunValue/Plan/fence重验。内部Artifact Typed Plan读取RPC只接受
 Scheduler workload identity与exact fenced descriptor，不暴露为Runtime API。
 
@@ -347,7 +348,7 @@ operation age/outcome、internal RPC latency/denial和DB pool utilization。tena
 - Run admission只有完整binding snapshot事务成功才返回201；
 - SSE在NATS丢失/断线后从Event cursor恢复，慢client不使服务内存无界；
 - public/internal route无Secret、object locator、DB payload、lease token或敏感正文泄漏；
-- Run/control route对unknown observation/selected-target/item-count/loop-condition/compute-result字段一律以`invalid_request`拒绝，
+- Run/control route对unknown observation/selected-target/item-count/loop-condition/compute-result/terminal-value/failure字段一律以`invalid_request`拒绝，
   且domain repository调用计数为零；
 - API、Sandbox、Artifact与critical-control饱和隔舱符合18资格合同。
 

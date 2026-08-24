@@ -1,13 +1,18 @@
-# Platform v2 00～18 Cross-review（CR-179）
+# Platform v2 00～18 Cross-review（CR-180）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-179 Accepted |
+| 状态 | Closed / CR-180 Accepted |
 | 日期 | 2026-08-24 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-179 implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-180 implementation feedback |
 | 目的 | 验证简化后的状态、ID、schema、错误、事务、事件、权限、容量、恢复、Draft/Deployment/Run admission authority和fixture闭包 |
 
 ## 1. 结论
+
+CR-180发现的terminal source P1已按05→06→07→17→18关闭：Plan v3用exact data port冻结Return final value与Raise safe
+Failure，publication对齐exact Agent Interface output/error schema，Scheduler只物化immutable RunValue，owner transaction重新解析
+Scope并重验value/schema/content/classification及正文后原子提交terminal。Plan v1/v2 clean-cut拒绝；不增加表、current projection、
+WorkClass、public字段或兼容层。
 
 CR-179发现的Loop carried Scope lifecycle P1已按05→06→07→18关闭：body settlement复制immutable carried RunValue并预建下一
 iteration open Scope，continuation condition与同轮body复用该Scope，false exit原子关闭并回到固定词法父Scope；所有iteration Scope
@@ -42,7 +47,7 @@ immutable exact Deployment closure、Resource active binding和AdministrativeGat
 lifecycle、generated owner schema与八类public route保持同一authority。Acceptance 13～17的正负、并发、Receipt/Event/Outbox与
 machine-contract门禁通过，00～18全量复核未发现新的P0/P1合同冲突。
 
-因此CR-179恢复Implementation Authorization并将受影响合同推进为Accepted。Accepted只表示target合同闭合；它不表示target已成为
+因此CR-180恢复Implementation Authorization并将受影响合同推进为Accepted。Accepted只表示target合同闭合；它不表示target已成为
 current production behavior，也不替代18要求的L4～L6、CapacityProfile、restore/soak、signed supply-chain或GitOps cutover证据。
 
 CR-171继承CR-170的public Artifact DTO与可信服务交接结论，并消解实施反馈发现的tenant Artifact default Policy authority缺口。全量审查确认首版目标收敛为：
@@ -87,11 +92,12 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / CR-179 | target协议、authority与current-behavior边界闭合 |
-| 01～04 | Accepted / CR-173（CR-179影响复核） | owner、ID、Resource、Policy、persistence authority不变 |
-| 05～07 | Accepted / CR-179 | Plan v2、Map/Loop Scope binding与Scheduler边界闭合 |
-| 08～17 | Accepted / CR-173/174（CR-179影响复核） | domain owner与public禁止internal port注入不变 |
-| 18 | Accepted / CR-179 | profile v5不变；Map/Loop隔离、原子性与重放资格矩阵闭合 |
+| 00 | Accepted / CR-180 | target协议、authority与current-behavior边界闭合 |
+| 01～04 | Accepted / CR-173（CR-180影响复核） | owner、ID、Resource、Policy、persistence authority不变 |
+| 05～07 | Accepted / CR-180 | Plan v3 terminal ports、Map/Loop Scope binding与Scheduler边界闭合 |
+| 08～16 | Accepted / CR-173/174（CR-180影响复核） | domain owner与leaf协议不变 |
+| 17 | Accepted / CR-180 | public/internal generic proxy禁止terminal authority注入 |
+| 18 | Accepted / CR-180 | profile v5不变；terminal/Map/Loop原子性与重放资格矩阵闭合 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | In Progress | L1～L3与public contract已恢复；L4～L6、CapacityProfile和GitOps cutover仍待外部资格环境 |
@@ -184,6 +190,24 @@ CR-178全量影响复核确认不改变03表结构、08～16外部协议、17 pu
 - **fixtures**：L1覆盖pair schema/producer/duplicate；L2覆盖两轮不串值、Scope复用、false close、stale fence/ID冲突/Receipt replay；L3覆盖settlement与wake间crash恢复。
 
 CR-179全量影响复核确认不改变baseline表、Plan wire/profile版本、08～17外部协议/public DTO、Artifact/Model/MCP/Sandbox拓扑或GitOps发布权威。
+
+### 2.7 CR-180 Return/Raise terminal authority cross-review
+
+- **State ownership**：final正文/Failure唯一authority仍是immutable RunValue；Return/Raise只冻结exact port，Run拥有唯一terminal state，
+  Receipt/Event只保存bounded evidence，不建立terminal value projection。
+- **IDs与schema**：沿用ExactDataPortRef、ExactRunValueRef与Agent Interface Revision；Plan wire提升到version 3且不接受v1/v2。
+  Return schema必须等于output schema，Raise schema必须等于error schema并解码为safe Failure。
+- **事务与并发**：terminal owner锁定Job/Run/Node/root Scope，按词法环境解析port并重验tenant/run/value/schema/content/classification；
+  RunValue/output link、Scope/Node/Job/Run、quota、Receipt/Event/Outbox同一first-winner事务，stale fence或任一漂移整批不可见。
+- **错误与权限**：missing/cross-run/closed Scope、wrong producer/schema、正文schema失败映射closed plan/integrity failure；public、Worker、
+  NATS和generic internal proxy均不能提交terminal正文、Failure、schema或classification。
+- **容量与恢复**：lookup与正文上限复用既有Scope/value-ref/Inline/Artifact profile；Artifact读取沿用Data Worker exact lease授权；重启从
+  Plan、Scope和RunValue恢复，不依赖进程缓存或第二queue。
+- **fixtures**：L1 Plan v1/v2与port/schema负向；L2 fresh PostgreSQL覆盖Inline/Artifact、shadow、stale fence、ID冲突、原子回滚/replay；
+  L3覆盖Data RPC物化与terminal窗口kill/restart。L4～L6沿用既有topology/capacity/release门禁。
+
+CR-180逐份复核00～18的state ownership、IDs、JSON schema、errors、transactions、events、permissions、capacity、failure recovery和fixtures；
+01～04、08～16无需新字段，baseline仍为23/22表，HardLimitProfile仍为v5，Artifact/Model/MCP/Sandbox/GitOps与`/v1` clean-cut不变。
 
 ## 3. 状态所有权
 
@@ -418,10 +442,12 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
     MapItem Scope/Node/Job/cursor原子提交并覆盖batch crash/replay与动态Scope隔离，不新增表/profile/public字段。
 22. Loop carried pair冻结exact body/next NodeOutput与相同schema；body settlement预建下一open Scope并原子复制binding，continuation/body
     复用该Scope，false exit关闭并返回固定词法父Scope；两轮不串值、不读terminal Scope、不形成父链自环，冲突与crash/replay无部分rollover。
+23. Typed Plan version 3的Return/Raise冻结exact terminal port并分别对齐Agent output/error schema；v1/v2、wrong producer/schema、
+    missing/cross-run/closed Scope value、正文或Artifact digest漂移、stale fence与ID冲突fail closed，terminal提交/replay无部分状态。
 
 ## 16. 未决项
 
-CR-179合同范围没有未关闭P0/P1。Acceptance 22与既有13～21形成单一闭包，00～18状态为Accepted。
+CR-180合同范围没有未关闭P0/P1。Acceptance 23与既有13～22形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

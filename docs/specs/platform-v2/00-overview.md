@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-179 |
+| 状态 | Accepted / CR-180 |
 | 日期 | 2026-08-24 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -58,6 +58,10 @@
 > 预建下一iteration的open Scope并绑定复制后的immutable carried RunValue，continuation在该Scope求值且condition为true时body复用同一
 > Scope；condition为false时原子关闭它并从词法父Scope激活exit。所有iteration Scope保持同一root Loop controller owner，不形成跨轮父链。
 
+> 2026-08-24 implementation feedback（CR-180）：Run terminal接线时确认无字段`Return`/`Raise`无法满足Succeeded final ValueRef与
+> Failed safe Failure不变量。CR-180把二者收紧为引用exact data port的Plan v3 terminal consumer；Compiler/publication对齐Agent
+> output/error schema，Scheduler只物化已提交RunValue，owner transaction重验Scope、value、schema/content/classification及正文。
+
 ## 1. 决策摘要
 
 Platform v2 采用以下不可逆的架构决定：
@@ -84,14 +88,14 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Accepted / CR-179 | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | Accepted / CR-180 | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-173 | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-173 | ID、Resource、Version、Deployment、Binding |
 | 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-176 | PostgreSQL、事务、Outbox、Lease、恢复 |
 | 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-173 | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-179 | Agent Interface、Typed Plan、Model Loop |
-| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-179 | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-179 | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-180 | Agent Interface、Typed Plan、Model Loop |
+| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-180 | Run、NodeExecution、暂停、重试、取消 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-180 | Scheduler、Worker、Lease、背压和隔舱并发 |
 | 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-173 | Child Run、父子通信、取消传播和循环限制 |
 | 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / CR-173 | Capability Interface、Implementation、Registry |
 | 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-173 | 调用协议、幂等、同步快路径、异步恢复 |
@@ -101,8 +105,8 @@ Platform v2 采用以下不可逆的架构决定：
 | 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-173 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-173 | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-173 | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-174 | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-179 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-180 | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-180 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得
