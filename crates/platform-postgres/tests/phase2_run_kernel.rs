@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use insight_platform_artifacts::{
-    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, SchedulerTypedPlanLease,
-    SchedulerTypedPlanRequestResolver,
+    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, SchedulerRunValueLease,
+    SchedulerRunValueRequestResolver, SchedulerTypedPlanLease, SchedulerTypedPlanRequestResolver,
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, pinned_nominal_reference,
@@ -914,7 +914,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         lease_token_digest: digest('0'),
         request_digest: digest('3'),
         maximum_bytes: typed_plan_bytes.len(),
-        deadline: Utc::now() + Duration::milliseconds(100),
+        deadline: Utc::now() + Duration::milliseconds(400),
     })
         .await
         .unwrap();
@@ -931,9 +931,123 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         repository.authorize_object_read(&wrong_fence).await,
         Err(ArtifactObjectReadAuthorityError::Denied)
     ));
+    let artifact_value_body = json!({"question": "artifact terminal"});
+    let artifact_value_bytes = canonical_json(&artifact_value_body).unwrap();
+    let artifact_value_digest: Sha256Digest = canonical_digest(&artifact_value_body)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let artifact_value_metadata =
+        TypedPayload::new(1, &json!({"display_name": "terminal.json"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest,
+            security_domain_digest, object_reference_ciphertext, object_generation, key_id,
+            encryption_domain_id, content_digest, size_bytes, state, verified_at,
+            created_at, updated_at
+        ) VALUES ($1, $2, 'fixture', $3, $4, $5, 'run-value-generation-1',
+                  'fixture-key', $6, $7, $8, 'verified', statement_timestamp(),
+                  statement_timestamp(), statement_timestamp())
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind("blb_0198f1c3-9a00-7c3e-b1f3-773c2836ae00")
+    .bind(digest('5').to_string())
+    .bind(digest('6').to_string())
+    .bind(vec![10_u8, 11, 12])
+    .bind("enc_0198f1c3-9a00-7c3e-b1f3-773c2836ae03")
+    .bind(artifact_value_digest.to_string())
+    .bind(i64::try_from(artifact_value_bytes.len()).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, metadata_schema_version, metadata,
+            metadata_digest, retention_policy_revision_id, retain_until, created_by
+        ) VALUES ($1, $2, $3, 'run_output', 'internal', $4, $5,
+                  'application/json', 'application/json', 'ready', $6, $7, $8,
+                  $9, $10, $11)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind("art_0198f1c3-9a00-7c3e-b1f3-773c2836ae01")
+    .bind("blb_0198f1c3-9a00-7c3e-b1f3-773c2836ae00")
+    .bind(i64::try_from(artifact_value_bytes.len()).unwrap())
+    .bind(artifact_value_digest.to_string())
+    .bind(artifact_value_metadata.schema_version)
+    .bind(&artifact_value_metadata.value)
+    .bind(&artifact_value_metadata.digest)
+    .bind(POLICY_REVISION_ID)
+    .bind(Utc::now() + Duration::days(30))
+    .bind(PRINCIPAL_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_values (
+            tenant_id, value_id, run_id, node_id, value_kind, classification,
+            schema_digest, content_digest, inline_value, artifact_id
+        ) VALUES ($1, $2, $3, NULL, 'terminal_fixture', 'internal', $4, $5, NULL, $6)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind("val_0198f1c3-9a00-7c3e-b1f3-773c2836ae02")
+    .bind(running_for_recovery.run_id.as_deref().unwrap())
+    .bind(agent_schema().canonical_digest.to_string())
+    .bind(artifact_value_digest.to_string())
+    .bind("art_0198f1c3-9a00-7c3e-b1f3-773c2836ae01")
+    .execute(&pool)
+    .await
+    .unwrap();
+    let run_value_lease = SchedulerRunValueLease {
+        tenant_id: id(TENANT_ID),
+        run_id: id(running_for_recovery.run_id.as_deref().unwrap()),
+        orchestration_job_id: id(&running_for_recovery.job_id),
+        worker_process_generation_id: id(WORKER_D_ID),
+        lease_generation: u64::try_from(running_for_recovery.lease_epoch).unwrap(),
+        lease_token_digest: digest('0'),
+        run_value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c2836ae02"),
+        request_digest: digest('7'),
+        maximum_bytes: artifact_value_bytes.len(),
+        deadline: Utc::now() + Duration::milliseconds(400),
+    };
+    let run_value_read = repository
+        .resolve_run_value_read(run_value_lease.clone())
+        .await
+        .unwrap();
+    assert_eq!(run_value_read.schema_digest, agent_schema().canonical_digest);
+    assert_eq!(run_value_read.classification, DataClassification::Internal);
+    assert_eq!(
+        run_value_read.artifact.artifact_id(),
+        &id("art_0198f1c3-9a00-7c3e-b1f3-773c2836ae01")
+    );
+    let authorized_value = repository
+        .authorize_object_read(&run_value_read)
+        .await
+        .unwrap();
+    assert_eq!(
+        authorized_value.blob_id,
+        id("blb_0198f1c3-9a00-7c3e-b1f3-773c2836ae00")
+    );
+    let mut wrong_value = run_value_lease;
+    wrong_value.run_value_id = id("val_0198f1c3-9a00-7c3e-b1f3-773c2836ae04");
+    assert!(matches!(
+        repository.resolve_run_value_read(wrong_value).await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
     tokio::time::sleep(std::time::Duration::from_millis(550)).await;
     assert!(matches!(
         repository.authorize_object_read(&typed_plan_read).await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
+    assert!(matches!(
+        repository.authorize_object_read(&run_value_read).await,
         Err(ArtifactObjectReadAuthorityError::Denied)
     ));
     let running_recovery = DriveExpiredOrchestrationJobs {
