@@ -1,8 +1,8 @@
-# Platform v2 四阶段实现计划（CR-181）
+# Platform v2 四阶段实现计划（CR-183）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-182 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-183 contracts accepted; L3～L6 pending |
 | 日期 | 2026-08-24 |
 | 合同输入 | 00～18、cross-review CR-181/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 
@@ -11,6 +11,8 @@
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。
 
 > CR-182 cross-review已关闭并恢复实现授权；candidate selection必须使用04 schema v1三种closed mode与共享纯evaluator。
+
+> CR-183确认Selection document自身不含digest，publication只接受外层`rules_digest == canonical(document)`。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则

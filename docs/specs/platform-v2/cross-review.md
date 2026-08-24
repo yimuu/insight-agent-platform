@@ -1,10 +1,10 @@
-# Platform v2 00～18 Cross-review（CR-182）
+# Platform v2 00～18 Cross-review（CR-183）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-182 Accepted |
+| 状态 | Closed / CR-183 Accepted |
 | 日期 | 2026-08-24 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-182 selection program implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-183 selection digest implementation feedback |
 
 > CR-182重新打开04 selection program及05～11/16/18影响复核；CR-181历史结论保留，但在closed selector owner schema、
 > deterministic evaluator、evidence重验和L1～L3 fixture闭合前不授权selection/leaf dispatch实现。
@@ -20,6 +20,13 @@
 
 CR-182逐份00～18影响复核没有未关闭P0/P1，形成Acceptance 25：Selection Policy document schema v1非空且closed，三个mode与route
 presence/schema严格匹配，Scheduler与repository共享纯evaluator并由owner transaction重算；unknown/漂移/fallback全部fail closed。
+
+### CR-183 selection document digest cross-review
+
+CR-183删除Selection document内不可能闭合的自引用digest，复用Policy Resource唯一`rules_digest`与exact Revision semantic digest。
+02/09 publication、04 selector、06/07 owner重验与18 fixture均已有对应digest边界；05、08、10～17、baseline、Plan v4、API与topology无字段或
+authority变化。Acceptance 26：Selection document canonical bytes不含自身digest，publication要求`rules_digest == canonical(document)`，
+runtime exact binding继续验证Revision/Deployment digest。00～18影响复核无未关闭P0/P1。
 
 > CR-181重新打开本cross-review。CR-180的历史结论保留为审计记录，但不再授权实现；需按05→06～16→17→18顺序
 > 复核04 candidate selection及Plan v4 external leaf payload的state ownership、IDs、schema、transaction、event、permission、capacity、recovery与fixture后
@@ -111,9 +118,9 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / CR-182 | target协议、authority与current-behavior边界闭合 |
+| 00 | Accepted / CR-183 | target协议、authority与current-behavior边界闭合 |
 | 01～03 | Accepted / CR-173/176（CR-181影响复核） | owner、ID、Resource与persistence authority不变 |
-| 04 | Accepted / CR-182 | exact candidate selection program/evidence与owner重验闭合 |
+| 04 | Accepted / CR-183 | exact candidate selection program/evidence与owner重验闭合 |
 | 05～07 | Accepted / CR-182 | Plan v4 leaf/terminal ports、Scope binding与Scheduler边界闭合 |
 | 08～16 | Accepted / CR-182 impact review | domain owner只消费exact dispatch/result snapshot，无第二authority |
 | 17 | Accepted / CR-181 | public/internal generic proxy禁止leaf与terminal authority注入 |
@@ -489,10 +496,11 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
     node声明output并创建唯一resume Job，Plan v1/v2/v3及caller-supplied dispatch/result字段fail closed，L1～L3覆盖crash/replay。
 25. Selection Policy document schema v1非空且closed；`only_candidate | ordered_first | route_hash`使用唯一canonical排序/hash算法，
     Scheduler与repository共享纯evaluator并由owner transaction重算，unknown/route漂移/集合外结果/health fallback全部fail closed。
+26. Selection document不保存自引用digest；Policy `rules_digest`唯一等于document canonical digest，exact Revision/Deployment binding冻结runtime identity。
 
 ## 16. 未决项
 
-CR-182合同范围没有未关闭P0/P1。Acceptance 25与既有13～24形成单一闭包，00～18状态为Accepted。
+CR-183合同范围没有未关闭P0/P1。Acceptance 26与既有13～25形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

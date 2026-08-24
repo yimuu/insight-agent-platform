@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
+| 状态 | Accepted / CR-183 |
 | 日期 | 2026-08-24 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -14,6 +14,9 @@
 
 > 2026-08-24 implementation feedback（CR-182）：CR-181冻结了CandidateSelectionEvidence却没有冻结可执行selector program，
 > `PolicyKind::Selection`仍允许空document。CR-182补齐首版closed selector mode并暂停selection/leaf dispatch实现，直到影响复核关闭。
+
+> CR-183 implementation feedback：CR-182示例误把`semantic_digest`放进自身canonical document。Selection Policy沿用02/09
+> `PolicyResourceSpec.rules_digest`作为唯一外部digest，document不保存自引用digest。
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
 
 > `Platform v2` 是架构代号，不是公共 API 版本。目标系统会在 clean replacement 后直接占用 `/v1` 和
@@ -96,11 +99,11 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Accepted / CR-182 | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | Accepted / CR-183 | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-173 | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-173 | ID、Resource、Version、Deployment、Binding |
 | 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-176 | PostgreSQL、事务、Outbox、Lease、恢复 |
-| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-182 | 多租户、授权、Secret、Effect、Quota、Approval |
+| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-183 | 多租户、授权、Secret、Effect、Quota、Approval |
 | 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-182 | Agent Interface、Typed Plan、Model Loop |
 | 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-182 | Run、NodeExecution、暂停、重试、取消 |
 | 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-182 | Scheduler、Worker、Lease、背压和隔舱并发 |

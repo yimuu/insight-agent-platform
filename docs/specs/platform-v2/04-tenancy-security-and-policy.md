@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
+| 状态 | Accepted / CR-183 |
 | 日期 | 2026-08-20 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
@@ -219,9 +219,11 @@ struct CandidateSelectionPolicyDocument {
     schema_version: u32, // 固定1
     mode: OnlyCandidate | OrderedFirst | RouteHash,
     route_schema_digest: Option<Digest>,
-    semantic_digest: Digest,
 }
 ```
+
+document canonical digest由外层`PolicyResourceSpec.rules_digest`唯一保存并在publication重验；document内部不得保存自身digest，
+Selection Policy Deployment/Binding再通过exact Revision semantic digest冻结该published document。
 
 `only_candidate`要求exact candidate count为1且没有route；`ordered_first`要求没有route并选择规范排序后的第一个candidate；
 `route_hash`要求route schema digest完全匹配，计算route canonical JSON bytes的SHA-256，将digest作为大端无符号整数对candidate count
