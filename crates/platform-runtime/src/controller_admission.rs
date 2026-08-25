@@ -21,6 +21,41 @@ use serde_json::Value;
 use sqlx::Row;
 use std::collections::BTreeMap;
 
+pub type ControllerModelPolicyFacts =
+    insight_platform_postgres::model_turn_repository::ExactModelPolicyFacts;
+
+#[derive(Clone)]
+pub struct PostgresControllerModelPolicyLoader {
+    repository: PgRepository,
+}
+
+impl PostgresControllerModelPolicyLoader {
+    pub fn new(repository: PgRepository) -> Self {
+        Self { repository }
+    }
+
+    pub async fn load_exact(
+        &self,
+        tenant_id: &insight_platform_contracts::ResourceId,
+        selected_deployment: &insight_platform_contracts::ExactDeploymentRef,
+    ) -> Result<ControllerModelPolicyFacts, DurablePlanDriverError> {
+        self.repository
+            .load_exact_model_policy_facts(tenant_id, selected_deployment)
+            .await
+            .map_err(|failure| match failure {
+                insight_platform_postgres::repository::RepositoryError::Database(_) => {
+                    DurablePlanDriverError::Unavailable
+                }
+                insight_platform_postgres::repository::RepositoryError::NotFound(_)
+                | insight_platform_postgres::repository::RepositoryError::StaleFence
+                | insight_platform_postgres::repository::RepositoryError::LeaseExpired => {
+                    DurablePlanDriverError::FenceLost
+                }
+                _ => DurablePlanDriverError::InvariantViolation,
+            })
+    }
+}
+
 #[derive(Clone)]
 pub struct PostgresControllerCapabilityAdmissionProvider {
     repository: PgRepository,

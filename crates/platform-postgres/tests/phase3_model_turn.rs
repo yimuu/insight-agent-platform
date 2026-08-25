@@ -11,9 +11,10 @@ use insight_platform_contracts::{
     CommandAudit, CommandOutcome, ContextWindowContract, DataClassification, DataRegion,
     DecimalMoney, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
     ExactPolicyBinding, ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding,
-    FrozenSlotTarget, InstalledModelAdapter, JobState, ModelCatalogEvidence,
-    ModelDeploymentClosure, ModelIdentityStability, ModelLimits, ModelModalities,
-    ModelProfileResourceSpec, ModelProviderDeploymentClosure, ModelProviderResourceSpec,
+    FrozenSlotTarget, InstalledModelAdapter, JobState, ModelBudgetPolicyDocument,
+    ModelCatalogEvidence, ModelDeploymentClosure, ModelIdentityStability, ModelLimits,
+    ModelModalities, ModelProfileResourceSpec, ModelProviderDeploymentClosure,
+    ModelProviderResourceSpec, ModelPublicProjectionPolicyDocument, ModelSafetyPolicyDocument,
     ModelToolContract, ModelTurnState, ModelUsageContract, NativeCapabilityContract, Permission,
     PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, ProviderDataHandlingContract,
@@ -64,6 +65,7 @@ use insight_platform_postgres::{
 use insight_platform_registry::CreateDeployment;
 use insight_platform_security::BindTenantSchedulingPolicy;
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::collections::BTreeMap;
 
@@ -80,6 +82,15 @@ fn digest(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
         .unwrap()
+}
+
+fn raw_digest(bytes: &[u8]) -> Sha256Digest {
+    let mut encoded = String::from("sha256:");
+    for byte in Sha256::digest(bytes) {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").unwrap();
+    }
+    encoded.parse().unwrap()
 }
 
 fn named_digest(label: &str) -> Sha256Digest {
@@ -607,6 +618,70 @@ async fn seed_policy_versions(
     policies: &[ExactVersionRef],
 ) {
     for (index, exact) in policies.iter().enumerate() {
+        let selection = (index == 8).then_some(CandidateSelectionPolicyDocument {
+            schema_version: 1,
+            mode: CandidateSelectionMode::OnlyCandidate,
+            route_schema_digest: None,
+        });
+        let scheduling = (index == 12).then_some(SchedulingPolicyDocument {
+            version: 1,
+            weight: 1,
+            burst: 4,
+            aging_rounds: 4,
+        });
+        let model_budget = (index == 6).then_some(ModelBudgetPolicyDocument {
+            schema_version: 1,
+            maximum_attempts_per_turn: 3,
+            maximum_input_tokens_per_turn: 3_000,
+            maximum_output_tokens_per_turn: 512,
+            maximum_total_tokens_per_turn: 3_512,
+            cost_ceiling_microunits_per_turn: 1_000_000,
+        });
+        let model_public_projection = (index == 7).then_some(ModelPublicProjectionPolicyDocument {
+            schema_version: 1,
+            reject_prompt_overflow: true,
+            retain_source_map: true,
+            retain_sensitive_prompt_body: false,
+        });
+        let safety_instruction = "Follow exact platform safety and authorization contracts.";
+        let model_safety = (index == 9).then(|| ModelSafetyPolicyDocument {
+            schema_version: 1,
+            contract_id: "platform.model_safety.v1".to_owned(),
+            platform_instruction: safety_instruction.to_owned(),
+            instruction_content_digest: raw_digest(safety_instruction.as_bytes()),
+            instruction_byte_budget: 1_024,
+            instruction_token_budget: 256,
+            pre_dispatch_rules_digest: digest('1'),
+            post_response_rules_digest: digest('2'),
+        });
+        let policy_kind = match index {
+            0 => PolicyKind::Protocol,
+            1 => PolicyKind::Network,
+            2 => PolicyKind::Tls,
+            3 => PolicyKind::Trust,
+            4 | 5 => PolicyKind::DataHandling,
+            6 => PolicyKind::Budget,
+            7 => PolicyKind::PublicProjection,
+            8 => PolicyKind::Selection,
+            9 => PolicyKind::ModelSafety,
+            10 => PolicyKind::Authorization,
+            11 => PolicyKind::Execution,
+            12 => PolicyKind::Scheduling,
+            _ => unreachable!(),
+        };
+        let rules_digest = if let Some(document) = &selection {
+            document.canonical_digest().unwrap()
+        } else if let Some(document) = &scheduling {
+            document.canonical_digest().unwrap()
+        } else if let Some(document) = &model_budget {
+            document.canonical_digest().unwrap()
+        } else if let Some(document) = &model_public_projection {
+            document.canonical_digest().unwrap()
+        } else if let Some(document) = &model_safety {
+            document.canonical_digest().unwrap()
+        } else {
+            digest('e')
+        };
         insert_version(
             pool,
             tenant_id,
@@ -621,48 +696,14 @@ async fn seed_policy_versions(
                     contract_digest: digest('d'),
                     dependency_versions: vec![],
                     policy_versions: vec![],
-                    policy_kind: if index == 8 {
-                        PolicyKind::Selection
-                    } else if index == 12 {
-                        PolicyKind::Scheduling
-                    } else {
-                        PolicyKind::Retry
-                    },
-                    rules_digest: if index == 8 {
-                        CandidateSelectionPolicyDocument {
-                            schema_version: 1,
-                            mode: CandidateSelectionMode::OnlyCandidate,
-                            route_schema_digest: None,
-                        }
-                        .canonical_digest()
-                        .unwrap()
-                    } else if index == 12 {
-                        SchedulingPolicyDocument {
-                            version: 1,
-                            weight: 1,
-                            burst: 4,
-                            aging_rounds: 4,
-                        }
-                        .canonical_digest()
-                        .unwrap()
-                    } else {
-                        digest('e')
-                    },
-                    selection: (index == 8).then_some(CandidateSelectionPolicyDocument {
-                        schema_version: 1,
-                        mode: CandidateSelectionMode::OnlyCandidate,
-                        route_schema_digest: None,
-                    }),
-                    scheduling: (index == 12).then_some(SchedulingPolicyDocument {
-                        version: 1,
-                        weight: 1,
-                        burst: 4,
-                        aging_rounds: 4,
-                    }),
+                    policy_kind,
+                    rules_digest,
+                    selection,
+                    scheduling,
                     retention: None,
-                    model_safety: None,
-                    model_budget: None,
-                    model_public_projection: None,
+                    model_safety,
+                    model_budget,
+                    model_public_projection,
                     mcp_protocol: None,
                     mcp_auth: None,
                     sandbox_isolation: None,
@@ -2197,6 +2238,22 @@ async fn model_turn_fixture() {
     verify_schema(&pool).await.unwrap();
     let repository = PgRepository::new(pool.clone());
     let fixture = seed_fixture(&pool, &repository).await;
+    let policy_facts = repository
+        .load_exact_model_policy_facts(&fixture.tenant_id, &fixture.model_deployment)
+        .await
+        .unwrap();
+    assert_eq!(policy_facts.deployment, fixture.model_closure);
+    assert_eq!(policy_facts.budget.maximum_attempts_per_turn, 3);
+    assert!(policy_facts.public_projection.reject_prompt_overflow);
+    assert_eq!(policy_facts.safety.contract_id, "platform.model_safety.v1");
+    let mut wrong_deployment = fixture.model_deployment.clone();
+    wrong_deployment.deployment_digest = digest('0');
+    assert!(matches!(
+        repository
+            .load_exact_model_policy_facts(&fixture.tenant_id, &wrong_deployment)
+            .await,
+        Err(RepositoryError::Conflict("exact Model Deployment"))
+    ));
     assert_model_deployment_closures_fail_closed(&repository, &fixture).await;
 
     let primary = command_for_node(&fixture, &fixture.primary_node_id, 0x100);

@@ -11,9 +11,11 @@ use crate::{
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, ArtifactRef, CommandOutcome, DeploymentClosure, EntityLifecycle,
-    FrozenSlotTarget, JobState, ModelTurnState, NodeExecutionState, Permission, PlanNodeKind,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, RunState,
-    Sha256Digest, ValueRef, WorkClass,
+    FrozenSlotTarget, JobState, ModelBudgetPolicyDocument, ModelDeploymentClosure,
+    ModelPublicProjectionPolicyDocument, ModelSafetyPolicyDocument, ModelTurnState,
+    NodeExecutionState, Permission, PlanNodeKind, PolicyKind, PolicyResourceSpec, QuotaDimension,
+    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, RunState, Sha256Digest,
+    ValueRef, WorkClass,
 };
 use insight_platform_invocations::InvocationValueStorage;
 use insight_platform_jobs::{JobFence, JobProjection, LeasePolicy};
@@ -35,6 +37,110 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct PreparedModelExecution {
     pub turn: ModelTurnRecord,
     pub job: JobRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactModelPolicyFacts {
+    pub deployment: ModelDeploymentClosure,
+    pub safety: ModelSafetyPolicyDocument,
+    pub budget: ModelBudgetPolicyDocument,
+    pub public_projection: ModelPublicProjectionPolicyDocument,
+}
+
+impl PgRepository {
+    pub async fn load_exact_model_policy_facts(
+        &self,
+        tenant_id: &ResourceId,
+        selected_deployment: &insight_platform_contracts::ExactDeploymentRef,
+    ) -> Result<ExactModelPolicyFacts, RepositoryError> {
+        if tenant_id.kind() != ResourceKind::Tenant
+            || selected_deployment.resource_kind != ResourceKind::ModelDeployment
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Model policy lookup identity".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool().begin().await?;
+        let record = load_deployment(
+            &mut transaction,
+            tenant_id,
+            &selected_deployment.deployment_id,
+        )
+        .await?;
+        if record.tenant_id != tenant_id.to_string()
+            || record.deployment_id != selected_deployment.deployment_id.to_string()
+            || record.bindings.digest != selected_deployment.deployment_digest.to_string()
+        {
+            return Err(RepositoryError::Conflict("exact Model Deployment"));
+        }
+        let closure = decode_deployment_closure(&record.bindings)?;
+        let DeploymentClosure::ModelProfile(deployment) = closure else {
+            return Err(RepositoryError::CorruptRow(
+                "Model Deployment contains the wrong closure".to_owned(),
+            ));
+        };
+        if record.resource_version_id != deployment.profile_revision.revision_id.to_string() {
+            return Err(RepositoryError::Conflict(
+                "Model Deployment profile revision",
+            ));
+        }
+        let safety = load_exact_model_policy_document(
+            &mut transaction,
+            tenant_id,
+            &deployment.safety_policy,
+            PolicyKind::ModelSafety,
+            |policy| policy.model_safety.clone(),
+        )
+        .await?;
+        let budget = load_exact_model_policy_document(
+            &mut transaction,
+            tenant_id,
+            &deployment.budget_policy,
+            PolicyKind::Budget,
+            |policy| policy.model_budget.clone(),
+        )
+        .await?;
+        let public_projection = load_exact_model_policy_document(
+            &mut transaction,
+            tenant_id,
+            &deployment.public_projection_policy,
+            PolicyKind::PublicProjection,
+            |policy| policy.model_public_projection.clone(),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(ExactModelPolicyFacts {
+            deployment,
+            safety,
+            budget,
+            public_projection,
+        })
+    }
+}
+
+async fn load_exact_model_policy_document<T>(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    exact: &insight_platform_contracts::ExactVersionRef,
+    expected_kind: PolicyKind,
+    select: impl FnOnce(&PolicyResourceSpec) -> Option<T>,
+) -> Result<T, RepositoryError> {
+    let published = load_enabled_exact_published_version(
+        transaction,
+        tenant_id,
+        exact,
+        RegistryResourceKind::Policy,
+    )
+    .await?;
+    let ResourceDocument::Policy(policy) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Model Policy revision contains the wrong document".to_owned(),
+        ));
+    };
+    if policy.policy_kind != expected_kind {
+        return Err(RepositoryError::Conflict("exact Model Policy kind"));
+    }
+    select(&policy).ok_or(RepositoryError::Conflict("exact Model Policy document"))
 }
 
 #[async_trait::async_trait]
