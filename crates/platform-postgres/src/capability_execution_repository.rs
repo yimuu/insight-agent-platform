@@ -128,6 +128,7 @@ impl ClaimedCapabilityExecution {
             physical_attempt: projection.attempt_count,
             attempt_limit: projection.attempt_limit,
             admission_digest: admission.canonical_digest.clone(),
+            output_schema_digest: admission.output_schema_digest.clone(),
             idempotency_key_digest: admission.idempotency_key_digest.clone(),
             effect: admission.effect,
             idempotency: admission.idempotency,

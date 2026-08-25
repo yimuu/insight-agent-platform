@@ -7,13 +7,17 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use insight_platform_capability_adapters::{
+    CapabilityAdapterFailure, CapabilityAdapterFailureClass, CapabilityAdapterResponse,
     CapabilityAdapterWorker, CapabilityExecutionAuthority, ExecuteCapabilityAdapterJob,
+    InstalledNativeAdapter, InstalledNativeRegistry, NativeCapabilityAdapter,
 };
 use insight_platform_contracts::{
-    HardLimitProfile, ResourceId, ResourceIdError, ResourceKind, Sha256Digest, WorkClass,
+    canonical_digest, HardLimitProfile, ResourceId, ResourceIdError, ResourceKind, Sha256Digest,
+    ValueRef, WorkClass,
 };
 use insight_platform_invocations::{
-    CapabilityClaimSlot, CapabilityWorkerAudit, ClaimCapabilityJobs, CAPABILITY_QUOTA_LINES,
+    CapabilityClaimSlot, CapabilityExecutionInputMaterial, CapabilityOutputValue,
+    CapabilityWorkerAudit, ClaimCapabilityJobs, DispatchOutcome, CAPABILITY_QUOTA_LINES,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_postgres::{
@@ -31,6 +35,100 @@ use uuid::Uuid;
 
 pub const CAPABILITY_NATIVE_WORKER_ROLE: &str = "capability.native";
 pub const CAPABILITY_REMOTE_WORKER_ROLE: &str = "capability.remote";
+pub const BUILTIN_ECHO_ADAPTER_ID: &str = "builtin.echo";
+pub const BUILTIN_ECHO_ADAPTER_VERSION: &str = "1.0.0";
+pub const BUILTIN_ECHO_ENTRYPOINT_ID: &str = "echo.inline";
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuiltinEchoCapabilityAdapter;
+
+impl BuiltinEchoCapabilityAdapter {
+    pub fn installed_descriptor() -> InstalledNativeAdapter {
+        InstalledNativeAdapter {
+            adapter_id: BUILTIN_ECHO_ADAPTER_ID.to_owned(),
+            adapter_version: BUILTIN_ECHO_ADAPTER_VERSION.to_owned(),
+            module_digest: domain_digest("builtin-echo-module"),
+            entrypoint_id: BUILTIN_ECHO_ENTRYPOINT_ID.to_owned(),
+        }
+    }
+}
+
+#[async_trait]
+impl NativeCapabilityAdapter for BuiltinEchoCapabilityAdapter {
+    fn descriptor(&self) -> InstalledNativeAdapter {
+        Self::installed_descriptor()
+    }
+
+    async fn invoke(
+        &self,
+        request: &insight_platform_capability_adapters::CapabilityAdapterRequest,
+    ) -> Result<CapabilityAdapterResponse, CapabilityAdapterFailure> {
+        let CapabilityExecutionInputMaterial::Inline { value } = &request.input.material else {
+            return Err(permanent_adapter_failure(
+                "builtin_echo_inline_only",
+                "Built-in echo accepts Inline input only",
+            ));
+        };
+        let value_id =
+            ResourceId::from_uuid_v7(ResourceKind::RunValue, Uuid::now_v7()).map_err(|_| {
+                permanent_adapter_failure(
+                    "builtin_echo_identity",
+                    "Output identity generation failed",
+                )
+            })?;
+        let validation_evidence_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "adapter": BUILTIN_ECHO_ADAPTER_ID,
+            "content_digest": request.input.exact.content_digest,
+            "output_schema_digest": request.output_schema_digest,
+            "schema_version": 1,
+        }))
+        .map_err(|_| {
+            permanent_adapter_failure("builtin_echo_evidence", "Output evidence generation failed")
+        })?
+        .parse()
+        .map_err(|_| {
+            permanent_adapter_failure("builtin_echo_evidence", "Output evidence generation failed")
+        })?;
+        Ok(CapabilityAdapterResponse {
+            outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+                value_id,
+                classification: request.input.exact.classification,
+                schema_digest: request.output_schema_digest.clone(),
+                content_digest: request.input.exact.content_digest.clone(),
+                value: ValueRef::Inline {
+                    value: value.clone(),
+                },
+                artifact_link_id: None,
+                validation_evidence_digest,
+            }),
+        })
+    }
+}
+
+pub fn install_builtin_native_adapters(
+    registry: &mut InstalledNativeRegistry,
+) -> Result<(), insight_platform_capability_adapters::CapabilityDispatchError> {
+    registry.install(Arc::new(BuiltinEchoCapabilityAdapter))
+}
+
+fn domain_digest(domain: &str) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"insight.platform/v1/capability-worker/builtin\0");
+    hasher.update(domain.as_bytes());
+    format!("sha256:{}", lower_hex(&hasher.finalize()))
+        .parse()
+        .expect("SHA-256 digest constructed from fixed bytes is valid")
+}
+
+fn permanent_adapter_failure(code: &str, message: &str) -> CapabilityAdapterFailure {
+    CapabilityAdapterFailure {
+        class: CapabilityAdapterFailureClass::Permanent,
+        safe_code: code.to_owned(),
+        safe_message: message.to_owned(),
+        evidence_digest: domain_digest(code),
+        external_identity_digest: None,
+    }
+}
 
 fn expected_role(work_class: WorkClass) -> Option<&'static str> {
     match work_class {
@@ -1019,5 +1117,18 @@ mod tests {
             result,
             Err(CapabilityWorkerDriverError::WrongWorkerManifest)
         ));
+    }
+
+    #[test]
+    fn builtin_echo_has_one_deterministic_installed_descriptor() {
+        let first = BuiltinEchoCapabilityAdapter::installed_descriptor();
+        let second = BuiltinEchoCapabilityAdapter::installed_descriptor();
+        assert_eq!(first, second);
+        assert_eq!(first.adapter_id, BUILTIN_ECHO_ADAPTER_ID);
+        assert_eq!(first.adapter_version, BUILTIN_ECHO_ADAPTER_VERSION);
+        assert_eq!(first.entrypoint_id, BUILTIN_ECHO_ENTRYPOINT_ID);
+        let mut registry = InstalledNativeRegistry::default();
+        install_builtin_native_adapters(&mut registry).unwrap();
+        assert!(install_builtin_native_adapters(&mut registry).is_err());
     }
 }

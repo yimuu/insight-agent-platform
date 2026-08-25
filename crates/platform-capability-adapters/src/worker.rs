@@ -544,6 +544,7 @@ mod tests {
             physical_attempt,
             attempt_limit,
             admission_digest: digest('6'),
+            output_schema_digest: digest('d'),
             idempotency_key_digest: digest('7'),
             effect,
             idempotency,
