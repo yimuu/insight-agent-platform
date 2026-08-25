@@ -1,12 +1,12 @@
 {
-  "contract_digest": "sha256:1cbba5d1576fc4863f463a8cdd2511db370ad60d7a804ecb5caa3e6ce4811410",
+  "contract_digest": "sha256:cdffcb757c5ed14aaf4e4274e76ee339c5692964abb990b0bf6bcf6bdc97bdd6",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
-      "bytes": 76962,
+      "bytes": 78821,
       "media_type": "application/yaml",
       "path": "contracts/platform-v1/openapi.yaml",
-      "sha256": "7fd031891a18863c7187471a8cd34a8273fcd62cb23459152e173d81bfa8a4cc"
+      "sha256": "76616bb2b01ba99f1be55b46bc79acf211db34220d0e8b3ada2001917d72602b"
     },
     {
       "bytes": 30015,

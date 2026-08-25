@@ -2688,6 +2688,7 @@ dependencies = [
  "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-invocations",
+ "insight-platform-jobs",
  "insight-platform-mcp-host",
  "insight-platform-observability",
  "insight-platform-orchestrator",

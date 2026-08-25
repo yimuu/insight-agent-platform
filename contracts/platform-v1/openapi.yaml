@@ -336,6 +336,36 @@ paths:
         "403": {$ref: "#/components/responses/ApiProblem"}
         "404": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/signals/{signal_key}:
+    post:
+      operationId: signalRun
+      summary: Idempotently resolve one exact typed Signal wait
+      tags: [Runs]
+      x-insight-permission: agent.run
+      x-insight-idempotency: run_signal_scoped_receipt
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: signal_key
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_]*$"}
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SignalRunRequestV1"}
+      responses:
+        "204":
+          description: The matching pending Signal was consumed or this exact request replayed.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /runs/{run_id}:pause:
     post:
       operationId: pauseRun
@@ -1394,6 +1424,23 @@ components:
         classification: {$ref: "#/components/schemas/DataClassification"}
         schema_digest: {$ref: "#/components/schemas/Digest"}
         content_digest: {$ref: "#/components/schemas/Digest"}
+        value: {$ref: "#/components/schemas/ValueRef"}
+    SignalRunRequestV1:
+      type: object
+      additionalProperties: false
+      required: [payload]
+      properties:
+        payload:
+          oneOf:
+            - {$ref: "#/components/schemas/SignalRunPayloadV1"}
+            - {type: "null"}
+    SignalRunPayloadV1:
+      type: object
+      additionalProperties: false
+      required: [classification, schema_digest, value]
+      properties:
+        classification: {$ref: "#/components/schemas/DataClassification"}
+        schema_digest: {$ref: "#/components/schemas/Digest"}
         value: {$ref: "#/components/schemas/ValueRef"}
     SubmitTaskInputV1:
       type: object

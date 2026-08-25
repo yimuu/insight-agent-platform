@@ -278,7 +278,8 @@ SignalWait的exact key、可选payload schema/摘要、immutable RunValue、当�
 timeout的typed Job scheduling与critical-control bounded scan已通过fresh PostgreSQL 16 r88 L2 fixture；Timer另已在fresh PostgreSQL 16
 r113完成claim、durable park、独立safety到期唤醒、continuation claim、Return物化与Run终态的真实协调器L3链路；r181进一步完成
 durable park后强制终止首个Worker、由替代Worker及独立safety scanner恢复且finish Node唯一的Timer多进程kill-window。独立认证Signal
-ingress、Child/Task/Signal的多进程kill/recovery仍未完成，ModelLoop、CapabilityCall和ContextQuery仍缺完整production多进程L3，因此不能据此宣称
+ingress已接入generated OpenAPI、Gateway和同事务Principal/Signal owner重验，并在fresh PostgreSQL 16 r187通过权限、owner与Receipt replay门禁。
+Child/Task/Signal的多进程kill/recovery仍未完成，ModelLoop、CapabilityCall和ContextQuery仍缺完整production多进程L3，因此不能据此宣称
 Phase 2完成。
 
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、

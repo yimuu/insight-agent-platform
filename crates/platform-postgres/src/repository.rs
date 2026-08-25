@@ -1178,6 +1178,111 @@ impl PgRepository {
         Ok(run)
     }
 
+    pub async fn resolve_signal_wake_target_for_principal(
+        &self,
+        request: &ResolveOrchestrationSignalTarget,
+    ) -> Result<OrchestrationSignalWakeTarget, RepositoryError> {
+        if request.tenant_id.kind() != ResourceKind::Tenant
+            || request.run_id.kind() != ResourceKind::Run
+            || !valid_orchestration_signal_key(&request.signal_key)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Run signal target is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            &request.tenant_id,
+            &request.principal_id,
+            request.principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::AgentRun) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        load_run(&mut transaction, &request.tenant_id, &request.run_id).await?;
+        let operation = format!("orchestration.job.wake.{}", WakeSource::Signal.as_str());
+        let replay = sqlx::query(
+            r#"
+            SELECT receipt.request_digest, receipt.state, job.job_id,
+                   job.version, job.wake_generation
+            FROM insight_platform.receipts AS receipt
+            JOIN insight_platform.jobs AS job
+              ON job.tenant_id = receipt.tenant_id AND job.job_id = receipt.scope_id
+            WHERE receipt.tenant_id = $1
+              AND receipt.receipt_kind = 'job_commit'
+              AND receipt.scope_kind = 'job'
+              AND receipt.scope_id = receipt.dedupe_owner_id
+              AND receipt.operation = $2
+              AND receipt.idempotency_key_digest = $3
+              AND job.run_id = $4
+            ORDER BY receipt.created_at
+            LIMIT 2
+            "#,
+        )
+        .bind(request.tenant_id.to_string())
+        .bind(&operation)
+        .bind(request.idempotency_key_digest.to_string())
+        .bind(request.run_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        if replay.len() > 1 {
+            return Err(RepositoryError::CorruptRow(
+                "Run signal idempotency key resolved to multiple Jobs".to_owned(),
+            ));
+        }
+        if let Some(row) = replay.into_iter().next() {
+            if row.try_get::<String, _>("request_digest")? != request.request_digest.to_string() {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            if row.try_get::<String, _>("state")? != "succeeded" {
+                return Err(RepositoryError::Conflict("Run signal receipt"));
+            }
+            let target = orchestration_signal_target_from_row(row)?;
+            transaction.commit().await?;
+            return Ok(target);
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT job.job_id, job.version, job.wake_generation
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.run_nodes AS node
+              ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+            WHERE job.tenant_id = $1 AND job.run_id = $2
+              AND job.work_class = 'orchestration'
+              AND job.owner_kind = 'node_execution'
+              AND job.state = 'waiting' AND job.wake_kind = 'signal'
+              AND job.worker_id IS NULL AND job.terminal_at IS NULL
+              AND node.record_kind = 'node_execution'
+              AND node.node_kind = 'signal_wait' AND node.state = 'waiting'
+              AND node.terminal_at IS NULL
+              AND node.payload #>> '{signal_key}' = $3
+            ORDER BY job.job_id
+            LIMIT 2
+            "#,
+        )
+        .bind(request.tenant_id.to_string())
+        .bind(request.run_id.to_string())
+        .bind(&request.signal_key)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if rows.len() != 1 {
+            return Err(if rows.is_empty() {
+                RepositoryError::NotFound("pending Run signal")
+            } else {
+                RepositoryError::Conflict("ambiguous pending Run signal")
+            });
+        }
+        let target = orchestration_signal_target_from_row(
+            rows.into_iter()
+                .next()
+                .expect("one Signal target exists after exact cardinality check"),
+        )?;
+        transaction.commit().await?;
+        Ok(target)
+    }
+
     pub async fn read_public_run_events_for_principal(
         &self,
         tenant_id: &ResourceId,
@@ -10290,6 +10395,22 @@ impl PgSchedulerTransaction {
         let tenant_id = command.tenant_id.to_string();
         let job_id = command.job_id.to_string();
         let mut transaction = self.transaction.begin().await?;
+        let signal_principal = match command.signal_authority.as_ref() {
+            Some(authority) => {
+                let snapshot = load_current_principal_snapshot(
+                    &mut transaction,
+                    &authority.tenant_id,
+                    &authority.principal_id,
+                    authority.principal_kind,
+                )
+                .await?;
+                if !snapshot.permissions.contains(Permission::AgentRun) {
+                    return Err(RepositoryError::PermissionDenied);
+                }
+                Some(snapshot)
+            }
+            None => None,
+        };
         let signal_payload_evidence = command.signal_payload.as_ref().map(|payload| {
             serde_json::json!({
                 "classification": payload.classification.as_str(),
@@ -10307,6 +10428,7 @@ impl PgSchedulerTransaction {
                 "source": command.source.as_str(),
                 "signal_key": command.signal_key,
                 "signal_payload_evidence": signal_payload_evidence,
+                "signal_principal": signal_principal,
             }),
             65_536,
         )?;
@@ -10317,6 +10439,16 @@ impl PgSchedulerTransaction {
         }
         let observed = load_job_by_text(&mut transaction, &tenant_id, &job_id).await?;
         require_orchestration_job(&observed)?;
+        let signal_run_id = command
+            .signal_authority
+            .as_ref()
+            .map(|authority| authority.run_id.to_string());
+        if signal_run_id
+            .as_ref()
+            .is_some_and(|run_id| observed.run_id.as_ref() != Some(run_id))
+        {
+            return Err(RepositoryError::NotFound("Run signal owner"));
+        }
         if observed.state != JobState::Waiting.as_str()
             || observed.version != command.expected_job_version
             || observed.wake_generation
@@ -10925,6 +11057,7 @@ impl PgSchedulerTransaction {
                     idempotency_key_digest: slot.idempotency_key_digest,
                     request_digest: slot.request_digest,
                     receipt_expires_at: scan_now + Duration::hours(1),
+                    signal_authority: None,
                     mutations: slot.mutations,
                 })
                 .await?;
@@ -30802,6 +30935,34 @@ impl OrchestrationWakeMutationIds {
 }
 
 #[derive(Debug, Clone)]
+pub struct OrchestrationSignalAuthority {
+    pub tenant_id: ResourceId,
+    pub principal_id: ResourceId,
+    pub principal_kind: PrincipalKind,
+    pub run_id: ResourceId,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveOrchestrationSignalTarget {
+    pub tenant_id: ResourceId,
+    pub principal_id: ResourceId,
+    pub principal_kind: PrincipalKind,
+    pub run_id: ResourceId,
+    pub signal_key: String,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestrationSignalWakeTarget {
+    pub job_id: ResourceId,
+    pub job_version: i64,
+    pub wake_generation: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct WakeOrchestrationJob {
     pub tenant_id: ResourceId,
     pub job_id: ResourceId,
@@ -30813,6 +30974,7 @@ pub struct WakeOrchestrationJob {
     pub idempotency_key_digest: Sha256Digest,
     pub request_digest: Sha256Digest,
     pub receipt_expires_at: DateTime<Utc>,
+    pub signal_authority: Option<OrchestrationSignalAuthority>,
     pub mutations: OrchestrationWakeMutationIds,
 }
 
@@ -31186,6 +31348,18 @@ impl WakeOrchestrationJob {
             || self.receipt_expires_at <= Utc::now()
             || (self.source == WakeSource::Signal) != self.signal_key.is_some()
             || (self.source != WakeSource::Signal && self.signal_payload.is_some())
+            || self
+                .signal_key
+                .as_deref()
+                .is_some_and(|key| !valid_orchestration_signal_key(key))
+            || self.signal_authority.as_ref().is_some_and(|authority| {
+                self.source != WakeSource::Signal
+                    || authority.tenant_id.kind() != ResourceKind::Tenant
+                    || authority.run_id.kind() != ResourceKind::Run
+                    || authority.tenant_id != self.tenant_id
+                    || authority.idempotency_key_digest != self.idempotency_key_digest
+                    || authority.request_digest != self.request_digest
+            })
         {
             return Err(RepositoryError::InvalidInput(
                 "orchestration wake command is invalid".to_owned(),
@@ -34686,6 +34860,33 @@ fn run_from_row(row: PgRow) -> Result<RunRecord, RepositoryError> {
         terminal_at: row.try_get("terminal_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn valid_orchestration_signal_key(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+
+fn orchestration_signal_target_from_row(
+    row: PgRow,
+) -> Result<OrchestrationSignalWakeTarget, RepositoryError> {
+    let wake_generation: i64 = row.try_get("wake_generation")?;
+    Ok(OrchestrationSignalWakeTarget {
+        job_id: row.try_get::<String, _>("job_id")?.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?,
+        job_version: row.try_get("version")?,
+        wake_generation: u64::try_from(wake_generation).map_err(|_| {
+            RepositoryError::CorruptRow("negative Signal wake generation".to_owned())
+        })?,
     })
 }
 

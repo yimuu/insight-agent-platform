@@ -44,8 +44,9 @@ use insight_platform_postgres::{
         ExpiredOrchestrationTaskSlot, FailOrchestrationJob, HeartbeatJob, JobFence,
         MaterializedTerminalValue, NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal,
         OrchestrationClaimSlot, OrchestrationConvergenceSlot, OrchestrationFailureCause,
-        OrchestrationTerminalMutationIds, OrchestrationWakeMutationIds, OrchestrationYield,
-        OrchestrationYieldMutationIds, PgRepository, RepositoryError, ResolveOrchestrationTask,
+        OrchestrationSignalAuthority, OrchestrationTerminalMutationIds,
+        OrchestrationWakeMutationIds, OrchestrationYield, OrchestrationYieldMutationIds,
+        PgRepository, RepositoryError, ResolveOrchestrationSignalTarget, ResolveOrchestrationTask,
         ResolveOrchestrationTaskMutationIds, RunRecord, SafetyScanShard, StartOrchestrationJob,
         TerminalChildRunSlot, TypedPayload, WakeOrchestrationJob, YieldOrchestrationJob,
     },
@@ -1033,7 +1034,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         ["7a16", "7a17", "7a18", "7a19"],
         ["7a1a", "7a1b", "7a1c"],
     );
-    running_claim.lease_milliseconds = 500;
+    running_claim.lease_milliseconds = 5_000;
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let claimed_for_running_recovery = scheduler
         .claim_orchestration_jobs(running_claim)
@@ -1262,7 +1263,18 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         repository.resolve_run_value_read(wrong_value).await,
         Err(ArtifactObjectReadAuthorityError::Denied)
     ));
-    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET lease_expires_at = clock_timestamp() - interval '1 millisecond'
+        WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&running_for_recovery.job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert!(matches!(
         repository.authorize_object_read(&typed_plan_read).await,
         Err(ArtifactObjectReadAuthorityError::Denied)
@@ -1749,6 +1761,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         idempotency_key_digest: digest('a'),
         request_digest: digest('b'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
+        signal_authority: None,
         mutations: OrchestrationWakeMutationIds {
             receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c2836791a"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836791b"),
@@ -2119,6 +2132,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         idempotency_key_digest: digest('8'),
         request_digest: digest('9'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
+        signal_authority: None,
         mutations: OrchestrationWakeMutationIds {
             receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c2836811a"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836811b"),
@@ -2149,6 +2163,65 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     ));
     scheduler.rollback().await.unwrap();
     signal_wake.signal_key = Some("release".to_owned());
+    let signal_run_id: ResourceId = signal_waited
+        .job
+        .run_id
+        .as_deref()
+        .expect("Signal Job has a Run owner")
+        .parse()
+        .unwrap();
+    let signal_target_request = ResolveOrchestrationSignalTarget {
+        tenant_id: id(TENANT_ID),
+        principal_id: id(PRINCIPAL_ID),
+        principal_kind: PrincipalKind::AgentRunner,
+        run_id: signal_run_id.clone(),
+        signal_key: "release".to_owned(),
+        idempotency_key_digest: signal_wake.idempotency_key_digest.clone(),
+        request_digest: signal_wake.request_digest.clone(),
+    };
+    let signal_target = repository
+        .resolve_signal_wake_target_for_principal(&signal_target_request)
+        .await
+        .unwrap();
+    assert_eq!(signal_target.job_id, signal_wake.job_id);
+    assert_eq!(signal_target.job_version, signal_wake.expected_job_version);
+    assert_eq!(
+        signal_target.wake_generation,
+        signal_wake.expected_wake_generation
+    );
+    let mut denied_signal_target = signal_target_request.clone();
+    denied_signal_target.principal_id = id(DENIED_PRINCIPAL_ID);
+    assert!(matches!(
+        repository
+            .resolve_signal_wake_target_for_principal(&denied_signal_target)
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    let mut denied_signal_wake = signal_wake.clone();
+    denied_signal_wake.signal_authority = Some(OrchestrationSignalAuthority {
+        tenant_id: id(TENANT_ID),
+        principal_id: id(DENIED_PRINCIPAL_ID),
+        principal_kind: PrincipalKind::AgentRunner,
+        run_id: signal_run_id.clone(),
+        idempotency_key_digest: signal_wake.idempotency_key_digest.clone(),
+        request_digest: signal_wake.request_digest.clone(),
+    });
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler
+            .wake_orchestration_job(denied_signal_wake)
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    scheduler.rollback().await.unwrap();
+    signal_wake.signal_authority = Some(OrchestrationSignalAuthority {
+        tenant_id: id(TENANT_ID),
+        principal_id: id(PRINCIPAL_ID),
+        principal_kind: PrincipalKind::AgentRunner,
+        run_id: signal_run_id,
+        idempotency_key_digest: signal_wake.idempotency_key_digest.clone(),
+        request_digest: signal_wake.request_digest.clone(),
+    });
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let signal_woken = match scheduler
         .wake_orchestration_job(signal_wake.clone())
@@ -2196,6 +2269,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap()
         .iter()
         .any(|binding| binding.pointer("/value/value_id") == Some(&json!(signal_payload.value_id))));
+    let replay_target = repository
+        .resolve_signal_wake_target_for_principal(&signal_target_request)
+        .await
+        .unwrap();
+    assert_eq!(replay_target.job_id, signal_wake.job_id);
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler

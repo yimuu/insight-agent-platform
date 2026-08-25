@@ -39,7 +39,7 @@ use insight_platform_api::{
         build_run_router, run_etag, ControlRunIntent, CreateRunIntent, HmacRunEventCursorCodec,
         ReadRunEventsIntent, ReadRunIntent, RunApplication, RunApplicationError,
         RunEventCursorCodec, RunEventProjectionV1, RunHttpState, RunResultViewV1, RunViewV1,
-        SystemRunClock,
+        SignalRunIntent, SystemRunClock,
     },
     task::{
         build_task_router, task_etag, ReadTaskIntent, ResolveTaskIntent, SystemTaskClock,
@@ -58,6 +58,7 @@ use insight_platform_invocations::{
     CapabilityApprovalDecision, CapabilityApprovalDispatchMutationIds, InvocationTransaction,
     ResolveCapabilityApproval,
 };
+use insight_platform_jobs::WakeSource;
 use insight_platform_mcp_host::CreateMcpDiscoveryOperation;
 use insight_platform_observability::ProcessHttpMetrics;
 use insight_platform_orchestrator::{
@@ -70,8 +71,9 @@ use insight_platform_postgres::{
         OperationReadError,
     },
     repository::{
-        PgRepository, RepositoryError, ResolveOrchestrationTask,
-        ResolveOrchestrationTaskMutationIds,
+        OrchestrationSignalAuthority, OrchestrationWakeMutationIds, PgRepository, RepositoryError,
+        ResolveOrchestrationSignalTarget, ResolveOrchestrationTask,
+        ResolveOrchestrationTaskMutationIds, WakeOrchestrationJob,
     },
     verify_schema,
 };
@@ -1193,6 +1195,92 @@ impl RunApplication for PgRuns {
             insight_platform_contracts::CommandOutcome::Applied(record)
             | insight_platform_contracts::CommandOutcome::Replayed(record) => record,
         })
+    }
+
+    async fn signal_run(&self, intent: SignalRunIntent) -> Result<(), RunApplicationError> {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            return Err(RunApplicationError::Unavailable);
+        }
+        let target = self
+            .0
+            .resolve_signal_wake_target_for_principal(&ResolveOrchestrationSignalTarget {
+                tenant_id: intent.principal.tenant_id.clone(),
+                principal_id: intent.principal.principal_id.clone(),
+                principal_kind: intent.principal.principal_kind,
+                run_id: intent.run_id.clone(),
+                signal_key: intent.signal_key.clone(),
+                idempotency_key_digest: intent.idempotency_key_digest.clone(),
+                request_digest: intent.request_digest.clone(),
+            })
+            .await
+            .map_err(map_run_repository_error)?;
+        let make_id = |kind| {
+            ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7())
+                .map_err(|_| RunApplicationError::Internal)
+        };
+        let signal_payload = intent
+            .request
+            .payload
+            .map(|payload| {
+                let content_digest = match &payload.value {
+                    ValueRef::Inline { value } => canonical_digest(value)
+                        .map_err(|_| RunApplicationError::Invalid)?
+                        .parse()
+                        .map_err(|_| RunApplicationError::Internal)?,
+                    ValueRef::Artifact { artifact }
+                        if artifact.classification() == payload.classification =>
+                    {
+                        artifact.content_digest().clone()
+                    }
+                    ValueRef::Artifact { .. } => return Err(RunApplicationError::Invalid),
+                };
+                Ok(RunInputValue {
+                    value_id: make_id(ResourceKind::RunValue)?,
+                    classification: payload.classification,
+                    schema_digest: payload.schema_digest,
+                    content_digest,
+                    value: payload.value,
+                })
+            })
+            .transpose()?;
+        let signal_authority = OrchestrationSignalAuthority {
+            tenant_id: intent.principal.tenant_id.clone(),
+            principal_id: intent.principal.principal_id,
+            principal_kind: intent.principal.principal_kind,
+            run_id: intent.run_id,
+            idempotency_key_digest: intent.idempotency_key_digest.clone(),
+            request_digest: intent.request_digest.clone(),
+        };
+        let mut transaction = self
+            .0
+            .begin_scheduler_transaction()
+            .await
+            .map_err(map_run_repository_error)?;
+        transaction
+            .wake_orchestration_job(WakeOrchestrationJob {
+                tenant_id: intent.principal.tenant_id,
+                job_id: target.job_id,
+                expected_job_version: target.job_version,
+                expected_wake_generation: target.wake_generation,
+                source: WakeSource::Signal,
+                signal_key: Some(intent.signal_key),
+                signal_payload,
+                idempotency_key_digest: intent.idempotency_key_digest,
+                request_digest: intent.request_digest,
+                receipt_expires_at: now + chrono::Duration::hours(24),
+                signal_authority: Some(signal_authority),
+                mutations: OrchestrationWakeMutationIds {
+                    receipt_id: make_id(ResourceKind::Receipt)?,
+                    node_event_id: make_id(ResourceKind::Event)?,
+                    node_outbox_id: make_id(ResourceKind::OutboxEvent)?,
+                    job_event_id: make_id(ResourceKind::Event)?,
+                    job_outbox_id: make_id(ResourceKind::OutboxEvent)?,
+                },
+            })
+            .await
+            .map_err(map_run_repository_error)?;
+        transaction.commit().await.map_err(map_run_repository_error)
     }
 
     async fn read_run(&self, intent: ReadRunIntent) -> Result<RunViewV1, RunApplicationError> {

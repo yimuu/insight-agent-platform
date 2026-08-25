@@ -46,6 +46,20 @@ pub struct CreateRunRequestV1 {
     pub deadline: UtcTimestamp,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignalRunPayloadV1 {
+    pub classification: DataClassification,
+    pub schema_digest: Sha256Digest,
+    pub value: ValueRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignalRunRequestV1 {
+    pub payload: Option<SignalRunPayloadV1>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunViewV1 {
@@ -282,6 +296,17 @@ pub struct ControlRunIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SignalRunIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub run_id: ResourceId,
+    pub signal_key: String,
+    pub request: SignalRunRequestV1,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunApplicationError {
     Unauthenticated,
@@ -315,6 +340,9 @@ pub trait RunApplication: Send + Sync {
         &self,
         _intent: ControlRunIntent,
     ) -> Result<RunViewV1, RunApplicationError> {
+        Err(RunApplicationError::Internal)
+    }
+    async fn signal_run(&self, _intent: SignalRunIntent) -> Result<(), RunApplicationError> {
         Err(RunApplicationError::Internal)
     }
     async fn read_run_result(
@@ -376,6 +404,7 @@ pub fn build_run_router(state: RunHttpState) -> Router {
         )
         .route("/v1/runs/{run_id}/result", get(read_run_result))
         .route("/v1/runs/{run_id}/events", get(read_run_events))
+        .route("/v1/runs/{run_id}/signals/{signal_key}", post(signal_run))
         .layer(DefaultBodyLimit::max(MAX_RUN_REQUEST_BYTES))
         .with_state(state)
 }
@@ -522,6 +551,90 @@ async fn read_run_result(
         Ok(_) => problem(RunApplicationError::Internal),
         Err(error) => problem(error),
     }
+}
+
+async fn signal_run(
+    State(state): State<RunHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    Path((run_id, signal_key)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<SignalRunRequestV1>, JsonRejection>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(RunApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(RunApplicationError::Unauthenticated);
+    }
+    let run_id = match run_id.parse::<ResourceId>() {
+        Ok(id) if id.kind() == ResourceKind::Run => id,
+        _ => return problem(RunApplicationError::NotFound),
+    };
+    if !valid_signal_key(&signal_key) {
+        return problem(RunApplicationError::NotFound);
+    }
+    let Json(request) = match body {
+        Ok(request) => request,
+        Err(_) => return problem(RunApplicationError::Invalid),
+    };
+    let idempotency_key_digest = match control_idempotency_digest(
+        &headers,
+        &principal,
+        &run_id,
+        &format!("run.signal.{signal_key}"),
+    ) {
+        Ok(digest) => digest,
+        Err(error) => return problem(error),
+    };
+    let request_digest = match canonical_digest(&serde_json::json!({
+        "idempotency_key_digest": idempotency_key_digest,
+        "operation": "run.signal",
+        "principal_id": principal.principal_id,
+        "request": request,
+        "run_id": run_id,
+        "schema_version": 1,
+        "signal_key": signal_key,
+        "tenant_id": principal.tenant_id,
+    }))
+    .ok()
+    .and_then(|value| value.parse().ok())
+    {
+        Some(digest) => digest,
+        None => return problem(RunApplicationError::Invalid),
+    };
+    match state
+        .application
+        .signal_run(SignalRunIntent {
+            principal,
+            run_id,
+            signal_key,
+            request,
+            idempotency_key_digest,
+            request_digest,
+            deadline: state.clock.now() + Duration::milliseconds(RUN_COMMAND_DEADLINE_MILLISECONDS),
+        })
+        .await
+    {
+        Ok(()) => {
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            response.headers_mut().insert(
+                CACHE_CONTROL,
+                HeaderValue::from_static("no-store, private, max-age=0"),
+            );
+            response
+        }
+        Err(error) => problem(error),
+    }
+}
+
+fn valid_signal_key(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
 async fn control_run_action(
@@ -1024,6 +1137,10 @@ mod tests {
             })
         }
 
+        async fn signal_run(&self, _intent: SignalRunIntent) -> Result<(), RunApplicationError> {
+            Ok(())
+        }
+
         async fn read_run_result(
             &self,
             intent: ReadRunIntent,
@@ -1232,6 +1349,59 @@ mod tests {
             response.headers().get(CACHE_CONTROL).unwrap(),
             "no-store, private, max-age=0"
         );
+    }
+
+    #[tokio::test]
+    async fn run_signal_requires_a_closed_typed_body_and_scoped_idempotency() {
+        let now = Utc::now();
+        let router = build_run_router(RunHttpState::new(
+            Arc::new(FixtureApplication),
+            Arc::new(FixedClock(now)),
+        ));
+        let run_id = id(ResourceKind::Run, 3);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/runs/{run_id}/signals/release"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "release-1")
+                    .extension(principal(now))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "payload": {
+                                "classification": "internal",
+                                "schema_digest": digest('b'),
+                                "value": {"kind": "inline", "value": {"released": true}}
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
+
+        let invalid = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/runs/{run_id}/signals/Release"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "release-2")
+                    .extension(principal(now))
+                    .body(Body::from(r#"{"payload":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
