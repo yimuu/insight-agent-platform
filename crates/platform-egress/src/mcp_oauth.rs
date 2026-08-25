@@ -1245,6 +1245,8 @@ pub struct ReqwestMcpOAuthCredentialBroker {
     transport: Arc<dyn McpOAuthTokenHttpTransport>,
     limits: McpOAuthEgressLimits,
     permits: Arc<Semaphore>,
+    #[cfg(any(test, feature = "protocol-fixtures"))]
+    allow_loopback_for_protocol_fixture: bool,
 }
 
 impl ReqwestMcpOAuthCredentialBroker {
@@ -1286,7 +1288,28 @@ impl ReqwestMcpOAuthCredentialBroker {
             transport,
             limits,
             permits: Arc::new(Semaphore::new(limits.maximum_in_flight)),
+            #[cfg(any(test, feature = "protocol-fixtures"))]
+            allow_loopback_for_protocol_fixture: false,
         })
+    }
+
+    /// Enables loopback only in explicit protocol-fixture builds. Production binaries retain the
+    /// public-destination-only guard.
+    #[cfg(any(test, feature = "protocol-fixtures"))]
+    pub fn allow_loopback_for_protocol_fixture(mut self) -> Self {
+        self.allow_loopback_for_protocol_fixture = true;
+        self
+    }
+
+    fn destination_allowed(&self, address: &SocketAddr) -> bool {
+        if is_public_destination_ip(address.ip()) {
+            return true;
+        }
+        #[cfg(any(test, feature = "protocol-fixtures"))]
+        if self.allow_loopback_for_protocol_fixture && address.ip().is_loopback() {
+            return true;
+        }
+        false
     }
 
     async fn resolve_addresses(
@@ -1319,7 +1342,7 @@ impl ReqwestMcpOAuthCredentialBroker {
         if addresses.is_empty()
             || addresses.len() > self.limits.maximum_dns_answers
             || addresses.iter().any(|address| {
-                address.port() != endpoint.port || !is_public_destination_ip(address.ip())
+                address.port() != endpoint.port || !self.destination_allowed(address)
             })
         {
             return Err(McpOAuthCredentialBrokerError::Rejected);
@@ -1716,17 +1739,21 @@ mod tests {
     };
     use jsonwebtoken::{encode, EncodingKey, Header};
     use rcgen::{
-        BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair as RcgenKeyPair,
+        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair as RcgenKeyPair, SanType,
     };
     use ring::{
         rand::SystemRandom,
         signature::{Ed25519KeyPair, KeyPair},
     };
+    use rustls::{pki_types::PrivatePkcs8KeyDer, ServerConfig};
     use std::{
         net::Ipv4Addr,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         sync::Mutex,
     };
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio_rustls::TlsAcceptor;
 
     fn digest(character: char) -> Sha256Digest {
         format!("sha256:{}", character.to_string().repeat(64))
@@ -1976,6 +2003,86 @@ mod tests {
             },
             encoding,
         )
+    }
+
+    async fn start_oauth_https_fixture() -> (
+        SocketAddr,
+        String,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut ca_parameters = CertificateParams::default();
+        ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca =
+            CertifiedIssuer::self_signed(ca_parameters, RcgenKeyPair::generate().unwrap()).unwrap();
+        let mut server_parameters = CertificateParams::default();
+        server_parameters.subject_alt_names =
+            vec![SanType::DnsName("auth.example.test".try_into().unwrap())];
+        server_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let server_key = RcgenKeyPair::generate().unwrap();
+        let server_certificate = server_parameters.signed_by(&server_key, &ca).unwrap();
+        let tls = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![server_certificate.der().clone()],
+                    PrivatePkcs8KeyDer::from(server_key.serialize_der()).into(),
+                )
+                .unwrap(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let Ok(mut stream) = TlsAcceptor::from(tls).accept(stream).await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 1_024];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(position) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            assert!(
+                headers.starts_with("POST /oauth/token HTTP/1.1\r\n"),
+                "{headers}"
+            );
+            let lower_headers = headers.to_ascii_lowercase();
+            assert!(lower_headers.contains("host: auth.example.test:"));
+            let content_length = lower_headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            while request.len() - header_end < content_length {
+                let mut chunk = [0_u8; 1_024];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body =
+                std::str::from_utf8(&request[header_end..header_end + content_length]).unwrap();
+            assert!(body.contains("code=one-time-code"));
+            assert!(body.contains("code_verifier=pkce-verifier"));
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            let response_body = br#"{"access_token":"access-secret","refresh_token":"refresh-secret","token_type":"Bearer","expires_in":600,"scope":"openid tools.call tools.read"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response_body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(response_body).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        (address, ca.pem(), calls, task)
     }
 
     struct FixtureSecrets {
@@ -2366,6 +2473,71 @@ mod tests {
         assert!(!verifier.called.load(Ordering::SeqCst));
         assert_eq!(store.load_calls.load(Ordering::SeqCst), 0);
         assert_eq!(store.store_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn oauth_token_https_uses_only_the_installed_trust_bundle() {
+        let now = Utc::now();
+        let (address, root_pem, calls, server) = start_oauth_https_fixture().await;
+        let mut contract = contract(now);
+        contract.auth_profile.token_endpoint.endpoint.port = address.port();
+        contract
+            .auth_profile
+            .token_endpoint
+            .endpoint_identity_digest = contract
+            .auth_profile
+            .token_endpoint
+            .endpoint
+            .canonical_digest()
+            .unwrap();
+        let auth_policy = ExactVersionRef::new(
+            contract.binding.auth_policy.revision_id.clone(),
+            contract.auth_profile.canonical_digest().unwrap(),
+        )
+        .unwrap();
+        contract.binding.auth_policy = auth_policy.clone();
+        contract.deployment_closure.auth_policy = Some(auth_policy);
+        contract.validate_at(now).unwrap();
+        let (mut installed, _) = verification_binding_fixture(&contract);
+        installed.token_endpoint_trust_roots_pem = root_pem;
+        let catalog = InstalledMcpOAuthVerificationCatalog::new(vec![installed]).unwrap();
+        let verifier = Arc::new(FixtureVerifier {
+            called: AtomicBool::new(false),
+        });
+        let store = Arc::new(FixtureStore {
+            load_calls: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            prepared: Mutex::new(None),
+        });
+        let broker = ReqwestMcpOAuthCredentialBroker::new(
+            Arc::new(FixtureSecrets {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(FixtureDns {
+                address: Ipv4Addr::LOCALHOST,
+                calls: AtomicUsize::new(0),
+            }),
+            catalog,
+            verifier.clone(),
+            store.clone(),
+            McpOAuthEgressLimits::default(),
+        )
+        .unwrap()
+        .allow_loopback_for_protocol_fixture();
+        let parsed = parse_mcp_oauth_callback_query(b"state=s&code=one-time-code").unwrap();
+        let McpOAuthCallbackWireOutcome::AuthorizationCode(code) = parsed.outcome else {
+            panic!("fixture must contain a code");
+        };
+
+        let grant = broker
+            .exchange_authorization_code(&contract, code, now)
+            .await
+            .unwrap();
+        assert_eq!(grant.token_secret_binding.binding_generation, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(verifier.called.load(Ordering::SeqCst));
+        assert_eq!(store.store_calls.load(Ordering::SeqCst), 1);
+        server.await.unwrap();
     }
 
     #[tokio::test]
