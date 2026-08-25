@@ -4,11 +4,11 @@ use futures::{stream, StreamExt};
 use insight_platform_contracts::{
     checked_in_hard_limit_profile, ArtifactRef, AuthoringPackage, ClosedJsonValue, CommandOutcome,
     ContextWindowContract, DataClassification, DataRegion, Effect, ExactSecretBindingRef,
-    ExactVersionRef, InstalledModelAdapter, ModelCatalogEvidence, ModelIdentityStability,
-    ModelLimits, ModelModalities, ModelToolContract, ModelUsageContract,
-    ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
-    ProviderTrainingPolicy, SecretPurpose, SecretResolutionPolicy, StructuredOutputContract,
-    ValueRef,
+    ExactVersionRef, ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds,
+    InstalledModelAdapter, ModelCatalogEvidence, ModelIdentityStability, ModelLimits,
+    ModelModalities, ModelToolContract, ModelUsageContract, ProviderDataHandlingContract,
+    ProviderModelIdentity, ProviderRequestLimits, ProviderTrainingPolicy, SecretPurpose,
+    SecretResolutionPolicy, StructuredOutputContract, ValueRef,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_models::{
@@ -634,6 +634,7 @@ impl ModelOutputMaterializer for RejectingMaterializer {
 struct CapturingAuthority {
     outcome: Mutex<Option<ModelDispatchOutcome>>,
     fence: Mutex<Option<JobFence>>,
+    terminal_mutations: Mutex<Option<(bool, bool)>>,
 }
 
 #[async_trait]
@@ -646,6 +647,10 @@ impl ModelExecutionAuthority for Arc<CapturingAuthority> {
         command: insight_platform_models::CommitModelOutcome,
     ) -> Result<CommandOutcome<Self::Record>, Self::Error> {
         *self.fence.lock().unwrap() = Some(command.fence.clone());
+        *self.terminal_mutations.lock().unwrap() = Some((
+            command.resume_mutations.is_some(),
+            command.failure_mutations.is_some(),
+        ));
         *self.outcome.lock().unwrap() = Some(command.outcome);
         Ok(CommandOutcome::Applied("committed".to_owned()))
     }
@@ -673,6 +678,27 @@ fn worker_command(execution: ModelAdapterExecutionRequest) -> ExecuteModelAdapte
             token_digest: sha('7'),
         },
         usage_reservation_id: id(ResourceKind::UsageReservation, 44),
+        resume_mutations: Some(ExternalLeafResumeMutationIds {
+            continuation_node_execution_id: id(ResourceKind::NodeExecution, 50),
+            continuation_job_id: id(ResourceKind::Job, 51),
+            run_event_id: id(ResourceKind::Event, 52),
+            run_outbox_id: id(ResourceKind::OutboxEvent, 53),
+            leaf_node_event_id: id(ResourceKind::Event, 54),
+            leaf_node_outbox_id: id(ResourceKind::OutboxEvent, 55),
+            continuation_node_event_id: id(ResourceKind::Event, 56),
+            continuation_node_outbox_id: id(ResourceKind::OutboxEvent, 57),
+            continuation_job_event_id: id(ResourceKind::Event, 58),
+            continuation_job_outbox_id: id(ResourceKind::OutboxEvent, 59),
+        }),
+        failure_mutations: Some(ExternalLeafFailureMutationIds {
+            convergence_job_id: id(ResourceKind::Job, 60),
+            run_event_id: id(ResourceKind::Event, 61),
+            run_outbox_id: id(ResourceKind::OutboxEvent, 62),
+            leaf_node_event_id: id(ResourceKind::Event, 63),
+            leaf_node_outbox_id: id(ResourceKind::OutboxEvent, 64),
+            convergence_job_event_id: id(ResourceKind::Event, 65),
+            convergence_job_outbox_id: id(ResourceKind::OutboxEvent, 66),
+        }),
         quota_entry_ids: (45..49)
             .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
             .collect(),
@@ -693,6 +719,7 @@ async fn worker_materializes_and_commits_one_fenced_terminal_outcome() {
     let authority = Arc::new(CapturingAuthority {
         outcome: Mutex::new(None),
         fence: Mutex::new(None),
+        terminal_mutations: Mutex::new(None),
     });
     let worker = ModelAdapterWorker::new(
         Arc::new(ModelAdapterHost::new(
@@ -712,6 +739,10 @@ async fn worker_materializes_and_commits_one_fenced_terminal_outcome() {
         authority.outcome.lock().unwrap().as_ref(),
         Some(ModelDispatchOutcome::Succeeded(_))
     ));
+    assert_eq!(
+        *authority.terminal_mutations.lock().unwrap(),
+        Some((true, false))
+    );
 }
 
 #[tokio::test]
@@ -728,6 +759,7 @@ async fn output_capacity_rejection_is_committed_without_provider_dispatch() {
     let authority = Arc::new(CapturingAuthority {
         outcome: Mutex::new(None),
         fence: Mutex::new(None),
+        terminal_mutations: Mutex::new(None),
     });
     let worker = ModelAdapterWorker::new(
         Arc::new(ModelAdapterHost::new(
@@ -756,6 +788,10 @@ async fn output_capacity_rejection_is_committed_without_provider_dispatch() {
     assert_eq!(failure.safe_code, "model_output_too_large");
     assert!(!measurement.observation.request_sent);
     assert!(measurement.usage.is_none());
+    assert_eq!(
+        *authority.terminal_mutations.lock().unwrap(),
+        Some((false, true))
+    );
 }
 
 #[tokio::test]
@@ -771,6 +807,7 @@ async fn prepared_outcome_accepts_only_same_lease_heartbeat_fence() {
     let authority = Arc::new(CapturingAuthority {
         outcome: Mutex::new(None),
         fence: Mutex::new(None),
+        terminal_mutations: Mutex::new(None),
     });
     let worker = ModelAdapterWorker::new(
         Arc::new(ModelAdapterHost::new(
@@ -827,6 +864,7 @@ async fn dispatched_failure_is_conservatively_accounted_and_attempt_bounded() {
         let authority = Arc::new(CapturingAuthority {
             outcome: Mutex::new(None),
             fence: Mutex::new(None),
+            terminal_mutations: Mutex::new(None),
         });
         let worker = ModelAdapterWorker::new(
             Arc::new(ModelAdapterHost::new(

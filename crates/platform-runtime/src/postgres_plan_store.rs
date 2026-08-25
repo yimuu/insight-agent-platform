@@ -3,11 +3,12 @@
 use crate::{
     allocate_capability_invocation_mutations, allocate_child_run_mutations,
     allocate_context_query_mutations, allocate_controller_step_mutations,
-    allocate_human_task_mutations, allocate_orchestration_terminal_mutations,
-    CoordinatorIdentityFactory, DerivedControllerCommit, DurableCapabilityDispatchFacts,
-    DurableChildAgentDispatchFacts, DurableContextDispatchFacts, DurableControllerFacts,
-    DurableControllerPhase, DurablePlanDriverError, DurablePlanGenerationStore,
-    GenerationHandoffReason, StartedOrchestrationJob,
+    allocate_human_task_mutations, allocate_model_turn_mutations,
+    allocate_orchestration_terminal_mutations, CoordinatorIdentityFactory, DerivedControllerCommit,
+    DurableCapabilityDispatchFacts, DurableChildAgentDispatchFacts, DurableContextDispatchFacts,
+    DurableControllerFacts, DurableControllerPhase, DurableModelDispatchFacts,
+    DurablePlanDriverError, DurablePlanGenerationStore, GenerationHandoffReason,
+    StartedOrchestrationJob,
 };
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -26,10 +27,10 @@ use insight_platform_orchestrator::{
 use insight_platform_postgres::repository::{
     ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep, CommitPlanTerminal,
     ControllerFacts, DeferOrchestrationToCapabilityInvocation, DeferOrchestrationToChildRun,
-    DeferOrchestrationToContextQuery, DeferOrchestrationToTask, DerivedExpressionFailureEvidence,
-    FailOrchestrationJob, JobFence, MaterializedTerminalValue, OrchestrationFailureCause,
-    OrchestrationYield, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
-    ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+    DeferOrchestrationToContextQuery, DeferOrchestrationToModelTurn, DeferOrchestrationToTask,
+    DerivedExpressionFailureEvidence, FailOrchestrationJob, JobFence, MaterializedTerminalValue,
+    OrchestrationFailureCause, OrchestrationYield, OrchestrationYieldMutationIds, PgRepository,
+    RepositoryError, ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use insight_platform_tasks::TaskDefinition;
 use serde_json::json;
@@ -265,6 +266,7 @@ pub struct PostgresDurablePlanGenerationStore<M, I> {
     materializer: Arc<M>,
     identities: Arc<I>,
     capability_admission: Arc<dyn ControllerCapabilityAdmissionProvider>,
+    model_admission: Arc<dyn ControllerModelAdmissionProvider>,
     handoff_retry_delay: Duration,
 }
 
@@ -294,6 +296,39 @@ pub trait ControllerCapabilityAdmissionProvider: Send + Sync + 'static {
     ) -> Result<ControllerCapabilityAdmissionDecision, DurablePlanDriverError>;
 }
 
+#[derive(Debug, Clone)]
+pub struct ControllerModelAdmissionRequest {
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub node_execution_id: ResourceId,
+    pub model_turn_id: ResourceId,
+    pub request_value_id: ResourceId,
+    pub selected_deployment: insight_platform_contracts::ExactDeploymentRef,
+    pub input: ResolvedExpressionInput,
+    pub input_value: ClosedJsonValue,
+    pub tool_slots: Vec<insight_platform_contracts::FrozenSlotBinding>,
+    pub maximum_rounds: u16,
+    pub maximum_capability_calls: u32,
+    pub maximum_parallel_calls_per_round: u16,
+    pub token_budget: u64,
+    pub deadline: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ControllerModelAdmissionDecision {
+    pub request: insight_platform_models::ModelRequestValue,
+    pub requested_attempt_limit: u32,
+    pub cost_ceiling_microunits: u64,
+}
+
+#[async_trait]
+pub trait ControllerModelAdmissionProvider: Send + Sync + 'static {
+    async fn assemble(
+        &self,
+        request: ControllerModelAdmissionRequest,
+    ) -> Result<ControllerModelAdmissionDecision, DurablePlanDriverError>;
+}
+
 impl<M, I> PostgresDurablePlanGenerationStore<M, I>
 where
     M: ControllerRunValueMaterializer,
@@ -304,6 +339,7 @@ where
         materializer: Arc<M>,
         identities: Arc<I>,
         capability_admission: Arc<dyn ControllerCapabilityAdmissionProvider>,
+        model_admission: Arc<dyn ControllerModelAdmissionProvider>,
         handoff_retry_delay: Duration,
     ) -> Result<Self, DurablePlanDriverError> {
         if handoff_retry_delay.is_zero() || i64::try_from(handoff_retry_delay.as_millis()).is_err()
@@ -315,6 +351,7 @@ where
             materializer,
             identities,
             capability_admission,
+            model_admission,
             handoff_retry_delay,
         })
     }
@@ -513,6 +550,147 @@ where
             .map_err(classify_repository_failure)?;
         match transaction
             .defer_orchestration_to_context_query(context)
+            .await
+        {
+            Ok(_) => transaction
+                .commit()
+                .await
+                .map_err(classify_repository_failure),
+            Err(failure) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(classify_repository_failure)?;
+                Err(classify_repository_failure(failure))
+            }
+        }
+    }
+
+    async fn commit_model_dispatch(
+        &self,
+        job: &StartedOrchestrationJob,
+        command: DerivedControllerCommit,
+    ) -> Result<(), DurablePlanDriverError> {
+        let DurableControllerPhase::ModelDispatch(facts) = command.facts.phase else {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        };
+        let DurableModelDispatchFacts {
+            input,
+            value,
+            route,
+            selection_policy,
+            selection_document,
+            candidates,
+            tool_slots,
+        } = *facts;
+        let RuntimeNode::ModelLoop {
+            model_slot_id,
+            maximum_rounds,
+            maximum_capability_calls,
+            maximum_parallel_calls_per_round,
+            token_budget,
+            ..
+        } = command
+            .materialized
+            .plan
+            .node(&command.facts.plan_node_key)
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        else {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        };
+        let route_reference = route.as_ref().map(|(resolved, _)| ExactRunValueRef {
+            value_id: resolved.run_value_id.clone(),
+            schema_digest: resolved.schema_digest.clone(),
+            content_digest: resolved.content_digest.clone(),
+        });
+        let selection_evidence = derive_candidate_selection(
+            model_slot_id,
+            &selection_policy,
+            &selection_document,
+            &candidates,
+            route_reference
+                .as_ref()
+                .zip(route.as_ref().map(|(_, value)| value)),
+        )
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let tenant_id: ResourceId = job
+            .started()
+            .tenant_id
+            .parse()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let run_id: ResourceId = job
+            .started()
+            .run_id
+            .as_deref()
+            .ok_or(DurablePlanDriverError::InvariantViolation)?
+            .parse()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let model_turn_id = self.new_id(ResourceKind::ModelTurn)?;
+        let request_value_id = self.new_id(ResourceKind::RunValue)?;
+        let admission = self
+            .model_admission
+            .assemble(ControllerModelAdmissionRequest {
+                tenant_id,
+                run_id,
+                node_execution_id: command.facts.node_execution_id.clone(),
+                model_turn_id: model_turn_id.clone(),
+                request_value_id: request_value_id.clone(),
+                selected_deployment: selection_evidence.selected_deployment.clone(),
+                input: input.clone(),
+                input_value: value,
+                tool_slots: tool_slots.clone(),
+                maximum_rounds: *maximum_rounds,
+                maximum_capability_calls: *maximum_capability_calls,
+                maximum_parallel_calls_per_round: *maximum_parallel_calls_per_round,
+                token_budget: *token_budget,
+                deadline: job.started().deadline,
+            })
+            .await?;
+        if admission.request.value_id != request_value_id {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        }
+        let model_job_id = self.new_id(ResourceKind::Job)?;
+        let request_digest: Sha256Digest = canonical_digest(&json!({
+            "job_id": command.fence.job_id,
+            "lease_generation": command.fence.lease_epoch,
+            "model_job_id": model_job_id,
+            "model_turn_id": model_turn_id,
+            "operation": "orchestration.model.defer",
+            "plan_digest": command.materialized.request.artifact.content_digest(),
+            "request_value_digest": admission.request.content_digest,
+            "selection_evidence_digest": selection_evidence.canonical_digest,
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let deferred = DeferOrchestrationToModelTurn {
+            fence: command.fence,
+            plan: command.materialized.plan,
+            model_turn_id,
+            model_job_id,
+            input,
+            request: admission.request,
+            route,
+            selection_evidence,
+            tool_slots,
+            requested_attempt_limit: admission.requested_attempt_limit,
+            cost_ceiling_microunits: admission.cost_ceiling_microunits,
+            idempotency_key_digest: self
+                .identities
+                .new_lease_token_digest()
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            request_digest,
+            receipt_expires_at: job.started().deadline,
+            mutations: allocate_model_turn_mutations(self.identities.as_ref())
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+        };
+        let mut transaction = self
+            .repository
+            .begin_scheduler_transaction()
+            .await
+            .map_err(classify_repository_failure)?;
+        match transaction
+            .defer_orchestration_to_model_turn(deferred)
             .await
         {
             Ok(_) => transaction
@@ -996,6 +1174,39 @@ where
                     )),
                 })
             }
+            ControllerFacts::ModelDispatch(facts) => {
+                let value = self
+                    .materializer
+                    .materialize(&context, &facts.input)
+                    .await
+                    .map_err(map_materialization_failure)?;
+                let route = if let Some(route) = facts.route {
+                    let value = self
+                        .materializer
+                        .materialize(&context, &route)
+                        .await
+                        .map_err(map_materialization_failure)?;
+                    Some((route, value))
+                } else {
+                    None
+                };
+                Ok(DurableControllerFacts {
+                    node_execution_id: facts.identity.node_execution_id,
+                    node_execution_version: facts.identity.node_execution_version,
+                    plan_node_key: facts.identity.plan_node_key,
+                    phase: DurableControllerPhase::ModelDispatch(Box::new(
+                        DurableModelDispatchFacts {
+                            input: facts.input,
+                            value,
+                            route,
+                            selection_policy: facts.selection_policy,
+                            selection_document: facts.selection_document,
+                            candidates: facts.candidates,
+                            tool_slots: facts.tool_slots,
+                        },
+                    )),
+                })
+            }
         }
     }
 
@@ -1012,6 +1223,7 @@ where
             (DurableControllerPhase::ChildAgentDispatch(_), None) => None,
             (DurableControllerPhase::CapabilityDispatch(_), None) => None,
             (DurableControllerPhase::ContextDispatch(_), None) => None,
+            (DurableControllerPhase::ModelDispatch(_), None) => None,
             _ => return Err(DurablePlanDriverError::InvariantViolation),
         };
         if matches!(
@@ -1037,6 +1249,15 @@ where
             }
         ) {
             return self.commit_context_dispatch(job, command).await;
+        }
+        if matches!(
+            command.decision,
+            insight_platform_orchestrator::ControllerDecision::DispatchLeaf {
+                kind: insight_platform_orchestrator::LeafKind::ModelLoop,
+                ..
+            }
+        ) {
+            return self.commit_model_dispatch(job, command).await;
         }
         if matches!(
             command.decision,

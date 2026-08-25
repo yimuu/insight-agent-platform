@@ -17,6 +17,7 @@ futures.workspace = true
 insight-platform-artifacts.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-invocations.workspace = true
+insight-platform-models.workspace = true
 insight-platform-orchestrator.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-sandbox.workspace = true

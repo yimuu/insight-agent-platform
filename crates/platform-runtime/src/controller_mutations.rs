@@ -8,8 +8,8 @@ use insight_platform_postgres::repository::{
     ControllerScopeSlot, ControllerStepMutationIds, ControllerStructuralExitSlot,
     ControllerStructuralRequirement, DeferOrchestrationCapabilityMutationIds,
     DeferOrchestrationChildMutationIds, DeferOrchestrationContextMutationIds,
-    DeferOrchestrationTaskMutationIds, OrchestrationTerminalMutationIds,
-    OrchestrationYieldMutationIds, MAX_ORCHESTRATION_QUOTA_LINES,
+    DeferOrchestrationModelMutationIds, DeferOrchestrationTaskMutationIds,
+    OrchestrationTerminalMutationIds, OrchestrationYieldMutationIds, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 
 pub fn allocate_orchestration_terminal_mutations(
@@ -107,6 +107,33 @@ pub fn allocate_context_query_mutations(
         context_prepare_receipt_id: new_id(identities, ResourceKind::Receipt)?,
         context_prepare_event_id: new_id(identities, ResourceKind::Event)?,
         context_prepare_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+    })
+}
+
+pub fn allocate_model_turn_mutations(
+    identities: &impl CoordinatorIdentityFactory,
+) -> Result<DeferOrchestrationModelMutationIds, IdentityFactoryError> {
+    Ok(DeferOrchestrationModelMutationIds {
+        source: OrchestrationYieldMutationIds {
+            receipt_id: new_id(identities, ResourceKind::Receipt)?,
+            quota_entry_ids: allocate_ids(
+                identities,
+                ResourceKind::QuotaLedgerEntry,
+                MAX_ORCHESTRATION_QUOTA_LINES,
+            )?,
+            run_event_id: new_id(identities, ResourceKind::Event)?,
+            run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+            node_event_id: new_id(identities, ResourceKind::Event)?,
+            node_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+            job_event_id: new_id(identities, ResourceKind::Event)?,
+            job_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        },
+        model_create_receipt_id: new_id(identities, ResourceKind::Receipt)?,
+        model_create_event_id: new_id(identities, ResourceKind::Event)?,
+        model_create_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        model_prepare_receipt_id: new_id(identities, ResourceKind::Receipt)?,
+        model_prepare_event_id: new_id(identities, ResourceKind::Event)?,
+        model_prepare_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
     })
 }
 

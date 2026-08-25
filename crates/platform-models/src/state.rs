@@ -6,7 +6,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     CommandAudit, CommandOutcome, DecimalMoney, DeploymentClosure, ExactDeploymentRef,
-    ExactPolicyBinding, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
+    ExactPolicyBinding, ExactVersionRef, ExternalLeafFailureMutationIds,
+    ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
     FrozenSlotTarget, ModelDeploymentClosure, ModelProfileResourceSpec,
     ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelTurnState, NodeExecutionState,
     Permission, PlanNodeKind, PlatformFailureCode, PrincipalSnapshot, ResourceDocument, ResourceId,
@@ -793,6 +794,8 @@ pub struct ModelClaimSlot {
     pub quota_entry_ids: Vec<ResourceId>,
     pub event_id: ResourceId,
     pub outbox_id: ResourceId,
+    pub resume_mutations: Option<ExternalLeafResumeMutationIds>,
+    pub failure_mutations: Option<ExternalLeafFailureMutationIds>,
 }
 
 impl ModelClaimSlot {
@@ -801,6 +804,15 @@ impl ModelClaimSlot {
         if self.usage_reservation_id.kind() != ResourceKind::UsageReservation
             || self.event_id.kind() != ResourceKind::Event
             || self.outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.resume_mutations.is_some() != self.failure_mutations.is_some()
+            || self
+                .resume_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || self
+                .failure_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
         {
             return Err(ModelTurnError::InvalidIdentity);
         }
@@ -1058,6 +1070,8 @@ pub struct CommitModelOutcome {
     pub quota_entry_ids: Vec<ResourceId>,
     pub request: CanonicalModelRequest,
     pub outcome: ModelDispatchOutcome,
+    pub resume_mutations: Option<ExternalLeafResumeMutationIds>,
+    pub failure_mutations: Option<ExternalLeafFailureMutationIds>,
 }
 
 impl CommitModelOutcome {
@@ -1071,6 +1085,22 @@ impl CommitModelOutcome {
             || self.fence.lease_generation == 0
             || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
             || self.usage_reservation_id.kind() != ResourceKind::UsageReservation
+            || self.resume_mutations.is_some()
+                && !matches!(
+                    &self.outcome,
+                    ModelDispatchOutcome::Succeeded(output) if output.response.tool_intents.is_empty()
+                )
+            || self.failure_mutations.is_some()
+                && !matches!(self.outcome, ModelDispatchOutcome::PermanentFailure { .. })
+            || (self.resume_mutations.is_some() && self.failure_mutations.is_some())
+            || self
+                .resume_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || self
+                .failure_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
         {
             return Err(ModelTurnError::InvalidCommand);
         }
@@ -1529,7 +1559,8 @@ pub fn decide_model_cancellation_outcome(
     })
 }
 
-pub trait ModelTurnTransaction {
+#[async_trait::async_trait]
+pub trait ModelTurnTransaction: Send {
     type Error;
     type ExecutionRecord;
     type ControlRecord;
@@ -1563,6 +1594,7 @@ pub trait ModelTurnTransaction {
     async fn rollback(self) -> Result<(), Self::Error>;
 }
 
+#[async_trait::async_trait]
 pub trait ModelTurnStore {
     type Error;
     type Transaction<'a>: ModelTurnTransaction<Error = Self::Error>

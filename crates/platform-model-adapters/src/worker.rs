@@ -5,7 +5,8 @@ use super::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    CommandOutcome, DecimalMoney, FailureClass, ResourceId, ResourceKind, Retryability,
+    CommandOutcome, DecimalMoney, ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds,
+    FailureClass, ResourceId, ResourceKind, Retryability,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_models::{
@@ -23,6 +24,8 @@ pub struct ExecuteModelAdapterJob {
     pub fence: JobFence,
     pub usage_reservation_id: ResourceId,
     pub quota_entry_ids: Vec<ResourceId>,
+    pub resume_mutations: Option<ExternalLeafResumeMutationIds>,
+    pub failure_mutations: Option<ExternalLeafFailureMutationIds>,
 }
 
 impl ExecuteModelAdapterJob {
@@ -46,6 +49,15 @@ impl ExecuteModelAdapterJob {
                 .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
             || self.quota_entry_ids.iter().collect::<BTreeSet<_>>().len()
                 != self.quota_entry_ids.len()
+            || self.resume_mutations.is_some() != self.failure_mutations.is_some()
+            || self
+                .resume_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || self
+                .failure_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
         {
             return Err(ModelAdapterWorkerContractError::InvalidCommand);
         }
@@ -188,6 +200,15 @@ where
                     .map_err(|_| ModelAdapterWorkerContractError::InvalidCommand)?
             }
         };
+        let resume_mutations = matches!(
+            &outcome,
+            ModelDispatchOutcome::Succeeded(output) if output.response.tool_intents.is_empty()
+        )
+        .then_some(command.resume_mutations)
+        .flatten();
+        let failure_mutations = matches!(&outcome, ModelDispatchOutcome::PermanentFailure { .. })
+            .then_some(command.failure_mutations)
+            .flatten();
         Ok(PreparedModelAdapterCommit {
             command: CommitModelOutcome {
                 audit: command.audit,
@@ -199,6 +220,8 @@ where
                 quota_entry_ids: command.quota_entry_ids,
                 request: *command.execution.request,
                 outcome,
+                resume_mutations,
+                failure_mutations,
             },
         })
     }

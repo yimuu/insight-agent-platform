@@ -62,6 +62,8 @@ pub struct ClaimedModelExecution {
     pub fence: JobFence,
     pub usage_reservation_id: ResourceId,
     pub quota_entry_ids: Vec<ResourceId>,
+    pub resume_mutations: Option<insight_platform_contracts::ExternalLeafResumeMutationIds>,
+    pub failure_mutations: Option<insight_platform_contracts::ExternalLeafFailureMutationIds>,
 }
 
 impl ClaimedModelExecution {
@@ -148,6 +150,8 @@ impl ClaimedModelExecution {
             fence: self.fence.clone(),
             usage_reservation_id: self.usage_reservation_id.clone(),
             quota_entry_ids: quota_settlement_entry_ids,
+            resume_mutations: self.resume_mutations.clone(),
+            failure_mutations: self.failure_mutations.clone(),
             execution,
         };
         command
@@ -169,9 +173,10 @@ impl ControlledModelExecution {
     }
 }
 
-pub struct PgModelTurnTransaction {
-    transaction: Transaction<'static, Postgres>,
+pub struct PgModelTurnTransaction<'a> {
+    transaction: Transaction<'a, Postgres>,
     limits: ModelTurnLimits,
+    scope_environment_limits: insight_platform_orchestrator::ScopeEnvironmentLimits,
 }
 
 #[derive(Debug)]
@@ -215,18 +220,43 @@ struct ModelQuotaReservationLine {
 impl PgRepository {
     pub async fn begin_model_turn_transaction(
         &self,
-    ) -> Result<PgModelTurnTransaction, RepositoryError> {
+    ) -> Result<PgModelTurnTransaction<'_>, RepositoryError> {
         Ok(PgModelTurnTransaction {
             transaction: self.pool().begin().await?,
             limits: self.model_turn_limits(),
+            scope_environment_limits: self.scope_environment_limits(),
         })
     }
 }
 
+pub(crate) async fn load_model_turn_for_replay(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    model_turn_id: &ResourceId,
+    limits: ModelTurnLimits,
+) -> Result<ModelTurnRecord, RepositoryError> {
+    load_model_turn(transaction, tenant_id, model_turn_id, false, limits).await
+}
+
+impl<'a> PgModelTurnTransaction<'a> {
+    pub(crate) fn from_transaction(
+        transaction: Transaction<'a, Postgres>,
+        limits: ModelTurnLimits,
+        scope_environment_limits: insight_platform_orchestrator::ScopeEnvironmentLimits,
+    ) -> Self {
+        Self {
+            transaction,
+            limits,
+            scope_environment_limits,
+        }
+    }
+}
+
+#[async_trait::async_trait]
 impl ModelTurnStore for PgRepository {
     type Error = RepositoryError;
     type Transaction<'a>
-        = PgModelTurnTransaction
+        = PgModelTurnTransaction<'a>
     where
         Self: 'a;
 
@@ -235,7 +265,8 @@ impl ModelTurnStore for PgRepository {
     }
 }
 
-impl ModelTurnTransaction for PgModelTurnTransaction {
+#[async_trait::async_trait]
+impl<'a> ModelTurnTransaction for PgModelTurnTransaction<'a> {
     type Error = RepositoryError;
     type ExecutionRecord = PreparedModelExecution;
     type ControlRecord = ControlledModelExecution;
@@ -708,25 +739,23 @@ async fn validate_model_tool_projections(
     request: &ModelRequestValue,
 ) -> Result<(), RepositoryError> {
     for tool in &request.request.tools {
-        let matches = run
-            .bindings
-            .slots
-            .iter()
-            .filter_map(|slot| match &slot.target {
-                FrozenSlotTarget::Capability {
-                    candidates,
-                    tool_alias,
-                    ..
-                } if candidates.contains(&tool.capability_deployment)
-                    && tool_alias
-                        .as_deref()
-                        .is_none_or(|alias| alias == tool.projected_name) =>
-                {
-                    Some(())
+        let mut matches = 0usize;
+        for slot in &run.bindings.slots {
+            if let FrozenSlotTarget::Capability {
+                candidates,
+                tool_alias,
+                ..
+            } = &slot.target
+            {
+                let alias_matches = match tool_alias {
+                    Some(alias) => alias == &tool.projected_name,
+                    None => true,
+                };
+                if candidates.contains(&tool.capability_deployment) && alias_matches {
+                    matches += 1;
                 }
-                _ => None,
-            })
-            .count();
+            }
+        }
         if matches != 1 {
             return Err(RepositoryError::InvalidInput(
                 "Model tool projection is not an unambiguous frozen Capability binding".to_owned(),
@@ -793,12 +822,17 @@ async fn require_committed_tool_results(
     run_id: &ResourceId,
     request: &ModelRequestValue,
 ) -> Result<(), RepositoryError> {
-    for result in request.request.messages.iter().flat_map(|message| {
-        message.parts.iter().filter_map(|part| match part {
-            CanonicalMessagePart::ToolResult(result) => Some(result),
+    let results = request
+        .request
+        .messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            CanonicalMessagePart::ToolResult(result) => Some(result.clone()),
             _ => None,
         })
-    }) {
+        .collect::<Vec<_>>();
+    for result in results {
         let row = sqlx::query(
             r#"
             SELECT invocation.invocation_kind, invocation.run_id AS invocation_run_id,
@@ -1400,6 +1434,7 @@ impl PgRepository {
             }
             let run = load_run_for_update(&mut transaction, &tenant_id, &run_id).await?;
             let node = load_model_node_for_update(&mut transaction, &tenant_id, &node_id).await?;
+            let plan_leaf = node.state == NodeExecutionState::Waiting;
             let current_turn = load_model_turn(
                 &mut transaction,
                 &tenant_id,
@@ -1516,6 +1551,8 @@ impl PgRepository {
                 },
                 usage_reservation_id: slot.usage_reservation_id.clone(),
                 quota_entry_ids: slot.quota_entry_ids.clone(),
+                resume_mutations: plan_leaf.then(|| slot.resume_mutations.clone()).flatten(),
+                failure_mutations: plan_leaf.then(|| slot.failure_mutations.clone()).flatten(),
             });
         }
         transaction.commit().await?;
@@ -1825,14 +1862,24 @@ async fn require_model_claim_parents(
         parse_id(&provider_deployment.resource_id, "Model Provider resource")?;
     let provider_resource =
         load_resource(transaction, &turn.tenant_id, &provider_resource_id).await?;
+    let plan_leaf = node.state == NodeExecutionState::Waiting;
+    let run_state = run.state.parse::<RunState>().ok();
     if turn.run_id.to_string() != run.run_id
         || node.run_id != run.run_id
         || node.scope_instance_id != turn.scope_instance_id
-        || run.state.parse::<RunState>().ok() != Some(RunState::Running)
+        || if plan_leaf {
+            !matches!(run_state, Some(RunState::Running | RunState::Waiting))
+        } else {
+            run_state != Some(RunState::Running)
+        }
         || run.current.control.pause_requested
         || run.current.control.cancel_requested_at.is_some()
         || run.current.control.timeout_requested_at.is_some()
-        || node.state != NodeExecutionState::Running
+        || if plan_leaf {
+            node.state != NodeExecutionState::Waiting
+        } else {
+            node.state != NodeExecutionState::Running
+        }
         || node.node_kind != PlanNodeKind::ModelLoop
         || database_now >= run.deadline
         || database_now >= node.deadline
@@ -1857,6 +1904,39 @@ async fn require_model_claim_parents(
         || provider_resource.gate_state != "enabled"
     {
         return Err(RepositoryError::Conflict("Model dispatch parent"));
+    }
+    if plan_leaf {
+        let mut current = run.current.clone();
+        if run_state == Some(RunState::Waiting) {
+            current.waiting_reason = None;
+        }
+        current
+            .validate(&turn.run_id)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE insight_platform.runs
+            SET state = 'running', version = version + 1,
+                active_work_count = active_work_count + 1,
+                current_schema_version = $4, current_payload = $5,
+                current_payload_digest = $6, updated_at = $7
+            WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+              AND state IN ('running', 'waiting') AND terminal_at IS NULL
+            "#,
+        )
+        .bind(&run.tenant_id)
+        .bind(&run.run_id)
+        .bind(run.version)
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .bind(database_now)
+        .execute(&mut **transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(RepositoryError::Conflict("Model Plan leaf claim permit"));
+        }
     }
     Ok(())
 }
@@ -1909,7 +1989,7 @@ async fn update_started_model_job(
     job_from_row(row)
 }
 
-impl PgModelTurnTransaction {
+impl<'a> PgModelTurnTransaction<'a> {
     async fn commit_model_outcome_inner(
         &mut self,
         command: CommitModelOutcome,
@@ -2013,6 +2093,26 @@ impl PgModelTurnTransaction {
                 database_now,
             )
             .await?;
+            if let Some(mutations) = command.resume_mutations.as_ref() {
+                let exact = output
+                    .exact_for(
+                        &decision.turn.run_id,
+                        &decision.turn.node_execution_id,
+                        &command.request,
+                        self.limits,
+                    )
+                    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+                crate::repository::settle_model_leaf_success_in_transaction(
+                    &mut transaction,
+                    &decision.turn,
+                    &command.job_id,
+                    &exact,
+                    mutations,
+                    self.scope_environment_limits,
+                    database_now,
+                )
+                .await?;
+            }
         }
         let job = update_model_job(
             &mut transaction,
@@ -2023,6 +2123,19 @@ impl PgModelTurnTransaction {
         )
         .await?;
         update_model_turn(&mut transaction, &current_turn, &decision.turn, self.limits).await?;
+        if let (ModelDispatchOutcome::PermanentFailure { failure, .. }, Some(mutations)) =
+            (&command.outcome, command.failure_mutations.as_ref())
+        {
+            crate::repository::settle_model_leaf_failure_in_transaction(
+                &mut transaction,
+                &decision.turn,
+                &command.job_id,
+                &failure.failure,
+                mutations,
+                database_now,
+            )
+            .await?;
+        }
         let (event_type, disposition) = match &command.outcome {
             ModelDispatchOutcome::Succeeded(output) if output.response.tool_intents.is_empty() => {
                 ("model.completed", "completed")

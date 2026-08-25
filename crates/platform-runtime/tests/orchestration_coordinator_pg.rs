@@ -34,7 +34,9 @@ use insight_platform_runtime::postgres::{
 use insight_platform_runtime::{
     ActiveOrchestrationJob, ControllerCapabilityAdmissionDecision,
     ControllerCapabilityAdmissionProvider, ControllerCapabilityAdmissionRequest,
-    CoordinatorIdentityFactory, CoordinatorTiming, ExactPlanGenerationDriver, ExecutionDisposition,
+    ControllerModelAdmissionDecision, ControllerModelAdmissionProvider,
+    ControllerModelAdmissionRequest, CoordinatorIdentityFactory, CoordinatorTiming,
+    DurablePlanDriverError, ExactPlanGenerationDriver, ExecutionDisposition,
     GenerationHandlerDisposition, GenerationHandlerError, GenerationHandoffReason,
     LeaseFencedOrchestrationExecutor, MaterializingOrchestrationJobHandler,
     OrchestrationCoordinatorConfig, OrchestrationExecutorConfig, OrchestrationExecutorTiming,
@@ -92,6 +94,18 @@ impl ControllerCapabilityAdmissionProvider for EmptyCapabilityAdmissionProvider 
             policies: InvocationPolicyDecisionBundle::build(Vec::new(), None).unwrap(),
             mcp_runtime: None,
         })
+    }
+}
+
+struct EmptyModelAdmissionProvider;
+
+#[async_trait]
+impl ControllerModelAdmissionProvider for EmptyModelAdmissionProvider {
+    async fn assemble(
+        &self,
+        _request: ControllerModelAdmissionRequest,
+    ) -> Result<ControllerModelAdmissionDecision, DurablePlanDriverError> {
+        Err(DurablePlanDriverError::InvariantViolation)
     }
 }
 
@@ -731,6 +745,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                 .unwrap()),
                 Arc::new(UuidCoordinatorIdentityFactory),
                 Arc::new(EmptyCapabilityAdmissionProvider),
+                Arc::new(EmptyModelAdmissionProvider),
                 Duration::from_millis(50),
             )
             .unwrap(),
