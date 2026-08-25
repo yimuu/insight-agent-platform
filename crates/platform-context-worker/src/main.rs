@@ -12,7 +12,8 @@ use insight_platform_contracts::{
     ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, run_worker_permit_sampler, update_worker_permits,
+    ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_worker::LocalWorkerPools;
@@ -151,6 +152,7 @@ async fn run() -> Result<(), ProcessError> {
         process_generation_id.clone(),
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let observability_pools = pools.clone();
     let driver = ContextWorkerDriver::new(
         repository,
         pools,
@@ -158,15 +160,26 @@ async fn run() -> Result<(), ProcessError> {
         config.driver_config()?,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let permit_metrics = Arc::new(WorkerPermitMetrics::default());
+    update_worker_permits(&permit_metrics, &observability_pools);
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("context-native-worker", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_worker_permits(
+            "context-native-worker",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            Arc::clone(&permit_metrics),
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityFailed)?;
     eprintln!("platform-context-worker started");
     let cancellation = CancellationToken::new();
+    let _permit_sampler = tokio::spawn(run_worker_permit_sampler(
+        permit_metrics,
+        observability_pools,
+        cancellation.child_token(),
+    ));
     let worker_cancellation = cancellation.child_token();
     let mut worker = tokio::spawn(async move { driver.run(worker_cancellation).await });
     let http_cancellation = cancellation.child_token();

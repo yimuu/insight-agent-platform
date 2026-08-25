@@ -11,6 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 axum.workspace = true
+insight-platform-worker.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

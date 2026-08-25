@@ -23,7 +23,8 @@ use insight_platform_model_worker::{
 };
 use insight_platform_models::ModelTurnLimits;
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, run_worker_permit_sampler, update_worker_permits,
+    ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_worker::LocalWorkerPools;
@@ -302,6 +303,7 @@ async fn run() -> Result<(), ProcessError> {
         process_generation_id.clone(),
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let observability_pools = pools.clone();
     let egress = Arc::new(EgressBrokerGrpcClient::new(
         connect_egress(&config).await?,
         config.rpc_limits()?,
@@ -370,9 +372,15 @@ async fn run() -> Result<(), ProcessError> {
         config.cancellation_driver_config()?,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let permit_metrics = Arc::new(WorkerPermitMetrics::default());
+    update_worker_permits(&permit_metrics, &observability_pools);
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("model-worker", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_worker_permits(
+            "model-worker",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            Arc::clone(&permit_metrics),
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -381,6 +389,11 @@ async fn run() -> Result<(), ProcessError> {
     eprintln!("platform-model-worker started");
     let cancellation = CancellationToken::new();
     let mut components = JoinSet::new();
+    let permit_cancellation = cancellation.child_token();
+    components.spawn(async move {
+        run_worker_permit_sampler(permit_metrics, observability_pools, permit_cancellation).await;
+        Ok(())
+    });
     let driver_cancellation = cancellation.child_token();
     components.spawn(async move {
         driver

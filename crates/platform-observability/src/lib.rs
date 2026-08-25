@@ -11,12 +11,14 @@ use axum::{
     routing::get,
     Router,
 };
+use insight_platform_worker::LocalWorkerPools;
 use std::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio_util::sync::CancellationToken;
 
 const OUTCOMES: [&str; 3] = ["success", "rejected", "failure"];
 const BUCKETS_MILLISECONDS: [u64; 10] = [5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000];
@@ -114,6 +116,7 @@ pub struct ProcessHttpMetrics {
     requests: Vec<AtomicU64>,
     duration_microseconds: Vec<AtomicU64>,
     duration_buckets: Vec<AtomicU64>,
+    worker_permits: Option<Arc<WorkerPermitMetrics>>,
     orchestration: Option<Arc<OrchestrationOperationalMetrics>>,
 }
 
@@ -122,7 +125,15 @@ impl ProcessHttpMetrics {
         component_role: &'static str,
         operations: &'static [&'static str],
     ) -> Result<Self, MetricsInstallError> {
-        Self::install_inner(component_role, operations, None)
+        Self::install_inner(component_role, operations, None, None)
+    }
+
+    pub fn install_with_worker_permits(
+        component_role: &'static str,
+        operations: &'static [&'static str],
+        worker_permits: Arc<WorkerPermitMetrics>,
+    ) -> Result<Self, MetricsInstallError> {
+        Self::install_inner(component_role, operations, Some(worker_permits), None)
     }
 
     pub fn install_with_orchestration(
@@ -130,12 +141,13 @@ impl ProcessHttpMetrics {
         operations: &'static [&'static str],
         orchestration: Arc<OrchestrationOperationalMetrics>,
     ) -> Result<Self, MetricsInstallError> {
-        Self::install_inner(component_role, operations, Some(orchestration))
+        Self::install_inner(component_role, operations, None, Some(orchestration))
     }
 
     fn install_inner(
         component_role: &'static str,
         operations: &'static [&'static str],
+        worker_permits: Option<Arc<WorkerPermitMetrics>>,
         orchestration: Option<Arc<OrchestrationOperationalMetrics>>,
     ) -> Result<Self, MetricsInstallError> {
         if !valid_label(component_role) {
@@ -165,6 +177,7 @@ impl ProcessHttpMetrics {
             requests: atomics(series),
             duration_microseconds: atomics(series),
             duration_buckets: atomics(series * (BUCKETS_MILLISECONDS.len() + 1)),
+            worker_permits,
             orchestration,
         })
     }
@@ -262,10 +275,80 @@ impl ProcessHttpMetrics {
                 );
             }
         }
-        if let Some(orchestration) = &self.orchestration {
+        if let Some(worker_permits) = &self.worker_permits {
+            worker_permits.render_prometheus(role, &mut output);
+        } else if let Some(orchestration) = &self.orchestration {
             orchestration.render_prometheus(role, &mut output);
         }
         output
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkerPermitSnapshot {
+    pub business_capacity: u64,
+    pub business_available: u64,
+    pub critical_control_capacity: u64,
+    pub critical_control_available: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct WorkerPermitMetrics {
+    business_capacity: AtomicU64,
+    business_available: AtomicU64,
+    critical_control_capacity: AtomicU64,
+    critical_control_available: AtomicU64,
+}
+
+impl WorkerPermitMetrics {
+    pub fn update(&self, snapshot: WorkerPermitSnapshot) {
+        self.business_capacity
+            .store(snapshot.business_capacity, Ordering::Release);
+        self.business_available
+            .store(snapshot.business_available, Ordering::Release);
+        self.critical_control_capacity
+            .store(snapshot.critical_control_capacity, Ordering::Release);
+        self.critical_control_available
+            .store(snapshot.critical_control_available, Ordering::Release);
+    }
+
+    fn render_prometheus(&self, role: &str, output: &mut String) {
+        render_worker_permits(
+            role,
+            self.business_capacity.load(Ordering::Acquire),
+            self.business_available.load(Ordering::Acquire),
+            self.critical_control_capacity.load(Ordering::Acquire),
+            self.critical_control_available.load(Ordering::Acquire),
+            output,
+        );
+    }
+}
+
+pub fn update_worker_permits(metrics: &WorkerPermitMetrics, pools: &LocalWorkerPools) {
+    let snapshot = pools.snapshot();
+    metrics.update(WorkerPermitSnapshot {
+        business_capacity: u64::try_from(snapshot.business_capacity).unwrap_or(u64::MAX),
+        business_available: u64::try_from(snapshot.business_available).unwrap_or(u64::MAX),
+        critical_control_capacity: u64::try_from(snapshot.critical_control_capacity)
+            .unwrap_or(u64::MAX),
+        critical_control_available: u64::try_from(snapshot.critical_control_available)
+            .unwrap_or(u64::MAX),
+    });
+}
+
+pub async fn run_worker_permit_sampler(
+    metrics: Arc<WorkerPermitMetrics>,
+    pools: LocalWorkerPools,
+    cancellation: CancellationToken,
+) {
+    update_worker_permits(&metrics, &pools);
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return,
+            _ = interval.tick() => update_worker_permits(&metrics, &pools),
+        }
     }
 }
 
@@ -328,26 +411,14 @@ impl OrchestrationOperationalMetrics {
     fn render_prometheus(&self, role: &str, output: &mut String) {
         use fmt::Write as _;
 
-        output.push_str(
-            "# HELP insight_platform_worker_permits Process-local worker permits by fixed lane and state.\n\
-             # TYPE insight_platform_worker_permits gauge\n",
+        render_worker_permits(
+            role,
+            self.business_capacity.load(Ordering::Acquire),
+            self.business_available.load(Ordering::Acquire),
+            self.critical_control_capacity.load(Ordering::Acquire),
+            self.critical_control_available.load(Ordering::Acquire),
+            output,
         );
-        for (lane, capacity, available) in [
-            (
-                "business",
-                self.business_capacity.load(Ordering::Acquire),
-                self.business_available.load(Ordering::Acquire),
-            ),
-            (
-                "critical_control",
-                self.critical_control_capacity.load(Ordering::Acquire),
-                self.critical_control_available.load(Ordering::Acquire),
-            ),
-        ] {
-            let used = capacity.saturating_sub(available);
-            let _ = writeln!(output, "insight_platform_worker_permits{{component_role=\"{role}\",lane=\"{lane}\",state=\"available\"}} {available}");
-            let _ = writeln!(output, "insight_platform_worker_permits{{component_role=\"{role}\",lane=\"{lane}\",state=\"used\"}} {used}");
-        }
         output.push_str(
             "# HELP insight_platform_orchestration_active_jobs Jobs currently executing in the coordinator.\n\
              # TYPE insight_platform_orchestration_active_jobs gauge\n",
@@ -388,6 +459,34 @@ impl OrchestrationOperationalMetrics {
         ] {
             let _ = writeln!(output, "insight_platform_recovery_operations_total{{component_role=\"{role}\",outcome=\"{outcome}\"}} {value}");
         }
+    }
+}
+
+fn render_worker_permits(
+    role: &str,
+    business_capacity: u64,
+    business_available: u64,
+    critical_control_capacity: u64,
+    critical_control_available: u64,
+    output: &mut String,
+) {
+    use fmt::Write as _;
+
+    output.push_str(
+        "# HELP insight_platform_worker_permits Process-local worker permits by fixed lane and state.\n\
+         # TYPE insight_platform_worker_permits gauge\n",
+    );
+    for (lane, capacity, available) in [
+        ("business", business_capacity, business_available),
+        (
+            "critical_control",
+            critical_control_capacity,
+            critical_control_available,
+        ),
+    ] {
+        let used = capacity.saturating_sub(available);
+        let _ = writeln!(output, "insight_platform_worker_permits{{component_role=\"{role}\",lane=\"{lane}\",state=\"available\"}} {available}");
+        let _ = writeln!(output, "insight_platform_worker_permits{{component_role=\"{role}\",lane=\"{lane}\",state=\"used\"}} {used}");
     }
 }
 
@@ -493,5 +592,26 @@ mod tests {
         assert!(rendered.contains("outcome=\"claimed\"} 13"));
         assert!(rendered.contains("outcome=\"scan_failed\"} 1"));
         assert!(!rendered.contains("worker_process_generation"));
+    }
+
+    #[test]
+    fn generic_worker_permits_export_only_fixed_lane_and_state() {
+        let permits = Arc::new(WorkerPermitMetrics::default());
+        permits.update(WorkerPermitSnapshot {
+            business_capacity: 4,
+            business_available: 1,
+            critical_control_capacity: 2,
+            critical_control_available: 2,
+        });
+        let metrics = ProcessHttpMetrics::install_with_worker_permits(
+            "model-worker",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            permits,
+        )
+        .unwrap();
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains("lane=\"business\",state=\"available\"} 1"));
+        assert!(rendered.contains("lane=\"business\",state=\"used\"} 3"));
+        assert!(!rendered.contains("insight_platform_orchestration_active_jobs"));
     }
 }

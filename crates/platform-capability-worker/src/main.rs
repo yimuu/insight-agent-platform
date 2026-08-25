@@ -13,7 +13,8 @@ use insight_platform_contracts::{
     ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, run_worker_permit_sampler, update_worker_permits,
+    ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_worker::LocalWorkerPools;
@@ -202,6 +203,7 @@ async fn run() -> Result<(), ProcessError> {
         process_generation_id.clone(),
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let observability_pools = pools.clone();
     let claim_repository = Arc::new(PgRepository::new(business_pool.clone()));
     let commit_repository = PgRepository::new(business_pool.clone());
     let heartbeat_repository = Arc::new(PgRepository::new(critical_control_pool.clone()));
@@ -223,9 +225,15 @@ async fn run() -> Result<(), ProcessError> {
         config.driver_config()?,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let permit_metrics = Arc::new(WorkerPermitMetrics::default());
+    update_worker_permits(&permit_metrics, &observability_pools);
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("capability-native-worker", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_worker_permits(
+            "capability-native-worker",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            Arc::clone(&permit_metrics),
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -233,6 +241,11 @@ async fn run() -> Result<(), ProcessError> {
     eprintln!("platform-capability-native-worker started");
 
     let cancellation = CancellationToken::new();
+    let _permit_sampler = tokio::spawn(run_worker_permit_sampler(
+        permit_metrics,
+        observability_pools,
+        cancellation.child_token(),
+    ));
     let worker_cancellation = cancellation.child_token();
     let mut worker_task = tokio::spawn(async move { driver.run(worker_cancellation).await });
     let http_cancellation = cancellation.child_token();

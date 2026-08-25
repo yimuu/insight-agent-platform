@@ -359,6 +359,11 @@ business/critical-control permit available/used；该surface不把process-local 
 critical-control permit持续耗尽与recovery scan failure ratio两条带runbook告警。静态与unit门禁通过；其他role saturation、durable queue/outbox/
 recovery lag、dependency health及production scrape仍待真实owner接线和资格验证。
 
+r266新增shared worker-permit sampler并接入Model、Capability Native/Remote和Context Native/Remote五个production pool。它周期读取各进程
+同一`LocalWorkerPools`物理authority，只导出fixed business/critical-control lane的capacity-derived available/used；不暴露generation、Job或
+tenant identity，shutdown token终止sampler。连同Orchestration已有接线，6个pool具备动态permit saturation series；其余11个pool及durable
+backlog/dependency health仍待对应owner接线。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

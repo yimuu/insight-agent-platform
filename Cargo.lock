@@ -2935,7 +2935,9 @@ name = "insight-platform-observability"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "insight-platform-worker",
  "tokio",
+ "tokio-util",
  "tower",
 ]
 
