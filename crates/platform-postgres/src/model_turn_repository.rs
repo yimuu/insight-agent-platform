@@ -10,11 +10,13 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    canonical_digest, ArtifactRef, CommandOutcome, DeploymentClosure, EntityLifecycle,
-    FrozenSlotTarget, JobState, ModelBudgetPolicyDocument, ModelDeploymentClosure,
-    ModelPublicProjectionPolicyDocument, ModelSafetyPolicyDocument, ModelTurnState,
-    NodeExecutionState, Permission, PlanNodeKind, PolicyKind, PolicyResourceSpec, QuotaDimension,
-    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, RunState, Sha256Digest,
+    canonical_digest, AgentResourceSpec, ArtifactRef, CommandOutcome, DeploymentClosure,
+    EntityLifecycle, ExactDeploymentRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
+    JobState, ModelBudgetPolicyDocument, ModelDeploymentClosure, ModelProfileResourceSpec,
+    ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelPublicProjectionPolicyDocument,
+    ModelSafetyPolicyDocument, ModelTurnState, NodeExecutionState, Permission, PlanNodeKind,
+    PolicyKind, PolicyResourceSpec, QuotaDimension, RegistryResourceKind, ResourceDocument,
+    ResourceId, ResourceKind, RunBindingsSnapshot, RunState, Sha256Digest, SkillResourceSpec,
     ValueRef, WorkClass,
 };
 use insight_platform_invocations::InvocationValueStorage;
@@ -26,9 +28,9 @@ use insight_platform_models::{
     CanonicalMessagePart, ClaimModelJobs, CommitModelCancellationOutcome, CommitModelOutcome,
     ControlModelTurn, CreateModelTurn, ModelAdmissionFacts, ModelControlKind, ModelDispatchOutcome,
     ModelExecutionInput, ModelExecutionInputMaterial, ModelJobPayload, ModelOutputValue,
-    ModelQuotaCeiling, ModelQuotaSettlement, ModelRequestValue, ModelTurnLimits, ModelTurnPayload,
-    ModelTurnRecord, ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, PrepareModelDispatch,
-    PreparedModelDispatch, MODEL_QUOTA_LINES,
+    ModelQuotaCeiling, ModelQuotaSettlement, ModelRequestValue, ModelToolProjection,
+    ModelTurnLimits, ModelTurnPayload, ModelTurnRecord, ModelTurnStore, ModelTurnTransaction,
+    ModelWorkerAudit, PrepareModelDispatch, PreparedModelDispatch, MODEL_QUOTA_LINES,
 };
 use insight_platform_orchestrator::derive_candidate_selection;
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
@@ -46,6 +48,26 @@ pub struct ExactModelPolicyFacts {
     pub safety: ModelSafetyPolicyDocument,
     pub budget: ModelBudgetPolicyDocument,
     pub public_projection: ModelPublicProjectionPolicyDocument,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExactControllerSkillFacts {
+    pub slot_id: String,
+    pub deployment: ExactDeploymentRef,
+    pub revision: ExactVersionRef,
+    pub skill: SkillResourceSpec,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExactControllerModelAssemblyFacts {
+    pub run_bindings: RunBindingsSnapshot,
+    pub agent: AgentResourceSpec,
+    pub model: ExactModelPolicyFacts,
+    pub profile: ModelProfileResourceSpec,
+    pub provider_deployment: ModelProviderDeploymentClosure,
+    pub provider: ModelProviderResourceSpec,
+    pub skills: Vec<ExactControllerSkillFacts>,
+    pub tools: Vec<ModelToolProjection>,
 }
 
 impl PgRepository {
@@ -115,6 +137,252 @@ impl PgRepository {
             safety,
             budget,
             public_projection,
+        })
+    }
+
+    pub async fn load_exact_controller_model_assembly_facts(
+        &self,
+        tenant_id: &ResourceId,
+        run_id: &ResourceId,
+        model_slot_id: &str,
+        selected_model: &ExactDeploymentRef,
+        tool_slots: &[FrozenSlotBinding],
+    ) -> Result<ExactControllerModelAssemblyFacts, RepositoryError> {
+        let model = self
+            .load_exact_model_policy_facts(tenant_id, selected_model)
+            .await?;
+        let mut transaction = self.pool().begin().await?;
+        let run = load_run_for_update(&mut transaction, tenant_id, run_id).await?;
+        let model_record =
+            load_deployment(&mut transaction, tenant_id, &selected_model.deployment_id).await?;
+        if model_record.bindings.digest != selected_model.deployment_digest.to_string()
+            || model_record.resource_version_id
+                != model.deployment.profile_revision.revision_id.to_string()
+        {
+            return Err(RepositoryError::Conflict("exact Model assembly Deployment"));
+        }
+        let model_resource_id = parse_id(&model_record.resource_id, "Model assembly Profile")?;
+        let model_resource = load_resource(&mut transaction, tenant_id, &model_resource_id).await?;
+        require_enabled_resource(
+            &model_resource,
+            RegistryResourceKind::ModelProfile,
+            "Model assembly Deployment gate",
+        )?;
+        let model_slot = run
+            .bindings
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == model_slot_id)
+            .ok_or(RepositoryError::NotFound("frozen Model slot"))?;
+        let FrozenSlotTarget::Model { candidates, .. } = &model_slot.target else {
+            return Err(RepositoryError::Conflict("frozen Model slot kind"));
+        };
+        if !candidates.contains(selected_model)
+            || tool_slots.iter().any(|slot| {
+                run.bindings
+                    .slots
+                    .iter()
+                    .find(|frozen| frozen.slot_id == slot.slot_id)
+                    != Some(slot)
+            })
+        {
+            return Err(RepositoryError::Conflict("exact Model assembly slots"));
+        }
+
+        let agent_payload = load_enabled_exact_published_version(
+            &mut transaction,
+            tenant_id,
+            &run.bindings.agent_interface,
+            RegistryResourceKind::Agent,
+        )
+        .await?;
+        let ResourceDocument::Agent(agent) = agent_payload.document else {
+            return Err(RepositoryError::CorruptRow(
+                "Agent interface revision contains the wrong document".to_owned(),
+            ));
+        };
+        let profile_payload = load_enabled_exact_published_version(
+            &mut transaction,
+            tenant_id,
+            &model.deployment.profile_revision,
+            RegistryResourceKind::ModelProfile,
+        )
+        .await?;
+        let ResourceDocument::ModelProfile(profile) = profile_payload.document else {
+            return Err(RepositoryError::CorruptRow(
+                "Model Profile revision contains the wrong document".to_owned(),
+            ));
+        };
+        let provider_record = load_deployment(
+            &mut transaction,
+            tenant_id,
+            &model.deployment.provider_deployment.deployment_id,
+        )
+        .await?;
+        if provider_record.bindings.digest
+            != model
+                .deployment
+                .provider_deployment
+                .deployment_digest
+                .to_string()
+        {
+            return Err(RepositoryError::Conflict(
+                "exact Model Provider Deployment binding",
+            ));
+        }
+        let DeploymentClosure::ModelProvider(provider_deployment) =
+            decode_deployment_closure(&provider_record.bindings)?
+        else {
+            return Err(RepositoryError::CorruptRow(
+                "Model Provider Deployment has the wrong closure".to_owned(),
+            ));
+        };
+        let provider_resource_id =
+            parse_id(&provider_record.resource_id, "Model assembly Provider")?;
+        let provider_resource =
+            load_resource(&mut transaction, tenant_id, &provider_resource_id).await?;
+        require_enabled_resource(
+            &provider_resource,
+            RegistryResourceKind::ModelProvider,
+            "Model assembly Provider gate",
+        )?;
+        if provider_record.resource_version_id
+            != provider_deployment
+                .provider_revision
+                .revision_id
+                .to_string()
+            || profile.provider_revision != provider_deployment.provider_revision
+        {
+            return Err(RepositoryError::Conflict(
+                "Model assembly Provider revision",
+            ));
+        }
+        let provider_payload = load_enabled_exact_published_version(
+            &mut transaction,
+            tenant_id,
+            &provider_deployment.provider_revision,
+            RegistryResourceKind::ModelProvider,
+        )
+        .await?;
+        let ResourceDocument::ModelProvider(provider) = provider_payload.document else {
+            return Err(RepositoryError::CorruptRow(
+                "Model Provider revision contains the wrong document".to_owned(),
+            ));
+        };
+
+        let mut skills = Vec::new();
+        let mut tools = Vec::new();
+        for slot in tool_slots {
+            let (candidates, selection_policy) = match &slot.target {
+                FrozenSlotTarget::Skill {
+                    candidates,
+                    selection_policy,
+                }
+                | FrozenSlotTarget::Capability {
+                    candidates,
+                    selection_policy,
+                    ..
+                } => (candidates, selection_policy),
+                _ => return Err(RepositoryError::Conflict("Model assembly slot kind")),
+            };
+            let selection_document =
+                load_exact_frozen_selection_policy(&mut transaction, &run, selection_policy, false)
+                    .await?;
+            let selected = derive_candidate_selection(
+                &slot.slot_id,
+                selection_policy,
+                &selection_document,
+                candidates,
+                None,
+            )
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+            .selected_deployment;
+            let deployment =
+                load_deployment(&mut transaction, tenant_id, &selected.deployment_id).await?;
+            if deployment.bindings.digest != selected.deployment_digest.to_string() {
+                return Err(RepositoryError::Conflict("exact Model assembly Deployment"));
+            }
+            let resource_id = parse_id(&deployment.resource_id, "Model assembly resource")?;
+            let resource = load_resource(&mut transaction, tenant_id, &resource_id).await?;
+            match &slot.target {
+                FrozenSlotTarget::Skill { .. } => {
+                    require_enabled_resource(
+                        &resource,
+                        RegistryResourceKind::Skill,
+                        "Model Skill Deployment gate",
+                    )?;
+                    let DeploymentClosure::Skill(closure) =
+                        decode_deployment_closure(&deployment.bindings)?
+                    else {
+                        return Err(RepositoryError::Conflict("Model Skill Deployment closure"));
+                    };
+                    let published = load_enabled_exact_published_version(
+                        &mut transaction,
+                        tenant_id,
+                        &closure.skill_revision,
+                        RegistryResourceKind::Skill,
+                    )
+                    .await?;
+                    let ResourceDocument::Skill(skill) = published.document else {
+                        return Err(RepositoryError::Conflict("Model Skill revision document"));
+                    };
+                    skills.push(ExactControllerSkillFacts {
+                        slot_id: slot.slot_id.clone(),
+                        deployment: selected,
+                        revision: closure.skill_revision,
+                        skill,
+                    });
+                }
+                FrozenSlotTarget::Capability { tool_alias, .. } => {
+                    require_enabled_resource(
+                        &resource,
+                        RegistryResourceKind::CapabilityInterface,
+                        "Model tool Capability gate",
+                    )?;
+                    let DeploymentClosure::CapabilityInterface(closure) =
+                        decode_deployment_closure(&deployment.bindings)?
+                    else {
+                        return Err(RepositoryError::Conflict(
+                            "Model tool Capability Deployment closure",
+                        ));
+                    };
+                    let published = load_enabled_exact_published_version(
+                        &mut transaction,
+                        tenant_id,
+                        &closure.interface,
+                        RegistryResourceKind::CapabilityInterface,
+                    )
+                    .await?;
+                    let ResourceDocument::CapabilityInterface(interface) = published.document
+                    else {
+                        return Err(RepositoryError::Conflict(
+                            "Model tool Capability Interface document",
+                        ));
+                    };
+                    tools.push(ModelToolProjection {
+                        projected_name: tool_alias.clone().unwrap_or_else(|| slot.slot_id.clone()),
+                        capability_deployment: selected,
+                        interface_revision: closure.interface,
+                        input_schema: interface.input_schema,
+                        output_schema_digest: interface.output_schema.canonical_digest,
+                        effect: interface.effect,
+                    });
+                }
+                _ => unreachable!(),
+            }
+        }
+        skills.sort_by(|left, right| left.slot_id.cmp(&right.slot_id));
+        tools.sort_by(|left, right| left.projected_name.cmp(&right.projected_name));
+        transaction.commit().await?;
+        Ok(ExactControllerModelAssemblyFacts {
+            run_bindings: run.bindings,
+            agent,
+            model,
+            profile: *profile,
+            provider_deployment,
+            provider,
+            skills,
+            tools,
         })
     }
 }

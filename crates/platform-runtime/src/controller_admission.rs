@@ -6,20 +6,32 @@
 
 use crate::{
     ControllerCapabilityAdmissionDecision, ControllerCapabilityAdmissionProvider,
-    ControllerCapabilityAdmissionRequest, DurablePlanDriverError,
+    ControllerCapabilityAdmissionRequest, ControllerModelAdmissionDecision,
+    ControllerModelAdmissionProvider, ControllerModelAdmissionRequest, DurablePlanDriverError,
 };
 use async_trait::async_trait;
+use insight_platform_artifacts::{
+    BrokeredSchedulerSkillInstructionMaterializer, SchedulerSkillPackageLease,
+    SchedulerSkillPackageReader, SchedulerSkillPackageRequestResolver,
+    MAX_SCHEDULER_SKILL_PACKAGE_BYTES,
+};
 use insight_platform_contracts::{
-    canonical_digest, CapabilityBackendBinding, DeploymentClosure, ExactVersionRef,
-    FrozenSlotTarget, RunBindingsSnapshot, Sha256Digest,
+    canonical_digest, canonical_json, checked_in_hard_limit_profile, CapabilityBackendBinding,
+    DataClassification, DeploymentClosure, ExactVersionRef, FrozenSlotTarget, RunBindingsSnapshot,
+    Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::{
     InvocationPolicyDecision, InvocationPolicyDecisionBundle, InvocationPolicyDisposition,
+};
+use insight_platform_models::{
+    assemble_prompt_messages, CanonicalModelRequest, ModelRequestValue, ModelResponseContract,
+    ModelTurnLimits, PromptAssemblyBlock, PromptAssemblyPhase, SafeTraceContext,
 };
 use insight_platform_postgres::repository::PgRepository;
 use serde_json::Value;
 use sqlx::Row;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub type ControllerModelPolicyFacts =
     insight_platform_postgres::model_turn_repository::ExactModelPolicyFacts;
@@ -53,6 +65,382 @@ impl PostgresControllerModelPolicyLoader {
                 }
                 _ => DurablePlanDriverError::InvariantViolation,
             })
+    }
+}
+
+#[derive(Clone)]
+pub struct PostgresControllerModelAdmissionProvider {
+    repository: PgRepository,
+    skill_materializer: Arc<BrokeredSchedulerSkillInstructionMaterializer>,
+}
+
+impl PostgresControllerModelAdmissionProvider {
+    pub fn new(
+        repository: PgRepository,
+        skill_resolver: Arc<dyn SchedulerSkillPackageRequestResolver>,
+        skill_reader: Arc<dyn SchedulerSkillPackageReader>,
+    ) -> Self {
+        Self {
+            repository,
+            skill_materializer: Arc::new(BrokeredSchedulerSkillInstructionMaterializer::new(
+                skill_resolver,
+                skill_reader,
+            )),
+        }
+    }
+}
+
+#[async_trait]
+impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvider {
+    async fn assemble(
+        &self,
+        request: ControllerModelAdmissionRequest,
+    ) -> Result<ControllerModelAdmissionDecision, DurablePlanDriverError> {
+        if request.lease.tenant_id != request.tenant_id
+            || request.lease.run_id != request.run_id
+            || request.deadline > request.lease.deadline
+            || request.maximum_rounds == 0
+            || request.maximum_capability_calls == 0
+            || request.maximum_parallel_calls_per_round == 0
+            || request.token_budget == 0
+        {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        }
+        let insight_platform_orchestrator::RuntimeNode::ModelLoop {
+            model_slot_id,
+            skill_slot_ids,
+            capability_slot_ids,
+            input,
+            maximum_rounds,
+            maximum_capability_calls,
+            maximum_parallel_calls_per_round,
+            token_budget,
+            ..
+        } = &request.plan_node
+        else {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        };
+        let requested_skill_slots = request
+            .tool_slots
+            .iter()
+            .filter(|slot| matches!(&slot.target, FrozenSlotTarget::Skill { .. }))
+            .map(|slot| slot.slot_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let requested_capability_slots = request
+            .tool_slots
+            .iter()
+            .filter(|slot| matches!(&slot.target, FrozenSlotTarget::Capability { .. }))
+            .map(|slot| slot.slot_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        if model_slot_id != &request.model_slot_id
+            || input != &request.input.port
+            || *maximum_rounds != request.maximum_rounds
+            || *maximum_capability_calls != request.maximum_capability_calls
+            || *maximum_parallel_calls_per_round != request.maximum_parallel_calls_per_round
+            || *token_budget != request.token_budget
+            || requested_skill_slots != skill_slot_ids.iter().map(String::as_str).collect()
+            || requested_capability_slots
+                != capability_slot_ids.iter().map(String::as_str).collect()
+            || request.input_value.schema_digest != request.input.schema_digest
+            || request.input_value.canonical_digest != request.input.content_digest
+        {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        }
+        let facts = self
+            .repository
+            .load_exact_controller_model_assembly_facts(
+                &request.tenant_id,
+                &request.run_id,
+                &request.model_slot_id,
+                &request.selected_deployment,
+                &request.tool_slots,
+            )
+            .await
+            .map_err(map_repository_error)?;
+        if request.maximum_rounds > facts.profile.limits.maximum_rounds
+            || request.maximum_capability_calls > facts.profile.tools.maximum_calls_per_turn
+            || u32::from(request.maximum_parallel_calls_per_round)
+                > facts.profile.limits.maximum_parallel_tool_calls
+        {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        }
+
+        let mut blocks = vec![PromptAssemblyBlock {
+            phase: PromptAssemblyPhase::PlatformSafety,
+            ordinal: 0,
+            source_kind: "model_safety_policy".to_owned(),
+            source_id: facts.model.safety.contract_id.clone(),
+            source_digest: facts.model.deployment.safety_policy.semantic_digest.clone(),
+            classification: DataClassification::Internal,
+            byte_budget: facts.model.safety.instruction_byte_budget,
+            token_budget: facts.model.safety.instruction_token_budget,
+            text: facts.model.safety.platform_instruction.clone(),
+        }];
+        let agent_text = canonical_text(&serde_json::json!({
+            "agent_interface": facts.run_bindings.agent_interface,
+            "contract_digest": facts.agent.contract_digest,
+            "input_schema_digest": facts.agent.input_schema.canonical_digest,
+            "output_schema_digest": facts.agent.output_schema.canonical_digest,
+        }))?;
+        blocks.push(exact_block(
+            PromptAssemblyPhase::AgentContract,
+            0,
+            "agent_contract",
+            facts.run_bindings.agent_interface.revision_id.to_string(),
+            facts.run_bindings.agent_interface.semantic_digest.clone(),
+            DataClassification::Internal,
+            agent_text,
+        )?);
+        let node_text = canonical_text(&serde_json::json!({
+            "node": request.plan_node,
+            "plan_node_key": request.plan_node_key,
+            "plan_revision": facts.run_bindings.plan,
+        }))?;
+        blocks.push(exact_block(
+            PromptAssemblyPhase::PlanNodeInstruction,
+            0,
+            "plan_node",
+            request.node_execution_id.to_string(),
+            facts.run_bindings.plan.semantic_digest.clone(),
+            DataClassification::Internal,
+            node_text,
+        )?);
+
+        let mut skill_ordinal = 0_u32;
+        for skill in &facts.skills {
+            let request_digest = digest_value(&serde_json::json!({
+                "job_id": request.lease.orchestration_job_id,
+                "lease_generation": request.lease.lease_generation,
+                "operation": "scheduler.skill-package.materialize",
+                "run_id": request.run_id,
+                "skill_deployment": skill.deployment,
+                "skill_slot_id": skill.slot_id,
+            }))?;
+            let maximum_bytes =
+                usize::try_from(skill.skill.authoring_package.artifact.byte_length())
+                    .ok()
+                    .filter(|bytes| *bytes > 0 && *bytes <= MAX_SCHEDULER_SKILL_PACKAGE_BYTES)
+                    .ok_or(DurablePlanDriverError::InvariantViolation)?;
+            let sections = self
+                .skill_materializer
+                .materialize_all(
+                    SchedulerSkillPackageLease {
+                        tenant_id: request.tenant_id.clone(),
+                        run_id: request.run_id.clone(),
+                        orchestration_job_id: request.lease.orchestration_job_id.clone(),
+                        worker_process_generation_id: request
+                            .lease
+                            .worker_process_generation_id
+                            .clone(),
+                        lease_generation: request.lease.lease_generation,
+                        lease_token_digest: request.lease.lease_token_digest.clone(),
+                        skill_slot_id: skill.slot_id.clone(),
+                        skill_deployment_id: skill.deployment.deployment_id.clone(),
+                        request_digest,
+                        maximum_bytes,
+                        deadline: request.deadline,
+                    },
+                    &skill.revision,
+                    &skill.skill,
+                )
+                .await
+                .map_err(|failure| match failure {
+                    insight_platform_artifacts::SchedulerSkillInstructionMaterializeError::Unavailable => DurablePlanDriverError::Unavailable,
+                    insight_platform_artifacts::SchedulerSkillInstructionMaterializeError::Denied
+                    | insight_platform_artifacts::SchedulerSkillInstructionMaterializeError::NotFound => DurablePlanDriverError::FenceLost,
+                    _ => DurablePlanDriverError::InvariantViolation,
+                })?;
+            for section in sections {
+                blocks.push(PromptAssemblyBlock {
+                    phase: PromptAssemblyPhase::SelectedSkill,
+                    ordinal: skill_ordinal,
+                    source_kind: "skill_instruction".to_owned(),
+                    source_id: format!("{}:{}", skill.slot_id, section.section_id),
+                    source_digest: skill.revision.semantic_digest.clone(),
+                    classification: section.data_classification,
+                    byte_budget: u32::try_from(section.text.len())
+                        .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+                    token_budget: section.max_tokens,
+                    text: section.text,
+                });
+                skill_ordinal = skill_ordinal
+                    .checked_add(1)
+                    .ok_or(DurablePlanDriverError::InvariantViolation)?;
+            }
+        }
+        let input_text = canonical_text(&request.input_value.value)?;
+        blocks.push(exact_block(
+            PromptAssemblyPhase::UserInput,
+            0,
+            "run_value",
+            request.input.run_value_id.to_string(),
+            request.input.content_digest.clone(),
+            request.input.classification,
+            input_text,
+        )?);
+
+        let maximum_input_tokens = request
+            .token_budget
+            .min(facts.model.budget.maximum_input_tokens_per_turn)
+            .min(u64::from(facts.profile.limits.maximum_input_tokens));
+        let assembled = assemble_prompt_messages(
+            blocks,
+            facts.profile.limits.maximum_text_bytes,
+            maximum_input_tokens,
+        )
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile())
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let available_output = request
+            .token_budget
+            .checked_sub(assembled.total_estimated_tokens)
+            .ok_or(DurablePlanDriverError::InvariantViolation)?;
+        let policy_available_output = facts
+            .model
+            .budget
+            .maximum_total_tokens_per_turn
+            .checked_sub(assembled.total_estimated_tokens)
+            .ok_or(DurablePlanDriverError::InvariantViolation)?;
+        let hard_available_output = limits
+            .maximum_tokens_per_turn()
+            .checked_sub(assembled.total_estimated_tokens)
+            .ok_or(DurablePlanDriverError::InvariantViolation)?;
+        let max_output_tokens = u64::from(facts.profile.limits.maximum_output_tokens)
+            .min(u64::from(facts.model.budget.maximum_output_tokens_per_turn))
+            .min(available_output)
+            .min(policy_available_output);
+        let max_output_tokens = max_output_tokens.min(hard_available_output);
+        let max_output_tokens = u32::try_from(max_output_tokens)
+            .ok()
+            .filter(|tokens| *tokens > 0)
+            .ok_or(DurablePlanDriverError::InvariantViolation)?;
+        let trace_id_digest = digest_value(&serde_json::json!({
+            "model_turn_id": request.model_turn_id,
+            "run_id": request.run_id,
+            "tenant_id": request.tenant_id,
+        }))?;
+        let parent_span_id_digest = digest_value(&serde_json::json!({
+            "node_execution_id": request.node_execution_id,
+            "orchestration_job_id": request.lease.orchestration_job_id,
+        }))?;
+        let allow_tool_intents = !facts.tools.is_empty();
+        let canonical = CanonicalModelRequest {
+            schema_version: 1,
+            model_turn_id: request.model_turn_id.clone(),
+            messages: assembled.messages,
+            tools: facts.tools,
+            response_contract: ModelResponseContract {
+                output_schema_digest: facts.agent.output_schema.canonical_digest.clone(),
+                structured_schema: Some(facts.agent.output_schema),
+                allow_tool_intents,
+                allow_message_with_tool_intents: false,
+            },
+            generation_parameters: facts.model.deployment.generation_defaults.clone(),
+            max_output_tokens,
+            input_token_estimate: assembled.total_estimated_tokens,
+            estimator_contract_digest: facts.profile.context.estimator_contract_digest.clone(),
+            source_map_digest: assembled.source_map_digest,
+            truncation_policy: facts.model.deployment.public_projection_policy.clone(),
+            classification: assembled.classification,
+            deadline: request.deadline,
+            trace_context: SafeTraceContext {
+                trace_id_digest,
+                parent_span_id_digest,
+            },
+        };
+        canonical
+            .validate_for(
+                &request.model_turn_id,
+                &facts.provider,
+                &facts.profile,
+                &facts.provider_deployment.region,
+                chrono::Utc::now(),
+                limits,
+            )
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let value = serde_json::to_value(&canonical)
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let content_digest = digest_value(&value)?;
+        let schema_digest = digest_value(&serde_json::json!({
+            "contract": "canonical_model_request",
+            "schema_version": 1,
+        }))?;
+        Ok(ControllerModelAdmissionDecision {
+            request: ModelRequestValue {
+                value_id: request.request_value_id,
+                classification: canonical.classification,
+                schema_digest,
+                content_digest,
+                value: ValueRef::Inline { value },
+                request: canonical,
+            },
+            requested_attempt_limit: facts
+                .model
+                .budget
+                .maximum_attempts_per_turn
+                .min(limits.maximum_attempts()),
+            cost_ceiling_microunits: facts.model.budget.cost_ceiling_microunits_per_turn,
+        })
+    }
+}
+
+fn canonical_text(value: &serde_json::Value) -> Result<String, DurablePlanDriverError> {
+    String::from_utf8(
+        canonical_json(value).map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+    )
+    .map_err(|_| DurablePlanDriverError::InvariantViolation)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exact_block(
+    phase: PromptAssemblyPhase,
+    ordinal: u32,
+    source_kind: &str,
+    source_id: String,
+    source_digest: Sha256Digest,
+    classification: DataClassification,
+    text: String,
+) -> Result<PromptAssemblyBlock, DurablePlanDriverError> {
+    let byte_budget =
+        u32::try_from(text.len()).map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+    let token_budget = byte_budget
+        .checked_add(3)
+        .map(|bytes| bytes / 4)
+        .ok_or(DurablePlanDriverError::InvariantViolation)?
+        .max(1);
+    Ok(PromptAssemblyBlock {
+        phase,
+        ordinal,
+        source_kind: source_kind.to_owned(),
+        source_id,
+        source_digest,
+        classification,
+        byte_budget,
+        token_budget,
+        text,
+    })
+}
+
+fn digest_value(value: &serde_json::Value) -> Result<Sha256Digest, DurablePlanDriverError> {
+    canonical_digest(value)
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)
+}
+
+fn map_repository_error(
+    failure: insight_platform_postgres::repository::RepositoryError,
+) -> DurablePlanDriverError {
+    match failure {
+        insight_platform_postgres::repository::RepositoryError::Database(_) => {
+            DurablePlanDriverError::Unavailable
+        }
+        insight_platform_postgres::repository::RepositoryError::NotFound(_)
+        | insight_platform_postgres::repository::RepositoryError::StaleFence
+        | insight_platform_postgres::repository::RepositoryError::LeaseExpired => {
+            DurablePlanDriverError::FenceLost
+        }
+        _ => DurablePlanDriverError::InvariantViolation,
     }
 }
 

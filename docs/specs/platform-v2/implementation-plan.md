@@ -44,6 +44,11 @@
 > Capability Deployment也会整批回滚。fresh PostgreSQL 16 r178已覆盖两候选`ordered_first`正/负路径及既有tool continuation、quota和
 > first-winner回归。该证据仍不等于production canonical request provider或完整ModelLoop L3。
 
+> 2026-08-25 implementation evidence：production `PostgresControllerModelAdmissionProvider`已实现exact Agent/Profile/Provider/Model Policy
+> facts读取、Plan node/input逐项绑定、Skill package materialization、Capability selector/tool schema投影、四方预算交集与Inline canonical
+> request构造；fresh PostgreSQL 16 r180已验证assembly facts只返回`ordered_first`选中的Capability及ModelTurn全回归。provider进程组合与
+> kill/recovery ModelLoop L3尚未完成，因此本批仍不能宣称完整production链路。
+
 > CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer另已在fresh PostgreSQL 16 r113完成真实协调器L3链路（claim、durable park、独立safety到期唤醒、continuation claim、Return物化与Run终态）。Child/Task/Signal的独立进程kill/recovery L3、Timer kill-window、Signal认证ingress及Model/Capability/Context external leaf仍待完成。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 

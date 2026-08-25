@@ -299,12 +299,16 @@ pub trait ControllerCapabilityAdmissionProvider: Send + Sync + 'static {
 
 #[derive(Debug, Clone)]
 pub struct ControllerModelAdmissionRequest {
+    pub lease: ControllerRunValueReadContext,
     pub tenant_id: ResourceId,
     pub run_id: ResourceId,
     pub node_execution_id: ResourceId,
     pub model_turn_id: ResourceId,
     pub request_value_id: ResourceId,
     pub selected_deployment: insight_platform_contracts::ExactDeploymentRef,
+    pub model_slot_id: String,
+    pub plan_node_key: insight_platform_orchestrator::PlanNodeKey,
+    pub plan_node: RuntimeNode,
     pub input: ResolvedExpressionInput,
     pub input_value: ClosedJsonValue,
     pub tool_slots: Vec<insight_platform_contracts::FrozenSlotBinding>,
@@ -742,12 +746,21 @@ where
         let admission = self
             .model_admission
             .assemble(ControllerModelAdmissionRequest {
+                lease: ControllerRunValueReadContext::from_started(job, &command.fence)?,
                 tenant_id,
                 run_id,
                 node_execution_id: command.facts.node_execution_id.clone(),
                 model_turn_id: model_turn_id.clone(),
                 request_value_id: request_value_id.clone(),
                 selected_deployment: selection_evidence.selected_deployment.clone(),
+                model_slot_id: model_slot_id.clone(),
+                plan_node_key: command.facts.plan_node_key.clone(),
+                plan_node: command
+                    .materialized
+                    .plan
+                    .node(&command.facts.plan_node_key)
+                    .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+                    .clone(),
                 input: input.clone(),
                 input_value: value,
                 tool_slots: tool_slots.clone(),

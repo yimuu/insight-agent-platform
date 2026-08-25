@@ -2273,6 +2273,26 @@ async fn model_turn_fixture() {
     assert_eq!(policy_facts.budget.maximum_attempts_per_turn, 3);
     assert!(policy_facts.public_projection.reject_prompt_overflow);
     assert_eq!(policy_facts.safety.contract_id, "platform.model_safety.v1");
+    let assembly_facts = repository
+        .load_exact_controller_model_assembly_facts(
+            &fixture.tenant_id,
+            &fixture.run_id,
+            "primary_model",
+            &fixture.model_deployment,
+            std::slice::from_ref(&fixture.tool_slot_binding),
+        )
+        .await
+        .unwrap();
+    assert!(assembly_facts.skills.is_empty());
+    assert_eq!(assembly_facts.tools.len(), 1);
+    assert_eq!(
+        assembly_facts.tools[0].capability_deployment,
+        fixture.capability_deployment
+    );
+    assert_eq!(
+        assembly_facts.agent.output_schema.canonical_digest,
+        fixture.output_schema.canonical_digest
+    );
     let mut wrong_deployment = fixture.model_deployment.clone();
     wrong_deployment.deployment_digest = digest('0');
     assert!(matches!(
