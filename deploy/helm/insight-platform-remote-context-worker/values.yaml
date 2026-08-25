@@ -7,6 +7,7 @@ candidate:
   deploymentConfigDigest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 namespace: platform-remote-context-worker
 replicas: 2
+observability: {port: 9090}
 config:
   existingConfigMap: insight-platform-remote-context-worker-candidate
   fileKey: remote-context-worker.json
@@ -27,6 +28,9 @@ networkPolicy:
   egressNamespaceSelector: {kubernetes.io/metadata.name: platform-egress}
   egressPodSelector: {insight.platform/workload-role: egress-broker}
   egressPort: 8443
+  monitoringNamespaceSelector: {insight.platform/monitoring-namespace: "true"}
+  monitoringPodSelector: {app.kubernetes.io/name: prometheus}
+monitoring: {enabled: true, interval: 30s, scrapeTimeout: 5s}
 resources:
   requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
   limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}

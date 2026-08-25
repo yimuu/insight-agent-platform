@@ -27,8 +27,14 @@ required = [
     "kind: NetworkPolicy",
     "port: 5432",
     "port: 8443",
+    "kind: ServiceMonitor",
+    "name: observability",
+    "path: /readyz",
+    "path: /metrics",
 ]
 failures = [f"missing Remote Context deployment invariant: {token}" for token in required if token not in rendered and token not in dockerfile and token not in source]
+if "process_observability_router" not in source:
+    failures.append("Remote Context Worker is missing shared process observability")
 for forbidden in ["SECRET_BROKER", "NATS_", "SANDBOX_", "port: 4222"]:
     if forbidden in rendered or forbidden in source:
         failures.append(f"Remote Context Worker gained forbidden dependency: {forbidden}")

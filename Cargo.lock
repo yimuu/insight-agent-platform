@@ -2619,11 +2619,13 @@ dependencies = [
 name = "insight-platform-context-worker"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "chrono",
  "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
  "insight-platform-jobs",
+ "insight-platform-observability",
  "insight-platform-postgres",
  "insight-platform-worker",
  "serde",

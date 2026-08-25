@@ -304,6 +304,10 @@ r253把shared process observability接入Capability Native/Remote；readiness分
 startup closure之后，worker与HTTP listener共同fail closed。两个隔离chart均增加内部Service、HTTP probes、ServiceMonitor和精确
 Prometheus ingress，同时保留各自原有出站权限。该证据不包含真实scrape、业务queue/permit指标或production topology enforcement。
 
+r254为Context Native/Remote接入同一shared process observability；Native与Remote分别在exact adapter/PostgreSQL及额外Egress mTLS
+startup closure完成后Ready，driver/listener共同fail closed。两个chart使用独立Service、ServiceMonitor和Prometheus-only ingress；
+该证据不包含Dataset/query SLI或production scrape。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

@@ -27,6 +27,10 @@ required = [
     "PLATFORM_CONTEXT_WORKER_DATABASE_URL",
     "kind: NetworkPolicy",
     "port: 5432",
+    "kind: ServiceMonitor",
+    "name: observability",
+    "path: /readyz",
+    "path: /metrics",
 ]
 for token in required:
     if token not in rendered and token not in dockerfile:
@@ -36,6 +40,8 @@ for forbidden in ["EGRESS_", "SECRET_", "NATS_", "SANDBOX_", "platform-egress", 
         failures.append(f"NativeCatalog Context Worker gained forbidden dependency: {forbidden}")
 if "platform-context-worker" not in dockerfile:
     failures.append("runtime image is missing platform-context-worker")
+if "process_observability_router" not in source:
+    failures.append("Context Worker is missing shared process observability")
 if failures:
     raise SystemExit("\n".join(failures))
 PY

@@ -11,6 +11,9 @@ use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
     ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_worker::LocalWorkerPools;
 use serde::Deserialize;
@@ -28,6 +31,7 @@ const MAX_CONFIG_BYTES: usize = 1_048_576;
 #[serde(deny_unknown_fields)]
 struct ContextWorkerProcessConfig {
     schema_version: u32,
+    observability_listen_address: String,
     worker_manifest: WorkerManifest,
     native_catalog: NativeCatalogAdapter,
     database_max_connections: u32,
@@ -70,6 +74,10 @@ impl ContextWorkerProcessConfig {
     }
 
     fn validate(&self) -> Result<(), ProcessError> {
+        let observability: std::net::SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         self.worker_manifest
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -77,6 +85,7 @@ impl ContextWorkerProcessConfig {
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
+            || observability.port() == 0
             || self.worker_manifest.worker_role != CONTEXT_WORKER_ROLE
             || self.worker_manifest.work_class != WorkClass::Context
             || self.worker_manifest.adapter_runtime_digest
@@ -149,17 +158,52 @@ async fn run() -> Result<(), ProcessError> {
         config.driver_config()?,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("context-native-worker", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
+        .await
+        .map_err(|_| ProcessError::ObservabilityFailed)?;
     eprintln!("platform-context-worker started generation={process_generation_id}");
     let cancellation = CancellationToken::new();
-    let worker_cancellation = cancellation.clone();
-    let worker = tokio::spawn(async move { driver.run(worker_cancellation).await });
-    wait_for_shutdown_signal().await?;
-    cancellation.cancel();
-    worker
-        .await
-        .map_err(|_| ProcessError::WorkerFailed)?
-        .map_err(|_| ProcessError::WorkerFailed)?;
-    Ok(())
+    let worker_cancellation = cancellation.child_token();
+    let mut worker = tokio::spawn(async move { driver.run(worker_cancellation).await });
+    let http_cancellation = cancellation.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut http = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(http_cancellation.cancelled_owned())
+            .await
+    });
+    metrics.mark_ready();
+    tokio::select! {
+        signal = wait_for_shutdown_signal() => {
+            signal?;
+            cancellation.cancel();
+            worker.await.map_err(|_| ProcessError::WorkerFailed)?
+                .map_err(|_| ProcessError::WorkerFailed)?;
+            http.await.map_err(|_| ProcessError::ObservabilityFailed)?
+                .map_err(|_| ProcessError::ObservabilityFailed)?;
+            Ok(())
+        }
+        result = &mut worker => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::WorkerFailed)?
+                .map_err(|_| ProcessError::WorkerFailed)?;
+            http.await.map_err(|_| ProcessError::ObservabilityFailed)?
+                .map_err(|_| ProcessError::ObservabilityFailed)?;
+            Err(ProcessError::WorkerFailed)
+        }
+        result = &mut http => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::ObservabilityFailed)?
+                .map_err(|_| ProcessError::ObservabilityFailed)?;
+            worker.await.map_err(|_| ProcessError::WorkerFailed)?
+                .map_err(|_| ProcessError::WorkerFailed)?;
+            Err(ProcessError::ObservabilityFailed)
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -216,6 +260,7 @@ enum ProcessError {
     SchemaMismatch,
     SignalUnavailable,
     WorkerFailed,
+    ObservabilityFailed,
 }
 
 impl fmt::Display for ProcessError {
@@ -229,6 +274,7 @@ impl fmt::Display for ProcessError {
             Self::SchemaMismatch => formatter.write_str("database schema does not match candidate"),
             Self::SignalUnavailable => formatter.write_str("shutdown signal is unavailable"),
             Self::WorkerFailed => formatter.write_str("Context Worker failed"),
+            Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }
     }
 }
@@ -252,6 +298,7 @@ mod tests {
         let installed = digest('a');
         ContextWorkerProcessConfig {
             schema_version: 1,
+            observability_listen_address: "127.0.0.1:9090".to_owned(),
             worker_manifest: WorkerManifest {
                 manifest_version: WORKER_MANIFEST_VERSION,
                 worker_role: CONTEXT_WORKER_ROLE.to_owned(),

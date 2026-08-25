@@ -14,6 +14,16 @@ metadata:
   namespace: {{ .Values.namespace }}
 automountServiceAccountToken: false
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-context-worker.name" . }}
+  namespace: {{ .Values.namespace }}
+  labels: {{ include "insight-platform-context-worker.labels" . | nindent 4 }}
+spec:
+  selector: {{ include "insight-platform-context-worker.labels" . | nindent 4 }}
+  ports: [{name: observability, port: {{ int .Values.observability.port }}, targetPort: observability, protocol: TCP}]
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -60,23 +70,24 @@ spec:
           image: {{ include "insight-platform-context-worker.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/platform-context-worker"]
+          ports: [{name: observability, containerPort: {{ int .Values.observability.port }}, protocol: TCP}]
           env:
             - {name: PLATFORM_CONTEXT_WORKER_CONFIG, value: /etc/insight/config/context-worker.json}
             - {name: PLATFORM_CONTEXT_WORKER_CONFIG_DIGEST, value: {{ .Values.config.digest | quote }}}
             - name: PLATFORM_CONTEXT_WORKER_DATABASE_URL
               valueFrom: {secretKeyRef: {name: {{ .Values.database.existingSecret }}, key: {{ .Values.database.urlKey }}}}
           startupProbe:
-            exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}
+            httpGet: {path: /livez, port: observability}
             periodSeconds: 2
             timeoutSeconds: 2
             failureThreshold: 30
           readinessProbe:
-            exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}
+            httpGet: {path: /readyz, port: observability}
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3
           livenessProbe:
-            exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}
+            httpGet: {path: /livez, port: observability}
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 6

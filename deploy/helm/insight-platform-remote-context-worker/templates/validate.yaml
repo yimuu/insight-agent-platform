@@ -6,4 +6,6 @@
 {{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.egressNamespaceSelector) (empty .Values.networkPolicy.egressPodSelector) -}}
 {{- fail "PostgreSQL and Egress NetworkPolicy targets are required" -}}{{- end -}}
 {{- if or (lt (int .Values.networkPolicy.egressPort) 1) (gt (int .Values.networkPolicy.egressPort) 65535) -}}{{- fail "Egress port is invalid" -}}{{- end -}}
+{{- if or (lt (int .Values.observability.port) 1) (gt (int .Values.observability.port) 65535) -}}{{- fail "observability port must be in 1..65535" -}}{{- end -}}
+{{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) -}}{{- fail "monitoring requires exact namespace and Pod selectors" -}}{{- end -}}
 {{- if and .Values.autoscaling.enabled (lt (int .Values.autoscaling.minReplicas) 2) -}}{{- fail "HPA requires two replicas" -}}{{- end -}}

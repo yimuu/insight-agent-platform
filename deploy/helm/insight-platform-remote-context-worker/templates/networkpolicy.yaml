@@ -11,7 +11,15 @@ spec:
   podSelector:
     matchLabels: {{- include "insight-platform-remote-context-worker.labels" . | nindent 6 }}
   policyTypes: [Ingress, Egress]
-  ingress: []
+  ingress:
+    {{- if .Values.monitoring.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.observability.port }}}]
+    {{- end }}
   egress:
     - to:
         - namespaceSelector:

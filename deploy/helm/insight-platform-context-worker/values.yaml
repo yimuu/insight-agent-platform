@@ -8,6 +8,7 @@ candidate:
 
 namespace: platform-context-worker
 replicas: 2
+observability: {port: 9090}
 
 config:
   existingConfigMap: insight-platform-context-worker-candidate
@@ -22,6 +23,9 @@ networkPolicy:
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
   postgresCidrs: [10.10.0.0/24]
+  monitoringNamespaceSelector: {insight.platform/monitoring-namespace: "true"}
+  monitoringPodSelector: {app.kubernetes.io/name: prometheus}
+monitoring: {enabled: true, interval: 30s, scrapeTimeout: 5s}
 
 resources:
   requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
