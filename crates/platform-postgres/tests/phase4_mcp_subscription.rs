@@ -2,8 +2,10 @@ use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::ArtifactReferenceSnapshot;
 use insight_platform_context::{
     AdmitContextSubscriptionRefresh, ContextSubscriptionAdmissionAudit,
-    ContextSubscriptionRefreshCause, ContextSubscriptionRefreshRequest,
-    CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+    ContextSubscriptionRefreshCause, ContextSubscriptionRefreshEvidence,
+    ContextSubscriptionRefreshFailureClass, ContextSubscriptionRefreshRequest,
+    ContextSubscriptionRefreshResponse, CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+    CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
 };
 use insight_platform_contracts::{
     canonical_digest, AllowedMcpServerCapabilities, ArtifactPurpose, ArtifactRef,
@@ -20,14 +22,14 @@ use insight_platform_contracts::{
     McpProtocolPolicyDocument, McpServerLimits, McpServerResourceSpec, McpSessionState,
     McpTransportBinding, McpTransportFeatures, Permission, PermissionSet, PolicyKind,
     PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PublishedMcpMethod,
-    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
-    SandboxArtifactIoPolicyDocument, SandboxIsolationClass, SandboxIsolationPolicyDocument,
-    SandboxNetworkPolicyDocument, SandboxResourcePolicyDocument, SandboxRuntimeFamily,
-    SandboxSecretDeliveryMode, SandboxSecretResolutionPolicyDocument, SecretBindingPayload,
-    SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, MCP_PROTOCOL_BASELINE,
+    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
+    ResourceKind, SandboxArtifactIoPolicyDocument, SandboxIsolationClass,
+    SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument, SandboxResourcePolicyDocument,
+    SandboxRuntimeFamily, SandboxSecretDeliveryMode, SandboxSecretResolutionPolicyDocument,
+    SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, WorkClass, MCP_PROTOCOL_BASELINE,
 };
-use insight_platform_jobs::JobFence as DomainJobFence;
+use insight_platform_jobs::{JobFence as DomainJobFence, LeasePolicy};
 use insight_platform_mcp_host::{
     CompleteMcpSubscriptionReconcile, CompleteMcpSubscriptionRefresh, CreateMcpDiscoveryOperation,
     CreateMcpResourceSubscription, EncryptedMcpState, McpAuthorizationBindingRecord,
@@ -42,9 +44,14 @@ use insight_platform_mcp_host::{
     WakeMcpSubscriptionReconcile,
 };
 use insight_platform_postgres::{
+    mcp_repository::{
+        ClaimContextSubscriptionRefreshJobs, CommitContextSubscriptionRefresh,
+        ContextSubscriptionRefreshClaimSlot, ContextSubscriptionRefreshRecoverySlot,
+        DriveExpiredContextSubscriptionRefreshJobs,
+    },
     repository::{
-        ClaimJobs, JobFence as RepositoryJobFence, NewPrincipal, NewSecretBinding, NewTenant,
-        NewTenantPrincipal, PgRepository, RepositoryError, TypedPayload,
+        ClaimJobs, JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewSecretBinding,
+        NewTenant, NewTenantPrincipal, PgRepository, RepositoryError, TypedPayload,
     },
     verify_schema,
 };
@@ -1402,6 +1409,26 @@ async fn mcp_subscription_fixture() {
     let repository = PgRepository::new(pool.clone());
     let now = Utc::now();
     let fixture = seed(&pool, &repository, now).await;
+    let context_quota_account_id = id(ResourceKind::QuotaAccount, 0x5f0);
+    repository
+        .create_quota_account(NewQuotaAccount {
+            tenant_id: fixture.tenant_id.to_string(),
+            quota_account_id: context_quota_account_id.to_string(),
+            scope_kind: "tenant".to_owned(),
+            scope_id: fixture.tenant_id.to_string(),
+            work_class: WorkClass::Context.as_str().to_owned(),
+            metric: QuotaDimension::WorkClassConcurrentOperations
+                .as_str()
+                .to_owned(),
+            limit_value: 4,
+            payload: TypedPayload::new(
+                1,
+                &serde_json::json!({"fixture": "context-subscription-refresh"}),
+            )
+            .unwrap(),
+        })
+        .await
+        .unwrap();
     let mut discovery_audit = command_audit(&fixture.tenant_id, &fixture.principal_id, 0x600, now);
     discovery_audit.idempotency_key_digest = named_digest("public-discovery-key");
     discovery_audit.request_digest = named_digest("public-discovery-request");
@@ -1685,6 +1712,8 @@ async fn mcp_subscription_fixture() {
     .unwrap();
     assert_eq!(admission_event_count, 1);
 
+    // The MCP worker settles its own accepted invalidation and clears the pending marker before
+    // the independent Context worker claims the durable refresh Job.
     let refresh_worker = id(ResourceKind::WorkerProcessGeneration, 0x280);
     let refresh_fence =
         claim_and_start(&repository, &fixture, &refresh_worker, "refresh-lease").await;
@@ -1696,7 +1725,7 @@ async fn mcp_subscription_fixture() {
         expected_subscription_version: replay.record.version,
         expected_session_generation: 1,
         expected_event_generation: 2,
-        refresh_evidence_digest: accepted.durable_work_digest,
+        refresh_evidence_digest: accepted.durable_work_digest.clone(),
     };
     refresh.audit.request_digest = refresh.request_digest().unwrap();
     let refreshed = match repository
@@ -1716,23 +1745,86 @@ async fn mcp_subscription_fixture() {
         CommandOutcome::Replayed(_)
     ));
 
-    // This repository fixture isolates the next admission after an already-terminal Context
-    // work item. Context worker completion/recovery is covered by its own process fixture.
-    sqlx::query(
-        r#"
-        UPDATE insight_platform.jobs
-        SET state = 'succeeded', result_digest = payload_digest,
-            terminal_at = clock_timestamp(), updated_at = clock_timestamp()
-        WHERE tenant_id = $1 AND job_id = $2
-          AND work_class = 'context' AND owner_kind = 'mcp_operation'
-          AND state = 'ready'
-        "#,
+    let context_worker = id(ResourceKind::WorkerProcessGeneration, 0x279);
+    let context_worker_manifest = named_digest("context-worker-manifest");
+    let candidates = repository
+        .scan_claimable_context_subscription_refresh_jobs(&context_worker_manifest, 8)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].job_id, accepted.job_id);
+    let claims = repository
+        .claim_context_subscription_refresh_jobs(ClaimContextSubscriptionRefreshJobs {
+            worker_process_generation_id: context_worker,
+            worker_manifest_digest: context_worker_manifest,
+            slots: vec![ContextSubscriptionRefreshClaimSlot {
+                tenant_id: fixture.tenant_id.clone(),
+                job_id: accepted.job_id.clone(),
+                lease_token_digest: named_digest("context-refresh-lease"),
+                quota_reservation_id: id(ResourceKind::UsageReservation, 0x27a),
+                quota_reserve_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x27b),
+                event_id: id(ResourceKind::Event, 0x27c),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x27d),
+            }],
+            lease_policy: LeasePolicy {
+                requested_milliseconds: 30_000,
+                hard_maximum_milliseconds: 30_000,
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].quota_account_id, context_quota_account_id);
+    let attempt = claims[0].attempt.clone();
+    let evidence = ContextSubscriptionRefreshEvidence {
+        schema_version: CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
+        attempt_digest: attempt.canonical_digest().unwrap(),
+        request_digest: attempt.request.request_digest.clone(),
+        response_digest: named_digest("context-refresh-response"),
+        resource_set_digest: named_digest("context-refresh-resource-set"),
+        resource_count: 1,
+        item_count: 2,
+        byte_count: 512,
+        remote_revision: Some("revision-1".to_owned()),
+        cursor: None,
+        observed_at: now,
+    };
+    let commit = CommitContextSubscriptionRefresh {
+        attempt,
+        response: ContextSubscriptionRefreshResponse::Completed { evidence },
+        quota_settlement_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x27e),
+        event_id: id(ResourceKind::Event, 0x27f),
+        outbox_id: id(ResourceKind::OutboxEvent, 0x281),
+    };
+    let completed_context_job = repository
+        .commit_context_subscription_refresh(commit.clone())
+        .await
+        .unwrap();
+    assert_eq!(completed_context_job.state, "succeeded");
+    assert_eq!(
+        repository
+            .commit_context_subscription_refresh(commit)
+            .await
+            .unwrap(),
+        completed_context_job
+    );
+    let context_quota_reserved: i64 = sqlx::query_scalar(
+        "SELECT reserved_value FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND quota_account_id = $2",
     )
     .bind(fixture.tenant_id.to_string())
-    .bind(accepted.job_id.to_string())
-    .execute(&pool)
+    .bind(context_quota_account_id.to_string())
+    .fetch_one(&pool)
     .await
     .unwrap();
+    assert_eq!(context_quota_reserved, 0);
+    let context_observations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.invocations WHERE tenant_id = $1 AND invocation_kind = 'context'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(context_observations, 0);
 
     let mut stale = notification(&fixture, 1, 1, 0x2a0, now + Duration::seconds(1));
     stale.event_key_digest = named_digest("stale-distinct-key");
@@ -1821,6 +1913,167 @@ async fn mcp_subscription_fixture() {
             .await
             .unwrap(),
         reconcile_acceptance
+    );
+    assert!(repository
+        .scan_claimable_context_subscription_refresh_jobs(
+            &named_digest("wrong-context-worker-manifest"),
+            8,
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    let reconcile_context_candidates = repository
+        .scan_claimable_context_subscription_refresh_jobs(
+            &named_digest("context-worker-manifest"),
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reconcile_context_candidates.len(), 1);
+    assert_eq!(
+        reconcile_context_candidates[0].job_id,
+        reconcile_acceptance.job_id
+    );
+    let recovery_worker = id(ResourceKind::WorkerProcessGeneration, 0x2ca);
+    let first_reconcile_claim = repository
+        .claim_context_subscription_refresh_jobs(ClaimContextSubscriptionRefreshJobs {
+            worker_process_generation_id: recovery_worker,
+            worker_manifest_digest: named_digest("context-worker-manifest"),
+            slots: vec![ContextSubscriptionRefreshClaimSlot {
+                tenant_id: fixture.tenant_id.clone(),
+                job_id: reconcile_acceptance.job_id.clone(),
+                lease_token_digest: named_digest("reconcile-context-lease-1"),
+                quota_reservation_id: id(ResourceKind::UsageReservation, 0x2cb),
+                quota_reserve_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x2cc),
+                event_id: id(ResourceKind::Event, 0x2cd),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x2ce),
+            }],
+            lease_policy: LeasePolicy {
+                requested_milliseconds: 30_000,
+                hard_maximum_milliseconds: 30_000,
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(first_reconcile_claim[0].attempt.attempt_number, 1);
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(reconcile_acceptance.job_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let recovered = repository
+        .drive_expired_context_subscription_refresh_jobs(
+            DriveExpiredContextSubscriptionRefreshJobs {
+                shard_index: 0,
+                shard_count: 1,
+                limit: 1,
+                retry_backoff_milliseconds: 1,
+                slots: vec![ContextSubscriptionRefreshRecoverySlot {
+                    quota_settlement_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x2cf),
+                    event_id: id(ResourceKind::Event, 0x2d1),
+                    outbox_id: id(ResourceKind::OutboxEvent, 0x2d2),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].state, "retry_scheduled");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let second_reconcile_claim = repository
+        .claim_context_subscription_refresh_jobs(ClaimContextSubscriptionRefreshJobs {
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x2d3),
+            worker_manifest_digest: named_digest("context-worker-manifest"),
+            slots: vec![ContextSubscriptionRefreshClaimSlot {
+                tenant_id: fixture.tenant_id.clone(),
+                job_id: reconcile_acceptance.job_id.clone(),
+                lease_token_digest: named_digest("reconcile-context-lease-2"),
+                quota_reservation_id: id(ResourceKind::UsageReservation, 0x2d4),
+                quota_reserve_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x2d5),
+                event_id: id(ResourceKind::Event, 0x2d6),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x2d7),
+            }],
+            lease_policy: LeasePolicy {
+                requested_milliseconds: 30_000,
+                hard_maximum_milliseconds: 30_000,
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(second_reconcile_claim[0].attempt.attempt_number, 2);
+    let retry_commit = CommitContextSubscriptionRefresh {
+        attempt: second_reconcile_claim[0].attempt.clone(),
+        response: ContextSubscriptionRefreshResponse::RetryableFailure {
+            class: ContextSubscriptionRefreshFailureClass::Dependency,
+            evidence_digest: named_digest("retryable-context-refresh"),
+            retry_after_milliseconds: 1,
+        },
+        quota_settlement_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x2d8),
+        event_id: id(ResourceKind::Event, 0x2d9),
+        outbox_id: id(ResourceKind::OutboxEvent, 0x2da),
+    };
+    assert_eq!(
+        repository
+            .commit_context_subscription_refresh(retry_commit)
+            .await
+            .unwrap()
+            .state,
+        "retry_scheduled"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let terminal_reconcile_claim = repository
+        .claim_context_subscription_refresh_jobs(ClaimContextSubscriptionRefreshJobs {
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x2db),
+            worker_manifest_digest: named_digest("context-worker-manifest"),
+            slots: vec![ContextSubscriptionRefreshClaimSlot {
+                tenant_id: fixture.tenant_id.clone(),
+                job_id: reconcile_acceptance.job_id.clone(),
+                lease_token_digest: named_digest("reconcile-context-lease-3"),
+                quota_reservation_id: id(ResourceKind::UsageReservation, 0x2dc),
+                quota_reserve_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x2dd),
+                event_id: id(ResourceKind::Event, 0x2de),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x2df),
+            }],
+            lease_policy: LeasePolicy {
+                requested_milliseconds: 30_000,
+                hard_maximum_milliseconds: 30_000,
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(terminal_reconcile_claim[0].attempt.attempt_number, 3);
+    let terminal_attempt = terminal_reconcile_claim[0].attempt.clone();
+    let terminal_evidence = ContextSubscriptionRefreshEvidence {
+        schema_version: CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
+        attempt_digest: terminal_attempt.canonical_digest().unwrap(),
+        request_digest: terminal_attempt.request.request_digest.clone(),
+        response_digest: named_digest("reconcile-context-response"),
+        resource_set_digest: named_digest("reconcile-context-resource-set"),
+        resource_count: 2,
+        item_count: 4,
+        byte_count: 1_024,
+        remote_revision: Some("revision-2".to_owned()),
+        cursor: Some("cursor-2".to_owned()),
+        observed_at: Utc::now(),
+    };
+    assert_eq!(
+        repository
+            .commit_context_subscription_refresh(CommitContextSubscriptionRefresh {
+                attempt: terminal_attempt,
+                response: ContextSubscriptionRefreshResponse::Completed {
+                    evidence: terminal_evidence,
+                },
+                quota_settlement_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x2e1),
+                event_id: id(ResourceKind::Event, 0x2e2),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x2e3),
+            })
+            .await
+            .unwrap()
+            .state,
+        "succeeded"
     );
     let total_context_jobs: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM insight_platform.jobs WHERE tenant_id = $1 AND work_class = 'context' AND owner_kind = 'mcp_operation' AND owner_id = $2",

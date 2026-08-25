@@ -1,10 +1,11 @@
 use crate::repository::{
     append_command_event, append_scheduler_event, claim_command_receipt, decode_deployment_closure,
-    decode_typed_payload, decode_versioned_payload, load_deployment, load_resource,
-    load_resource_for_update, load_task_for_update, payload_from_row, require_ready_run_artifact,
-    require_tenant_permission, task_projection, terminalize_command_receipt,
-    validate_deployment_closure_exists, validate_exact_secret_bindings_at_creation,
-    PgRegistryTransaction, PgRepository, RepositoryError, ResourceRecord, TaskRecord, TypedPayload,
+    decode_typed_payload, decode_versioned_payload, job_from_row, job_projection, load_deployment,
+    load_job_for_update_by_text, load_resource, load_resource_for_update, load_task_for_update,
+    payload_from_row, require_ready_run_artifact, require_tenant_permission, task_projection,
+    terminalize_command_receipt, validate_deployment_closure_exists,
+    validate_exact_secret_bindings_at_creation, PgRegistryTransaction, PgRepository,
+    RepositoryError, ResourceRecord, TaskRecord, TypedPayload,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -12,20 +13,23 @@ use insight_platform_artifacts::ArtifactReferenceSnapshot;
 use insight_platform_context::{
     AcceptedContextSubscriptionRefresh, AdmitContextSubscriptionRefresh,
     ContextSubscriptionAdmissionAuthority, ContextSubscriptionAdmissionError,
+    ContextSubscriptionExecutionError, ContextSubscriptionRefreshAttempt,
     ContextSubscriptionRefreshCause, ContextSubscriptionRefreshJobPayload,
+    ContextSubscriptionRefreshResponse,
 };
 use insight_platform_contracts::{
     checked_in_hard_limit_profile, ArtifactPurpose, ArtifactReferenceKind, CommandOutcome,
     ContextBackendBinding, ContextBackendContract, DeploymentClosure, EntityLifecycle,
     ExactDeploymentRef, JobState, McpAuthorizationPrincipalKind, McpAuthorizationState,
     McpDeploymentClosure, McpProtocolPolicyDocument, McpServerExecutionContract, McpSessionState,
-    Permission, PolicyKind, PrincipalIdentityState, PrincipalKind, RegistryResourceKind,
-    ResourceDocument, ResourceId, ResourceKind, Sha256Digest,
+    Permission, PolicyKind, PrincipalIdentityState, PrincipalKind, QuotaDimension,
+    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Sha256Digest, WorkClass,
 };
 use insight_platform_jobs::{
-    decide_expired_lease as decide_expired_job_lease,
+    decide_claim as decide_job_claim, decide_expired_lease as decide_expired_job_lease,
     decide_owner_terminal as decide_job_owner_terminal, decide_retry as decide_job_retry,
-    decide_terminal as decide_job_terminal, JobLease, JobOwnerRef, JobProjection,
+    decide_start as decide_job_start, decide_terminal as decide_job_terminal, JobFence, JobLease,
+    JobOwnerRef, JobProjection, LeasePolicy,
 };
 use insight_platform_mcp_host::{
     AuthenticatedMcpOAuthState, AuthorizedMcpOAuthPkceCleanup, BeginMcpOAuthAuthorization,
@@ -68,10 +72,165 @@ use insight_platform_tasks::{
     TaskState,
 };
 use sqlx::{Acquire, Postgres, Row, Transaction};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 const MCP_AUTHORIZATION_RESOURCE_KIND: &str = "mcp_authorization_binding";
 const MCP_DISCOVERY_RESOURCE_KIND: &str = "mcp_discovery_snapshot";
+const CONTEXT_SUBSCRIPTION_REFRESH_MAX_CLAIM_BATCH: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimableContextSubscriptionRefreshJob {
+    pub tenant_id: ResourceId,
+    pub job_id: ResourceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSubscriptionRefreshClaimSlot {
+    pub tenant_id: ResourceId,
+    pub job_id: ResourceId,
+    pub lease_token_digest: Sha256Digest,
+    pub quota_reservation_id: ResourceId,
+    pub quota_reserve_entry_id: ResourceId,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaimContextSubscriptionRefreshJobs {
+    pub worker_process_generation_id: ResourceId,
+    pub worker_manifest_digest: Sha256Digest,
+    pub slots: Vec<ContextSubscriptionRefreshClaimSlot>,
+    pub lease_policy: LeasePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimedContextSubscriptionRefresh {
+    pub job: crate::repository::JobRecord,
+    pub attempt: ContextSubscriptionRefreshAttempt,
+    pub quota_account_id: ResourceId,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitContextSubscriptionRefresh {
+    pub attempt: ContextSubscriptionRefreshAttempt,
+    pub response: ContextSubscriptionRefreshResponse,
+    pub quota_settlement_entry_id: ResourceId,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextSubscriptionRefreshRecoverySlot {
+    pub quota_settlement_entry_id: ResourceId,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveExpiredContextSubscriptionRefreshJobs {
+    pub shard_index: u16,
+    pub shard_count: u16,
+    pub limit: u16,
+    pub retry_backoff_milliseconds: u64,
+    pub slots: Vec<ContextSubscriptionRefreshRecoverySlot>,
+}
+
+impl ClaimContextSubscriptionRefreshJobs {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.slots.is_empty()
+            || self.slots.len() > CONTEXT_SUBSCRIPTION_REFRESH_MAX_CLAIM_BATCH
+            || self.lease_policy.requested_milliseconds == 0
+            || self.lease_policy.requested_milliseconds
+                > self.lease_policy.hard_maximum_milliseconds
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Context subscription refresh claim is invalid".to_owned(),
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        for slot in &self.slots {
+            if slot.tenant_id.kind() != ResourceKind::Tenant
+                || slot.job_id.kind() != ResourceKind::Job
+                || slot.quota_reservation_id.kind() != ResourceKind::UsageReservation
+                || slot.quota_reserve_entry_id.kind() != ResourceKind::QuotaLedgerEntry
+                || slot.event_id.kind() != ResourceKind::Event
+                || slot.outbox_id.kind() != ResourceKind::OutboxEvent
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "Context subscription refresh claim identity is invalid".to_owned(),
+                ));
+            }
+            for id in [
+                &slot.quota_reservation_id,
+                &slot.quota_reserve_entry_id,
+                &slot.event_id,
+                &slot.outbox_id,
+            ] {
+                if !ids.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "Context subscription refresh claim identities must be unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CommitContextSubscriptionRefresh {
+    fn validate_at(&self, now: DateTime<Utc>) -> Result<(), RepositoryError> {
+        self.attempt
+            .validate_at(now)
+            .map_err(invalid_context_subscription_execution)?;
+        self.response
+            .validate_for(&self.attempt, now)
+            .map_err(invalid_context_subscription_execution)?;
+        if self.quota_settlement_entry_id.kind() != ResourceKind::QuotaLedgerEntry
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Context subscription refresh outcome identity is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl DriveExpiredContextSubscriptionRefreshJobs {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.shard_count == 0
+            || self.shard_count > 256
+            || self.shard_index >= self.shard_count
+            || self.limit == 0
+            || usize::from(self.limit) > CONTEXT_SUBSCRIPTION_REFRESH_MAX_CLAIM_BATCH
+            || self.slots.len() != usize::from(self.limit)
+            || self.retry_backoff_milliseconds == 0
+            || self.retry_backoff_milliseconds > 3_600_000
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Context subscription refresh recovery request is invalid".to_owned(),
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        for slot in &self.slots {
+            if slot.quota_settlement_entry_id.kind() != ResourceKind::QuotaLedgerEntry
+                || slot.event_id.kind() != ResourceKind::Event
+                || slot.outbox_id.kind() != ResourceKind::OutboxEvent
+                || !ids.insert(slot.quota_settlement_entry_id.to_string())
+                || !ids.insert(slot.event_id.to_string())
+                || !ids.insert(slot.outbox_id.to_string())
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "Context subscription refresh recovery identity is invalid".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpOAuthCallbackRecord {
@@ -1979,6 +2138,469 @@ impl PgRepository {
         transaction.commit().await?;
         Ok(accepted)
     }
+
+    pub async fn scan_claimable_context_subscription_refresh_jobs(
+        &self,
+        worker_manifest_digest: &Sha256Digest,
+        limit: u16,
+    ) -> Result<Vec<ClaimableContextSubscriptionRefreshJob>, RepositoryError> {
+        if limit == 0 || usize::from(limit) > CONTEXT_SUBSCRIPTION_REFRESH_MAX_CLAIM_BATCH {
+            return Err(RepositoryError::InvalidInput(
+                "Context subscription refresh scan limit is invalid".to_owned(),
+            ));
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT job.tenant_id, job.job_id
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.deployments AS deployment
+              ON deployment.tenant_id = job.tenant_id
+             AND deployment.deployment_id = job.payload #>> '{request,context_deployment,deployment_id}'
+            WHERE job.work_class = 'context' AND job.owner_kind = 'mcp_operation'
+              AND job.state IN ('ready', 'retry_scheduled')
+              AND job.scheduled_at <= clock_timestamp()
+              AND COALESCE(job.retry_at, job.scheduled_at) <= clock_timestamp()
+              AND job.deadline > clock_timestamp()
+              AND job.attempt_no < job.attempt_limit
+              AND deployment.bindings #>> '{bindings,required_worker_manifest_digest}' = $2
+            ORDER BY job.priority DESC, COALESCE(job.retry_at, job.scheduled_at), job.job_id
+            LIMIT $1
+            "#,
+        )
+        .bind(i64::from(limit))
+        .bind(worker_manifest_digest.to_string())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ClaimableContextSubscriptionRefreshJob {
+                    tenant_id: row.try_get::<String, _>("tenant_id")?.parse().map_err(
+                        |failure: insight_platform_contracts::ResourceIdError| {
+                            RepositoryError::CorruptRow(failure.to_string())
+                        },
+                    )?,
+                    job_id: row.try_get::<String, _>("job_id")?.parse().map_err(
+                        |failure: insight_platform_contracts::ResourceIdError| {
+                            RepositoryError::CorruptRow(failure.to_string())
+                        },
+                    )?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn claim_context_subscription_refresh_jobs(
+        &self,
+        command: ClaimContextSubscriptionRefreshJobs,
+    ) -> Result<Vec<ClaimedContextSubscriptionRefresh>, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        let mut slots = command.slots.iter().collect::<Vec<_>>();
+        slots.sort_by(|left, right| {
+            (&left.tenant_id, &left.job_id).cmp(&(&right.tenant_id, &right.job_id))
+        });
+        let mut claimed = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let observed = load_context_subscription_refresh_job(
+                &mut transaction,
+                &slot.tenant_id,
+                &slot.job_id,
+                false,
+            )
+            .await?;
+            let payload: ContextSubscriptionRefreshJobPayload =
+                decode_versioned_payload(&observed.payload, "Context subscription refresh Job")?;
+            payload
+                .validate_at(database_now)
+                .map_err(invalid_context_subscription_admission)?;
+            if observed.work_class != WorkClass::Context.as_str()
+                || observed.owner_kind != ResourceKind::McpOperation.descriptor().name
+                || observed.owner_id != payload.request.subscription_id.to_string()
+                || observed.request_digest != payload.request.request_digest.to_string()
+            {
+                return Err(RepositoryError::CorruptRow(
+                    "Context subscription refresh Job binding drifted".to_owned(),
+                ));
+            }
+            let subscription = load_mcp_subscription(
+                &mut transaction,
+                &slot.tenant_id,
+                &payload.request.subscription_id,
+                true,
+                database_now,
+            )
+            .await?;
+            let required_manifest = validate_context_subscription_refresh_source(
+                &mut transaction,
+                &subscription,
+                &payload.request,
+                ContextSubscriptionRefreshSourceEvidence::AcceptedJob(&slot.job_id),
+                database_now,
+            )
+            .await?;
+            if required_manifest != command.worker_manifest_digest {
+                return Err(RepositoryError::Conflict(
+                    "Context subscription refresh Worker manifest",
+                ));
+            }
+            let current = load_context_subscription_refresh_job(
+                &mut transaction,
+                &slot.tenant_id,
+                &slot.job_id,
+                true,
+            )
+            .await?;
+            require_same_context_subscription_refresh_job(&observed, &current)?;
+            let projection = job_projection(&current)?;
+            let leased = decide_job_claim(
+                &projection,
+                database_now,
+                command.worker_process_generation_id.clone(),
+                slot.lease_token_digest.clone(),
+                command.lease_policy,
+            )
+            .map_err(map_job_decision_error)?;
+            let lease_fence = JobFence {
+                expected_version: leased.version,
+                worker_process_generation_id: command.worker_process_generation_id.clone(),
+                lease_generation: leased.lease_generation,
+                token_digest: slot.lease_token_digest.clone(),
+            };
+            let running = decide_job_start(&leased, &lease_fence, database_now)
+                .map_err(map_job_decision_error)?;
+            let quota_account_id = reserve_context_subscription_refresh_quota(
+                &mut transaction,
+                &current,
+                slot,
+                &running,
+            )
+            .await?;
+            let job = update_context_subscription_refresh_job(
+                &mut transaction,
+                &current,
+                &running,
+                Some(&slot.quota_reservation_id),
+                None,
+                database_now,
+            )
+            .await?;
+            let attempt = ContextSubscriptionRefreshAttempt {
+                schema_version:
+                    insight_platform_context::CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
+                job_id: slot.job_id.clone(),
+                worker_process_generation_id: command.worker_process_generation_id.clone(),
+                job_fence: JobFence {
+                    expected_version: running.version,
+                    worker_process_generation_id: command.worker_process_generation_id.clone(),
+                    lease_generation: running.lease_generation,
+                    token_digest: slot.lease_token_digest.clone(),
+                },
+                attempt_number: running.attempt_count,
+                request: payload.request,
+            };
+            attempt
+                .validate_at(database_now)
+                .map_err(invalid_context_subscription_execution)?;
+            append_scheduler_event(
+                &mut transaction,
+                &current.tenant_id,
+                &slot.event_id,
+                &slot.outbox_id,
+                "job",
+                &current.job_id,
+                as_i64(running.version, "Context refresh Job version")?,
+                None,
+                "context.subscription_refresh.started",
+                &TypedPayload::new(
+                    1,
+                    &serde_json::json!({
+                        "attempt_count": running.attempt_count,
+                        "job_id": running.job_id,
+                        "lease_generation": running.lease_generation,
+                        "quota_account_id": quota_account_id,
+                        "worker_process_generation_id": command.worker_process_generation_id,
+                    }),
+                )?,
+            )
+            .await?;
+            claimed.push(ClaimedContextSubscriptionRefresh {
+                job,
+                attempt,
+                quota_account_id,
+            });
+        }
+        transaction.commit().await?;
+        Ok(claimed)
+    }
+
+    pub async fn commit_context_subscription_refresh(
+        &self,
+        command: CommitContextSubscriptionRefresh,
+    ) -> Result<crate::repository::JobRecord, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command.validate_at(database_now)?;
+        let response_digest = command
+            .response
+            .canonical_digest()
+            .map_err(invalid_context_subscription_execution)?;
+        if claim_context_subscription_refresh_commit_receipt(
+            &mut transaction,
+            &command,
+            &response_digest,
+            database_now,
+        )
+        .await?
+        {
+            let job = load_job_for_update_by_text(
+                &mut transaction,
+                &command.attempt.request.tenant_id.to_string(),
+                &command.attempt.job_id.to_string(),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(job);
+        }
+        let observed = load_context_subscription_refresh_job(
+            &mut transaction,
+            &command.attempt.request.tenant_id,
+            &command.attempt.job_id,
+            false,
+        )
+        .await?;
+        let payload: ContextSubscriptionRefreshJobPayload =
+            decode_versioned_payload(&observed.payload, "Context subscription refresh Job")?;
+        if payload.request != command.attempt.request {
+            return Err(RepositoryError::StaleFence);
+        }
+        let subscription = load_mcp_subscription(
+            &mut transaction,
+            &command.attempt.request.tenant_id,
+            &command.attempt.request.subscription_id,
+            true,
+            database_now,
+        )
+        .await?;
+        validate_context_subscription_refresh_source(
+            &mut transaction,
+            &subscription,
+            &command.attempt.request,
+            ContextSubscriptionRefreshSourceEvidence::AcceptedJob(&command.attempt.job_id),
+            database_now,
+        )
+        .await?;
+        let current = load_context_subscription_refresh_job(
+            &mut transaction,
+            &command.attempt.request.tenant_id,
+            &command.attempt.job_id,
+            true,
+        )
+        .await?;
+        require_same_context_subscription_refresh_job(&observed, &current)?;
+        require_context_subscription_refresh_fence(&current, &command.attempt)?;
+        let projection = job_projection(&current)?;
+        let (next, disposition, event_type, result_digest) =
+            decide_context_subscription_refresh_outcome(
+                &projection,
+                &command,
+                &response_digest,
+                database_now,
+            )?;
+        settle_context_subscription_refresh_quota(
+            &mut transaction,
+            &current,
+            &command.quota_settlement_entry_id,
+            &response_digest,
+        )
+        .await?;
+        let job = update_context_subscription_refresh_job(
+            &mut transaction,
+            &current,
+            &next,
+            current
+                .quota_reservation_id
+                .as_deref()
+                .map(|value| value.parse::<ResourceId>())
+                .transpose()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+                .as_ref(),
+            Some(&result_digest),
+            database_now,
+        )
+        .await?;
+        append_scheduler_event(
+            &mut transaction,
+            &current.tenant_id,
+            &command.event_id,
+            &command.outbox_id,
+            "job",
+            &current.job_id,
+            as_i64(next.version, "Context refresh Job version")?,
+            None,
+            event_type,
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "attempt_count": next.attempt_count,
+                    "job_id": next.job_id,
+                    "lease_generation": next.lease_generation,
+                    "result_digest": result_digest,
+                    "state": next.state,
+                }),
+            )?,
+        )
+        .await?;
+        complete_context_subscription_refresh_commit_receipt(
+            &mut transaction,
+            &command,
+            &response_digest,
+            disposition,
+            database_now,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(job)
+    }
+
+    pub async fn drive_expired_context_subscription_refresh_jobs(
+        &self,
+        command: DriveExpiredContextSubscriptionRefreshJobs,
+    ) -> Result<Vec<crate::repository::JobRecord>, RepositoryError> {
+        command.validate()?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT job.*
+            FROM insight_platform.jobs AS job
+            WHERE job.work_class = 'context' AND job.owner_kind = 'mcp_operation'
+              AND job.state IN ('leased', 'running')
+              AND job.lease_expires_at <= $1 AND job.terminal_at IS NULL
+              AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
+            ORDER BY job.lease_expires_at, job.tenant_id, job.job_id
+            LIMIT $2
+            "#,
+        )
+        .bind(database_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard_index))
+        .bind(i64::from(command.shard_count))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut recovered = Vec::with_capacity(rows.len());
+        for (row, slot) in rows.into_iter().zip(&command.slots) {
+            let observed = job_from_row(row)?;
+            let observed_job_id = observed.job_id.parse::<ResourceId>().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let payload: ContextSubscriptionRefreshJobPayload =
+                decode_versioned_payload(&observed.payload, "Context subscription refresh Job")?;
+            let subscription = load_mcp_subscription(
+                &mut transaction,
+                &payload.request.tenant_id,
+                &payload.request.subscription_id,
+                true,
+                database_now,
+            )
+            .await?;
+            validate_context_subscription_refresh_source(
+                &mut transaction,
+                &subscription,
+                &payload.request,
+                ContextSubscriptionRefreshSourceEvidence::AcceptedJob(&observed_job_id),
+                database_now,
+            )
+            .await?;
+            let current = load_context_subscription_refresh_job(
+                &mut transaction,
+                &payload.request.tenant_id,
+                &observed_job_id,
+                true,
+            )
+            .await?;
+            require_same_context_subscription_refresh_job(&observed, &current)?;
+            let projection = job_projection(&current)?;
+            let retry_at = database_now
+                .checked_add_signed(chrono::Duration::milliseconds(
+                    i64::try_from(command.retry_backoff_milliseconds).map_err(|_| {
+                        RepositoryError::InvalidInput(
+                            "Context refresh recovery backoff overflow".to_owned(),
+                        )
+                    })?,
+                ))
+                .ok_or_else(|| {
+                    RepositoryError::InvalidInput(
+                        "Context refresh recovery backoff overflow".to_owned(),
+                    )
+                })?;
+            let target = if database_now >= projection.deadline {
+                JobState::TimedOut
+            } else if projection.state == JobState::Leased {
+                JobState::Ready
+            } else if projection.attempt_count < projection.attempt_limit
+                && retry_at < projection.deadline
+            {
+                JobState::RetryScheduled
+            } else {
+                JobState::Failed
+            };
+            let next = decide_expired_job_lease(
+                &projection,
+                projection.version,
+                projection.lease_generation,
+                database_now,
+                target,
+                (target == JobState::RetryScheduled).then_some(retry_at),
+            )
+            .map_err(map_job_decision_error)?;
+            settle_context_subscription_refresh_quota(
+                &mut transaction,
+                &current,
+                &slot.quota_settlement_entry_id,
+                &payload.request.request_digest,
+            )
+            .await?;
+            let result_digest = matches!(target, JobState::Failed | JobState::TimedOut)
+                .then_some(&payload.request.request_digest);
+            let job = update_context_subscription_refresh_job(
+                &mut transaction,
+                &current,
+                &next,
+                None,
+                result_digest,
+                database_now,
+            )
+            .await?;
+            append_scheduler_event(
+                &mut transaction,
+                &current.tenant_id,
+                &slot.event_id,
+                &slot.outbox_id,
+                "job",
+                &current.job_id,
+                as_i64(next.version, "Context refresh Job version")?,
+                None,
+                "context.subscription_refresh.lease_recovered",
+                &TypedPayload::new(
+                    1,
+                    &serde_json::json!({
+                        "attempt_count": next.attempt_count,
+                        "job_id": next.job_id,
+                        "lease_generation": next.lease_generation,
+                        "state": next.state,
+                    }),
+                )?,
+            )
+            .await?;
+            recovered.push(job);
+        }
+        transaction.commit().await?;
+        Ok(recovered)
+    }
 }
 
 async fn claim_context_subscription_admission_receipt(
@@ -2067,7 +2689,29 @@ async fn validate_context_subscription_admission_source(
     command: &AdmitContextSubscriptionRefresh,
     database_now: DateTime<Utc>,
 ) -> Result<(), RepositoryError> {
-    let request = &command.request;
+    validate_context_subscription_refresh_source(
+        transaction,
+        record,
+        &command.request,
+        ContextSubscriptionRefreshSourceEvidence::Pending,
+        database_now,
+    )
+    .await
+    .map(|_| ())
+}
+
+enum ContextSubscriptionRefreshSourceEvidence<'a> {
+    Pending,
+    AcceptedJob(&'a ResourceId),
+}
+
+async fn validate_context_subscription_refresh_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    record: &McpSubscriptionRecord,
+    request: &insight_platform_context::ContextSubscriptionRefreshRequest,
+    source_evidence: ContextSubscriptionRefreshSourceEvidence<'_>,
+    database_now: DateTime<Utc>,
+) -> Result<Sha256Digest, RepositoryError> {
     let binding = &record.payload.binding;
     if record.tenant_id != request.tenant_id
         || record.subscription_id != request.subscription_id
@@ -2090,59 +2734,61 @@ async fn validate_context_subscription_admission_source(
             "Context subscription admission source",
         ));
     }
-    match &request.cause {
-        ContextSubscriptionRefreshCause::FullReconcile {
-            observed_subscription_version,
-        } => {
-            if record.payload.pending_invalidation.is_some()
-                || *observed_subscription_version != record.version
-                || request.event_generation != record.version
-                || request.event_key_digest != binding.resource_uri_digest
-                || request.body_digest != binding.discovery_snapshot_digest
-            {
-                return Err(RepositoryError::Conflict(
-                    "Context subscription reconcile evidence",
-                ));
+    match source_evidence {
+        ContextSubscriptionRefreshSourceEvidence::Pending => match &request.cause {
+            ContextSubscriptionRefreshCause::FullReconcile {
+                observed_subscription_version,
+            } => {
+                if record.payload.pending_invalidation.is_some()
+                    || *observed_subscription_version != record.version
+                    || request.event_generation != record.version
+                    || request.event_key_digest != binding.resource_uri_digest
+                    || request.body_digest != binding.discovery_snapshot_digest
+                {
+                    return Err(RepositoryError::Conflict(
+                        "Context subscription reconcile evidence",
+                    ));
+                }
             }
-        }
-        cause => {
-            let pending =
-                record
-                    .payload
-                    .pending_invalidation
-                    .as_ref()
-                    .ok_or(RepositoryError::Conflict(
+            cause => {
+                let pending = record.payload.pending_invalidation.as_ref().ok_or(
+                    RepositoryError::Conflict("Context subscription notification evidence"),
+                )?;
+                let cause_matches = matches!(
+                    (cause, pending.class),
+                    (
+                        ContextSubscriptionRefreshCause::ResourceUpdated,
+                        insight_platform_mcp_host::McpNotificationClass::ResourceUpdated
+                    ) | (
+                        ContextSubscriptionRefreshCause::ResourceListChanged,
+                        insight_platform_mcp_host::McpNotificationClass::ResourceListChanged
+                    ) | (
+                        ContextSubscriptionRefreshCause::ToolListChanged,
+                        insight_platform_mcp_host::McpNotificationClass::ToolListChanged
+                    ) | (
+                        ContextSubscriptionRefreshCause::PromptListChanged,
+                        insight_platform_mcp_host::McpNotificationClass::PromptListChanged
+                    )
+                );
+                if !cause_matches
+                    || pending.session_generation != request.session_generation
+                    || pending.event_generation != request.event_generation
+                    || pending.event_key_digest != request.event_key_digest
+                    || pending.body_digest != request.body_digest
+                    || (pending.class
+                        == insight_platform_mcp_host::McpNotificationClass::ResourceUpdated
+                        && pending.resource_uri_digest.as_ref()
+                            != Some(&request.resource_uri_digest))
+                {
+                    return Err(RepositoryError::Conflict(
                         "Context subscription notification evidence",
-                    ))?;
-            let cause_matches = matches!(
-                (cause, pending.class),
-                (
-                    ContextSubscriptionRefreshCause::ResourceUpdated,
-                    insight_platform_mcp_host::McpNotificationClass::ResourceUpdated
-                ) | (
-                    ContextSubscriptionRefreshCause::ResourceListChanged,
-                    insight_platform_mcp_host::McpNotificationClass::ResourceListChanged
-                ) | (
-                    ContextSubscriptionRefreshCause::ToolListChanged,
-                    insight_platform_mcp_host::McpNotificationClass::ToolListChanged
-                ) | (
-                    ContextSubscriptionRefreshCause::PromptListChanged,
-                    insight_platform_mcp_host::McpNotificationClass::PromptListChanged
-                )
-            );
-            if !cause_matches
-                || pending.session_generation != request.session_generation
-                || pending.event_generation != request.event_generation
-                || pending.event_key_digest != request.event_key_digest
-                || pending.body_digest != request.body_digest
-                || (pending.class
-                    == insight_platform_mcp_host::McpNotificationClass::ResourceUpdated
-                    && pending.resource_uri_digest.as_ref() != Some(&request.resource_uri_digest))
-            {
-                return Err(RepositoryError::Conflict(
-                    "Context subscription notification evidence",
-                ));
+                    ));
+                }
             }
+        },
+        ContextSubscriptionRefreshSourceEvidence::AcceptedJob(job_id) => {
+            require_context_subscription_refresh_admission_receipt(transaction, request, job_id)
+                .await?;
         }
     }
 
@@ -2169,6 +2815,51 @@ async fn validate_context_subscription_admission_source(
         &contract,
     )
     .await
+}
+
+async fn require_context_subscription_refresh_admission_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &insight_platform_context::ContextSubscriptionRefreshRequest,
+    job_id: &ResourceId,
+) -> Result<(), RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state, response_reference_id,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'mcp_operation' AND scope_id = $2
+          AND dedupe_owner_id = $2
+          AND operation = 'context.subscription_refresh.admit'
+          AND idempotency_key_digest = $3
+        FOR SHARE
+        "#,
+    )
+    .bind(request.tenant_id.to_string())
+    .bind(request.subscription_id.to_string())
+    .bind(request.request_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "Context subscription refresh admission Receipt",
+    ))?;
+    if row.try_get::<String, _>("request_digest")? != request.request_digest.to_string()
+        || row.try_get::<String, _>("state")? != "succeeded"
+        || row.try_get::<Option<String>, _>("response_reference_id")? != Some(job_id.to_string())
+    {
+        return Err(RepositoryError::Conflict(
+            "Context subscription refresh admission Receipt",
+        ));
+    }
+    let stored = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let accepted: AcceptedContextSubscriptionRefresh =
+        decode_versioned_payload(&stored, "Context subscription refresh admission Receipt")?;
+    if accepted.job_id != *job_id || accepted.request_digest != request.request_digest {
+        return Err(RepositoryError::Conflict(
+            "Context subscription refresh admission Receipt",
+        ));
+    }
+    Ok(())
 }
 
 async fn complete_context_subscription_admission_receipt(
@@ -2219,6 +2910,530 @@ fn invalid_context_subscription_admission(
     failure: ContextSubscriptionAdmissionError,
 ) -> RepositoryError {
     RepositoryError::InvalidInput(failure.to_string())
+}
+
+fn invalid_context_subscription_execution(
+    failure: ContextSubscriptionExecutionError,
+) -> RepositoryError {
+    RepositoryError::InvalidInput(failure.to_string())
+}
+
+fn map_job_decision_error(failure: insight_platform_jobs::JobError) -> RepositoryError {
+    match failure {
+        insight_platform_jobs::JobError::LeaseExpired => RepositoryError::LeaseExpired,
+        insight_platform_jobs::JobError::StaleFence => RepositoryError::StaleFence,
+        _ => RepositoryError::Conflict("Context subscription refresh Job transition"),
+    }
+}
+
+async fn load_context_subscription_refresh_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    job_id: &ResourceId,
+    for_update: bool,
+) -> Result<crate::repository::JobRecord, RepositoryError> {
+    let row = if for_update {
+        sqlx::query(
+            r#"
+            SELECT * FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND job_id = $2
+              AND work_class = 'context' AND owner_kind = 'mcp_operation'
+            FOR UPDATE
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT * FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND job_id = $2
+              AND work_class = 'context' AND owner_kind = 'mcp_operation'
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+    }
+    .ok_or(RepositoryError::NotFound(
+        "Context subscription refresh Job",
+    ))?;
+    job_from_row(row)
+}
+
+fn require_same_context_subscription_refresh_job(
+    observed: &crate::repository::JobRecord,
+    current: &crate::repository::JobRecord,
+) -> Result<(), RepositoryError> {
+    if observed.version != current.version
+        || observed.state != current.state
+        || observed.lease_epoch != current.lease_epoch
+        || observed.worker_id != current.worker_id
+        || observed.lease_token_digest != current.lease_token_digest
+        || observed.quota_reservation_id != current.quota_reservation_id
+        || observed.payload.digest != current.payload.digest
+    {
+        return Err(RepositoryError::Conflict(
+            "Context subscription refresh Job",
+        ));
+    }
+    Ok(())
+}
+
+async fn reserve_context_subscription_refresh_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &crate::repository::JobRecord,
+    slot: &ContextSubscriptionRefreshClaimSlot,
+    running: &JobProjection,
+) -> Result<ResourceId, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT quota_account_id, version, reserved_value, used_value, limit_value
+        FROM insight_platform.quota_accounts
+        WHERE tenant_id = $1 AND scope_kind = 'tenant' AND scope_id = $1
+          AND work_class = 'context' AND metric = $2
+        ORDER BY quota_account_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(QuotaDimension::WorkClassConcurrentOperations.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    if row.len() != 1 {
+        return Err(RepositoryError::QuotaExceeded);
+    }
+    let row = &row[0];
+    let quota_account_id = row
+        .try_get::<String, _>("quota_account_id")?
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let version: i64 = row.try_get("version")?;
+    let reserved: i64 = row.try_get("reserved_value")?;
+    let used: i64 = row.try_get("used_value")?;
+    let limit: i64 = row.try_get("limit_value")?;
+    if reserved
+        .checked_add(used)
+        .and_then(|value| value.checked_add(1))
+        .is_none_or(|value| value > limit)
+    {
+        return Err(RepositoryError::QuotaExceeded);
+    }
+    let next_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.quota_accounts
+        SET reserved_value = reserved_value + 1, version = version + 1,
+            updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND quota_account_id = $2 AND version = $3
+          AND reserved_value + used_value + 1 <= limit_value
+        RETURNING version
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(quota_account_id.to_string())
+    .bind(version)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::QuotaExceeded)?;
+    let request = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "job_id": running.job_id,
+            "lease_generation": running.lease_generation,
+            "quota_account_id": quota_account_id,
+            "quota_reservation_id": slot.quota_reservation_id,
+        }),
+        65_536,
+    )?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.quota_ledger (
+            tenant_id, quota_entry_id, quota_account_id, correlation_id,
+            entry_kind, reserved_amount, used_amount, account_version, request_digest
+        ) VALUES ($1, $2, $3, $4, 'reserve', 1, 0, $5, $6)
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(slot.quota_reserve_entry_id.to_string())
+    .bind(quota_account_id.to_string())
+    .bind(slot.quota_reservation_id.to_string())
+    .bind(next_version)
+    .bind(request.digest)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(quota_account_id)
+}
+
+async fn settle_context_subscription_refresh_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &crate::repository::JobRecord,
+    settlement_entry_id: &ResourceId,
+    request_digest: &Sha256Digest,
+) -> Result<(), RepositoryError> {
+    let reservation_id = job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow(
+            "Context subscription refresh Job has no quota reservation".to_owned(),
+        )
+    })?;
+    let row = sqlx::query(
+        r#"
+        SELECT account.quota_account_id, account.version, account.reserved_value,
+               reserve.reserved_amount, reserve.used_amount
+        FROM insight_platform.quota_ledger AS reserve
+        JOIN insight_platform.quota_accounts AS account
+          ON account.tenant_id = reserve.tenant_id
+         AND account.quota_account_id = reserve.quota_account_id
+        WHERE reserve.tenant_id = $1 AND reserve.correlation_id = $2
+          AND reserve.entry_kind = 'reserve'
+          AND account.scope_kind = 'tenant' AND account.scope_id = $1
+          AND account.work_class = 'context' AND account.metric = $3
+        FOR UPDATE OF account
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(reservation_id)
+    .bind(QuotaDimension::WorkClassConcurrentOperations.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    if row.len() != 1
+        || row[0].try_get::<i64, _>("reserved_amount")? != 1
+        || row[0].try_get::<i64, _>("used_amount")? != 0
+        || row[0].try_get::<i64, _>("reserved_value")? < 1
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Context subscription refresh quota bundle drifted".to_owned(),
+        ));
+    }
+    let quota_account_id: String = row[0].try_get("quota_account_id")?;
+    let version: i64 = row[0].try_get("version")?;
+    let next_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.quota_accounts
+        SET reserved_value = reserved_value - 1, version = version + 1,
+            updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND quota_account_id = $2 AND version = $3
+          AND reserved_value >= 1
+        RETURNING version
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(&quota_account_id)
+    .bind(version)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "Context subscription refresh quota settlement",
+    ))?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.quota_ledger (
+            tenant_id, quota_entry_id, quota_account_id, correlation_id,
+            entry_kind, reserved_amount, used_amount, account_version, request_digest
+        ) VALUES ($1, $2, $3, $4, 'settle', 1, 0, $5, $6)
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(settlement_entry_id.to_string())
+    .bind(&quota_account_id)
+    .bind(reservation_id)
+    .bind(next_version)
+    .bind(request_digest.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn update_context_subscription_refresh_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &crate::repository::JobRecord,
+    next: &JobProjection,
+    quota_reservation_id: Option<&ResourceId>,
+    result_digest: Option<&Sha256Digest>,
+    database_now: DateTime<Utc>,
+) -> Result<crate::repository::JobRecord, RepositoryError> {
+    let terminal = matches!(
+        next.state,
+        JobState::Succeeded | JobState::Failed | JobState::Cancelled | JobState::TimedOut
+    );
+    let lease = next.lease.as_ref();
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = $4, version = $5, attempt_no = $6, lease_epoch = $7,
+            worker_id = $8, lease_token_digest = $9, heartbeat_at = $10,
+            lease_expires_at = $11, scheduled_at = $12, retry_at = $13,
+            quota_reservation_id = COALESCE($14, quota_reservation_id),
+            result_digest = COALESCE($15, result_digest),
+            started_at = CASE WHEN $4 = 'running' THEN COALESCE(started_at, $16) ELSE started_at END,
+            terminal_at = CASE WHEN $17 THEN $16 ELSE NULL END,
+            updated_at = $16
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'context' AND owner_kind = 'mcp_operation'
+        "#,
+    )
+    .bind(&current.tenant_id)
+    .bind(&current.job_id)
+    .bind(current.version)
+    .bind(next.state.as_str())
+    .bind(as_i64(next.version, "Context subscription refresh Job version")?)
+    .bind(i32::try_from(next.attempt_count).map_err(|_| {
+        RepositoryError::CorruptRow("Context refresh attempt overflow".to_owned())
+    })?)
+    .bind(as_i64(
+        next.lease_generation,
+        "Context subscription refresh lease generation",
+    )?)
+    .bind(
+        lease.map(|lease| lease.worker_process_generation_id.to_string()),
+    )
+    .bind(lease.map(|lease| lease.token_digest.to_string()))
+    .bind(lease.map(|lease| lease.heartbeat_at))
+    .bind(lease.map(|lease| lease.expires_at))
+    .bind(next.scheduled_at)
+    .bind(next.retry_at)
+    .bind(quota_reservation_id.map(ToString::to_string))
+    .bind(result_digest.map(ToString::to_string))
+    .bind(database_now)
+    .bind(terminal)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::StaleFence);
+    }
+    load_job_for_update_by_text(transaction, &current.tenant_id, &current.job_id).await
+}
+
+fn require_context_subscription_refresh_fence(
+    current: &crate::repository::JobRecord,
+    attempt: &ContextSubscriptionRefreshAttempt,
+) -> Result<(), RepositoryError> {
+    if current.tenant_id != attempt.request.tenant_id.to_string()
+        || current.job_id != attempt.job_id.to_string()
+        || current.work_class != WorkClass::Context.as_str()
+        || current.owner_kind != ResourceKind::McpOperation.descriptor().name
+        || current.owner_id != attempt.request.subscription_id.to_string()
+        || current.state != JobState::Running.as_str()
+        || current.version
+            != as_i64(
+                attempt.job_fence.expected_version,
+                "Context subscription refresh fence version",
+            )?
+        || current.worker_id.as_deref()
+            != Some(attempt.worker_process_generation_id.to_string().as_str())
+        || current.lease_epoch
+            != as_i64(
+                attempt.job_fence.lease_generation,
+                "Context subscription refresh lease generation",
+            )?
+        || current.lease_token_digest.as_deref()
+            != Some(attempt.job_fence.token_digest.to_string().as_str())
+        || current.attempt_no
+            != i32::try_from(attempt.attempt_number).map_err(|_| {
+                RepositoryError::InvalidInput("Context refresh attempt overflow".to_owned())
+            })?
+    {
+        return Err(RepositoryError::StaleFence);
+    }
+    Ok(())
+}
+
+fn decide_context_subscription_refresh_outcome(
+    current: &JobProjection,
+    command: &CommitContextSubscriptionRefresh,
+    response_digest: &Sha256Digest,
+    database_now: DateTime<Utc>,
+) -> Result<(JobProjection, &'static str, &'static str, Sha256Digest), RepositoryError> {
+    match &command.response {
+        ContextSubscriptionRefreshResponse::Completed { evidence } => Ok((
+            decide_job_terminal(
+                current,
+                &command.attempt.job_fence,
+                database_now,
+                JobState::Succeeded,
+            )
+            .map_err(map_job_decision_error)?,
+            "completed",
+            "context.subscription_refresh.completed",
+            evidence
+                .canonical_digest()
+                .map_err(invalid_context_subscription_execution)?,
+        )),
+        ContextSubscriptionRefreshResponse::RetryableFailure {
+            retry_after_milliseconds,
+            ..
+        } => {
+            let retry_at = database_now
+                .checked_add_signed(chrono::Duration::milliseconds(
+                    i64::try_from(*retry_after_milliseconds).map_err(|_| {
+                        RepositoryError::InvalidInput("Context refresh retry overflow".to_owned())
+                    })?,
+                ))
+                .ok_or_else(|| {
+                    RepositoryError::InvalidInput("Context refresh retry overflow".to_owned())
+                })?;
+            if current.attempt_count < current.attempt_limit && retry_at < current.deadline {
+                Ok((
+                    decide_job_retry(current, &command.attempt.job_fence, database_now, retry_at)
+                        .map_err(map_job_decision_error)?,
+                    "retry_scheduled",
+                    "context.subscription_refresh.retry_scheduled",
+                    response_digest.clone(),
+                ))
+            } else {
+                Ok((
+                    decide_job_terminal(
+                        current,
+                        &command.attempt.job_fence,
+                        database_now,
+                        JobState::Failed,
+                    )
+                    .map_err(map_job_decision_error)?,
+                    "failed",
+                    "context.subscription_refresh.failed",
+                    response_digest.clone(),
+                ))
+            }
+        }
+        ContextSubscriptionRefreshResponse::PermanentFailure { class, .. } => {
+            let (terminal, disposition) = match class {
+                insight_platform_context::ContextSubscriptionRefreshFailureClass::Deadline => {
+                    (JobState::TimedOut, "timed_out")
+                }
+                insight_platform_context::ContextSubscriptionRefreshFailureClass::Cancelled => {
+                    (JobState::Cancelled, "cancelled")
+                }
+                _ => (JobState::Failed, "failed"),
+            };
+            Ok((
+                decide_job_terminal(current, &command.attempt.job_fence, database_now, terminal)
+                    .map_err(map_job_decision_error)?,
+                disposition,
+                "context.subscription_refresh.failed",
+                response_digest.clone(),
+            ))
+        }
+    }
+}
+
+async fn claim_context_subscription_refresh_commit_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &CommitContextSubscriptionRefresh,
+    response_digest: &Sha256Digest,
+    database_now: DateTime<Utc>,
+) -> Result<bool, RepositoryError> {
+    let attempt_digest = command
+        .attempt
+        .canonical_digest()
+        .map_err(invalid_context_subscription_execution)?;
+    let receipt_id = new_internal_id(ResourceKind::Receipt)?;
+    let payload = TypedPayload::with_limit(1, &command.response, 262_144)?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest,
+            state, payload_schema_version, payload, payload_digest, expires_at, created_at
+        ) VALUES ($1, $2, 'job_commit', 'job', $3, $4,
+                  'context.subscription_refresh.commit', $5, $6, 'processing',
+                  $7, $8, $9, $10, $11)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(command.attempt.request.tenant_id.to_string())
+    .bind(receipt_id.to_string())
+    .bind(command.attempt.job_id.to_string())
+    .bind(command.attempt.worker_process_generation_id.to_string())
+    .bind(attempt_digest.to_string())
+    .bind(response_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(command.attempt.request.deadline)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(false);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state, response_reference_id,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'job_commit'
+          AND scope_kind = 'job' AND scope_id = $2 AND dedupe_owner_id = $3
+          AND operation = 'context.subscription_refresh.commit'
+          AND idempotency_key_digest = $4
+        FOR UPDATE
+        "#,
+    )
+    .bind(command.attempt.request.tenant_id.to_string())
+    .bind(command.attempt.job_id.to_string())
+    .bind(command.attempt.worker_process_generation_id.to_string())
+    .bind(attempt_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != response_digest.to_string()
+        || row.try_get::<String, _>("state")? != "succeeded"
+        || row.try_get::<Option<String>, _>("response_reference_id")?
+            != Some(command.attempt.job_id.to_string())
+    {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    let stored = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let response: ContextSubscriptionRefreshResponse =
+        decode_typed_payload(&stored, "Context subscription refresh commit Receipt")?;
+    if response != command.response {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    Ok(true)
+}
+
+async fn complete_context_subscription_refresh_commit_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &CommitContextSubscriptionRefresh,
+    response_digest: &Sha256Digest,
+    disposition: &str,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let attempt_digest = command
+        .attempt
+        .canonical_digest()
+        .map_err(invalid_context_subscription_execution)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = $6, response_reference_id = $2,
+            completed_at = $7
+        WHERE tenant_id = $1 AND receipt_kind = 'job_commit'
+          AND scope_kind = 'job' AND scope_id = $2 AND dedupe_owner_id = $3
+          AND operation = 'context.subscription_refresh.commit'
+          AND idempotency_key_digest = $4 AND request_digest = $5
+          AND state = 'processing'
+        "#,
+    )
+    .bind(command.attempt.request.tenant_id.to_string())
+    .bind(command.attempt.job_id.to_string())
+    .bind(command.attempt.worker_process_generation_id.to_string())
+    .bind(attempt_digest.to_string())
+    .bind(response_digest.to_string())
+    .bind(disposition)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    Ok(())
 }
 
 fn map_context_subscription_admission_error(
@@ -8403,7 +9618,7 @@ async fn validate_mcp_subscription_context_binding(
     tenant_id: &ResourceId,
     context_deployment: &ExactDeploymentRef,
     contract: &McpHostExecutionContract,
-) -> Result<(), RepositoryError> {
+) -> Result<Sha256Digest, RepositoryError> {
     let deployment =
         load_deployment(transaction, tenant_id, &context_deployment.deployment_id).await?;
     if deployment.bindings.digest != context_deployment.deployment_digest.to_string() {
@@ -8488,7 +9703,7 @@ async fn validate_mcp_subscription_context_binding(
             "Context URI Policy revision contains the wrong document".to_owned(),
         ));
     }
-    Ok(())
+    Ok(closure.required_worker_manifest_digest)
 }
 
 fn require_same_subscription_base(

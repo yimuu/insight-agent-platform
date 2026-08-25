@@ -31,6 +31,11 @@
 > Host只执行credential-free ReadOnly协议I/O并返回bounded digest/count evidence。首版没有subscription cache/Observation，PostgreSQL outcome、
 > Context Worker handler、Host RPC composition及三进程kill-window必须按此合同实现。
 
+> 2026-08-26 implementation evidence：r272实现CR-192 PostgreSQL owner全路径。exact Worker manifest scan、subscription→Job锁序、
+> successful admission Receipt/current session/auth/closure重验、Context concurrent quota、fenced attempt、JobCommit success/retry、expired running
+> lease recovery及Event/Outbox均已接线。fresh PostgreSQL 16 fixture按MCP先清pending、Context后claim的真实时序覆盖wrong manifest零claim、
+> replay、attempt 2/3与零Context Observation。Context Worker production handler、Host Resource RPC和三进程L3仍待实现。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

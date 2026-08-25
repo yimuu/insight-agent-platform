@@ -655,6 +655,12 @@ r271补齐MCP→Context typed adapter与full reconcile L2：adapter不能提供J
 evidence；fresh PostgreSQL在前一refresh Job已终态的分层fixture中证明reconcile acceptance/replay与下一唯一Job。测试中的前序Job终态是fixture
 安排，不代表Context worker已交付；真实handler、lease/recovery与进程kill-window仍未闭合。
 
+r272实现CR-192 PostgreSQL execution owner：只读scan按exact Context Worker manifest过滤，claim按subscription→Job锁序重验当前
+session/auth/Deployment/root及成功admission Receipt，预留独立Context concurrent quota并生成fenced attempt；JobCommit Receipt原子提交
+bounded success/retry evidence、quota settlement、Job/Event/Outbox。fresh PostgreSQL 16 fixture覆盖MCP先清除pending marker后Context claim、
+wrong manifest零claim、success replay、retryable outcome、expired running lease恢复到attempt 2、attempt 3唯一成功及零Context
+Invocation/Observation。该L2尚不包含真实MCP Resource RPC或独立Context/MCP/Egress进程L3。
+
 ## 24. 明确推迟的工作
 
 - 跨地域 index replication 与主动容灾；

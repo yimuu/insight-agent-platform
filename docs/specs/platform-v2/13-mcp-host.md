@@ -203,4 +203,8 @@ r271新增Host侧typed Context invalidation target，覆盖notification与full r
 没有Job/work-digest输入。fresh PostgreSQL full reconcile acceptance/replay也已通过。该target尚未组合进production binary，Context Job handler与
 Host/Context独立进程L3仍待完成。
 
+r272关闭refresh Job的PostgreSQL claim/terminal/retry/recovery L2，并验证MCP Worker先以durable acceptance结算自身Job、清除pending marker后，
+Context Worker仍只凭exact admission Receipt与当前session/auth/closure安全claim；旧pending字段不再成为第二执行权威。MCP Host
+`RefreshResources` RPC、真实Streamable HTTP read/list及三进程kill-window仍待实现。
+
 首版remote Streamable HTTP合同无未决设计问题。

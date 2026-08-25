@@ -256,21 +256,16 @@ pub struct ContextSubscriptionRefreshAttempt {
 }
 
 impl ContextSubscriptionRefreshAttempt {
-    pub fn validate_at(
-        &self,
-        now: DateTime<Utc>,
-    ) -> Result<(), ContextSubscriptionExecutionError> {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ContextSubscriptionExecutionError> {
         self.request
             .validate_at(now)
             .map_err(|_| ContextSubscriptionExecutionError::InvalidAttempt)?;
         if self.schema_version != CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION
             || self.job_id.kind() != ResourceKind::Job
-            || self.worker_process_generation_id.kind()
-                != ResourceKind::WorkerProcessGeneration
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.job_fence.expected_version == 0
             || self.job_fence.lease_generation == 0
-            || self.job_fence.worker_process_generation_id
-                != self.worker_process_generation_id
+            || self.job_fence.worker_process_generation_id != self.worker_process_generation_id
             || self.attempt_number == 0
         {
             return Err(ContextSubscriptionExecutionError::InvalidAttempt);
@@ -278,9 +273,7 @@ impl ContextSubscriptionRefreshAttempt {
         Ok(())
     }
 
-    pub fn canonical_digest(
-        &self,
-    ) -> Result<Sha256Digest, ContextSubscriptionExecutionError> {
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, ContextSubscriptionExecutionError> {
         crate::digest(self).map_err(|_| ContextSubscriptionExecutionError::Canonicalization)
     }
 }
@@ -327,9 +320,7 @@ impl ContextSubscriptionRefreshEvidence {
         Ok(())
     }
 
-    pub fn canonical_digest(
-        &self,
-    ) -> Result<Sha256Digest, ContextSubscriptionExecutionError> {
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, ContextSubscriptionExecutionError> {
         crate::digest(self).map_err(|_| ContextSubscriptionExecutionError::Canonicalization)
     }
 }
@@ -370,6 +361,10 @@ pub enum ContextSubscriptionRefreshResponse {
 }
 
 impl ContextSubscriptionRefreshResponse {
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, ContextSubscriptionExecutionError> {
+        crate::digest(self).map_err(|_| ContextSubscriptionExecutionError::Canonicalization)
+    }
+
     pub fn validate_for(
         &self,
         attempt: &ContextSubscriptionRefreshAttempt,

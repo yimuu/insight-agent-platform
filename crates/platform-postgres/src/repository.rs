@@ -35319,6 +35319,19 @@ pub(crate) fn job_projection(record: &JobRecord) -> Result<JobProjection, Reposi
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
             None
         }
+        WorkClass::Context if owner_id.kind() == ResourceKind::McpOperation => {
+            let payload: insight_platform_context::ContextSubscriptionRefreshJobPayload =
+                decode_versioned_payload(&record.payload, "Context subscription refresh Job")?;
+            payload
+                .validate_at(record.created_at)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            if payload.request.subscription_id != owner_id {
+                return Err(RepositoryError::CorruptRow(
+                    "Context subscription refresh Job owner does not match its payload".to_owned(),
+                ));
+            }
+            None
+        }
         WorkClass::Context => {
             return Err(RepositoryError::CorruptRow(
                 "Context Job has an unsupported owner kind".to_owned(),
