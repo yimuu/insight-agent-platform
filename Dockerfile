@@ -14,6 +14,7 @@ RUN cargo build --locked --release --bin insight-agent-platform \
     && cargo build --locked --release -p insight-platform-gateway --bin platform-gateway \
     && cargo build --locked --release -p insight-platform-model-worker --bin platform-model-worker \
     && cargo build --locked --release -p insight-platform-orchestration-worker --bin platform-orchestration-worker \
+    && cargo build --locked --release -p insight-platform-capability-worker --bin platform-capability-native-worker \
     && cargo build --locked --release -p insight-platform-mcp-cleanup-worker --bin platform-mcp-cleanup-worker \
     && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-data-worker \
     && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-gateway \
@@ -42,6 +43,7 @@ COPY --from=builder /workspace/target/release/platform-callback-api /usr/local/b
 COPY --from=builder /workspace/target/release/platform-gateway /usr/local/bin/platform-gateway
 COPY --from=builder /workspace/target/release/platform-model-worker /usr/local/bin/platform-model-worker
 COPY --from=builder /workspace/target/release/platform-orchestration-worker /usr/local/bin/platform-orchestration-worker
+COPY --from=builder /workspace/target/release/platform-capability-native-worker /usr/local/bin/platform-capability-native-worker
 COPY --from=builder /workspace/target/release/platform-mcp-cleanup-worker /usr/local/bin/platform-mcp-cleanup-worker
 COPY --from=builder /workspace/target/release/platform-artifact-data-worker /usr/local/bin/platform-artifact-data-worker
 COPY --from=builder /workspace/target/release/platform-artifact-gateway /usr/local/bin/platform-artifact-gateway

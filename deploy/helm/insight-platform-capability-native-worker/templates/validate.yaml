@@ -1,0 +1,9 @@
+{{- if lt (int .Values.replicas) 2 -}}{{- fail "Native Capability Worker requires at least two replicas" -}}{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) -}}{{- fail "image.digest must be exact sha256" -}}{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) -}}{{- fail "config.digest must be exact sha256" -}}{{- end -}}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.networkPolicy.postgresCidrs) -}}{{- fail "config, database and PostgreSQL CIDRs are required" -}}{{- end -}}
+{{- if .Values.autoscaling.enabled -}}
+{{- if lt (int .Values.autoscaling.minReplicas) 2 -}}{{- fail "HPA requires at least two replicas" -}}{{- end -}}
+{{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) -}}{{- fail "HPA maximum must be at least minimum" -}}{{- end -}}
+{{- if or (lt (int .Values.autoscaling.targetCPUUtilizationPercentage) 1) (gt (int .Values.autoscaling.targetCPUUtilizationPercentage) 100) -}}{{- fail "HPA CPU target must be in 1..100" -}}{{- end -}}
+{{- end -}}

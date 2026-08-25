@@ -57,6 +57,13 @@
 > nominal RunValue ID、保持content/classification并绑定exact output schema；Artifact输入fail closed。adapter/worker tests与strict Clippy
 > 通过；它只为Native真实进程L3提供受限实现，不代表remote backend或Artifact materialization完成。
 
+> 2026-08-25 implementation evidence：Native Capability Worker已有独立production binary与Helm role。进程以strict JSON加canonical
+> config digest启动，要求配置枚举的唯一`builtin.echo` descriptor与镜像内静态registry逐字段一致，并把该清单摘要绑定到exact Worker
+> manifest；claim/heartbeat使用分离且总额封闭的business/critical-control PostgreSQL pool，启动前重验baseline schema，SIGTERM进入bounded
+> drain。Helm锁定digest image/config、双副本/PDB/HPA、restricted pod且只允许DNS/PostgreSQL egress；正向render与错digest、单副本、空
+> PostgreSQL CIDR、错误HPA负向fixture，以及worker tests、strict Clippy、crate-boundary scan均通过。真实多进程kill/recovery L3尚未完成，
+> 因此本证据只关闭Native production composition与静态部署边界，不关闭Phase 2 exit gate。
+
 > 2026-08-25 implementation evidence：ModelTurn admission现已把Plan列出的Skill/Capability slots逐项冻结进snapshot与Receipt replay，
 > 并在owner transaction用各slot的exact Selection Policy重新执行共享selector；请求投影即使引用候选集合内的合法但未选中
 > Capability Deployment也会整批回滚。fresh PostgreSQL 16 r178已覆盖两候选`ordered_first`正/负路径及既有tool continuation、quota和
