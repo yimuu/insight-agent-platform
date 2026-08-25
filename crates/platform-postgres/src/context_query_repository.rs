@@ -45,6 +45,7 @@ pub struct PreparedContextExecution {
 pub struct ClaimedContextExecution {
     pub query: ContextQueryRecord,
     pub job: JobRecord,
+    pub query_input: ValueRef,
     pub quota_account_ids: Vec<String>,
     pub resume_mutations: insight_platform_contracts::ExternalLeafResumeMutationIds,
     pub failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds,
@@ -1125,7 +1126,7 @@ async fn lock_context_input(
     tenant_id: &ResourceId,
     run_id: &ResourceId,
     request: &insight_platform_context::ContextQueryRequest,
-) -> Result<(), RepositoryError> {
+) -> Result<ValueRef, RepositoryError> {
     let row = sqlx::query(
         r#"
         SELECT run_id, node_id, value_kind, classification, schema_digest,
@@ -1157,13 +1158,25 @@ async fn lock_context_input(
     let inline: Option<serde_json::Value> = row.try_get("inline_value")?;
     let artifact_id: Option<String> = row.try_get("artifact_id")?;
     match (&request.input.storage, inline, artifact_id) {
-        (insight_platform_invocations::InvocationValueStorage::Inline, Some(_), None) => Ok(()),
+        (insight_platform_invocations::InvocationValueStorage::Inline, Some(value), None) => {
+            let digest: Sha256Digest = canonical_digest(&value)
+                .map_err(|_| RepositoryError::CorruptRow("Context input JSON".to_owned()))?
+                .parse()
+                .map_err(|_| RepositoryError::CorruptRow("Context input digest".to_owned()))?;
+            if digest != request.input.content_digest {
+                return Err(RepositoryError::Conflict("Context query input digest"));
+            }
+            Ok(ValueRef::Inline { value })
+        }
         (
             insight_platform_invocations::InvocationValueStorage::Artifact { artifact },
             None,
             Some(stored),
         ) if stored == artifact.artifact_id().to_string() => {
-            require_ready_run_artifact(transaction, tenant_id, artifact).await
+            require_ready_run_artifact(transaction, tenant_id, artifact).await?;
+            Ok(ValueRef::Artifact {
+                artifact: artifact.clone(),
+            })
         }
         _ => Err(RepositoryError::Conflict("Context query input storage")),
     }
@@ -1658,6 +1671,13 @@ impl PgRepository {
             {
                 return Err(RepositoryError::Conflict("Context Worker manifest"));
             }
+            let query_input = lock_context_input(
+                &mut transaction,
+                &tenant_id,
+                &run_id,
+                &query.payload.admission.request,
+            )
+            .await?;
             let current_job =
                 load_context_job(&mut transaction, &tenant_id, &slot.job_id, true).await?;
             require_same_context_job(&observed_job, &current_job)?;
@@ -1744,6 +1764,7 @@ impl PgRepository {
             claimed.push(ClaimedContextExecution {
                 query: next_query,
                 job,
+                query_input,
                 quota_account_ids,
                 resume_mutations: slot.resume_mutations.clone(),
                 failure_mutations: slot.failure_mutations.clone(),

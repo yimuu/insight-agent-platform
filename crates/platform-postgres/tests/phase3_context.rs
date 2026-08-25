@@ -2498,6 +2498,12 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     assert_eq!(first_claim.claimed.query.state, ContextQueryState::InFlight);
     assert_eq!(first_claim.claimed.job.attempt_no, 1);
     assert_eq!(first_claim.claimed.quota_account_ids.len(), 3);
+    assert_eq!(
+        first_claim.claimed.query_input,
+        ValueRef::Inline {
+            value: json!({"question": "top customers"}),
+        }
+    );
 
     let reserved: Vec<(String, i64, i64)> = sqlx::query_as(
         r#"
