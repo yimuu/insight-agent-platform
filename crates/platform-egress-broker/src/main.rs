@@ -15,11 +15,13 @@ use insight_platform_egress::{
     InstalledMcpOAuthJwtVerifier, InstalledMcpOAuthVerificationBinding,
     InstalledMcpOAuthVerificationCatalog, InstalledMcpStreamableHttpEndpoint,
     InstalledMcpStreamableHttpEndpointCatalog, InstalledModelProviderEndpoint,
-    InstalledModelProviderEndpointCatalog, McpOAuthEgressLimits, McpRemoteTaskStateKey,
+    InstalledModelProviderEndpointCatalog, InstalledRemoteContextEndpoint,
+    InstalledRemoteContextEndpointCatalog, McpOAuthEgressLimits, McpRemoteTaskStateKey,
     McpStreamableHttpEgressLimits, McpSubscriptionStateKey, ModelProviderEgressLimits,
-    ReqwestCapabilityHttpEgressTransport, ReqwestMcpOAuthCredentialBroker,
-    ReqwestMcpStreamableHttpConnector, ReqwestMcpStreamableHttpSubscriptionConnector,
-    ReqwestModelProviderEgressBroker, SecretMaterialResolver, SensitiveMcpRemoteTaskStateKey,
+    RemoteContextEgressLimits, ReqwestCapabilityHttpEgressTransport,
+    ReqwestMcpOAuthCredentialBroker, ReqwestMcpStreamableHttpConnector,
+    ReqwestMcpStreamableHttpSubscriptionConnector, ReqwestModelProviderEgressBroker,
+    ReqwestRemoteContextSearchConnector, SecretMaterialResolver, SensitiveMcpRemoteTaskStateKey,
     SensitiveMcpSubscriptionStateKey, TokioEgressDnsResolver,
 };
 use insight_platform_egress_rpc::{
@@ -80,6 +82,7 @@ struct ProcessConfig {
     model_limits: ModelProviderEgressLimits,
     capability_http_limits: CapabilityHttpEgressLimits,
     capability_grpc_limits: CapabilityGrpcEgressLimits,
+    remote_context_limits: RemoteContextEgressLimits,
     mcp_oauth_limits: McpOAuthEgressLimits,
     mcp_oauth_service_principal_id: ResourceId,
     mcp_oauth_verification_bindings: Vec<InstalledMcpOAuthVerificationBinding>,
@@ -91,6 +94,7 @@ struct ProcessConfig {
     model_endpoints: Vec<InstalledModelProviderEndpoint>,
     capability_http_endpoints: Vec<InstalledCapabilityHttpEndpoint>,
     capability_grpc_endpoints: Vec<InstalledCapabilityGrpcEndpoint>,
+    remote_context_endpoints: Vec<InstalledRemoteContextEndpoint>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -253,6 +257,9 @@ impl ProcessConfig {
         self.capability_grpc_limits
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
+        self.remote_context_limits
+            .validate()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         self.mcp_oauth_limits
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -279,6 +286,8 @@ impl ProcessConfig {
         InstalledCapabilityHttpEndpointCatalog::new(self.capability_http_endpoints.clone())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         InstalledCapabilityGrpcEndpointCatalog::new(self.capability_grpc_endpoints.clone())
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+        InstalledRemoteContextEndpointCatalog::new(self.remote_context_endpoints.clone())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         Ok(())
     }
@@ -413,6 +422,16 @@ async fn run() -> Result<(), ProcessError> {
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
+    let remote_context = Arc::new(
+        ReqwestRemoteContextSearchConnector::new(
+            InstalledRemoteContextEndpointCatalog::new(config.remote_context_endpoints)
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+            Arc::clone(&secrets),
+            dns.clone(),
+            config.remote_context_limits,
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
     let grpc = Arc::new(
         HyperCapabilityGrpcEgressTransport::new(
             InstalledCapabilityGrpcEndpointCatalog::new(config.capability_grpc_endpoints)
@@ -427,6 +446,7 @@ async fn run() -> Result<(), ProcessError> {
     let maximum = rpc_limits.maximum_message_bytes();
     let service = EgressBrokerServiceServer::new(
         EgressBrokerGrpcService::new(model, http, grpc, rpc_limits)
+            .with_remote_context(remote_context)
             .with_mcp_oauth(oauth, oauth_pkce_cleaner)
             .with_mcp_streamable_http(mcp_streamable_http)
             .with_mcp_streamable_http_subscription(
