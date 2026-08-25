@@ -29,18 +29,17 @@ use insight_platform_postgres::{
     repository::{
         ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep,
         ChildRunCancellationSlot, ClaimOrchestrationJobs, ClaimedOrchestrationJob,
-        CommitPlanTerminal, CompleteOrchestrationRun, ControllerActivationSlot, ControllerFacts,
-        ControllerLoopRolloverSlot, ControllerPendingNodeSlot, ControllerPendingWakeSlot,
-        ControllerRemainderCancellationSlot, ControllerScopeSlot, ControllerStepMutationIds,
-        ControllerStructuralExitSlot, DeferOrchestrationChildMutationIds,
-        DeferOrchestrationTaskMutationIds, DeferOrchestrationToChildRun, DeferOrchestrationToTask,
-        DriveChildRunCancellations, DriveDueOrchestrationRetries, DriveDueOrchestrationWaits,
-        DriveExpiredOrchestrationJobs, DriveExpiredOrchestrationTasks,
-        DriveOrchestrationConvergence, DriveTerminalChildRuns, DueOrchestrationRetrySlot,
-        DueOrchestrationWaitSlot, ExpiredOrchestrationRecoverySlot, ExpiredOrchestrationTaskSlot,
-        FailOrchestrationJob, HeartbeatJob, JobFence, MaterializedTerminalValue, NewPrincipal,
-        NewQuotaAccount, NewTenant, NewTenantPrincipal, OrchestrationClaimSlot,
-        OrchestrationConvergenceSlot, OrchestrationFailureCause, OrchestrationRunTerminalState,
+        CommitPlanTerminal, ControllerActivationSlot, ControllerFacts, ControllerLoopRolloverSlot,
+        ControllerPendingNodeSlot, ControllerPendingWakeSlot, ControllerRemainderCancellationSlot,
+        ControllerScopeSlot, ControllerStepMutationIds, ControllerStructuralExitSlot,
+        DeferOrchestrationChildMutationIds, DeferOrchestrationTaskMutationIds,
+        DeferOrchestrationToChildRun, DeferOrchestrationToTask, DriveChildRunCancellations,
+        DriveDueOrchestrationRetries, DriveDueOrchestrationWaits, DriveExpiredOrchestrationJobs,
+        DriveExpiredOrchestrationTasks, DriveOrchestrationConvergence, DriveTerminalChildRuns,
+        DueOrchestrationRetrySlot, DueOrchestrationWaitSlot, ExpiredOrchestrationRecoverySlot,
+        ExpiredOrchestrationTaskSlot, FailOrchestrationJob, HeartbeatJob, JobFence,
+        MaterializedTerminalValue, NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal,
+        OrchestrationClaimSlot, OrchestrationConvergenceSlot, OrchestrationFailureCause,
         OrchestrationTerminalMutationIds, OrchestrationWakeMutationIds, OrchestrationYield,
         OrchestrationYieldMutationIds, PgRepository, RepositoryError, ResolveOrchestrationTask,
         ResolveOrchestrationTaskMutationIds, RunRecord, SafetyScanShard, StartOrchestrationJob,
@@ -582,6 +581,26 @@ fn runtime_plan() -> RuntimePlan {
                     },
                 },
             ),
+        ]),
+    }
+}
+
+fn child_runtime_plan() -> RuntimePlan {
+    let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
+    let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
+    RuntimePlan {
+        plan_version: 4,
+        interface_revision_id: id(CHILD_AGENT_INTERFACE_ID),
+        entry_node_id: entry.clone(),
+        dependency_slots: BTreeMap::new(),
+        nodes: BTreeMap::from([
+            (
+                entry,
+                RuntimeNode::Start {
+                    next: finish.clone(),
+                },
+            ),
+            (finish, return_run_input()),
         ]),
     }
 }
@@ -1353,24 +1372,36 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     scheduler.commit().await.unwrap();
     assert!(heartbeat.version > started.version);
 
-    let output_json = json!({"answer": "done"});
-    let output_digest: Sha256Digest = canonical_digest(&output_json).unwrap().parse().unwrap();
-    let result_payload = TypedPayload::new(1, &json!({"outcome": "ok"})).unwrap();
-    let complete = CompleteOrchestrationRun {
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET plan_node_key = 'input_otherwise', node_kind = 'return'
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'running'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(terminal_command.entry_node_execution_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let output_json = match &terminal_command.input.value {
+        ValueRef::Inline { value } => value.clone(),
+        ValueRef::Artifact { .. } => panic!("terminal fixture input must be Inline"),
+    };
+    let complete = CommitPlanTerminal {
         fence: JobFence {
             expected_job_version: heartbeat.version,
             ..start.fence.clone()
         },
-        terminal_state: OrchestrationRunTerminalState::Succeeded,
-        result_digest: result_payload.digest.parse().unwrap(),
-        result_payload,
-        output: Some(RunInputValue {
-            value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367820"),
-            classification: DataClassification::Internal,
-            schema_digest: digest('f'),
-            content_digest: output_digest,
-            value: ValueRef::Inline { value: output_json },
-        }),
+        plan: runtime_plan(),
+        value: MaterializedTerminalValue {
+            value_id: terminal_command.input.value_id.clone(),
+            classification: terminal_command.input.classification,
+            schema_digest: terminal_command.input.schema_digest.clone(),
+            content_digest: terminal_command.input.content_digest.clone(),
+            body: output_json,
+        },
         idempotency_key_digest: digest('0'),
         request_digest: digest('1'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -1394,7 +1425,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler
-            .complete_orchestration_run(complete.clone())
+            .commit_plan_terminal(complete.clone())
             .await
             .unwrap(),
         CommandOutcome::Applied(_)
@@ -1413,7 +1444,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     );
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let completed = match scheduler
-        .complete_orchestration_run(complete.clone())
+        .commit_plan_terminal(complete.clone())
         .await
         .unwrap()
     {
@@ -1435,8 +1466,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .await
         .unwrap();
     assert_eq!(public_result.run_id, terminal_command.run_id);
-    assert_eq!(public_result.value_id, complete.output.as_ref().unwrap().value_id);
-    assert_eq!(public_result.value, complete.output.as_ref().unwrap().value);
+    assert_eq!(public_result.value_id, complete.value.value_id);
+    assert_eq!(
+        public_result.value,
+        ValueRef::Inline {
+            value: complete.value.body.clone()
+        }
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT reserved_value FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND quota_account_id = $2",
@@ -1450,7 +1486,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     );
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
-        scheduler.complete_orchestration_run(complete.clone()).await.unwrap(),
+        scheduler.commit_plan_terminal(complete.clone()).await.unwrap(),
         CommandOutcome::Replayed(record) if record.job.state == "succeeded"
     ));
     scheduler.commit().await.unwrap();
@@ -1459,7 +1495,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler
-            .complete_orchestration_run(conflicting_complete)
+            .commit_plan_terminal(conflicting_complete)
             .await,
         Err(RepositoryError::IdempotencyConflict)
     ));
@@ -2808,29 +2844,23 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     );
     assert_eq!(active_cancelled.state, "cancelling");
 
-    let losing_result_payload = TypedPayload::new(
-        1,
-        &Failure {
-            code: FailureCode::Platform {
-                code: PlatformFailureCode::DependencyUnavailable,
-            },
-            class: FailureClass::Dependency,
-            retryability: Retryability::Never,
-            safe_message: None,
-            details_ref: None,
-            source: FailureSource::Dependency,
-        },
-    )
-    .unwrap();
-    let losing_result = CompleteOrchestrationRun {
+    let losing_body = match &wait_command.input.value {
+        ValueRef::Inline { value } => value.clone(),
+        ValueRef::Artifact { .. } => panic!("cancellation fixture input must be Inline"),
+    };
+    let losing_result = CommitPlanTerminal {
         fence: JobFence {
             expected_job_version: active_cancel_started.version,
             ..active_cancel_start.fence
         },
-        terminal_state: OrchestrationRunTerminalState::Failed,
-        result_digest: losing_result_payload.digest.parse().unwrap(),
-        result_payload: losing_result_payload,
-        output: None,
+        plan: runtime_plan(),
+        value: MaterializedTerminalValue {
+            value_id: wait_command.input.value_id.clone(),
+            classification: wait_command.input.classification,
+            schema_digest: wait_command.input.schema_digest.clone(),
+            content_digest: wait_command.input.content_digest.clone(),
+            body: losing_body,
+        },
         idempotency_key_digest: digest('8'),
         request_digest: digest('9'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -2853,7 +2883,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
-        scheduler.complete_orchestration_run(losing_result).await,
+        scheduler.commit_plan_terminal(losing_result).await,
         Err(RepositoryError::Conflict("orchestration parent closure"))
     ));
     scheduler.rollback().await.unwrap();
@@ -3593,7 +3623,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .await
     .unwrap();
     let child_input: Value = json!({"question": "select one"});
-    let child_input_digest = canonical_digest(&child_input).unwrap().parse().unwrap();
+    let child_input_digest: Sha256Digest =
+        canonical_digest(&child_input).unwrap().parse().unwrap();
     let (selection_policy, selection_candidates) = match &bindings
         .slots
         .iter()
@@ -3679,7 +3710,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367e06"),
             classification: DataClassification::Internal,
             schema_digest: agent_schema().canonical_digest,
-            content_digest: child_input_digest,
+            content_digest: child_input_digest.clone(),
             value: ValueRef::Inline { value: child_input },
         },
         source_value_ids: vec![parent_input_value_id],
@@ -3947,28 +3978,36 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
 
-    let child_output: Value = json!({"answer": "delegated"});
-    let child_output_digest: Sha256Digest =
-        canonical_digest(&child_output).unwrap().parse().unwrap();
-    let child_result_payload =
-        TypedPayload::new(1, &json!({"outcome": "child_succeeded"})).unwrap();
-    let complete_child = CompleteOrchestrationRun {
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET plan_node_key = 'finish', node_kind = 'return'
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'running'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(child_job_started.node_id.as_deref().unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let child_terminal_body = match &defer_child.input.value {
+        ValueRef::Inline { value } => value.clone(),
+        ValueRef::Artifact { .. } => panic!("child fixture input must be Inline"),
+    };
+    let complete_child = CommitPlanTerminal {
         fence: JobFence {
             expected_job_version: child_job_started.version,
             ..child_job_start.fence
         },
-        terminal_state: OrchestrationRunTerminalState::Succeeded,
-        result_digest: child_result_payload.digest.parse().unwrap(),
-        result_payload: child_result_payload,
-        output: Some(RunInputValue {
-            value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367f0b"),
-            classification: DataClassification::Internal,
-            schema_digest: agent_schema().canonical_digest,
-            content_digest: child_output_digest.clone(),
-            value: ValueRef::Inline {
-                value: child_output,
-            },
-        }),
+        plan: child_runtime_plan(),
+        value: MaterializedTerminalValue {
+            value_id: defer_child.input.value_id.clone(),
+            classification: defer_child.input.classification,
+            schema_digest: defer_child.input.schema_digest.clone(),
+            content_digest: defer_child.input.content_digest.clone(),
+            body: child_terminal_body,
+        },
         idempotency_key_digest: digest('9'),
         request_digest: digest('a'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -3991,7 +4030,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let completed_child = match scheduler
-        .complete_orchestration_run(complete_child)
+        .commit_plan_terminal(complete_child)
         .await
         .unwrap()
     {
@@ -4061,8 +4100,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .bind(&terminal_child[0].parent_run.run_id)
         .bind(&terminal_child[0].parent_node_id)
         .bind(agent_schema().canonical_digest.to_string())
-        .bind(child_output_digest.to_string())
-        .bind(json!({"answer": "delegated"}))
+        .bind(child_input_digest.to_string())
+        .bind(json!({"question": "select one"}))
         .fetch_one(&pool)
         .await
         .unwrap(),
@@ -9935,6 +9974,8 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     let plan = runtime_plan();
     let typed_plan_digest = plan.canonical_digest(plan_limits()).unwrap();
     let typed_plan_bytes = canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
+    let child_plan = child_runtime_plan();
+    let child_typed_plan_digest = child_plan.canonical_digest(plan_limits()).unwrap();
     let resource_payload = TypedPayload::new(1, &json!({"fixture": "phase2-run"})).unwrap();
     let agent_plan_payload = TypedPayload::new(
         1,
@@ -9994,7 +10035,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 output_schema: agent_schema(),
                 error_schema: agent_error_schema(),
                 typed_plan_artifact_id: id("art_0198f1c3-9a00-7c3e-b1f3-773c2836701c"),
-                typed_plan_digest: digest('f'),
+                typed_plan_digest: child_typed_plan_digest,
             }),
             validation: ValidationSummary {
                 validator_digest: digest('1'),
@@ -10172,7 +10213,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             POLICY_REVISION_ID => &policy_payload,
             SELECTION_POLICY_REVISION_ID => &selection_policy_payload,
             AGENT_INTERFACE_ID | AGENT_PLAN_ID => &agent_plan_payload,
-            CHILD_AGENT_INTERFACE_ID => &child_interface_payload,
+            CHILD_AGENT_INTERFACE_ID | CHILD_AGENT_PLAN_ID => &child_interface_payload,
             _ => &resource_payload,
         };
         sqlx::query(
@@ -10419,7 +10460,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     let child_closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(CHILD_AGENT_INTERFACE_ID), digest('8')).unwrap(),
         plan: ExactVersionRef::new(id(CHILD_AGENT_PLAN_ID), digest('9')).unwrap(),
-        entry_node_id: "start".to_owned(),
+        entry_node_id: "entry".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
         slots: vec![],
         policies: vec![policy_binding.clone()],

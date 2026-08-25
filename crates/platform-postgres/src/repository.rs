@@ -11183,122 +11183,6 @@ impl PgSchedulerTransaction {
         ))
     }
 
-    pub async fn complete_orchestration_run(
-        &mut self,
-        command: CompleteOrchestrationRun,
-    ) -> Result<CommandOutcome<CompletedOrchestrationRun>, RepositoryError> {
-        command.validate()?;
-        let terminal_failure = command.terminal_failure()?;
-        let mut transaction = self.transaction.begin().await?;
-        if claim_job_mutation_receipt(
-            &mut transaction,
-            &command.fence,
-            &command.mutations.receipt_id,
-            "orchestration.run.complete",
-            &command.idempotency_key_digest,
-            &command.request_digest,
-            &command.result_payload,
-            command.receipt_expires_at,
-        )
-        .await?
-        {
-            let completed = load_completed_orchestration_run(
-                &mut transaction,
-                &command.fence.tenant_id,
-                &command.fence.job_id,
-            )
-            .await?;
-            transaction.commit().await?;
-            return Ok(CommandOutcome::Replayed(completed));
-        }
-
-        let observed = load_job_by_text(
-            &mut transaction,
-            &command.fence.tenant_id,
-            &command.fence.job_id,
-        )
-        .await?;
-        require_orchestration_job(&observed)?;
-        let quota_accounts = lock_job_quota_bundle(
-            &mut transaction,
-            &observed,
-            &command.mutations.quota_entry_ids,
-        )
-        .await?;
-        let parents = lock_terminal_orchestration_parents(&mut transaction, &observed).await?;
-        let current = load_job_for_update_by_text(
-            &mut transaction,
-            &command.fence.tenant_id,
-            &command.fence.job_id,
-        )
-        .await?;
-        if current.version != observed.version
-            || current.payload.digest != observed.payload.digest
-            || current.quota_reservation_id != observed.quota_reservation_id
-        {
-            return Err(RepositoryError::Conflict("orchestration Job"));
-        }
-        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *transaction)
-            .await?;
-        let next = decide_job_terminal(
-            &job_projection(&current)?,
-            &domain_job_fence(&command.fence)?,
-            database_now,
-            command.terminal_state.job_state(),
-        )?;
-        let output_value_id = if let Some(output) = &command.output {
-            Some(
-                insert_run_output_value(&mut transaction, &current, &parents.node_id, output)
-                    .await?,
-            )
-        } else {
-            None
-        };
-        settle_locked_job_quota_bundle(
-            &mut transaction,
-            &current,
-            &quota_accounts,
-            &command.mutations.quota_entry_ids,
-            &command.request_digest,
-        )
-        .await?;
-        let mut completed = mutate_terminal_orchestration_run(
-            &mut transaction,
-            &current,
-            &next,
-            &parents,
-            command.terminal_state,
-            &command.result_digest,
-            output_value_id.as_deref(),
-            terminal_failure.as_ref(),
-            database_now,
-        )
-        .await?;
-        completed.settled_quota_account_ids = quota_accounts
-            .iter()
-            .map(|account| account.quota_account_id.clone())
-            .collect();
-        append_orchestration_terminal_events(
-            &mut transaction,
-            &completed,
-            command.terminal_state,
-            &command.mutations,
-            &command.result_payload,
-        )
-        .await?;
-        terminalize_job_mutation_receipt(
-            &mut transaction,
-            &command.fence,
-            &command.mutations.receipt_id,
-            &command.request_digest,
-            command.terminal_state.as_str(),
-        )
-        .await?;
-        transaction.commit().await?;
-        Ok(CommandOutcome::Applied(completed))
-    }
-
     /// Commits a Return or Raise only from the exact terminal port frozen in the bound Plan.
     /// The supplied body is materialization evidence, never terminal authority: the transaction
     /// re-resolves the current lexical Scope and revalidates the immutable RunValue and Interface.
@@ -12056,51 +11940,6 @@ async fn settle_locked_job_quota_bundle(
         .await?;
     }
     Ok(())
-}
-
-async fn insert_run_output_value(
-    transaction: &mut Transaction<'_, Postgres>,
-    job: &JobRecord,
-    node_id: &str,
-    output: &RunInputValue,
-) -> Result<String, RepositoryError> {
-    let tenant_id: ResourceId =
-        job.tenant_id
-            .parse()
-            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
-                RepositoryError::CorruptRow(failure.to_string())
-            })?;
-    if let ValueRef::Artifact { artifact } = &output.value {
-        require_ready_run_artifact(transaction, &tenant_id, artifact).await?;
-    }
-    let (inline_value, artifact_id) = match &output.value {
-        ValueRef::Inline { value } => (Some(value), None),
-        ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
-    };
-    let run_id = job
-        .run_id
-        .as_deref()
-        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?;
-    sqlx::query(
-        r#"
-        INSERT INTO insight_platform.run_values (
-            tenant_id, value_id, run_id, node_id, value_kind, classification,
-            schema_digest, content_digest, inline_value, artifact_id
-        ) VALUES ($1, $2, $3, $4, 'run_output', $5, $6, $7, $8, $9)
-        "#,
-    )
-    .bind(&job.tenant_id)
-    .bind(output.value_id.to_string())
-    .bind(run_id)
-    .bind(node_id)
-    .bind(output.classification.as_str())
-    .bind(output.schema_digest.to_string())
-    .bind(output.content_digest.to_string())
-    .bind(inline_value)
-    .bind(artifact_id)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(output.value_id.to_string())
 }
 
 fn root_scope_environment(
@@ -21708,7 +21547,6 @@ async fn settle_terminal_child_run(
                 SELECT schema_digest, content_digest
                 FROM insight_platform.run_values
                 WHERE tenant_id = $1 AND run_id = $2 AND value_id = $3
-                  AND value_kind = 'run_output' AND node_id IS NOT NULL
                 "#,
             )
             .bind(&child_run.tenant_id)
@@ -31502,59 +31340,6 @@ impl CommitPlanTerminal {
             return Err(RepositoryError::InvalidInput(
                 "Plan terminal receipt has expired".to_owned(),
             ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct CompleteOrchestrationRun {
-    pub fence: JobFence,
-    pub terminal_state: OrchestrationRunTerminalState,
-    pub result_digest: Sha256Digest,
-    pub result_payload: TypedPayload,
-    pub output: Option<RunInputValue>,
-    pub idempotency_key_digest: Sha256Digest,
-    pub request_digest: Sha256Digest,
-    pub receipt_expires_at: DateTime<Utc>,
-    pub mutations: OrchestrationTerminalMutationIds,
-}
-
-impl CompleteOrchestrationRun {
-    fn terminal_failure(&self) -> Result<Option<Failure>, RepositoryError> {
-        if self.terminal_state != OrchestrationRunTerminalState::Failed {
-            return Ok(None);
-        }
-        let failure: Failure = decode_typed_payload(&self.result_payload, "Run Failure")?;
-        failure
-            .validate(1_024)
-            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
-        Ok(Some(failure))
-    }
-
-    fn validate(&self) -> Result<(), RepositoryError> {
-        self.fence.validate()?;
-        self.mutations.validate()?;
-        if self.receipt_expires_at <= Utc::now()
-            || (self.terminal_state == OrchestrationRunTerminalState::Succeeded)
-                != self.output.is_some()
-            || self.result_digest.as_str() != self.result_payload.digest
-        {
-            return Err(RepositoryError::InvalidInput(
-                "orchestration terminal command is invalid".to_owned(),
-            ));
-        }
-        self.terminal_failure()?;
-        if let Some(output) = &self.output {
-            output
-                .validate(JsonLimits {
-                    max_bytes: 65_536,
-                    max_depth: 32,
-                    max_properties_per_object: 1_024,
-                    max_items_per_array: 4_096,
-                    max_string_bytes: 65_536,
-                })
-                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         }
         Ok(())
     }
