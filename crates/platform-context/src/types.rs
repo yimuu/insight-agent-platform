@@ -771,11 +771,22 @@ impl ContextAdmissionSnapshot {
             || !self.policies.contains(&self.binding.authorization_policy)
             || !self.policies.contains(&self.binding.ranking_policy)
             || !self.policies.contains(&self.context_closure.parser_policy)
+            || !self.policies.contains(&self.context_closure.chunker_policy)
             || !self.policies.contains(&self.context_closure.ranking_policy)
             || !self.policies.contains(&self.context_closure.data_policy)
             || self
                 .context_closure
                 .network_policy
+                .as_ref()
+                .is_some_and(|policy| !self.policies.contains(policy))
+            || self
+                .context_closure
+                .tls_policy
+                .as_ref()
+                .is_some_and(|policy| !self.policies.contains(policy))
+            || self
+                .context_closure
+                .trust_policy
                 .as_ref()
                 .is_some_and(|policy| !self.policies.contains(policy))
             || self.dataset_generation.is_some()
