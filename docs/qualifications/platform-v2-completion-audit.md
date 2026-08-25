@@ -2,7 +2,7 @@
 
 状态：In Progress / repository and production gaps remain
 
-日期：2026-08-24
+日期：2026-08-25
 
 本审计按 `00-overview.md` 的统一完成定义和 `implementation-plan.md` 四阶段 exit gate 核对当前工作树。
 它记录可以复现的证据与缺口，不改变合同，也不把存在源码、测试或静态清单等同于 production behavior。
@@ -30,9 +30,9 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
 | Public API | `/v1` OpenAPI/owner schema、route负向conformance与root public API baseline通过 | public contract实现闭合 |
 | Typed Plan materialization | Agent Revision冻结`typed_plan_artifact_id`与digest；发布事务校验Ready JSON Artifact/Verified Blob；Scheduler专用mTLS Data RPC以Run、Job lease、exact Plan Revision和ArtifactRef双重授权读取 | 闭合Scheduler物化输入与传输边界，不代表production Scheduler handler完成 |
-| Typed Plan v4 wire | RuntimePlan保存closed dependency slots及全部external leaf payload，拒绝v1/v2/v3并验证slot kind、output producer、input reachability与bounded budget；fresh PG的phase2 Run kernel和真实coordinator既有路径通过 | L1/L2 wire与既有controller未回归；ChildAgent/HumanTask已接owner store，其他external leaf与完整L3仍待实现 |
+| Typed Plan v4 wire | RuntimePlan保存closed dependency slots及全部external leaf payload，拒绝v1/v2/v3并验证slot kind、output producer、input reachability与bounded budget；fresh PG的phase2 Run kernel和真实coordinator既有路径通过 | L1/L2 wire与controller未回归；Timer/Signal/HumanTask/ChildAgent真实多进程L3已闭合，Model/Capability/Context仍待完整L3 |
 | Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；ChildAgent owner transaction按Run冻结的exact Policy Deployment/Revision加载文档、锁定当前gate、重解析Plan v4 input/route与Scope并重算选择，拒绝伪造结果 | L1/L2 ChildAgent selection/input owner闭合；Model/Capability选择与完整多进程dispatch证据仍待实现 |
-| 已有部署 | Gateway、Callback、MCP cleanup、Model Worker、Artifact三role、Sandbox、Security/Egress Helm静态门禁通过 | 只证明这些checked-in清单的静态边界 |
+| 已有部署 | Gateway、Callback、Orchestration Worker、MCP cleanup、Model Worker、Artifact三role、Sandbox、Security/Egress Helm静态门禁通过 | 只证明这些checked-in清单的静态边界 |
 | HTTP observability | shared bounded-label owner；Gateway与Callback具备request/outcome、latency、ready、`/metrics`及ServiceMonitor/NetworkPolicy | 闭合两个公网HTTP role，不代表全平台observability |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator | 可验证证据形状，不证明任一外部门禁通过 |
@@ -66,14 +66,14 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 ### 仓库内缺口
 
-1. `insight-platform-runtime`只有library，没有Scheduler/Recovery production binary、process config、startup manifest、
-   readiness/drain和Helm Deployment。
+1. 独立Orchestration Worker binary、process config、startup/readiness/drain、restricted Helm Deployment和critical-control safety composition已闭合。
+   fresh PostgreSQL 16 r199已完成Timer→Signal→HumanTask→ChildAgent→Return五进程kill/recovery，parent/child终态、typed child output及唯一finish Node均通过。
 2. `StartedOrchestrationJobHandler`已有正式materialize→commit/handoff生命周期adapter；PostgreSQL durable Plan store已闭合
    Start/Compute/Branch/Fork/Join/Map/Loop/ErrorBoundary成功控制路径的durable fact读取、Inline RunValue物化、精确mutation-slot
    规划、通用或derived fenced commit与retry handoff；FailNode现在也从locked facts推导ErrorBoundary/structured-exit/wake/
    sibling-cancellation槽，并在失败owner transaction重验expression evidence。Inline Return/Raise terminal、ChildAgent和HumanTask已接入该store；
-   Timer durable wait现已接入，Model/Capability/Context及Signal分派尚未接入；Artifact-backed RunValue的Scheduler侧Data RPC materializer、exact leased resolver、Broker reader与读前/读后
-   authority现已接入，但独立Scheduler/Artifact Data Worker进程边界仍待L3 crash/restart验证，因此完整production composition仍未闭合；
+   Timer/Signal durable wait与Model/Capability/Context dispatch均已接入；Artifact-backed RunValue的Scheduler侧Data RPC materializer、exact leased resolver、Broker reader与读前/读后
+   authority现已接入，但Orchestration Worker/Artifact Data Worker的production-equivalent RPC kill/restart仍待L3验证，且Model/Capability/Context下游role尚未全部闭合；
    exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
    exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure；
    Scheduler侧也已用当前fence从PostgreSQL解析descriptor并完成canonical JSON、Plan limits和semantic digest复验，但其余external leaf
@@ -82,13 +82,13 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    observation；ChildAgent deferral现要求exact Plan v4、冻结slot Selection Policy和candidate evidence，并在同一SERIALIZABLE owner
    transaction中按当前Scope重解析input/可选route RunValue、锁定Policy/Revision当前gate且不依赖active head、重跑共享evaluator；fresh PostgreSQL
    覆盖dispatch facts、only-candidate正向、伪造input/classification/selected Deployment整批回滚。PostgreSQL durable Plan store现已消费
-   `CreateChildRun`，在事务外仅物化可选route正文、生成typed child identities/evidence并调用上述owner command；该路径仍缺独立Scheduler
-   进程的完整parent→child→parent terminal L3 fixture。HumanTask owner现从exact Plan v4重验definition、response schema与timeout，runtime
+   `CreateChildRun`，在事务外仅物化可选route正文、生成typed child identities/evidence并调用上述owner command；独立Worker的
+   parent→child→parent terminal L3已在r199闭合。HumanTask owner现从exact Plan v4重验definition、response schema与timeout，runtime
    store消费`CreateDurableWait::HumanTask`并生成共享Task mutations；Task first-winner transaction现把成功response RunValue绑定到当前Scope，并在
    Node payload持久化owner-derived succeeded/declined/timed_out/cancelled事实，恢复controller会重验该事实后resume或稳定失败，不再重复创建Task；
-   fresh PostgreSQL r77保持response/expiry/late response/first-winner/replay并验证response Scope binding。尚缺独立Scheduler的完整Task wait/resume L3。
+   fresh PostgreSQL r77保持response/expiry/late response/first-winner/replay并验证response Scope binding；完整Task wait/resume L3已在r199闭合。
    Timer owner不再接受caller-supplied WakeContract，而是从exact Plan v4和数据库时间派生due time、generation与仅Timer wake source；过早wake、
-   Plan digest漂移和first-winner均fail closed，runtime store已消费`CreateDurableWait::Timer`。fresh PostgreSQL r79通过，但独立Timer scanner/process L3仍待完成。
+   Plan digest漂移和first-winner均fail closed，runtime store已消费`CreateDurableWait::Timer`。fresh PostgreSQL r79通过，独立Timer scanner/process L3已在r181/r199闭合。
    CR-176 Scope data-port environment owner、root/child binding、bounded lexical lookup、exact Inline/Ready Artifact
    authority读取与stale fence拒绝已经实现并通过fresh PostgreSQL Phase 2。derived commit现已对Branch/Map/Loop在事务内重验
    input/evaluation/classification evidence并重新执行pure evaluator，fresh PostgreSQL覆盖Branch正向提交和伪造classification整批回滚。
@@ -102,7 +102,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    rollover及active-remainder cancellation槽；fresh PostgreSQL覆盖Quorum cancel集合与已提交Join facts。手工注入
    `ControllerObservation`仍不计production证据。fresh PostgreSQL runtime fixture现已把真实claim/start、lease heartbeat/handoff/recovery、
    exact Typed Plan authority读取与canonical materialization、数据库派生Start facts及fenced Start→Return activation串成同一条
-   coordinator链；它证明正式adapter/store的进程内组合，但仍不是独立Scheduler binary或多进程crash/restart证据。
+   coordinator链；独立Orchestration Worker binary与wait-node/Subagent多进程crash/restart证据已在r199闭合，但Model/Capability/Context下游进程仍待接入。
    CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
    CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向、每item RunValue/MapItem Scope原子写及
    L2 batch/replay fixture已实现；process crash/restart的L3 fixture仍待production handler闭合后完成。
@@ -117,7 +117,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    fixture也已在fresh PostgreSQL通过。CR-180 L1/L2 terminal证据已闭合；独立Scheduler与Artifact Data Worker之间的L3 kill/restart
    fixture仍未完成，因此尚不能计入完整Phase 2 production terminal证据。
 3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
-4. 当前多进程end-to-end证据由fixture拼装ports，不能替代上述production composition。
+4. wait-node与Subagent多进程证据使用production Orchestration composition但仍以fixture提供Artifact读取端口；Model/Capability/Context真实外部role尚未串入同一L3链路。
 
 ## 5. Phase 3 审计
 
@@ -151,7 +151,7 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 ### 仓库内缺口
 
-1. 18列出的Scheduler/Recovery、Capability Worker、Context Worker、MCP Host等独立物理role没有release chart。
+1. 18列出的Capability Worker、Context Worker、MCP Host等独立物理role没有release chart；Scheduler/Recovery已由独立Orchestration Worker chart闭合。
 2. 除Public Gateway与Callback API的首批Prometheus SLI外，其余Platform v2 binaries仍只有结构化日志或process-local snapshots；缺少完整
    Prometheus/OTel export、低基数queue/dependency/recovery指标、trace propagation/redaction的process wiring。
 3. Gateway与Callback已有ServiceMonitor；其余role仍缺少ServiceMonitor/PodMonitor，且全平台尚无dashboard、symptom-first PrometheusRule与逐alert runbook。
@@ -170,13 +170,11 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 按上游到下游执行，且每批通过后提交：
 
-1. Plan v4剩余Model/Capability/Context、Signal leaf owner dispatch，以及Timer/Task/Subagent完整L3 lifecycle；
-2. 删除caller-supplied orchestration completion并以真实child terminal/result-link替代；
-3. Scheduler/Recovery binary、真实orchestration handler和独立release chart；
-4. Capability Worker、Context Worker、remote MCP Host production composition与charts；
-5. 将已闭合的shared low-cardinality HTTP observability boundary逐role接入，并补queue/dependency metrics、trace/redaction；
-6. ServiceMonitor/dashboard/alerts/runbooks和完整topology静态checker；
-7. reproducible signed candidate pipeline、外部L4～L6、GitOps clean cut、current文档与规范归档。
+1. Plan v4剩余Model/Capability/Context完整external-leaf L3 lifecycle；
+2. Capability Worker、Context Worker、remote MCP Host production composition与charts；
+3. 将已闭合的shared low-cardinality HTTP observability boundary逐role接入，并补queue/dependency metrics、trace/redaction；
+4. ServiceMonitor/dashboard/alerts/runbooks和完整topology静态checker；
+5. reproducible signed candidate pipeline、外部L4～L6、GitOps clean cut、current文档与规范归档。
 
 如果实现发现domain port不足以支持production handler，必须先按02→06/07/09/10→17/18修订合同并重新cross-review，
 不得在binary中以自由JSON、in-memory authority或host process execution绕过缺口。
