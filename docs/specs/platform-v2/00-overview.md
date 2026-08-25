@@ -276,8 +276,9 @@ CR-171之前候选架构的多类functional fixture；只有已按CR-171重新�
 截至2026-08-25，Plan v4的ChildAgent、HumanTask、TimerWait与SignalWait已接入PostgreSQL owner transaction和durable Plan store。
 SignalWait的exact key、可选payload schema/摘要、immutable RunValue、当前Scope绑定、首次胜出和Receipt重放，以及Timer due/Signal
 timeout的typed Job scheduling与critical-control bounded scan已通过fresh PostgreSQL 16 r88 L2 fixture；Timer另已在fresh PostgreSQL 16
-r113完成claim、durable park、独立safety到期唤醒、continuation claim、Return物化与Run终态的真实协调器L3链路。独立认证Signal
-ingress、Child/Task/Signal的多进程kill/recovery及Timer kill-window仍未完成，ModelLoop、CapabilityCall和ContextQuery owner dispatch也尚未接线，因此不能据此宣称
+r113完成claim、durable park、独立safety到期唤醒、continuation claim、Return物化与Run终态的真实协调器L3链路；r181进一步完成
+durable park后强制终止首个Worker、由替代Worker及独立safety scanner恢复且finish Node唯一的Timer多进程kill-window。独立认证Signal
+ingress、Child/Task/Signal的多进程kill/recovery仍未完成，ModelLoop、CapabilityCall和ContextQuery仍缺完整production多进程L3，因此不能据此宣称
 Phase 2完成。
 
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
