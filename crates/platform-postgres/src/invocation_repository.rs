@@ -1017,6 +1017,7 @@ async fn resolve_mcp_capability_runtime(
         discovery_snapshot_id,
         discovery_snapshot_digest,
         authorization_policy,
+        ..
     } = &capability_closure.backend
     else {
         if command.mcp_runtime.is_some() {
@@ -1175,6 +1176,7 @@ async fn validate_frozen_mcp_runtime_at_claim(
             discovery_snapshot_id,
             discovery_snapshot_digest,
             authorization_policy,
+            ..
         },
     ) = (&admission.mcp_runtime, &contract.deployment_closure.backend)
     else {

@@ -43,6 +43,11 @@
 > Deployment冻结exact installed codec identity/module/descriptor及required Worker manifest。实现必须在claim/dispatch外部I/O前重验三者；
 > 空registry、测试codec、资格外镜像或运行时模板解释器都不能计为production remote backend。
 
+> 2026-08-25 implementation evidence：CR-188 Rust owner与HTTP/gRPC/MCP dispatcher已冻结并重验exact installed codec、完整backend
+> descriptor及required Worker manifest；manifest/module/descriptor漂移在transport调用计数为零时fail closed。相关contract/adapter tests、
+> strict Clippy及fresh PostgreSQL 16 r200完整Capability Invocation fixture通过。Capability binary/startup manifest、真实remote protocol L3与
+> L4 rollout drift仍待完成，不能把本证据宣称为production remote backend闭环。
+
 > 2026-08-25 implementation evidence：ModelTurn admission现已把Plan列出的Skill/Capability slots逐项冻结进snapshot与Receipt replay，
 > 并在owner transaction用各slot的exact Selection Policy重新执行共享selector；请求投影即使引用候选集合内的合法但未选中
 > Capability Deployment也会整批回滚。fresh PostgreSQL 16 r178已覆盖两候选`ordered_first`正/负路径及既有tool continuation、quota和

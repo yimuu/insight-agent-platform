@@ -9,7 +9,7 @@ use insight_platform_contracts::{
     CanonicalHttpEndpoint, CapabilityBackendBinding, CapabilityBackendContract,
     CapabilityBackendKind, CapabilityBackendLimits, CapabilityIdempotencyKind, Effect,
     ExactSecretBindingRef, ExactVersionRef, HttpCapabilityContract, HttpCapabilityMethod,
-    Sha256Digest,
+    InstalledCapabilityCodecRef, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,15 +23,25 @@ pub const MAX_HTTP_ADAPTER_HEADER_VALUE_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InstalledHttpCodecDescriptor {
+    pub codec_id: String,
+    pub codec_version: String,
+    pub module_digest: Sha256Digest,
+    pub worker_protocol_version: u32,
+    pub descriptor_digest: Sha256Digest,
     pub protocol_contract_digest: Sha256Digest,
     pub request_mapping_digest: Sha256Digest,
     pub response_mapping_digest: Sha256Digest,
     pub error_mapping_digest: Sha256Digest,
 }
 
-impl From<&HttpCapabilityContract> for InstalledHttpCodecDescriptor {
-    fn from(contract: &HttpCapabilityContract) -> Self {
+impl InstalledHttpCodecDescriptor {
+    pub fn exact(codec: &InstalledCapabilityCodecRef, contract: &HttpCapabilityContract) -> Self {
         Self {
+            codec_id: codec.codec_id.clone(),
+            codec_version: codec.codec_version.clone(),
+            module_digest: codec.module_digest.clone(),
+            worker_protocol_version: codec.worker_protocol_version,
+            descriptor_digest: codec.descriptor_digest.clone(),
             protocol_contract_digest: contract.protocol_contract_digest.clone(),
             request_mapping_digest: contract.request_mapping_digest.clone(),
             response_mapping_digest: contract.response_mapping_digest.clone(),
@@ -230,10 +240,14 @@ impl InstalledHttpCodecRegistry {
 
     fn resolve(
         &self,
+        codec: &InstalledCapabilityCodecRef,
         contract: &HttpCapabilityContract,
     ) -> Result<&Arc<dyn HttpCapabilityCodec>, CapabilityDispatchError> {
+        codec
+            .validate_for(&CapabilityBackendContract::Http(contract.clone()))
+            .map_err(|_| CapabilityDispatchError::BackendContractMismatch)?;
         self.codecs
-            .get(&InstalledHttpCodecDescriptor::from(contract))
+            .get(&InstalledHttpCodecDescriptor::exact(codec, contract))
             .ok_or(CapabilityDispatchError::ProtocolCodecNotInstalled)
     }
 }
@@ -270,6 +284,8 @@ impl CapabilityBackendPort for HttpCapabilityAdapter {
             ));
         };
         let CapabilityBackendBinding::Http {
+            codec,
+            worker_manifest_digest,
             endpoint,
             endpoint_identity_digest,
             network_policy,
@@ -281,7 +297,15 @@ impl CapabilityBackendPort for HttpCapabilityAdapter {
                 CapabilityDispatchError::BackendContractMismatch,
             ));
         };
-        let codec = self.codecs.resolve(contract).map_err(contract_failure)?;
+        if worker_manifest_digest != &request.worker_manifest_digest {
+            return Err(contract_failure(
+                CapabilityDispatchError::BackendContractMismatch,
+            ));
+        }
+        let codec = self
+            .codecs
+            .resolve(codec, contract)
+            .map_err(contract_failure)?;
         let encoded = codec.encode(request)?;
         let transport_request = HttpTransportRequest {
             identity: CapabilityTransportRequestIdentity::from_adapter_request(

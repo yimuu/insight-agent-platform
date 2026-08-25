@@ -485,7 +485,7 @@ winner与原claim必须在tenant、Invocation/Job、attempt、lease/token、Work
 optimistic version；Native/HTTP/gRPC随后取消同一物理执行。transport cancel observation不等于no-effect proof，write Effect因此进入
 ReconciliationRequired；deadline后只允许在由frozen backend timeout派生且受平台hard limit封顶的cleanup window提交。
 
-15项adapter/worker unit、8项Invocation unit与fresh PostgreSQL 16端到端fixture覆盖exact selection、malformed input、timeout uncertainty、
+16项adapter/worker unit、8项Invocation unit与fresh PostgreSQL 16端到端fixture覆盖exact selection、malformed input、timeout uncertainty、
 unsafe write retry降级、attempt exhaustion、stale Worker identity、terminal/cancellation commit、cancel/completed first-winner和replay。
 Egress另有29项unit，其中8项覆盖Capability HTTP/gRPC exact catalog、DNS public-IP/connection pinning、late Secret、bounded framing/response、
 Effect/idempotency failure与stale exact cancel；不增加表或migration。
@@ -513,4 +513,9 @@ Capability registry、backend resolution和publication fixture仍待实现。具
 分别由10、14冻结，但必须实现本规范的统一Interface和安全合同。
 
 CR-188已关闭remote codec可执行权威：runtime只执行Deployment冻结且由Worker startup manifest证明的静态installed codec；
-mapping digest不再被误当成可实例化程序。对应machine contract、publication/claim/dispatcher与L1～L4 fixture仍待实现。
+mapping digest不再被误当成可实例化程序。
+
+2026-08-25 implementation evidence：Rust owner已加入closed installed codec reference与domain-separated完整backend descriptor digest；
+HTTP/gRPC/MCP Deployment binding冻结required Worker manifest，三个dispatcher在transport前同时重验manifest、codec identity/module与
+descriptor。16项adapter test包含manifest/module/descriptor漂移且transport调用计数为零；fresh PostgreSQL 16 r200完整Invocation
+admission/claim/outcome/Task/reconcile/Receipt/quota fixture通过。production binary/startup manifest publication与L3/L4仍待完成。

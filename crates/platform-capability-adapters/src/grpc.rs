@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use insight_platform_contracts::{
     CanonicalHttpEndpoint, CapabilityBackendBinding, CapabilityBackendContract,
     CapabilityBackendKind, CapabilityBackendLimits, CapabilityIdempotencyKind, Effect,
-    ExactSecretBindingRef, ExactVersionRef, GrpcCapabilityContract, Sha256Digest,
+    ExactSecretBindingRef, ExactVersionRef, GrpcCapabilityContract, InstalledCapabilityCodecRef,
+    Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,6 +23,11 @@ pub const MAX_GRPC_METADATA_VALUE_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InstalledGrpcCodecDescriptor {
+    pub codec_id: String,
+    pub codec_version: String,
+    pub module_digest: Sha256Digest,
+    pub worker_protocol_version: u32,
+    pub descriptor_digest: Sha256Digest,
     pub protobuf_contract_digest: Sha256Digest,
     pub service_name: String,
     pub method_name: String,
@@ -30,9 +36,14 @@ pub struct InstalledGrpcCodecDescriptor {
     pub error_mapping_digest: Sha256Digest,
 }
 
-impl From<&GrpcCapabilityContract> for InstalledGrpcCodecDescriptor {
-    fn from(contract: &GrpcCapabilityContract) -> Self {
+impl InstalledGrpcCodecDescriptor {
+    pub fn exact(codec: &InstalledCapabilityCodecRef, contract: &GrpcCapabilityContract) -> Self {
         Self {
+            codec_id: codec.codec_id.clone(),
+            codec_version: codec.codec_version.clone(),
+            module_digest: codec.module_digest.clone(),
+            worker_protocol_version: codec.worker_protocol_version,
+            descriptor_digest: codec.descriptor_digest.clone(),
             protobuf_contract_digest: contract.protobuf_contract_digest.clone(),
             service_name: contract.service_name.clone(),
             method_name: contract.method_name.clone(),
@@ -229,10 +240,14 @@ impl InstalledGrpcCodecRegistry {
 
     fn resolve(
         &self,
+        codec: &InstalledCapabilityCodecRef,
         contract: &GrpcCapabilityContract,
     ) -> Result<&Arc<dyn GrpcCapabilityCodec>, CapabilityDispatchError> {
+        codec
+            .validate_for(&CapabilityBackendContract::Grpc(contract.clone()))
+            .map_err(|_| CapabilityDispatchError::BackendContractMismatch)?;
         self.codecs
-            .get(&InstalledGrpcCodecDescriptor::from(contract))
+            .get(&InstalledGrpcCodecDescriptor::exact(codec, contract))
             .ok_or(CapabilityDispatchError::ProtocolCodecNotInstalled)
     }
 }
@@ -269,6 +284,8 @@ impl CapabilityBackendPort for GrpcCapabilityAdapter {
             ));
         };
         let CapabilityBackendBinding::Grpc {
+            codec,
+            worker_manifest_digest,
             endpoint,
             endpoint_identity_digest,
             network_policy,
@@ -280,7 +297,15 @@ impl CapabilityBackendPort for GrpcCapabilityAdapter {
                 CapabilityDispatchError::BackendContractMismatch,
             ));
         };
-        let codec = self.codecs.resolve(contract).map_err(contract_failure)?;
+        if worker_manifest_digest != &request.worker_manifest_digest {
+            return Err(contract_failure(
+                CapabilityDispatchError::BackendContractMismatch,
+            ));
+        }
+        let codec = self
+            .codecs
+            .resolve(codec, contract)
+            .map_err(contract_failure)?;
         let encoded = codec.encode(request)?;
         let transport_request = GrpcTransportRequest {
             identity: CapabilityTransportRequestIdentity::from_adapter_request(

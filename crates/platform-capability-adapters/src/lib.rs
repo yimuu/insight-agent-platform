@@ -899,13 +899,14 @@ mod tests {
         CapabilityBackendFeatures, CapabilityBackendLimits, CapabilityDeploymentClosure,
         CapabilityEndpointScheme, DataClassification, ExactDeploymentRef, ExactSecretBindingRef,
         ExactVersionRef, GrpcCapabilityContract, HttpCapabilityContract, HttpCapabilityMethod,
-        InteractionSchemaDocument, McpAuthorizationPrincipalKind, McpClientCapabilities,
-        McpDeploymentClosure, McpDiscoverySnapshot, McpExperimentalFeature, McpMetadataPolicy,
-        McpMethodLimits, McpNegotiatedCapabilities, McpProtocolPolicyDocument,
+        InstalledCapabilityCodecRef, InteractionSchemaDocument, McpAuthorizationPrincipalKind,
+        McpClientCapabilities, McpDeploymentClosure, McpDiscoverySnapshot, McpExperimentalFeature,
+        McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities, McpProtocolPolicyDocument,
         McpServerExecutionContract, McpServerLimits, McpToolCapabilityContract,
         McpTransportBinding, McpTransportFeatures, McpTransportKind, NativeCapabilityContract,
         PrincipalKind, PublishedMcpMethod, SecretPurpose, SecretResolutionPolicy,
-        MCP_PROTOCOL_BASELINE, WORKER_PROTOCOL_VERSION,
+        INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION, MCP_PROTOCOL_BASELINE,
+        WORKER_PROTOCOL_VERSION,
     };
     use insight_platform_invocations::{
         CapabilityImplementationContract, CapabilityUncertainty, ExactInvocationValueRef,
@@ -932,6 +933,21 @@ mod tests {
         format!("sha256:{}", character.to_string().repeat(64))
             .parse()
             .unwrap()
+    }
+
+    fn installed_codec(
+        contract: &CapabilityBackendContract,
+        codec_id: &str,
+    ) -> InstalledCapabilityCodecRef {
+        InstalledCapabilityCodecRef {
+            schema_version: INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION,
+            backend_kind: contract.kind(),
+            codec_id: codec_id.to_owned(),
+            codec_version: "1.0.0".to_owned(),
+            module_digest: digest('e'),
+            worker_protocol_version: WORKER_PROTOCOL_VERSION,
+            descriptor_digest: contract.descriptor_digest().unwrap(),
+        }
     }
 
     fn exact(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef {
@@ -1047,6 +1063,7 @@ mod tests {
             port: 443,
             base_path: "/v1/invoke".to_owned(),
         };
+        let codec = installed_codec(&backend_contract, "fixture.http");
         let implementation = CapabilityImplementationContract {
             revision: revision.clone(),
             interface_revision: interface.clone(),
@@ -1064,6 +1081,8 @@ mod tests {
                 implementation: revision,
                 interface,
                 backend: CapabilityBackendBinding::Http {
+                    codec,
+                    worker_manifest_digest: digest('a'),
                     endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
                     endpoint,
                     network_policy: exact(ResourceKind::PolicyRevision, 14, '8'),
@@ -1097,6 +1116,7 @@ mod tests {
             port: 443,
             base_path: "/".to_owned(),
         };
+        let codec = installed_codec(&backend_contract, "fixture.grpc");
         let implementation = CapabilityImplementationContract {
             revision: revision.clone(),
             interface_revision: interface.clone(),
@@ -1114,6 +1134,8 @@ mod tests {
                 implementation: revision,
                 interface,
                 backend: CapabilityBackendBinding::Grpc {
+                    codec,
+                    worker_manifest_digest: digest('a'),
                     endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
                     endpoint,
                     network_policy: exact(ResourceKind::PolicyRevision, 54, '8'),
@@ -1336,8 +1358,12 @@ mod tests {
             supports_task: tasks,
             supports_progress: false,
         };
-        let descriptor = InstalledMcpToolCodecDescriptor::from(&tool_contract);
         let backend_contract = CapabilityBackendContract::Mcp(tool_contract);
+        let codec = installed_codec(&backend_contract, "fixture.mcp");
+        let CapabilityBackendContract::Mcp(tool_contract) = &backend_contract else {
+            unreachable!();
+        };
+        let descriptor = InstalledMcpToolCodecDescriptor::exact(&codec, tool_contract);
         let implementation = CapabilityImplementationContract {
             revision: implementation_revision.clone(),
             interface_revision: interface.clone(),
@@ -1368,6 +1394,8 @@ mod tests {
                 implementation: implementation_revision,
                 interface,
                 backend: CapabilityBackendBinding::Mcp {
+                    codec,
+                    worker_manifest_digest: digest('0'),
                     mcp_deployment: mcp_deployment.clone(),
                     discovery_snapshot_id: discovery.snapshot_id.clone(),
                     discovery_snapshot_digest: discovery.canonical_digest.clone(),
@@ -1779,7 +1807,14 @@ mod tests {
         let mut codecs = InstalledHttpCodecRegistry::default();
         codecs
             .install(Arc::new(FixtureHttpCodec {
-                descriptor: InstalledHttpCodecDescriptor::from(contract),
+                descriptor: {
+                    let CapabilityBackendBinding::Http { codec, .. } =
+                        &execution.deployment_closure.backend
+                    else {
+                        unreachable!();
+                    };
+                    InstalledHttpCodecDescriptor::exact(codec, contract)
+                },
             }))
             .unwrap();
         let transport = Arc::new(FixtureHttpTransport::default());
@@ -1824,6 +1859,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_manifest_and_codec_drift_fail_before_transport_io() {
+        let execution = http_execution(1_000);
+        let CapabilityBackendContract::Http(contract) = &execution.implementation.backend_contract
+        else {
+            unreachable!();
+        };
+        let CapabilityBackendBinding::Http { codec, .. } = &execution.deployment_closure.backend
+        else {
+            unreachable!();
+        };
+        let mut codecs = InstalledHttpCodecRegistry::default();
+        codecs
+            .install(Arc::new(FixtureHttpCodec {
+                descriptor: InstalledHttpCodecDescriptor::exact(codec, contract),
+            }))
+            .unwrap();
+        let transport = Arc::new(FixtureHttpTransport::default());
+        let adapter = Arc::new(HttpCapabilityAdapter::new(codecs, transport.clone()));
+        let mut dispatcher = CapabilityDispatcher::new(InstalledNativeRegistry::default());
+        dispatcher.install_port(adapter).unwrap();
+
+        let wrong_manifest = request(execution.clone(), digest('f'));
+        assert_eq!(
+            dispatcher
+                .dispatch(&wrong_manifest)
+                .await
+                .unwrap_err()
+                .safe_code,
+            "backend_contract_mismatch"
+        );
+
+        let mut wrong_module = execution.clone();
+        let CapabilityBackendBinding::Http { codec, .. } =
+            &mut wrong_module.deployment_closure.backend
+        else {
+            unreachable!();
+        };
+        codec.module_digest = digest('0');
+        let wrong_module = CapabilityExecutionContract::build(
+            wrong_module.deployment,
+            wrong_module.deployment_closure,
+            wrong_module.implementation,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatcher
+                .dispatch(&request(wrong_module, digest('a')))
+                .await
+                .unwrap_err()
+                .safe_code,
+            "protocol_codec_not_installed"
+        );
+
+        let mut wrong_descriptor = execution;
+        let CapabilityBackendBinding::Http { codec, .. } =
+            &mut wrong_descriptor.deployment_closure.backend
+        else {
+            unreachable!();
+        };
+        codec.descriptor_digest = digest('0');
+        assert_eq!(
+            dispatcher
+                .dispatch(&request(wrong_descriptor, digest('a')))
+                .await
+                .unwrap_err()
+                .safe_code,
+            "invalid_request"
+        );
+        assert!(transport.observed.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn grpc_adapter_freezes_service_method_endpoint_and_safe_metadata() {
         let execution = grpc_execution(1_000);
         let CapabilityBackendContract::Grpc(contract) = &execution.implementation.backend_contract
@@ -1833,7 +1940,14 @@ mod tests {
         let mut codecs = InstalledGrpcCodecRegistry::default();
         codecs
             .install(Arc::new(FixtureGrpcCodec {
-                descriptor: InstalledGrpcCodecDescriptor::from(contract),
+                descriptor: {
+                    let CapabilityBackendBinding::Grpc { codec, .. } =
+                        &execution.deployment_closure.backend
+                    else {
+                        unreachable!();
+                    };
+                    InstalledGrpcCodecDescriptor::exact(codec, contract)
+                },
             }))
             .unwrap();
         let transport = Arc::new(FixtureGrpcTransport::default());

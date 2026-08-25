@@ -9,8 +9,8 @@ use insight_platform_contracts::{
     canonical_digest, CapabilityBackendBinding, CapabilityBackendContract, CapabilityBackendKind,
     CapabilityDeploymentClosure, CapabilityImplementationResourceSpec,
     CapabilityInterfaceResourceSpec, ClosedJsonValue, DataClassification, Effect,
-    ExactDeploymentRef, InteractionKind, McpToolCapabilityContract, McpTransportKind,
-    PublishedMcpMethod, ResourceId, ResourceKind, Sha256Digest, ValueRef,
+    ExactDeploymentRef, InstalledCapabilityCodecRef, InteractionKind, McpToolCapabilityContract,
+    McpTransportKind, PublishedMcpMethod, ResourceId, ResourceKind, Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::{
     BackendInputRequest, CapabilityExecutionInputMaterial, CapabilityInputAction, DispatchOutcome,
@@ -31,6 +31,11 @@ use std::{
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InstalledMcpToolCodecDescriptor {
+    pub codec_id: String,
+    pub codec_version: String,
+    pub module_digest: Sha256Digest,
+    pub worker_protocol_version: u32,
+    pub descriptor_digest: Sha256Digest,
     pub remote_tool_name: String,
     pub remote_input_schema_digest: insight_platform_contracts::Sha256Digest,
     pub output_mapping_digest: insight_platform_contracts::Sha256Digest,
@@ -39,9 +44,17 @@ pub struct InstalledMcpToolCodecDescriptor {
     pub discovery_semantic_evidence_digest: insight_platform_contracts::Sha256Digest,
 }
 
-impl From<&McpToolCapabilityContract> for InstalledMcpToolCodecDescriptor {
-    fn from(contract: &McpToolCapabilityContract) -> Self {
+impl InstalledMcpToolCodecDescriptor {
+    pub fn exact(
+        codec: &InstalledCapabilityCodecRef,
+        contract: &McpToolCapabilityContract,
+    ) -> Self {
         Self {
+            codec_id: codec.codec_id.clone(),
+            codec_version: codec.codec_version.clone(),
+            module_digest: codec.module_digest.clone(),
+            worker_protocol_version: codec.worker_protocol_version,
+            descriptor_digest: codec.descriptor_digest.clone(),
             remote_tool_name: contract.remote_tool_name.clone(),
             remote_input_schema_digest: contract.remote_input_schema_digest.clone(),
             output_mapping_digest: contract.output_mapping_digest.clone(),
@@ -125,20 +138,25 @@ impl InstalledMcpToolCodecRegistry {
 
     fn resolve(
         &self,
+        codec: &InstalledCapabilityCodecRef,
         contract: &McpToolCapabilityContract,
     ) -> Result<&Arc<dyn McpToolCapabilityCodec>, CapabilityDispatchError> {
+        codec
+            .validate_for(&CapabilityBackendContract::Mcp(contract.clone()))
+            .map_err(|_| CapabilityDispatchError::BackendContractMismatch)?;
         self.codecs
-            .get(&InstalledMcpToolCodecDescriptor::from(contract))
+            .get(&InstalledMcpToolCodecDescriptor::exact(codec, contract))
             .ok_or(CapabilityDispatchError::ProtocolCodecNotInstalled)
     }
 
     pub fn decode_managed_sandbox(
         &self,
+        codec: &InstalledCapabilityCodecRef,
         contract: &McpToolCapabilityContract,
         context: &ManagedMcpToolDecodeContext<'_>,
         outcome: McpOperationOutcome,
     ) -> Result<CapabilityAdapterResponse, CapabilityAdapterFailure> {
-        self.resolve(contract)
+        self.resolve(codec, contract)
             .map_err(contract_failure)?
             .decode_managed_sandbox(context, outcome)
     }
@@ -188,6 +206,8 @@ impl McpCapabilityAdapter {
             ));
         };
         let CapabilityBackendBinding::Mcp {
+            codec,
+            worker_manifest_digest,
             mcp_deployment,
             discovery_snapshot_id,
             discovery_snapshot_digest,
@@ -198,6 +218,11 @@ impl McpCapabilityAdapter {
                 CapabilityDispatchError::BackendContractMismatch,
             ));
         };
+        if worker_manifest_digest != &request.worker_manifest_digest {
+            return Err(contract_failure(
+                CapabilityDispatchError::BackendContractMismatch,
+            ));
+        }
         let runtime = request
             .mcp_runtime
             .as_ref()
@@ -242,7 +267,7 @@ impl McpCapabilityAdapter {
         }
         let codec = self
             .codecs
-            .resolve(tool_contract)
+            .resolve(codec, tool_contract)
             .map_err(contract_failure)?;
         let params = codec.encode(request)?;
         params

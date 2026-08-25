@@ -381,6 +381,44 @@ pub struct McpToolCapabilityContract {
     pub supports_progress: bool,
 }
 
+pub const INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledCapabilityCodecRef {
+    pub schema_version: u32,
+    pub backend_kind: CapabilityBackendKind,
+    pub codec_id: String,
+    pub codec_version: String,
+    pub module_digest: Sha256Digest,
+    pub worker_protocol_version: u32,
+    pub descriptor_digest: Sha256Digest,
+}
+
+impl InstalledCapabilityCodecRef {
+    pub fn validate_for(
+        &self,
+        contract: &CapabilityBackendContract,
+    ) -> Result<(), CapabilityContractError> {
+        if self.schema_version != INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION
+            || !matches!(
+                self.backend_kind,
+                CapabilityBackendKind::Http
+                    | CapabilityBackendKind::Grpc
+                    | CapabilityBackendKind::Mcp
+            )
+            || self.backend_kind != contract.kind()
+            || !valid_qualified_name(&self.codec_id, MAX_CAPABILITY_ADAPTER_NAME_BYTES)
+            || !valid_stable_value(&self.codec_version, MAX_CAPABILITY_ADAPTER_NAME_BYTES)
+            || self.worker_protocol_version != WORKER_PROTOCOL_VERSION
+            || self.descriptor_digest != contract.descriptor_digest()?
+        {
+            return Err(CapabilityContractError::InvalidBackend);
+        }
+        Ok(())
+    }
+}
+
 impl McpToolCapabilityContract {
     fn validate(&self) -> Result<(), CapabilityContractError> {
         self.protocol_profile
@@ -441,6 +479,21 @@ impl CapabilityBackendContract {
         }
     }
 
+    pub fn descriptor_digest(&self) -> Result<Sha256Digest, CapabilityContractError> {
+        if !matches!(self, Self::Http(_) | Self::Grpc(_) | Self::Mcp(_)) {
+            return Err(CapabilityContractError::InvalidBackend);
+        }
+        let value = serde_json::json!({
+            "contract": self,
+            "domain": "insight.platform/v1/installed-capability-codec-descriptor",
+            "schema_version": INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION,
+        });
+        canonical_digest(&value)
+            .map_err(|_| CapabilityContractError::Canonicalization)?
+            .parse()
+            .map_err(|_| CapabilityContractError::Canonicalization)
+    }
+
     pub fn validate(
         &self,
         features: &CapabilityBackendFeatures,
@@ -494,6 +547,8 @@ pub enum CapabilityBackendBinding {
         adapter_module_digest: Sha256Digest,
     },
     Http {
+        codec: InstalledCapabilityCodecRef,
+        worker_manifest_digest: Sha256Digest,
         endpoint: CanonicalHttpEndpoint,
         endpoint_identity_digest: Sha256Digest,
         network_policy: ExactVersionRef,
@@ -501,6 +556,8 @@ pub enum CapabilityBackendBinding {
         trust_policy: ExactVersionRef,
     },
     Grpc {
+        codec: InstalledCapabilityCodecRef,
+        worker_manifest_digest: Sha256Digest,
         endpoint: CanonicalHttpEndpoint,
         endpoint_identity_digest: Sha256Digest,
         network_policy: ExactVersionRef,
@@ -508,6 +565,8 @@ pub enum CapabilityBackendBinding {
         trust_policy: ExactVersionRef,
     },
     Mcp {
+        codec: InstalledCapabilityCodecRef,
+        worker_manifest_digest: Sha256Digest,
         mcp_deployment: ExactDeploymentRef,
         discovery_snapshot_id: ResourceId,
         discovery_snapshot_digest: Sha256Digest,
@@ -540,6 +599,7 @@ impl CapabilityBackendBinding {
         match self {
             Self::Native { .. } => Ok(()),
             Self::Http {
+                codec,
                 endpoint,
                 endpoint_identity_digest,
                 network_policy,
@@ -548,6 +608,7 @@ impl CapabilityBackendBinding {
                 ..
             }
             | Self::Grpc {
+                codec,
                 endpoint,
                 endpoint_identity_digest,
                 network_policy,
@@ -555,12 +616,15 @@ impl CapabilityBackendBinding {
                 trust_policy,
                 ..
             } => {
-                if endpoint.canonical_digest().as_ref() != Ok(endpoint_identity_digest) {
+                if codec.backend_kind != self.kind()
+                    || endpoint.canonical_digest().as_ref() != Ok(endpoint_identity_digest)
+                {
                     return Err(CapabilityContractError::InvalidBinding);
                 }
                 validate_distinct_policy_refs(&[network_policy, tls_policy, trust_policy])
             }
             Self::Mcp {
+                codec,
                 mcp_deployment,
                 discovery_snapshot_id,
                 authorization_policy,
@@ -572,7 +636,8 @@ impl CapabilityBackendBinding {
                 authorization_policy
                     .validate()
                     .map_err(|_| CapabilityContractError::InvalidBinding)?;
-                if mcp_deployment.resource_kind != ResourceKind::McpDeployment
+                if codec.backend_kind != CapabilityBackendKind::Mcp
+                    || mcp_deployment.resource_kind != ResourceKind::McpDeployment
                     || discovery_snapshot_id.kind() != ResourceKind::McpDiscoverySnapshot
                     || authorization_policy.resource_kind != ResourceKind::PolicyRevision
                 {
@@ -620,6 +685,11 @@ impl CapabilityBackendBinding {
             return Err(CapabilityContractError::InvalidBinding);
         }
         match (self, contract) {
+            (Self::Http { codec, .. }, CapabilityBackendContract::Http(_))
+            | (Self::Grpc { codec, .. }, CapabilityBackendContract::Grpc(_))
+            | (Self::Mcp { codec, .. }, CapabilityBackendContract::Mcp(_)) => {
+                codec.validate_for(contract)
+            }
             (
                 Self::Native {
                     adapter_module_digest,
@@ -1098,6 +1168,16 @@ mod tests {
             Err(CapabilityContractError::InvalidBinding)
         );
         let http = CapabilityBackendBinding::Http {
+            codec: InstalledCapabilityCodecRef {
+                schema_version: INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION,
+                backend_kind: CapabilityBackendKind::Http,
+                codec_id: "fixture.http".to_owned(),
+                codec_version: "1".to_owned(),
+                module_digest: digest('1'),
+                worker_protocol_version: WORKER_PROTOCOL_VERSION,
+                descriptor_digest: digest('2'),
+            },
+            worker_manifest_digest: digest('3'),
             endpoint: CanonicalHttpEndpoint {
                 scheme: CapabilityEndpointScheme::Https,
                 host: "api.example.test".to_owned(),
