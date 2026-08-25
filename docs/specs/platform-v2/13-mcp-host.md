@@ -229,4 +229,8 @@ r276交付独立Host→Egress Resource Refresh RPC与Streamable HTTP protocol ad
 按冻结limits执行initialize、full-reconcile list和exact-root read，正文只产生digest/count evidence；服务器返回的其他URI不会成为后续read target。
 全套unit/真实mTLS/strict Clippy已通过。production Host binary、Context Worker binary与三进程kill-window尚未组合，故L3仍未关闭。
 
+r277新增独立`platform-mcp-resource-host` production entrypoint，组合PostgreSQL resolver、closed Host service及MCP Host→Egress mTLS client；
+Egress Broker production composition也安装同一Resource Refresh connector。独立subscription Context Worker entrypoint只以Context Worker audience
+调用该Host。all-target/既有process L3/strict Clippy通过；尚未render Helm和执行subscription kill-window，故L3仍未关闭。
+
 首版remote Streamable HTTP合同无未决设计问题。

@@ -413,6 +413,10 @@ r276增加Host→Egress closed Resource Refresh transport、MCP Host-only Egress
 fixture证明服务器列出的非冻结URI不会成为read target，成功只返回digest/count/byte evidence。该批没有production进程组合与kill-window，
 因此只关闭CR-194 L1和协议adapter，不推进L3。
 
+r277交付可部署的MCP Resource Host与subscription Context Worker二进制，并把Egress production service接上refresh connector；两个进程保持
+独立DB/permit pool和互斥mTLS audience。all-target、既有Host process L3与strict Clippy通过。由于Helm workload/NetworkPolicy和fresh PostgreSQL
+三进程强杀矩阵尚未通过，该证据只关闭process composition编译/单元门禁，不计L3完成。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

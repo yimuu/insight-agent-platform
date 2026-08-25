@@ -10,6 +10,10 @@ publish = false
 name = "platform-mcp-host"
 path = "src/main.rs"
 
+[[bin]]
+name = "platform-mcp-resource-host"
+path = "src/resource_main.rs"
+
 [dependencies]
 axum.workspace = true
 insight-platform-contracts.workspace = true
@@ -17,8 +21,10 @@ insight-platform-egress-rpc.workspace = true
 insight-platform-mcp-host.workspace = true
 insight-platform-mcp-rpc.workspace = true
 insight-platform-observability.workspace = true
+insight-platform-postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true

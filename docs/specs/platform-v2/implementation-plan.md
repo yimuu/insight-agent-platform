@@ -66,6 +66,12 @@
 > byte evidence后丢弃。Egress RPC只接受MCP Host workload，post-dispatch失败保持uncertain。Host/Egress/RPC全套、真实mTLS及strict Clippy通过；
 > production MCP Host/Context Worker process composition和kill-window仍待实现，L3状态不变。
 
+> 2026-08-26 implementation evidence：r277增加两个同现有ComponentRole、独立pool的production entrypoint：
+> `platform-mcp-resource-host`组合PostgreSQL resolver、Host protocol与MCP Host-only Egress client；
+> `platform-subscription-context-worker`组合exact Context Worker manifest scan、独立permit/DB pool与Context Worker-only Host mTLS client。
+> Egress Broker production service同时安装Resource Refresh connector。全部binary/all-target tests、既有Host process L3、strict Clippy与合同检查通过。
+> Helm topology和subscription三进程kill-window仍待下一批，因此不提前关闭L3。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

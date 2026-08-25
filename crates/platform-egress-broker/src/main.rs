@@ -458,7 +458,8 @@ async fn run() -> Result<(), ProcessError> {
         EgressBrokerGrpcService::new(model, http, grpc, rpc_limits)
             .with_remote_context(remote_context)
             .with_mcp_oauth(oauth, oauth_pkce_cleaner)
-            .with_mcp_streamable_http(mcp_streamable_http)
+            .with_mcp_streamable_http(mcp_streamable_http.clone())
+            .with_mcp_resource_refresh(mcp_streamable_http)
             .with_mcp_streamable_http_subscription(
                 mcp_streamable_http_subscription,
                 mcp_subscription_bridge,

@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "platform-remote-context-worker"
 path = "src/remote_main.rs"
 
+[[bin]]
+name = "platform-subscription-context-worker"
+path = "src/subscription_main.rs"
+
 [dependencies]
 axum.workspace = true
 chrono.workspace = true
@@ -24,6 +28,7 @@ insight-platform-context.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-egress-rpc.workspace = true
 insight-platform-jobs.workspace = true
+insight-platform-mcp-rpc.workspace = true
 insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-worker.workspace = true
@@ -33,4 +38,5 @@ sqlx.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
+url.workspace = true
 uuid.workspace = true
