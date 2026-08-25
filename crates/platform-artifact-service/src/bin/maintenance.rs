@@ -1,9 +1,3 @@
-use axum::{
-    http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
-    routing::get,
-    Router,
-};
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
@@ -17,6 +11,9 @@ use insight_platform_contracts::{
     canonical_digest, parse_strict_json, JsonLimits, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_jobs::JobFence as DomainJobFence;
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_postgres::{
     artifact_repository::{ArtifactExecutionSlot, StartedArtifactExecution},
     repository::{
@@ -187,7 +184,11 @@ async fn run() -> Result<(), MaintenanceError> {
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|_| MaintenanceError::HttpUnavailable)?;
-    let server = axum::serve(listener, Router::new().route("/readyz", get(ready)))
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("artifact-maintenance", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| MaintenanceError::InvalidConfiguration)?,
+    );
+    let server = axum::serve(listener, process_observability_router(Arc::clone(&metrics)))
         .with_graceful_shutdown({
             let mut receiver = shutdown_sender.subscribe();
             async move {
@@ -197,6 +198,7 @@ async fn run() -> Result<(), MaintenanceError> {
         .into_future();
     tokio::pin!(worker);
     tokio::pin!(server);
+    metrics.mark_ready();
     tokio::select! {
         result = &mut worker => result.map_err(|_| MaintenanceError::WorkerUnavailable),
         result = &mut server => result.map_err(|_| MaintenanceError::HttpUnavailable),
@@ -215,14 +217,6 @@ async fn run() -> Result<(), MaintenanceError> {
             .map_err(|_| MaintenanceError::ShutdownDeadlineExceeded)?
         }
     }
-}
-
-async fn ready() -> Response {
-    let mut response = (StatusCode::OK, "ready").into_response();
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
 }
 
 #[derive(Clone, Copy)]

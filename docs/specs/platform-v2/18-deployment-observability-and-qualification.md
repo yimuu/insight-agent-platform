@@ -340,6 +340,11 @@ r261为Artifact Data Worker接入shared process observability。readiness位于�
 Scheduler/Sandbox/guest broker、双TLS RPC、scan worker及HTTP listener组合之后；任一组件提前退出使进程fail closed。Scheduler/Controller、
 gVisor guest与Prometheus仍由不同端口和source selector隔离。该证据不包含真实S3/KMS、production scrape或L4 enforcement。
 
+r262将Artifact Maintenance唯一内部health listener升级为shared process observability；readiness位于restricted PostgreSQL/schema、AWS
+provider catalog、bounded deletion backend、maintenance worker与HTTP listener组合之后，worker/listener共同fail closed。NetworkPolicy只允许
+精确Prometheus source访问该端口，普通业务caller仍无Maintenance ingress。至此17个ComponentRole workload pool均具备shared HTTP
+readiness/metrics接线；该证据仍不包含真实scrape、业务SLI、dashboard/alerts或L4 enforcement。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

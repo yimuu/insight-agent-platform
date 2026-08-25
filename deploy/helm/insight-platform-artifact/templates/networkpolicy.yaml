@@ -44,7 +44,9 @@ spec:
             matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxGuestPodSelector | nindent 16 }}
       ports: [{protocol: TCP, port: 9444}]
     {{- else }}
+    {{- if not (and $root.Values.monitoring.enabled (hasKey $component "observabilityPort")) }}
     []
+    {{- end }}
     {{- end }}
     {{- if and $root.Values.monitoring.enabled (hasKey $component "observabilityPort") }}
     - from:

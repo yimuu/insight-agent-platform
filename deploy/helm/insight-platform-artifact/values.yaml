@@ -44,7 +44,8 @@ roles:
   maintenance:
     command: /usr/local/bin/platform-artifact-maintenance
     replicas: 2
-    ports: [{name: http, port: 8081}]
+    ports: [{name: observability, port: 8081}]
+    observabilityPort: 8081
     config: {existingConfigMap: insight-platform-artifact-maintenance-config, fileKey: artifact-maintenance.json, digest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}
     database: {existingSecret: insight-platform-artifact-maintenance-database, urlKey: database-url}
     serviceAccount:

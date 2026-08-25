@@ -22,7 +22,10 @@
 {{- if empty $component.serviceAccount.annotations }}{{ fail (printf "%s workload identity is required" $role) }}{{- end }}
 {{- if hasKey $component "observabilityPort" }}
 {{- if or (lt (int $component.observabilityPort) 1) (gt (int $component.observabilityPort) 65535) }}{{ fail (printf "%s observability port must be in 1..65535" $role) }}{{- end }}
-{{- range $port := $component.ports }}{{- if eq (int $component.observabilityPort) (int $port.port) }}{{ fail (printf "%s observability port must be distinct" $role) }}{{- end }}{{- end }}
+{{- range $port := $component.ports }}
+{{- if and (eq (int $component.observabilityPort) (int $port.port)) (ne $port.name "observability") }}{{ fail (printf "%s observability port must be distinct" $role) }}{{- end }}
+{{- if and (eq $port.name "observability") (ne (int $component.observabilityPort) (int $port.port)) }}{{ fail (printf "%s named observability port drifted" $role) }}{{- end }}
+{{- end }}
 {{- end }}
 {{- $sa := toJson $component.serviceAccount.annotations -}}
 {{- if hasKey $identities $sa }}{{ fail "Artifact roles cannot share a storage workload identity" }}{{- end }}

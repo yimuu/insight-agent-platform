@@ -9,6 +9,8 @@ metadata:
     pod-security.kubernetes.io/enforce-version: latest
 {{- range $role, $component := .Values.roles }}
 {{- $context := dict "role" $role }}
+{{- $hasObservabilityPort := false }}
+{{- range $port := $component.ports }}{{- if eq $port.name "observability" }}{{- $hasObservabilityPort = true }}{{- end }}{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -31,7 +33,7 @@ spec:
     {{- range $port := $component.ports }}
     - {name: {{ $port.name }}, protocol: TCP, port: {{ int $port.port }}, targetPort: {{ $port.name }}}
     {{- end }}
-    {{- if hasKey $component "observabilityPort" }}
+    {{- if and (hasKey $component "observabilityPort") (not $hasObservabilityPort) }}
     - {name: observability, protocol: TCP, port: {{ int $component.observabilityPort }}, targetPort: observability}
     {{- end }}
 ---
@@ -79,7 +81,7 @@ spec:
             {{- range $port := $component.ports }}
             - {name: {{ $port.name }}, containerPort: {{ int $port.port }}, protocol: TCP}
             {{- end }}
-            {{- if hasKey $component "observabilityPort" }}
+            {{- if and (hasKey $component "observabilityPort") (not $hasObservabilityPort) }}
             - {name: observability, containerPort: {{ int $component.observabilityPort }}, protocol: TCP}
             {{- end }}
           env:
