@@ -402,6 +402,9 @@ production process composition与kill/restart fixture，该证据只关闭handle
 r274新增Resource Refresh protobuf/client/server L1，并以真实mTLS证明Host的Context Worker audience与Capability/Model身份互斥、错误schema closed；
 尚未把该service加入production binary，也未到达Egress/remote endpoint，不能计作L3外部I/O或kill-window证据。
 
+r275以fresh PostgreSQL 16验证Host resolver只接受heartbeat后的latest Context fence并重载当前subscription/session/auth/closure；该L2证明
+fail-closed authority lookup，但尚无真实Host→Egress调用或多进程kill-window，L3状态不变。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

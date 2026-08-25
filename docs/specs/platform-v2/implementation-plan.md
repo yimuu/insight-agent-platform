@@ -51,6 +51,11 @@
 > Context Worker SPIFFE audience，在decode前拒绝Capability/Model身份，并以closed success/failure union传播全部CR-193错误。protobuf、unit、真实mTLS
 > identity fixture及strict Clippy通过。production Host adapter/server composition与Egress resource protocol仍待下一批，故L3状态不变。
 
+> 2026-08-26 implementation evidence：r275增加Host-side refresh resolver与composition service。PostgreSQL resolver在单个只读事务重载
+> running Context Job/payload/latest fence、successful admission、active subscription/session、exact Context/MCP Deployment、Discovery与Auth
+> closure；任一漂移返回closed rejection且协议port尚未调用。fresh PostgreSQL 16 fixture在heartbeat后用latest fence成功解析并继续完成原有
+> terminal/replay矩阵，strict Clippy通过。Egress Resource wire adapter与production server composition仍待实现。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

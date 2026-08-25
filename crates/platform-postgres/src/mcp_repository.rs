@@ -35,37 +35,38 @@ use insight_platform_mcp_host::{
     AuthenticatedMcpOAuthState, AuthorizedMcpOAuthPkceCleanup, BeginMcpOAuthAuthorization,
     CancelMcpDiscoveryOperation, CommitMcpDiscovery, CompleteMcpOAuthCallback,
     CompleteMcpSubscriptionReconcile, CompleteMcpSubscriptionRefresh,
-    CreateMcpAuthorizationBinding, CreateMcpDiscoveryOperation, DriveExpiredMcpOAuthTasks,
-    DueMcpSubscriptionReconcile, DueMcpSubscriptionRecovery, ExpiredMcpDiscoveryJobObservation,
-    McpAuthorizationBindingRecord, McpAuthorizationContext, McpAuthorizationReplacement,
-    McpDiscoveryAdmission, McpDiscoveryAttemptResolution, McpDiscoveryContractQuery,
-    McpDiscoveryExecutionContract, McpDiscoveryExecutionContractResolver, McpDiscoveryJobPayload,
-    McpDiscoveryOperationPayload, McpDiscoveryOperationRecord, McpDiscoveryOperationState,
-    McpDiscoveryPersistenceError, McpDiscoveryRequest, McpDiscoveryResultBinding,
-    McpDiscoveryResultStore, McpDiscoverySnapshotRecord, McpExecutionContractQuery,
-    McpExecutionContractResolutionError, McpExecutionContractResolver, McpHostExecutionContract,
-    McpJobPayload, McpNotificationApplyDisposition, McpNotificationCommit,
-    McpNotificationCommitAuthority, McpNotificationCommitOutcome, McpNotificationPersistenceError,
-    McpNotificationReceipt, McpOAuthAuthorizationStartAuthority,
-    McpOAuthAuthorizationStartAuthorityError, McpOAuthAuthorizationStartCommitDisposition,
-    McpOAuthAuthorizationStartCommitOutcome, McpOAuthAuthorizationStartIntent,
-    McpOAuthCallbackAuthority, McpOAuthCallbackAuthorityError, McpOAuthCallbackCommitDisposition,
-    McpOAuthCallbackCommitOutcome, McpOAuthCallbackResolution, McpOAuthExchangeContract,
-    McpOAuthPkceCleanupAuthority, McpOAuthPkceCleanupAuthorityError, McpOAuthPkceCleanupCause,
-    McpOAuthPkceCleanupHint, McpOAuthPkceCleanupRequest, McpResourceSubscriptionBinding,
-    McpSessionBindingKey, McpSessionRecord, McpSubscriptionAuthority, McpSubscriptionContractQuery,
-    McpSubscriptionExecutionResolver, McpSubscriptionJobPayload, McpSubscriptionPayload,
-    McpSubscriptionPersistenceError, McpSubscriptionReconcileAuthority,
-    McpSubscriptionReconcileScan, McpSubscriptionRecord, McpSubscriptionRecoveryAuthority,
-    McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan, McpSubscriptionState,
-    McpSubscriptionTransportTerminationAuthority, McpSubscriptionWorkerAudit,
+    ContextSubscriptionRefreshResolver, CreateMcpAuthorizationBinding, CreateMcpDiscoveryOperation,
+    DriveExpiredMcpOAuthTasks, DueMcpSubscriptionReconcile, DueMcpSubscriptionRecovery,
+    ExpiredMcpDiscoveryJobObservation, McpAuthorizationBindingRecord, McpAuthorizationContext,
+    McpAuthorizationReplacement, McpDiscoveryAdmission, McpDiscoveryAttemptResolution,
+    McpDiscoveryContractQuery, McpDiscoveryExecutionContract,
+    McpDiscoveryExecutionContractResolver, McpDiscoveryJobPayload, McpDiscoveryOperationPayload,
+    McpDiscoveryOperationRecord, McpDiscoveryOperationState, McpDiscoveryPersistenceError,
+    McpDiscoveryRequest, McpDiscoveryResultBinding, McpDiscoveryResultStore,
+    McpDiscoverySnapshotRecord, McpExecutionContractQuery, McpExecutionContractResolutionError,
+    McpExecutionContractResolver, McpHostExecutionContract, McpJobPayload,
+    McpNotificationApplyDisposition, McpNotificationCommit, McpNotificationCommitAuthority,
+    McpNotificationCommitOutcome, McpNotificationPersistenceError, McpNotificationReceipt,
+    McpOAuthAuthorizationStartAuthority, McpOAuthAuthorizationStartAuthorityError,
+    McpOAuthAuthorizationStartCommitDisposition, McpOAuthAuthorizationStartCommitOutcome,
+    McpOAuthAuthorizationStartIntent, McpOAuthCallbackAuthority, McpOAuthCallbackAuthorityError,
+    McpOAuthCallbackCommitDisposition, McpOAuthCallbackCommitOutcome, McpOAuthCallbackResolution,
+    McpOAuthExchangeContract, McpOAuthPkceCleanupAuthority, McpOAuthPkceCleanupAuthorityError,
+    McpOAuthPkceCleanupCause, McpOAuthPkceCleanupHint, McpOAuthPkceCleanupRequest,
+    McpResourceSubscriptionBinding, McpSessionBindingKey, McpSessionRecord,
+    McpSubscriptionAuthority, McpSubscriptionContractQuery, McpSubscriptionExecutionResolver,
+    McpSubscriptionJobPayload, McpSubscriptionPayload, McpSubscriptionPersistenceError,
+    McpSubscriptionReconcileAuthority, McpSubscriptionReconcileScan, McpSubscriptionRecord,
+    McpSubscriptionRecoveryAuthority, McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan,
+    McpSubscriptionState, McpSubscriptionTransportTerminationAuthority, McpSubscriptionWorkerAudit,
     NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission, NewMcpDiscoveryExecutionContract,
     NewMcpDiscoverySnapshotRecord, NewMcpHostExecutionContract, NewMcpResourceSubscriptionBinding,
     ReactivateMcpAuthorizationBinding, RecoverDueMcpSubscription, RecoverExpiredMcpDiscoveryJob,
     ReportMcpSubscriptionSessionLoss, ReportMcpSubscriptionTransportTermination,
-    ResolveMcpDiscoveryAttempt, ResolvedMcpDiscoveryExecution, ResolvedMcpOAuthAuthorizationStart,
-    ResolvedMcpSubscriptionExecution, SaveMcpSubscriptionSession,
-    TransitionMcpAuthorizationBinding, WakeMcpSubscriptionReconcile, MCP_OAUTH_PKCE_SECRET_PURPOSE,
+    ResolveMcpDiscoveryAttempt, ResolvedContextSubscriptionRefresh, ResolvedMcpDiscoveryExecution,
+    ResolvedMcpOAuthAuthorizationStart, ResolvedMcpSubscriptionExecution,
+    SaveMcpSubscriptionSession, TransitionMcpAuthorizationBinding, WakeMcpSubscriptionReconcile,
+    MCP_OAUTH_PKCE_SECRET_PURPOSE,
 };
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
@@ -3545,6 +3546,91 @@ impl McpSubscriptionExecutionResolver for PgRepository {
 }
 
 #[async_trait]
+impl ContextSubscriptionRefreshResolver for PgRepository {
+    async fn resolve_context_subscription_refresh(
+        &self,
+        attempt: &ContextSubscriptionRefreshAttempt,
+    ) -> Result<ResolvedContextSubscriptionRefresh, ContextSubscriptionExecutionError> {
+        attempt.validate_at(Utc::now())?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| ContextSubscriptionExecutionError::Unavailable)?;
+        let database_now = database_now(&mut transaction)
+            .await
+            .map_err(map_context_subscription_resolution_error)?;
+        attempt.validate_at(database_now)?;
+        let job = load_context_subscription_refresh_job(
+            &mut transaction,
+            &attempt.request.tenant_id,
+            &attempt.job_id,
+            false,
+        )
+        .await
+        .map_err(map_context_subscription_resolution_error)?;
+        let payload: ContextSubscriptionRefreshJobPayload =
+            decode_versioned_payload(&job.payload, "Context subscription refresh Job")
+                .map_err(map_context_subscription_resolution_error)?;
+        if payload.request != attempt.request
+            || job
+                .lease_expires_at
+                .is_none_or(|expires_at| expires_at <= database_now)
+        {
+            return Err(ContextSubscriptionExecutionError::Rejected);
+        }
+        require_context_subscription_refresh_fence(&job, attempt)
+            .map_err(map_context_subscription_resolution_error)?;
+        let subscription = load_mcp_subscription(
+            &mut transaction,
+            &attempt.request.tenant_id,
+            &attempt.request.subscription_id,
+            false,
+            database_now,
+        )
+        .await
+        .map_err(map_context_subscription_resolution_error)?;
+        validate_context_subscription_refresh_source(
+            &mut transaction,
+            &subscription,
+            &attempt.request,
+            ContextSubscriptionRefreshSourceEvidence::AcceptedJob(&attempt.job_id),
+            database_now,
+        )
+        .await
+        .map_err(map_context_subscription_resolution_error)?;
+        let binding = &subscription.payload.binding;
+        let contract = resolve_mcp_execution_contract(
+            &mut transaction,
+            &McpExecutionContractQuery {
+                schema_version: 1,
+                tenant_id: binding.tenant_id.clone(),
+                mcp_deployment: binding.mcp_deployment.clone(),
+                discovery_snapshot_id: binding.discovery_snapshot_id.clone(),
+                discovery_snapshot_digest: binding.discovery_snapshot_digest.clone(),
+                authorization_binding_id: binding.authorization_binding_id.clone(),
+                authorization_generation: binding.authorization_generation,
+                authorization_context_digest: binding.authorization_context_digest.clone(),
+                principal_id: binding.principal_id.clone(),
+            },
+            database_now,
+        )
+        .await
+        .map_err(map_context_subscription_resolution_error)?;
+        let resolved = ResolvedContextSubscriptionRefresh {
+            subscription,
+            contract,
+        };
+        resolved.validate_for(attempt)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ContextSubscriptionExecutionError::Unavailable)?;
+        Ok(resolved)
+    }
+}
+
+#[async_trait]
 impl McpSubscriptionAuthority for PgRepository {
     async fn save_subscription_session(
         &self,
@@ -5232,6 +5318,23 @@ fn map_execution_resolution_error(failure: RepositoryError) -> McpExecutionContr
         | RepositoryError::PermissionDenied
         | RepositoryError::IdempotencyConflict
         | RepositoryError::CorruptRow(_) => McpExecutionContractResolutionError::NotFoundOrChanged,
+    }
+}
+
+fn map_context_subscription_resolution_error(
+    failure: RepositoryError,
+) -> ContextSubscriptionExecutionError {
+    match failure {
+        RepositoryError::Database(_) => ContextSubscriptionExecutionError::Unavailable,
+        RepositoryError::InvalidInput(_) => ContextSubscriptionExecutionError::InvalidAttempt,
+        RepositoryError::NotFound(_)
+        | RepositoryError::Conflict(_)
+        | RepositoryError::StaleFence
+        | RepositoryError::LeaseExpired
+        | RepositoryError::QuotaExceeded
+        | RepositoryError::PermissionDenied
+        | RepositoryError::IdempotencyConflict
+        | RepositoryError::CorruptRow(_) => ContextSubscriptionExecutionError::Rejected,
     }
 }
 

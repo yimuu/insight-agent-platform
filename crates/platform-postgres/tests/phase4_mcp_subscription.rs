@@ -31,17 +31,17 @@ use insight_platform_contracts::{
 };
 use insight_platform_jobs::{JobFence as DomainJobFence, LeasePolicy};
 use insight_platform_mcp_host::{
-    CompleteMcpSubscriptionReconcile, CompleteMcpSubscriptionRefresh, CreateMcpDiscoveryOperation,
-    CreateMcpResourceSubscription, EncryptedMcpState, McpAuthorizationBindingRecord,
-    McpDiscoveryAdmission, McpDiscoveryOperationPayload, McpDiscoveryResultBinding,
-    McpDiscoverySnapshotRecord, McpExecutionContractQuery, McpNotificationApplyDisposition,
-    McpNotificationAudit, McpNotificationClass, McpNotificationCommit,
-    McpSubscriptionContractQuery, McpSubscriptionExecutionResolver, McpSubscriptionReconcileScan,
-    McpSubscriptionRecord, McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan,
-    McpSubscriptionWorkerAudit, NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission,
-    NewMcpDiscoverySnapshotRecord, RecoverDueMcpSubscription,
-    ReportMcpSubscriptionTransportTermination, SaveMcpSubscriptionSession,
-    WakeMcpSubscriptionReconcile,
+    CompleteMcpSubscriptionReconcile, CompleteMcpSubscriptionRefresh,
+    ContextSubscriptionRefreshResolver, CreateMcpDiscoveryOperation, CreateMcpResourceSubscription,
+    EncryptedMcpState, McpAuthorizationBindingRecord, McpDiscoveryAdmission,
+    McpDiscoveryOperationPayload, McpDiscoveryResultBinding, McpDiscoverySnapshotRecord,
+    McpExecutionContractQuery, McpNotificationApplyDisposition, McpNotificationAudit,
+    McpNotificationClass, McpNotificationCommit, McpSubscriptionContractQuery,
+    McpSubscriptionExecutionResolver, McpSubscriptionReconcileScan, McpSubscriptionRecord,
+    McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan, McpSubscriptionWorkerAudit,
+    NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord,
+    RecoverDueMcpSubscription, ReportMcpSubscriptionTransportTermination,
+    SaveMcpSubscriptionSession, WakeMcpSubscriptionReconcile,
 };
 use insight_platform_postgres::{
     mcp_repository::{
@@ -1821,6 +1821,18 @@ async fn mcp_subscription_fixture() {
     ));
     let mut terminal_attempt = dispatch_attempt;
     terminal_attempt.job_fence.expected_version = u64::try_from(heartbeat.version).unwrap();
+    let resolved = repository
+        .resolve_context_subscription_refresh(&terminal_attempt)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved.subscription.subscription_id,
+        terminal_attempt.request.subscription_id
+    );
+    assert_eq!(
+        resolved.contract.deployment,
+        terminal_attempt.request.mcp_deployment
+    );
     let commit = CommitContextSubscriptionRefresh {
         attempt: terminal_attempt,
         response: ContextSubscriptionRefreshResponse::Completed { evidence },

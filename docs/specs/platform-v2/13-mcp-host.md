@@ -219,4 +219,8 @@ r274交付独立closed protobuf `McpResourceRefreshService`及Rust client/server
 Context Worker URI SAN，且在envelope decode前授权；request/outcome使用bounded canonical JCS、digest和closed错误码。真实mTLS fixture已通过，
 但production Host尚未组合resolver与Resource transport，因此该证据不关闭process L3。
 
+r275实现Host refresh application service与PostgreSQL resolver：RPC进入协议port前重验running Context Job/latest fence、原始payload、成功
+admission、active subscription/session及exact MCP execution closure。fresh PostgreSQL heartbeat fixture通过；Egress Resource adapter和production
+binary接线仍未完成。
+
 首版remote Streamable HTTP合同无未决设计问题。
