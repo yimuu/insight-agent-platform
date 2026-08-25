@@ -9,7 +9,7 @@
 
 ## 1. 结论
 
-00～18均已完成CR-189 cross-review（历史CR-173～188结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
+00～18均已完成CR-190 cross-review（历史CR-173～189结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
 实现与真实PostgreSQL门禁已闭合；Phase 2的production Orchestration、Model、Capability、Context与wait/Subagent主要L3链路已经闭合；
 Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact资格。Phase 4 public API和15-role/17-pool静态部署闭包已完成，
 完整observability及production-equivalent L4～L6仍未交付。
@@ -25,7 +25,7 @@ Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact
 
 | 范围 | 当前证据 | 结论 |
 |---|---|---|
-| 合同 | 00～18 CR-181 cross-review闭合；Plan v4冻结external leaf payload与exact candidate selection/owner transaction；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
+| 合同 | 00～18 CR-190 cross-review闭合；Plan v4 external leaf与MCP subscription→Context durable admission均冻结exact owner transaction；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
 | Persistence | schema contract v7、唯一`0001_platform_baseline.sql`；PG16/17 fresh baseline与事务/并发测试 | Phase 1 persistence闭合 |
 | Rust workspace | workspace all-target/all-feature tests与Clippy `-D warnings`通过 | L1～L3范围内有效 |
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
@@ -141,7 +141,8 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 ### 仓库内或外部缺口
 
 1. MCP Host production binary/Helm与ToolsCall process L3已闭合；OAuth Callback/Cleanup/Egress和subscription的真实endpoint多进程
-   kill/restart L3仍缺，fresh PostgreSQL r249只证明durable owner层。
+   kill/restart L3仍缺，fresh PostgreSQL r249只证明既有durable owner层；CR-190新增的subscription→Context admission owner transaction、
+   production target/claim loop及对应L2/L3尚未实现。
 2. Context Native/Remote和Capability Native/Remote production composition已闭合；Dataset build/Text2SQL、Artifact和各外部依赖仍须按
    production qualification matrix取得适用的真实协议、故障与隔舱证据。
 3. S3/KMS/Secret Manager只有adapter/fixture和deployment contract，没有production-equivalent fault/rotation/restore证据。

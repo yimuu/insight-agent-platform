@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-188）
+# Platform v2 四阶段实现计划（CR-190）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-189 contracts accepted; L3～L6 pending |
-| 日期 | 2026-08-25 |
-| 合同输入 | 00～18、cross-review CR-188/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+| 状态 | In Progress / CR-190 contracts accepted; L3～L6 pending |
+| 日期 | 2026-08-26 |
+| 合同输入 | 00～18、cross-review CR-190、ADR-0001、ADR-0002、AGENTS.md |
 
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
@@ -147,6 +147,10 @@
 > freeze，也没有exact TLS/trust Policy或required Context Worker manifest。CR-189按02→04→07→12→17→18补齐immutable Deployment closure，
 > 并完成00～18 cross-review；不新增表、aggregate、Job、WorkClass、route或role。后续remote Context实现必须消费该Accepted合同，禁止以
 > 进程本地自由URL、默认trust store或明文Secret绕过。
+
+> 2026-08-26 contract feedback：production MCP subscription组合发现Context invalidation target缺少durable owner port；CR-190已按
+> 12→13→07/18冻结Context owner transaction、shared Context Job、Receipt/Event/Outbox、exact acceptance replay与MCP/Context pool隔离，
+> 并完成00～18 cross-review。后续实现不得由Host生成work digest、直接写Context结果或以内存callback冒充durable admission。
 
 > 2026-08-25 implementation evidence：RemoteSearch新增独立`platform-remote-context-worker`，与Native Worker共享Context/Job owner但
 > 只通过typed mTLS Egress RPC执行远端查询；进程启动、claim扫描和Egress端分别重验exact Worker manifest、canonical endpoint、protocol/

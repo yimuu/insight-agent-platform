@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-189 |
-| 日期 | 2026-08-25 |
+| 状态 | Accepted / CR-190 |
+| 日期 | 2026-08-26 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
 
@@ -514,7 +514,21 @@ result 或 run_values并使用Interface的`observation_schema` digest；完整Ob
 
 ## 18. 幂等、并发与背压
 
+### 18.1 MCP subscription invalidation admission
+
+MCP Resource subscription的notification refresh与full reconcile由Context application owner接收，不由MCP Host直接执行Context backend。
+输入冻结tenant、subscription、exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource
+identity/digest、reason与canonical request digest。owner transaction必须重载published Context/MCP closure和当前subscription evidence，按
+`(tenant, subscription, session generation, event generation, request digest)` claim `Command` Receipt，并以shared `Context` Job承载刷新工作；
+同一事务写Job、Receipt、Event和Outbox后返回`request_digest + durable_work_digest + accepted_at`。
+
+replay返回第一次接受的相同Job/evidence；字段漂移、stale generation、撤权、wrong Deployment/Discovery、Receipt key复用不同digest均fail closed且
+不创建Job。MCP Host只能在验证acceptance绑定exact request后结算自身MCP subscription Job；RPC可传输命令但不能替代owner transaction，
+in-memory callback、caller生成work digest和直接写Context结果均禁止。refresh Job使用Context pool/tenant quota，MCP connection/Job不持有
+Context permit；Context Job失败或重试由其自身lease/recovery推进，不回滚已提交notification history。
+
 - ContextQuery 以稳定 node/query ordinal 和 query digest 幂等；
+- MCP subscription refresh/reconcile以stable subscription/session/event/request digest幂等并创建至多一个Context Job；
 - Attempt 使用 lease/epoch/fence，迟到结果不能覆盖 first-winner；
 - worker outcome按`(tenant, Job, WorkerProcessGeneration, operation, idempotency digest)`使用`JobCommit` Receipt；
 - callback/poll/timer按`(tenant, Job, operation, idempotency digest)`使用`Callback` Receipt，重复信号返回同一稳定disposition；

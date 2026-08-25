@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-188 |
-| 日期 | 2026-08-20 |
+| 状态 | Accepted / CR-190 |
+| 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
 
@@ -109,6 +109,11 @@ Deployment、Resource identity、auth binding、protocol profile、cursor、rate
 通知先通过Receipt去重、大小/schema/tenant验证和rate limit，再写Event/Outbox。活跃连接不是durable authority；
 断线后从已提交cursor恢复，无法恢复时做full reconcile。订阅饱和不得占用Capability、Model或Sandbox pool。
 
+notification commit后，MCP subscription Worker从exact pending invalidation构造12定义的closed Context admission request，并调用Context owner
+application port。只有owner transaction已提交shared Context Job + Receipt/Event/Outbox且返回的request digest精确匹配时，Worker才可提交
+`complete_subscription_refresh/reconcile`并park自身MCP Job；它不生成durable work digest、不直接创建Context结果，也不以内存future等待Context
+完成。commit-window不确定必须按同一Receipt key查询/replay，Host restart从PostgreSQL subscription/Job恢复；旧session/worker fence不得再次接线。
+
 ## 9. OAuth 与authorization
 
 OAuth authorization code flow使用PKCE、state、nonce、exact redirect URI与short-lived callback Receipt。数据库只保存
@@ -149,6 +154,7 @@ redirect漂移或scope扩大全部fail closed。token refresh/revoke由Egress Br
 - remote Task不持有常驿future，poll/callback只有一个winner；
 - OAuth replay、scope escalation、tenant mismatch、expired state与redirect drift被拒绝；
 - subscription在丢失连接或NATS消息后可从durable cursor/reconcile恢复；
+- subscription invalidation在Host kill/restart和Context admission commit不确定窗口中只创建一个Context Job，且MCP/Context permit相互隔离；
 - 首版部署不包含stdio runner、Sandbox session child、microVM或动态运行时installer。
 
 ## 13. 分层证据

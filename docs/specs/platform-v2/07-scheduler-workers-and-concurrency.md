@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-189 |
-| 日期 | 2026-08-25 |
+| 状态 | Accepted / CR-190 |
+| 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
 
@@ -62,6 +62,8 @@ WorkClass是closed machine registry，由03拥有。backend映射固定如下：
 - Native Capability → `CapabilityNative`；
 - HTTP/gRPC Capability与MCP Tool adapter → `CapabilityRemote`；
 - MCP discovery、remote subscription等Host自有工作 → `Mcp`；
+- MCP notification触发的Context refresh/reconcile admission只在Context owner事务创建`Context` Job；MCP Job只等待durable acceptance，
+  不执行Context backend，也不占Context permit；
 - WASI或gVisor代码 → `Sandbox`；
 - Artifact stage/read/verify/maintenance → `Artifact`。
 

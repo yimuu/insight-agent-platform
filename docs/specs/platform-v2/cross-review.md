@@ -1,10 +1,34 @@
-# Platform v2 00～18 Cross-review（CR-189）
+# Platform v2 00～18 Cross-review（CR-190）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-189 Accepted |
-| 日期 | 2026-08-25 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-189 remote Context implementation feedback |
+| 状态 | Closed / CR-190 Accepted |
+| 日期 | 2026-08-26 |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-190 MCP subscription implementation feedback |
+
+### CR-190 MCP subscription→Context durable admission impact review
+
+production MCP Host接线确认13要求notification触发Context invalidation/reconcile，但12未定义durable接收owner；现有port只有测试target，若由Host
+生成work digest、直接写Job或使用内存回调，会绕过Context exact Deployment/authorization、Receipt与独立WorkClass capacity。CR-190将该边界
+冻结为Context application owner transaction：exact subscription evidence输入，shared Context Job + Command Receipt/Event/Outbox原子提交，返回
+绑定request的durable acceptance；MCP Worker随后只结算自身Job。
+
+| Spec | CR-190结论 |
+|---|---|
+| 00 | 登记implementation feedback；clean-cut、`/v1`及完成定义不变 |
+| 01～04 | plane、shared Job/Receipt/Event/Outbox、tenant/authorization authority不变；不新增表或current projection |
+| 05～06、08～11 | Plan/Run/Subagent/Capability/Skill语义不变；subscription refresh不是Run leaf |
+| 07 | MCP与Context使用独立WorkClass/permit；Context owner transaction创建Context Job，MCP Job不执行backend |
+| 12 | 新增exact subscription invalidation/reconcile admission、idempotency、transaction、error和recovery合同 |
+| 13 | Host构造closed request、验证durable acceptance并在kill/restart后Receipt replay；不得生成work digest |
+| 14～16 | Sandbox/Artifact/Model与Inline-only不变 |
+| 17 | 无新public route/body；subscription management DTO不暴露internal Job或digest override |
+| 18 | L2/L3增加唯一Context Job、commit-window kill、stale fence与pool isolation证据 |
+
+00～18已按state ownership、ID、JSON schema、error、transaction、Event、permission、capacity、failure recovery及fixture全量复核。CR-190不新增
+aggregate、表、WorkClass、deployment role或public API；Context Job沿用shared Job，历史沿用Event/Outbox，幂等沿用Receipt。Acceptance 33：任一
+MCP subscription invalidation只能由Context owner从exact committed evidence创建至多一个Context Job；Host/Context任一进程在acceptance窗口崩溃
+后replay仍返回同一durable work，stale session/fence零创建且两个pool互不占用。00、07、12、13、18恢复Accepted / CR-190。
 
 ### CR-189 remote Context exact transport authority impact review
 
@@ -248,7 +272,8 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00、02、04、07、12、17～18 | Accepted / CR-189 | remote Context exact endpoint/Policy/Worker closure与既有authority闭合 |
+| 00、07、12～13、18 | Accepted / CR-190 | MCP subscription→Context durable admission、Receipt replay和pool隔离闭合 |
+| 02、04、17 | Accepted / CR-189（CR-190影响复核） | exact identity/security/public API authority不变 |
 | 01、03 | Accepted / CR-173/176（CR-189影响复核） | plane、persistence、事务与恢复authority不变 |
 | 05～06 | Accepted / CR-184（CR-189影响复核） | Plan v4 external leaf与Run snapshot只复制补全后的exact closure |
 | 08、14 | Accepted / CR-182/181（CR-189影响复核） | Subagent与Sandbox execution plane不变 |
