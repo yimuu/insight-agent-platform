@@ -153,8 +153,8 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
         by_role.setdefault(role, []).append(workload)
     for role in sorted(COMPONENT_ROLES):
         matches = by_role.get(role, [])
-        if len(matches) != 1:
-            failures.append(f"{role} must have exactly one live workload, found {len(matches)}")
+        if not matches:
+            failures.append(f"{role} must have at least one live workload")
 
     policy_items = items(policies, "NetworkPolicy")
     pdb_items = items(pdbs, "PodDisruptionBudget")
@@ -163,73 +163,120 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
     summary_roles = {}
     namespaces = set()
     for role, matches in sorted(by_role.items()):
-        if len(matches) != 1:
-            continue
-        workload = matches[0]
-        namespace, name = identity(workload)
-        namespaces.add(namespace)
-        spec = workload.get("spec", {})
-        template = spec.get("template", {})
-        pod_spec = template.get("spec", {})
-        pod_labels = template.get("metadata", {}).get("labels", {})
-        service_account = pod_spec.get("serviceAccountName")
-        if isinstance(service_account, str) and service_account:
-            owner = service_accounts.setdefault((namespace, service_account), role)
-            if owner != role:
-                failures.append(f"{role} shares ServiceAccount {service_account} with {owner}")
-
-        images = validate_pod_security(role, pod_spec, failures)
         expected_image = candidate_images.get(role)
-        if not images or any(image != expected_image for image in images):
-            failures.append(f"{role} live image digest differs from CandidateManifest")
-
         target = replica_targets.get(role, {})
         minimum = target.get("min_replicas")
         maximum = target.get("max_replicas")
-        status = workload.get("status", {})
-        if workload.get("kind") == "Deployment":
-            desired = spec.get("replicas")
-            ready = status.get("readyReplicas", 0)
-            if status.get("observedGeneration") != workload.get("metadata", {}).get("generation"):
-                failures.append(f"{role} controller has not observed the current generation")
-            if status.get("updatedReplicas", 0) != desired or ready != desired or status.get("unavailableReplicas", 0) != 0:
-                failures.append(f"{role} rollout is not fully updated and Ready")
-        else:
-            desired = status.get("desiredNumberScheduled")
-            ready = status.get("numberReady", 0)
-            if status.get("observedGeneration") != workload.get("metadata", {}).get("generation"):
-                failures.append(f"{role} controller has not observed the current generation")
-            if status.get("updatedNumberScheduled", 0) != desired or ready != desired or status.get("numberUnavailable", 0) != 0:
-                failures.append(f"{role} rollout is not fully updated and Ready")
-        if not isinstance(desired, int) or not isinstance(minimum, int) or not isinstance(maximum, int) or not minimum <= desired <= maximum:
-            failures.append(f"{role} live replicas fall outside CapacityProfile")
+        aggregate_desired = 0
+        aggregate_ready = 0
+        aggregate_minimum = 0
+        aggregate_maximum = 0
+        role_workloads = []
+        for workload in matches:
+            namespace, name = identity(workload)
+            namespaces.add(namespace)
+            spec = workload.get("spec", {})
+            template = spec.get("template", {})
+            pod_spec = template.get("spec", {})
+            pod_labels = template.get("metadata", {}).get("labels", {})
+            service_account = pod_spec.get("serviceAccountName")
+            if isinstance(service_account, str) and service_account:
+                workload_identity = f"{workload.get('kind')}/{namespace}/{name}"
+                owner = service_accounts.setdefault(
+                    (namespace, service_account), workload_identity
+                )
+                if owner != workload_identity:
+                    failures.append(
+                        f"{role} shares ServiceAccount {service_account} with {owner}"
+                    )
 
-        matching_pdb = [p for p in pdb_items if identity(p)[0] == namespace and selector_matches(p.get("spec", {}).get("selector"), pod_labels)]
-        if len(matching_pdb) != 1:
-            failures.append(f"{role} must have exactly one matching PodDisruptionBudget")
-        if workload.get("kind") == "Deployment":
-            matching_hpa = [
-                h for h in hpa_items
-                if identity(h)[0] == namespace
-                and h.get("spec", {}).get("scaleTargetRef", {}).get("apiVersion") == "apps/v1"
-                and h.get("spec", {}).get("scaleTargetRef", {}).get("kind") == "Deployment"
-                and h.get("spec", {}).get("scaleTargetRef", {}).get("name") == name
-            ]
-            if len(matching_hpa) != 1:
-                failures.append(f"{role} must have exactly one matching HorizontalPodAutoscaler")
+            images = validate_pod_security(role, pod_spec, failures)
+            if not images or any(image != expected_image for image in images):
+                failures.append(f"{role} live image digest differs from CandidateManifest")
+
+            status = workload.get("status", {})
+            if workload.get("kind") == "Deployment":
+                desired = spec.get("replicas")
+                ready = status.get("readyReplicas", 0)
+                updated = status.get("updatedReplicas", 0)
+                unavailable = status.get("unavailableReplicas", 0)
             else:
-                hpa = matching_hpa[0].get("spec", {})
-                if hpa.get("minReplicas") != minimum or hpa.get("maxReplicas") != maximum:
-                    failures.append(f"{role} HPA replica bounds differ from CapacityProfile")
+                desired = status.get("desiredNumberScheduled")
+                ready = status.get("numberReady", 0)
+                updated = status.get("updatedNumberScheduled", 0)
+                unavailable = status.get("numberUnavailable", 0)
+            if status.get("observedGeneration") != workload.get("metadata", {}).get("generation"):
+                failures.append(f"{role} controller has not observed the current generation")
+            if updated != desired or ready != desired or unavailable != 0:
+                failures.append(f"{role} rollout is not fully updated and Ready")
+            if not isinstance(desired, int) or not isinstance(ready, int):
+                failures.append(f"{role} live replicas are invalid")
+                desired = 0
+                ready = 0
+            aggregate_desired += desired
+            aggregate_ready += ready
 
+            matching_pdb = [
+                p
+                for p in pdb_items
+                if identity(p)[0] == namespace
+                and selector_matches(p.get("spec", {}).get("selector"), pod_labels)
+            ]
+            if len(matching_pdb) != 1:
+                failures.append(f"{role}/{name} must have exactly one matching PodDisruptionBudget")
+            if workload.get("kind") == "Deployment":
+                matching_hpa = [
+                    h
+                    for h in hpa_items
+                    if identity(h)[0] == namespace
+                    and h.get("spec", {}).get("scaleTargetRef", {}).get("apiVersion") == "apps/v1"
+                    and h.get("spec", {}).get("scaleTargetRef", {}).get("kind") == "Deployment"
+                    and h.get("spec", {}).get("scaleTargetRef", {}).get("name") == name
+                ]
+                if len(matching_hpa) != 1:
+                    failures.append(f"{role}/{name} must have exactly one matching HorizontalPodAutoscaler")
+                else:
+                    hpa = matching_hpa[0].get("spec", {})
+                    hpa_minimum = hpa.get("minReplicas")
+                    hpa_maximum = hpa.get("maxReplicas")
+                    if not isinstance(hpa_minimum, int) or not isinstance(hpa_maximum, int):
+                        failures.append(f"{role}/{name} HPA replica bounds are invalid")
+                    else:
+                        aggregate_minimum += hpa_minimum
+                        aggregate_maximum += hpa_maximum
+            else:
+                aggregate_minimum += desired
+                aggregate_maximum += desired
+
+            role_workloads.append(
+                {
+                    "kind": workload.get("kind"),
+                    "namespace": namespace,
+                    "name": name,
+                    "service_account": service_account,
+                    "desired_replicas": desired,
+                    "ready_replicas": ready,
+                }
+            )
+
+        if (
+            not isinstance(minimum, int)
+            or not isinstance(maximum, int)
+            or aggregate_minimum != minimum
+            or aggregate_maximum != maximum
+            or not minimum <= aggregate_desired <= maximum
+        ):
+            failures.append(f"{role} aggregate replica/HPA closure differs from CapacityProfile")
         summary_roles[role] = {
-            "kind": workload.get("kind"),
-            "namespace": namespace,
-            "name": name,
-            "service_account": service_account,
             "image_digest": expected_image,
-            "desired_replicas": desired,
-            "ready_replicas": ready,
+            "desired_replicas": aggregate_desired,
+            "ready_replicas": aggregate_ready,
+            "min_replicas": aggregate_minimum,
+            "max_replicas": aggregate_maximum,
+            "workloads": sorted(
+                role_workloads,
+                key=lambda item: (item["namespace"], item["kind"], item["name"]),
+            ),
         }
 
     for namespace in sorted(namespaces):

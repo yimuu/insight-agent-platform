@@ -234,6 +234,10 @@ desired replica Ready、replica/autoscaling bounds、per-role ServiceAccount iso
 CPU/memory/ephemeral-storage request/limit以及每个承载namespace的双向default-deny。静态Helm render或该validator自身的fixture只证明门禁
 行为，不能替代production-equivalent cluster上的实际L4 evidence。
 
+ComponentRole是candidate image与capacity聚合维度，不强制一个role只能有一个Kubernetes workload。Native/Remote等多pool必须逐个拥有独立
+ServiceAccount、PDB/autoscaler和完整安全closure；同role所有container匹配同一candidate image digest，DaemonSet固定副本与Deployment HPA
+边界聚合后精确等于该role CapacityProfile，避免漏标pool或以拆Deployment方式放大capacity。
+
 当前分层证据：fresh PostgreSQL 16 r208已通过Native exact startup registry/Worker manifest双进程强杀、expired-lease owner recovery、
 quota settlement与non-idempotent reconciliation，关闭Native部分L3；r217以真实Remote Worker+mTLS Egress RPC分别通过HTTP/gRPC
 错manifest零claim/零外部调用、响应后commit-window强杀、第二进程expired-lease恢复及非幂等调用不重放，关闭Remote HTTP/gRPC L3。
@@ -271,6 +275,9 @@ r245新增上述live workload inventory preflight并接入production qualificati
 mutable/wrong image、rollout/replica、ServiceAccount、default-deny、restricted security/resource和HPA drift，连同既有4个真实node shape/
 RuntimeClass topology fixture全部通过。该本地证据没有运行production-equivalent cluster，因此只证明L4 gate会fail closed，不能将L4标为
 通过；当前部署只有在真实inventory满足同一CandidateManifest/CapacityProfile后才能生成workload digest evidence。
+
+r247修正一个role只允许一个workload的过度实现约束，增加同role多隔离pool的聚合副本/HPA闭包和独立ServiceAccount检查；新增双Context
+pool正向fixture后workload矩阵为6项。该修正不降低closed 15-role、exact image或任一安全/rollout负向门禁。
 
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role

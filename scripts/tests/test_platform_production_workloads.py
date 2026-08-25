@@ -113,6 +113,7 @@ def valid_inputs():
         "replicas": {role: {"min_replicas": 2, "max_replicas": 4} for role in digests},
         "hpa": {role: {"target_utilization_basis_points": 7000} for role in digests},
     }
+    capacity["replicas"]["sandbox_wasi_executor"]["max_replicas"] = 2
     deployments = []
     daemonsets = []
     pdbs = []
@@ -155,7 +156,7 @@ class ProductionWorkloadTests(unittest.TestCase):
             item for item in inputs[2]["items"] if MODULE.role_of(item) != "management_api"
         ]
         inputs[2]["items"][0]["spec"]["template"]["spec"]["containers"][0]["image"] = "registry.example/model:latest"
-        with self.assertRaisesRegex(ValueError, "management_api must have exactly one"):
+        with self.assertRaisesRegex(ValueError, "management_api must have at least one"):
             MODULE.validate_workloads(*inputs)
 
     def test_rejects_rollout_image_and_replica_drift(self):
@@ -186,6 +187,29 @@ class ProductionWorkloadTests(unittest.TestCase):
         matching_hpa["spec"]["maxReplicas"] = 9
         with self.assertRaisesRegex(ValueError, "ephemeral-storage"):
             MODULE.validate_workloads(*inputs)
+
+    def test_accepts_multiple_isolated_pools_for_one_component_role(self):
+        inputs = list(copy.deepcopy(valid_inputs()))
+        original = next(
+            item for item in inputs[2]["items"] if MODULE.role_of(item) == "context_worker"
+        )
+        remote = copy.deepcopy(original)
+        remote["metadata"]["name"] = "context_worker_remote"
+        remote["spec"]["template"]["spec"]["serviceAccountName"] = "context-worker-remote"
+        inputs[2]["items"].append(remote)
+        original_hpa = next(
+            item for item in inputs[6]["items"] if item["metadata"]["name"] == "context_worker"
+        )
+        remote_hpa = copy.deepcopy(original_hpa)
+        remote_hpa["metadata"]["name"] = "context_worker_remote"
+        remote_hpa["spec"]["scaleTargetRef"]["name"] = "context_worker_remote"
+        inputs[6]["items"].append(remote_hpa)
+        inputs[1]["replicas"]["context_worker"] = {"min_replicas": 4, "max_replicas": 8}
+
+        summary, _ = MODULE.validate_workloads(*inputs)
+        self.assertEqual(len(summary["roles"]["context_worker"]["workloads"]), 2)
+        self.assertEqual(summary["roles"]["context_worker"]["min_replicas"], 4)
+        self.assertEqual(summary["roles"]["context_worker"]["max_replicas"], 8)
 
 
 if __name__ == "__main__":

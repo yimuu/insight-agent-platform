@@ -192,7 +192,8 @@
 
 > 2026-08-26 implementation evidence：production qualification preflight新增fail-closed live workload inventory门禁。它从真实cluster
 > 抓取Deployment、DaemonSet、NetworkPolicy、PDB与HPA，对照同一production CandidateManifest和CapacityProfile重验15个closed
-> ComponentRole恰有一个独立workload、全部container使用exact image digest、rollout generation/ready replica无漂移、replica/HPA范围一致、
+> ComponentRole至少有一个独立workload pool、全部container使用exact image digest、rollout generation/ready replica无漂移、聚合
+> replica/HPA范围与profile精确一致、
 > ServiceAccount不复用且token不automount，并检查non-root、RuntimeDefault seccomp、只读root、drop ALL、CPU/memory/ephemeral-storage
 > request/limit与namespace exact default-deny。r245的5个workload正负fixture连同既有4个node/runtime-class topology fixture全部通过，覆盖
 > 缺role、mutable/wrong image、未就绪/越界副本、共享identity、缺default-deny、安全资源与HPA漂移。该证据只证明门禁实现与fail-closed
@@ -204,6 +205,11 @@
 > Deployment、ServiceAccount、DB Secret、Service、PDB/HPA、NetworkPolicy与ServiceMonitor，Ingress按closed `/v1` noun路由；Runtime独占
 > Artifact出站和Secret mounts。5个Gateway tests（含双向401/404零越权路由矩阵）、Helm lint、角色/副本负向render及静态权限检查通过。
 > 该批关闭15-role inventory中的Management/Runtime物理隔舱实现，不代表其余13 role或真实cluster L4已经通过。
+
+> 2026-08-26 qualification correction：r247删除r245把一个ComponentRole误等同为“恰好一个Kubernetes workload”的过度约束。
+> CandidateManifest按role冻结image，CapacityProfile按role冻结聚合副本范围；同一role可有Native/Remote等多个隔离pool，但每个pool必须使用
+> 独立ServiceAccount/PDB/autoscaler且全部image匹配同一candidate digest，所有DaemonSet固定副本与Deployment HPA min/max求和后必须精确等于
+> role CapacityProfile。新增多Context pool正向fixture，既有缺role、共享identity、rollout/image/security负向矩阵保留。
 
 > CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer在fresh PostgreSQL 16 r181完成真实多进程L3 kill-window。fresh PostgreSQL 16 r199进一步把同一链路扩展为Timer→Signal→HumanTask→ChildAgent→Return：四次durable park后分别强制终止Worker，认证Signal/Task owner恢复外部等待，exact-binding child Run在自身Timer后由第五个Worker恢复并终态化，critical-control scanner结算terminal child link、复制typed output、恢复parent，最终parent/child均成功且parent finish Node唯一。该过程还修复terminal-child误用64项claim limit而非专属recovery batch limit，以及一个scanner失败会阻断其余critical-control lane的问题。Timer/Signal/Task/Child的独立进程kill/recovery L3至此闭合；Native Capability已在fresh PostgreSQL 16 r208以真实双进程kill/recovery闭合，Model、Remote Capability与Context external leaf仍待完成。
 
