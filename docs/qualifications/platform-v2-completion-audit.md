@@ -2,16 +2,17 @@
 
 状态：In Progress / repository and production gaps remain
 
-日期：2026-08-25
+日期：2026-08-26
 
 本审计按 `00-overview.md` 的统一完成定义和 `implementation-plan.md` 四阶段 exit gate 核对当前工作树。
 它记录可以复现的证据与缺口，不改变合同，也不把存在源码、测试或静态清单等同于 production behavior。
 
 ## 1. 结论
 
-00～18均已完成CR-181影响cross-review（历史CR-173～180结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
-实现与真实PostgreSQL门禁已闭合；Phase 2/3已有大量domain/repository/runtime库和L1～L3证据，但缺少若干production
-composition；Phase 4只有public API及部分role清单，完整物理拓扑、observability和L4～L6尚未交付。
+00～18均已完成CR-189 cross-review（历史CR-173～188结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
+实现与真实PostgreSQL门禁已闭合；Phase 2的production Orchestration、Model、Capability、Context与wait/Subagent主要L3链路已经闭合；
+Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact资格。Phase 4 public API和15-role/17-pool静态部署闭包已完成，
+完整observability及production-equivalent L4～L6仍未交付。
 
 因此：
 
@@ -30,12 +31,12 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
 | Public API | `/v1` OpenAPI/owner schema、route负向conformance与root public API baseline通过 | public contract实现闭合 |
 | Typed Plan materialization | Agent Revision冻结`typed_plan_artifact_id`与digest；发布事务校验Ready JSON Artifact/Verified Blob；Scheduler专用mTLS Data RPC以Run、Job lease、exact Plan Revision和ArtifactRef双重授权读取 | 闭合Scheduler物化输入与传输边界，不代表production Scheduler handler完成 |
-| Typed Plan v4 wire | RuntimePlan保存closed dependency slots及全部external leaf payload，拒绝v1/v2/v3并验证slot kind、output producer、input reachability与bounded budget；fresh PG的phase2 Run kernel和真实coordinator既有路径通过 | L1/L2 wire与controller未回归；Timer/Signal/HumanTask/ChildAgent真实多进程L3已闭合，Model/Capability/Context仍待完整L3 |
-| Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；ChildAgent owner transaction按Run冻结的exact Policy Deployment/Revision加载文档、锁定当前gate、重解析Plan v4 input/route与Scope并重算选择，拒绝伪造结果 | L1/L2 ChildAgent selection/input owner闭合；Model/Capability选择与完整多进程dispatch证据仍待实现 |
-| 已有部署 | Gateway、Callback、Orchestration Worker、MCP cleanup、Model Worker、Artifact三role、Sandbox、Security/Egress Helm静态门禁通过 | 只证明这些checked-in清单的静态边界 |
+| Typed Plan v4 wire | RuntimePlan保存closed dependency slots及全部external leaf payload，拒绝v1/v2/v3并验证slot kind、output producer、input reachability与bounded budget；fresh PG的phase2 Run kernel和真实coordinator既有路径通过 | L1/L2 wire与controller已闭合；Timer/Signal/HumanTask/ChildAgent、Model tool-result、Capability和Context的production component L3均有独立证据 |
+| Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；各owner按Run冻结exact Policy/Revision重算并拒绝伪造结果 | L1/L2 owner闭合，production Model/Capability/Context dispatch已在对应L3链路重验exact binding |
+| 已有部署 | 11个chart覆盖全部15个ComponentRole、17个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
 | HTTP observability | shared bounded-label owner；Gateway与Callback具备request/outcome、latency、ready、`/metrics`及ServiceMonitor/NetworkPolicy | 闭合两个公网HTTP role，不代表全平台observability |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
-| Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator | 可验证证据形状，不证明任一外部门禁通过 |
+| Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator；live topology/workload preflight对照Candidate/Capacity并拒绝rollout、image、config、identity、安全和容量漂移 | 可验证证据形状与preflight行为，不证明任一外部门禁通过 |
 | Runbooks | production dependency recovery与GitOps clean-cut手册已提交 | 操作准备完成，execution evidence pending |
 
 最近一次完整仓库复核使用全新PG16数据库、NATS和all-feature workspace测试；工作树完成批次均按单一目的提交。
@@ -64,7 +65,11 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 - capacity-aware coordinator、lease-fenced executor、orchestration/artifact/sandbox safety driver库；
 - ModelTurn、CapabilityInvocation、Task与Inline hard-limit domain/repository闭包。
 
-### 仓库内缺口
+### 当前证据边界
+
+本节较长的逐项记录保留早期实现轨迹；以下后续证据覆盖其中“仍待”表述：r199闭合Timer/Signal/HumanTask/ChildAgent，r208闭合Native
+Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243闭合Native/Remote Context与Orchestration resume，r233/r244
+闭合Model provider及tool-result整链。它们均为各自声明范围的L3，不自动提升为L4～L6。
 
 1. 独立Orchestration Worker binary、process config、startup/readiness/drain、restricted Helm Deployment和critical-control safety composition已闭合。
    fresh PostgreSQL 16 r199已完成Timer→Signal→HumanTask→ChildAgent→Return五进程kill/recovery，parent/child终态、typed child output及唯一finish Node均通过。
@@ -116,8 +121,8 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
    materialization和Run Succeeded串成同一链，并断言exact output value。Raise safe Failure正向提交及不安全Failure拒绝/整批回滚
    fixture也已在fresh PostgreSQL通过。CR-180 L1/L2 terminal证据已闭合；独立Scheduler与Artifact Data Worker之间的L3 kill/restart
    fixture仍未完成，因此尚不能计入完整Phase 2 production terminal证据。
-3. 没有独立Capability Worker与Context Worker process composition、role-scoped DB pool/queue/permit和deployment。
-4. wait-node与Subagent多进程证据使用production Orchestration composition但仍以fixture提供Artifact读取端口；Model/Capability/Context真实外部role尚未串入同一L3链路。
+3. 独立Capability Native/Remote、Context Native/Remote production process、role-scoped pool/permit和deployment已闭合；跨role容量隔舱仍须L5实测。
+4. r243/r244已分别贯通Remote Context→Return及Model→Capability→Model→Return；production-equivalent network/identity与滚动故障仍归L4。
 
 ## 5. Phase 3 审计
 
@@ -132,8 +137,10 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 ### 仓库内或外部缺口
 
-1. remote MCP Host缺少production binary和独立Helm release；现有cleanup worker不等于Host。
-2. Context query/build和Capability execution缺少production worker composition，因此无法形成完整real end-to-end链。
+1. MCP Host production binary/Helm与ToolsCall process L3已闭合；OAuth Callback/Cleanup/Egress和subscription的真实endpoint多进程
+   kill/restart L3仍缺，fresh PostgreSQL r249只证明durable owner层。
+2. Context Native/Remote和Capability Native/Remote production composition已闭合；Dataset build/Text2SQL、Artifact和各外部依赖仍须按
+   production qualification matrix取得适用的真实协议、故障与隔舱证据。
 3. S3/KMS/Secret Manager只有adapter/fixture和deployment contract，没有production-equivalent fault/rotation/restore证据。
 4. gVisor没有真实`RuntimeClass=runsc`多节点执行、escape/cleanup/process-kill/watch-restart/node-loss证据。
 5. 单lane saturation对其他lane与critical-control的production profile SLO影响尚未测量。
@@ -151,11 +158,13 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 ### 仓库内缺口
 
-1. 18列出的Capability Worker、Context Worker、MCP Host等独立物理role没有release chart；Scheduler/Recovery已由独立Orchestration Worker chart闭合。
+1. 15个ComponentRole已由17个独立workload pool闭合；Candidate image与`deployment_config_digest`已进入全局render/live preflight门禁，
+   但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
 2. 除Public Gateway与Callback API的首批Prometheus SLI外，其余Platform v2 binaries仍只有结构化日志或process-local snapshots；缺少完整
    Prometheus/OTel export、低基数queue/dependency/recovery指标、trace propagation/redaction的process wiring。
 3. Gateway与Callback已有ServiceMonitor；其余role仍缺少ServiceMonitor/PodMonitor，且全平台尚无dashboard、symptom-first PrometheusRule与逐alert runbook。
-4. 没有把全部role render/startup manifest/NetworkPolicy/DB pool/identity互斥纳入一个完整release topology checker。
+4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
+   mTLS与live identity enforcement仍须production-equivalent L4验证。
 5. 没有可重现的signed image/SBOM/provenance build pipeline与GitOps environment repository输入。
 
 ### 外部门禁
@@ -170,11 +179,11 @@ composition；Phase 4只有public API及部分role清单，完整物理拓扑、
 
 按上游到下游执行，且每批通过后提交：
 
-1. Plan v4剩余Model/Capability/Context完整external-leaf L3 lifecycle；
-2. Capability Worker、Context Worker、remote MCP Host production composition与charts；
-3. 将已闭合的shared low-cardinality HTTP observability boundary逐role接入，并补queue/dependency metrics、trace/redaction；
-4. ServiceMonitor/dashboard/alerts/runbooks和完整topology静态checker；
-5. reproducible signed candidate pipeline、外部L4～L6、GitOps clean cut、current文档与规范归档。
+1. MCP OAuth Callback/Cleanup/Egress与subscription真实endpoint的多进程L3 kill/restart；
+2. 将已闭合的shared low-cardinality HTTP observability boundary逐role接入，并补queue/dependency metrics、trace/redaction；
+3. ServiceMonitor/dashboard、symptom-first alerts及逐alert runbook；
+4. reproducible signed candidate pipeline；
+5. 外部L4～L6、GitOps clean cut、current文档与规范归档。
 
 如果实现发现domain port不足以支持production handler，必须先按02→06/07/09/10→17/18修订合同并重新cross-review，
 不得在binary中以自由JSON、in-memory authority或host process execution绕过缺口。
