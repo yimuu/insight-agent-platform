@@ -2,10 +2,11 @@ use crate::repository::{
     append_command_event, append_scheduler_event, begin_read_only_repeatable,
     claim_command_receipt, decode_typed_payload, job_from_row, job_projection,
     load_current_principal_snapshot, load_exact_active_policy_deployment,
-    load_job_for_update_by_text, load_task_for_update, payload_from_row, require_tenant_permission,
-    run_bindings_from_row, safety_scan_cursor_from_row, safety_scan_page,
-    terminalize_command_receipt, validate_safety_scan_request, JobRecord, PgRepository,
-    RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
+    load_exact_selection_policy_for_tenant, load_job_for_update_by_text, load_task_for_update,
+    payload_from_row, require_tenant_permission, run_bindings_from_row,
+    safety_scan_cursor_from_row, safety_scan_page, terminalize_command_receipt,
+    validate_safety_scan_request, JobRecord, PgRepository, RepositoryError, SafetyScanCursor,
+    SafetyScanPage, SafetyScanShard, TypedPayload,
 };
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{
@@ -46,6 +47,7 @@ use insight_platform_contracts::{
     SandboxArtifactIoPolicyDocument, Sha256Digest, TenantConfig, WorkClass,
 };
 use insight_platform_jobs::JobFence;
+use insight_platform_orchestrator::derive_candidate_selection;
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
     TaskState,
@@ -1326,18 +1328,37 @@ impl SchedulerSkillPackageRequestResolver for PgRepository {
         let DeploymentClosure::Skill(closure) = closure else {
             return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
         };
-        let admitted = bindings.slots.iter().any(|slot| {
-            slot.slot_id == lease.skill_slot_id
-                && matches!(
-                    &slot.target,
-                    FrozenSlotTarget::Skill { candidates, .. }
-                        if candidates.iter().any(|candidate| {
-                            candidate.deployment_id == lease.skill_deployment_id
-                                && candidate.deployment_digest == deployment_digest
-                        })
-                )
-        });
-        if !admitted {
+        let slot = bindings
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == lease.skill_slot_id)
+            .ok_or(ArtifactObjectReadAuthorityError::Denied)?;
+        let FrozenSlotTarget::Skill {
+            candidates,
+            selection_policy,
+        } = &slot.target
+        else {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        };
+        let selection_document = load_exact_selection_policy_for_tenant(
+            &mut transaction,
+            &lease.tenant_id.to_string(),
+            selection_policy,
+            false,
+        )
+        .await
+        .map_err(classify_gateway_artifact_read_error)?;
+        let selected = derive_candidate_selection(
+            &slot.slot_id,
+            selection_policy,
+            &selection_document,
+            candidates,
+            None,
+        )
+        .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        if selected.selected_deployment.deployment_id != lease.skill_deployment_id
+            || selected.selected_deployment.deployment_digest != deployment_digest
+        {
             return Err(ArtifactObjectReadAuthorityError::Denied);
         }
         let skill_revision_id = parse_id(

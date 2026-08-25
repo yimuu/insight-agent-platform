@@ -20807,6 +20807,15 @@ pub(crate) async fn load_exact_frozen_selection_policy(
     binding: &insight_platform_contracts::ExactPolicyBinding,
     lock_rows: bool,
 ) -> Result<CandidateSelectionPolicyDocument, RepositoryError> {
+    load_exact_selection_policy_for_tenant(transaction, &run.tenant_id, binding, lock_rows).await
+}
+
+pub(crate) async fn load_exact_selection_policy_for_tenant(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    binding: &insight_platform_contracts::ExactPolicyBinding,
+    lock_rows: bool,
+) -> Result<CandidateSelectionPolicyDocument, RepositoryError> {
     binding
         .validate()
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
@@ -20832,7 +20841,7 @@ pub(crate) async fn load_exact_frozen_selection_policy(
             FOR SHARE OF deployment, resource, version
             "#,
         )
-        .bind(&run.tenant_id)
+        .bind(tenant_id)
         .bind(binding.deployment.deployment_id.to_string())
         .bind(binding.deployment.deployment_digest.to_string())
         .bind(binding.revision.revision_id.to_string())
@@ -20871,7 +20880,7 @@ pub(crate) async fn load_exact_frozen_selection_policy(
           AND version.resource_version_kind = 'policy_revision'
         "#,
     )
-    .bind(&run.tenant_id)
+    .bind(tenant_id)
     .bind(binding.deployment.deployment_id.to_string())
     .bind(binding.deployment.deployment_digest.to_string())
     .bind(binding.revision.revision_id.to_string())

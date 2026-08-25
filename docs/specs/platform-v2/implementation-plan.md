@@ -20,6 +20,10 @@
 > CR-185已关闭：Skill package首版物理合同为11定义的无压缩`insight.skill-package/1` frame；实现必须先完成
 > dedicated Artifact verification/materialization，再接入InstructionSection与deterministic Model request assembler。
 
+> 2026-08-25 implementation evidence：fenced Skill package broker不再接受“候选集合成员”作为充分授权；它从Run snapshot的exact
+> Skill slot加载enabled Selection Policy并重新执行共享selector，只允许确定性选中的Skill Deployment读取package。fresh PostgreSQL 16
+> r179已通过正确读取、错误slot、未绑定Deployment、Artifact完整性与既有Run kernel first-winner回归。
+
 > CR-186已关闭：deterministic Model request assembler使用七阶段canonical block和完整source map；Skill/Context/User固定为非特权
 > role，ordinal冲突与byte/token overflow fail closed，首版没有隐式truncation或恢复时重排。
 
