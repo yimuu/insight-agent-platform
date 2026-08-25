@@ -39,3 +39,5 @@ url.workspace = true
 [dev-dependencies]
 insight-platform-jobs.workspace = true
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }
+rustls.workspace = true
+tokio-rustls.workspace = true

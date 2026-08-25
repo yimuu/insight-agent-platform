@@ -156,6 +156,12 @@
 > 该证据关闭Remote Worker→Egress RPC component L3；production HTTPS last-hop、完整Run→Context→resume→Return整链、隔舱容量与L4
 > rollout仍分别归后续门禁，不能由本fixture替代。
 
+> 2026-08-25 implementation evidence：RemoteSearch Egress connector现将canonical request编码和closed response normalization收敛为
+> 同一production路径，并以真实TLS socket、独立CA、只含`search.example.test` SAN的server certificate、固定DNS结果和显式PEM trust
+> bundle完成HTTPS last-hop protocol fixture；服务端逐字节验证POST path/body，客户端验证closed response、classification与evidence。
+> loopback许可仅存在于`cfg(test)`且限定loopback，production仍执行public-destination SSRF deny。完整Egress test matrix 53项与strict Clippy
+> 通过。该批关闭RemoteSearch HTTPS wire/protocol L3，但完整Run→Context→resume→Return、隔舱容量及L4 rollout仍未由此关闭。
+
 > 2026-08-25 implementation evidence：runtime新增production orchestration composition，明确把business claim/heartbeat连接与
 > critical-control Plan/RunValue/Skill读取、owner commit及Safety scanner连接分开，并用同一mTLS Artifact Scheduler client组合exact
 > Plan materializer、Capability/Model admission、durable Plan driver、lease-fenced executor和coordinator。独立binary和Helm角色已在

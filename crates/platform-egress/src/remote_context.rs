@@ -222,6 +222,8 @@ pub struct ReqwestRemoteContextSearchConnector {
     dns: Arc<dyn EgressDnsResolver>,
     limits: RemoteContextEgressLimits,
     permits: Arc<Semaphore>,
+    #[cfg(test)]
+    allow_loopback_for_protocol_fixture: bool,
 }
 
 impl ReqwestRemoteContextSearchConnector {
@@ -238,7 +240,26 @@ impl ReqwestRemoteContextSearchConnector {
             dns,
             limits,
             permits: Arc::new(Semaphore::new(limits.maximum_in_flight)),
+            #[cfg(test)]
+            allow_loopback_for_protocol_fixture: false,
         })
+    }
+
+    #[cfg(test)]
+    fn allow_loopback_for_protocol_fixture(mut self) -> Self {
+        self.allow_loopback_for_protocol_fixture = true;
+        self
+    }
+
+    fn destination_allowed(&self, address: &SocketAddr) -> bool {
+        if is_public_destination_ip(address.ip()) {
+            return true;
+        }
+        #[cfg(test)]
+        if self.allow_loopback_for_protocol_fixture && address.ip().is_loopback() {
+            return true;
+        }
+        false
     }
 
     async fn addresses(
@@ -274,7 +295,7 @@ impl ReqwestRemoteContextSearchConnector {
         if addresses.is_empty()
             || addresses.len() > self.limits.maximum_dns_answers
             || addresses.iter().any(|address| {
-                address.port() != entry.endpoint.port || !is_public_destination_ip(address.ip())
+                address.port() != entry.endpoint.port || !self.destination_allowed(address)
             })
         {
             return Err(before_dispatch("context_egress_destination_denied", false));
@@ -616,7 +637,13 @@ mod tests {
     use insight_platform_contracts::{
         CapabilityEndpointScheme, DataClassification, DataRegion, ResourceId, ValueRef,
     };
-    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair, SanType,
+    };
+    use rustls::{pki_types::PrivatePkcs8KeyDer, ServerConfig};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio_rustls::TlsAcceptor;
 
     fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
         format!(
@@ -709,6 +736,135 @@ mod tests {
         (installed, request)
     }
 
+    struct EmptySecrets;
+
+    #[async_trait]
+    impl SecretMaterialResolver for EmptySecrets {
+        async fn resolve(
+            &self,
+            _tenant_id: &ResourceId,
+            _binding: &ExactSecretBindingRef,
+        ) -> Result<crate::ResolvedSecretMaterial, SecretMaterialResolutionError> {
+            Err(SecretMaterialResolutionError::NotFound)
+        }
+    }
+
+    struct FixtureDns(SocketAddr);
+
+    #[async_trait]
+    impl EgressDnsResolver for FixtureDns {
+        async fn resolve(
+            &self,
+            host: &str,
+            port: u16,
+        ) -> Result<Vec<SocketAddr>, DnsResolutionError> {
+            assert_eq!(host, "search.example.test");
+            assert_eq!(port, self.0.port());
+            Ok(vec![self.0])
+        }
+    }
+
+    async fn start_remote_search_https_fixture() -> (SocketAddr, String, tokio::task::JoinHandle<()>)
+    {
+        let mut ca_parameters = CertificateParams::default();
+        ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = CertifiedIssuer::self_signed(ca_parameters, KeyPair::generate().unwrap()).unwrap();
+        let mut server_parameters = CertificateParams::default();
+        server_parameters.subject_alt_names =
+            vec![SanType::DnsName("search.example.test".try_into().unwrap())];
+        server_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let server_key = KeyPair::generate().unwrap();
+        let server_certificate = server_parameters.signed_by(&server_key, &ca).unwrap();
+        let tls = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![server_certificate.der().clone()],
+                PrivatePkcs8KeyDer::from(server_key.serialize_der()).into(),
+            )
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = TlsAcceptor::from(Arc::new(tls))
+                .accept(stream)
+                .await
+                .unwrap();
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 1_024];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(position) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            assert!(
+                headers.starts_with("POST /v1/query HTTP/1.1\r\n"),
+                "{headers}"
+            );
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("host: search.example.test:"));
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .map(str::to_owned)
+                })
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            while request.len() - header_end < content_length {
+                let mut chunk = [0_u8; 1_024];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let wire_request = parse_strict_json(
+                &request[header_end..header_end + content_length],
+                JsonLimits {
+                    max_bytes: 65_536,
+                    max_depth: 16,
+                    max_items_per_array: 32,
+                    max_properties_per_object: 16,
+                    max_string_bytes: 16_384,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                wire_request["query"],
+                serde_json::json!({"query": "bounded"})
+            );
+            let body = canonical_json(&serde_json::json!({
+                "schema_version": 1,
+                "items": [{
+                    "source_identity": "record-https-1",
+                    "content": {"title": "TLS result"},
+                    "structured_fields": {},
+                    "score_millionths": 910000,
+                    "locator": "opaque-https-1",
+                    "display_label": "TLS result",
+                    "classification": "internal"
+                }],
+                "next_cursor_digest": null,
+                "remote_revision_digest": digest('c')
+            }))
+            .unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        (address, ca.pem(), task)
+    }
+
     #[test]
     fn installed_remote_context_catalog_matches_the_complete_frozen_closure() {
         let (installed, request) = fixture();
@@ -795,5 +951,32 @@ mod tests {
         ));
         let duplicate = br#"{"schema_version":1,"schema_version":1,"items":[],"next_cursor_digest":null,"remote_revision_digest":null}"#;
         assert!(normalize_remote_search_response(&request, duplicate, evidence).is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_search_https_last_hop_pins_dns_and_explicit_trust() {
+        let (address, root_pem, server) = start_remote_search_https_fixture().await;
+        let (mut installed, mut request) = fixture();
+        installed.endpoint.port = address.port();
+        installed.endpoint_identity_digest = installed.endpoint.canonical_digest().unwrap();
+        installed.trusted_root_pem = root_pem;
+        request.endpoint = installed.endpoint.clone();
+        request.endpoint_identity_digest = installed.endpoint_identity_digest.clone();
+        let connector = ReqwestRemoteContextSearchConnector::new(
+            InstalledRemoteContextEndpointCatalog::new(vec![installed]).unwrap(),
+            Arc::new(EmptySecrets),
+            Arc::new(FixtureDns(address)),
+            RemoteContextEgressLimits::default(),
+        )
+        .unwrap()
+        .allow_loopback_for_protocol_fixture();
+        let response = connector.query(request.clone()).await.unwrap();
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].display_label, "TLS result");
+        assert_eq!(
+            response.backend_request_digest,
+            request.normalized_query_digest
+        );
+        server.await.unwrap();
     }
 }
