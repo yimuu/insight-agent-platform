@@ -3,8 +3,7 @@
 use insight_platform_contracts::{canonical_digest, parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
 use insight_platform_mcp_host::{
-    McpResourceRefreshConnector, McpResourceRefreshHost,
-    StreamableHttpMcpResourceRefreshProtocol,
+    McpResourceRefreshConnector, McpResourceRefreshHost, StreamableHttpMcpResourceRefreshProtocol,
 };
 use insight_platform_mcp_rpc::{
     proto::mcp_resource_refresh_service_server::McpResourceRefreshServiceServer,
@@ -176,11 +175,10 @@ async fn run() -> Result<(), ProcessError> {
     let host = Arc::new(McpResourceRefreshHost::new(repository, protocol));
     let limits = config.host_rpc_limits()?;
     let maximum = limits.maximum_message_bytes();
-    let service = McpResourceRefreshServiceServer::new(McpResourceRefreshGrpcService::new(
-        host, limits,
-    ))
-    .max_encoding_message_size(maximum)
-    .max_decoding_message_size(maximum);
+    let service =
+        McpResourceRefreshServiceServer::new(McpResourceRefreshGrpcService::new(host, limits))
+            .max_encoding_message_size(maximum)
+            .max_decoding_message_size(maximum);
     let service = tonic::service::interceptor::InterceptedService::new(
         service,
         ContextWorkerWorkloadIdentity,
@@ -378,16 +376,22 @@ enum ProcessError {
 impl fmt::Display for ProcessError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingEnvironment(name) => write!(formatter, "required environment {name} is missing"),
+            Self::MissingEnvironment(name) => {
+                write!(formatter, "required environment {name} is missing")
+            }
             Self::InvalidConfiguration => formatter.write_str("process configuration is invalid"),
             Self::FileUnavailable => formatter.write_str("required file is unavailable"),
             Self::DatabaseUnavailable => formatter.write_str("PostgreSQL is unavailable"),
             Self::SchemaMismatch => formatter.write_str("PostgreSQL schema is incompatible"),
             Self::EgressUnavailable => formatter.write_str("Egress Broker is unavailable"),
-            Self::SignalUnavailable => formatter.write_str("shutdown signal handler is unavailable"),
+            Self::SignalUnavailable => {
+                formatter.write_str("shutdown signal handler is unavailable")
+            }
             Self::ServerFailed => formatter.write_str("MCP Resource Host RPC server failed"),
             Self::DrainTimeout => formatter.write_str("MCP Resource Host drain grace expired"),
-            Self::ServerExitedUnexpectedly => formatter.write_str("MCP Resource Host exited unexpectedly"),
+            Self::ServerExitedUnexpectedly => {
+                formatter.write_str("MCP Resource Host exited unexpectedly")
+            }
             Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }
     }

@@ -2,8 +2,7 @@
 
 use insight_platform_context::ContextSubscriptionRefreshBackend;
 use insight_platform_context_worker::{
-    ContextWorkerConfig, ContextWorkerTiming, SubscriptionContextWorkerDriver,
-    CONTEXT_WORKER_ROLE,
+    ContextWorkerConfig, ContextWorkerTiming, SubscriptionContextWorkerDriver, CONTEXT_WORKER_ROLE,
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
@@ -183,13 +182,9 @@ async fn run() -> Result<(), ProcessError> {
     let backend: Arc<dyn ContextSubscriptionRefreshBackend> = Arc::new(
         McpResourceRefreshGrpcClient::new(connect_host(&config).await?, config.host_rpc_limits()?),
     );
-    let driver = SubscriptionContextWorkerDriver::new(
-        repository,
-        pools,
-        backend,
-        config.driver_config()?,
-    )
-    .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let driver =
+        SubscriptionContextWorkerDriver::new(repository, pools, backend, config.driver_config()?)
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
     let permit_metrics = Arc::new(WorkerPermitMetrics::default());
     update_worker_permits(&permit_metrics, &observability_pools);
     let metrics = Arc::new(
@@ -352,13 +347,17 @@ enum ProcessError {
 impl fmt::Display for ProcessError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingEnvironment(name) => write!(formatter, "required environment {name} is missing"),
+            Self::MissingEnvironment(name) => {
+                write!(formatter, "required environment {name} is missing")
+            }
             Self::InvalidConfiguration => formatter.write_str("process configuration is invalid"),
             Self::FileUnavailable => formatter.write_str("required file is unavailable"),
             Self::DatabaseUnavailable => formatter.write_str("PostgreSQL is unavailable"),
             Self::SchemaMismatch => formatter.write_str("PostgreSQL schema is incompatible"),
             Self::HostUnavailable => formatter.write_str("MCP Resource Host is unavailable"),
-            Self::SignalUnavailable => formatter.write_str("shutdown signal handler is unavailable"),
+            Self::SignalUnavailable => {
+                formatter.write_str("shutdown signal handler is unavailable")
+            }
             Self::WorkerFailed => formatter.write_str("subscription Context Worker failed"),
             Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }

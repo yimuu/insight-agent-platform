@@ -4,14 +4,13 @@ use insight_platform_context::{
     ContextSubscriptionExecutionError, ContextSubscriptionRefreshAttempt,
     ContextSubscriptionRefreshBackend, ContextSubscriptionRefreshCause,
     ContextSubscriptionRefreshEvidence, ContextSubscriptionRefreshResponse,
-    CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
-    MAX_CONTEXT_SUBSCRIPTION_REFRESH_BYTES, MAX_CONTEXT_SUBSCRIPTION_REFRESH_ITEMS,
-    MAX_CONTEXT_SUBSCRIPTION_REFRESH_RESOURCES,
+    CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION, MAX_CONTEXT_SUBSCRIPTION_REFRESH_BYTES,
+    MAX_CONTEXT_SUBSCRIPTION_REFRESH_ITEMS, MAX_CONTEXT_SUBSCRIPTION_REFRESH_RESOURCES,
 };
 use insight_platform_contracts::{
-    CanonicalHttpEndpoint, ExactDeploymentRef, ExactSecretBindingRef,
-    ExactVersionRef, McpClientCapabilities, McpMethodLimits, McpNegotiatedCapabilities,
-    McpTransportBinding, PublishedMcpMethod, ResourceId, ResourceKind, Sha256Digest,
+    CanonicalHttpEndpoint, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef,
+    McpClientCapabilities, McpMethodLimits, McpNegotiatedCapabilities, McpTransportBinding,
+    PublishedMcpMethod, ResourceId, ResourceKind, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -128,7 +127,9 @@ impl McpResourceRefreshTransportRequest {
             || self.deadline <= now
             || self.list_limits.is_some() != full_reconcile
             || !valid_refresh_limits(self.read_limits)
-            || self.list_limits.is_some_and(|limits| !valid_refresh_limits(limits))
+            || self
+                .list_limits
+                .is_some_and(|limits| !valid_refresh_limits(limits))
             || self.maximum_resources == 0
             || self.maximum_resources > MAX_CONTEXT_SUBSCRIPTION_REFRESH_RESOURCES
             || self.maximum_items == 0
