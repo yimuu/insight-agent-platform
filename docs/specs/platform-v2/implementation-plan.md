@@ -45,12 +45,12 @@
 
 > 2026-08-25 implementation evidence：CR-188 Rust owner与HTTP/gRPC/MCP dispatcher已冻结并重验exact installed codec、完整backend
 > descriptor及required Worker manifest；manifest/module/descriptor漂移在transport调用计数为零时fail closed。相关contract/adapter tests、
-> strict Clippy及fresh PostgreSQL 16 r200完整Capability Invocation fixture通过。Native binary/startup manifest已在后续r207闭合；真实remote
+> strict Clippy及fresh PostgreSQL 16 r200完整Capability Invocation fixture通过。Native binary/startup manifest已在后续r208闭合；真实remote
 > protocol L3与L4 rollout drift仍待完成，不能把本证据宣称为production remote backend闭环。
 
 > 2026-08-25 implementation evidence：Capability claim command现携带进程Worker manifest digest，PostgreSQL owner transaction在启动
 > attempt和预留quota前对照exact Deployment。fresh PostgreSQL 16 r201证明错镜像得到空claim、正确manifest仍通过完整Invocation闭环；
-> dispatcher的codec/manifest I/O前二次校验保留。Native binary/startup及kill/recovery在后续r207闭合，Remote仍待完成。
+> dispatcher的codec/manifest I/O前二次校验保留。Native binary/startup及kill/recovery在后续r208闭合，Remote仍待完成。
 
 > 2026-08-25 implementation evidence：credential-free Capability adapter request现携带Invocation已冻结的exact output schema digest，
 > 消除production adapter硬编码result schema的测试缝隙。Capability Worker新增静态`builtin.echo` Native adapter：仅接受Inline、生成新
@@ -97,7 +97,7 @@
 > restricted Pod、无ServiceAccount token、default-deny且只开放DNS/PostgreSQL/Artifact Data Worker。binary config test、clippy和Helm
 > positive/negative static boundary已通过；真实多进程kill/recovery和容量资格尚未完成。
 
-> CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer在fresh PostgreSQL 16 r181完成真实多进程L3 kill-window。fresh PostgreSQL 16 r199进一步把同一链路扩展为Timer→Signal→HumanTask→ChildAgent→Return：四次durable park后分别强制终止Worker，认证Signal/Task owner恢复外部等待，exact-binding child Run在自身Timer后由第五个Worker恢复并终态化，critical-control scanner结算terminal child link、复制typed output、恢复parent，最终parent/child均成功且parent finish Node唯一。该过程还修复terminal-child误用64项claim limit而非专属recovery batch limit，以及一个scanner失败会阻断其余critical-control lane的问题。Timer/Signal/Task/Child的独立进程kill/recovery L3至此闭合；Model/Capability/Context external leaf仍待完成。
+> CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer在fresh PostgreSQL 16 r181完成真实多进程L3 kill-window。fresh PostgreSQL 16 r199进一步把同一链路扩展为Timer→Signal→HumanTask→ChildAgent→Return：四次durable park后分别强制终止Worker，认证Signal/Task owner恢复外部等待，exact-binding child Run在自身Timer后由第五个Worker恢复并终态化，critical-control scanner结算terminal child link、复制typed output、恢复parent，最终parent/child均成功且parent finish Node唯一。该过程还修复terminal-child误用64项claim limit而非专属recovery batch limit，以及一个scanner失败会阻断其余critical-control lane的问题。Timer/Signal/Task/Child的独立进程kill/recovery L3至此闭合；Native Capability已在fresh PostgreSQL 16 r208以真实双进程kill/recovery闭合，Model、Remote Capability与Context external leaf仍待完成。
 
 > 2026-08-25 implementation evidence：public `/v1/runs/{run_id}/signals/{signal_key}`现已进入generated OpenAPI与Gateway；closed typed body、
 > principal/run/signal scoped Idempotency-Key、stable signal key和204 no-store合同由API tests覆盖。Gateway只解析目标，Scheduler owner transaction仍会

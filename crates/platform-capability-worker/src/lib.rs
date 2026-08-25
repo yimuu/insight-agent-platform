@@ -8,12 +8,17 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityAdapterFailureClass, CapabilityAdapterResponse,
-    CapabilityAdapterWorker, CapabilityExecutionAuthority, ExecuteCapabilityAdapterJob,
-    InstalledNativeAdapter, InstalledNativeRegistry, NativeCapabilityAdapter,
+    CapabilityAdapterWorker, CapabilityExecutionAuthority, EncodedGrpcCapabilityRequest,
+    EncodedHttpCapabilityRequest, ExecuteCapabilityAdapterJob, GrpcCapabilityCodec,
+    GrpcTransportResponse, HttpCapabilityCodec, HttpTransportResponse,
+    InstalledGrpcCodecDescriptor, InstalledGrpcCodecRegistry, InstalledHttpCodecDescriptor,
+    InstalledHttpCodecRegistry, InstalledNativeAdapter, InstalledNativeRegistry,
+    NativeCapabilityAdapter, SafeHttpHeader,
 };
 use insight_platform_contracts::{
-    canonical_digest, HardLimitProfile, ResourceId, ResourceIdError, ResourceKind, Sha256Digest,
-    ValueRef, WorkClass,
+    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, HardLimitProfile,
+    JsonLimits, ResourceId, ResourceIdError, ResourceKind, Sha256Digest, ValueRef, WorkClass,
+    WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     CapabilityClaimSlot, CapabilityExecutionInputMaterial, CapabilityOutputValue,
@@ -43,6 +48,314 @@ pub const CAPABILITY_REMOTE_WORKER_ROLE: &str = "capability.remote";
 pub const BUILTIN_ECHO_ADAPTER_ID: &str = "builtin.echo";
 pub const BUILTIN_ECHO_ADAPTER_VERSION: &str = "1.0.0";
 pub const BUILTIN_ECHO_ENTRYPOINT_ID: &str = "echo.inline";
+pub const BUILTIN_JSON_CODEC_ID: &str = "platform.json";
+pub const BUILTIN_JSON_CODEC_VERSION: &str = "1.0.0";
+
+pub fn builtin_json_codec_module_digest() -> Sha256Digest {
+    domain_digest("builtin-json-codec-module")
+}
+
+#[derive(Debug, Clone)]
+pub struct BuiltinJsonHttpCapabilityCodec {
+    descriptor: InstalledHttpCodecDescriptor,
+}
+
+impl BuiltinJsonHttpCapabilityCodec {
+    pub fn new(descriptor: InstalledHttpCodecDescriptor) -> Result<Self, CapabilityAdapterFailure> {
+        validate_json_codec_identity(
+            &descriptor.codec_id,
+            &descriptor.codec_version,
+            &descriptor.module_digest,
+            descriptor.worker_protocol_version,
+        )?;
+        Ok(Self { descriptor })
+    }
+}
+
+impl HttpCapabilityCodec for BuiltinJsonHttpCapabilityCodec {
+    fn descriptor(&self) -> InstalledHttpCodecDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn encode(
+        &self,
+        request: &insight_platform_capability_adapters::CapabilityAdapterRequest,
+    ) -> Result<EncodedHttpCapabilityRequest, CapabilityAdapterFailure> {
+        let CapabilityExecutionInputMaterial::Inline { value } = &request.input.material else {
+            return Err(permanent_adapter_failure(
+                "builtin_json_inline_only",
+                "Built-in JSON codec accepts Inline input only",
+            ));
+        };
+        Ok(EncodedHttpCapabilityRequest {
+            headers: vec![SafeHttpHeader {
+                name: "content-type".to_owned(),
+                value: "application/json".to_owned(),
+            }],
+            body: serde_jcs::to_vec(value).map_err(|_| {
+                permanent_adapter_failure(
+                    "builtin_json_encode",
+                    "Built-in JSON request encoding failed",
+                )
+            })?,
+        })
+    }
+
+    fn decode(
+        &self,
+        request: &insight_platform_capability_adapters::CapabilityAdapterRequest,
+        response: HttpTransportResponse,
+    ) -> Result<CapabilityAdapterResponse, CapabilityAdapterFailure> {
+        if (200..=299).contains(&response.status) {
+            decode_json_success(
+                request,
+                &response.body,
+                response.transport_evidence_digest,
+                "http",
+            )
+        } else {
+            let class = http_failure_class(response.status);
+            failure_result(
+                request,
+                class,
+                "builtin_json_http_status",
+                response.transport_evidence_digest,
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BuiltinJsonGrpcCapabilityCodec {
+    descriptor: InstalledGrpcCodecDescriptor,
+}
+
+impl BuiltinJsonGrpcCapabilityCodec {
+    pub fn new(descriptor: InstalledGrpcCodecDescriptor) -> Result<Self, CapabilityAdapterFailure> {
+        validate_json_codec_identity(
+            &descriptor.codec_id,
+            &descriptor.codec_version,
+            &descriptor.module_digest,
+            descriptor.worker_protocol_version,
+        )?;
+        Ok(Self { descriptor })
+    }
+}
+
+impl GrpcCapabilityCodec for BuiltinJsonGrpcCapabilityCodec {
+    fn descriptor(&self) -> InstalledGrpcCodecDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn encode(
+        &self,
+        request: &insight_platform_capability_adapters::CapabilityAdapterRequest,
+    ) -> Result<EncodedGrpcCapabilityRequest, CapabilityAdapterFailure> {
+        let CapabilityExecutionInputMaterial::Inline { value } = &request.input.material else {
+            return Err(permanent_adapter_failure(
+                "builtin_json_inline_only",
+                "Built-in JSON codec accepts Inline input only",
+            ));
+        };
+        Ok(EncodedGrpcCapabilityRequest {
+            metadata: Vec::new(),
+            message: serde_jcs::to_vec(value).map_err(|_| {
+                permanent_adapter_failure(
+                    "builtin_json_encode",
+                    "Built-in JSON request encoding failed",
+                )
+            })?,
+        })
+    }
+
+    fn decode(
+        &self,
+        request: &insight_platform_capability_adapters::CapabilityAdapterRequest,
+        response: GrpcTransportResponse,
+    ) -> Result<CapabilityAdapterResponse, CapabilityAdapterFailure> {
+        if response.status_code == 0 {
+            decode_json_success(
+                request,
+                &response.message,
+                response.transport_evidence_digest,
+                "grpc",
+            )
+        } else {
+            let class = grpc_failure_class(response.status_code);
+            failure_result(
+                request,
+                class,
+                "builtin_json_grpc_status",
+                response.transport_evidence_digest,
+            )
+        }
+    }
+}
+
+fn validate_json_codec_identity(
+    codec_id: &str,
+    codec_version: &str,
+    module_digest: &Sha256Digest,
+    worker_protocol_version: u32,
+) -> Result<(), CapabilityAdapterFailure> {
+    if codec_id != BUILTIN_JSON_CODEC_ID
+        || codec_version != BUILTIN_JSON_CODEC_VERSION
+        || module_digest != &builtin_json_codec_module_digest()
+        || worker_protocol_version != WORKER_PROTOCOL_VERSION
+    {
+        return Err(permanent_adapter_failure(
+            "builtin_json_codec_identity",
+            "Built-in JSON codec identity is invalid",
+        ));
+    }
+    Ok(())
+}
+
+pub fn install_builtin_http_json_codecs(
+    registry: &mut InstalledHttpCodecRegistry,
+    descriptors: impl IntoIterator<Item = InstalledHttpCodecDescriptor>,
+) -> Result<(), insight_platform_capability_adapters::CapabilityDispatchError> {
+    for descriptor in descriptors {
+        let codec = BuiltinJsonHttpCapabilityCodec::new(descriptor).map_err(|_| {
+            insight_platform_capability_adapters::CapabilityDispatchError::InvalidInstalledAdapter
+        })?;
+        registry.install(Arc::new(codec))?;
+    }
+    Ok(())
+}
+
+pub fn install_builtin_grpc_json_codecs(
+    registry: &mut InstalledGrpcCodecRegistry,
+    descriptors: impl IntoIterator<Item = InstalledGrpcCodecDescriptor>,
+) -> Result<(), insight_platform_capability_adapters::CapabilityDispatchError> {
+    for descriptor in descriptors {
+        let codec = BuiltinJsonGrpcCapabilityCodec::new(descriptor).map_err(|_| {
+            insight_platform_capability_adapters::CapabilityDispatchError::InvalidInstalledAdapter
+        })?;
+        registry.install(Arc::new(codec))?;
+    }
+    Ok(())
+}
+
+fn http_failure_class(status: u16) -> CapabilityAdapterFailureClass {
+    if status == 408 || status == 429 || status >= 500 {
+        CapabilityAdapterFailureClass::RetryableAfterDispatch
+    } else {
+        CapabilityAdapterFailureClass::Permanent
+    }
+}
+
+fn grpc_failure_class(status_code: u16) -> CapabilityAdapterFailureClass {
+    match status_code {
+        4 => CapabilityAdapterFailureClass::TimedOutUncertain,
+        8 | 10 | 14 => CapabilityAdapterFailureClass::RetryableAfterDispatch,
+        _ => CapabilityAdapterFailureClass::Permanent,
+    }
+}
+
+fn decode_json_success(
+    request: &insight_platform_capability_adapters::CapabilityAdapterRequest,
+    bytes: &[u8],
+    transport_evidence_digest: Sha256Digest,
+    transport: &str,
+) -> Result<CapabilityAdapterResponse, CapabilityAdapterFailure> {
+    let maximum = usize::try_from(
+        request
+            .execution
+            .implementation
+            .backend_limits
+            .maximum_response_bytes,
+    )
+    .map_err(|_| permanent_adapter_failure("builtin_json_limits", "JSON limit is invalid"))?;
+    let value = parse_bounded_remote_json(bytes, maximum)?;
+    let content_digest: Sha256Digest = canonical_digest(&value)
+        .map_err(|_| permanent_adapter_failure("builtin_json_digest", "JSON digest failed"))?
+        .parse()
+        .map_err(|_| permanent_adapter_failure("builtin_json_digest", "JSON digest failed"))?;
+    let value_id =
+        ResourceId::from_uuid_v7(ResourceKind::RunValue, Uuid::now_v7()).map_err(|_| {
+            permanent_adapter_failure("builtin_json_identity", "Output identity generation failed")
+        })?;
+    let validation_evidence_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+        "content_digest": content_digest,
+        "output_schema_digest": request.output_schema_digest,
+        "schema_version": 1,
+        "transport": transport,
+        "transport_evidence_digest": transport_evidence_digest,
+    }))
+    .map_err(|_| permanent_adapter_failure("builtin_json_evidence", "Evidence digest failed"))?
+    .parse()
+    .map_err(|_| permanent_adapter_failure("builtin_json_evidence", "Evidence digest failed"))?;
+    Ok(CapabilityAdapterResponse {
+        outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+            value_id,
+            classification: request.input.exact.classification,
+            schema_digest: request.output_schema_digest.clone(),
+            content_digest,
+            value: ValueRef::Inline { value },
+            artifact_link_id: None,
+            validation_evidence_digest,
+        }),
+    })
+}
+
+fn parse_bounded_remote_json(
+    bytes: &[u8],
+    maximum: usize,
+) -> Result<serde_json::Value, CapabilityAdapterFailure> {
+    let hard_limits = checked_in_hard_limit_profile();
+    parse_strict_json(
+        bytes,
+        JsonLimits {
+            max_bytes: maximum,
+            max_depth: usize::try_from(hard_limits.api.json_depth.hard_max).map_err(|_| {
+                permanent_adapter_failure("builtin_json_limits", "JSON limit is invalid")
+            })?,
+            max_properties_per_object: usize::try_from(hard_limits.api.json_properties.hard_max)
+                .map_err(|_| {
+                    permanent_adapter_failure("builtin_json_limits", "JSON limit is invalid")
+                })?,
+            max_items_per_array: usize::try_from(hard_limits.api.json_items.hard_max).map_err(
+                |_| permanent_adapter_failure("builtin_json_limits", "JSON limit is invalid"),
+            )?,
+            max_string_bytes: maximum,
+        },
+    )
+    .map_err(|_| {
+        permanent_adapter_failure(
+            "builtin_json_response",
+            "Remote response is not bounded strict JSON",
+        )
+    })
+}
+
+fn failure_result(
+    request: &insight_platform_capability_adapters::CapabilityAdapterRequest,
+    class: CapabilityAdapterFailureClass,
+    code: &str,
+    transport_evidence_digest: Sha256Digest,
+) -> Result<CapabilityAdapterResponse, CapabilityAdapterFailure> {
+    let requires_external_identity = matches!(
+        class,
+        CapabilityAdapterFailureClass::RetryableAfterDispatch
+            | CapabilityAdapterFailureClass::Uncertain
+            | CapabilityAdapterFailureClass::TimedOutUncertain
+    );
+    let failure = CapabilityAdapterFailure {
+        class,
+        safe_code: code.to_owned(),
+        safe_message: "Remote JSON Capability returned a non-success status".to_owned(),
+        evidence_digest: transport_evidence_digest,
+        external_identity_digest: requires_external_identity.then(|| {
+            insight_platform_capability_adapters::CapabilityTransportRequestIdentity::from_adapter_request(
+                    request,
+                    request.execution.implementation.backend_kind,
+                )
+                .evidence_digest()
+        }),
+    };
+    Err(failure)
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BuiltinEchoCapabilityAdapter;
@@ -1215,5 +1528,88 @@ mod tests {
         let mut registry = InstalledNativeRegistry::default();
         install_builtin_native_adapters(&mut registry).unwrap();
         assert!(install_builtin_native_adapters(&mut registry).is_err());
+    }
+
+    fn http_json_descriptor() -> InstalledHttpCodecDescriptor {
+        InstalledHttpCodecDescriptor {
+            codec_id: BUILTIN_JSON_CODEC_ID.to_owned(),
+            codec_version: BUILTIN_JSON_CODEC_VERSION.to_owned(),
+            module_digest: builtin_json_codec_module_digest(),
+            worker_protocol_version: WORKER_PROTOCOL_VERSION,
+            descriptor_digest: digest('1'),
+            protocol_contract_digest: digest('2'),
+            request_mapping_digest: digest('3'),
+            response_mapping_digest: digest('4'),
+            error_mapping_digest: digest('5'),
+        }
+    }
+
+    fn grpc_json_descriptor() -> InstalledGrpcCodecDescriptor {
+        InstalledGrpcCodecDescriptor {
+            codec_id: BUILTIN_JSON_CODEC_ID.to_owned(),
+            codec_version: BUILTIN_JSON_CODEC_VERSION.to_owned(),
+            module_digest: builtin_json_codec_module_digest(),
+            worker_protocol_version: WORKER_PROTOCOL_VERSION,
+            descriptor_digest: digest('6'),
+            protobuf_contract_digest: digest('7'),
+            service_name: "insight.fixture.v1.Lookup".to_owned(),
+            method_name: "Get".to_owned(),
+            request_mapping_digest: digest('8'),
+            response_mapping_digest: digest('9'),
+            error_mapping_digest: digest('a'),
+        }
+    }
+
+    #[test]
+    fn builtin_json_codecs_require_exact_installed_identity_and_reject_duplicates() {
+        let mut wrong = http_json_descriptor();
+        wrong.module_digest = digest('f');
+        assert!(BuiltinJsonHttpCapabilityCodec::new(wrong).is_err());
+
+        let mut http = InstalledHttpCodecRegistry::default();
+        install_builtin_http_json_codecs(&mut http, [http_json_descriptor()]).unwrap();
+        assert!(install_builtin_http_json_codecs(&mut http, [http_json_descriptor()]).is_err());
+
+        let mut grpc = InstalledGrpcCodecRegistry::default();
+        install_builtin_grpc_json_codecs(&mut grpc, [grpc_json_descriptor()]).unwrap();
+        assert!(install_builtin_grpc_json_codecs(&mut grpc, [grpc_json_descriptor()]).is_err());
+    }
+
+    #[test]
+    fn builtin_json_parser_is_strict_and_bounded_by_reviewed_limits() {
+        assert_eq!(
+            parse_bounded_remote_json(br#"{"b":2,"a":1}"#, 64).unwrap(),
+            serde_json::json!({"a": 1, "b": 2})
+        );
+        assert!(parse_bounded_remote_json(br#"{} trailing"#, 64).is_err());
+        assert!(parse_bounded_remote_json(br#"{"too_large":true}"#, 4).is_err());
+
+        let profile = checked_in_hard_limit_profile();
+        let excessive_depth = format!(
+            "{}0{}",
+            "[".repeat(usize::try_from(profile.api.json_depth.hard_max).unwrap() + 1),
+            "]".repeat(usize::try_from(profile.api.json_depth.hard_max).unwrap() + 1)
+        );
+        assert!(parse_bounded_remote_json(excessive_depth.as_bytes(), 1_024).is_err());
+    }
+
+    #[test]
+    fn builtin_json_status_mapping_preserves_uncertainty_classes_for_shared_policy() {
+        assert_eq!(
+            http_failure_class(503),
+            CapabilityAdapterFailureClass::RetryableAfterDispatch
+        );
+        assert_eq!(
+            http_failure_class(404),
+            CapabilityAdapterFailureClass::Permanent
+        );
+        assert_eq!(
+            grpc_failure_class(4),
+            CapabilityAdapterFailureClass::TimedOutUncertain
+        );
+        assert_eq!(
+            grpc_failure_class(14),
+            CapabilityAdapterFailureClass::RetryableAfterDispatch
+        );
     }
 }
