@@ -30,6 +30,7 @@ members = [
     "crates/platform-mcp-host",
     "crates/platform-mcp-cleanup-worker",
     "crates/platform-observability",
+    "crates/platform-orchestration-worker",
     "crates/platform-postgres",
     "crates/platform-orchestrator",
     "crates/platform-registry",
@@ -148,6 +149,7 @@ insight-platform-models = { path = "crates/platform-models" }
 insight-platform-mcp-host = { path = "crates/platform-mcp-host" }
 insight-platform-mcp-cleanup-worker = { path = "crates/platform-mcp-cleanup-worker" }
 insight-platform-observability = { path = "crates/platform-observability" }
+insight-platform-orchestration-worker = { path = "crates/platform-orchestration-worker" }
 insight-platform-postgres = { path = "crates/platform-postgres" }
 insight-platform-orchestrator = { path = "crates/platform-orchestrator" }
 insight-platform-registry = { path = "crates/platform-registry" }

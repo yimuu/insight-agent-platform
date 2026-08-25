@@ -917,6 +917,12 @@ pub struct RunningOrchestrationSafetyDriver {
 }
 
 impl RunningOrchestrationSafetyDriver {
+    pub fn is_finished(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+
     pub fn snapshot(&self) -> SafetyDriverSnapshot {
         safety_snapshot(&self.metrics)
     }

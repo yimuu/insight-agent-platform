@@ -46,6 +46,35 @@ pub struct RunningProductionOrchestration {
     pub safety: RunningOrchestrationSafetyDriver,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductionOrchestrationExit {
+    pub coordinator: crate::CoordinatorExit,
+    pub safety: crate::SafetyDriverSnapshot,
+}
+
+impl RunningProductionOrchestration {
+    pub fn is_finished(&self) -> bool {
+        self.coordinator.is_finished() || self.safety.is_finished()
+    }
+
+    pub fn request_shutdown(&self) {
+        self.coordinator.request_drain();
+        self.safety.request_stop();
+    }
+
+    pub async fn shutdown(
+        self,
+    ) -> Result<ProductionOrchestrationExit, ProductionOrchestrationError> {
+        self.request_shutdown();
+        let (coordinator, safety) =
+            tokio::join!(self.coordinator.shutdown(), self.safety.shutdown());
+        Ok(ProductionOrchestrationExit {
+            coordinator: coordinator.map_err(|_| ProductionOrchestrationError::RuntimeFailed)?,
+            safety: safety.map_err(|_| ProductionOrchestrationError::RuntimeFailed)?,
+        })
+    }
+}
+
 pub fn start_production_orchestration(
     business_repository: PgRepository,
     critical_control_repository: PgRepository,
@@ -134,11 +163,15 @@ pub fn start_production_orchestration(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductionOrchestrationError {
     InvalidConfiguration,
+    RuntimeFailed,
 }
 
 impl fmt::Display for ProductionOrchestrationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("production orchestration composition is invalid")
+        formatter.write_str(match self {
+            Self::InvalidConfiguration => "production orchestration composition is invalid",
+            Self::RuntimeFailed => "production orchestration runtime failed",
+        })
     }
 }
 

@@ -2822,6 +2822,26 @@ name = "insight-platform-observability"
 version = "0.1.0"
 
 [[package]]
+name = "insight-platform-orchestration-worker"
+version = "0.1.0"
+dependencies = [
+ "insight-platform-artifact-rpc",
+ "insight-platform-artifacts",
+ "insight-platform-contracts",
+ "insight-platform-orchestrator",
+ "insight-platform-postgres",
+ "insight-platform-runtime",
+ "insight-platform-worker",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tonic",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "insight-platform-orchestrator"
 version = "0.1.0"
 dependencies = [

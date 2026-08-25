@@ -1,0 +1,32 @@
+{{- if lt (int .Values.replicas) 2 -}}
+{{- fail "Orchestration Worker requires at least two replicas" -}}
+{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) -}}
+{{- fail "image.digest must be an exact sha256 digest" -}}
+{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) -}}
+{{- fail "config.digest must be an exact sha256 digest" -}}
+{{- end -}}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.artifactTls.existingSecret) -}}
+{{- fail "config, database and Artifact mTLS inputs must be existing projected objects" -}}
+{{- end -}}
+{{- if or (empty .Values.artifactTls.keys.ca) (empty .Values.artifactTls.keys.certificate) (empty .Values.artifactTls.keys.privateKey) -}}
+{{- fail "Artifact mTLS projected keys are required" -}}
+{{- end -}}
+{{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.artifactNamespace) (empty .Values.networkPolicy.artifactPodSelector) -}}
+{{- fail "PostgreSQL CIDRs and the exact Artifact destination are required" -}}
+{{- end -}}
+{{- if or (lt (int .Values.networkPolicy.artifactPort) 1) (gt (int .Values.networkPolicy.artifactPort) 65535) -}}
+{{- fail "Artifact port must be in 1..65535" -}}
+{{- end -}}
+{{- if .Values.autoscaling.enabled -}}
+{{- if lt (int .Values.autoscaling.minReplicas) 2 -}}
+{{- fail "Orchestration Worker HPA requires at least two replicas" -}}
+{{- end -}}
+{{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) -}}
+{{- fail "Orchestration Worker HPA maximum must be at least its minimum" -}}
+{{- end -}}
+{{- if or (lt (int .Values.autoscaling.targetCPUUtilizationPercentage) 1) (gt (int .Values.autoscaling.targetCPUUtilizationPercentage) 100) -}}
+{{- fail "Orchestration Worker HPA CPU target must be in 1..100" -}}
+{{- end -}}
+{{- end -}}

@@ -811,6 +811,12 @@ pub struct RunningWorkCoordinator {
 }
 
 impl RunningWorkCoordinator {
+    pub fn is_finished(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+
     pub fn wake_handle(&self) -> CoordinatorWakeHandle {
         self.wake.clone()
     }

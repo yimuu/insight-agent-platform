@@ -55,8 +55,14 @@
 
 > 2026-08-25 implementation evidence：runtime新增production orchestration composition，明确把business claim/heartbeat连接与
 > critical-control Plan/RunValue/Skill读取、owner commit及Safety scanner连接分开，并用同一mTLS Artifact Scheduler client组合exact
-> Plan materializer、Capability/Model admission、durable Plan driver、lease-fenced executor和coordinator。独立binary、Helm角色及真实
-> process shutdown/kill fixture仍是下一批门禁，不能仅凭composition函数声明production部署完成。
+> Plan materializer、Capability/Model admission、durable Plan driver、lease-fenced executor和coordinator。独立binary和Helm角色已在
+> 后续批次补齐；真实process shutdown/kill fixture仍是下一门禁，不能仅凭composition函数声明production部署完成。
+
+> 2026-08-25 implementation evidence：新增独立`platform-orchestration-worker` binary与Helm role。进程使用digest-bound closed config、
+> Orchestration WorkerManifest、独立business/critical-control PostgreSQL pools、startup schema verification和mTLS Artifact Scheduler client；
+> SIGTERM同时drain coordinator/safety后关闭连接池，内部driver提前退出会使进程fail closed。Helm固定image digest、双副本/PDB/HPA、
+> restricted Pod、无ServiceAccount token、default-deny且只开放DNS/PostgreSQL/Artifact Data Worker。binary config test、clippy和Helm
+> positive/negative static boundary已通过；真实多进程kill/recovery和容量资格尚未完成。
 
 > CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer另已在fresh PostgreSQL 16 r113完成真实协调器L3链路（claim、durable park、独立safety到期唤醒、continuation claim、Return物化与Run终态）。Child/Task/Signal的独立进程kill/recovery L3、Timer kill-window、Signal认证ingress及Model/Capability/Context external leaf仍待完成。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |

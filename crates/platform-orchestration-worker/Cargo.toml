@@ -1,0 +1,27 @@
+[package]
+name = "insight-platform-orchestration-worker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "platform-orchestration-worker"
+path = "src/main.rs"
+
+[dependencies]
+insight-platform-artifact-rpc.workspace = true
+insight-platform-artifacts.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-orchestrator.workspace = true
+insight-platform-postgres.workspace = true
+insight-platform-runtime.workspace = true
+insight-platform-worker.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+url.workspace = true
+uuid.workspace = true

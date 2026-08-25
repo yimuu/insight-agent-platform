@@ -1,0 +1,142 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    insight.platform/workload-namespace: orchestration-worker
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "insight-platform-orchestration-worker.name" . }}
+  namespace: {{ .Values.namespace }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "insight-platform-orchestration-worker.name" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "insight-platform-orchestration-worker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ int .Values.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-orchestration-worker.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "insight-platform-orchestration-worker.labels" . | nindent 8 }}
+        insight.platform/workload-role: orchestration-worker
+    spec:
+      serviceAccountName: {{ include "insight-platform-orchestration-worker.name" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 150
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "insight-platform-orchestration-worker.labels" . | nindent 14 }}
+      containers:
+        - name: orchestration-worker
+          image: {{ include "insight-platform-orchestration-worker.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-orchestration-worker"]
+          env:
+            - {name: PLATFORM_ORCHESTRATION_WORKER_CONFIG, value: /etc/insight/config/orchestration-worker.json}
+            - {name: PLATFORM_ORCHESTRATION_WORKER_CONFIG_DIGEST, value: {{ .Values.config.digest | quote }}}
+            - name: PLATFORM_ORCHESTRATION_WORKER_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.database.existingSecret }}, key: {{ .Values.database.urlKey }}}}
+            - {name: PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CA_PATH, value: /etc/insight/artifact-tls/ca.pem}
+            - {name: PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CERT_PATH, value: /etc/insight/artifact-tls/client.pem}
+            - {name: PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_KEY_PATH, value: /etc/insight/artifact-tls/client-key.pem}
+          startupProbe:
+            exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: artifact-tls, mountPath: /etc/insight/artifact-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.config.existingConfigMap }}
+            items: [{key: {{ .Values.config.fileKey }}, path: orchestration-worker.json}]
+        - name: artifact-tls
+          secret:
+            secretName: {{ .Values.artifactTls.existingSecret }}
+            items:
+              - {key: {{ .Values.artifactTls.keys.ca }}, path: ca.pem}
+              - {key: {{ .Values.artifactTls.keys.certificate }}, path: client.pem}
+              - {key: {{ .Values.artifactTls.keys.privateKey }}, path: client-key.pem}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+{{- if .Values.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "insight-platform-orchestration-worker.name" . }}
+  namespace: {{ .Values.namespace }}
+spec:
+  minAvailable: {{ int .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-orchestration-worker.labels" . | nindent 6 }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "insight-platform-orchestration-worker.name" . }}
+  namespace: {{ .Values.namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "insight-platform-orchestration-worker.name" . }}
+  minReplicas: {{ int .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ int .Values.autoscaling.maxReplicas }}
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 300}
+    scaleUp: {stabilizationWindowSeconds: 30}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ int .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

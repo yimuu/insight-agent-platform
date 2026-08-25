@@ -60,6 +60,8 @@ jobs:
         run: bash scripts/check-platform-security-deployment.sh
       - name: Check Model Worker deployment boundary
         run: bash scripts/check-platform-model-worker-deployment.sh
+      - name: Check Orchestration Worker deployment boundary
+        run: bash scripts/check-platform-orchestration-worker-deployment.sh
       - name: Check Artifact Broker deployment boundary
         run: bash scripts/check-platform-artifact-deployment.sh
       - name: Check callback API deployment boundary
