@@ -2882,6 +2882,7 @@ version = "0.1.0"
 dependencies = [
  "async-nats",
  "async-trait",
+ "axum",
  "chrono",
  "futures",
  "insight-platform-contracts",
@@ -2889,6 +2890,7 @@ dependencies = [
  "insight-platform-jobs",
  "insight-platform-model-adapters",
  "insight-platform-models",
+ "insight-platform-observability",
  "insight-platform-postgres",
  "insight-platform-worker",
  "serde",
@@ -2920,6 +2922,11 @@ dependencies = [
 [[package]]
 name = "insight-platform-observability"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "tokio",
+ "tower",
+]
 
 [[package]]
 name = "insight-platform-orchestration-worker"

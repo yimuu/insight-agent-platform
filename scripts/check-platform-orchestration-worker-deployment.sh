@@ -38,7 +38,7 @@ for required in (
     "runtime.is_finished()",
     "runtime.shutdown()",
     "ProcessHttpMetrics",
-    "observability_router",
+    "process_observability_router",
 ):
     if required not in source:
         failures.append(f"Orchestration Worker production composition is missing {required}")

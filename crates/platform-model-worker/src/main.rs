@@ -22,6 +22,9 @@ use insight_platform_model_worker::{
     MODEL_WORKER_ROLE,
 };
 use insight_platform_models::ModelTurnLimits;
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_worker::LocalWorkerPools;
 use serde::Deserialize;
@@ -53,6 +56,7 @@ const MAX_INSTALLED_MODEL_ADAPTERS: usize = 8;
 #[serde(deny_unknown_fields)]
 struct ModelWorkerProcessConfig {
     schema_version: u32,
+    observability_listen_address: String,
     worker_manifest: WorkerManifest,
     installed_adapters: Vec<InstalledModelAdapter>,
     database_max_connections: u32,
@@ -115,6 +119,10 @@ impl ModelWorkerProcessConfig {
     }
 
     fn validate(&self) -> Result<(), ProcessError> {
+        let observability: std::net::SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         self.worker_manifest
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -125,6 +133,7 @@ impl ModelWorkerProcessConfig {
         let egress =
             Url::parse(&self.egress_endpoint).map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
+            || observability.port() == 0
             || self.worker_manifest.worker_role != MODEL_WORKER_ROLE
             || self.worker_manifest.work_class != WorkClass::Model
             || self.installed_adapters.len() != 2
@@ -365,6 +374,13 @@ async fn run() -> Result<(), ProcessError> {
         config.cancellation_driver_config()?,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("model-worker", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
+        .await
+        .map_err(|_| ProcessError::ObservabilityFailed)?;
 
     eprintln!(
         "platform-model-worker started generation={} manifest={}",
@@ -396,6 +412,15 @@ async fn run() -> Result<(), ProcessError> {
             .map(|_| ())
             .map_err(|_| ProcessError::WorkerFailed)
     });
+    let http_cancellation = cancellation.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    components.spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(http_cancellation.cancelled_owned())
+            .await
+            .map_err(|_| ProcessError::ObservabilityFailed)
+    });
+    metrics.mark_ready();
     tokio::select! {
         signal = shutdown_signal() => {
             cancellation.cancel();
@@ -556,6 +581,7 @@ enum ProcessError {
     SignalUnavailable,
     WorkerFailed,
     WorkerExitedUnexpectedly,
+    ObservabilityFailed,
 }
 
 impl fmt::Display for ProcessError {
@@ -574,6 +600,7 @@ impl fmt::Display for ProcessError {
             Self::WorkerExitedUnexpectedly => {
                 formatter.write_str("Model Worker exited unexpectedly")
             }
+            Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }
     }
 }
@@ -604,6 +631,7 @@ mod tests {
         let manifest_digest = manifest.canonical_digest().unwrap();
         ModelWorkerProcessConfig {
             schema_version: 1,
+            observability_listen_address: "127.0.0.1:9090".to_owned(),
             worker_manifest: manifest,
             installed_adapters: vec![
                 InstalledModelAdapter {

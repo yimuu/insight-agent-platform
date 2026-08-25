@@ -1,19 +1,14 @@
 //! Deployable durable orchestration process for the clean-cut Platform v1 candidate.
 
-use axum::{
-    extract::Extension,
-    http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
-    routing::get,
-    Router,
-};
 use insight_platform_artifact_rpc::{ArtifactInternalRpcLimits, ArtifactSchedulerGrpcClient};
 use insight_platform_artifacts::MAX_TYPED_PLAN_ARTIFACT_BYTES;
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
     ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
-use insight_platform_observability::ProcessHttpMetrics;
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_orchestrator::{ExpressionLimits, PlanLimits};
 use insight_platform_postgres::{repository::SafetyScanShard, verify_schema};
 use insight_platform_runtime::postgres::{
@@ -40,7 +35,6 @@ const ARTIFACT_CERT_PATH_ENV: &str = "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CER
 const ARTIFACT_KEY_PATH_ENV: &str = "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
-const HTTP_OPERATIONS: &[&str] = &["live", "ready", "metrics", "other"];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -303,14 +297,14 @@ async fn run() -> Result<(), ProcessError> {
     )
     .map_err(|_| ProcessError::RuntimeFailed)?;
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("scheduler-recovery", HTTP_OPERATIONS)
+        ProcessHttpMetrics::install("scheduler-recovery", PROCESS_OBSERVABILITY_OPERATIONS)
             .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityFailed)?;
     let (http_shutdown, http_shutdown_receiver) = tokio::sync::oneshot::channel();
-    let router = observability_router(Arc::clone(&metrics));
+    let router = process_observability_router(Arc::clone(&metrics));
     let mut http = tokio::spawn(async move {
         axum::serve(listener, router)
             .with_graceful_shutdown(async move {
@@ -354,46 +348,6 @@ async fn run() -> Result<(), ProcessError> {
             }
         }
     }
-}
-
-fn observability_router(metrics: Arc<ProcessHttpMetrics>) -> Router {
-    Router::new()
-        .route("/livez", get(live))
-        .route("/readyz", get(ready))
-        .route("/metrics", get(metrics_response))
-        .layer(Extension(metrics))
-}
-
-async fn live() -> Response {
-    no_store(StatusCode::OK, "live")
-}
-
-async fn ready(Extension(metrics): Extension<Arc<ProcessHttpMetrics>>) -> Response {
-    if metrics.is_ready() {
-        no_store(StatusCode::OK, "ready")
-    } else {
-        no_store(StatusCode::SERVICE_UNAVAILABLE, "not ready")
-    }
-}
-
-async fn metrics_response(Extension(metrics): Extension<Arc<ProcessHttpMetrics>>) -> Response {
-    let mut response = metrics.render_prometheus().into_response();
-    response.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
-    );
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
-}
-
-fn no_store(status: StatusCode, body: &'static str) -> Response {
-    let mut response = (status, body).into_response();
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
 }
 
 async fn connect_artifact(
@@ -629,17 +583,5 @@ mod tests {
             unbounded.validate(),
             Err(ProcessError::InvalidConfiguration)
         );
-    }
-
-    #[tokio::test]
-    async fn observability_is_bounded_and_readiness_is_explicit() {
-        let metrics =
-            Arc::new(ProcessHttpMetrics::install("scheduler-recovery", HTTP_OPERATIONS).unwrap());
-        let response = ready(Extension(Arc::clone(&metrics))).await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        metrics.mark_ready();
-        let response = metrics_response(Extension(metrics)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
     }
 }

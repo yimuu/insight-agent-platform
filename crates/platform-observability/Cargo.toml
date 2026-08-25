@@ -8,3 +8,10 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+axum.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tower.workspace = true
