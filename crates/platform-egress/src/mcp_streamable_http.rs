@@ -54,6 +54,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
 
 pub const MAX_INSTALLED_MCP_HTTP_ENDPOINTS: usize = 4_096;
+pub const MAX_MCP_TRUST_BUNDLE_BYTES: usize = 262_144;
 pub const MAX_MCP_HTTP_REQUEST_BYTES_HARD: u32 = 1_048_576;
 pub const MAX_MCP_HTTP_RESPONSE_BYTES_HARD: u32 = 16_777_216;
 pub const MAX_MCP_HTTP_HEADERS_HARD: u16 = 256;
@@ -859,6 +860,7 @@ pub struct InstalledMcpStreamableHttpEndpoint {
     pub trust_policy: ExactVersionRef,
     pub auth_policy: ExactVersionRef,
     pub token_credential_purpose: SecretPurpose,
+    pub trusted_root_pem: String,
 }
 
 impl InstalledMcpStreamableHttpEndpoint {
@@ -875,7 +877,14 @@ impl InstalledMcpStreamableHttpEndpoint {
             || self.endpoint.canonical_digest().as_ref() != Ok(&self.endpoint_identity_digest)
             || parse_endpoint_host(&self.endpoint.host).is_err()
             || !valid_mcp_path(&self.endpoint.base_path)
+            || self.trusted_root_pem.is_empty()
+            || self.trusted_root_pem.len() > MAX_MCP_TRUST_BUNDLE_BYTES
         {
+            return Err(EgressConfigurationError::InvalidEndpoint);
+        }
+        let roots = reqwest::Certificate::from_pem_bundle(self.trusted_root_pem.as_bytes())
+            .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
+        if roots.is_empty() {
             return Err(EgressConfigurationError::InvalidEndpoint);
         }
         let policies = [
@@ -1073,6 +1082,7 @@ struct PinnedMcpHttpRequest {
     allow_elicitation_request: bool,
     maximum_headers: usize,
     external_identity_digest: Sha256Digest,
+    trusted_root_pem: String,
 }
 
 struct PinnedMcpHttpResponse {
@@ -1090,6 +1100,7 @@ struct PinnedMcpSseRequest {
     total_timeout: Duration,
     maximum_headers: usize,
     external_identity_digest: Sha256Digest,
+    trusted_root_pem: String,
 }
 
 struct PinnedMcpSseResponse {
@@ -1122,6 +1133,11 @@ impl PinnedMcpHttpTransport for ReqwestPinnedMcpHttpTransport {
         &self,
         request: PinnedMcpHttpRequest,
     ) -> Result<PinnedMcpHttpResponse, McpTransportFailure> {
+        let roots = reqwest::Certificate::from_pem_bundle(request.trusted_root_pem.as_bytes())
+            .map_err(|_| rejected("mcp_egress_trust_bundle_invalid"))?;
+        if roots.is_empty() {
+            return Err(rejected("mcp_egress_trust_bundle_invalid"));
+        }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
@@ -1130,6 +1146,7 @@ impl PinnedMcpHttpTransport for ReqwestPinnedMcpHttpTransport {
             .connect_timeout(request.timeout)
             .timeout(request.timeout)
             .pool_max_idle_per_host(0)
+            .tls_certs_only(roots)
             .resolve_to_addrs(&request.dns_host, &request.addresses)
             .build()
             .map_err(|_| rejected("mcp_egress_client_build_failed"))?;
@@ -1262,6 +1279,11 @@ impl PinnedMcpHttpTransport for ReqwestPinnedMcpHttpTransport {
         &self,
         request: PinnedMcpSseRequest,
     ) -> Result<PinnedMcpSseResponse, McpTransportFailure> {
+        let roots = reqwest::Certificate::from_pem_bundle(request.trusted_root_pem.as_bytes())
+            .map_err(|_| rejected("mcp_egress_subscription_trust_bundle_invalid"))?;
+        if roots.is_empty() {
+            return Err(rejected("mcp_egress_subscription_trust_bundle_invalid"));
+        }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
@@ -1270,6 +1292,7 @@ impl PinnedMcpHttpTransport for ReqwestPinnedMcpHttpTransport {
             .connect_timeout(request.connect_timeout)
             .timeout(request.total_timeout)
             .pool_max_idle_per_host(0)
+            .tls_certs_only(roots)
             .resolve_to_addrs(&request.dns_host, &request.addresses)
             .build()
             .map_err(|_| rejected("mcp_egress_subscription_client_build_failed"))?;
@@ -1329,6 +1352,8 @@ pub struct ReqwestMcpStreamableHttpConnector {
     remote_tasks: Arc<AeadMcpRemoteTaskStateCodec>,
     limits: McpStreamableHttpEgressLimits,
     permits: Arc<Semaphore>,
+    #[cfg(test)]
+    allow_loopback_for_protocol_fixture: bool,
 }
 
 impl ReqwestMcpStreamableHttpConnector {
@@ -1366,7 +1391,26 @@ impl ReqwestMcpStreamableHttpConnector {
             remote_tasks,
             limits,
             permits: Arc::new(Semaphore::new(limits.maximum_in_flight)),
+            #[cfg(test)]
+            allow_loopback_for_protocol_fixture: false,
         })
+    }
+
+    #[cfg(test)]
+    fn allow_loopback_for_protocol_fixture(mut self) -> Self {
+        self.allow_loopback_for_protocol_fixture = true;
+        self
+    }
+
+    fn destination_allowed(&self, address: &SocketAddr) -> bool {
+        if is_public_destination_ip(address.ip()) {
+            return true;
+        }
+        #[cfg(test)]
+        if self.allow_loopback_for_protocol_fixture && address.ip().is_loopback() {
+            return true;
+        }
+        false
     }
 
     async fn acquire(&self) -> Result<OwnedSemaphorePermit, McpTransportFailure> {
@@ -1409,7 +1453,7 @@ impl ReqwestMcpStreamableHttpConnector {
         if addresses.is_empty()
             || addresses.len() > self.limits.maximum_dns_answers
             || addresses.iter().any(|address| {
-                address.port() != endpoint.port || !is_public_destination_ip(address.ip())
+                address.port() != endpoint.port || !self.destination_allowed(address)
             })
         {
             return Err(rejected("mcp_egress_destination_denied"));
@@ -1546,6 +1590,7 @@ impl ReqwestMcpStreamableHttpConnector {
                 expected_response_id: expected_response_id.map(str::to_owned),
                 allow_elicitation_request,
                 external_identity_digest,
+                trusted_root_pem: entry.trusted_root_pem.clone(),
             })
             .await
     }
@@ -2913,6 +2958,7 @@ impl ReqwestMcpStreamableHttpSubscriptionConnector {
                 expected_response_id: expected_response_id.map(str::to_owned),
                 allow_elicitation_request: false,
                 external_identity_digest,
+                trusted_root_pem: entry.trusted_root_pem.clone(),
             })
             .await
     }
@@ -3240,6 +3286,7 @@ impl ReqwestMcpSubscriptionActivation {
                 total_timeout: remaining,
                 maximum_headers: self.request.maximum_headers as usize,
                 external_identity_digest: self.external_identity_digest.clone(),
+                trusted_root_pem: self.entry.trusted_root_pem.clone(),
             })
             .await?;
         if response.status == StatusCode::UNAUTHORIZED || response.status == StatusCode::FORBIDDEN {
@@ -4614,10 +4661,17 @@ mod tests {
     use super::*;
     use insight_platform_context::ContextSubscriptionRefreshCause;
     use insight_platform_contracts::{SecretResolutionPolicy, MCP_PROTOCOL_BASELINE};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair, SanType,
+    };
+    use rustls::{pki_types::PrivatePkcs8KeyDer, ServerConfig};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
     };
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio_rustls::TlsAcceptor;
 
     fn digest(character: char) -> Sha256Digest {
         format!("sha256:{}", character.to_string().repeat(64))
@@ -4640,6 +4694,145 @@ mod tests {
 
     fn exact_deployment(kind: ResourceKind, suffix: u16, character: char) -> ExactDeploymentRef {
         ExactDeploymentRef::new(id(kind, suffix), digest(character)).unwrap()
+    }
+
+    fn trusted_root_pem() -> String {
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        CertifiedIssuer::self_signed(params, KeyPair::generate().unwrap())
+            .unwrap()
+            .pem()
+    }
+
+    async fn start_resource_refresh_https_fixture(
+        expected_requests: usize,
+    ) -> (
+        SocketAddr,
+        String,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut ca_parameters = CertificateParams::default();
+        ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = CertifiedIssuer::self_signed(ca_parameters, KeyPair::generate().unwrap()).unwrap();
+        let mut server_parameters = CertificateParams::default();
+        server_parameters.subject_alt_names = vec![SanType::DnsName(
+            "mcp.example.test".try_into().unwrap(),
+        )];
+        server_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let server_key = KeyPair::generate().unwrap();
+        let server_certificate = server_parameters.signed_by(&server_key, &ca).unwrap();
+        let tls = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![server_certificate.der().clone()],
+                    PrivatePkcs8KeyDer::from(server_key.serialize_der()).into(),
+                )
+                .unwrap(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let task = tokio::spawn(async move {
+            for _ in 0..expected_requests {
+                let (stream, _) = listener.accept().await.unwrap();
+                let Ok(mut stream) = TlsAcceptor::from(Arc::clone(&tls)).accept(stream).await else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0_u8; 1_024];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(position) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break position + 4;
+                    }
+                };
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                assert!(headers.starts_with("POST /mcp HTTP/1.1\r\n"), "{headers}");
+                let lower_headers = headers.to_ascii_lowercase();
+                assert!(lower_headers.contains("host: mcp.example.test:"));
+                assert!(lower_headers.contains("authorization: bearer mcp-token-canary"));
+                let content_length = lower_headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                while request.len() - header_end < content_length {
+                    let mut chunk = [0_u8; 1_024];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let body: Value = serde_json::from_slice(
+                    &request[header_end..header_end + content_length],
+                )
+                .unwrap();
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                let method = body.get("method").and_then(Value::as_str).unwrap();
+                let id = body.get("id").cloned();
+                let (status, session, response_body) = match method {
+                    "initialize" => (
+                        "200 OK",
+                        Some("refresh-session-canary"),
+                        canonical_json(&serde_json::json!({
+                            "id": id,
+                            "jsonrpc": "2.0",
+                            "result": {
+                                "capabilities": {"resources": {}, "tools": {}},
+                                "protocolVersion": MCP_PROTOCOL_BASELINE,
+                                "serverInfo": {"name": "tls-fixture", "version": "1"}
+                            }
+                        }))
+                        .unwrap(),
+                    ),
+                    "notifications/initialized" => ("202 Accepted", None, Vec::new()),
+                    "resources/list" => (
+                        "200 OK",
+                        None,
+                        canonical_json(&serde_json::json!({
+                            "id": id,
+                            "jsonrpc": "2.0",
+                            "result": {"resources": [
+                                {"name": "other", "uri": "mcp://untrusted.example/other"},
+                                {"name": "root", "uri": "mcp://catalog.example/items/42"}
+                            ]}
+                        }))
+                        .unwrap(),
+                    ),
+                    "resources/read" => (
+                        "200 OK",
+                        None,
+                        canonical_json(&serde_json::json!({
+                            "id": id,
+                            "jsonrpc": "2.0",
+                            "result": {"contents": [{
+                                "mimeType": "text/plain",
+                                "text": "TLS body canary",
+                                "uri": "mcp://catalog.example/items/42"
+                            }]}
+                        }))
+                        .unwrap(),
+                    ),
+                    _ => panic!("unexpected MCP method {method}"),
+                };
+                let session_header = session
+                    .map(|value| format!("mcp-session-id: {value}\r\n"))
+                    .unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{session_header}content-length: {}\r\nconnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(&response_body).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        (address, ca.pem(), calls, task)
     }
 
     struct FixtureSecrets {
@@ -4910,6 +5103,7 @@ mod tests {
                 trust_policy: trust_policy.clone(),
                 auth_policy: auth_policy.clone(),
                 token_credential_purpose: purpose,
+                trusted_root_pem: trusted_root_pem(),
             },
             request: McpStreamableHttpRequest {
                 tenant_id: id(ResourceKind::Tenant, 10),
@@ -5300,6 +5494,58 @@ mod tests {
             !String::from_utf8_lossy(&request.body).contains("untrusted.example/other")
                 || String::from_utf8_lossy(&request.body).contains("resources/list")
         }));
+    }
+
+    #[tokio::test]
+    async fn resource_refresh_https_uses_only_the_installed_trust_bundle() {
+        let (address, root_pem, calls, server) = start_resource_refresh_https_fixture(4).await;
+        let mut fixture = fixture();
+        fixture.entry.endpoint.host = "mcp.example.test".to_owned();
+        fixture.entry.endpoint.port = address.port();
+        fixture.entry.endpoint_identity_digest = fixture.entry.endpoint.canonical_digest().unwrap();
+        fixture.entry.trusted_root_pem = root_pem;
+        fixture.request.endpoint = fixture.entry.endpoint.clone();
+        fixture.request.endpoint_identity_digest = fixture.entry.endpoint_identity_digest.clone();
+        let request = resource_refresh_request(&fixture);
+        let connector = ReqwestMcpStreamableHttpConnector::new(
+            InstalledMcpStreamableHttpEndpointCatalog::new(vec![fixture.entry.clone()]).unwrap(),
+            secrets(),
+            Arc::new(FixtureDns {
+                addresses: vec![address],
+            }),
+            remote_task_codec("tls-fixture-key", '7', 7),
+            McpStreamableHttpEgressLimits::default(),
+        )
+        .unwrap()
+        .allow_loopback_for_protocol_fixture();
+        let evidence = connector.refresh_resources(request).await.unwrap();
+        assert_eq!(evidence.resource_count, 1);
+        assert_eq!(evidence.item_count, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        server.await.unwrap();
+
+        let (address, _server_root, calls, server) = start_resource_refresh_https_fixture(1).await;
+        let mut wrong = fixture;
+        wrong.entry.endpoint.port = address.port();
+        wrong.entry.endpoint_identity_digest = wrong.entry.endpoint.canonical_digest().unwrap();
+        wrong.entry.trusted_root_pem = trusted_root_pem();
+        wrong.request.endpoint = wrong.entry.endpoint.clone();
+        wrong.request.endpoint_identity_digest = wrong.entry.endpoint_identity_digest.clone();
+        let request = resource_refresh_request(&wrong);
+        let connector = ReqwestMcpStreamableHttpConnector::new(
+            InstalledMcpStreamableHttpEndpointCatalog::new(vec![wrong.entry.clone()]).unwrap(),
+            secrets(),
+            Arc::new(FixtureDns {
+                addresses: vec![address],
+            }),
+            remote_task_codec("wrong-tls-fixture-key", '8', 8),
+            McpStreamableHttpEgressLimits::default(),
+        )
+        .unwrap()
+        .allow_loopback_for_protocol_fixture();
+        assert!(connector.refresh_resources(request).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        server.await.unwrap();
     }
 
     #[tokio::test]

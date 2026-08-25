@@ -90,6 +90,12 @@
 > 窗口，但Egress仍是测试进程内service，且尚未接真实Streamable HTTP fake server；独立Egress OS进程、真实list/read wire、pre-dispatch零I/O
 > 与pool saturation矩阵仍待完成，因此不把完整subscription L3标为关闭。
 
+> 2026-08-26 implementation evidence：r280实现CR-195。`InstalledMcpStreamableHttpEndpoint`现在要求不超过256 KiB的非空可解析PEM
+> trust bundle；POST与subscription SSE均以reqwest `tls_certs_only`构造每次连接，禁用内置/系统默认根，同时继续按canonical hostname和固定DNS
+> 地址握手。真实TLS socket fixture使用独立CA/SAN跑通initialize、initialized、`resources/list`与exact-root `resources/read`，换成另一有效CA时
+> TLS失败且HTTP业务request计数为零。Egress/Broker全套测试、strict Clippy与合同检查通过。该证据关闭CR-195 L1与真实HTTPS last-hop L3切片，
+> 但尚未把Egress放入r279的独立OS进程恢复矩阵。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

@@ -430,6 +430,10 @@ subscription recovery batch未收敛到仓储64项上限导致production Worker�
 list/read也未进入该多进程fixture；因此本证据关闭Host/Context crash-window切片，但不替代独立Egress进程、真实fake MCP server、wrong identity/
 closure零I/O、pool saturation及L4 rollout证据，完整subscription L3状态保持未完成。
 
+r280关闭CR-195的L1与HTTPS wire L3切片：installed MCP endpoint对显式PEM bundle执行非空、256 KiB、证书解析与startup config反序列化校验；
+reqwest POST/SSE只装载该bundle而不合并默认根。独立CA/SAN真实TLS fixture完整执行initialize/initialized/list/read，错CA在HTTP request计数为零
+时失败。Egress/Broker全套与strict Clippy通过；独立Egress OS进程、L4 bundle rollout drift/readiness仍是后续门禁。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

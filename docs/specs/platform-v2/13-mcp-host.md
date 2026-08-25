@@ -242,4 +242,8 @@ Worker并以expired lease恢复；第二次response后暂停Job terminal commit�
 一个completed Event。Egress Broker在该fixture中通过真实mTLS运行于测试进程内，尚不是独立OS进程，且未连接真实Streamable HTTP fake server；
 因此只关闭Host/Context process recovery切片，完整subscription protocol L3仍须补齐独立Egress、真实list/read wire及pre-dispatch零I/O矩阵。
 
+r280实现CR-195显式trust material：installed endpoint拒绝空、超限或不可解析PEM，真实POST/SSE client用`tls_certs_only`禁用默认根。
+真实TLS socket以独立CA和canonical SAN完成full reconcile的四步wire；错CA在HTTP业务bytes计数为零时失败。该证据关闭MCP HTTPS trust last-hop，
+但独立Egress OS进程与r279 crash-window的组合fixture仍待完成。
+
 首版remote Streamable HTTP合同无未决设计问题。

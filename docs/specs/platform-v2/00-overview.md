@@ -335,6 +335,9 @@ ContextQuery/Job owner合同。fresh PostgreSQL 16 r240进一步通过错digest�
 Egress尚运行在测试进程内且未接真实Streamable HTTP fake server，因此该证据只关闭Host/Context进程恢复切片，不改变完整subscription L3、
 隔舱容量与L4～L6仍未完成的边界。
 
+r280随后实现CR-195：MCP installed endpoint携带显式bounded PEM trust bundle，实际POST/SSE client只信任该bundle；独立CA/SAN真实TLS
+fixture跑通full reconcile list/read，错CA在零HTTP业务request时失败。该证据不等于Egress已进入独立OS进程恢复矩阵，也不推进L4～L6状态。
+
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
 storage与audit closure全部由服务端拥有；upload target是唯一显式Secret-bearing响应例外。Public Gateway不取得storage authority，Artifact Gateway
 不信任自由principal header，两者以exact audience mTLS连接并由Artifact Gateway从PostgreSQL重绑定current principal。
