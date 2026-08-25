@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-195 |
+| 状态 | Accepted / CR-196 |
 | 日期 | 2026-08-26 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -22,6 +22,9 @@
 
 > CR-195 impact：MCP Streamable HTTP L1校验installed trust bundle的PEM/size/config digest及exact Policy匹配；L3以独立CA/SAN和真实TLS
 > socket证明只接受显式bundle、默认trust store与错bundle均在HTTP业务bytes前失败；L4验证rollout中bundle/config drift使readiness关闭。
+
+> CR-196 impact：OAuth verification/startup binding增加exact Trust Policy与bounded token-endpoint PEM roots。L1覆盖PEM parse/size、Auth/Trust/
+> endpoint/config digest漂移；L3以独立CA/SAN真实token endpoint证明default-root与错bundle在authorization code bytes发送前失败；L4覆盖rollout drift。
 
 ## 1. 决策摘要
 

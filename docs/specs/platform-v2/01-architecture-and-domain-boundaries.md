@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-195 |
+| 状态 | Accepted / CR-196 |
 | 日期 | 2026-08-26 |
 | 依赖 | [`00-overview.md`](00-overview.md) |
 | 直接下游 | 02、03、04、05、18 |
@@ -15,6 +15,7 @@ Sandbox。平台不采用
 
 CR-195明确Egress process-installed catalog是exact Deployment/Policy到可执行TLS trust material的唯一运行时适配边界；普通Worker、MCP Host
 和调用方不能提供CA bundle或触发默认trust store。该material是启动配置，不是业务current state，也不改变Deployment owner。
+CR-196确认该边界同时拥有OAuth token endpoint的trust material；Callback/Host只发送credential-free typed contract，不成为TLS authority。
 
 ```text
 Control Plane

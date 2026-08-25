@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-195 |
+| 状态 | Accepted / CR-196 |
 | 日期 | 2026-08-26 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
@@ -21,6 +21,9 @@
 > CR-195：MCP Streamable HTTP同样禁止默认trust store。Egress startup catalog必须把exact Trust Policy编译为bounded显式PEM trust
 > bundle并纳入配置digest；每次请求以exact Deployment/Policy refs选择该entry，TLS只信任该bundle并校验canonical endpoint hostname。
 > bundle缺失、PEM无效、entry漂移或调用方尝试覆盖trust material时，必须在HTTP dispatch前fail closed。
+
+> CR-196：OAuth token exchange也是remote HTTPS adapter。Egress OAuth installed binding必须把MCP Deployment closure的exact Trust Policy
+> 编译为bounded PEM roots并绑定exact Auth Policy/profile/token endpoint；不得使用系统默认CA，也不得由Callback/RPC提供trust正文。
 
 ## 1. 决策摘要
 
@@ -226,6 +229,8 @@ redirect重验、request/response限制和sanitized error mapping。普通Worker
 
 首版remote HTTPS adapter不得读取操作系统默认CA集合来补全缺失Trust Policy。process-installed entry中的显式trust bundle是唯一证书根输入，
 受bounded parse、startup config digest和exact Deployment/Policy匹配保护；运行时request/protobuf不携带PEM正文。
+该要求覆盖Capability HTTP、Remote Context、MCP Streamable HTTP及OAuth token exchange；OAuth本地JWKS验证材料与TLS roots职责不同但必须在同一
+installed binding中分别exact冻结。
 
 ## 8. Code 与Skill trust
 

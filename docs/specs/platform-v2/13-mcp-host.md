@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-195 |
+| 状态 | Accepted / CR-196 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
@@ -15,6 +15,9 @@
 
 > CR-195 impact：MCP Egress installed endpoint除exact Policy refs外必须持有bounded显式PEM trust bundle；实际HTTPS client仅信任该bundle并
 > 校验canonical endpoint hostname，不使用默认trust store。Host/Context request仍不携带CA/pin正文，错entry在HTTP bytes发送前拒绝。
+
+> CR-196 impact：OAuth token endpoint复用Deployment closure的exact Trust Policy但由OAuth installed verification binding携带独立bounded
+> PEM roots；token client仅信任该bundle。Auth Policy/profile/JWKS/Trust Policy/token endpoint任一漂移均在消费authorization code前拒绝。
 
 ## 1. 决策摘要
 
@@ -139,6 +142,8 @@ AEAD ciphertext、digest、reference identity和expiry，不保存raw code、ver
 
 callback first-winner原子更新AuthorizationBinding、Receipt、Event和Outbox。重放、state/tenant/provider mismatch、过期、
 redirect漂移或scope扩大全部fail closed。token refresh/revoke由Egress Broker执行，Host只看sanitized evidence。
+OAuth installed binding同时冻结exact Auth Policy/profile、local verification JWKS、Deployment Trust Policy和token endpoint PEM roots；TLS client
+关闭默认根信任、redirect和proxy。Callback/Host contract不携带PEM，缺失/无效/错Policy bundle在发送token request bytes前失败。
 
 ## 10. 所有权与持久化
 

@@ -1,10 +1,28 @@
-# Platform v2 00～18 Cross-review（CR-195）
+# Platform v2 00～18 Cross-review（CR-196）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-195 Accepted |
+| 状态 | Closed / CR-196 Accepted |
 | 日期 | 2026-08-26 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-195 MCP explicit TLS trust feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-196 OAuth token TLS trust feedback |
+
+### CR-196 OAuth token endpoint explicit TLS trust impact review
+
+真实OAuth Callback/token exchange准备确认CR-195只把MCP Streamable HTTP endpoint的exact Trust Policy编译为可执行PEM roots；OAuth token
+reqwest client仍使用系统默认CA。04已禁止任何首版remote HTTPS adapter以默认trust补全closure，因此machine/runtime合同不一致。CR-196要求
+OAuth installed verification binding同时冻结Deployment closure exact Trust Policy及bounded PEM roots，并绑定exact Auth Policy/profile/token endpoint。
+
+| Spec | CR-196结论 |
+|---|---|
+| 00～02 | clean `/v1`、Resource/Deployment owner不变；OAuth startup binding增加content-addressed trust material |
+| 03、05～12、14～17 | Job/Run/Task/Receipt/Callback/API/Sandbox/Artifact/Model schema与事务不变；调用方不携带PEM |
+| 04 | OAuth token adapter只使用installed roots与canonical hostname；default roots、缺失/无效PEM、exact ref漂移均dispatch前拒绝 |
+| 13 | OAuth binding分别冻结local JWT verification JWKS与token endpoint TLS roots，并重验Auth/Trust/endpoint闭包 |
+| 18 | L1/L3/L4增加OAuth roots parse/digest、独立CA/SAN、zero-token-bytes负向及rollout config drift矩阵 |
+
+00～18已按state ownership、IDs/schema、errors、transactions、events、permissions、capacity、failure recovery与fixtures全量复核。
+CR-196不新增table、aggregate、route、role、WorkClass、Secret路径或第二current-state authority；PEM只存在于GitOps/startup config与Egress
+bounded memory，不进入Callback/Host/RPC/Event/log。00、01、02、04、13、18恢复Accepted / CR-196，Implementation Authorization恢复有效。
 
 ### CR-195 MCP explicit TLS trust-material impact review
 

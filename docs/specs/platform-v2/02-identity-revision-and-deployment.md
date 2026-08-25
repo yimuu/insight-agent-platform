@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-195 |
+| 状态 | Accepted / CR-196 |
 | 日期 | 2026-08-26 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
@@ -25,6 +25,10 @@ RemoteSearch还冻结canonical endpoint和exact Network/TLS/Trust Policy。只�
 CR-195进一步要求首版MCP Streamable HTTP的process-installed endpoint entry把exact Trust Policy编译为bounded显式PEM trust bundle；entry与
 startup config都必须content-addressed，并与exact MCP Deployment、endpoint、Network/TLS/Trust/Auth Policy refs一起校验。该运行时material
 不回写Deployment、不成为第二active binding，也不能由RPC调用方覆盖。
+
+CR-196把OAuth token endpoint纳入同一规则：OAuth process-installed verification binding除exact Auth Policy/profile/JWKS外，必须冻结
+Deployment closure的exact Trust Policy及其bounded PEM roots。token endpoint变化、Trust Policy漂移或bundle变化都产生新的startup config
+digest；Callback RPC不携带或覆盖trust正文。
 
 这里的“可运行”包含可被未来Run选择/解析的定义绑定，不等于启动独立进程。Skill Deployment冻结一个exact Skill Revision及其
 requirement resolution；Policy Deployment冻结一个exact Policy Revision及其适用环境/资格闭包；Sandbox Deployment冻结exact

@@ -2,11 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-195 |
+| 状态 | Accepted / CR-196 |
 | 日期 | 2026-08-26 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
+
+> 2026-08-26 implementation feedback（CR-196）：真实OAuth token exchange审计发现CR-195只为MCP Streamable HTTP endpoint安装显式
+> trust bundle，`ReqwestMcpOAuthCredentialBroker`仍读取默认CA集合。CR-196将同一exact Trust Policy编译结果加入OAuth verification/startup
+> binding，绑定auth profile与token endpoint；HTTPS client只使用该bounded PEM bundle和canonical hostname。无新业务表、Resource字段、
+> public route、Secret路径或current-state authority。
 
 > 2026-08-26 implementation feedback（CR-191）：CR-190要求subscription refresh/reconcile创建`Context` Job且不新增aggregate，
 > 但03 closed owner registry只允许`ContextQuery/ContextDataset`，没有合法owner可绑定已有MCP subscription。CR-191增加唯一
