@@ -345,6 +345,11 @@ provider catalog、bounded deletion backend、maintenance worker与HTTP listener
 精确Prometheus source访问该端口，普通业务caller仍无Maintenance ingress。至此17个ComponentRole workload pool均具备shared HTTP
 readiness/metrics接线；该证据仍不包含真实scrape、业务SLI、dashboard/alerts或L4 enforcement。
 
+r263新增独立observability chart，为现有process/HTTP series提供一个role-filtered dashboard及telemetry missing、持续NotReady、有效流量下
+failure ratio/p95 latency四条symptom-first alert。全部alert有stable owner/severity、HTTPS runbook URL和checked-in逐alert步骤；静态门禁拒绝
+高基数/Secret label、非法threshold、非HTTPS runbook及缺失discovery label。该证据不发明尚不存在的queue/dependency/recovery/permit series，
+也不替代Prometheus production scrape、alert delivery或L4演练。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

@@ -35,6 +35,7 @@ Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact
 | Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；各owner按Run冻结exact Policy/Revision重算并拒绝伪造结果 | L1/L2 owner闭合，production Model/Capability/Context dispatch已在对应L3链路重验exact binding |
 | 已有部署 | 11个chart覆盖全部15个ComponentRole、17个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
 | HTTP observability | shared bounded-label owner；全部17个ComponentRole workload pool及Sandbox两种process attestor具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency | process wiring与静态部署闭合，不代表真实scrape或完整业务observability |
+| Dashboard/alerts | 独立chart提供role-filtered process/HTTP dashboard、4条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代业务SLI或真实alert delivery |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator；live topology/workload preflight对照Candidate/Capacity并拒绝rollout、image、config、identity、安全和容量漂移 | 可验证证据形状与preflight行为，不证明任一外部门禁通过 |
 | Runbooks | production dependency recovery与GitOps clean-cut手册已提交 | 操作准备完成，execution evidence pending |
@@ -162,7 +163,8 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
    但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
 2. 全部17个ComponentRole workload pool及Sandbox process attestor已有shared process metrics；仍缺低基数queue/dependency/recovery业务指标、
    完整trace propagation/redaction门禁和production scrape证据。
-3. 全部17个pool及Sandbox process attestor已有ServiceMonitor；全平台尚无dashboard、symptom-first PrometheusRule与逐alert runbook。
+3. 全部17个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP dashboard、四条symptom-first PrometheusRule及逐alert runbook已闭合，
+   但queue/dependency/recovery/permit业务series对应的panel/alert仍待指标owner接线后补齐。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
    mTLS与live identity enforcement仍须production-equivalent L4验证。
 5. 没有可重现的signed image/SBOM/provenance build pipeline与GitOps environment repository输入。

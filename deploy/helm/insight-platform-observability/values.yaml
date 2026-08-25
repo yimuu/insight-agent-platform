@@ -1,0 +1,18 @@
+namespace: platform-monitoring
+
+dashboard:
+  enabled: true
+  labels: {grafana_dashboard: "1"}
+
+alerts:
+  enabled: true
+  labels: {prometheus: platform}
+  evaluationWindow: 5m
+  notReadyFor: 10m
+  scrapeMissingFor: 10m
+  errorRatioFor: 10m
+  latencyFor: 15m
+  minimumRequestRate: 0.1
+  maximumFailureRatio: 0.05
+  maximumP95Seconds: 2
+  runbookBaseUrl: https://runbooks.insight.platform/platform-v2-observability

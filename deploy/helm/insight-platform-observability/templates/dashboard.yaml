@@ -1,0 +1,24 @@
+{{- if .Values.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: insight-platform-runtime-dashboard
+  namespace: {{ .Values.namespace }}
+  labels: {{ toYaml .Values.dashboard.labels | nindent 4 }}
+data:
+  insight-platform-runtime.json: |-
+    {
+      "schemaVersion": 39,
+      "title": "Insight Platform Runtime Symptoms",
+      "uid": "insight-platform-runtime",
+      "tags": ["insight-platform", "runtime"],
+      "templating": {"list": [{"name": "component_role", "type": "query", "query": "label_values(insight_platform_process_build_info, component_role)", "includeAll": true, "multi": true}]},
+      "time": {"from": "now-6h", "to": "now"},
+      "panels": [
+        {"id": 1, "type": "stat", "title": "Ready", "targets": [{"expr": "max by (component_role) (insight_platform_process_ready{component_role=~\"$component_role\"})"}], "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0}},
+        {"id": 2, "type": "timeseries", "title": "Business request rate", "targets": [{"expr": "sum by (component_role) (rate(insight_platform_http_requests_total{component_role=~\"$component_role\",operation!~\"live|ready|metrics\"}[5m]))"}], "gridPos": {"h": 8, "w": 9, "x": 6, "y": 0}},
+        {"id": 3, "type": "timeseries", "title": "Failure ratio", "targets": [{"expr": "sum by (component_role) (rate(insight_platform_http_requests_total{component_role=~\"$component_role\",outcome=\"failure\",operation!~\"live|ready|metrics\"}[5m])) / clamp_min(sum by (component_role) (rate(insight_platform_http_requests_total{component_role=~\"$component_role\",operation!~\"live|ready|metrics\"}[5m])), 0.000001)"}], "gridPos": {"h": 8, "w": 9, "x": 15, "y": 0}},
+        {"id": 4, "type": "timeseries", "title": "HTTP p95 seconds", "targets": [{"expr": "histogram_quantile(0.95, sum by (component_role, le) (rate(insight_platform_http_request_duration_seconds_bucket{component_role=~\"$component_role\",operation!~\"live|ready|metrics\"}[5m])))"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}}
+      ]
+    }
+{{- end }}

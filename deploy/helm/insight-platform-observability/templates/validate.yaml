@@ -1,0 +1,7 @@
+{{- if empty .Values.namespace }}{{- fail "monitoring namespace is required" }}{{- end }}
+{{- if and .Values.dashboard.enabled (empty .Values.dashboard.labels) }}{{- fail "dashboard discovery labels are required" }}{{- end }}
+{{- if .Values.alerts.enabled }}
+{{- if empty .Values.alerts.labels }}{{- fail "PrometheusRule discovery labels are required" }}{{- end }}
+{{- if not (regexMatch "^https://[^?#]+$" .Values.alerts.runbookBaseUrl) }}{{- fail "alerts require one stable HTTPS runbook base URL" }}{{- end }}
+{{- if or (le (float64 .Values.alerts.minimumRequestRate) 0.0) (le (float64 .Values.alerts.maximumFailureRatio) 0.0) (ge (float64 .Values.alerts.maximumFailureRatio) 1.0) (le (float64 .Values.alerts.maximumP95Seconds) 0.0) }}{{- fail "alert thresholds are outside closed positive bounds" }}{{- end }}
+{{- end }}

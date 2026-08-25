@@ -1,0 +1,6 @@
+apiVersion: v2
+name: insight-platform-observability
+description: Platform v2 symptom-first dashboards and alerts
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
