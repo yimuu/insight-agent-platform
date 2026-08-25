@@ -3410,7 +3410,7 @@ async fn model_turn_fixture() {
     .unwrap();
     assert_eq!(
         owner_states,
-        ("succeeded".to_owned(), "ready".to_owned(), 1)
+        ("succeeded".to_owned(), "ready".to_owned(), 0)
     );
 
     sqlx::query(

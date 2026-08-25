@@ -2023,6 +2023,8 @@ impl PgRepository {
             self.model_turn_limits(),
         )
         .await?;
+        release_model_plan_leaf_permit(&mut transaction, &current_job, &current_turn, database_now)
+            .await?;
         append_scheduler_event(
             &mut transaction,
             &current_job.tenant_id,
@@ -2261,6 +2263,50 @@ impl PgRepository {
         transaction.commit().await?;
         Ok(claimed)
     }
+}
+
+async fn release_model_plan_leaf_permit(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+    turn: &ModelTurnRecord,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let plan_leaf_waiting: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution' AND node_kind = 'model_loop'
+              AND state = 'waiting' AND terminal_at IS NULL
+        )
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(turn.node_execution_id.to_string())
+    .bind(turn.run_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !plan_leaf_waiting {
+        return Ok(());
+    }
+    let updated = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET version = version + 1, active_work_count = active_work_count - 1,
+            updated_at = $3
+        WHERE tenant_id = $1 AND run_id = $2 AND terminal_at IS NULL
+          AND state = 'running' AND active_work_count > 0
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(turn.run_id.to_string())
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(RepositoryError::Conflict("expired Model Plan leaf permit"));
+    }
+    Ok(())
 }
 
 async fn load_model_execution_input(
