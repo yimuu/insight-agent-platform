@@ -228,6 +228,12 @@ CR-188 L1覆盖installed codec manifest closed schema、排序/数量、descript
 冻结codec/Worker manifest及claim first-winner；L3覆盖真实Capability Worker静态registry、heartbeat/kill/recovery并证明空registry、错
 codec/module/descriptor/Worker manifest在Egress/MCP调用计数仍为零时fail closed；L4覆盖镜像rollout manifest drift使readiness/claim关闭。
 
+L4 rollout preflight必须从待资格cluster读取live Deployment/DaemonSet、NetworkPolicy、PDB与HPA inventory，并对照同一production
+CandidateManifest和CapacityProfile fail closed验证：closed ComponentRole closure、exact digest image、controller observed generation、全部
+desired replica Ready、replica/autoscaling bounds、per-role ServiceAccount isolation、token automount关闭、restricted pod/container security、
+CPU/memory/ephemeral-storage request/limit以及每个承载namespace的双向default-deny。静态Helm render或该validator自身的fixture只证明门禁
+行为，不能替代production-equivalent cluster上的实际L4 evidence。
+
 当前分层证据：fresh PostgreSQL 16 r208已通过Native exact startup registry/Worker manifest双进程强杀、expired-lease owner recovery、
 quota settlement与non-idempotent reconciliation，关闭Native部分L3；r217以真实Remote Worker+mTLS Egress RPC分别通过HTTP/gRPC
 错manifest零claim/零外部调用、响应后commit-window强杀、第二进程expired-lease恢复及非幂等调用不重放，关闭Remote HTTP/gRPC L3。
@@ -260,6 +266,11 @@ TLS NATS跑通Run→Model tool intent→CapabilityInvocation→tool result→第
 各2个、Capability Job/Invocation各1个、唯一Return Node成功、无非terminal Job，Run output精确指向独立`model_structured_output`
 RunValue；完整canonical response保留为另一Inline RunValue而不冒充Agent output。该证据关闭Model tool-result production component L3；
 隔舱容量、L4 rollout及其余L4～L6仍是release blocker。
+
+r245新增上述live workload inventory preflight并接入production qualification入口；5个正负fixture覆盖完整15-role closure以及缺role、
+mutable/wrong image、rollout/replica、ServiceAccount、default-deny、restricted security/resource和HPA drift，连同既有4个真实node shape/
+RuntimeClass topology fixture全部通过。该本地证据没有运行production-equivalent cluster，因此只证明L4 gate会fail closed，不能将L4标为
+通过；当前部署只有在真实inventory满足同一CandidateManifest/CapacityProfile后才能生成workload digest evidence。
 
 每个production release至少覆盖：
 

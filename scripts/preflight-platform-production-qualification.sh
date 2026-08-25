@@ -46,6 +46,11 @@ cp "$capacity" "$output/capacity-profile.json"
 "$kubectl_bin" version -o json >"$output/raw/kubernetes-version.json"
 "$kubectl_bin" get nodes -o json >"$output/raw/nodes.json"
 "$kubectl_bin" get runtimeclass runsc -o json >"$output/raw/runtimeclass-runsc.json"
+"$kubectl_bin" get deployments --all-namespaces -o json >"$output/raw/deployments.json"
+"$kubectl_bin" get daemonsets --all-namespaces -o json >"$output/raw/daemonsets.json"
+"$kubectl_bin" get networkpolicies --all-namespaces -o json >"$output/raw/networkpolicies.json"
+"$kubectl_bin" get poddisruptionbudgets --all-namespaces -o json >"$output/raw/poddisruptionbudgets.json"
+"$kubectl_bin" get horizontalpodautoscalers --all-namespaces -o json >"$output/raw/horizontalpodautoscalers.json"
 "$kubectl_bin" api-resources --api-group=admissionregistration.k8s.io -o name \
   >"$output/raw/admission-api-resources.txt"
 if ! grep -qx 'validatingadmissionpolicies.admissionregistration.k8s.io' \
@@ -59,6 +64,16 @@ python3 "$root/scripts/check-platform-production-topology.py" \
   --nodes "$output/raw/nodes.json" \
   --runtime-class "$output/raw/runtimeclass-runsc.json" \
   --output "$output/topology.json"
+
+python3 "$root/scripts/check-platform-production-workloads.py" \
+  --candidate "$candidate" \
+  --capacity "$capacity" \
+  --deployments "$output/raw/deployments.json" \
+  --daemonsets "$output/raw/daemonsets.json" \
+  --networkpolicies "$output/raw/networkpolicies.json" \
+  --pdbs "$output/raw/poddisruptionbudgets.json" \
+  --hpas "$output/raw/horizontalpodautoscalers.json" \
+  --output "$output/workloads.json"
 
 "$kubectl_bin" config current-context >"$output/raw/kubernetes-context.txt"
 "$kubectl_bin" version --client -o json >"$output/raw/kubectl-version.json"
