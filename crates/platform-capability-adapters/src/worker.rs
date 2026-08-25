@@ -180,6 +180,32 @@ pub struct CapabilityAdapterWorker<A> {
     authority: A,
 }
 
+/// Adapter outcome held only in the Capability Worker process between external I/O and the
+/// lease-fenced owner commit. PostgreSQL remains the durable authority; this value exists so a
+/// long-running dispatch can heartbeat its Job and replace only the optimistic fence version
+/// before committing the already-observed physical outcome.
+pub struct PreparedCapabilityAdapterOutcome {
+    command: ExecuteCapabilityAdapterJob,
+    outcome: DispatchOutcome,
+}
+
+impl PreparedCapabilityAdapterOutcome {
+    pub fn refresh_fence(
+        &mut self,
+        fence: JobFence,
+    ) -> Result<(), CapabilityAdapterWorkerContractError> {
+        if fence.expected_version <= self.command.fence.expected_version
+            || fence.worker_process_generation_id != self.command.fence.worker_process_generation_id
+            || fence.lease_generation != self.command.fence.lease_generation
+            || fence.token_digest != self.command.fence.token_digest
+        {
+            return Err(CapabilityAdapterWorkerContractError::InvalidCommand);
+        }
+        self.command.fence = fence;
+        Ok(())
+    }
+}
+
 impl<A> CapabilityAdapterWorker<A>
 where
     A: CapabilityExecutionAuthority,
@@ -195,6 +221,14 @@ where
         &self,
         command: ExecuteCapabilityAdapterJob,
     ) -> Result<CommandOutcome<A::Record>, CapabilityAdapterWorkerError<A::Error>> {
+        let prepared = self.prepare(command).await?;
+        self.commit(prepared).await
+    }
+
+    pub async fn prepare(
+        &self,
+        command: ExecuteCapabilityAdapterJob,
+    ) -> Result<PreparedCapabilityAdapterOutcome, CapabilityAdapterWorkerError<A::Error>> {
         command
             .validate_at(Utc::now())
             .map_err(CapabilityAdapterWorkerError::Contract)?;
@@ -203,6 +237,14 @@ where
             Err(failure) => failure_outcome(&command, failure)
                 .map_err(CapabilityAdapterWorkerError::Contract)?,
         };
+        Ok(PreparedCapabilityAdapterOutcome { command, outcome })
+    }
+
+    pub async fn commit(
+        &self,
+        prepared: PreparedCapabilityAdapterOutcome,
+    ) -> Result<CommandOutcome<A::Record>, CapabilityAdapterWorkerError<A::Error>> {
+        let PreparedCapabilityAdapterOutcome { command, outcome } = prepared;
         let resume_mutations = matches!(&outcome, DispatchOutcome::Completed(_))
             .then_some(command.resume_mutations)
             .flatten();
@@ -710,6 +752,45 @@ mod tests {
         assert_eq!(committed[0].job_id, execution.job_id);
         assert_eq!(committed[0].fence, command.fence);
         assert_eq!(committed[0].outcome, response.outcome);
+    }
+
+    #[tokio::test]
+    async fn prepared_dispatch_accepts_only_a_newer_exact_heartbeat_fence() {
+        let execution = request(
+            digest('c'),
+            Effect::ReadOnly,
+            CapabilityIdempotencyKind::Intrinsic,
+            1,
+            2,
+        );
+        let output_json = serde_json::json!({"accepted": true});
+        let response = CapabilityAdapterResponse {
+            outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+                value_id: id(ResourceKind::RunValue, 31),
+                classification: DataClassification::Internal,
+                schema_digest: digest('d'),
+                content_digest: canonical_digest(&output_json).unwrap().parse().unwrap(),
+                value: ValueRef::Inline { value: output_json },
+                artifact_link_id: None,
+                validation_evidence_digest: digest('e'),
+            }),
+        };
+        let (worker, authority) = worker(&execution, Ok(response));
+        let command = command(execution);
+        let mut prepared = worker.prepare(command.clone()).await.unwrap();
+
+        assert_eq!(
+            prepared.refresh_fence(command.fence.clone()),
+            Err(CapabilityAdapterWorkerContractError::InvalidCommand)
+        );
+        let mut heartbeat_fence = command.fence.clone();
+        heartbeat_fence.expected_version += 1;
+        prepared.refresh_fence(heartbeat_fence.clone()).unwrap();
+        worker.commit(prepared).await.unwrap();
+
+        let committed = authority.commands.lock().unwrap();
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].fence, heartbeat_fence);
     }
 
     #[tokio::test]
