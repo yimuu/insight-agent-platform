@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-191 |
+| 状态 | Accepted / CR-192 |
 | 日期 | 2026-08-26 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -227,6 +227,13 @@ Scheduler/repository重算一致、route/candidate/policy漂移和整批回滚�
 CR-188 L1覆盖installed codec manifest closed schema、排序/数量、descriptor重算及unknown backend；L2覆盖remote Deployment与Invocation
 冻结codec/Worker manifest及claim first-winner；L3覆盖真实Capability Worker静态registry、heartbeat/kill/recovery并证明空registry、错
 codec/module/descriptor/Worker manifest在Egress/MCP调用计数仍为零时fail closed；L4覆盖镜像rollout manifest drift使readiness/claim关闭。
+
+CR-192 L1覆盖subscription refresh request/outcome closed schema、digest/count/byte/deadline bounds、ReadOnly retry mapping以及
+Observation/cache/dataset零创建；L2 fresh PostgreSQL覆盖exact `Context -> McpOperation` claim、quota reservation、JobCommit first-winner、
+terminal Event/Outbox、stale fence零写入、retry与expired-lease recovery。L3必须使用独立Context Worker、MCP Host和Egress进程及真实
+Streamable HTTP fake server，在claim后、Host dispatch前后、response后/terminal commit前分别kill，证明wrong workload/owner/closure零外部I/O、
+ReadOnly uncertain产生新attempt、唯一terminal evidence、无Context Observation/cache row、Context/MCP permit与DB pool相互隔离。L4再以mTLS、
+RBAC、NetworkPolicy和Context/MCP各自饱和验证只有允许的Context→Host→Egress路径，且任一lane饱和不使另一lane或API readiness失败。
 
 L4 rollout preflight必须从待资格cluster读取live Deployment/DaemonSet、NetworkPolicy、PDB与HPA inventory，并对照同一production
 CandidateManifest和CapacityProfile fail closed验证：closed ComponentRole closure、exact digest image、controller observed generation、全部

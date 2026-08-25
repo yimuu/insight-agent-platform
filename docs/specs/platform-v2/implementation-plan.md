@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-191）
+# Platform v2 四阶段实现计划（CR-192）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-191 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-192 contracts accepted; L3～L6 pending |
 | 日期 | 2026-08-26 |
-| 合同输入 | 00～18、cross-review CR-191、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-192、ADR-0001、ADR-0002、AGENTS.md |
 
 > 2026-08-26 contract feedback：CR-190 L2接线发现closed owner registry没有subscription refresh Context Job的合法pair。CR-191在03增加
 > 唯一`Context -> McpOperation` pair，并在07/12/13/18冻结source row/payload/WorkClass claim约束；不新增WorkClass、aggregate、table或route。
@@ -25,6 +25,11 @@
 > fixture覆盖notification/full reconcile映射及owner返回digest回传。fresh PostgreSQL 16 fixture进一步在前一Context Job已终态的分层安排下证明
 > full reconcile acceptance/replay创建下一唯一Context Job，MCP reconcile completion消费其digest。Context Job真实handler/recovery、Host process
 > composition与kill-window L3仍待实现。
+
+> 2026-08-26 contract feedback：CR-191只允许创建subscription Context Job，却没有定义production handler、成功evidence或
+> response后commit-window恢复。CR-192冻结Context Worker claim/lease/retry/terminal authority与typed Context→MCP Host Resource Refresh RPC；
+> Host只执行credential-free ReadOnly协议I/O并返回bounded digest/count evidence。首版没有subscription cache/Observation，PostgreSQL outcome、
+> Context Worker handler、Host RPC composition及三进程kill-window必须按此合同实现。
 
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，

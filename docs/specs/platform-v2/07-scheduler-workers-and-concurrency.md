@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-191 |
+| 状态 | Accepted / CR-192 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
@@ -179,6 +179,13 @@ round、cursor和bounded tenant deficit，不复制Job current state。
 - NATS丢消息时由bounded safety scan恢复；
 - lease过期后Recovery复核owner、generation、effect、deadline与attempt budget后first-win；
 - 对外部非幂等Effect的timeout不推断“没有发生”，而进入reconciliation。
+
+`Context -> McpOperation`只能由Context Worker候选扫描和claim；普通ContextQuery handler不能解析其payload，MCP Host也没有claim权限。
+claim事务先重验closed payload、exact subscription source、Context/MCP Deployment与Context Worker manifest，再获得Context local permit及
+generation-owned durable quota。Context Worker用当前Job/worker generation/fence调用13的Resource Refresh RPC并保持Context permit；MCP Host
+只获取自身有界RPC/session I/O permit，绝不持有或释放Context permit。成功/失败由Context owner以JobCommit Receipt提交；heartbeat、
+deadline、cancel、expired-lease recovery和stale response沿用shared Job first-winner。ReadOnly post-dispatch uncertain进入bounded retry，
+不降级为UnknownOutcome或由Host直接terminal。
 
 ## 9. 关停、可观测性与安全
 

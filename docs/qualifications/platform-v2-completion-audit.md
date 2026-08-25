@@ -9,7 +9,7 @@
 
 ## 1. 结论
 
-00～18均已完成CR-191 cross-review（历史CR-173～190结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
+00～18均已完成CR-192 cross-review（历史CR-173～191结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
 实现与真实PostgreSQL门禁已闭合；Phase 2的production Orchestration、Model、Capability、Context与wait/Subagent主要L3链路已经闭合；
 Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact资格。Phase 4 public API和15-role/17-pool静态部署闭包已完成，
 完整observability及production-equivalent L4～L6仍未交付。
@@ -25,7 +25,7 @@ Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact
 
 | 范围 | 当前证据 | 结论 |
 |---|---|---|
-| 合同 | 00～18 CR-191 cross-review闭合；Plan v4 external leaf、MCP subscription→Context durable admission及其closed owner pair均冻结；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
+| 合同 | 00～18 CR-192 cross-review闭合；Plan v4 external leaf、MCP subscription→Context durable admission、closed owner pair及refresh execution/outcome均冻结；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
 | Persistence | schema contract v7、唯一`0001_platform_baseline.sql`；PG16/17 fresh baseline与事务/并发测试 | Phase 1 persistence闭合 |
 | Rust workspace | workspace all-target/all-feature tests与Clippy `-D warnings`通过 | L1～L3范围内有效 |
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |

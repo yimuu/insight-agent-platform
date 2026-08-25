@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-189 |
-| 日期 | 2026-08-23 |
+| 状态 | Accepted / CR-192 |
+| 日期 | 2026-08-26 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
 
@@ -323,10 +323,16 @@ internal service只有跨物理信任边界时才存在，不为每个domain tra
 | ArtifactGateway | 经Public Gateway转发的public upload/download HTTP语义 | exact public-gateway mTLS audience + current principal rebinding |
 | ArtifactDataWorker | internal stage/read/verify/derive | exact workload capability + owner/Job fence |
 | ArtifactMaintenance | delete/GC/quarantine/reconcile | closed maintenance transition |
+| McpResourceRefresh | Context Worker提交fenced subscription refresh/reconcile | Host重载Job/subscription/closure；credential-free、ReadOnly、bounded evidence |
 
 没有Model Artifact Producer、Model/Sandbox专用Artifact Broker、microVM RPC、Managed stdio runner或Installation release service。
 Artifact public hop保持同一个OpenAPI HTTP请求/响应语义，不生成一份字段对等protobuf；其余internal RPC使用protobuf。所有跨进程调用使用
 mTLS workload identity、exact audience、tenant/owner/fence重绑定、bounded deadline/message/stream和stable status mapping。
+
+`McpResourceRefresh`只存在于internal protobuf，不增加public `/v1` route或Operation kind。request/response字段由12/13唯一拥有；RPC server必须
+在任何MCP/Egress I/O前校验Context Worker audience、`Context -> McpOperation` owner pair、ready/running lease、worker generation/fence和
+exact closure。safe status只区分permanent rejection、retryable dependency/capacity、deadline/cancel与成功evidence；raw remote body/error、
+session/token/Secret不得跨越该边界。
 
 ## 14. Rate limit、quota 与backpressure
 

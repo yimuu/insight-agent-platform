@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-191 |
-| 日期 | 2026-08-20 |
+| 状态 | Accepted / CR-192 |
+| 日期 | 2026-08-26 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
 
@@ -166,6 +166,13 @@ Event retention和Outbox delivery retention不同。Outbox terminal后可按poli
 
 retry只由owner Effect、idempotency、failure class、attempt budget、deadline和published policy决定，并将`retry_at`持久化。
 Worker不内存sleep。cancel/timeout先写durable intent，物理cancel是best effort，不把unknown external effect改写为“未发生”。
+
+`Context -> McpOperation` subscription refresh Job固定为ReadOnly physical attempt。Context owner以Job lease/fence调用协议adapter；
+成功只允许保存closed terminal evidence（request/response/resource digest、item/byte count、observed time），不把remote body、session或
+Secret写入Job/Event/Receipt，也不声称创建Context Observation、dataset generation或cache。owner按`JobCommit` Receipt原子提交
+Job terminal、quota settlement、Event和Outbox；stale fence或字段漂移零写入。dispatch前validation/authorization失败为terminal failure，
+可恢复dependency/capacity失败进入bounded retry；响应是否到达不改变ReadOnly属性，post-dispatch uncertain可作为新attempt安全重读并保留
+attempt evidence。deadline/cancel/lease recovery继续使用同一Job generation/fence规则。
 
 reconciliation冻结exact owner/Job generation、backend idempotency/correlation identity、known evidence、deadline/budget和closed decision policy。
 只能返回`ConfirmedSucceeded | ConfirmedFailed | StillUnknown | RetryableProbeFailure`。不确定保持Unknown/Reconciling并交由人/运维

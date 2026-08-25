@@ -1,10 +1,37 @@
-# Platform v2 00～18 Cross-review（CR-191）
+# Platform v2 00～18 Cross-review（CR-192）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-191 Accepted |
+| 状态 | Closed / CR-192 Accepted |
 | 日期 | 2026-08-26 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-191 Context Job owner-pair implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-192 subscription Context Job execution/outcome feedback |
+
+### CR-192 MCP subscription refresh execution/outcome impact review
+
+CR-191允许Context owner创建`Context -> McpOperation` Job，但现有Context Worker只执行`Context -> ContextQuery`，且合同没有定义刷新成功
+evidence、Host调用边界或response后commit-window。若直接terminalize Job会伪造远端刷新；若让Host claim/提交则会把MCP协议adapter变成第二
+Job authority。CR-192把refresh固定为Context Worker拥有的fenced ReadOnly attempt，并增加唯一typed internal Context→MCP Host Resource Refresh RPC。
+
+| Spec | CR-192结论 |
+|---|---|
+| 00 | 登记feedback；clean `/v1`、无兼容层与current/target边界不变 |
+| 01 | Context Worker拥有Job/lease/retry/terminal，MCP Host只拥有协议I/O；两个bulkhead与permit保持独立 |
+| 02 | exact ResourceVersion/Deployment/Binding lifecycle不变；RPC只消费已冻结closure |
+| 03 | ReadOnly attempt按JobCommit Receipt原子提交bounded terminal evidence/Event/Outbox；stale fence零写入 |
+| 04 | request credential-free；Host重载Auth/session，Secret仍由Egress最后一跳解析；Context与MCP quota不混用 |
+| 05～06、08～11 | refresh不是Run leaf/ContextQuery/Capability/Subagent/Skill，不创建Node、Invocation或RunValue |
+| 07 | 只有Context Worker可claim；Host不claim/heartbeat/terminal，post-dispatch uncertain按bounded attempt安全重读 |
+| 12 | 定义closed attempt/outcome、无subscription cache/Observation语义及retry/cancel/recovery |
+| 13 | 定义Host Resource Refresh RPC、I/O前重验、bounded safe evidence和零current-state mutation |
+| 14～16 | Sandbox、Artifact、Model合同不变；remote body不经Artifact或Model路径 |
+| 17 | RPC只进入internal protobuf，无public route/Operation；mTLS audience与owner/fence重绑定 |
+| 18 | L1～L4增加claim/commit/kill-window、零I/O、零cache及pool/topology隔离矩阵 |
+
+00～18已按state ownership、IDs、closed JSON/protobuf schemas、errors、transactions、events、permissions、capacity、failure recovery和fixtures
+全量复核。CR-192不新增aggregate、table、WorkClass、ComponentRole、public route或Secret传播；successful Job只证明一次exact bounded remote
+read/reconcile，不声明Context cache、Observation、Dataset或后续query可重读。Acceptance 35：独立Context Worker→MCP Host→Egress链在任意
+claim/dispatch/response/commit崩溃窗口中保持唯一Job terminal、fenced retry、zero stale commit与相互隔离的permit；wrong identity/closure/fence在
+外部I/O计数为零时拒绝。00、01、03、04、07、12、13、17、18恢复Accepted / CR-192。
 
 ### CR-191 MCP subscription refresh Context Job owner-pair impact review
 
@@ -296,12 +323,11 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00、07、12～13、18 | Accepted / CR-190 | MCP subscription→Context durable admission、Receipt replay和pool隔离闭合 |
-| 02、04、17 | Accepted / CR-189（CR-190影响复核） | exact identity/security/public API authority不变 |
-| 01、03 | Accepted / CR-173/176（CR-189影响复核） | plane、persistence、事务与恢复authority不变 |
+| 00、01、03～04、07、12～13、17～18 | Accepted / CR-192 | subscription refresh execution/outcome、typed internal RPC、fenced recovery与pool隔离闭合 |
+| 02 | Accepted / CR-189（CR-192影响复核） | exact Resource lifecycle与Deployment authority不变 |
 | 05～06 | Accepted / CR-184（CR-189影响复核） | Plan v4 external leaf与Run snapshot只复制补全后的exact closure |
 | 08、14 | Accepted / CR-182/181（CR-189影响复核） | Subagent与Sandbox execution plane不变 |
-| 09～10、13 | Accepted / CR-188（CR-189影响复核） | Capability/MCP owner不被Context transport替代 |
+| 09～10 | Accepted / CR-188（CR-192影响复核） | Capability owner不被Context/MCP transport替代 |
 | 11、15 | Accepted / CR-185（CR-189影响复核） | Skill/Artifact authority不变 |
 | 16 | Accepted / CR-187（CR-189影响复核） | Model provider/Inline authority不变 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
@@ -680,7 +706,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-188合同范围没有未关闭P0/P1。Acceptance 31与既有13～30形成单一闭包，00～18状态为Accepted。
+CR-192合同范围没有未关闭P0/P1。Acceptance 35与既有13～34形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-189 |
-| 日期 | 2026-08-20 |
+| 状态 | Accepted / CR-192 |
+| 日期 | 2026-08-26 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
 
@@ -242,6 +242,11 @@ external request rate。不为每个domain建quota table。
 Job claim/I/O前以一个generation-owned QuotaReservation bundle原子预留全部lines，terminal/recovery锁定实际bundle原子
 consume/release。调用方只携带reservation identity/fence，不重述或删减scope lines。local process permit是物理容量，
 不durable quota是不同authority。
+
+subscription refresh只预留`WorkClass::Context`并发与适用的tenant/remote-host request lines，不预留Run/ContextQuery item quota，
+也不复用MCP connection Job的reservation。Context Worker发出的internal request不得携带raw session、authorization header、token、
+Secret value或自由endpoint；MCP Host以tenant + subscription + Context Job fence重载exact MCP Deployment、Discovery与Auth binding，
+Secret仍只在Egress最后一跳解析。wrong workload audience、owner/fence/closure或撤权必须在外部I/O前拒绝。
 
 Artifact只有普通staging/ready/physical/grant/traffic quota，无Model Artifact Producer专用bundle。
 

@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
-| 日期 | 2026-08-21 |
+| 状态 | Accepted / CR-192 |
+| 日期 | 2026-08-26 |
 | 依赖 | [`00-overview.md`](00-overview.md) |
 | 直接下游 | 02、03、04、05、18 |
 
@@ -161,6 +161,11 @@ Execution Plane 分为以下 bulkhead：
 一个隔舱饱和时必须通过有界队列和 durable backpressure 停留在自己的工作类别，不能获取其他隔舱的
 permit，也不能使 API readiness 失败。
 
+MCP subscription refresh是跨两个执行隔舱的typed协作，不合并所有权：Context Worker claim并拥有shared Context Job的
+lease、retry、terminal与tenant quota；MCP Host仅在收到带exact Job fence的内部Resource Refresh请求后执行MCP wire I/O。
+Host不claim Context Job、不自行从notification执行Context工作，也不写Context result/current state；Context Worker不获得MCP
+session或Secret value。调用与结果都必须是有界、credential-free机器合同，任一侧饱和只保留自身permit。
+
 ### 4.4 Data Plane
 
 - PostgreSQL：所有管理和运行状态的唯一事务权威；
@@ -179,8 +184,8 @@ permit，也不能使 API readiness 失败。
 | `scheduler` | claim、lease、outbox、recovery drive | 叶节点执行 |
 | `model-worker` | Model Invocation | Capability 和 Sandbox |
 | `capability-worker` | Capability Invocation dispatch | Script process |
-| `context-worker` | Context Query、授权过滤、检索与 citation assembly | Capability 副作用与 Agent Plan |
-| `mcp-host` | MCP 协议与连接状态 | Agent Plan |
+| `context-worker` | Context Query、授权过滤、检索、citation assembly及subscription refresh Job terminal | MCP wire/session/Secret、Capability 副作用与 Agent Plan |
+| `mcp-host` | MCP 协议、连接状态及fenced Resource Refresh adapter | Context Job/Result current authority与 Agent Plan |
 | `sandbox-executor` | WASI代码运行；或受限创建/观察/清理gVisor single-Job Pod | Run state authority、任意Kubernetes管理 |
 | `artifact-gateway` | public upload/download、grant与边界限流 | 业务owner状态推进、内部Worker凭据 |
 | `artifact-data-worker` | exact owner绑定的stage/read/verify/derive | public API、Run/Invocation current state |

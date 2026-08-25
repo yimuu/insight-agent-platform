@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-191 |
+| 状态 | Accepted / CR-192 |
 | 日期 | 2026-08-26 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
@@ -529,8 +529,26 @@ replay返回第一次接受的相同Job/evidence；字段漂移、stale generati
 in-memory callback、caller生成work digest和直接写Context结果均禁止。refresh Job使用Context pool/tenant quota，MCP connection/Job不持有
 Context permit；Context Job失败或重试由其自身lease/recovery推进，不回滚已提交notification history。
 
+### 18.2 Subscription refresh execution 与outcome
+
+Context Worker按`Context -> McpOperation`精确扫描/claim，不能把payload投影为ContextQuery。每个attempt冻结tenant、subscription、Job、
+worker generation/fence、exact Context/MCP Deployment与Discovery/Auth/session/event/root evidence、cause、deadline和admission request digest，
+然后调用13的typed internal MCP Resource Refresh RPC。RPC请求不含raw session/token/Secret、自由URL/header或调用方选择的method；MCP Host必须在
+外部I/O前从PostgreSQL重载当前subscription、exact MCP execution closure及Job fence。
+
+首版refresh执行对root resource做有界`resources/read`，full reconcile按冻结root/profile执行有界list/read集合；具体wire method由13的
+published protocol profile决定，不由Context Worker自由选择。成功响应只返回closed evidence：request/response/resource-set digest、
+resource/item/byte count、remote revision或cursor（若有）和observed time。正文、URI locator、session、token与未归一化remote error不得返回或
+持久化。Context owner重验evidence digest与限制后，以`JobCommit` Receipt在单一事务terminalize Job、结算quota并写Event/Outbox。
+
+该成功事实仅表示exact subscription source已完成一次协议刷新/重验；首版没有materialized subscription cache，因而不创建Context Observation、
+RunValue、Dataset Generation或Context-specific row，也不得宣称后续ContextQuery命中缓存。dispatch前永久拒绝直接失败；dependency/capacity和
+ReadOnly post-dispatch uncertain按attempt/deadline做bounded retry。取消、超时、lease recovery或旧worker返回均由Job fence first-winner，
+不得回滚notification history或让MCP Host提交terminal。
+
 - ContextQuery 以稳定 node/query ordinal 和 query digest 幂等；
 - MCP subscription refresh/reconcile以stable subscription/session/event/request digest幂等并创建至多一个Context Job；
+- refresh成功只产生bounded terminal evidence，不产生Observation/cache/dataset；
 - Attempt 使用 lease/epoch/fence，迟到结果不能覆盖 first-winner；
 - worker outcome按`(tenant, Job, WorkerProcessGeneration, operation, idempotency digest)`使用`JobCommit` Receipt；
 - callback/poll/timer按`(tenant, Job, operation, idempotency digest)`使用`Callback` Receipt，重复信号返回同一稳定disposition；

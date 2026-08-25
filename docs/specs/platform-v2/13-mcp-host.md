@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-191 |
+| 状态 | Accepted / CR-192 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
@@ -115,6 +115,16 @@ application port。只有owner transaction已提交shared Context Job + Receipt/
 完成。commit-window不确定必须按同一Receipt key查询/replay，Host restart从PostgreSQL subscription/Job恢复；旧session/worker fence不得再次接线。
 Context owner创建的物理刷新Job以closed `Context -> McpOperation` pair绑定当前subscription identity；Host自有connection/recovery Job仍为
 `Mcp -> McpOperation`。owner pair相同不代表WorkClass或claim authority相同，任一worker扫描错class/payload必须零claim。
+
+Context Worker执行该Job时只调用Host的typed internal `RefreshResources` RPC。请求携带tenant、subscription、Context Job ID、worker
+generation/fence、exact Context/MCP Deployment、Discovery/Auth/session/event/root evidence、cause、deadline和request digest；不得携带raw
+session/token/Secret、自由endpoint/header或任意MCP method。Host以独立workload audience重载当前subscription、Job state/fence及published
+MCP execution closure，任何漂移均在Egress调用前fail closed。Host随后按冻结protocol profile执行bounded `resources/read`或full reconcile
+list/read，并只返回request/response/resource-set digest、counts、remote revision/cursor、observed time或closed safe failure。
+
+该RPC是ReadOnly protocol adapter，不是Job owner：Host不claim/heartbeat/terminalize Context Job，不创建Observation/cache，也不因notification
+自行调用它。响应后Host崩溃或RPC completion uncertain允许Context owner用新attempt安全重读；Host仍须执行session/Egress permit、rate/body/time
+limits，Context Worker在整个调用期间只持有自己的Context permit。Secret由Egress最后一跳解析，Host返回值与默认日志不含remote body或凭据。
 
 ## 9. OAuth 与authorization
 
