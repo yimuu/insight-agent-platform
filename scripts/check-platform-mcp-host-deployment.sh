@@ -32,6 +32,7 @@ for required in (
     "CapabilityWorkerWorkloadIdentity",
     "serve_with_shutdown",
     "drain_grace_milliseconds",
+    "process_observability_router",
 ):
     if required not in source:
         failures.append(f"MCP Host production composition is missing {required}")
@@ -59,6 +60,10 @@ for needle in (
     "kind: Deployment",
     "kind: PodDisruptionBudget",
     "kind: HorizontalPodAutoscaler",
+    "kind: ServiceMonitor",
+    "name: observability",
+    "path: /readyz",
+    "path: /metrics",
     'command: ["/usr/local/bin/platform-mcp-host"]',
     "insight.platform/workload-role: mcp-host",
     "insight.platform/workload-namespace: mcp-host",
@@ -96,6 +101,8 @@ negative_values = (
     ("--set", "serverTls.existingSecret=", "both TLS identities"),
     ("--set", "networkPolicy.callerNamespace=", "exact caller"),
     ("--set", "autoscaling.minReplicas=1", "at least two replicas"),
+    ("--set", "observability.port=9443", "observability port must be distinct"),
+    ("--set-json", "networkPolicy.monitoringPodSelector=null", "monitoring requires exact"),
 )
 for flag, assignment, expected in negative_values:
     result = subprocess.run(["helm", "template", "platform", str(chart), flag, assignment], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)

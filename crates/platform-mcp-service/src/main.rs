@@ -13,6 +13,9 @@ use insight_platform_mcp_rpc::{
     proto::mcp_host_execution_service_server::McpHostExecutionServiceServer,
     CapabilityWorkerWorkloadIdentity, McpHostGrpcService, McpHostInternalRpcLimits,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use serde::Deserialize;
 use std::{
     error::Error, fmt, io::Read as _, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration,
@@ -37,6 +40,7 @@ const MAX_TLS_FILE_BYTES: usize = 1_048_576;
 struct ProcessConfig {
     schema_version: u32,
     listen_address: String,
+    observability_listen_address: String,
     tls_server_name: String,
     maximum_rpc_message_bytes: usize,
     egress: EgressConfig,
@@ -89,10 +93,16 @@ impl ProcessConfig {
             .listen_address
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let observability: SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         let endpoint =
             Url::parse(&self.egress.endpoint).map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
             || listen.port() == 0
+            || observability.port() == 0
+            || observability == listen
             || !valid_tls_server_name(&self.tls_server_name)
             || endpoint.scheme() != "https"
             || endpoint.host_str().is_none()
@@ -187,6 +197,22 @@ async fn run() -> Result<(), ProcessError> {
         .add_service(service)
         .serve_with_shutdown(address, server_cancellation.cancelled_owned());
     let mut server_task = tokio::spawn(server);
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("mcp-host", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let observability_listener =
+        tokio::net::TcpListener::bind(&config.observability_listen_address)
+            .await
+            .map_err(|_| ProcessError::ObservabilityFailed)?;
+    let observability_cancellation = cancellation.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut observability_task = tokio::spawn(async move {
+        axum::serve(observability_listener, router)
+            .with_graceful_shutdown(observability_cancellation.cancelled_owned())
+            .await
+    });
+    metrics.mark_ready();
     eprintln!(
         "platform-mcp-host started address={} server_name={}",
         address, config.tls_server_name
@@ -203,6 +229,14 @@ async fn run() -> Result<(), ProcessError> {
             .map_err(|_| ProcessError::DrainTimeout)?
             .map_err(|_| ProcessError::ServerFailed)?
             .map_err(|_| ProcessError::ServerFailed)?;
+            tokio::time::timeout(
+                Duration::from_millis(config.drain_grace_milliseconds),
+                &mut observability_task,
+            )
+            .await
+            .map_err(|_| ProcessError::DrainTimeout)?
+            .map_err(|_| ProcessError::ObservabilityFailed)?
+            .map_err(|_| ProcessError::ObservabilityFailed)?;
             Ok(())
         }
         result = &mut server_task => {
@@ -210,7 +244,18 @@ async fn run() -> Result<(), ProcessError> {
             result
                 .map_err(|_| ProcessError::ServerFailed)?
                 .map_err(|_| ProcessError::ServerFailed)?;
+            observability_task.await
+                .map_err(|_| ProcessError::ObservabilityFailed)?
+                .map_err(|_| ProcessError::ObservabilityFailed)?;
             Err(ProcessError::ServerExitedUnexpectedly)
+        }
+        result = &mut observability_task => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::ObservabilityFailed)?
+                .map_err(|_| ProcessError::ObservabilityFailed)?;
+            server_task.await.map_err(|_| ProcessError::ServerFailed)?
+                .map_err(|_| ProcessError::ServerFailed)?;
+            Err(ProcessError::ObservabilityFailed)
         }
     }
 }
@@ -325,6 +370,7 @@ enum ProcessError {
     ServerFailed,
     DrainTimeout,
     ServerExitedUnexpectedly,
+    ObservabilityFailed,
 }
 
 impl fmt::Display for ProcessError {
@@ -344,6 +390,7 @@ impl fmt::Display for ProcessError {
             Self::ServerExitedUnexpectedly => {
                 formatter.write_str("MCP Host server exited unexpectedly")
             }
+            Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }
     }
 }
@@ -358,6 +405,7 @@ mod tests {
         ProcessConfig {
             schema_version: 1,
             listen_address: "0.0.0.0:9443".to_owned(),
+            observability_listen_address: "0.0.0.0:9090".to_owned(),
             tls_server_name: "platform-mcp-host.platform-mcp-host.svc".to_owned(),
             maximum_rpc_message_bytes: 1_048_576,
             egress: EgressConfig {

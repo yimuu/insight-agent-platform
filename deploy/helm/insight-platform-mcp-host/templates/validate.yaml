@@ -3,6 +3,8 @@
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) -}}{{- fail "config.digest must be exact sha256" -}}{{- end -}}
 {{- if or (empty .Values.config.existingConfigMap) (empty .Values.serverTls.existingSecret) (empty .Values.egressTls.existingSecret) -}}{{- fail "config and both TLS identities are required" -}}{{- end -}}
 {{- if or (empty .Values.networkPolicy.callerNamespace) (empty .Values.networkPolicy.callerPodSelector) (empty .Values.networkPolicy.egressNamespace) (empty .Values.networkPolicy.egressPodSelector) -}}{{- fail "exact caller and Egress selectors are required" -}}{{- end -}}
+{{- if or (lt (int .Values.observability.port) 1) (gt (int .Values.observability.port) 65535) (eq (int .Values.observability.port) (int .Values.service.port)) -}}{{- fail "observability port must be distinct and in 1..65535" -}}{{- end -}}
+{{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) -}}{{- fail "monitoring requires exact namespace and Pod selectors" -}}{{- end -}}
 {{- if .Values.autoscaling.enabled -}}
 {{- if lt (int .Values.autoscaling.minReplicas) 2 -}}{{- fail "HPA requires at least two replicas" -}}{{- end -}}
 {{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) -}}{{- fail "HPA maximum must be at least minimum" -}}{{- end -}}

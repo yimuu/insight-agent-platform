@@ -2848,6 +2848,7 @@ name = "insight-platform-mcp-service"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "futures",
  "insight-platform-capability-adapters",
@@ -2856,6 +2857,7 @@ dependencies = [
  "insight-platform-mcp-host",
  "insight-platform-mcp-rpc",
  "insight-platform-model-adapters",
+ "insight-platform-observability",
  "rcgen",
  "serde",
  "serde_json",

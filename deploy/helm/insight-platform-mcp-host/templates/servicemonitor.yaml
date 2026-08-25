@@ -1,0 +1,10 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: {name: {{ include "insight-platform-mcp-host.name" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  namespaceSelector: {matchNames: [{{ .Values.namespace }}]}
+  selector:
+    matchLabels: {{ include "insight-platform-mcp-host.labels" . | nindent 6 }}
+  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
+{{- end }}
