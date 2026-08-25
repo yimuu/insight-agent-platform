@@ -149,7 +149,7 @@ fn fixture_plan() -> RuntimePlan {
             (
                 entry,
                 RuntimeNode::TimerWait {
-                    delay_milliseconds: 100,
+                    delay_milliseconds: 3_000,
                     resume: finish.clone(),
                 },
             ),
@@ -472,6 +472,182 @@ impl StartedOrchestrationJobHandler for PostgresHandoffHandler {
 }
 
 #[test]
+fn timer_recovery_worker_process_entry() {
+    if std::env::var("PLATFORM_TIMER_RECOVERY_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
+        let profile = checked_in_hard_limit_profile();
+        let process_generation_id = fresh_id(ResourceKind::WorkerProcessGeneration);
+        let bulkheads = PostgresConnectionBulkheads::connect(
+            &database_url,
+            PostgresConnectionBulkheadConfig {
+                worker_role: format!("orch.timer-{}", process_generation_id.uuid()),
+                business_max_connections: 1,
+                critical_control_reserved_connections: 2,
+                process_connection_budget: 3,
+                acquire_timeout: Duration::from_secs(2),
+                statement_timeout: Duration::from_secs(30),
+                idle_timeout: Some(Duration::from_secs(30)),
+                max_lifetime: Some(Duration::from_secs(300)),
+            },
+            &profile,
+        )
+        .await
+        .unwrap();
+        verify_schema(bulkheads.business_pool()).await.unwrap();
+        let pools = LocalWorkerPools::new(
+            WorkerManifest {
+                manifest_version: 1,
+                worker_role: "orchestration.timer-recovery".to_owned(),
+                work_class: WorkClass::Orchestration,
+                adapter_runtime_digest: digest('e'),
+                protocol_version: 1,
+                max_concurrency: 1,
+                critical_control_reserved_slots: 1,
+            },
+            process_generation_id,
+        )
+        .unwrap();
+        let plan = fixture_plan();
+        let plan_bytes = canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
+        let plan_materializer = Arc::new(
+            SchedulerPlanMaterializer::new(
+                Arc::new(bulkheads.critical_control_repository()),
+                Arc::new(StaticTypedPlanReader { bytes: plan_bytes }),
+                SchedulerPlanMaterializerConfig {
+                    request_timeout: Duration::from_secs(1),
+                    maximum_bytes: 64 * 1024,
+                    json_limits: JsonLimits::CONTRACT_FIXTURE,
+                    plan_limits: PlanLimits::from_profile(&profile).unwrap(),
+                },
+            )
+            .unwrap(),
+        );
+        let durable_store = Arc::new(
+            PostgresDurablePlanGenerationStore::new(
+                bulkheads.critical_control_repository(),
+                Arc::new(
+                    SchedulerControllerRunValueMaterializer::new(
+                        Arc::new(RecordingRunValueResolver {
+                            repository: bulkheads.critical_control_repository(),
+                            calls: Arc::new(AtomicU64::new(0)),
+                            last_error: Arc::new(Mutex::new(None)),
+                            last_request: Arc::new(Mutex::new(None)),
+                        }),
+                        Arc::new(StaticRunValueReader {
+                            bytes: canonical_json(&json!({"question": "coordinator"})).unwrap(),
+                            calls: Arc::new(AtomicU64::new(0)),
+                        }),
+                        Duration::from_secs(1),
+                    )
+                    .unwrap(),
+                ),
+                Arc::new(UuidCoordinatorIdentityFactory),
+                Arc::new(EmptyCapabilityAdmissionProvider),
+                Arc::new(EmptyModelAdmissionProvider),
+                Duration::from_millis(50),
+            )
+            .unwrap(),
+        );
+        let handler = Arc::new(MaterializingOrchestrationJobHandler::new(
+            plan_materializer,
+            Arc::new(
+                ExactPlanGenerationDriver::new(durable_store, ExpressionLimits::ABSOLUTE).unwrap(),
+            ),
+        ));
+        let executor = Arc::new(
+            LeaseFencedOrchestrationExecutor::new(
+                Arc::new(bulkheads.business_repository()),
+                handler,
+                Arc::new(UuidCoordinatorIdentityFactory),
+                OrchestrationExecutorConfig::from_profile(
+                    &profile,
+                    OrchestrationExecutorTiming {
+                        heartbeat_jitter: Duration::from_millis(10),
+                        store_retry_backoff: Duration::from_millis(10),
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let coordinator = WorkCoordinator::new(
+            Arc::new(bulkheads.business_repository()),
+            executor,
+            Arc::new(UuidCoordinatorIdentityFactory),
+            pools.clone(),
+            OrchestrationCoordinatorConfig::from_profile(
+                &profile,
+                CoordinatorTiming {
+                    coalesce_window: Duration::from_millis(2),
+                    safety_scan_interval: Duration::from_millis(100),
+                    safety_scan_jitter: Duration::ZERO,
+                    claim_failure_backoff: Duration::from_millis(5),
+                    drain_grace: Duration::from_secs(1),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .spawn();
+        let safety = OrchestrationSafetyDriver::new(
+            Arc::new(bulkheads.critical_control_repository()),
+            Arc::new(UuidCoordinatorIdentityFactory),
+            pools,
+            OrchestrationSafetyConfig::from_profile(
+                &profile,
+                SafetyScanShard::whole(),
+                SafetyDriverTiming {
+                    scan_interval: Duration::from_millis(100),
+                    scan_jitter: Duration::ZERO,
+                    failure_backoff: Duration::from_millis(10),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .spawn();
+
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let states = sqlx::query_as::<_, (String, String)>(
+                    r#"
+                    SELECT job.state, run.state
+                    FROM insight_platform.jobs AS job
+                    JOIN insight_platform.runs AS run
+                      ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
+                    WHERE job.tenant_id = $1 AND job.job_id = $2
+                    "#,
+                )
+                .bind(TENANT_ID)
+                .bind(JOB_ID)
+                .fetch_one(bulkheads.critical_control_pool())
+                .await
+                .unwrap();
+                if states == ("succeeded".to_owned(), "succeeded".to_owned()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timer recovery process did not reach the durable terminal state");
+        coordinator.shutdown().await.unwrap();
+        safety.shutdown().await.unwrap();
+        bulkheads.close().await;
+        println!("TIMER_RECOVERY_CHILD_RESULT terminal=succeeded");
+    });
+}
+
+#[test]
 fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -706,117 +882,92 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         assert!(safety.snapshot().scan_attempts >= 2);
         drop(local_business_saturation);
         drop(_business_saturation);
+        let safety_exit = safety.shutdown().await.unwrap();
+        assert!(safety_exit.mutations >= 1);
 
-        let plan = fixture_plan();
-        let plan_bytes = canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
-        let plan_materializer = Arc::new(
-            SchedulerPlanMaterializer::new(
-                Arc::new(bulkheads.critical_control_repository()),
-                Arc::new(StaticTypedPlanReader { bytes: plan_bytes }),
-                SchedulerPlanMaterializerConfig {
-                    request_timeout: Duration::from_secs(1),
-                    maximum_bytes: 64 * 1024,
-                    json_limits: JsonLimits::CONTRACT_FIXTURE,
-                    plan_limits: PlanLimits::from_profile(&profile).unwrap(),
-                },
-            )
-            .unwrap(),
-        );
-        let run_value_resolver_calls = Arc::new(AtomicU64::new(0));
-        let run_value_reader_calls = Arc::new(AtomicU64::new(0));
-        let run_value_resolver_error = Arc::new(Mutex::new(None));
-        let run_value_resolver_request = Arc::new(Mutex::new(None));
-        let durable_store = Arc::new(
-            PostgresDurablePlanGenerationStore::new(
-                bulkheads.critical_control_repository(),
-                Arc::new(SchedulerControllerRunValueMaterializer::new(
-                    Arc::new(RecordingRunValueResolver {
-                        repository: bulkheads.critical_control_repository(),
-                            calls: Arc::clone(&run_value_resolver_calls),
-                            last_error: Arc::clone(&run_value_resolver_error),
-                            last_request: Arc::clone(&run_value_resolver_request),
-                    }),
-                    Arc::new(StaticRunValueReader {
-                        bytes: canonical_json(&json!({"question": "coordinator"})).unwrap(),
-                        calls: Arc::clone(&run_value_reader_calls),
-                    }),
-                    Duration::from_secs(1),
-                )
-                .unwrap()),
-                Arc::new(UuidCoordinatorIdentityFactory),
-                Arc::new(EmptyCapabilityAdmissionProvider),
-                Arc::new(EmptyModelAdmissionProvider),
-                Duration::from_millis(50),
-            )
-            .unwrap(),
-        );
-        let plan_driver = Arc::new(
-            ExactPlanGenerationDriver::new(durable_store, ExpressionLimits::ABSOLUTE).unwrap(),
-        );
-        let materializing_handler = Arc::new(MaterializingOrchestrationJobHandler::new(
-            plan_materializer,
-            plan_driver,
-        ));
-        let materializing_executor = Arc::new(
-            LeaseFencedOrchestrationExecutor::new(
-                Arc::new(bulkheads.business_repository()),
-                materializing_handler,
-                Arc::new(UuidCoordinatorIdentityFactory),
-                OrchestrationExecutorConfig::from_profile(
-                    &profile,
-                    OrchestrationExecutorTiming {
-                        heartbeat_jitter: Duration::from_millis(10),
-                        store_retry_backoff: Duration::from_millis(10),
-                    },
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        );
-        let materializing_coordinator = WorkCoordinator::new(
-            Arc::new(bulkheads.business_repository()),
-            materializing_executor,
-            Arc::new(UuidCoordinatorIdentityFactory),
-            pools,
-            coordinator_config,
-        )
-        .unwrap()
-        .spawn();
-        let terminal_result = tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                let source_state: String = sqlx::query_scalar(
-                    "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
-                )
-                .bind(TENANT_ID)
-                .bind(JOB_ID)
-                .fetch_one(bulkheads.critical_control_pool())
-                .await
-                .unwrap();
-                let run_state: String = sqlx::query_scalar(
-                    "SELECT state FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
-                )
-                .bind(TENANT_ID)
-                .bind(RUN_ID)
-                .fetch_one(bulkheads.critical_control_pool())
-                .await
-                .unwrap();
-                if source_state == "succeeded" && run_state == "succeeded" {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let executable = std::env::current_exe().unwrap();
+        let spawn_timer_worker = || {
+            Command::new(&executable)
+                .arg("--exact")
+                .arg("timer_recovery_worker_process_entry")
+                .arg("--nocapture")
+                .arg("--test-threads=1")
+                .env("PLATFORM_TIMER_RECOVERY_CHILD", "1")
+                .env("PLATFORM_TEST_DATABASE_URL", &database_url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let mut crash_child = spawn_timer_worker();
+        let park_deadline = Instant::now() + Duration::from_secs(5);
+        let scheduled_at = loop {
+            if crash_child.try_wait().unwrap().is_some() {
+                let failed = crash_child.wait_with_output().unwrap();
+                panic!(
+                    "first Timer worker exited before durable park: stdout={} stderr={}",
+                    String::from_utf8_lossy(&failed.stdout),
+                    String::from_utf8_lossy(&failed.stderr),
+                );
             }
-        })
-        .await;
+            let parked = sqlx::query_as::<_, (String, Option<chrono::DateTime<Utc>>, String)>(
+                r#"
+                SELECT job.state, job.scheduled_at, node.state
+                FROM insight_platform.jobs AS job
+                JOIN insight_platform.run_nodes AS node
+                  ON node.tenant_id = job.tenant_id
+                 AND node.node_id = job.node_id
+                WHERE job.tenant_id = $1 AND job.job_id = $2
+                "#,
+            )
+            .bind(TENANT_ID)
+            .bind(JOB_ID)
+            .fetch_one(bulkheads.critical_control_pool())
+            .await
+            .unwrap();
+            if parked.0 == "waiting" && parked.2 == "waiting" {
+                break parked.1.expect("Timer wait must own a database deadline");
+            }
+            if Instant::now() >= park_deadline {
+                crash_child.kill().unwrap();
+                let failed = crash_child.wait_with_output().unwrap();
+                panic!(
+                    "first process did not durably park the Timer: stdout={} stderr={}",
+                    String::from_utf8_lossy(&failed.stdout),
+                    String::from_utf8_lossy(&failed.stderr),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(scheduled_at > Utc::now());
+        crash_child.kill().unwrap();
+        let crashed = crash_child.wait_with_output().unwrap();
+        assert!(!crashed.status.success());
+
+        let until_due = scheduled_at.signed_duration_since(Utc::now());
+        if let Ok(until_due) = until_due.to_std() {
+            tokio::time::sleep(until_due + Duration::from_millis(100)).await;
+        }
+        let recovery_child = spawn_timer_worker();
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(20),
+            tokio::task::spawn_blocking(move || recovery_child.wait_with_output()),
+        )
+        .await
+        .expect("replacement Timer worker process did not exit")
+        .unwrap()
+        .unwrap();
         assert!(
-            terminal_result.is_ok(),
-            "materialized terminal did not commit: resolver_calls={}, reader_calls={}, resolver_error={:?}, resolver_request={:?}",
-            run_value_resolver_calls.load(Ordering::Relaxed),
-            run_value_reader_calls.load(Ordering::Relaxed),
-            *run_value_resolver_error.lock().unwrap(),
-            *run_value_resolver_request.lock().unwrap(),
+            recovered.status.success(),
+            "replacement Timer worker failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&recovered.stdout),
+            String::from_utf8_lossy(&recovered.stderr),
         );
-        assert!(run_value_resolver_calls.load(Ordering::Relaxed) >= 1);
-        assert!(run_value_reader_calls.load(Ordering::Relaxed) >= 1);
+        assert!(
+            String::from_utf8_lossy(&recovered.stdout)
+                .contains("TIMER_RECOVERY_CHILD_RESULT terminal=succeeded")
+        );
         let activated = sqlx::query_as::<_, (String, String)>(
             r#"
             SELECT plan_node_key, state
@@ -844,11 +995,20 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
             .as_deref(),
             Some(VALUE_ID)
         );
-        let materializing_exit = materializing_coordinator.shutdown().await.unwrap();
-        assert!(materializing_exit.snapshot.settled_generations >= 1);
-        let safety_exit = safety.shutdown().await.unwrap();
-        assert!(safety_exit.mutations >= 2);
-        assert!(safety_exit.scan_attempts >= 10);
+        let finish_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND run_id = $2 AND plan_node_key = 'finish'
+              AND record_kind = 'node_execution' AND state = 'succeeded'
+            "#,
+        )
+        .bind(TENANT_ID)
+        .bind(RUN_ID)
+        .fetch_one(bulkheads.critical_control_pool())
+        .await
+        .unwrap();
+        assert_eq!(finish_count, 1);
         bulkheads.close().await;
     });
 }
