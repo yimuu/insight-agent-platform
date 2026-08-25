@@ -20,6 +20,12 @@
 > versioned stable acceptance。fresh PostgreSQL 16 fixture证明notification接受与Receipt replay返回同一Job/digest，stale generation整批回滚且
 > 只有一个Context Job/Event，MCP completion消费owner生成的durable work digest。reconcile正向fixture、Context worker handler与Host adapter/L3仍待实现。
 
+> 2026-08-26 implementation evidence：r271新增typed MCP→Context production adapter；它从冻结的invalidation/reconcile request构造Context
+> command，自身不接受Job ID或work digest，commit-uncertain保持可重放错误。MCP request补齐exact root URI/digest与subscription deadline；unit
+> fixture覆盖notification/full reconcile映射及owner返回digest回传。fresh PostgreSQL 16 fixture进一步在前一Context Job已终态的分层安排下证明
+> full reconcile acceptance/replay创建下一唯一Context Job，MCP reconcile completion消费其digest。Context Job真实handler/recovery、Host process
+> composition与kill-window L3仍待实现。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

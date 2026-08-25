@@ -15,6 +15,7 @@ base64.workspace = true
 chrono.workspace = true
 futures.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-context.workspace = true
 insight-platform-jobs.workspace = true
 ring.workspace = true
 serde.workspace = true

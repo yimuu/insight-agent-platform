@@ -376,6 +376,10 @@ r270在fresh PostgreSQL 16上覆盖notification admission的Job/Receipt/Event/Ou
 整批回滚及MCP completion引用durable work digest。full reconcile、wrong-class claim、Context handler、Host/Context独立进程kill-window和permit
 隔离仍待L2/L3，因此不推进qualification状态。
 
+r271补齐typed Host adapter unit evidence与fresh PostgreSQL full reconcile acceptance/replay；后者只在fixture明确终态化前一个Context Job后验证
+下一Job，未伪装Context worker行为。wrong-class claim、真实Context handler/recovery、production binary composition、进程kill-window与permit
+隔离仍是L3/L5 blocker。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

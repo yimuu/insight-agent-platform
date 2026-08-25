@@ -1,5 +1,10 @@
 use super::*;
 use chrono::Duration as ChronoDuration;
+use insight_platform_context::{
+    AcceptedContextSubscriptionRefresh, AdmitContextSubscriptionRefresh,
+    ContextSubscriptionAdmissionAuthority, ContextSubscriptionAdmissionError,
+    ContextSubscriptionRefreshCause, CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+};
 use insight_platform_contracts::{
     AllowedMcpServerCapabilities, ArtifactRef, CanonicalHttpEndpoint, CapabilityEndpointScheme,
     CommandAudit, CommandOutcome, DataClassification, ExactSecretBindingRef, ExactVersionRef,
@@ -2156,6 +2161,30 @@ struct CapturingSubscriptionTarget {
     reconcile: Mutex<Option<McpSubscriptionReconcileRequest>>,
 }
 
+#[derive(Default)]
+struct CapturingContextAdmissionAuthority {
+    commands: Mutex<Vec<AdmitContextSubscriptionRefresh>>,
+}
+
+#[async_trait]
+impl ContextSubscriptionAdmissionAuthority for CapturingContextAdmissionAuthority {
+    async fn admit_context_subscription_refresh(
+        &self,
+        command: AdmitContextSubscriptionRefresh,
+    ) -> Result<AcceptedContextSubscriptionRefresh, ContextSubscriptionAdmissionError> {
+        command.validate_at(Utc::now())?;
+        let accepted = AcceptedContextSubscriptionRefresh {
+            schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+            request_digest: command.request.request_digest.clone(),
+            durable_work_digest: sha('9'),
+            job_id: id(ResourceKind::Job, 0x5f0),
+            accepted_at: Utc::now(),
+        };
+        self.commands.lock().unwrap().push(command);
+        Ok(accepted)
+    }
+}
+
 #[async_trait]
 impl McpSubscriptionInvalidationTarget for CapturingSubscriptionTarget {
     async fn accept_invalidation(
@@ -2597,6 +2626,75 @@ async fn subscription_worker_acknowledges_only_after_durable_refresh_acceptance(
         .payload
         .pending_invalidation
         .is_none());
+}
+
+#[tokio::test]
+async fn context_invalidation_adapter_maps_notification_and_reconcile_without_job_input() {
+    let now = Utc::now();
+    let contract = subscription_contract(now);
+    let mut invalidated = ready_subscription_record(&contract, now);
+    let notification = McpNotificationCommit {
+        audit: McpNotificationAudit {
+            tenant_id: invalidated.tenant_id.clone(),
+            receipt_id: id(ResourceKind::Receipt, 0x5e0),
+            event_id: id(ResourceKind::Event, 0x5e1),
+            outbox_id: id(ResourceKind::OutboxEvent, 0x5e2),
+            receipt_expires_at: now + ChronoDuration::hours(1),
+        },
+        tenant_id: invalidated.tenant_id.clone(),
+        subscription_id: invalidated.subscription_id.clone(),
+        authorization_generation: invalidated.payload.binding.authorization_generation,
+        session_generation: invalidated.payload.session.generation,
+        event_key_digest: sha('a'),
+        event_generation: 7,
+        class: McpNotificationClass::ResourceUpdated,
+        resource_uri_digest: Some(invalidated.payload.binding.resource_uri_digest.clone()),
+        body_digest: sha('b'),
+        wire_bytes: 128,
+        received_at: now,
+    };
+    let (payload, disposition) = invalidated
+        .payload
+        .apply_notification(&notification, now)
+        .unwrap();
+    assert_eq!(disposition, McpNotificationApplyDisposition::Wake);
+    invalidated.payload = payload;
+    invalidated.version += 1;
+
+    let authority = Arc::new(CapturingContextAdmissionAuthority::default());
+    let target = ContextSubscriptionInvalidationTarget::new(authority.clone());
+    let invalidation = McpSubscriptionInvalidationRequest::build(&invalidated).unwrap();
+    let accepted = target
+        .accept_invalidation(invalidation.clone())
+        .await
+        .unwrap();
+    assert_eq!(accepted.request_digest, invalidation.request_digest);
+    assert_eq!(accepted.durable_work_digest, sha('9'));
+
+    let reconciled = ready_subscription_record(&contract, now);
+    let reconcile = McpSubscriptionReconcileRequest::build(&reconciled).unwrap();
+    let reconcile_accepted = target.accept_reconcile(reconcile.clone()).await.unwrap();
+    assert_eq!(reconcile_accepted.request_digest, reconcile.request_digest);
+    assert_eq!(reconcile_accepted.durable_work_digest, sha('9'));
+
+    let commands = authority.commands.lock().unwrap();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].request.resource_uri, invalidation.resource_uri);
+    assert_eq!(
+        commands[0].request.resource_uri_digest,
+        invalidation.resource_uri_digest
+    );
+    assert!(matches!(
+        commands[0].request.cause,
+        ContextSubscriptionRefreshCause::ResourceUpdated
+    ));
+    assert!(matches!(
+        commands[1].request.cause,
+        ContextSubscriptionRefreshCause::FullReconcile {
+            observed_subscription_version
+        } if observed_subscription_version == reconciled.version
+    ));
+    assert_eq!(commands[1].request.event_generation, reconciled.version);
 }
 
 fn ready_subscription_record(

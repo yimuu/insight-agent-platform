@@ -189,4 +189,8 @@ r268已在Context owner边界交付CR-190 closed subscription refresh request、
 r270已补齐PostgreSQL owner transaction与notification Receipt replay/唯一Context Job L2 fixture，并让既有MCP completion消费owner返回的
 durable work digest；Host production adapter、full reconcile L2、独立claim/refresh进程及commit-window L3仍未完成。
 
+r271新增Host侧typed Context invalidation target，覆盖notification与full reconcile映射、exact root/deadline和commit-uncertain传播；adapter API
+没有Job/work-digest输入。fresh PostgreSQL full reconcile acceptance/replay也已通过。该target尚未组合进production binary，Context Job handler与
+Host/Context独立进程L3仍待完成。
+
 首版remote Streamable HTTP合同无未决设计问题。

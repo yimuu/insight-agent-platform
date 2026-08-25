@@ -2814,6 +2814,7 @@ dependencies = [
  "base64",
  "chrono",
  "futures",
+ "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-jobs",
  "ring",

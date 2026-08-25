@@ -11,6 +11,12 @@ use super::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::FutureExt;
+use insight_platform_context::{
+    AdmitContextSubscriptionRefresh, ContextSubscriptionAdmissionAudit,
+    ContextSubscriptionAdmissionAuthority, ContextSubscriptionAdmissionError,
+    ContextSubscriptionRefreshCause, ContextSubscriptionRefreshRequest,
+    CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+};
 use insight_platform_contracts::{
     CommandOutcome, McpSessionState, McpTransportKind, ResourceId, ResourceKind, Sha256Digest,
 };
@@ -20,6 +26,7 @@ use std::{
     collections::BTreeSet, error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration,
 };
 use tokio::sync::Semaphore;
+use uuid::Uuid;
 
 const MAX_SUBSCRIPTION_CLOCK_SKEW_SECONDS: i64 = 60;
 
@@ -221,12 +228,15 @@ pub struct McpSubscriptionInvalidationRequest {
     pub mcp_deployment: insight_platform_contracts::ExactDeploymentRef,
     pub discovery_snapshot_id: ResourceId,
     pub discovery_snapshot_digest: Sha256Digest,
+    pub resource_uri: String,
+    pub resource_uri_digest: Sha256Digest,
     pub authorization_generation: u64,
     pub session_generation: u64,
     pub event_generation: u64,
     pub event_key_digest: Sha256Digest,
     pub body_digest: Sha256Digest,
     pub reason: McpSubscriptionRefreshReason,
+    pub deadline: DateTime<Utc>,
     pub request_digest: Sha256Digest,
 }
 
@@ -264,12 +274,15 @@ impl McpSubscriptionInvalidationRequest {
             mcp_deployment: binding.mcp_deployment.clone(),
             discovery_snapshot_id: binding.discovery_snapshot_id.clone(),
             discovery_snapshot_digest: binding.discovery_snapshot_digest.clone(),
+            resource_uri: binding.resource_uri.clone(),
+            resource_uri_digest: binding.resource_uri_digest.clone(),
             authorization_generation: binding.authorization_generation,
             session_generation: pending.session_generation,
             event_generation: pending.event_generation,
             event_key_digest: pending.event_key_digest.clone(),
             body_digest: pending.body_digest.clone(),
             reason,
+            deadline: record.deadline,
             request_digest: static_digest("mcp_subscription_invalidation_placeholder"),
         };
         request.request_digest = request.canonical_request_digest()?;
@@ -317,11 +330,14 @@ impl McpSubscriptionInvalidationRequest {
             || self.mcp_deployment != binding.mcp_deployment
             || self.discovery_snapshot_id != binding.discovery_snapshot_id
             || self.discovery_snapshot_digest != binding.discovery_snapshot_digest
+            || self.resource_uri != binding.resource_uri
+            || self.resource_uri_digest != binding.resource_uri_digest
             || self.authorization_generation != binding.authorization_generation
             || self.session_generation != pending.session_generation
             || self.event_generation != pending.event_generation
             || self.event_key_digest != pending.event_key_digest
             || self.body_digest != pending.body_digest
+            || self.deadline != record.deadline
             || !reason_matches
             || self.canonical_request_digest()? != self.request_digest
         {
@@ -340,11 +356,14 @@ impl McpSubscriptionInvalidationRequest {
             "event_generation": self.event_generation,
             "event_key_digest": self.event_key_digest,
             "mcp_deployment": self.mcp_deployment,
+            "resource_uri": self.resource_uri,
+            "resource_uri_digest": self.resource_uri_digest,
             "reason": self.reason,
             "schema_version": self.schema_version,
             "session_generation": self.session_generation,
             "subscription_id": self.subscription_id,
             "tenant_id": self.tenant_id,
+            "deadline": self.deadline,
         }))
     }
 }
@@ -371,6 +390,7 @@ pub struct McpSubscriptionReconcileRequest {
     pub observed_subscription_version: u64,
     pub resource_uri: String,
     pub resource_uri_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
     pub request_digest: Sha256Digest,
 }
 
@@ -399,6 +419,7 @@ impl McpSubscriptionReconcileRequest {
             observed_subscription_version: record.version,
             resource_uri: binding.resource_uri.clone(),
             resource_uri_digest: binding.resource_uri_digest.clone(),
+            deadline: record.deadline,
             request_digest: static_digest("mcp_subscription_reconcile_placeholder"),
         };
         request.request_digest = request.canonical_request_digest()?;
@@ -419,6 +440,7 @@ impl McpSubscriptionReconcileRequest {
             || self.observed_subscription_version != record.version
             || self.resource_uri != binding.resource_uri
             || self.resource_uri_digest != binding.resource_uri_digest
+            || self.deadline != record.deadline
             || record.payload.pending_invalidation.is_some()
             || self.canonical_request_digest()? != self.request_digest
         {
@@ -437,6 +459,7 @@ impl McpSubscriptionReconcileRequest {
             "observed_subscription_version": self.observed_subscription_version,
             "resource_uri": self.resource_uri,
             "resource_uri_digest": self.resource_uri_digest,
+            "deadline": self.deadline,
             "schema_version": self.schema_version,
             "session_generation": self.session_generation,
             "subscription_id": self.subscription_id,
@@ -490,6 +513,208 @@ pub trait McpSubscriptionInvalidationTarget: Send + Sync {
         &self,
         request: McpSubscriptionReconcileRequest,
     ) -> Result<AcceptedMcpSubscriptionInvalidation, McpSubscriptionInvalidationError>;
+}
+
+/// Production adapter from the MCP worker contract to the durable Context
+/// application owner. The MCP process supplies no Job identity or work digest.
+pub struct ContextSubscriptionInvalidationTarget<A: ?Sized> {
+    authority: Arc<A>,
+}
+
+impl<A: ?Sized> ContextSubscriptionInvalidationTarget<A> {
+    pub fn new(authority: Arc<A>) -> Self {
+        Self { authority }
+    }
+}
+
+#[async_trait]
+impl<A> McpSubscriptionInvalidationTarget for ContextSubscriptionInvalidationTarget<A>
+where
+    A: ContextSubscriptionAdmissionAuthority + ?Sized,
+{
+    async fn accept_invalidation(
+        &self,
+        request: McpSubscriptionInvalidationRequest,
+    ) -> Result<AcceptedMcpSubscriptionInvalidation, McpSubscriptionInvalidationError> {
+        let mcp_request_digest = request.request_digest.clone();
+        let command = context_invalidation_command(request)?;
+        let accepted = self
+            .authority
+            .admit_context_subscription_refresh(command)
+            .await
+            .map_err(map_context_subscription_error)?;
+        Ok(AcceptedMcpSubscriptionInvalidation {
+            request_digest: mcp_request_digest,
+            durable_work_digest: accepted.durable_work_digest,
+            accepted_at: accepted.accepted_at,
+        })
+    }
+
+    async fn accept_reconcile(
+        &self,
+        request: McpSubscriptionReconcileRequest,
+    ) -> Result<AcceptedMcpSubscriptionInvalidation, McpSubscriptionInvalidationError> {
+        let mcp_request_digest = request.request_digest.clone();
+        let command = context_reconcile_command(request)?;
+        let accepted = self
+            .authority
+            .admit_context_subscription_refresh(command)
+            .await
+            .map_err(map_context_subscription_error)?;
+        Ok(AcceptedMcpSubscriptionInvalidation {
+            request_digest: mcp_request_digest,
+            durable_work_digest: accepted.durable_work_digest,
+            accepted_at: accepted.accepted_at,
+        })
+    }
+}
+
+fn context_invalidation_command(
+    request: McpSubscriptionInvalidationRequest,
+) -> Result<AdmitContextSubscriptionRefresh, McpSubscriptionInvalidationError> {
+    let cause = match request.reason {
+        McpSubscriptionRefreshReason::ResourceUpdated {
+            resource_uri,
+            resource_uri_digest,
+        } if resource_uri == request.resource_uri
+            && resource_uri_digest == request.resource_uri_digest =>
+        {
+            ContextSubscriptionRefreshCause::ResourceUpdated
+        }
+        McpSubscriptionRefreshReason::ResourceUpdated { .. } => {
+            return Err(McpSubscriptionInvalidationError::Rejected);
+        }
+        McpSubscriptionRefreshReason::ResourceListChanged => {
+            ContextSubscriptionRefreshCause::ResourceListChanged
+        }
+        McpSubscriptionRefreshReason::ToolListChanged => {
+            ContextSubscriptionRefreshCause::ToolListChanged
+        }
+        McpSubscriptionRefreshReason::PromptListChanged => {
+            ContextSubscriptionRefreshCause::PromptListChanged
+        }
+    };
+    context_admission_command(
+        request.tenant_id,
+        request.subscription_id,
+        request.context_deployment,
+        request.mcp_deployment,
+        request.discovery_snapshot_id,
+        request.discovery_snapshot_digest,
+        request.resource_uri,
+        request.resource_uri_digest,
+        request.authorization_generation,
+        request.session_generation,
+        request.event_generation,
+        request.event_key_digest,
+        request.body_digest,
+        cause,
+        request.deadline,
+        request.request_digest,
+    )
+}
+
+fn context_reconcile_command(
+    request: McpSubscriptionReconcileRequest,
+) -> Result<AdmitContextSubscriptionRefresh, McpSubscriptionInvalidationError> {
+    context_admission_command(
+        request.tenant_id,
+        request.subscription_id,
+        request.context_deployment,
+        request.mcp_deployment,
+        request.discovery_snapshot_id,
+        request.discovery_snapshot_digest.clone(),
+        request.resource_uri,
+        request.resource_uri_digest.clone(),
+        request.authorization_generation,
+        request.session_generation,
+        request.observed_subscription_version,
+        request.resource_uri_digest,
+        request.discovery_snapshot_digest,
+        ContextSubscriptionRefreshCause::FullReconcile {
+            observed_subscription_version: request.observed_subscription_version,
+        },
+        request.deadline,
+        request.request_digest,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn context_admission_command(
+    tenant_id: ResourceId,
+    subscription_id: ResourceId,
+    context_deployment: insight_platform_contracts::ExactDeploymentRef,
+    mcp_deployment: insight_platform_contracts::ExactDeploymentRef,
+    discovery_snapshot_id: ResourceId,
+    discovery_snapshot_digest: Sha256Digest,
+    resource_uri: String,
+    resource_uri_digest: Sha256Digest,
+    authorization_generation: u64,
+    session_generation: u64,
+    event_generation: u64,
+    event_key_digest: Sha256Digest,
+    body_digest: Sha256Digest,
+    cause: ContextSubscriptionRefreshCause,
+    deadline: DateTime<Utc>,
+    correlation_digest: Sha256Digest,
+) -> Result<AdmitContextSubscriptionRefresh, McpSubscriptionInvalidationError> {
+    let mut request = ContextSubscriptionRefreshRequest {
+        schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+        tenant_id,
+        subscription_id,
+        context_deployment,
+        mcp_deployment,
+        discovery_snapshot_id,
+        discovery_snapshot_digest,
+        resource_uri,
+        resource_uri_digest,
+        authorization_generation,
+        session_generation,
+        event_generation,
+        event_key_digest,
+        body_digest,
+        cause,
+        deadline,
+        request_digest: static_digest("context_subscription_admission_placeholder"),
+    };
+    request.request_digest = request
+        .canonical_request_digest()
+        .map_err(|_| McpSubscriptionInvalidationError::Rejected)?;
+    let request_id = ResourceId::from_uuid_v7(ResourceKind::ServerRequest, Uuid::now_v7())
+        .map_err(|_| McpSubscriptionInvalidationError::Unavailable)?;
+    let command = AdmitContextSubscriptionRefresh {
+        request,
+        audit: ContextSubscriptionAdmissionAudit {
+            schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+            request_id,
+            correlation_digest,
+        },
+    };
+    command
+        .validate_at(Utc::now())
+        .map_err(|_| McpSubscriptionInvalidationError::Rejected)?;
+    Ok(command)
+}
+
+fn map_context_subscription_error(
+    failure: ContextSubscriptionAdmissionError,
+) -> McpSubscriptionInvalidationError {
+    match failure {
+        ContextSubscriptionAdmissionError::Unavailable => {
+            McpSubscriptionInvalidationError::Unavailable
+        }
+        ContextSubscriptionAdmissionError::CommitUncertain => {
+            McpSubscriptionInvalidationError::CommitUncertain
+        }
+        ContextSubscriptionAdmissionError::InvalidRequest
+        | ContextSubscriptionAdmissionError::InvalidAudit
+        | ContextSubscriptionAdmissionError::InvalidJobPayload
+        | ContextSubscriptionAdmissionError::InvalidAcceptance
+        | ContextSubscriptionAdmissionError::Rejected
+        | ContextSubscriptionAdmissionError::Canonicalization => {
+            McpSubscriptionInvalidationError::Rejected
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

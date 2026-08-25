@@ -633,6 +633,10 @@ r270新增PostgreSQL Context owner transaction并在fresh PostgreSQL 16上证明
 `Context -> McpOperation` Job/Event/Outbox及stale session generation零写入；事务还重载published MCP/Context closure与当前授权。该fixture尚未覆盖
 full reconcile正向、Context worker执行/恢复、Host adapter或accept commit-window进程强杀，故18.1只完成部分L2。
 
+r271补齐MCP→Context typed adapter与full reconcile L2：adapter不能提供Job identity/work digest，Context authority返回值才成为MCP completion
+evidence；fresh PostgreSQL在前一refresh Job已终态的分层fixture中证明reconcile acceptance/replay与下一唯一Job。测试中的前序Job终态是fixture
+安排，不代表Context worker已交付；真实handler、lease/recovery与进程kill-window仍未闭合。
+
 ## 24. 明确推迟的工作
 
 - 跨地域 index replication 与主动容灾；

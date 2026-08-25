@@ -1334,6 +1334,43 @@ fn context_refresh_admission(
     }
 }
 
+fn context_reconcile_admission(
+    record: &McpSubscriptionRecord,
+    base: u16,
+) -> AdmitContextSubscriptionRefresh {
+    let binding = &record.payload.binding;
+    let mut request = ContextSubscriptionRefreshRequest {
+        schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+        tenant_id: record.tenant_id.clone(),
+        subscription_id: record.subscription_id.clone(),
+        context_deployment: binding.context_deployment.clone(),
+        mcp_deployment: binding.mcp_deployment.clone(),
+        discovery_snapshot_id: binding.discovery_snapshot_id.clone(),
+        discovery_snapshot_digest: binding.discovery_snapshot_digest.clone(),
+        resource_uri: binding.resource_uri.clone(),
+        resource_uri_digest: binding.resource_uri_digest.clone(),
+        authorization_generation: binding.authorization_generation,
+        session_generation: record.payload.session.generation,
+        event_generation: record.version,
+        event_key_digest: binding.resource_uri_digest.clone(),
+        body_digest: binding.discovery_snapshot_digest.clone(),
+        cause: ContextSubscriptionRefreshCause::FullReconcile {
+            observed_subscription_version: record.version,
+        },
+        deadline: record.deadline,
+        request_digest: named_digest("context-reconcile-placeholder"),
+    };
+    request.request_digest = request.canonical_request_digest().unwrap();
+    AdmitContextSubscriptionRefresh {
+        request,
+        audit: ContextSubscriptionAdmissionAudit {
+            schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+            request_id: id(ResourceKind::ServerRequest, base),
+            correlation_digest: named_digest(&format!("context-reconcile-correlation-{base}")),
+        },
+    }
+}
+
 #[test]
 fn mcp_subscription_is_durable_fenced_coalesced_and_tenant_scoped() {
     std::thread::Builder::new()
@@ -1679,6 +1716,24 @@ async fn mcp_subscription_fixture() {
         CommandOutcome::Replayed(_)
     ));
 
+    // This repository fixture isolates the next admission after an already-terminal Context
+    // work item. Context worker completion/recovery is covered by its own process fixture.
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'succeeded', result_digest = payload_digest,
+            terminal_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND job_id = $2
+          AND work_class = 'context' AND owner_kind = 'mcp_operation'
+          AND state = 'ready'
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(accepted.job_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let mut stale = notification(&fixture, 1, 1, 0x2a0, now + Duration::seconds(1));
     stale.event_key_digest = named_digest("stale-distinct-key");
     stale.resource_uri_digest = Some(refreshed.payload.binding.resource_uri_digest.clone());
@@ -1740,13 +1795,14 @@ async fn mcp_subscription_fixture() {
         candidate: due[0].clone(),
     };
     wake.audit.request_digest = wake.request_digest().unwrap();
-    assert!(matches!(
-        repository
-            .wake_mcp_subscription_reconcile(wake.clone())
-            .await
-            .unwrap(),
-        CommandOutcome::Applied(_)
-    ));
+    let woken = match repository
+        .wake_mcp_subscription_reconcile(wake.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("first periodic reconcile wake must apply"),
+    };
     assert!(matches!(
         repository
             .wake_mcp_subscription_reconcile(wake)
@@ -1754,6 +1810,27 @@ async fn mcp_subscription_fixture() {
             .unwrap(),
         CommandOutcome::Replayed(_)
     ));
+    let reconcile_admission = context_reconcile_admission(&woken, 0x2c8);
+    let reconcile_acceptance = repository
+        .admit_context_subscription_refresh(reconcile_admission.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .admit_context_subscription_refresh(reconcile_admission)
+            .await
+            .unwrap(),
+        reconcile_acceptance
+    );
+    let total_context_jobs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.jobs WHERE tenant_id = $1 AND work_class = 'context' AND owner_kind = 'mcp_operation' AND owner_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.subscription_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(total_context_jobs, 2);
     let reconcile_worker = id(ResourceKind::WorkerProcessGeneration, 0x2d0);
     let reconcile_fence =
         claim_and_start(&repository, &fixture, &reconcile_worker, "reconcile-lease").await;
@@ -1764,7 +1841,7 @@ async fn mcp_subscription_fixture() {
         fence: reconcile_fence,
         expected_subscription_version: refreshed.version,
         expected_session_generation: refreshed.payload.session.generation,
-        reconcile_evidence_digest: named_digest("periodic-reconcile-evidence"),
+        reconcile_evidence_digest: reconcile_acceptance.durable_work_digest,
     };
     reconcile.audit.request_digest = reconcile.request_digest().unwrap();
     let reconciled = repository
