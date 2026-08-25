@@ -233,6 +233,7 @@ fn runtime_plan() -> RuntimePlan {
     let input_otherwise = PlanNodeKey::new("input_otherwise".to_owned()).unwrap();
     let input_compute = PlanNodeKey::new("input_compute".to_owned()).unwrap();
     let child_call = PlanNodeKey::new("child_call".to_owned()).unwrap();
+    let child_call_2 = PlanNodeKey::new("child_call_2".to_owned()).unwrap();
     let human_task = PlanNodeKey::new("human_task".to_owned()).unwrap();
     let expiring_task = PlanNodeKey::new("expiring_task".to_owned()).unwrap();
     let timer_wait = PlanNodeKey::new("timer_wait".to_owned()).unwrap();
@@ -465,6 +466,32 @@ fn runtime_plan() -> RuntimePlan {
                     candidate_route: None,
                     output: insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
                         producer_node_id: child_call,
+                        port_id: DataPortKey::new("response".to_owned()).unwrap(),
+                        schema_digest: agent_schema().canonical_digest,
+                    },
+                    budget: insight_platform_orchestrator::ChildBudgetLimit {
+                        maximum_duration_milliseconds: 60_000,
+                        maximum_model_tokens: 1_000,
+                        maximum_capability_calls: 10,
+                        maximum_artifact_bytes: 1_048_576,
+                        maximum_descendant_runs: 8,
+                    },
+                    cancellation_policy: ChildCancellationPolicy::CascadeAndWait,
+                    attempt_limit: 3,
+                    retry_backoff_milliseconds: 100,
+                    resume: child_call_2.clone(),
+                },
+            ),
+            (
+                child_call_2.clone(),
+                RuntimeNode::ChildAgentCall {
+                    child_agent_slot_id: "child_worker".to_owned(),
+                    input: insight_platform_orchestrator::ExactDataPortRef::RunInput {
+                        schema_digest: agent_schema().canonical_digest,
+                    },
+                    candidate_route: None,
+                    output: insight_platform_orchestrator::ExactDataPortRef::NodeOutput {
+                        producer_node_id: child_call_2,
                         port_id: DataPortKey::new("response".to_owned()).unwrap(),
                         schema_digest: agent_schema().canonical_digest,
                     },
@@ -3921,7 +3948,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     scheduler.commit().await.unwrap();
 
     let child_output: Value = json!({"answer": "delegated"});
-    let child_output_digest = canonical_digest(&child_output).unwrap().parse().unwrap();
+    let child_output_digest: Sha256Digest =
+        canonical_digest(&child_output).unwrap().parse().unwrap();
     let child_result_payload =
         TypedPayload::new(1, &json!({"outcome": "child_succeeded"})).unwrap();
     let complete_child = CompleteOrchestrationRun {
@@ -3936,7 +3964,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28367f0b"),
             classification: DataClassification::Internal,
             schema_digest: agent_schema().canonical_digest,
-            content_digest: child_output_digest,
+            content_digest: child_output_digest.clone(),
             value: ValueRef::Inline {
                 value: child_output,
             },
@@ -3974,6 +4002,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(completed_child.run.state, "succeeded");
 
     let terminal_child_slot = TerminalChildRunSlot {
+        parent_output_value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28366f16"),
+        continuation_node_execution_id: id("nod_0198f1c3-9a00-7c3e-b1f3-773c28366f17"),
         resume_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c28367f16"),
         resume_request_digest: digest('b'),
         child_link_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f17"),
@@ -3982,6 +4012,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         parent_run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f18"),
         parent_node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f19"),
         parent_node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f19"),
+        continuation_node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28366f18"),
+        continuation_node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28366f18"),
         resume_job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f1a"),
         resume_job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f1a"),
     };
@@ -4000,6 +4032,10 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(terminal_child[0].parent_run.state, "running");
     assert_eq!(terminal_child[0].resume_job.state, "ready");
     assert_eq!(
+        terminal_child[0].parent_output_value_id,
+        Some(id("val_0198f1c3-9a00-7c3e-b1f3-773c28366f16"))
+    );
+    assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT state FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
         )
@@ -4008,7 +4044,49 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .fetch_one(&pool)
         .await
         .unwrap(),
-        "ready"
+        "succeeded"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*) FROM insight_platform.run_values
+            WHERE tenant_id = $1 AND value_id = $2 AND run_id = $3 AND node_id = $4
+              AND value_kind = 'run_output' AND classification = 'internal'
+              AND schema_digest = $5 AND content_digest = $6
+              AND inline_value = $7 AND artifact_id IS NULL
+            "#,
+        )
+        .bind(TENANT_ID)
+        .bind("val_0198f1c3-9a00-7c3e-b1f3-773c28366f16")
+        .bind(&terminal_child[0].parent_run.run_id)
+        .bind(&terminal_child[0].parent_node_id)
+        .bind(agent_schema().canonical_digest.to_string())
+        .bind(child_output_digest.to_string())
+        .bind(json!({"answer": "delegated"}))
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT plan_node_key FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution' AND state = 'ready'
+            "#,
+        )
+        .bind(TENANT_ID)
+        .bind("nod_0198f1c3-9a00-7c3e-b1f3-773c28366f17")
+        .bind(&terminal_child[0].parent_run.run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "child_call_2"
+    );
+    assert_eq!(
+        terminal_child[0].resume_job.node_id.as_deref(),
+        Some("nod_0198f1c3-9a00-7c3e-b1f3-773c28366f17")
     );
 
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -4016,6 +4094,10 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .drive_terminal_child_runs(DriveTerminalChildRuns {
             limit: 1,
             slots: vec![TerminalChildRunSlot {
+                parent_output_value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28366f1b"),
+                continuation_node_execution_id: id(
+                    "nod_0198f1c3-9a00-7c3e-b1f3-773c28366f1c",
+                ),
                 resume_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c28367f1b"),
                 resume_request_digest: digest('c'),
                 child_link_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f1c"),
@@ -4024,6 +4106,12 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 parent_run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f1d"),
                 parent_node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f1e"),
                 parent_node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f1e"),
+                continuation_node_event_id: id(
+                    "evt_0198f1c3-9a00-7c3e-b1f3-773c28366f1d",
+                ),
+                continuation_node_outbox_id: id(
+                    "obx_0198f1c3-9a00-7c3e-b1f3-773c28366f1d",
+                ),
                 resume_job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367f1f"),
                 resume_job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367f1f"),
             }],
@@ -4187,6 +4275,10 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .drive_terminal_child_runs(DriveTerminalChildRuns {
             limit: 1,
             slots: vec![TerminalChildRunSlot {
+                parent_output_value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c2836602f"),
+                continuation_node_execution_id: id(
+                    "nod_0198f1c3-9a00-7c3e-b1f3-773c28366030",
+                ),
                 resume_job_id: id("job_0198f1c3-9a00-7c3e-b1f3-773c2836802f"),
                 resume_request_digest: digest('4'),
                 child_link_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368030"),
@@ -4195,6 +4287,12 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
                 parent_run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368031"),
                 parent_node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368032"),
                 parent_node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368032"),
+                continuation_node_event_id: id(
+                    "evt_0198f1c3-9a00-7c3e-b1f3-773c28366031",
+                ),
+                continuation_node_outbox_id: id(
+                    "obx_0198f1c3-9a00-7c3e-b1f3-773c28366031",
+                ),
                 resume_job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368033"),
                 resume_job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368033"),
             }],
