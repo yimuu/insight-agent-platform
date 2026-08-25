@@ -44,12 +44,14 @@ mod capability_http;
 mod mcp_oauth;
 mod mcp_oauth_start;
 mod mcp_streamable_http;
+mod remote_context;
 
 pub use capability_grpc::*;
 pub use capability_http::*;
 pub use mcp_oauth::*;
 pub use mcp_oauth_start::*;
 pub use mcp_streamable_http::*;
+pub use remote_context::*;
 
 pub const MAX_INSTALLED_MODEL_ENDPOINTS: usize = 1_024;
 pub const MAX_EGRESS_IN_FLIGHT_HARD: usize = 4_096;
@@ -293,7 +295,11 @@ impl ResolvedSecretMaterial {
         })
     }
 
-    fn validate_for(&self, binding: &ExactSecretBindingRef, maximum_material_bytes: usize) -> bool {
+    pub(crate) fn validate_for(
+        &self,
+        binding: &ExactSecretBindingRef,
+        maximum_material_bytes: usize,
+    ) -> bool {
         binding.validate().is_ok()
             && binding.provider_id == self.provider_id
             && binding.permits_resolved_generation(

@@ -82,13 +82,13 @@ pub enum InstalledHttpCredentialInjection {
 }
 
 impl InstalledHttpCredentialInjection {
-    fn purpose(&self) -> &SecretPurpose {
+    pub(crate) fn purpose(&self) -> &SecretPurpose {
         match self {
             Self::BearerAuthorization { purpose } | Self::Header { purpose, .. } => purpose,
         }
     }
 
-    fn validate(&self) -> Result<(), EgressConfigurationError> {
+    pub(crate) fn validate(&self) -> Result<(), EgressConfigurationError> {
         match self {
             Self::BearerAuthorization { .. } => Ok(()),
             Self::Header { name, .. } => {
@@ -757,7 +757,7 @@ impl HttpNetworkTransport for ReqwestCapabilityHttpEgressTransport {
     }
 }
 
-fn insert_credential(
+pub(crate) fn insert_credential(
     headers: &mut HeaderMap,
     injection: &InstalledHttpCredentialInjection,
     credential: &ResolvedSecretMaterial,
@@ -800,7 +800,9 @@ fn http_method(method: HttpCapabilityMethod) -> Method {
     }
 }
 
-fn capability_url(endpoint: &CanonicalHttpEndpoint) -> Result<Url, EgressConfigurationError> {
+pub(crate) fn capability_url(
+    endpoint: &CanonicalHttpEndpoint,
+) -> Result<Url, EgressConfigurationError> {
     let raw = format!(
         "https://{}:{}{}",
         endpoint.host, endpoint.port, endpoint.base_path
