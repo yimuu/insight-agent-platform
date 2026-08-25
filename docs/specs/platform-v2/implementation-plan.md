@@ -72,6 +72,11 @@
 > Egress Broker production service同时安装Resource Refresh connector。全部binary/all-target tests、既有Host process L3、strict Clippy与合同检查通过。
 > Helm topology和subscription三进程kill-window仍待下一批，因此不提前关闭L3。
 
+> 2026-08-26 implementation evidence：r278把r277两个entrypoint加入同一digest候选镜像，并在既有Context Worker/MCP Host chart内增加
+> 独立subscription/resource pool。每个pool拥有独立ServiceAccount、PDB、HPA、config/TLS/DB input和精确NetworkPolicy；普通MCP Host仍无DB
+> egress，只有Resource Host可接受Context subscription caller并访问PostgreSQL/Egress。Helm lint/render、两类deployment checker及全局
+> ComponentRole closure通过（15 roles、19 isolated pools；Context=3、MCP Host=2）。真实多进程kill-window仍待执行，L3未关闭。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

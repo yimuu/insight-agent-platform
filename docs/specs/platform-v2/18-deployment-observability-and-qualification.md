@@ -417,6 +417,10 @@ r277交付可部署的MCP Resource Host与subscription Context Worker二进制�
 独立DB/permit pool和互斥mTLS audience。all-target、既有Host process L3与strict Clippy通过。由于Helm workload/NetworkPolicy和fresh PostgreSQL
 三进程强杀矩阵尚未通过，该证据只关闭process composition编译/单元门禁，不计L3完成。
 
+r278将subscription Context与Resource Host加入同一候选镜像和现有role chart，以独立ServiceAccount/PDB/HPA/config/TLS/DB/NetworkPolicy形成
+两个新pool；普通MCP Host的无PostgreSQL边界继续由部署checker验证，Resource Host仅接受subscription Context selector。Helm lint/render和
+ComponentRole closure通过（19 isolated pools）。该静态证据不替代fresh PostgreSQL三进程kill-window或production-equivalent L4 inventory。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

@@ -9,3 +9,11 @@
 {{- if lt (int .Values.autoscaling.minReplicas) 2 -}}{{- fail "HPA requires at least two replicas" -}}{{- end -}}
 {{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) -}}{{- fail "HPA maximum must be at least minimum" -}}{{- end -}}
 {{- end -}}
+{{- if .Values.resourcePool.enabled -}}
+{{- if lt (int .Values.resourcePool.replicas) 2 -}}{{- fail "MCP Resource Host requires at least two replicas" -}}{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.resourcePool.config.digest) -}}{{- fail "resourcePool config.digest must be exact sha256" -}}{{- end -}}
+{{- if or (empty .Values.resourcePool.config.existingConfigMap) (empty .Values.resourcePool.database.existingSecret) (empty .Values.resourcePool.serverTls.existingSecret) -}}{{- fail "MCP Resource Host config, database and server TLS are required" -}}{{- end -}}
+{{- if or (empty .Values.resourcePool.callerNamespace) (empty .Values.resourcePool.callerPodSelector) (empty .Values.resourcePool.postgresCidrs) -}}{{- fail "MCP Resource Host exact caller and PostgreSQL CIDRs are required" -}}{{- end -}}
+{{- if eq (int .Values.resourcePool.service.port) (int .Values.resourcePool.observability.port) -}}{{- fail "MCP Resource Host observability port must be distinct" -}}{{- end -}}
+{{- if and .Values.resourcePool.autoscaling.enabled (lt (int .Values.resourcePool.autoscaling.minReplicas) 2) -}}{{- fail "MCP Resource Host HPA requires at least two replicas" -}}{{- end -}}
+{{- end -}}

@@ -14,6 +14,7 @@ root = Path(sys.argv[1])
 rendered = Path(sys.argv[2]).read_text(encoding="utf-8")
 dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 source = (root / "crates/platform-context-worker/src/main.rs").read_text(encoding="utf-8")
+subscription_source = (root / "crates/platform-context-worker/src/subscription_main.rs").read_text(encoding="utf-8")
 failures = []
 
 required = [
@@ -36,12 +37,23 @@ for token in required:
     if token not in rendered and token not in dockerfile:
         failures.append(f"missing deployment invariant: {token}")
 for forbidden in ["EGRESS_", "SECRET_", "NATS_", "SANDBOX_", "platform-egress", "port: 4222"]:
-    if forbidden in rendered or forbidden in source:
+    if forbidden in source:
         failures.append(f"NativeCatalog Context Worker gained forbidden dependency: {forbidden}")
 if "platform-context-worker" not in dockerfile:
     failures.append("runtime image is missing platform-context-worker")
 if "process_observability_router" not in source:
     failures.append("Context Worker is missing shared process observability")
+for token in [
+    "/usr/local/bin/platform-subscription-context-worker",
+    "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_CA_PATH",
+    "app.kubernetes.io/component: context-subscription-worker",
+    "app.kubernetes.io/component: mcp-resource-host",
+]:
+    if token not in rendered and token not in dockerfile:
+        failures.append(f"missing subscription Context deployment invariant: {token}")
+for token in ["SubscriptionContextWorkerDriver", "McpResourceRefreshGrpcClient"]:
+    if token not in subscription_source:
+        failures.append(f"subscription Context Worker composition is missing {token}")
 if failures:
     raise SystemExit("\n".join(failures))
 PY

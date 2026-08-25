@@ -41,3 +41,47 @@ spec:
             matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
       ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
 {{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.resourcePool.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "insight-platform-mcp-host.resourceName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "insight-platform-mcp-host.resourceLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.resourcePool.callerNamespace }} }
+          podSelector:
+            matchLabels: {{ toYaml .Values.resourcePool.callerPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.resourcePool.service.port }}}]
+    {{- if .Values.monitoring.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.resourcePool.observability.port }}}]
+    {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.egressNamespace }} }
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.egressPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.egressPort }}}]
+    - to:
+        {{- range .Values.resourcePool.postgresCidrs }}
+        - ipBlock: {cidr: {{ . }} }
+        {{- end }}
+      ports: [{protocol: TCP, port: 5432}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+{{- end }}

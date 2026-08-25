@@ -40,3 +40,30 @@ autoscaling:
   minReplicas: 2
   maxReplicas: 16
   targetCPUUtilizationPercentage: 70
+resourcePool:
+  enabled: true
+  replicas: 2
+  service: {port: 9543}
+  observability: {port: 9190}
+  config:
+    existingConfigMap: insight-platform-mcp-resource-host-candidate
+    fileKey: mcp-resource-host.json
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  database:
+    existingSecret: insight-platform-mcp-resource-host-database
+    urlKey: database-url
+  serverTls:
+    existingSecret: insight-platform-mcp-resource-host-server-tls
+    keys: {clientCa: client-ca.pem, certificate: server.pem, privateKey: server-key.pem}
+  resources:
+    requests: {cpu: 250m, memory: 256Mi, ephemeral-storage: 64Mi}
+    limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 1Gi}
+  podDisruptionBudget: {enabled: true, minAvailable: 1}
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 16
+    targetCPUUtilizationPercentage: 70
+  callerNamespace: platform-context-worker
+  callerPodSelector: {app.kubernetes.io/component: context-subscription-worker}
+  postgresCidrs: [10.10.0.0/24]

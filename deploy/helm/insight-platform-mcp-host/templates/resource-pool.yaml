@@ -1,0 +1,134 @@
+{{- if .Values.resourcePool.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "insight-platform-mcp-host.resourceName" . }}, namespace: {{ .Values.namespace }}}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-mcp-host.resourceName" . }}
+  namespace: {{ .Values.namespace }}
+  labels: {{ include "insight-platform-mcp-host.resourceLabels" . | nindent 4 }}
+spec:
+  selector: {{ include "insight-platform-mcp-host.resourceLabels" . | nindent 4 }}
+  ports:
+    - {name: grpc-mtls, protocol: TCP, port: {{ int .Values.resourcePool.service.port }}, targetPort: grpc-mtls}
+    - {name: observability, protocol: TCP, port: {{ int .Values.resourcePool.observability.port }}, targetPort: observability}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: {{ include "insight-platform-mcp-host.resourceName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  replicas: {{ int .Values.resourcePool.replicas }}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-mcp-host.resourceLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "insight-platform-mcp-host.resourceLabels" . | nindent 8 }}
+        insight.platform/workload-role: mcp-host
+        insight.platform/component-role: mcp_host
+      annotations:
+        insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
+    spec:
+      serviceAccountName: {{ include "insight-platform-mcp-host.resourceName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mcp-resource-host
+          image: {{ include "insight-platform-mcp-host.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-mcp-resource-host"]
+          ports:
+            - {name: grpc-mtls, containerPort: {{ int .Values.resourcePool.service.port }}, protocol: TCP}
+            - {name: observability, containerPort: {{ int .Values.resourcePool.observability.port }}, protocol: TCP}
+          env:
+            - {name: PLATFORM_MCP_RESOURCE_HOST_CONFIG, value: /etc/insight/config/mcp-resource-host.json}
+            - {name: PLATFORM_MCP_RESOURCE_HOST_CONFIG_DIGEST, value: {{ .Values.resourcePool.config.digest | quote }} }
+            - name: PLATFORM_MCP_RESOURCE_HOST_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.resourcePool.database.existingSecret }}, key: {{ .Values.resourcePool.database.urlKey }}}}
+            - {name: PLATFORM_MCP_RESOURCE_HOST_SERVER_CLIENT_CA_PATH, value: /etc/insight/server-tls/client-ca.pem}
+            - {name: PLATFORM_MCP_RESOURCE_HOST_SERVER_CERT_PATH, value: /etc/insight/server-tls/server.pem}
+            - {name: PLATFORM_MCP_RESOURCE_HOST_SERVER_KEY_PATH, value: /etc/insight/server-tls/server-key.pem}
+            - {name: PLATFORM_MCP_RESOURCE_HOST_EGRESS_CA_PATH, value: /etc/insight/egress-tls/ca.pem}
+            - {name: PLATFORM_MCP_RESOURCE_HOST_EGRESS_CERT_PATH, value: /etc/insight/egress-tls/client.pem}
+            - {name: PLATFORM_MCP_RESOURCE_HOST_EGRESS_KEY_PATH, value: /etc/insight/egress-tls/client-key.pem}
+          startupProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          resources: {{ toYaml .Values.resourcePool.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: server-tls, mountPath: /etc/insight/server-tls, readOnly: true}
+            - {name: egress-tls, mountPath: /etc/insight/egress-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.resourcePool.config.existingConfigMap }}
+            items: [{key: {{ .Values.resourcePool.config.fileKey }}, path: mcp-resource-host.json}]
+        - name: server-tls
+          secret:
+            secretName: {{ .Values.resourcePool.serverTls.existingSecret }}
+            items:
+              - {key: {{ .Values.resourcePool.serverTls.keys.clientCa }}, path: client-ca.pem}
+              - {key: {{ .Values.resourcePool.serverTls.keys.certificate }}, path: server.pem}
+              - {key: {{ .Values.resourcePool.serverTls.keys.privateKey }}, path: server-key.pem}
+        - name: egress-tls
+          secret:
+            secretName: {{ .Values.egressTls.existingSecret }}
+            items:
+              - {key: {{ .Values.egressTls.keys.ca }}, path: ca.pem}
+              - {key: {{ .Values.egressTls.keys.certificate }}, path: client.pem}
+              - {key: {{ .Values.egressTls.keys.privateKey }}, path: client-key.pem}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+{{- if .Values.resourcePool.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ include "insight-platform-mcp-host.resourceName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  minAvailable: {{ int .Values.resourcePool.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-mcp-host.resourceLabels" . | nindent 6 }}
+{{- end }}
+{{- if .Values.resourcePool.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: {{ include "insight-platform-mcp-host.resourceName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "insight-platform-mcp-host.resourceName" . }}}
+  minReplicas: {{ int .Values.resourcePool.autoscaling.minReplicas }}
+  maxReplicas: {{ int .Values.resourcePool.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: {{ int .Values.resourcePool.autoscaling.targetCPUUtilizationPercentage }}}}
+{{- end }}
+{{- if .Values.monitoring.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: {name: {{ include "insight-platform-mcp-host.resourceName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  namespaceSelector: {matchNames: [{{ .Values.namespace }}]}
+  selector:
+    matchLabels: {{ include "insight-platform-mcp-host.resourceLabels" . | nindent 6 }}
+  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
+{{- end }}
+{{- end }}

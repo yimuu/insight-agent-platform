@@ -8,6 +8,7 @@ import subprocess
 root = pathlib.Path.cwd()
 rpc = (root / "crates/platform-mcp-rpc/src/lib.rs").read_text(encoding="utf-8")
 source = (root / "crates/platform-mcp-service/src/main.rs").read_text(encoding="utf-8")
+resource_source = (root / "crates/platform-mcp-service/src/resource_main.rs").read_text(encoding="utf-8")
 dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 chart = root / "deploy/helm/insight-platform-mcp-host"
 failures = []
@@ -45,8 +46,19 @@ for forbidden in (
 ):
     if forbidden in source:
         failures.append(f"MCP Host crosses a forbidden boundary through {forbidden}")
+for required in (
+    "PgRepository",
+    "McpResourceRefreshHost",
+    "McpResourceRefreshGrpcService",
+    "ContextWorkerWorkloadIdentity",
+    "StreamableHttpMcpResourceRefreshProtocol",
+):
+    if required not in resource_source:
+        failures.append(f"MCP Resource Host production composition is missing {required}")
 if "/usr/local/bin/platform-mcp-host" not in dockerfile:
     failures.append("runtime image is missing platform-mcp-host")
+if "/usr/local/bin/platform-mcp-resource-host" not in dockerfile:
+    failures.append("runtime image is missing platform-mcp-resource-host")
 
 try:
     subprocess.run(["helm", "lint", str(chart)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -65,6 +77,7 @@ for needle in (
     "path: /readyz",
     "path: /metrics",
     'command: ["/usr/local/bin/platform-mcp-host"]',
+    'command: ["/usr/local/bin/platform-mcp-resource-host"]',
     "insight.platform/workload-role: mcp-host",
     "insight.platform/workload-namespace: mcp-host",
     "automountServiceAccountToken: false",
@@ -73,6 +86,8 @@ for needle in (
     'capabilities: {drop: ["ALL"]}',
     "PLATFORM_MCP_HOST_SERVER_CLIENT_CA_PATH",
     "PLATFORM_MCP_HOST_EGRESS_CA_PATH",
+    "PLATFORM_MCP_RESOURCE_HOST_DATABASE_URL",
+    "app.kubernetes.io/component: context-subscription-worker",
     "app.kubernetes.io/component: capability-remote-worker",
     "app.kubernetes.io/component: egress-broker",
     "port: 9443",
@@ -86,13 +101,14 @@ for forbidden in (
     "hostPID: true",
     "privileged: true",
     "automountServiceAccountToken: true",
-    "port: 5432",
     "port: 4222",
 ):
     if forbidden in rendered:
         failures.append(f"rendered MCP Host has forbidden capability {forbidden}")
-if rendered.count("\nkind: Deployment\n") != 1 or rendered.count("\nkind: NetworkPolicy\n") != 2:
-    failures.append("MCP Host must render one workload and two NetworkPolicies")
+if rendered.count("\nkind: Deployment\n") != 2 or rendered.count("\nkind: NetworkPolicy\n") != 3:
+    failures.append("MCP Host must render two isolated workload pools and three NetworkPolicies")
+if rendered.count("port: 5432") != 1:
+    failures.append("only the MCP Resource Host NetworkPolicy may reach PostgreSQL")
 
 negative_values = (
     ("--set", "replicas=1", "at least two replicas"),
