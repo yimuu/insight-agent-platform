@@ -66,6 +66,9 @@ Job可作为Artifact/Receipt等关联的typed owner，但首版Job kind-owner re
 Deployment/Discovery/authorization/session/event evidence后创建；MCP Host不能凭该pair直接创建Job或执行Context backend。它复用已有
 subscription aggregate identity，不产生新的Context current-state aggregate。
 
+当前实施证据：r269已把该pair写入Rust closed machine authority、generated registry/root manifest与独立合同checker，并以正反unit fixture
+证明只开放目标方向。PostgreSQL source-row/payload验证和跨WorkClass claim仍待后续L2/L3证据。
+
 Sandbox execution只有shared Job owner/fence，无SandboxJob ID/aggregate。MCP首版无stdio session child。Operation无owner variant；
 它直接投影Job的typed owner。
 

@@ -10,6 +10,10 @@
 > 唯一`Context -> McpOperation` pair，并在07/12/13/18冻结source row/payload/WorkClass claim约束；不新增WorkClass、aggregate、table或route。
 > PostgreSQL实现必须先锁定同tenant `mcp_subscription` row，再创建该Context Job，MCP Host仍不得直接创建或claim它。
 
+> 2026-08-26 implementation evidence：r269将CR-191 `Context -> McpOperation` pair加入Rust machine authority与generated
+> `registries.json`，同步更新root contract manifest和独立合同checker；unit fixture同时证明该pair合法而反向`Mcp -> ContextQuery`仍被拒绝。
+> generated-contract、fixture conformance与strict Clippy通过。该证据只闭合owner registry，不代表PostgreSQL admission或worker claim已实现。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

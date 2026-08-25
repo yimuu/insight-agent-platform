@@ -952,6 +952,7 @@ def check_spec_registry_alignment(errors):
         {"work_class": "mcp", "owner_kind": "mcp_operation"},
         {"work_class": "context", "owner_kind": "context_query"},
         {"work_class": "context", "owner_kind": "context_dataset"},
+        {"work_class": "context", "owner_kind": "mcp_operation"},
         {"work_class": "sandbox", "owner_kind": "job"},
         {"work_class": "interaction", "owner_kind": "interaction"},
         {"work_class": "artifact", "owner_kind": "artifact"},

@@ -1842,6 +1842,7 @@ pub const EXECUTION_WORK_OWNER_PAIRS: &[(WorkClass, ResourceKind)] = &[
     (WorkClass::Mcp, ResourceKind::McpOperation),
     (WorkClass::Context, ResourceKind::ContextQuery),
     (WorkClass::Context, ResourceKind::ContextDataset),
+    (WorkClass::Context, ResourceKind::McpOperation),
     (WorkClass::Sandbox, ResourceKind::Job),
     (WorkClass::Interaction, ResourceKind::Interaction),
     (WorkClass::Artifact, ResourceKind::Artifact),
@@ -3538,6 +3539,14 @@ mod tests {
             assert!(pairs.insert((work_class.as_str(), owner_kind.descriptor().name)));
             assert!(is_execution_work_owner_pair(*work_class, *owner_kind));
         }
+        assert!(is_execution_work_owner_pair(
+            WorkClass::Context,
+            ResourceKind::McpOperation
+        ));
+        assert!(!is_execution_work_owner_pair(
+            WorkClass::Mcp,
+            ResourceKind::ContextQuery
+        ));
 
         assert!(SchedulerPriority::ALL
             .iter()

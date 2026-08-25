@@ -349,6 +349,10 @@
       "work_class": "context"
     },
     {
+      "owner_kind": "mcp_operation",
+      "work_class": "context"
+    },
+    {
       "owner_kind": "job",
       "work_class": "sandbox"
     },
