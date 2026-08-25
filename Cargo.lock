@@ -3072,8 +3072,10 @@ name = "insight-platform-sandbox-attestor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "insight-platform-contracts",
+ "insight-platform-observability",
  "insight-platform-sandbox",
  "insight-platform-sandbox-rpc",
  "libc",

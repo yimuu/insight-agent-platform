@@ -34,7 +34,7 @@ Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact
 | Typed Plan v4 wire | RuntimePlan保存closed dependency slots及全部external leaf payload，拒绝v1/v2/v3并验证slot kind、output producer、input reachability与bounded budget；fresh PG的phase2 Run kernel和真实coordinator既有路径通过 | L1/L2 wire与controller已闭合；Timer/Signal/HumanTask/ChildAgent、Model tool-result、Capability和Context的production component L3均有独立证据 |
 | Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；各owner按Run冻结exact Policy/Revision重算并拒绝伪造结果 | L1/L2 owner闭合，production Model/Capability/Context dispatch已在对应L3链路重验exact binding |
 | 已有部署 | 11个chart覆盖全部15个ComponentRole、17个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
-| HTTP observability | shared bounded-label owner；Gateway、Callback、Scheduler/Recovery、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Security Authority、Egress Broker、Sandbox Controller/WASI/gVisor具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency | 闭合14个workload pool，不代表全平台observability |
+| HTTP observability | shared bounded-label owner；Gateway、Callback、Scheduler/Recovery、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Security Authority、Egress Broker、Sandbox Controller/WASI/gVisor及两种process attestor具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency | 闭合14个ComponentRole workload pool及Sandbox支持进程，不代表全平台observability |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator；live topology/workload preflight对照Candidate/Capacity并拒绝rollout、image、config、identity、安全和容量漂移 | 可验证证据形状与preflight行为，不证明任一外部门禁通过 |
 | Runbooks | production dependency recovery与GitOps clean-cut手册已提交 | 操作准备完成，execution evidence pending |
@@ -160,9 +160,9 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 1. 15个ComponentRole已由17个独立workload pool闭合；Candidate image与`deployment_config_digest`已进入全局render/live preflight门禁，
    但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
-2. 除Public Gateway、Callback API、Scheduler/Recovery、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Security Authority、Egress Broker与Sandbox Controller/WASI/gVisor的首批Prometheus接线外，其余Platform v2 binaries仍只有结构化日志或process-local snapshots；缺少完整
+2. 除Public Gateway、Callback API、Scheduler/Recovery、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Security Authority、Egress Broker、Sandbox Controller/WASI/gVisor及process attestor的首批Prometheus接线外，其余Platform v2 binaries仍只有结构化日志或process-local snapshots；缺少完整
    Prometheus/OTel export、低基数queue/dependency/recovery指标、trace propagation/redaction的process wiring。
-3. Gateway、Callback、Scheduler/Recovery、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Security Authority、Egress Broker与Sandbox Controller/WASI/gVisor已有ServiceMonitor；其余role仍缺少ServiceMonitor/PodMonitor，且全平台尚无dashboard、symptom-first PrometheusRule与逐alert runbook。
+3. Gateway、Callback、Scheduler/Recovery、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Security Authority、Egress Broker、Sandbox Controller/WASI/gVisor及process attestor已有ServiceMonitor；其余role仍缺少ServiceMonitor/PodMonitor，且全平台尚无dashboard、symptom-first PrometheusRule与逐alert runbook。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
    mTLS与live identity enforcement仍须production-equivalent L4验证。
 5. 没有可重现的signed image/SBOM/provenance build pipeline与GitOps environment repository输入。

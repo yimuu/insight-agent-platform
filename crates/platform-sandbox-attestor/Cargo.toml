@@ -10,9 +10,11 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+axum.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-observability.workspace = true
 insight-platform-sandbox.workspace = true
 insight-platform-sandbox-rpc.workspace = true
 libc.workspace = true

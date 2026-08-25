@@ -36,6 +36,11 @@ if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platf
   echo "sandbox deployment: Executor shared observability composition is missing" >&2
   exit 1
 fi
+if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-attestor/Cargo.toml" ||
+   ! rg -q 'process_observability_router' "$root/crates/platform-sandbox-attestor/src/main.rs"; then
+  echo "sandbox deployment: process-attestor shared observability composition is missing" >&2
+  exit 1
+fi
 
 helm lint "$chart" >/dev/null
 helm template sandbox "$chart" >"$rendered"
@@ -46,6 +51,8 @@ for mutation in \
   '--set controller.observabilityPort=7443' \
   '--set executor.observabilityPort=7444' \
   '--set gvisor.observabilityPort=0' \
+  '--set attestor.observabilityPort=7444' \
+  '--set gvisor.attestor.observabilityPort=9090' \
   '--set-json networkPolicy.monitoringPodSelector=null' \
   '--set networkPolicy.enabled=false' \
   '--set-string executor.nodeSelector.kubernetes\.io/os=windows' \
@@ -72,7 +79,7 @@ end.compact
 failures = []
 
 service_monitors = docs.select { |doc| doc["kind"] == "ServiceMonitor" }
-failures << "Sandbox Controller/WASI/gVisor ServiceMonitors are missing" unless service_monitors.length == 3
+failures << "Sandbox Controller/WASI/gVisor/attestor ServiceMonitors are missing" unless service_monitors.length == 4
 unless File.read(ARGV.fetch(0)).include?("path: /readyz") && File.read(ARGV.fetch(0)).include?("path: /metrics")
   failures << "Sandbox HTTP readiness/metrics contract is missing"
 end

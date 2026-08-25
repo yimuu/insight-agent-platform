@@ -327,6 +327,11 @@ Controller mTLS、backend registry、NATS control与HTTP listener组合后Ready�
 两个pool的metrics Service与Prometheus ingress不增加WASI host authority或gVisor Kubernetes API权限。该证据不包含node/POD-local attestor
 observability、真实runsc、production scrape或L4 enforcement。
 
+r259为node-local与gVisor Pod-local两种process attestor接入shared process observability。readiness位于persistent generation registry、
+procfs/node identity observer、UDS+mTLS registration、Controller mTLS proof service及HTTP listener组合之后；任一server提前退出会取消并
+bounded drain其余server。node DaemonSet与Pod-local sidecar使用不同metrics端口和精确Prometheus ingress，不增加host或Controller authority。
+该证据不替代真实runsc、node-loss、production scrape或L4 enforcement。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

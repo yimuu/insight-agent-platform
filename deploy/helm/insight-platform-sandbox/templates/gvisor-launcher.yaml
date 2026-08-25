@@ -84,10 +84,12 @@ spec:
             - {name: PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_CA_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.controllerClientCa }}}
             - {name: PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_CERT_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.attestorServerCertificate }}}
             - {name: PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_KEY_PATH, value: /etc/insight/tls/{{ .Values.tls.keys.attestorServerPrivateKey }}}
-          ports: [{name: attest, containerPort: {{ int .Values.attestor.controllerPort }}, protocol: TCP}]
-          startupProbe: {tcpSocket: {port: attest}, failureThreshold: 30, periodSeconds: 2}
-          readinessProbe: {tcpSocket: {port: attest}, periodSeconds: 5, timeoutSeconds: 2}
-          livenessProbe: {tcpSocket: {port: attest}, periodSeconds: 10, timeoutSeconds: 2}
+          ports:
+            - {name: attest, containerPort: {{ int .Values.attestor.controllerPort }}, protocol: TCP}
+            - {name: attestor-metrics, containerPort: {{ int .Values.gvisor.attestor.observabilityPort }}, protocol: TCP}
+          startupProbe: {httpGet: {path: /livez, port: attestor-metrics}, failureThreshold: 30, periodSeconds: 2}
+          readinessProbe: {httpGet: {path: /readyz, port: attestor-metrics}, periodSeconds: 5, timeoutSeconds: 2}
+          livenessProbe: {httpGet: {path: /livez, port: attestor-metrics}, periodSeconds: 10, timeoutSeconds: 2}
           resources: {{ toYaml .Values.gvisor.attestor.resources | nindent 12 }}
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
@@ -127,7 +129,9 @@ spec:
     app.kubernetes.io/name: {{ .Chart.Name }}
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: executor-gvisor
-  ports: [{name: observability, port: {{ int .Values.gvisor.observabilityPort }}, targetPort: observability}]
+  ports:
+    - {name: observability, port: {{ int .Values.gvisor.observabilityPort }}, targetPort: observability}
+    - {name: attestor-metrics, port: {{ int .Values.gvisor.attestor.observabilityPort }}, targetPort: attestor-metrics}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

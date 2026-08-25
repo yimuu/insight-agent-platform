@@ -117,6 +117,7 @@ gvisor:
     requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 128Mi}
     limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 1Gi}
   attestor:
+    observabilityPort: 9091
     maximumRegistrations: 10000
     absentRetentionSeconds: 3900
     tlsHandshakeTimeoutMilliseconds: 5000
@@ -126,6 +127,7 @@ gvisor:
       limits: {cpu: 200m, memory: 128Mi, ephemeral-storage: 256Mi}
 
 attestor:
+  observabilityPort: 9090
   nodeSelector:
     kubernetes.io/os: linux
     kubernetes.io/arch: amd64

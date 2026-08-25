@@ -61,6 +61,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   "schema_version" 1
   "registration_socket_path" "/run/insight-sandbox-attestor/registration.sock"
   "controller_listen_address" (printf "0.0.0.0:%d" (int .Values.attestor.controllerPort))
+  "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.attestor.observabilityPort))
   "proc_root" "/host/proc"
   "node_uid_authority_path" "/host/node-uid"
   "registry_path" "/var/lib/insight-sandbox-attestor/registrations.json"
@@ -102,6 +103,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   "schema_version" 1
   "registration_socket_path" "/run/insight-sandbox-attestor/registration.sock"
   "controller_listen_address" (printf "0.0.0.0:%d" (int .Values.attestor.controllerPort))
+  "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.gvisor.attestor.observabilityPort))
   "proc_root" "/proc"
   "node_uid_authority_path" "/etc/insight/podinfo/uid"
   "registry_path" "/var/lib/insight-sandbox-attestor/registrations.json"

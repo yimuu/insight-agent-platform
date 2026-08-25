@@ -7,6 +7,9 @@
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_sandbox_attestor::{
     LinuxProcfsExecutorProcessObserver, NodeAttestorConfig, NodeProcessAttestor,
 };
@@ -53,6 +56,7 @@ struct AttestorProcessConfig {
     schema_version: u32,
     registration_socket_path: String,
     controller_listen_address: String,
+    observability_listen_address: String,
     proc_root: String,
     node_uid_authority_path: String,
     registry_path: String,
@@ -103,6 +107,10 @@ impl AttestorProcessConfig {
             .controller_listen_address
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let observability: SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         let profile = checked_in_hard_limit_profile();
         let minimum_retention = profile
             .capability_sandbox
@@ -117,6 +125,8 @@ impl AttestorProcessConfig {
             || !closed_absolute_path(registry_path, 4_096)
             || registration_socket_path == registry_path
             || controller.port() == 0
+            || observability.port() == 0
+            || observability == controller
             || self.maximum_registrations == 0
             || self.maximum_registrations > 100_000
             || self.absent_retention_seconds < minimum_retention
@@ -210,9 +220,19 @@ async fn run() -> Result<(), ProcessError> {
         config.tls_handshake_timeout_milliseconds,
     )?;
 
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("sandbox-process-attestor", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let observability_listener =
+        tokio::net::TcpListener::bind(&config.observability_listen_address)
+            .await
+            .map_err(|_| ProcessError::ObservabilityUnavailable)?;
+
     let shutdown = CancellationToken::new();
     let registration_shutdown = shutdown.child_token();
     let controller_shutdown = shutdown.child_token();
+    let observability_shutdown = shutdown.child_token();
     let mut registration_server = tokio::spawn(async move {
         Server::builder()
             .tls_config(registration_tls)
@@ -235,34 +255,90 @@ async fn run() -> Result<(), ProcessError> {
             .await
             .map_err(|_| ProcessError::ServerFailed)
     });
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut observability_server = tokio::spawn(async move {
+        axum::serve(observability_listener, router)
+            .with_graceful_shutdown(observability_shutdown.cancelled_owned())
+            .await
+    });
+    metrics.mark_ready();
 
-    tokio::select! {
-        signal = tokio::signal::ctrl_c() => {
-            signal.map_err(|_| ProcessError::SignalUnavailable)?;
-        }
-        result = &mut registration_server => {
-            result.map_err(|_| ProcessError::ServerFailed)??;
-            return Err(ProcessError::ServerExitedUnexpectedly);
-        }
-        result = &mut controller_server => {
-            result.map_err(|_| ProcessError::ServerFailed)??;
-            return Err(ProcessError::ServerExitedUnexpectedly);
-        }
-    }
+    let trigger = tokio::select! {
+        signal = tokio::signal::ctrl_c() => SupervisorTrigger::Signal(signal.is_ok()),
+        result = &mut registration_server => SupervisorTrigger::Registration(result),
+        result = &mut controller_server => SupervisorTrigger::Controller(result),
+        result = &mut observability_server => SupervisorTrigger::Observability(result),
+    };
     shutdown.cancel();
     let grace = Duration::from_millis(config.shutdown_grace_milliseconds);
-    tokio::time::timeout(grace, async {
-        (&mut registration_server)
+    match trigger {
+        SupervisorTrigger::Signal(received) => {
+            tokio::time::timeout(grace, async {
+                map_server_join((&mut registration_server).await)?;
+                map_server_join((&mut controller_server).await)?;
+                map_observability_join((&mut observability_server).await)
+            })
             .await
-            .map_err(|_| ProcessError::ServerFailed)??;
-        (&mut controller_server)
+            .map_err(|_| ProcessError::ShutdownTimeout)??;
+            if received {
+                Ok(())
+            } else {
+                Err(ProcessError::SignalUnavailable)
+            }
+        }
+        SupervisorTrigger::Registration(result) => {
+            let primary = map_server_join(result).and(Err(ProcessError::ServerExitedUnexpectedly));
+            tokio::time::timeout(grace, async {
+                map_server_join((&mut controller_server).await)?;
+                map_observability_join((&mut observability_server).await)
+            })
             .await
-            .map_err(|_| ProcessError::ServerFailed)??;
-        Ok::<_, ProcessError>(())
-    })
-    .await
-    .map_err(|_| ProcessError::ShutdownTimeout)??;
-    Ok(())
+            .map_err(|_| ProcessError::ShutdownTimeout)??;
+            primary
+        }
+        SupervisorTrigger::Controller(result) => {
+            let primary = map_server_join(result).and(Err(ProcessError::ServerExitedUnexpectedly));
+            tokio::time::timeout(grace, async {
+                map_server_join((&mut registration_server).await)?;
+                map_observability_join((&mut observability_server).await)
+            })
+            .await
+            .map_err(|_| ProcessError::ShutdownTimeout)??;
+            primary
+        }
+        SupervisorTrigger::Observability(result) => {
+            let primary = map_observability_join(result)
+                .and(Err(ProcessError::ObservabilityExitedUnexpectedly));
+            tokio::time::timeout(grace, async {
+                map_server_join((&mut registration_server).await)?;
+                map_server_join((&mut controller_server).await)
+            })
+            .await
+            .map_err(|_| ProcessError::ShutdownTimeout)??;
+            primary
+        }
+    }
+}
+
+enum SupervisorTrigger {
+    Signal(bool),
+    Registration(Result<Result<(), ProcessError>, tokio::task::JoinError>),
+    Controller(Result<Result<(), ProcessError>, tokio::task::JoinError>),
+    Observability(Result<Result<(), std::io::Error>, tokio::task::JoinError>),
+}
+
+fn map_server_join(
+    result: Result<Result<(), ProcessError>, tokio::task::JoinError>,
+) -> Result<(), ProcessError> {
+    result.map_err(|_| ProcessError::ServerFailed)?
+}
+
+fn map_observability_join(
+    result: Result<Result<(), std::io::Error>, tokio::task::JoinError>,
+) -> Result<(), ProcessError> {
+    result
+        .map_err(|_| ProcessError::ObservabilityUnavailable)?
+        .map_err(|_| ProcessError::ObservabilityUnavailable)
 }
 
 fn bind_registration_socket(path: &Path) -> Result<UnixListener, ProcessError> {
@@ -370,6 +446,8 @@ enum ProcessError {
     RegistrationSocketUnavailable,
     ServerFailed,
     ServerExitedUnexpectedly,
+    ObservabilityUnavailable,
+    ObservabilityExitedUnexpectedly,
     SignalUnavailable,
     ShutdownTimeout,
 }
@@ -386,6 +464,12 @@ impl fmt::Display for ProcessError {
             }
             Self::ServerFailed => formatter.write_str("attestor server failed"),
             Self::ServerExitedUnexpectedly => formatter.write_str("attestor server exited"),
+            Self::ObservabilityUnavailable => {
+                formatter.write_str("attestor observability server failed")
+            }
+            Self::ObservabilityExitedUnexpectedly => {
+                formatter.write_str("attestor observability server exited")
+            }
             Self::SignalUnavailable => formatter.write_str("shutdown signal unavailable"),
             Self::ShutdownTimeout => formatter.write_str("attestor shutdown timed out"),
         }
@@ -409,6 +493,7 @@ mod tests {
             schema_version: 1,
             registration_socket_path: "/run/insight-sandbox-attestor/registration.sock".into(),
             controller_listen_address: "127.0.0.1:7444".into(),
+            observability_listen_address: "127.0.0.1:9090".into(),
             proc_root: "/host/proc".into(),
             node_uid_authority_path: "/var/run/insight/node-uid".into(),
             registry_path: "/var/lib/insight-sandbox-attestor/registrations.json".into(),
