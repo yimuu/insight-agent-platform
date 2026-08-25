@@ -12,10 +12,12 @@ service ArtifactSandboxBrokerService {
   rpc ReadWasiArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
 }
 
-// Internal-only Typed Plan materialization boundary. Only the Scheduler workload may call it;
-// the closed request binds one live orchestration lease, Run, Plan Revision and Artifact.
+// Internal-only Scheduler materialization boundary. Only the Scheduler workload may call it;
+// each closed request binds one live orchestration lease and an exact Typed Plan or RunValue
+// Artifact. There is deliberately no generic object-read operation.
 service ArtifactSchedulerService {
   rpc ReadTypedPlan(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
+  rpc ReadRunValue(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
 }
 
 // Token-authenticated boundary exposed only to admission-locked gVisor guest Pods. The caller

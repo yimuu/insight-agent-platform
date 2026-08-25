@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use futures::Stream;
 use insight_platform_artifacts::{
+    SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerRunValueReader,
     SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest, SchedulerTypedPlanReader,
 };
 use insight_platform_contracts::{
@@ -60,6 +61,8 @@ const WASI_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.wasi.read/v1";
 const WASI_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.wasi.chunk/v1";
 const SCHEDULER_TYPED_PLAN_READ_OPERATION: &str = "artifact.scheduler.typed-plan.read/v1";
 const SCHEDULER_TYPED_PLAN_CHUNK_OPERATION: &str = "artifact.scheduler.typed-plan.chunk/v1";
+const SCHEDULER_RUN_VALUE_READ_OPERATION: &str = "artifact.scheduler.run-value.read/v1";
+const SCHEDULER_RUN_VALUE_CHUNK_OPERATION: &str = "artifact.scheduler.run-value.chunk/v1";
 const GVISOR_GUEST_AUTHORIZE_OPERATION: &str = "artifact.gvisor.guest.authorize/v1";
 const GVISOR_GUEST_READ_OPERATION: &str = "artifact.gvisor.guest.read/v1";
 const GVISOR_GUEST_PACKAGE_CHUNK_OPERATION: &str = "artifact.gvisor.guest.package.chunk/v1";
@@ -424,6 +427,46 @@ impl SchedulerTypedPlanReader for ArtifactSchedulerGrpcClient {
         )
         .await
         .map_err(map_scheduler_client_read_error)
+    }
+}
+
+#[async_trait]
+impl SchedulerRunValueReader for ArtifactSchedulerGrpcClient {
+    async fn read_exact(
+        &self,
+        request: SchedulerRunValueReadRequest,
+    ) -> Result<Vec<u8>, SchedulerRunValueReadError> {
+        request
+            .validate_at(chrono::Utc::now())
+            .map_err(|_| SchedulerRunValueReadError::Denied)?;
+        let artifact = request.artifact.clone();
+        let maximum_bytes = request.maximum_bytes;
+        let envelope = encode_request(
+            SCHEDULER_RUN_VALUE_READ_OPERATION,
+            &request,
+            self.rpc_limits,
+        )
+        .map_err(|_| SchedulerRunValueReadError::Integrity)?;
+        let request_digest = envelope.request_digest.clone();
+        let deadline = SystemTime::from(request.deadline);
+        let request = request_with_domain_deadline(envelope, deadline)
+            .map_err(map_scheduler_run_value_client_read_error)?;
+        let mut client = self.client.clone();
+        let mut response = await_rpc_before_deadline(deadline, client.read_run_value(request))
+            .await
+            .map_err(map_scheduler_run_value_client_read_error)?
+            .into_inner();
+        collect_artifact_stream(
+            &mut response,
+            &request_digest,
+            SCHEDULER_RUN_VALUE_CHUNK_OPERATION,
+            &artifact,
+            maximum_bytes,
+            self.rpc_limits,
+            deadline,
+        )
+        .await
+        .map_err(map_scheduler_run_value_client_read_error)
     }
 }
 
@@ -870,6 +913,14 @@ pub trait SchedulerTypedPlanResponseBroker: Send + Sync {
     ) -> Result<LeasedArtifactBytes, SchedulerTypedPlanReadError>;
 }
 
+#[async_trait]
+pub trait SchedulerRunValueResponseBroker: Send + Sync {
+    async fn read_run_value_for_response(
+        &self,
+        request: SchedulerRunValueReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerRunValueReadError>;
+}
+
 pub struct ArtifactSchedulerGrpcService<B> {
     broker: Arc<B>,
     rpc_limits: ArtifactInternalRpcLimits,
@@ -884,9 +935,10 @@ impl<B> ArtifactSchedulerGrpcService<B> {
 #[tonic::async_trait]
 impl<B> ArtifactSchedulerService for ArtifactSchedulerGrpcService<B>
 where
-    B: SchedulerTypedPlanResponseBroker + 'static,
+    B: SchedulerTypedPlanResponseBroker + SchedulerRunValueResponseBroker + 'static,
 {
     type ReadTypedPlanStream = ArtifactReadStream;
+    type ReadRunValueStream = ArtifactReadStream;
 
     async fn read_typed_plan(
         &self,
@@ -917,6 +969,41 @@ where
             response_read,
             &request_digest,
             SCHEDULER_TYPED_PLAN_CHUNK_OPERATION,
+            &artifact,
+            self.rpc_limits.maximum_chunk_bytes(),
+            deadline,
+        )
+    }
+
+    async fn read_run_value(
+        &self,
+        request: Request<ClosedArtifactReadRequest>,
+    ) -> Result<Response<Self::ReadRunValueStream>, Status> {
+        let envelope = request.into_inner();
+        let request_digest = envelope.request_digest.clone();
+        let read: SchedulerRunValueReadRequest = decode_request(
+            envelope,
+            SCHEDULER_RUN_VALUE_READ_OPERATION,
+            self.rpc_limits,
+        )
+        .map_err(Status::from)?;
+        read.validate_at(chrono::Utc::now())
+            .map_err(|_| Status::permission_denied("RunValue read denied"))?;
+        let artifact = read.artifact.clone();
+        let maximum_bytes = read.maximum_bytes;
+        let deadline = SystemTime::from(read.deadline);
+        let response_read = tokio::time::timeout(
+            server_deadline_budget(deadline)?,
+            self.broker.read_run_value_for_response(read),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("Artifact read deadline elapsed"))?
+        .map_err(map_scheduler_run_value_server_error)?;
+        require_broker_bytes(response_read.as_bytes(), &artifact, maximum_bytes)?;
+        artifact_read_stream(
+            response_read,
+            &request_digest,
+            SCHEDULER_RUN_VALUE_CHUNK_OPERATION,
             &artifact,
             self.rpc_limits.maximum_chunk_bytes(),
             deadline,
@@ -1264,6 +1351,18 @@ fn map_scheduler_client_read_error(error: ArtifactClientReadError) -> SchedulerT
     }
 }
 
+fn map_scheduler_run_value_client_read_error(
+    error: ArtifactClientReadError,
+) -> SchedulerRunValueReadError {
+    match error {
+        ArtifactClientReadError::Unavailable => SchedulerRunValueReadError::Unavailable,
+        ArtifactClientReadError::Denied => SchedulerRunValueReadError::Denied,
+        ArtifactClientReadError::NotFound => SchedulerRunValueReadError::NotFound,
+        ArtifactClientReadError::TooLarge => SchedulerRunValueReadError::TooLarge,
+        ArtifactClientReadError::Integrity => SchedulerRunValueReadError::Integrity,
+    }
+}
+
 fn map_scheduler_server_error(error: SchedulerTypedPlanReadError) -> Status {
     match error {
         SchedulerTypedPlanReadError::Unavailable => {
@@ -1276,6 +1375,22 @@ fn map_scheduler_server_error(error: SchedulerTypedPlanReadError) -> Status {
         }
         SchedulerTypedPlanReadError::Integrity => {
             Status::data_loss("Typed Plan integrity verification failed")
+        }
+    }
+}
+
+fn map_scheduler_run_value_server_error(error: SchedulerRunValueReadError) -> Status {
+    match error {
+        SchedulerRunValueReadError::Unavailable => {
+            Status::unavailable("Artifact Broker unavailable")
+        }
+        SchedulerRunValueReadError::Denied => Status::permission_denied("RunValue read denied"),
+        SchedulerRunValueReadError::NotFound => Status::not_found("RunValue Artifact not found"),
+        SchedulerRunValueReadError::TooLarge => {
+            Status::resource_exhausted("RunValue exceeds the read limit")
+        }
+        SchedulerRunValueReadError::Integrity => {
+            Status::data_loss("RunValue integrity verification failed")
         }
     }
 }
@@ -1381,6 +1496,32 @@ mod tests {
         }
     }
 
+    fn scheduler_run_value_request(bytes: &[u8]) -> SchedulerRunValueReadRequest {
+        SchedulerRunValueReadRequest {
+            tenant_id: id(ResourceKind::Tenant),
+            run_id: id(ResourceKind::Run),
+            orchestration_job_id: id(ResourceKind::Job),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+            lease_generation: 2,
+            lease_token_digest: digest('a'),
+            run_value_id: id(ResourceKind::RunValue),
+            schema_digest: digest('b'),
+            classification: DataClassification::Internal,
+            artifact: ArtifactRef::new(
+                id(ResourceKind::Artifact),
+                digest_bytes(bytes),
+                u64::try_from(bytes.len()).unwrap(),
+                "application/json",
+                DataClassification::Internal,
+                None,
+            )
+            .unwrap(),
+            request_digest: digest('c'),
+            maximum_bytes: bytes.len(),
+            deadline: Utc::now() + Duration::minutes(1),
+        }
+    }
+
     struct RecordingSandboxBroker {
         bytes: Vec<u8>,
         wasi_calls: AtomicUsize,
@@ -1399,7 +1540,8 @@ mod tests {
 
     struct RecordingSchedulerBroker {
         bytes: Vec<u8>,
-        calls: AtomicUsize,
+        typed_plan_calls: AtomicUsize,
+        run_value_calls: AtomicUsize,
     }
 
     #[async_trait]
@@ -1408,7 +1550,18 @@ mod tests {
             &self,
             _request: SchedulerTypedPlanReadRequest,
         ) -> Result<LeasedArtifactBytes, SchedulerTypedPlanReadError> {
-            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.typed_plan_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
+        }
+    }
+
+    #[async_trait]
+    impl SchedulerRunValueResponseBroker for RecordingSchedulerBroker {
+        async fn read_run_value_for_response(
+            &self,
+            _request: SchedulerRunValueReadRequest,
+        ) -> Result<LeasedArtifactBytes, SchedulerRunValueReadError> {
+            self.run_value_calls.fetch_add(1, Ordering::AcqRel);
             Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
         }
     }
@@ -1799,12 +1952,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_mtls_streams_typed_plan_and_rejects_other_roles_before_authority() {
+    async fn scheduler_mtls_streams_closed_artifacts_and_rejects_other_roles_before_authority() {
         let fixture = mtls_fixture();
         let bytes = br#"{"schema_version":1,"nodes":[]}"#.to_vec();
         let broker = Arc::new(RecordingSchedulerBroker {
             bytes: bytes.clone(),
-            calls: AtomicUsize::new(0),
+            typed_plan_calls: AtomicUsize::new(0),
+            run_value_calls: AtomicUsize::new(0),
         });
         let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
         let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -1853,7 +2007,14 @@ mod tests {
                 .unwrap(),
             bytes
         );
-        assert_eq!(broker.calls.load(Ordering::Acquire), 1);
+        assert_eq!(broker.typed_plan_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            SchedulerRunValueReader::read_exact(&client, scheduler_run_value_request(&bytes))
+                .await
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(broker.run_value_calls.load(Ordering::Acquire), 1);
 
         let wrong_channel = channel(
             &endpoint,
@@ -1875,7 +2036,8 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
-        assert_eq!(broker.calls.load(Ordering::Acquire), 1);
+        assert_eq!(broker.typed_plan_calls.load(Ordering::Acquire), 1);
+        assert_eq!(broker.run_value_calls.load(Ordering::Acquire), 1);
 
         drop(client);
         drop(wrong_client);
