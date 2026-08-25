@@ -1,10 +1,35 @@
-# Platform v2 00～18 Cross-review（CR-185）
+# Platform v2 00～18 Cross-review（CR-186）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-185 Accepted |
+| 状态 | Closed / CR-186 Accepted |
 | 日期 | 2026-08-25 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-185 Skill package byte-contract implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-186 Model request assembly implementation feedback |
+
+### CR-186 canonical Model request assembly impact review
+
+实现反馈确认11/16已有七阶段顺序与digest要求，但`ModelContentSource`尚未携带owner-scoped ID、实际content digest、phase/ordinal和
+逐块预算，因而恢复重组、同phase排序、overflow与Skill role隔离无法逐字节验收。CR-186冻结closed source-map wire：初始四个authority/
+input phase必选，Skill/Context可选；同phase ordinal唯一；Skill/Context/User恒为非特权`user` role；所有overflow fail closed且首版不隐式
+truncation。assistant/tool continuation使用独立尾部phase，不改变初始七阶段顺序。
+
+00～04、06～10、12～15与17的state authority、ID、transaction、public API、table和topology不变；05仅删除与Plan v4冲突的旧示例，
+11/16冻结canonical wire，18增加重排、ordinal碰撞、role injection、budget/digest与恢复一致性L1～L3 fixture。无新表、aggregate、Job、
+WorkClass、route或deployment role。Acceptance 29：相同exact blocks逐字节产生同一messages/source map digest，任何漂移或超限fail closed。
+
+| Spec | CR-186结论 |
+|---|---|
+| 00 | 登记assembly实现反馈；clean-cut与current/target边界不变 |
+| 01～04 | authority、tenant、Policy和persistence不变 |
+| 05 | Plan继续version 4；删除旧`messages` node示例，exact source仍来自published closure |
+| 06～10 | Run/Job/Invocation/selection owner事务不变 |
+| 11 | 冻结phase、source-map、trust role与overflow语义 |
+| 12～15 | Context/Artifact只提供exact bounded material，不取得assembler authority |
+| 16 | 冻结`ModelContentSource`字段与canonical ordering |
+| 17 | 无public caller-supplied prompt/source-map surface |
+| 18 | L1～L3增加determinism、role isolation、budget和recovery矩阵 |
+
+00～18复核无新增P0/P1，恢复Accepted / CR-186并继续implementation-plan。
 
 ### CR-185 canonical Skill package byte contract impact review
 
@@ -534,7 +559,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-183合同范围没有未关闭P0/P1。Acceptance 26与既有13～25形成单一闭包，00～18状态为Accepted。
+CR-186合同范围没有未关闭P0/P1。Acceptance 29与既有13～28形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

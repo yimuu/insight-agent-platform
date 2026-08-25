@@ -308,7 +308,13 @@ fn fixture() -> Fixture {
             classification: DataClassification::Internal,
             source: ModelContentSource {
                 source_kind: "agent_contract".to_owned(),
+                source_id: "agent-fixture".to_owned(),
                 source_digest: sha('6'),
+                content_digest: sha('6'),
+                assembly_phase: PromptAssemblyPhase::AgentContract,
+                ordinal: 0,
+                byte_budget: 1_024,
+                token_budget: 256,
                 trusted_instruction: true,
             },
         }],

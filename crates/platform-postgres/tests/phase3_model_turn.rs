@@ -1576,7 +1576,13 @@ fn command_for_node(fixture: &Fixture, node_id: &ResourceId, base: u16) -> Creat
             classification: DataClassification::Internal,
             source: ModelContentSource {
                 source_kind: "agent_contract".to_owned(),
+                source_id: "agent-fixture".to_owned(),
                 source_digest: digest('1'),
+                content_digest: digest('1'),
+                assembly_phase: insight_platform_models::PromptAssemblyPhase::AgentContract,
+                ordinal: 0,
+                byte_budget: 1_024,
+                token_budget: 256,
                 trusted_instruction: true,
             },
         }],
@@ -3351,7 +3357,13 @@ async fn model_turn_fixture() {
         classification: DataClassification::Internal,
         source: ModelContentSource {
             source_kind: "capability_tool_result".to_owned(),
+            source_id: "tool-result-fixture".to_owned(),
             source_digest: result_source_digest.clone(),
+            content_digest: result_source_digest.clone(),
+            assembly_phase: insight_platform_models::PromptAssemblyPhase::CapabilityToolResult,
+            ordinal: 0,
+            byte_budget: 1_024,
+            token_budget: 256,
             trusted_instruction: false,
         },
     });

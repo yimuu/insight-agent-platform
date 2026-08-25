@@ -13,6 +13,7 @@ pub const MAX_MODEL_NAME_BYTES: usize = 128;
 pub const MAX_MODEL_CALL_ID_BYTES: usize = 128;
 pub const MAX_MODEL_SAFE_IDENTITY_BYTES: usize = 512;
 pub const MAX_MODEL_SOURCE_KIND_BYTES: usize = 64;
+pub const MAX_MODEL_SOURCE_ID_BYTES: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,18 +24,60 @@ pub enum CanonicalMessageRole {
     Tool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptAssemblyPhase {
+    PlatformSafety,
+    AgentContract,
+    PlanNodeInstruction,
+    RequiredSkill,
+    SelectedSkill,
+    ContextObservation,
+    UserInput,
+    ModelAssistant,
+    CapabilityToolResult,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelContentSource {
     pub source_kind: String,
+    pub source_id: String,
     pub source_digest: Sha256Digest,
+    pub content_digest: Sha256Digest,
+    pub assembly_phase: PromptAssemblyPhase,
+    pub ordinal: u32,
+    pub byte_budget: u32,
+    pub token_budget: u32,
     pub trusted_instruction: bool,
 }
 
 impl ModelContentSource {
     fn validate_for_role(&self, role: CanonicalMessageRole) -> Result<(), ModelTurnError> {
         if !is_code(&self.source_kind, MAX_MODEL_SOURCE_KIND_BYTES)
+            || self.source_id.is_empty()
+            || self.source_id.len() > MAX_MODEL_SOURCE_ID_BYTES
+            || self.source_id.chars().any(char::is_control)
+            || self.byte_budget == 0
+            || self.token_budget == 0
             || (self.trusted_instruction && role != CanonicalMessageRole::Platform)
+            || matches!(
+                self.assembly_phase,
+                PromptAssemblyPhase::PlatformSafety
+                    | PromptAssemblyPhase::AgentContract
+                    | PromptAssemblyPhase::PlanNodeInstruction
+            ) != self.trusted_instruction
+            || (matches!(
+                self.assembly_phase,
+                PromptAssemblyPhase::RequiredSkill
+                    | PromptAssemblyPhase::SelectedSkill
+                    | PromptAssemblyPhase::ContextObservation
+                    | PromptAssemblyPhase::UserInput
+            ) && role != CanonicalMessageRole::User)
+            || (self.assembly_phase == PromptAssemblyPhase::CapabilityToolResult
+                && role != CanonicalMessageRole::Tool)
+            || (self.assembly_phase == PromptAssemblyPhase::ModelAssistant
+                && role != CanonicalMessageRole::Assistant)
         {
             return Err(ModelTurnError::InvalidMessage);
         }

@@ -234,7 +234,13 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
             classification: DataClassification::Internal,
             source: ModelContentSource {
                 source_kind: "agent_contract".to_owned(),
+                source_id: "agent-fixture".to_owned(),
                 source_digest: sha('b'),
+                content_digest: sha('b'),
+                assembly_phase: insight_platform_models::PromptAssemblyPhase::AgentContract,
+                ordinal: 0,
+                byte_budget: 1_024,
+                token_budget: 256,
                 trusted_instruction: true,
             },
         }],
@@ -1038,7 +1044,13 @@ fn wire_fixture(adapter_name: &str) -> Fixture {
         classification: DataClassification::Internal,
         source: ModelContentSource {
             source_kind: "user_input".to_owned(),
+            source_id: "input-fixture".to_owned(),
             source_digest: sha('3'),
+            content_digest: sha('3'),
+            assembly_phase: insight_platform_models::PromptAssemblyPhase::UserInput,
+            ordinal: 0,
+            byte_budget: 1_024,
+            token_budget: 256,
             trusted_instruction: false,
         },
     });

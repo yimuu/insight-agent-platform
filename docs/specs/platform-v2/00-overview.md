@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-185 |
+| 状态 | Accepted / CR-186 |
 | 日期 | 2026-08-25 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -23,6 +23,10 @@
 
 > 2026-08-25 implementation feedback（CR-185）：spec11只冻结了Skill逻辑目录与manifest，没有冻结package Artifact物理字节。
 > 11→15/17/18复核后固定首版无压缩`insight.skill-package/1` frame、专用media type与逐entry验证；不接受运行时ZIP/TAR猜测。
+
+> 2026-08-25 implementation feedback（CR-186）：spec11/16只规定Prompt assembly顺序，却未冻结每块进入canonical Model request
+> 后的source-map wire、信任角色和预算失败语义。11→16→18复核后固定七阶段block、owner-scoped source ID、source/content digest、
+> classification、ordinal及byte/token budget；首版不隐式截断，Skill/Context/User永不获得platform role。
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
 
 > `Platform v2` 是架构代号，不是公共 API 版本。目标系统会在 clean replacement 后直接占用 `/v1` 和

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-184 |
+| 状态 | Accepted / CR-186 |
 | 日期 | 2026-08-25 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -558,20 +558,9 @@ Timer、Signal 和 HumanTask 都是 durable wait。等待态不占 execution per
 
 ModelLoop 是 durable controller，不是一个隐藏的同步函数：
 
-```rust
-struct ModelLoopNode {
-    model_slot: SlotId,
-    skill_slots: Vec<SlotId>,
-    capability_slots: Vec<SlotId>,
-    messages: Vec<MessageTemplate>,
-    output_schema: ClosedJsonSchema,
-    max_rounds: u16,
-    max_capability_calls: u32,
-    max_parallel_calls_per_round: u16,
-    token_budget: TokenBudget,
-    publish_policy: PublishPolicy,
-}
-```
+ModelLoop的唯一machine wire是10.3的Plan v4 `ModelLoopNode`；本节不另定义含自由`messages`或运行时模板的旧node shape。
+Agent contract、exact Plan node语义和Prompt Asset来源均由已发布Agent Revision、Typed Plan与Deployment closure冻结，运行时
+只能将这些exact材料投影成11/16的canonical assembly block，不能从active head、自由模板或caller正文补猜。
 
 运行过程：
 

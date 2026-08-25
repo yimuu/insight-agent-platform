@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-185 |
+| 状态 | Accepted / CR-186 |
 | 日期 | 2026-08-07 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) |
 | 直接下游 | 12、17、18 |
@@ -15,6 +15,9 @@
 
 > CR-185：canonical Skill package 的物理字节合同已冻结为无压缩、长度前缀的
 > `insight.skill-package/1` frame；运行时不得猜测ZIP/TAR、按文件系统展开package或接受实现私有archive格式。
+
+> CR-186：Prompt assembler的canonical block/source-map wire、角色隔离与预算失败语义已经冻结；Skill正文只能形成
+> `user` role的untrusted instruction block，不能通过正文、section audience或trust metadata取得platform role。
 
 > Persistence ruling：Skill 使用 02 的共享 Resource/ResourceVersion；activation/selection 是 Run 或 Invocation 的 typed
 > snapshot/event，不建立 Skill 专用 lifecycle、activation 或 receipt 表族。
@@ -287,6 +290,13 @@ struct SkillActivation {
 Assembler 顺序固定为：平台安全合同、Agent contract、Plan node instructions、required Skills、已选择 Skills、
 Context observations、当前用户输入。每一块带 source ID、classification 和 byte/token budget；同一 phase 内按
 Deployment 固定的 ordinal 排序，不按包名、更新时间或模型偏好排序。
+
+canonical block额外携带`source_kind`、冻结来源的`source_digest`以及实际纳入UTF-8正文的`content_digest`。Assembler按
+`(phase, ordinal)`形成唯一位置，重复位置、空正文、NUL、digest/来源不一致或任一block/turn预算超限均稳定失败；首版不截断、
+不总结、不按模型context window偷偷丢块。平台安全、Agent contract与Plan node instruction投影为`platform` role；required/
+selected Skill、Context observation与current user input固定为`user` role且`trusted_instruction=false`。后续assistant/tool round使用
+独立闭合phase，不得插回七阶段初始序列。source map按最终顺序保存每块identity、digest、classification、预算、实际bytes与确定性
+token estimate，其canonical digest写入Model request。
 
 Skill 激活不复制可变 memory。Skill reference 只有在需要时通过 Artifact/Context grant 读取，并经过当前
 principal 和 data-flow policy。Assembler 输出保存 digest 和 source map；敏感正文是否持久化由 retention

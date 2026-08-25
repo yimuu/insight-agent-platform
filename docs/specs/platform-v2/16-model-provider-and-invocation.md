@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-184 |
+| 状态 | Accepted / CR-186 |
 | 日期 | 2026-08-25 |
 | 依赖 | 02、03、04、06、07、09、10、15 |
 | 直接下游 | 17、18 |
@@ -89,6 +89,12 @@ retry time和Worker fence。两者不复制current state。
 
 request assembly是pure deterministic function。相同冻结输入必须得到相同canonical request digest。所有list、message、
 content part、tool、schema、string和bytes有平台hard limit。prompt injection不能改变exact tool/policy/Secret权限。
+
+CR-186 canonical `ModelContentSource`固定包含`source_kind/source_id/source_digest/content_digest/assembly_phase/ordinal/
+byte_budget/token_budget/trusted_instruction`。初始request必须完整包含11的四个必选phase（platform safety、Agent contract、Plan node
+instruction、current user input），Skill与Context phase按exact activation/query事实可选；同phase ordinal唯一。canonical message顺序
+就是phase/ordinal顺序，source-map digest来自同序closed entries。任何overflow整批返回稳定admission failure，不允许Provider adapter、
+Model Worker或恢复路径自行截断或重排。
 
 ModelTurn在Provider dispatch前必须已经存在有效Inline request RunValue、Job、quota reservation和全部binding。
 

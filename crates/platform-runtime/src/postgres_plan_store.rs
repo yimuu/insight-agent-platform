@@ -370,6 +370,17 @@ fn assemble_default_model_continuation(
         .map_err(|_| DurablePlanDriverError::InvariantViolation)?
         .parse()
         .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+    let encoded_results = serde_json::to_vec(&request.results)
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+    let result_bytes = u32::try_from(encoded_results.len())
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+    let result_tokens = result_bytes
+        .checked_add(3)
+        .map(|bytes| bytes / 4)
+        .ok_or(DurablePlanDriverError::InvariantViolation)?
+        .max(1);
+    let result_ordinal = u32::try_from(canonical.messages.len())
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
     canonical
         .messages
         .push(insight_platform_models::CanonicalMessage {
@@ -383,13 +394,17 @@ fn assemble_default_model_continuation(
             classification,
             source: insight_platform_models::ModelContentSource {
                 source_kind: "capability_tool_result".to_owned(),
+                source_id: request.model_turn_id.to_string(),
                 source_digest: source_digest.clone(),
+                content_digest: source_digest.clone(),
+                assembly_phase: insight_platform_models::PromptAssemblyPhase::CapabilityToolResult,
+                ordinal: result_ordinal,
+                byte_budget: result_bytes,
+                token_budget: result_tokens,
                 trusted_instruction: false,
             },
         });
     canonical.classification = classification;
-    let encoded_results = serde_json::to_vec(&request.results)
-        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
     let added_tokens = u64::try_from(encoded_results.len())
         .ok()
         .and_then(|bytes| bytes.checked_add(3))
