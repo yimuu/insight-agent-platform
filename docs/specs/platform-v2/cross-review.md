@@ -1,10 +1,32 @@
-# Platform v2 00～18 Cross-review（CR-184）
+# Platform v2 00～18 Cross-review（CR-185）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-184 Accepted |
+| 状态 | Closed / CR-185 Accepted |
 | 日期 | 2026-08-25 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-184 external leaf terminal implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-185 Skill package byte-contract implementation feedback |
+
+### CR-185 canonical Skill package byte contract impact review
+
+实现反馈确认11此前只定义逻辑目录、manifest和ArtifactSliceRef，没有定义上传Artifact的物理archive编码。若由实现猜测
+ZIP/TAR或按本地目录展开，会让发布输入、内容扫描、digest、跨语言authoring与运行时materialization不确定。CR-185按
+11→15→17→18完成上游到下游复核并形成Acceptance 28：首版只接受无压缩、长度前缀、无trailing bytes的
+`insight.skill-package/1` frame和`application/vnd.insight.skill-package` verified media type。
+
+| Spec | CR-185结论 |
+|---|---|
+| 00 | clean-cut `/v1`、plane authority与实现/目标边界不变；登记physical package contract |
+| 01～04 | service ownership、tenant/permission/policy与persistence authority不变；无新表、Job或current-state projection |
+| 05～10 | Plan v4、Run/Job/Invocation、selector与Capability语义不变；只消费exact Skill binding |
+| 11 | 冻结frame magic、整数编码、entry顺序、EOF、专用media、双digest与无压缩规则 |
+| 12～14 | Context/MCP/Sandbox不解析或执行Skill package；既有权限与execution-plane边界不变 |
+| 15 | Artifact verification逐entry校验；generic read、ZIP/TAR猜测与storage credential暴露仍禁止 |
+| 16 | assembler只消费已验证instruction slice；Model Worker不解析archive、不持有object locator |
+| 17 | 上传API只接受exact Artifact/media，不提供服务器端格式转换或运行时协商 |
+| 18 | L1～L3增加frame corruption、exact binding与mTLS materialization证据；L4～L6门槛不变 |
+
+CR-185未引入新公开route、table、aggregate、worker class或deployment role；错误继续投影既有invalid input/integrity/denied类别。
+00～18逐份复核没有新增P0/P1，11、15、17、18与00恢复Accepted / CR-185，授权按implementation-plan继续实现。
 
 ### CR-184 external leaf terminal continuation cross-review
 
@@ -130,13 +152,12 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / CR-183 | target协议、authority与current-behavior边界闭合 |
+| 00 | Accepted / CR-185 | target协议、authority与current-behavior边界闭合 |
 | 01～03 | Accepted / CR-173/176（CR-181影响复核） | owner、ID、Resource与persistence authority不变 |
 | 04 | Accepted / CR-183 | exact candidate selection program/evidence与owner重验闭合 |
-| 05～07 | Accepted / CR-182 | Plan v4 leaf/terminal ports、Scope binding与Scheduler边界闭合 |
-| 08～16 | Accepted / CR-182 impact review | domain owner只消费exact dispatch/result snapshot，无第二authority |
-| 17 | Accepted / CR-181 | public/internal generic proxy禁止leaf与terminal authority注入 |
-| 18 | Accepted / CR-182 | profile v5不变；Plan v4 L1～L6资格矩阵闭合 |
+| 05～07、10、12、16 | Accepted / CR-184 | external leaf owner terminal与exact resume闭合 |
+| 08～09、13～14 | Accepted / CR-182 impact review | domain owner只消费exact dispatch/result snapshot，无第二authority |
+| 11、15、17～18 | Accepted / CR-185 | canonical Skill frame、Artifact验证、API输入与L1～L3证据闭合 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | In Progress | L1～L3与public contract已恢复；L4～L6、CapacityProfile和GitOps cutover仍待外部资格环境 |

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
+| 状态 | Accepted / CR-185 |
 | 日期 | 2026-08-07 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) |
 | 直接下游 | 12、17、18 |
@@ -12,6 +12,9 @@
 
 > CR-182：ModelLoop没有Skill route port，故Skill slot首版只接受`only_candidate | ordered_first` Selection Policy；`route_hash`在
 > Agent Deployment publication拒绝。
+
+> CR-185：canonical Skill package 的物理字节合同已冻结为无压缩、长度前缀的
+> `insight.skill-package/1` frame；运行时不得猜测ZIP/TAR、按文件系统展开package或接受实现私有archive格式。
 
 > Persistence ruling：Skill 使用 02 的共享 Resource/ResourceVersion；activation/selection 是 Run 或 Invocation 的 typed
 > snapshot/event，不建立 Skill 专用 lifecycle、activation 或 receipt 表族。
@@ -117,6 +120,24 @@ references/*
 examples/*.json
 assets/*
 ```
+
+首版物理编码固定为 `insight.skill-package/1`。整数全部为 unsigned big-endian，字节序列无padding：
+
+```text
+24 bytes  magic = ASCII "INSIGHT-SKILL-PACKAGE/1\n"
+u32       entry_count
+repeat entry_count times, in manifest canonical path order:
+  u16     path_byte_length
+  u64     content_byte_length
+  bytes   UTF-8 path
+  bytes   file content
+EOF       不允许footer或trailing bytes
+```
+
+Artifact verified media type固定为`application/vnd.insight.skill-package`。frame不压缩，不保存owner、mode、mtime、link、
+设备号或扩展header；所有entry metadata只来自Revision内的closed manifest。`entry_count`、ordered path、content length、
+每个file digest、展开总长度、manifest digest与整个Artifact digest必须同时匹配，任一不一致fail closed。因为首版无压缩，
+压缩比恒为1；未来压缩或第二archive编码必须经过新的协议revision，不得按media sniffing自动接受。
 
 规范要求：
 

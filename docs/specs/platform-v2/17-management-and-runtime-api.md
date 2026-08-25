@@ -2,13 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-181 |
+| 状态 | Accepted / CR-185 |
 | 日期 | 2026-08-23 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
 
 > CR-181 impact：public/internal API不暴露Plan leaf dispatch命令，也不接受selected Deployment、slot、port、schema、Task/Wake
 > definition、child entry、retry/deadline或resume target；这些字段只由Scheduler到owner repository的closed internal command承载并重验。
+
+> CR-185 impact：Skill package上传只接受11的专用media type与exact Artifact digest；API不提供ZIP/TAR转换、目录展开、
+> generic object read或运行时格式协商。目录authoring client必须在上传前生成canonical frame。
 
 ## 1. 决策摘要
 

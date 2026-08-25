@@ -2,13 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-184 |
+| 状态 | Accepted / CR-185 |
 | 日期 | 2026-08-25 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
 
 > CR-181 impact：资格矩阵增加Plan v4 external leaf dispatch、candidate selection、result binding与crash recovery；静态manifest或
 > repository单元fixture不能替代多进程owner-boundary证据。
+
+> CR-185 impact：L1/L2增加Skill frame canonicalization、截断/溢出/trailing bytes、path/digest/length mismatch与错误media拒绝；
+> L3覆盖Scheduler exact slot/deployment/revision/lease经Artifact Data Worker mTLS materialization且无storage credential泄漏。
 
 ## 1. 决策摘要
 

@@ -2,13 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-181 |
+| 状态 | Accepted / CR-185 |
 | 日期 | 2026-08-20 |
 | 依赖 | 02、03、04、07、09、10、12、13 |
 | 直接下游 | 16、17、18 |
 
 > CR-181 impact：Plan v4 input/route/result为Artifact-backed ValueRef时仍走Artifact Data Worker的brokered exact RunValue read/write；
 > Artifact metadata不能替代RunValue schema/content/classification authority，也不能决定selected candidate或resume target。
+
+> CR-185 impact：Skill package使用11冻结的`insight.skill-package/1`无压缩frame与专用verified media type；Artifact
+> verification必须逐entry验证manifest/digest/长度，普通JSON、ZIP、TAR或仅凭扩展名的对象不能成为Skill package Ready证据。
 
 ## 1. 决策摘要
 
@@ -135,6 +138,7 @@ verify按kind/purpose的published profile执行：
 
 - object generation、length、digest、media sniffing和canonicalization；
 - malware/archive-bomb、executable、document/script和格式专用scan；
+- Skill package按11的frame边界逐entry验证canonical path、长度、digest、media/classification manifest与无trailing bytes；
 - schema、classification、retention、SBOM/provenance等领域规则；
 - scanner/ruleset/runtime version、deadline和evidence expiry；
 - 不可变的VerificationEvidence digest。
