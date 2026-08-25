@@ -6,7 +6,7 @@
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
     BrokeredArtifactScannerReader, BrokeredSandboxArtifactBroker, BrokeredSchedulerRunValueReader,
-    BrokeredSchedulerTypedPlanReader,
+    BrokeredSchedulerSkillPackageReader, BrokeredSchedulerTypedPlanReader,
 };
 mod guest_identity;
 mod scan_worker;
@@ -21,12 +21,13 @@ use insight_platform_artifact_rpc::{
     ArtifactGvisorGuestGrpcService, ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcService,
     ArtifactSchedulerGrpcService, GvisorGuestResponseMaterializer, LeasedArtifactBytes,
     SandboxControllerWorkloadIdentity, SchedulerRunValueResponseBroker,
-    SchedulerTypedPlanResponseBroker, SchedulerWorkloadIdentity, WasiArtifactBrokerError,
-    WasiArtifactReadRequest, WasiArtifactResponseBroker,
+    SchedulerSkillPackageResponseBroker, SchedulerTypedPlanResponseBroker,
+    SchedulerWorkloadIdentity, WasiArtifactBrokerError, WasiArtifactReadRequest,
+    WasiArtifactResponseBroker,
 };
 use insight_platform_artifacts::{
-    SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerTypedPlanReadError,
-    SchedulerTypedPlanReadRequest,
+    SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerSkillPackageReadError,
+    SchedulerSkillPackageReadRequest, SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest,
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
@@ -62,6 +63,7 @@ struct SandboxRpcArtifactBroker {
 struct SchedulerRpcArtifactBroker {
     typed_plan_reader: BrokeredSchedulerTypedPlanReader,
     run_value_reader: BrokeredSchedulerRunValueReader,
+    skill_package_reader: BrokeredSchedulerSkillPackageReader,
 }
 
 struct GvisorGuestMaterializer {
@@ -117,6 +119,18 @@ impl SchedulerRunValueResponseBroker for SchedulerRpcArtifactBroker {
         request: SchedulerRunValueReadRequest,
     ) -> Result<LeasedArtifactBytes, SchedulerRunValueReadError> {
         let read = self.run_value_reader.read(&request).await?;
+        let (bytes, permit) = read.into_response_parts();
+        Ok(LeasedArtifactBytes::new(bytes, permit))
+    }
+}
+
+#[async_trait::async_trait]
+impl SchedulerSkillPackageResponseBroker for SchedulerRpcArtifactBroker {
+    async fn read_skill_package_for_response(
+        &self,
+        request: SchedulerSkillPackageReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerSkillPackageReadError> {
+        let read = self.skill_package_reader.read(&request).await?;
         let (bytes, permit) = read.into_response_parts();
         Ok(LeasedArtifactBytes::new(bytes, permit))
     }
@@ -341,6 +355,13 @@ async fn run() -> Result<(), ProcessError> {
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?,
         run_value_reader: BrokeredSchedulerRunValueReader::new(
+            read_repository.clone(),
+            Arc::clone(&unsealer),
+            stores.clone(),
+            broker_limits,
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        skill_package_reader: BrokeredSchedulerSkillPackageReader::new(
             read_repository.clone(),
             Arc::clone(&unsealer),
             stores.clone(),

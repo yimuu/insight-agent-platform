@@ -1,7 +1,9 @@
 use chrono::{Duration, Utc};
 use insight_platform_artifacts::{
     ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, SchedulerRunValueLease,
-    SchedulerRunValueRequestResolver, SchedulerTypedPlanLease, SchedulerTypedPlanRequestResolver,
+    SchedulerRunValueRequestResolver, SchedulerSkillPackageLease,
+    SchedulerSkillPackageRequestResolver, SchedulerTypedPlanLease,
+    SchedulerTypedPlanRequestResolver,
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, pinned_nominal_reference,
@@ -13,8 +15,10 @@ use insight_platform_contracts::{
     PlanNodeKind, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
     PublishedVersionPayload, ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot,
-    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef,
+    SchedulingPolicyDocument, Sha256Digest, SkillArtifactSliceRef, SkillDeploymentClosure,
+    SkillInstructionAudience, SkillInstructionPhase, SkillInstructionSection, SkillInterface,
+    SkillPackageEntry, SkillPackageEntryKind, SkillPackageManifest, SkillResourceSpec,
+    TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef,
 };
 use insight_platform_jobs::WakeSource;
 use insight_platform_orchestrator::{
@@ -69,6 +73,9 @@ const AGENT_ID: &str = "agt_0198f1c3-9a00-7c3e-b1f3-773c28367007";
 const AGENT_INTERFACE_ID: &str = "aif_0198f1c3-9a00-7c3e-b1f3-773c28367008";
 const AGENT_PLAN_ID: &str = "arev_0198f1c3-9a00-7c3e-b1f3-773c28367009";
 const AGENT_DEPLOYMENT_ID: &str = "adep_0198f1c3-9a00-7c3e-b1f3-773c2836700a";
+const SKILL_ID: &str = "skl_0198f1c3-9a00-7c3e-b1f3-773c28367201";
+const SKILL_REVISION_ID: &str = "srev_0198f1c3-9a00-7c3e-b1f3-773c28367202";
+const SKILL_DEPLOYMENT_ID: &str = "skdep_0198f1c3-9a00-7c3e-b1f3-773c28367203";
 const CHILD_AGENT_ID: &str = "agt_0198f1c3-9a00-7c3e-b1f3-773c2836700b";
 const CHILD_AGENT_INTERFACE_ID: &str = "aif_0198f1c3-9a00-7c3e-b1f3-773c2836701b";
 const CHILD_AGENT_PLAN_ID: &str = "arev_0198f1c3-9a00-7c3e-b1f3-773c2836702b";
@@ -1085,6 +1092,51 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     wrong_fence.lease_token_digest = digest('4');
     assert!(matches!(
         repository.authorize_object_read(&wrong_fence).await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
+    let skill_package_lease = SchedulerSkillPackageLease {
+        tenant_id: id(TENANT_ID),
+        run_id: id(running_for_recovery.run_id.as_deref().unwrap()),
+        orchestration_job_id: id(&running_for_recovery.job_id),
+        worker_process_generation_id: id(WORKER_D_ID),
+        lease_generation: u64::try_from(running_for_recovery.lease_epoch).unwrap(),
+        lease_token_digest: digest('0'),
+        skill_slot_id: "review_skill".to_owned(),
+        skill_deployment_id: id(SKILL_DEPLOYMENT_ID),
+        request_digest: digest('8'),
+        maximum_bytes: typed_plan_bytes.len(),
+        deadline: Utc::now() + Duration::milliseconds(400),
+    };
+    let skill_package_read = repository
+        .resolve_skill_package_read(skill_package_lease.clone())
+        .await
+        .unwrap();
+    assert_eq!(skill_package_read.skill_revision_id, id(SKILL_REVISION_ID));
+    assert_eq!(
+        skill_package_read.artifact.artifact_id(),
+        &id(TYPED_PLAN_ARTIFACT_ID)
+    );
+    assert_eq!(
+        repository
+            .authorize_object_read(&skill_package_read)
+            .await
+            .unwrap()
+            .blob_id,
+        id(TYPED_PLAN_BLOB_ID)
+    );
+    let mut wrong_skill_slot = skill_package_lease.clone();
+    wrong_skill_slot.skill_slot_id = "missing_skill".to_owned();
+    assert!(matches!(
+        repository
+            .resolve_skill_package_read(wrong_skill_slot)
+            .await,
+        Err(ArtifactObjectReadAuthorityError::Denied)
+    ));
+    let mut unbound_skill = skill_package_lease;
+    unbound_skill.skill_deployment_id =
+        id("skdep_0198f1c3-9a00-7c3e-b1f3-773c28367204");
+    assert!(matches!(
+        repository.resolve_skill_package_read(unbound_skill).await,
         Err(ArtifactObjectReadAuthorityError::Denied)
     ));
     let artifact_value_body = json!({"question": "artifact terminal"});
@@ -10146,11 +10198,117 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         },
     )
     .unwrap();
+    let skill_entries = vec![
+        SkillPackageEntry {
+            path: "instructions/review.md".to_owned(),
+            kind: SkillPackageEntryKind::Instruction,
+            media_type: "text/markdown".to_owned(),
+            byte_length: 1,
+            content_digest: digest('a'),
+            data_classification: DataClassification::Internal,
+            executable: false,
+        },
+        SkillPackageEntry {
+            path: "skill.json".to_owned(),
+            kind: SkillPackageEntryKind::Manifest,
+            media_type: "application/json".to_owned(),
+            byte_length: 1,
+            content_digest: digest('b'),
+            data_classification: DataClassification::Internal,
+            executable: false,
+        },
+    ];
+    let skill_manifest_digest: Sha256Digest = canonical_digest(&json!({
+        "entries": skill_entries,
+        "schema_version": 1,
+        "total_byte_length": typed_plan_bytes.len(),
+    }))
+    .unwrap()
+    .parse()
+    .unwrap();
+    let skill_sections = vec![SkillInstructionSection {
+        section_id: "review".to_owned(),
+        phase: SkillInstructionPhase::Validation,
+        audience: SkillInstructionAudience::Validator,
+        body: SkillArtifactSliceRef {
+            path: "instructions/review.md".to_owned(),
+            content_digest: digest('a'),
+            byte_offset: 0,
+            byte_length: 1,
+        },
+        max_tokens: 8,
+        data_classification: DataClassification::Internal,
+    }];
+    let skill_instruction_digest: Sha256Digest =
+        canonical_digest(&serde_json::to_value(&skill_sections).unwrap())
+            .unwrap()
+            .parse()
+            .unwrap();
+    let skill_requirement_digest: Sha256Digest = canonical_digest(&json!({
+        "capability": [],
+        "context": [],
+        "model": [],
+        "skill_dependencies": [],
+    }))
+    .unwrap()
+    .parse()
+    .unwrap();
+    let skill_payload = TypedPayload::new(
+        1,
+        &PublishedVersionPayload {
+            document: ResourceDocument::Skill(SkillResourceSpec {
+                authoring_package: AuthoringPackage {
+                    artifact: ArtifactRef::new(
+                        id(TYPED_PLAN_ARTIFACT_ID),
+                        typed_plan_digest.clone(),
+                        u64::try_from(typed_plan_bytes.len()).unwrap(),
+                        "application/json",
+                        DataClassification::Internal,
+                        Some("typed-plan.json".to_owned()),
+                    )
+                    .unwrap(),
+                    manifest_digest: skill_manifest_digest.clone(),
+                },
+                contract_digest: digest('c'),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                interface: SkillInterface {
+                    qualified_name: "review.method".to_owned(),
+                    purpose: "Review one bounded result".to_owned(),
+                    task_input_schema: agent_schema(),
+                    produced_guidance_schema: agent_schema(),
+                    compatible_agent_interfaces: vec![id(AGENT_INTERFACE_ID)],
+                },
+                manifest: SkillPackageManifest {
+                    schema_version: 1,
+                    entries: skill_entries,
+                    total_byte_length: u64::try_from(typed_plan_bytes.len()).unwrap(),
+                    canonical_digest: skill_manifest_digest,
+                },
+                instruction_sections: skill_sections,
+                skill_dependencies: vec![],
+                capability_requirements: vec![],
+                context_requirements: vec![],
+                model_requirements: vec![],
+                instruction_set_digest: skill_instruction_digest,
+                requirement_set_digest: skill_requirement_digest,
+            }),
+            validation: ValidationSummary {
+                validator_digest: digest('1'),
+                validated_draft_digest: digest('2'),
+                dependency_closure_digest: digest('3'),
+                security_evidence_digest: digest('4'),
+                warnings: vec![],
+            },
+        },
+    )
+    .unwrap();
     for (resource_id, resource_kind) in [
         (POLICY_ID, "policy"),
         (SELECTION_POLICY_ID, "policy"),
         (AGENT_ID, "agent"),
         (CHILD_AGENT_ID, "agent"),
+        (SKILL_ID, "skill"),
     ] {
         sqlx::query(
             r#"
@@ -10207,6 +10365,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             "agent_plan_revision",
             digest('9'),
         ),
+        (SKILL_REVISION_ID, SKILL_ID, "skill_revision", digest('d')),
     ];
     for (version_id, resource_id, kind, content_digest) in &versions {
         let version_payload = match *version_id {
@@ -10214,6 +10373,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             SELECTION_POLICY_REVISION_ID => &selection_policy_payload,
             AGENT_INTERFACE_ID | AGENT_PLAN_ID => &agent_plan_payload,
             CHILD_AGENT_INTERFACE_ID | CHILD_AGENT_PLAN_ID => &child_interface_payload,
+            SKILL_REVISION_ID => &skill_payload,
             _ => &resource_payload,
         };
         sqlx::query(
@@ -10457,6 +10617,48 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         .unwrap(),
         revision: selection_revision,
     };
+    let skill_deployment_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Skill(SkillDeploymentClosure {
+            skill_revision: ExactVersionRef::new(id(SKILL_REVISION_ID), digest('d')).unwrap(),
+            requirements: vec![],
+            selection_policy: selection_policy_binding.clone(),
+            qualification_evidence: ArtifactRef::new(
+                id(TYPED_PLAN_ARTIFACT_ID),
+                typed_plan_digest.clone(),
+                u64::try_from(typed_plan_bytes.len()).unwrap(),
+                "application/json",
+                DataClassification::Internal,
+                Some("typed-plan.json".to_owned()),
+            )
+            .unwrap(),
+        }),
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.deployments (
+            tenant_id, deployment_id, resource_id, resource_version_id, environment,
+            bindings_digest, payload_schema_version, bindings, created_by
+        ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(SKILL_DEPLOYMENT_ID)
+    .bind(SKILL_ID)
+    .bind(SKILL_REVISION_ID)
+    .bind(&skill_deployment_payload.digest)
+    .bind(skill_deployment_payload.schema_version)
+    .bind(&skill_deployment_payload.value)
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    let skill_deployment = ExactDeploymentRef::new(
+        id(SKILL_DEPLOYMENT_ID),
+        skill_deployment_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
     let child_closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(CHILD_AGENT_INTERFACE_ID), digest('8')).unwrap(),
         plan: ExactVersionRef::new(id(CHILD_AGENT_PLAN_ID), digest('9')).unwrap(),
@@ -10497,15 +10699,26 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         plan: ExactVersionRef::new(id(AGENT_PLAN_ID), typed_plan_digest).unwrap(),
         entry_node_id: "start".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
-        slots: vec![FrozenSlotBinding {
-            slot_id: "child_worker".to_owned(),
-            requirement_digest: digest('b'),
-            target: FrozenSlotTarget::ChildAgent {
-                candidates: vec![child_deployment],
-                selection_policy: selection_policy_binding,
+        slots: vec![
+            FrozenSlotBinding {
+                slot_id: "child_worker".to_owned(),
+                requirement_digest: digest('b'),
+                target: FrozenSlotTarget::ChildAgent {
+                    candidates: vec![child_deployment],
+                    selection_policy: selection_policy_binding.clone(),
+                },
+                binding_digest: digest('c'),
             },
-            binding_digest: digest('c'),
-        }],
+            FrozenSlotBinding {
+                slot_id: "review_skill".to_owned(),
+                requirement_digest: digest('d'),
+                target: FrozenSlotTarget::Skill {
+                    candidates: vec![skill_deployment],
+                    selection_policy: selection_policy_binding,
+                },
+                binding_digest: digest('e'),
+            },
+        ],
         policies: vec![policy_binding.clone()],
         execution_profile: policy_binding,
     };

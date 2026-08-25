@@ -7,6 +7,7 @@ use std::fmt;
 
 pub const MAX_TYPED_PLAN_ARTIFACT_BYTES: usize = 16 * 1_024 * 1_024;
 pub const MAX_SCHEDULER_RUN_VALUE_BYTES: usize = 1_048_576;
+pub const MAX_SCHEDULER_SKILL_PACKAGE_BYTES: usize = 16 * 1_024 * 1_024;
 
 pub const MAX_ARTIFACT_OBJECT_REFERENCE_BYTES: usize = 16_384;
 pub const MAX_ARTIFACT_OBJECT_GENERATION_BYTES: usize = 255;
@@ -321,6 +322,112 @@ pub trait SchedulerRunValueReader: Send + Sync {
         &self,
         request: SchedulerRunValueReadRequest,
     ) -> Result<Vec<u8>, SchedulerRunValueReadError>;
+}
+
+/// Scheduler-owned lookup key for one exact Skill Deployment admitted by the Run snapshot.
+/// The database resolves the immutable Skill Revision and its package Artifact under the live
+/// orchestration Job fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerSkillPackageLease {
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub orchestration_job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub lease_token_digest: Sha256Digest,
+    pub skill_slot_id: String,
+    pub skill_deployment_id: ResourceId,
+    pub request_digest: Sha256Digest,
+    pub maximum_bytes: usize,
+    pub deadline: DateTime<Utc>,
+}
+
+impl SchedulerSkillPackageLease {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ArtifactObjectReadAuthorityError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.run_id.kind() != ResourceKind::Run
+            || self.orchestration_job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || !stable_code(&self.skill_slot_id, 128)
+            || self.skill_deployment_id.kind() != ResourceKind::SkillDeployment
+            || self.lease_generation == 0
+            || self.maximum_bytes == 0
+            || self.maximum_bytes > MAX_SCHEDULER_SKILL_PACKAGE_BYTES
+            || self.deadline <= now
+        {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+pub trait SchedulerSkillPackageRequestResolver: Send + Sync {
+    async fn resolve_skill_package_read(
+        &self,
+        lease: SchedulerSkillPackageLease,
+    ) -> Result<SchedulerSkillPackageReadRequest, ArtifactObjectReadAuthorityError>;
+}
+
+/// Closed Scheduler request for the exact immutable package bound through one frozen Skill
+/// Deployment. It contains no physical locator or storage credential.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerSkillPackageReadRequest {
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub orchestration_job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub lease_token_digest: Sha256Digest,
+    pub skill_slot_id: String,
+    pub skill_deployment_id: ResourceId,
+    pub skill_revision_id: ResourceId,
+    pub manifest_digest: Sha256Digest,
+    pub artifact: ArtifactRef,
+    pub request_digest: Sha256Digest,
+    pub maximum_bytes: usize,
+    pub deadline: DateTime<Utc>,
+}
+
+impl SchedulerSkillPackageReadRequest {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ArtifactObjectReadAuthorityError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.run_id.kind() != ResourceKind::Run
+            || self.orchestration_job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || !stable_code(&self.skill_slot_id, 128)
+            || self.skill_deployment_id.kind() != ResourceKind::SkillDeployment
+            || self.skill_revision_id.kind() != ResourceKind::SkillRevision
+            || self.lease_generation == 0
+            || self.artifact.validate().is_err()
+            || self.maximum_bytes == 0
+            || self.maximum_bytes > MAX_SCHEDULER_SKILL_PACKAGE_BYTES
+            || u64::try_from(self.maximum_bytes)
+                .map_or(true, |maximum| maximum < self.artifact.byte_length())
+            || self.deadline <= now
+        {
+            return Err(ArtifactObjectReadAuthorityError::Denied);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerSkillPackageReadError {
+    Unavailable,
+    Denied,
+    NotFound,
+    TooLarge,
+    Integrity,
+}
+
+#[async_trait]
+pub trait SchedulerSkillPackageReader: Send + Sync {
+    async fn read_exact(
+        &self,
+        request: SchedulerSkillPackageReadRequest,
+    ) -> Result<Vec<u8>, SchedulerSkillPackageReadError>;
 }
 
 /// Closed public-Gateway request for one exact, bounded Artifact generation.
@@ -739,6 +846,70 @@ mod tests {
         wrong_kind.run_value_id = id(ResourceKind::Artifact, 6);
         assert_eq!(
             wrong_kind.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+    }
+
+    #[test]
+    fn scheduler_skill_package_read_is_exact_bounded_and_fenced() {
+        let now = Utc::now();
+        let request = SchedulerSkillPackageReadRequest {
+            tenant_id: id(ResourceKind::Tenant, 1),
+            run_id: id(ResourceKind::Run, 2),
+            orchestration_job_id: id(ResourceKind::Job, 3),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 4),
+            lease_generation: 2,
+            lease_token_digest: digest('a'),
+            skill_slot_id: "review_skill".to_owned(),
+            skill_deployment_id: id(ResourceKind::SkillDeployment, 5),
+            skill_revision_id: id(ResourceKind::SkillRevision, 6),
+            manifest_digest: digest('b'),
+            artifact: ArtifactRef::new(
+                id(ResourceKind::Artifact, 7),
+                digest('c'),
+                17,
+                "application/octet-stream",
+                DataClassification::Internal,
+                Some("skill.package".to_owned()),
+            )
+            .unwrap(),
+            request_digest: digest('d'),
+            maximum_bytes: 17,
+            deadline: now + chrono::Duration::seconds(1),
+        };
+        request.validate_at(now).unwrap();
+
+        let mut wrong_revision = request.clone();
+        wrong_revision.skill_revision_id = id(ResourceKind::PolicyRevision, 8);
+        assert_eq!(
+            wrong_revision.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+        let mut too_small = request.clone();
+        too_small.maximum_bytes = 16;
+        assert_eq!(
+            too_small.validate_at(now),
+            Err(ArtifactObjectReadAuthorityError::Denied)
+        );
+
+        let lease = SchedulerSkillPackageLease {
+            tenant_id: request.tenant_id,
+            run_id: request.run_id,
+            orchestration_job_id: request.orchestration_job_id,
+            worker_process_generation_id: request.worker_process_generation_id,
+            lease_generation: request.lease_generation,
+            lease_token_digest: request.lease_token_digest,
+            skill_slot_id: request.skill_slot_id,
+            skill_deployment_id: request.skill_deployment_id,
+            request_digest: request.request_digest,
+            maximum_bytes: MAX_SCHEDULER_SKILL_PACKAGE_BYTES,
+            deadline: request.deadline,
+        };
+        lease.validate_at(now).unwrap();
+        let mut wrong_deployment = lease;
+        wrong_deployment.skill_deployment_id = id(ResourceKind::CapabilityDeployment, 9);
+        assert_eq!(
+            wrong_deployment.validate_at(now),
             Err(ArtifactObjectReadAuthorityError::Denied)
         );
     }

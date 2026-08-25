@@ -18,6 +18,7 @@ service ArtifactSandboxBrokerService {
 service ArtifactSchedulerService {
   rpc ReadTypedPlan(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
   rpc ReadRunValue(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
+  rpc ReadSkillPackage(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
 }
 
 // Token-authenticated boundary exposed only to admission-locked gVisor guest Pods. The caller
