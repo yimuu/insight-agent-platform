@@ -5,30 +5,30 @@ use insight_platform_capability_adapters::{
     HttpTransportRequest, HttpTransportResponse,
 };
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, AdministrativeGate, AgentDeploymentClosure,
-    AgentResourceSpec, ArtifactRef, AuthoringPackage, CandidateSelectionMode,
-    CandidateSelectionPolicyDocument, CapabilityArtifactContract, CapabilityBackendBinding,
-    CapabilityBackendContract, CapabilityBackendFeatures, CapabilityBackendKind,
-    CapabilityBackendLimits, CapabilityCancellationKind, CapabilityDataFlowPolicy,
-    CapabilityDeploymentClosure, CapabilityIdempotencyKind, CapabilityImplementationResourceSpec,
-    CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
-    CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
-    CommandAudit, CommandOutcome, ContextWindowContract, DataClassification, DataRegion,
-    DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
-    ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
-    InstalledModelAdapter, JobState, ModelBudgetPolicyDocument, ModelCatalogEvidence,
-    ModelDeploymentClosure, ModelIdentityStability, ModelLimits, ModelModalities,
-    ModelProfileResourceSpec, ModelProviderDeploymentClosure, ModelProviderResourceSpec,
-    ModelPublicProjectionPolicyDocument, ModelSafetyPolicyDocument, ModelToolContract,
-    ModelTurnState, ModelUsageContract, NativeCapabilityContract, Permission, PermissionSet,
-    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
-    PrincipalKind, PrincipalSnapshot, ProviderDataHandlingContract, ProviderModelIdentity,
-    ProviderRequestLimits, ProviderTrainingPolicy, PublishedVersionPayload, QuotaDimension,
-    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot,
-    SchedulingPolicyDocument, SecretBindingPayload, SecretPurpose, SecretResolutionPolicy,
-    Sha256Digest, StructuredOutputContract, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef, WorkClass, WorkerManifest, WORKER_MANIFEST_VERSION,
-    WORKER_PROTOCOL_VERSION,
+    canonical_digest, canonical_json, checked_in_hard_limit_profile, AdministrativeGate,
+    AgentDeploymentClosure, AgentResourceSpec, ArtifactRef, AuthoringPackage,
+    CandidateSelectionMode, CandidateSelectionPolicyDocument, CapabilityArtifactContract,
+    CapabilityBackendBinding, CapabilityBackendContract, CapabilityBackendFeatures,
+    CapabilityBackendKind, CapabilityBackendLimits, CapabilityCancellationKind,
+    CapabilityDataFlowPolicy, CapabilityDeploymentClosure, CapabilityIdempotencyKind,
+    CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
+    CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
+    CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue, CommandAudit, CommandOutcome,
+    ContextWindowContract, DataClassification, DataRegion, DeploymentClosure, Effect,
+    EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactSecretBindingRef,
+    ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, InstalledModelAdapter, JobState,
+    ModelBudgetPolicyDocument, ModelCatalogEvidence, ModelDeploymentClosure,
+    ModelIdentityStability, ModelLimits, ModelModalities, ModelProfileResourceSpec,
+    ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelPublicProjectionPolicyDocument,
+    ModelSafetyPolicyDocument, ModelToolContract, ModelTurnState, ModelUsageContract,
+    NativeCapabilityContract, Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
+    ProviderTrainingPolicy, PublishedVersionPayload, QuotaDimension, RegistryResourceKind,
+    ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, SchedulingPolicyDocument,
+    SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest,
+    StructuredOutputContract, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef,
+    WorkClass, WorkerManifest, WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
@@ -124,6 +124,10 @@ fn raw_digest(bytes: &[u8]) -> Sha256Digest {
     encoded.parse().unwrap()
 }
 
+fn builtin_echo_module_digest() -> Sha256Digest {
+    raw_digest(b"insight.platform/v1/capability-worker/builtin\0builtin-echo-module")
+}
+
 fn named_digest(label: &str) -> Sha256Digest {
     canonical_digest(&json!({"phase3_model_turn": label}))
         .unwrap()
@@ -145,6 +149,30 @@ fn production_model_worker_manifest() -> WorkerManifest {
 
 fn production_model_worker_manifest_digest() -> Sha256Digest {
     production_model_worker_manifest()
+        .canonical_digest()
+        .unwrap()
+}
+
+fn production_capability_worker_manifest() -> WorkerManifest {
+    let installed = json!([{
+        "adapter_id": "builtin.echo",
+        "adapter_version": "1.0.0",
+        "module_digest": builtin_echo_module_digest(),
+        "entrypoint_id": "echo.inline",
+    }]);
+    WorkerManifest {
+        manifest_version: WORKER_MANIFEST_VERSION,
+        worker_role: "capability.native".to_owned(),
+        work_class: WorkClass::CapabilityNative,
+        adapter_runtime_digest: canonical_digest(&installed).unwrap().parse().unwrap(),
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        max_concurrency: 4,
+        critical_control_reserved_slots: 1,
+    }
+}
+
+fn production_capability_worker_manifest_digest() -> Sha256Digest {
+    production_capability_worker_manifest()
         .canonical_digest()
         .unwrap()
 }
@@ -1069,10 +1097,10 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     )
     .await;
     let native_contract = CapabilityBackendContract::Native(NativeCapabilityContract {
-        adapter_id: "builtin.model_tool_fixture".to_owned(),
+        adapter_id: "builtin.echo".to_owned(),
         adapter_version: "1.0.0".to_owned(),
-        module_digest: digest('7'),
-        entrypoint_id: "model.tool.fixture".to_owned(),
+        module_digest: builtin_echo_module_digest(),
+        entrypoint_id: "echo.inline".to_owned(),
         worker_protocol_version: WORKER_PROTOCOL_VERSION,
     });
     let native_contract_digest = native_contract.canonical_digest().unwrap();
@@ -1351,8 +1379,8 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         implementation: implementation_revision,
         interface: interface_revision.clone(),
         backend: CapabilityBackendBinding::Native {
-            worker_manifest_digest: digest('6'),
-            adapter_module_digest: digest('7'),
+            worker_manifest_digest: production_capability_worker_manifest_digest(),
+            adapter_module_digest: builtin_echo_module_digest(),
         },
         secret_bindings: vec![],
         policies: vec![agent_policy.clone()],
@@ -1434,11 +1462,16 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     }
 
     let agent_interface = version(ResourceKind::AgentInterfaceRevision, 0x38, '8');
-    let agent_plan = version(ResourceKind::AgentPlanRevision, 0x39, '9');
     let runtime_plan = model_runtime_plan(agent_interface.revision_id.clone(), &output_schema);
     let runtime_plan_digest = runtime_plan
         .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
         .unwrap();
+    let agent_plan = ExactVersionRef::new(
+        id(ResourceKind::AgentPlanRevision, 0x39),
+        runtime_plan_digest.clone(),
+    )
+    .unwrap();
+    let runtime_plan_bytes = canonical_json(&serde_json::to_value(&runtime_plan).unwrap()).unwrap();
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_package: authoring(0xa6, 'a'),
         contract_digest: digest('b'),
@@ -1448,7 +1481,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         output_schema: output_schema.clone(),
         error_schema: agent_schema(),
         typed_plan_artifact_id: id(ResourceKind::Artifact, 0xa6),
-        typed_plan_digest: runtime_plan_digest,
+        typed_plan_digest: runtime_plan_digest.clone(),
     });
     for (exact, revision_no) in [(&agent_interface, 1), (&agent_plan, 2)] {
         insert_version(
@@ -1466,6 +1499,41 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         )
         .await;
     }
+    let typed_plan_artifact = ArtifactRef::new(
+        id(ResourceKind::Artifact, 0xa6),
+        runtime_plan_digest,
+        u64::try_from(runtime_plan_bytes.len()).unwrap(),
+        "application/json",
+        DataClassification::Internal,
+        Some("model-runtime-plan.json".to_owned()),
+    )
+    .unwrap();
+    insert_ready_artifact(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &agent_policy.revision_id,
+        &typed_plan_artifact,
+        0xb6,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE insight_platform.artifacts SET purpose = 'typed_plan' WHERE tenant_id = $1 AND artifact_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(typed_plan_artifact.artifact_id().to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resource_versions SET artifact_id = $3 WHERE tenant_id = $1 AND resource_version_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(agent_plan.revision_id.to_string())
+    .bind(typed_plan_artifact.artifact_id().to_string())
+    .execute(pool)
+    .await
+    .unwrap();
     let selection_policy_deployment_id = id(ResourceKind::PolicyDeployment, 0x3b);
     let selection_policy_payload = TypedPayload::new(
         1,
@@ -3676,7 +3744,7 @@ async fn model_turn_fixture() {
         .claim_capability_jobs(ClaimCapabilityJobs {
             work_class: WorkClass::CapabilityNative,
             worker_process_generation_id: capability_worker_id.clone(),
-            worker_manifest_digest: digest('6'),
+            worker_manifest_digest: production_capability_worker_manifest_digest(),
             limit: 2,
             lease_milliseconds: 30_000,
             slots: vec![
@@ -3818,7 +3886,7 @@ async fn model_turn_fixture() {
         .claim_capability_jobs(ClaimCapabilityJobs {
             work_class: WorkClass::CapabilityNative,
             worker_process_generation_id: second_worker_id.clone(),
-            worker_manifest_digest: digest('6'),
+            worker_manifest_digest: production_capability_worker_manifest_digest(),
             limit: 1,
             lease_milliseconds: 30_000,
             slots: vec![CapabilityClaimSlot {
