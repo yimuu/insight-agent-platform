@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-186 |
+| 状态 | Accepted / CR-187 |
 | 日期 | 2026-08-25 |
 | 依赖 | 02、03、04、06、07、09、10、15 |
 | 直接下游 | 17、18 |
@@ -14,6 +14,11 @@
 
 Model Provider、Model Profile和Model Deployment复用shared Resource lifecycle。每个ModelTurn冻结exact provider/model/profile、
 prompt/tool/schema/safety/budget合同，shared Job拥有物理attempt、lease和retry。
+
+CR-187的`ModelDeploymentClosure`冻结`profile_revision/provider_deployment/data_policy/safety_policy/budget_policy/
+public_projection_policy/generation_defaults`；六个Revision/Deployment引用均exact且角色不同。Scheduler必须加载并验证04的Safety、
+Budget与PublicProjection document，不能由caller、Model Worker或测试默认值提供attempt/cost/safety/truncation事实。effective input/output/
+total token和attempt/cost上限取Plan/Profile/Provider/HardLimit/Policy的最小值；任一缺失、wrong kind、digest漂移或结果为零均fail closed。
 
 首版Model request与canonical response都是有界Inline RunValue。不建设Model Artifact Producer、Model Artifact Broker、
 output reservation、weighted materialization permit或Artifact-backed Model state machine。需要文件或大输出时，Agent调用
@@ -95,6 +100,9 @@ byte_budget/token_budget/trusted_instruction`。初始request必须完整包含1
 instruction、current user input），Skill与Context phase按exact activation/query事实可选；同phase ordinal唯一。canonical message顺序
 就是phase/ordinal顺序，source-map digest来自同序closed entries。任何overflow整批返回稳定admission failure，不允许Provider adapter、
 Model Worker或恢复路径自行截断或重排。
+
+platform safety block正文、raw content digest和逐块预算唯一来自exact `ModelSafetyPolicyDocument`；request的`truncation_policy`引用exact
+PublicProjection Policy Revision。`reject_prompt_overflow=true`意味着首版assembler只能成功纳入完整block或稳定失败，不存在隐藏截断实现。
 
 ModelTurn在Provider dispatch前必须已经存在有效Inline request RunValue、Job、quota reservation和全部binding。
 

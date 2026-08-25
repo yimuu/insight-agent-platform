@@ -590,7 +590,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         retain_provenance_sources: true,
         delete_requires_approval: true,
     };
-    let retention_document = ResourceDocument::Policy(PolicyResourceSpec {
+    let retention_document = ResourceDocument::Policy(Box::new(PolicyResourceSpec {
         authoring_package: AuthoringPackage {
             artifact: authoring_artifact.clone(),
             manifest_digest: digest('a'),
@@ -603,6 +603,9 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         selection: None,
         scheduling: None,
         retention: Some(retention),
+        model_safety: None,
+        model_budget: None,
+        model_public_projection: None,
         mcp_protocol: None,
         mcp_auth: None,
         sandbox_isolation: None,
@@ -610,7 +613,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         sandbox_network: None,
         sandbox_artifact_io: None,
         sandbox_secret_resolution: None,
-    });
+    }));
     let retention_resource_payload = TypedPayload::new(
         1,
         &ResourceDraftPayload {
@@ -827,7 +830,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
 
     prove_sandbox_package_runtime_bundle_publication(&pool, &repository, &authoring_artifact).await;
 
-    let document = ResourceDocument::Policy(PolicyResourceSpec {
+    let document = ResourceDocument::Policy(Box::new(PolicyResourceSpec {
         authoring_package: AuthoringPackage {
             artifact: authoring_artifact,
             manifest_digest: digest('6'),
@@ -840,6 +843,9 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         selection: None,
         scheduling: None,
         retention: None,
+        model_safety: None,
+        model_budget: None,
+        model_public_projection: None,
         mcp_protocol: None,
         mcp_auth: None,
         sandbox_isolation: None,
@@ -847,7 +853,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         sandbox_network: None,
         sandbox_artifact_io: None,
         sandbox_secret_resolution: None,
-    });
+    }));
     let draft = ResourceDraftPayload {
         display_name: "Tenant authorization policy".to_owned(),
         document: document.clone(),
@@ -1783,7 +1789,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         .unwrap(),
         revision: ExactVersionRef::new(id(VERSION_ID), digest('6')).unwrap(),
     }];
-    let dependency_policy_document = ResourceDocument::Policy(PolicyResourceSpec {
+    let dependency_policy_document = ResourceDocument::Policy(Box::new(PolicyResourceSpec {
         authoring_package: AuthoringPackage {
             artifact: qualification_artifact.clone(),
             manifest_digest: digest('6'),
@@ -1796,6 +1802,9 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         selection: None,
         scheduling: None,
         retention: None,
+        model_safety: None,
+        model_budget: None,
+        model_public_projection: None,
         mcp_protocol: None,
         mcp_auth: None,
         sandbox_isolation: None,
@@ -1803,7 +1812,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         sandbox_network: None,
         sandbox_artifact_io: None,
         sandbox_secret_resolution: None,
-    });
+    }));
     for (ordinal, (version_id, deployment_id, content_digest)) in [
         (POLICY_VERSION_2_ID, POLICY_DEPLOYMENT_2_ID, digest('7')),
         (POLICY_VERSION_3_ID, POLICY_DEPLOYMENT_3_ID, digest('8')),

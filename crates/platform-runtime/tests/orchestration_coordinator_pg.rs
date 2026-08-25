@@ -921,7 +921,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
     let policy_payload = TypedPayload::new(
         1,
         &PublishedVersionPayload {
-            document: ResourceDocument::Policy(PolicyResourceSpec {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                 authoring_package: AuthoringPackage {
                     artifact: ArtifactRef::new(
                         id("art_0198f1c5-0787-75e1-a9e8-d95ca0f36010"),
@@ -942,6 +942,9 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
                 selection: None,
                 scheduling: Some(scheduling),
                 retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
                 mcp_protocol: None,
                 mcp_auth: None,
                 sandbox_isolation: None,
@@ -949,7 +952,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
                 sandbox_network: None,
                 sandbox_artifact_io: None,
                 sandbox_secret_resolution: None,
-            }),
+            })),
             validation: ValidationSummary {
                 validator_digest: digest('6'),
                 validated_draft_digest: digest('7'),
@@ -1768,7 +1771,7 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
     let policy_payload = TypedPayload::new(
         1,
         &PublishedVersionPayload {
-            document: ResourceDocument::Policy(PolicyResourceSpec {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                 authoring_package: AuthoringPackage {
                     artifact: qualification_evidence.clone(),
                     manifest_digest: digest('4'),
@@ -1781,6 +1784,9 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
                 selection: None,
                 scheduling: Some(scheduling),
                 retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
                 mcp_protocol: None,
                 mcp_auth: None,
                 sandbox_isolation: None,
@@ -1788,7 +1794,7 @@ async fn seed_capacity_tenant(repository: &PgRepository) -> (ResourceId, RunBind
                 sandbox_network: None,
                 sandbox_artifact_io: None,
                 sandbox_secret_resolution: None,
-            }),
+            })),
             validation: ValidationSummary {
                 validator_digest: digest('6'),
                 validated_draft_digest: digest('7'),

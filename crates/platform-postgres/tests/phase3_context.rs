@@ -612,7 +612,7 @@ async fn seed_policy_versions(
             i64::try_from(index + 1).unwrap(),
             principal_id,
             PublishedVersionPayload {
-                document: ResourceDocument::Policy(PolicyResourceSpec {
+                document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                     authoring_package: authoring(0x90 + u16::try_from(index).unwrap()),
                     contract_digest: named_digest(&format!("policy-contract-{index}")),
                     dependency_versions: vec![],
@@ -622,6 +622,9 @@ async fn seed_policy_versions(
                     selection: None,
                     scheduling: None,
                     retention: None,
+                    model_safety: None,
+                    model_budget: None,
+                    model_public_projection: None,
                     mcp_protocol: None,
                     mcp_auth: None,
                     sandbox_isolation: None,
@@ -629,7 +632,7 @@ async fn seed_policy_versions(
                     sandbox_network: None,
                     sandbox_artifact_io: None,
                     sandbox_secret_resolution: None,
-                }),
+                })),
                 validation: validation(),
             },
         )

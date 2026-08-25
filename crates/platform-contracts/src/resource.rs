@@ -21,6 +21,7 @@ use crate::{
     StructuredOutputContract,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeSet, error::Error, fmt, str::FromStr};
 
 pub const MAX_RESOURCE_DEPENDENCIES: usize = 512;
@@ -959,6 +960,138 @@ pub struct ArtifactRetentionPolicy {
     pub delete_requires_approval: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSafetyPolicyDocument {
+    pub schema_version: u32,
+    pub contract_id: String,
+    pub platform_instruction: String,
+    pub instruction_content_digest: Sha256Digest,
+    pub instruction_byte_budget: u32,
+    pub instruction_token_budget: u32,
+    pub pre_dispatch_rules_digest: Sha256Digest,
+    pub post_response_rules_digest: Sha256Digest,
+}
+
+impl ModelSafetyPolicyDocument {
+    pub fn validate(&self) -> Result<(), ResourceContractError> {
+        let bytes = u32::try_from(self.platform_instruction.len())
+            .map_err(|_| ResourceContractError::UnboundedValue)?;
+        let tokens = bytes
+            .checked_add(3)
+            .ok_or(ResourceContractError::UnboundedValue)?
+            / 4;
+        if self.schema_version != 1
+            || !is_code(&self.contract_id)
+            || self.platform_instruction.is_empty()
+            || self.platform_instruction.contains('\0')
+            || self.instruction_byte_budget == 0
+            || self.instruction_token_budget == 0
+            || bytes > self.instruction_byte_budget
+            || tokens.max(1) > self.instruction_token_budget
+            || self.instruction_byte_budget > 65_536
+            || self.instruction_token_budget > 16_384
+            || sha256_bytes(self.platform_instruction.as_bytes())?
+                != self.instruction_content_digest
+        {
+            return Err(ResourceContractError::InvalidPolicyDocument);
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, ResourceContractError> {
+        self.validate()?;
+        digest_policy_document(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelBudgetPolicyDocument {
+    pub schema_version: u32,
+    pub maximum_attempts_per_turn: u32,
+    pub maximum_input_tokens_per_turn: u64,
+    pub maximum_output_tokens_per_turn: u32,
+    pub maximum_total_tokens_per_turn: u64,
+    pub cost_ceiling_microunits_per_turn: u64,
+}
+
+impl ModelBudgetPolicyDocument {
+    pub fn validate(&self) -> Result<(), ResourceContractError> {
+        if self.schema_version != 1
+            || self.maximum_attempts_per_turn == 0
+            || self.maximum_attempts_per_turn > 32
+            || self.maximum_input_tokens_per_turn == 0
+            || self.maximum_output_tokens_per_turn == 0
+            || self.maximum_total_tokens_per_turn == 0
+            || self.cost_ceiling_microunits_per_turn == 0
+            || self
+                .maximum_input_tokens_per_turn
+                .checked_add(u64::from(self.maximum_output_tokens_per_turn))
+                .is_none_or(|total| total > self.maximum_total_tokens_per_turn)
+        {
+            return Err(ResourceContractError::InvalidPolicyDocument);
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, ResourceContractError> {
+        self.validate()?;
+        digest_policy_document(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelPublicProjectionPolicyDocument {
+    pub schema_version: u32,
+    pub reject_prompt_overflow: bool,
+    pub retain_source_map: bool,
+    pub retain_sensitive_prompt_body: bool,
+}
+
+impl ModelPublicProjectionPolicyDocument {
+    pub fn validate(&self) -> Result<(), ResourceContractError> {
+        if self.schema_version != 1
+            || !self.reject_prompt_overflow
+            || !self.retain_source_map
+            || self.retain_sensitive_prompt_body
+        {
+            return Err(ResourceContractError::InvalidPolicyDocument);
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<Sha256Digest, ResourceContractError> {
+        self.validate()?;
+        digest_policy_document(self)
+    }
+}
+
+fn digest_policy_document<T: Serialize>(
+    document: &T,
+) -> Result<Sha256Digest, ResourceContractError> {
+    canonical_digest(
+        &serde_json::to_value(document).map_err(|_| ResourceContractError::Canonicalization)?,
+    )
+    .map_err(|_| ResourceContractError::Canonicalization)?
+    .parse()
+    .map_err(|_| ResourceContractError::Canonicalization)
+}
+
+fn sha256_bytes(bytes: &[u8]) -> Result<Sha256Digest, ResourceContractError> {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let mut encoded = String::from("sha256:");
+    for byte in hasher.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").map_err(|_| ResourceContractError::Canonicalization)?;
+    }
+    encoded
+        .parse()
+        .map_err(|_| ResourceContractError::Canonicalization)
+}
+
 impl ArtifactRetentionPolicy {
     pub fn validate(&self) -> Result<(), ResourceContractError> {
         if self.version != 1
@@ -994,6 +1127,9 @@ pub struct PolicyResourceSpec {
     pub selection: Option<CandidateSelectionPolicyDocument>,
     pub scheduling: Option<SchedulingPolicyDocument>,
     pub retention: Option<ArtifactRetentionPolicy>,
+    pub model_safety: Option<ModelSafetyPolicyDocument>,
+    pub model_budget: Option<ModelBudgetPolicyDocument>,
+    pub model_public_projection: Option<ModelPublicProjectionPolicyDocument>,
     pub mcp_protocol: Option<McpProtocolPolicyDocument>,
     pub mcp_auth: Option<Box<McpAuthPolicyDocument>>,
     pub sandbox_isolation: Option<crate::SandboxIsolationPolicyDocument>,
@@ -1012,6 +1148,9 @@ impl PolicyResourceSpec {
             self.selection.is_some(),
             self.scheduling.is_some(),
             self.retention.is_some(),
+            self.model_safety.is_some(),
+            self.model_budget.is_some(),
+            self.model_public_projection.is_some(),
             self.mcp_protocol.is_some(),
             self.mcp_auth.is_some(),
             self.sandbox_isolation.is_some(),
@@ -1047,6 +1186,34 @@ impl PolicyResourceSpec {
                     return Err(ResourceContractError::InvalidPolicyDocument);
                 }
                 Ok(())
+            }
+            PolicyKind::ModelSafety if document_count == 1 && self.model_safety.is_some() => {
+                validate_model_policy(
+                    self.model_safety.as_ref().expect("guarded above"),
+                    &self.rules_digest,
+                    ModelSafetyPolicyDocument::validate,
+                    ModelSafetyPolicyDocument::canonical_digest,
+                )
+            }
+            PolicyKind::Budget if document_count == 1 && self.model_budget.is_some() => {
+                validate_model_policy(
+                    self.model_budget.as_ref().expect("guarded above"),
+                    &self.rules_digest,
+                    ModelBudgetPolicyDocument::validate,
+                    ModelBudgetPolicyDocument::canonical_digest,
+                )
+            }
+            PolicyKind::PublicProjection
+                if document_count == 1 && self.model_public_projection.is_some() =>
+            {
+                validate_model_policy(
+                    self.model_public_projection
+                        .as_ref()
+                        .expect("guarded above"),
+                    &self.rules_digest,
+                    ModelPublicProjectionPolicyDocument::validate,
+                    ModelPublicProjectionPolicyDocument::canonical_digest,
+                )
             }
             PolicyKind::Protocol if document_count == 1 && self.mcp_protocol.is_some() => {
                 let document = self.mcp_protocol.as_ref().expect("guarded above");
@@ -1114,6 +1281,9 @@ impl PolicyResourceSpec {
             PolicyKind::Scheduling
             | PolicyKind::Selection
             | PolicyKind::Retention
+            | PolicyKind::ModelSafety
+            | PolicyKind::Budget
+            | PolicyKind::PublicProjection
             | PolicyKind::McpAuth
             | PolicyKind::Isolation
             | PolicyKind::Resource
@@ -1123,6 +1293,19 @@ impl PolicyResourceSpec {
             _ => Err(ResourceContractError::InvalidPolicyDocument),
         }
     }
+}
+
+fn validate_model_policy<T>(
+    document: &T,
+    expected_digest: &Sha256Digest,
+    validate: fn(&T) -> Result<(), ResourceContractError>,
+    digest: fn(&T) -> Result<Sha256Digest, ResourceContractError>,
+) -> Result<(), ResourceContractError> {
+    validate(document)?;
+    if digest(document)? != *expected_digest {
+        return Err(ResourceContractError::InvalidPolicyDocument);
+    }
+    Ok(())
 }
 
 trait SandboxPolicyDocument {
@@ -1347,7 +1530,7 @@ pub enum ResourceDocument {
     McpServer(McpServerResourceSpec),
     ModelProvider(ModelProviderResourceSpec),
     ModelProfile(Box<ModelProfileResourceSpec>),
-    Policy(PolicyResourceSpec),
+    Policy(Box<PolicyResourceSpec>),
     SandboxRuntime(SandboxRuntimeResourceSpec),
     SandboxPackage(SandboxPackageResourceSpec),
     SandboxProfile(SandboxProfileResourceSpec),
@@ -2410,6 +2593,7 @@ pub struct ModelDeploymentClosure {
     pub profile_revision: ExactVersionRef,
     pub provider_deployment: ExactDeploymentRef,
     pub data_policy: ExactVersionRef,
+    pub safety_policy: ExactVersionRef,
     pub budget_policy: ExactVersionRef,
     pub public_projection_policy: ExactVersionRef,
     pub generation_defaults: ClosedJsonValue,
@@ -2426,6 +2610,7 @@ impl ModelDeploymentClosure {
         }
         validate_distinct_policy_roles(&[
             &self.data_policy,
+            &self.safety_policy,
             &self.budget_policy,
             &self.public_projection_policy,
         ])?;
@@ -3628,6 +3813,9 @@ mod tests {
             selection: None,
             scheduling: None,
             retention: Some(retention.clone()),
+            model_safety: None,
+            model_budget: None,
+            model_public_projection: None,
             mcp_protocol: None,
             mcp_auth: None,
             sandbox_isolation: None,
@@ -3678,6 +3866,91 @@ mod tests {
     }
 
     #[test]
+    fn model_policies_are_nominal_digest_bound_and_fail_closed() {
+        let instruction = "Follow platform safety and authorization contracts.".to_owned();
+        let safety = ModelSafetyPolicyDocument {
+            schema_version: 1,
+            contract_id: "platform.model_safety.v1".to_owned(),
+            instruction_content_digest: sha256_bytes(instruction.as_bytes()).unwrap(),
+            instruction_byte_budget: 1_024,
+            instruction_token_budget: 256,
+            platform_instruction: instruction,
+            pre_dispatch_rules_digest: digest('1'),
+            post_response_rules_digest: digest('2'),
+        };
+        let budget = ModelBudgetPolicyDocument {
+            schema_version: 1,
+            maximum_attempts_per_turn: 3,
+            maximum_input_tokens_per_turn: 8_192,
+            maximum_output_tokens_per_turn: 1_024,
+            maximum_total_tokens_per_turn: 9_216,
+            cost_ceiling_microunits_per_turn: 500_000,
+        };
+        let projection = ModelPublicProjectionPolicyDocument {
+            schema_version: 1,
+            reject_prompt_overflow: true,
+            retain_source_map: true,
+            retain_sensitive_prompt_body: false,
+        };
+        let mut spec = PolicyResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: qualification_artifact(),
+                manifest_digest: digest('3'),
+            },
+            contract_digest: digest('4'),
+            dependency_versions: vec![],
+            policy_versions: vec![],
+            policy_kind: PolicyKind::ModelSafety,
+            rules_digest: safety.canonical_digest().unwrap(),
+            selection: None,
+            scheduling: None,
+            retention: None,
+            model_safety: Some(safety.clone()),
+            model_budget: None,
+            model_public_projection: None,
+            mcp_protocol: None,
+            mcp_auth: None,
+            sandbox_isolation: None,
+            sandbox_resource: None,
+            sandbox_network: None,
+            sandbox_artifact_io: None,
+            sandbox_secret_resolution: None,
+        };
+        spec.validate().unwrap();
+
+        spec.policy_kind = PolicyKind::Budget;
+        spec.rules_digest = budget.canonical_digest().unwrap();
+        spec.model_safety = None;
+        spec.model_budget = Some(budget.clone());
+        spec.validate().unwrap();
+
+        spec.policy_kind = PolicyKind::PublicProjection;
+        spec.rules_digest = projection.canonical_digest().unwrap();
+        spec.model_budget = None;
+        spec.model_public_projection = Some(projection.clone());
+        spec.validate().unwrap();
+
+        let mut forged_safety = safety;
+        forged_safety.instruction_content_digest = digest('0');
+        assert_eq!(
+            forged_safety.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+        let mut permissive_projection = projection;
+        permissive_projection.reject_prompt_overflow = false;
+        assert_eq!(
+            permissive_projection.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+        let mut impossible_budget = budget;
+        impossible_budget.maximum_total_tokens_per_turn = 8_000;
+        assert_eq!(
+            impossible_budget.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+    }
+
+    #[test]
     fn shared_network_policy_allows_generic_or_sandbox_typed_documents() {
         let mut spec = PolicyResourceSpec {
             authoring_package: AuthoringPackage {
@@ -3700,6 +3973,9 @@ mod tests {
             selection: None,
             scheduling: None,
             retention: None,
+            model_safety: None,
+            model_budget: None,
+            model_public_projection: None,
             mcp_protocol: None,
             mcp_auth: None,
             sandbox_isolation: None,

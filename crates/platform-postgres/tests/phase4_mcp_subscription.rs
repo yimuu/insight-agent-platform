@@ -273,6 +273,9 @@ fn policy_document(
         selection: None,
         scheduling: None,
         retention: None,
+        model_safety: None,
+        model_budget: None,
+        model_public_projection: None,
         mcp_protocol: protocol,
         mcp_auth: auth.map(Box::new),
         sandbox_isolation: None,
@@ -294,7 +297,7 @@ fn policy_document(
         }
         _ => {}
     }
-    ResourceDocument::Policy(document)
+    ResourceDocument::Policy(Box::new(document))
 }
 
 async fn insert_resource(

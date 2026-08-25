@@ -164,7 +164,7 @@ fn policy_document(
     protocol: Option<McpProtocolPolicyDocument>,
     auth: Option<McpAuthPolicyDocument>,
 ) -> ResourceDocument {
-    ResourceDocument::Policy(PolicyResourceSpec {
+    ResourceDocument::Policy(Box::new(PolicyResourceSpec {
         authoring_package: authoring(suffix, '5'),
         contract_digest: sha('6'),
         dependency_versions: vec![],
@@ -174,6 +174,9 @@ fn policy_document(
         selection: None,
         scheduling: None,
         retention: None,
+        model_safety: None,
+        model_budget: None,
+        model_public_projection: None,
         mcp_protocol: protocol,
         mcp_auth: auth.map(Box::new),
         sandbox_isolation: None,
@@ -181,7 +184,7 @@ fn policy_document(
         sandbox_network: None,
         sandbox_artifact_io: None,
         sandbox_secret_resolution: None,
-    })
+    }))
 }
 
 struct Fixture {

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-186 |
+| 状态 | Accepted / CR-187 |
 | 日期 | 2026-08-25 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -27,6 +27,10 @@
 > 2026-08-25 implementation feedback（CR-186）：spec11/16只规定Prompt assembly顺序，却未冻结每块进入canonical Model request
 > 后的source-map wire、信任角色和预算失败语义。11→16→18复核后固定七阶段block、owner-scoped source ID、source/content digest、
 > classification、ordinal及byte/token budget；首版不隐式截断，Skill/Context/User永不获得platform role。
+
+> 2026-08-25 implementation feedback（CR-187）：production Model admission发现Model Deployment虽引用Safety/Budget/
+> PublicProjection Policy，`PolicyResourceSpec`却没有对应nominal document，导致attempt、token/cost ceiling、平台安全指令和overflow
+> 语义只能由测试provider自由填写。04→16→17/18复核后冻结三类closed Policy，并给Model Deployment增加exact Safety binding。
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
 
 > `Platform v2` 是架构代号，不是公共 API 版本。目标系统会在 clean replacement 后直接占用 `/v1` 和
@@ -125,7 +129,7 @@ Platform v2 采用以下不可逆的架构决定：
 | 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-181 | MCP Transport、OAuth、投影、Task 和 Subscription |
 | 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-181 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-185 | S3、内容寻址、上传、生命周期和内容安全 |
-| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-184 | Provider、Model Profile、ModelTurn、流式响应和预算 |
+| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-187 | Provider、Model Profile、ModelTurn、流式响应和预算 |
 | 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-185 | 管理 API、Run API、事件流和错误模型 |
 | 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-185 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 

@@ -2387,7 +2387,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         1,
         &principal_id,
         PublishedVersionPayload {
-            document: ResourceDocument::Policy(PolicyResourceSpec {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                 authoring_package: package.clone(),
                 contract_digest: digest('7'),
                 dependency_versions: vec![],
@@ -2397,6 +2397,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 selection: None,
                 scheduling: None,
                 retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
                 mcp_protocol: None,
                 mcp_auth: None,
                 sandbox_isolation: None,
@@ -2404,7 +2407,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 sandbox_network: None,
                 sandbox_artifact_io: None,
                 sandbox_secret_resolution: None,
-            }),
+            })),
             validation: validation.clone(),
         },
     )
@@ -2435,7 +2438,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         1,
         &principal_id,
         PublishedVersionPayload {
-            document: ResourceDocument::Policy(PolicyResourceSpec {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                 authoring_package: package.clone(),
                 contract_digest: digest('e'),
                 dependency_versions: vec![],
@@ -2445,6 +2448,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 selection: Some(selection_document),
                 scheduling: None,
                 retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
                 mcp_protocol: None,
                 mcp_auth: None,
                 sandbox_isolation: None,
@@ -2452,7 +2458,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 sandbox_network: None,
                 sandbox_artifact_io: None,
                 sandbox_secret_resolution: None,
-            }),
+            })),
             validation: validation.clone(),
         },
     )

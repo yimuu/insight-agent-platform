@@ -33402,7 +33402,7 @@ pub(crate) async fn load_exact_active_policy_deployment(
             "Policy Deployment resolves to the wrong PolicyKind".to_owned(),
         ));
     }
-    Ok((closure.policy_revision, policy))
+    Ok((closure.policy_revision, *policy))
 }
 
 async fn lock_active_policy_deployment_for_binding(

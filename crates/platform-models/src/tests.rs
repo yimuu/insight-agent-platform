@@ -255,6 +255,7 @@ fn fixture() -> Fixture {
         profile_revision: profile_revision.clone(),
         provider_deployment: provider_deployment.clone(),
         data_policy: policy(36, 'a'),
+        safety_policy: policy(39, 'd'),
         budget_policy: policy(37, 'b'),
         public_projection_policy: policy(38, 'c'),
         generation_defaults: ClosedJsonValue::build(

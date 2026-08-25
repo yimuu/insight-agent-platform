@@ -213,6 +213,9 @@ fn sandbox_policy_resource(
         selection: None,
         scheduling: None,
         retention: None,
+        model_safety: None,
+        model_budget: None,
+        model_public_projection: None,
         mcp_protocol: None,
         mcp_auth: None,
         sandbox_isolation: None,
@@ -245,7 +248,7 @@ fn sandbox_policy_resource(
         }
         _ => unreachable!("fixture only publishes Sandbox execution policies"),
     }
-    ResourceDocument::Policy(spec)
+    ResourceDocument::Policy(Box::new(spec))
 }
 
 fn validation() -> ValidationSummary {
@@ -736,7 +739,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
                 id(ResourceKind::Policy, 65),
                 RegistryResourceKind::Policy,
                 exact(ResourceKind::PolicyRevision, 66, '6'),
-                ResourceDocument::Policy(PolicyResourceSpec {
+                ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                     authoring_package: authoring(64, '5'),
                     contract_digest: sha('6'),
                     dependency_versions: vec![],
@@ -762,6 +765,9 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
                         retain_provenance_sources: true,
                         delete_requires_approval: false,
                     }),
+                    model_safety: None,
+                    model_budget: None,
+                    model_public_projection: None,
                     mcp_protocol: None,
                     mcp_auth: None,
                     sandbox_isolation: None,
@@ -769,7 +775,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
                     sandbox_network: None,
                     sandbox_artifact_io: None,
                     sandbox_secret_resolution: None,
-                }),
+                })),
             ),
         ],
     }

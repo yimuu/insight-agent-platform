@@ -1,10 +1,24 @@
-# Platform v2 00～18 Cross-review（CR-186）
+# Platform v2 00～18 Cross-review（CR-187）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-186 Accepted |
+| 状态 | Closed / CR-187 Accepted |
 | 日期 | 2026-08-25 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-186 Model request assembly implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-187 Model Policy authority implementation feedback |
+
+### CR-187 Model Policy authority impact review
+
+production Model admission接线确认16要求冻结safety/budget/truncation，但shared `PolicyResourceSpec`没有这些PolicyKind的typed document，
+且Model Deployment没有Safety Revision角色；测试provider因而能自由填写attempt/cost/safety。CR-187在04冻结ModelSafety、ModelBudget和
+ModelPublicProjection三个nominal document，在16把exact Safety Revision加入Model Deployment closure，并规定effective ceiling取全部冻结
+上限的最小值。Policy `rules_digest`仍是唯一canonical digest authority。
+
+00～03、05～15的aggregate、Plan v4、Run/Job/Invocation、数据库表与执行平面不变；17的generic Resource/Deployment payload schema新增
+closed字段但不新增route或caller runtime override；18增加wrong kind/missing document/digest、zero/overflow、宽松projection及恢复漂移L1～L3。
+无新表、aggregate、Job、WorkClass、queue或deployment role。Acceptance 30：ModelTurn admission的安全指令、attempt/token/cost和overflow
+全部可从exact Run/Deployment/Policy closure确定，任何缺失或漂移fail closed。
+
+00～18逐份复核无新增P0/P1，恢复Accepted / CR-187并继续implementation-plan。
 
 ### CR-186 canonical Model request assembly impact review
 
@@ -559,7 +573,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-186合同范围没有未关闭P0/P1。Acceptance 29与既有13～28形成单一闭包，00～18状态为Accepted。
+CR-187合同范围没有未关闭P0/P1。Acceptance 30与既有13～29形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

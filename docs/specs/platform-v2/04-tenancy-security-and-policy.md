@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-183 |
+| 状态 | Accepted / CR-187 |
 | 日期 | 2026-08-20 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
@@ -128,6 +128,39 @@ TenantConfig和Run snapshot同时冻结Deployment与其中Revision，禁止跳�
 
 每个Policy payload是closed、versioned、canonical、有size limit的nominal type。发布时执行syntax/semantic/cross-policy/hard-limit
 验证。Run/Invocation/Job冻结exact Policy Deployment及其Policy ResourceVersion/digest，不在历史工作上自动换成current head。
+
+CR-187冻结Model admission首版必须消费的三个nominal document：
+
+```rust
+struct ModelSafetyPolicyDocument {
+    schema_version: 1,
+    contract_id: BoundedCode,
+    platform_instruction: BoundedUtf8,
+    instruction_content_digest: Digest,
+    instruction_byte_budget: u32,
+    instruction_token_budget: u32,
+    pre_dispatch_rules_digest: Digest,
+    post_response_rules_digest: Digest,
+}
+struct ModelBudgetPolicyDocument {
+    schema_version: 1,
+    maximum_attempts_per_turn: u32,
+    maximum_input_tokens_per_turn: u64,
+    maximum_output_tokens_per_turn: u32,
+    maximum_total_tokens_per_turn: u64,
+    cost_ceiling_microunits_per_turn: u64,
+}
+struct ModelPublicProjectionPolicyDocument {
+    schema_version: 1,
+    reject_prompt_overflow: true,
+    retain_source_map: true,
+    retain_sensitive_prompt_body: false,
+}
+```
+
+Safety instruction最多65536 UTF-8 bytes/16384 estimated tokens且raw SHA-256必须匹配；Budget各值非零、attempt不超过32且
+input+output不超过total；PublicProjection首版只接受上述fail-closed组合。三者都由外层`rules_digest == canonical(document)`绑定，
+unknown field/version、宽松overflow、敏感正文持久化或digest漂移在publication拒绝。
 
 current emergency gate可以阻止尚未开始的外部leaf、撤销grant/Secret/network或触发cancel，但不修改冻结snapshot、
 不改写已提交结果。决策保存policy ID/version/digest、input evidence digest、decision/reason和time，不保存Secret/正文。

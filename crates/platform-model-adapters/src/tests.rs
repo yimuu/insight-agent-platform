@@ -217,6 +217,7 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
         profile_revision: profile_revision.clone(),
         provider_deployment: provider_deployment.clone(),
         data_policy: policy(18, '8'),
+        safety_policy: policy(21, 'b'),
         budget_policy: policy(19, '9'),
         public_projection_policy: policy(20, 'a'),
         generation_defaults: ClosedJsonValue::build(

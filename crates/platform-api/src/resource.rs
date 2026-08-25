@@ -1770,7 +1770,7 @@ mod tests {
         .unwrap();
         CreateResourceRequestV1 {
             display_name: "Runtime protocol policy".to_owned(),
-            document: ResourceDocument::Policy(PolicyResourceSpec {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                 authoring_package: AuthoringPackage {
                     artifact,
                     manifest_digest: fixed_digest('c'),
@@ -1783,6 +1783,9 @@ mod tests {
                 selection: None,
                 scheduling: None,
                 retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
                 mcp_protocol: None,
                 mcp_auth: None,
                 sandbox_isolation: None,
@@ -1790,7 +1793,7 @@ mod tests {
                 sandbox_network: None,
                 sandbox_artifact_io: None,
                 sandbox_secret_resolution: None,
-            }),
+            })),
         }
     }
 

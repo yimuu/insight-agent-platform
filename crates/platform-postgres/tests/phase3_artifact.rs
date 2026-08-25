@@ -868,7 +868,7 @@ async fn seed_retention_root(
         retain_provenance_sources: true,
         delete_requires_approval: true,
     };
-    let document = ResourceDocument::Policy(PolicyResourceSpec {
+    let document = ResourceDocument::Policy(Box::new(PolicyResourceSpec {
         authoring_package: insight_platform_contracts::AuthoringPackage {
             artifact: artifact_ref,
             manifest_digest: digest('2'),
@@ -881,6 +881,9 @@ async fn seed_retention_root(
         selection: None,
         scheduling: None,
         retention: Some(retention),
+        model_safety: None,
+        model_budget: None,
+        model_public_projection: None,
         mcp_protocol: None,
         mcp_auth: None,
         sandbox_isolation: None,
@@ -888,7 +891,7 @@ async fn seed_retention_root(
         sandbox_network: None,
         sandbox_artifact_io: None,
         sandbox_secret_resolution: None,
-    });
+    }));
     let resource_payload = TypedPayload::new(
         1,
         &ResourceDraftPayload {
@@ -1049,7 +1052,7 @@ async fn seed_artifact_io_policy(
         archive_expansion_disabled: true,
     };
     let rules_digest = artifact_io.canonical_digest().unwrap();
-    let document = ResourceDocument::Policy(PolicyResourceSpec {
+    let document = ResourceDocument::Policy(Box::new(PolicyResourceSpec {
         authoring_package: insight_platform_contracts::AuthoringPackage {
             artifact: artifact_ref,
             manifest_digest: digest('a'),
@@ -1062,6 +1065,9 @@ async fn seed_artifact_io_policy(
         selection: None,
         scheduling: None,
         retention: None,
+        model_safety: None,
+        model_budget: None,
+        model_public_projection: None,
         mcp_protocol: None,
         mcp_auth: None,
         sandbox_isolation: None,
@@ -1069,7 +1075,7 @@ async fn seed_artifact_io_policy(
         sandbox_network: None,
         sandbox_artifact_io: Some(artifact_io),
         sandbox_secret_resolution: None,
-    });
+    }));
     let resource_payload = TypedPayload::new(
         1,
         &ResourceDraftPayload {

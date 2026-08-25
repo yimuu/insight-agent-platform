@@ -10122,7 +10122,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     let policy_payload = TypedPayload::new(
         1,
         &PublishedVersionPayload {
-            document: ResourceDocument::Policy(PolicyResourceSpec {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                 authoring_package: AuthoringPackage {
                     artifact: ArtifactRef::new(
                         id(POLICY_EVIDENCE_ARTIFACT_ID),
@@ -10143,6 +10143,9 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 selection: None,
                 scheduling: Some(scheduling),
                 retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
                 mcp_protocol: None,
                 mcp_auth: None,
                 sandbox_isolation: None,
@@ -10150,7 +10153,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 sandbox_network: None,
                 sandbox_artifact_io: None,
                 sandbox_secret_resolution: None,
-            }),
+            })),
             validation: ValidationSummary {
                 validator_digest: digest('1'),
                 validated_draft_digest: digest('0'),
@@ -10169,7 +10172,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     let selection_policy_payload = TypedPayload::new(
         1,
         &PublishedVersionPayload {
-            document: ResourceDocument::Policy(PolicyResourceSpec {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                 authoring_package: AuthoringPackage {
                     artifact: ArtifactRef::new(
                         id(POLICY_EVIDENCE_ARTIFACT_ID),
@@ -10193,6 +10196,9 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 selection: Some(selection_document.clone()),
                 scheduling: None,
                 retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
                 mcp_protocol: None,
                 mcp_auth: None,
                 sandbox_isolation: None,
@@ -10200,7 +10206,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                 sandbox_network: None,
                 sandbox_artifact_io: None,
                 sandbox_secret_resolution: None,
-            }),
+            })),
             validation: ValidationSummary {
                 validator_digest: digest('1'),
                 validated_draft_digest: digest('0'),

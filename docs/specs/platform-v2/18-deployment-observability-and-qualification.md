@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-186 |
+| 状态 | Accepted / CR-187 |
 | 日期 | 2026-08-25 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |

@@ -1,8 +1,8 @@
-# Platform v2 四阶段实现计划（CR-186）
+# Platform v2 四阶段实现计划（CR-187）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-186 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-187 contracts accepted; L3～L6 pending |
 | 日期 | 2026-08-25 |
 | 合同输入 | 00～18、cross-review CR-181/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 
@@ -26,6 +26,10 @@
 > CR-186 L1 pure assembler、Model/provider contract tests以及fresh PostgreSQL 16 ModelTurn持久化/tool continuation/first-winner
 > 回归已通过；从exact Agent/Plan/Skill/Context材料构造这些block并接入production Scheduler admission仍待后续批次，不能把本证据
 > 宣称为完整ModelLoop L3。
+
+> CR-187已关闭production Model admission的Policy来源缺口：Safety/Budget/PublicProjection均为closed nominal Policy document，
+> Model Deployment冻结exact Safety Revision；production provider必须从这些exact documents推导安全指令、attempt/token/cost与overflow，
+> 不接受测试默认值或caller自由字段。
 
 > CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer另已在fresh PostgreSQL 16 r113完成真实协调器L3链路（claim、durable park、独立safety到期唤醒、continuation claim、Return物化与Run终态）。Child/Task/Signal的独立进程kill/recovery L3、Timer kill-window、Signal认证ingress及Model/Capability/Context external leaf仍待完成。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
