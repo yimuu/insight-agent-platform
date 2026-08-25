@@ -9,23 +9,24 @@ use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, AgentDeploymentClosure,
     AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonSchema, CommandAudit,
     CommandOutcome, DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding,
-    ExactVersionRef, JsonLimits, Permission, PermissionSet, PlanNodeKind, PolicyDeploymentClosure,
-    PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot,
-    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef, WorkClass, WorkerManifest,
+    ExactVersionRef, InteractionKind, JsonLimits, Permission, PermissionSet, PlanNodeKind,
+    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
+    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, ResourceDocument, ResourceId,
+    ResourceKind, RunBindingsSnapshot, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
 };
 use insight_platform_invocations::InvocationPolicyDecisionBundle;
 use insight_platform_jobs::WakeSource;
 use insight_platform_orchestrator::{
-    AdmitRun, ExactDataPortRef, ExpressionLimits, PlanLimits, PlanNodeKey, RunInputValue,
-    RuntimeNode, RuntimePlan,
+    AdmitRun, DataPortKey, ExactDataPortRef, ExpressionLimits, HumanTaskDefinition, PlanLimits,
+    PlanNodeKey, RunInputValue, RuntimeNode, RuntimePlan,
 };
 use insight_platform_postgres::{
     repository::{
         NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal, OrchestrationSignalAuthority,
         OrchestrationWakeMutationIds, OrchestrationYield, OrchestrationYieldMutationIds,
-        PgRepository, ResolveOrchestrationSignalTarget, RunRecord, SafetyScanShard, TypedPayload,
+        PgRepository, ResolveOrchestrationSignalTarget, ResolveOrchestrationTask,
+        ResolveOrchestrationTaskMutationIds, RunRecord, SafetyScanShard, TypedPayload,
         WakeOrchestrationJob, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
     },
     verify_schema,
@@ -49,6 +50,7 @@ use insight_platform_runtime::{
     UuidCoordinatorIdentityFactory, WorkCoordinator,
 };
 use insight_platform_security::BindTenantSchedulingPolicy;
+use insight_platform_tasks::TaskState;
 use insight_platform_worker::{ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPools};
 use serde_json::json;
 use sqlx::{pool::PoolConnection, postgres::PgPoolOptions, Postgres, Row};
@@ -142,6 +144,7 @@ fn agent_schema() -> ClosedJsonSchema {
 fn fixture_plan() -> RuntimePlan {
     let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
     let signal = PlanNodeKey::new("signal".to_owned()).unwrap();
+    let task = PlanNodeKey::new("task".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 4,
@@ -161,6 +164,23 @@ fn fixture_plan() -> RuntimePlan {
                 RuntimeNode::SignalWait {
                     signal_key: "release".to_owned(),
                     payload: None,
+                    timeout_milliseconds: 60_000,
+                    resume: task.clone(),
+                },
+            ),
+            (
+                task.clone(),
+                RuntimeNode::HumanTask {
+                    definition: HumanTaskDefinition::Interaction {
+                        interaction_kind: InteractionKind::Form,
+                        eligible_principal_rule_digest: digest('6'),
+                        safe_prompt_key: "provide_input".to_owned(),
+                    },
+                    response: ExactDataPortRef::NodeOutput {
+                        producer_node_id: task,
+                        port_id: DataPortKey::new("response".to_owned()).unwrap(),
+                        schema_digest: agent_schema().canonical_digest,
+                    },
                     timeout_milliseconds: 60_000,
                     resume: finish.clone(),
                 },
@@ -1061,13 +1081,103 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
             .unwrap();
         signal_transaction.commit().await.unwrap();
 
+        let mut task_child = spawn_wait_worker();
+        let task_park_deadline = Instant::now() + Duration::from_secs(10);
+        let (task_id, task_generation, task_version) = loop {
+            if task_child.try_wait().unwrap().is_some() {
+                let failed = task_child.wait_with_output().unwrap();
+                panic!(
+                    "Signal recovery worker exited before durable HumanTask park: stdout={} stderr={}",
+                    String::from_utf8_lossy(&failed.stdout),
+                    String::from_utf8_lossy(&failed.stderr),
+                );
+            }
+            let task: Option<(String, i64, i64)> = sqlx::query_as(
+                r#"
+                SELECT task_id, generation, version
+                FROM insight_platform.tasks
+                WHERE tenant_id = $1 AND run_id = $2
+                  AND task_kind = 'interaction_form' AND state = 'pending'
+                "#,
+            )
+            .bind(TENANT_ID)
+            .bind(RUN_ID)
+            .fetch_optional(bulkheads.critical_control_pool())
+            .await
+            .unwrap();
+            if let Some(task) = task {
+                break task;
+            }
+            if Instant::now() >= task_park_deadline {
+                task_child.kill().unwrap();
+                let failed = task_child.wait_with_output().unwrap();
+                panic!(
+                    "Signal recovery worker did not durably park the HumanTask: stdout={} stderr={}",
+                    String::from_utf8_lossy(&failed.stdout),
+                    String::from_utf8_lossy(&failed.stderr),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        task_child.kill().unwrap();
+        let task_crashed = task_child.wait_with_output().unwrap();
+        assert!(!task_crashed.status.success());
+
+        let task_input = json!({"question": "approved"});
+        let task_idempotency_digest = fresh_digest();
+        let task_request_digest = fresh_digest();
+        let task_response = RunInputValue {
+            value_id: new_id(ResourceKind::RunValue),
+            classification: DataClassification::Internal,
+            schema_digest: agent_schema().canonical_digest,
+            content_digest: canonical_digest(&task_input).unwrap().parse().unwrap(),
+            value: ValueRef::Inline { value: task_input },
+        };
+        let mut task_transaction = bulkheads
+            .critical_control_repository()
+            .begin_scheduler_transaction()
+            .await
+            .unwrap();
+        task_transaction
+            .resolve_orchestration_task(ResolveOrchestrationTask {
+                audit: CommandAudit {
+                    tenant_id: id(TENANT_ID),
+                    principal_id: id(PRINCIPAL_ID),
+                    principal_kind: PrincipalKind::AgentRunner,
+                    receipt_id: new_id(ResourceKind::Receipt),
+                    event_id: new_id(ResourceKind::Event),
+                    outbox_id: new_id(ResourceKind::OutboxEvent),
+                    idempotency_key_digest: task_idempotency_digest,
+                    request_digest: task_request_digest.clone(),
+                    receipt_expires_at: Utc::now() + ChronoDuration::hours(1),
+                },
+                task_id: id(&task_id),
+                expected_generation: u64::try_from(task_generation).unwrap(),
+                expected_task_version: u64::try_from(task_version).unwrap(),
+                target: TaskState::Responded,
+                response: Some(task_response),
+                resume_job_id: new_id(ResourceKind::Job),
+                resume_request_digest: task_request_digest,
+                mutations: ResolveOrchestrationTaskMutationIds {
+                    run_event_id: new_id(ResourceKind::Event),
+                    run_outbox_id: new_id(ResourceKind::OutboxEvent),
+                    node_event_id: new_id(ResourceKind::Event),
+                    node_outbox_id: new_id(ResourceKind::OutboxEvent),
+                    job_event_id: new_id(ResourceKind::Event),
+                    job_outbox_id: new_id(ResourceKind::OutboxEvent),
+                },
+            })
+            .await
+            .unwrap();
+        task_transaction.commit().await.unwrap();
+
         let final_child = spawn_wait_worker();
         let recovered = tokio::time::timeout(
             Duration::from_secs(20),
             tokio::task::spawn_blocking(move || final_child.wait_with_output()),
         )
         .await
-        .expect("final Signal recovery worker process did not exit")
+        .expect("final HumanTask recovery worker process did not exit")
         .unwrap()
         .unwrap();
         assert!(
@@ -1121,6 +1231,16 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         .await
         .unwrap();
         assert_eq!(finish_count, 1);
+        let task_terminal = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT state, response_value_id FROM insight_platform.tasks WHERE tenant_id = $1 AND task_id = $2",
+        )
+        .bind(TENANT_ID)
+        .bind(&task_id)
+        .fetch_one(bulkheads.critical_control_pool())
+        .await
+        .unwrap();
+        assert_eq!(task_terminal.0, "responded");
+        assert!(task_terminal.1.is_some());
         bulkheads.close().await;
     });
 }
@@ -1153,6 +1273,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
             payload: TenantPrincipalPayload {
                 permissions: PermissionSet::new(vec![
                     Permission::AgentRun,
+                    Permission::InteractionRespond,
                     Permission::RuntimeControl,
                     Permission::TenantManage,
                 ])
@@ -1458,6 +1579,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
             PrincipalKind::AgentRunner,
             PermissionSet::new(vec![
                 Permission::AgentRun,
+                Permission::InteractionRespond,
                 Permission::RuntimeControl,
                 Permission::TenantManage,
             ])
