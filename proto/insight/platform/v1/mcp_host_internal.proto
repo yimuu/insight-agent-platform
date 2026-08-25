@@ -15,3 +15,8 @@ service McpHostExecutionService {
   rpc Execute(ClosedMcpHostEnvelope) returns (ClosedMcpHostEnvelope);
   rpc CancelRemoteTask(ClosedMcpHostEnvelope) returns (ClosedMcpHostEnvelope);
 }
+
+// Separate audience and nominal contract for credential-free Context subscription refreshes.
+service McpResourceRefreshService {
+  rpc RefreshResources(ClosedMcpHostEnvelope) returns (ClosedMcpHostEnvelope);
+}

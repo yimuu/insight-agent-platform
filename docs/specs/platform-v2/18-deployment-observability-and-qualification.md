@@ -399,6 +399,9 @@ r273接入subscription Context Worker driver，domain/unit evidence覆盖immutab
 fresh PostgreSQL 16证明调用跨heartbeat后旧version commit零写入、原Host evidence仍由latest fence成功提交。由于尚无Host Resource RPC、
 production process composition与kill/restart fixture，该证据只关闭handler与CR-193 L1/L2门禁，不推进L3/L4资格状态。
 
+r274新增Resource Refresh protobuf/client/server L1，并以真实mTLS证明Host的Context Worker audience与Capability/Model身份互斥、错误schema closed；
+尚未把该service加入production binary，也未到达Egress/remote endpoint，不能计作L3外部I/O或kill-window证据。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

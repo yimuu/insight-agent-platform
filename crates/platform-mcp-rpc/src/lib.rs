@@ -6,6 +6,10 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use insight_platform_context::{
+    ContextSubscriptionExecutionError, ContextSubscriptionRefreshAttempt,
+    ContextSubscriptionRefreshBackend, ContextSubscriptionRefreshResponse,
+};
 use insight_platform_contracts::{
     checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
 };
@@ -27,14 +31,22 @@ use proto::{
     mcp_host_execution_service_client::McpHostExecutionServiceClient,
     mcp_host_execution_service_server::McpHostExecutionService, ClosedMcpHostEnvelope,
 };
+use proto::{
+    mcp_resource_refresh_service_client::McpResourceRefreshServiceClient,
+    mcp_resource_refresh_service_server::McpResourceRefreshService,
+};
 
 pub const MCP_HOST_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
 pub const CAPABILITY_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/capability-worker";
+pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/context-worker";
 const EXECUTE_OPERATION: &str = "mcp_host.execute.v1";
 const EXECUTE_OUTCOME: &str = "mcp_host.execute_outcome.v1";
 const CANCEL_OPERATION: &str = "mcp_host.cancel_remote_task.v1";
 const CANCEL_OUTCOME: &str = "mcp_host.cancel_remote_task_outcome.v1";
+const REFRESH_RESOURCES_OPERATION: &str = "mcp_host.refresh_resources.v1";
+const REFRESH_RESOURCES_OUTCOME: &str = "mcp_host.refresh_resources_outcome.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McpHostInternalRpcLimits {
@@ -99,6 +111,67 @@ struct CancelWire {
     contract: McpHostExecutionContract,
     request: McpOperationRequest,
     deadline: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefreshResourcesWire {
+    schema_version: u32,
+    attempt: ContextSubscriptionRefreshAttempt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "status",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum RefreshResourcesWireOutcome {
+    Succeeded(ContextSubscriptionRefreshResponse),
+    Failed(ContextSubscriptionExecutionFailureCode),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ContextSubscriptionExecutionFailureCode {
+    InvalidAttempt,
+    InvalidEvidence,
+    InvalidResponse,
+    Rejected,
+    Unavailable,
+    CompletionUncertain,
+    Canonicalization,
+}
+
+impl From<ContextSubscriptionExecutionError> for ContextSubscriptionExecutionFailureCode {
+    fn from(value: ContextSubscriptionExecutionError) -> Self {
+        match value {
+            ContextSubscriptionExecutionError::InvalidAttempt => Self::InvalidAttempt,
+            ContextSubscriptionExecutionError::InvalidEvidence => Self::InvalidEvidence,
+            ContextSubscriptionExecutionError::InvalidResponse => Self::InvalidResponse,
+            ContextSubscriptionExecutionError::Rejected => Self::Rejected,
+            ContextSubscriptionExecutionError::Unavailable => Self::Unavailable,
+            ContextSubscriptionExecutionError::CompletionUncertain => Self::CompletionUncertain,
+            ContextSubscriptionExecutionError::Canonicalization => Self::Canonicalization,
+        }
+    }
+}
+
+impl From<ContextSubscriptionExecutionFailureCode> for ContextSubscriptionExecutionError {
+    fn from(value: ContextSubscriptionExecutionFailureCode) -> Self {
+        match value {
+            ContextSubscriptionExecutionFailureCode::InvalidAttempt => Self::InvalidAttempt,
+            ContextSubscriptionExecutionFailureCode::InvalidEvidence => Self::InvalidEvidence,
+            ContextSubscriptionExecutionFailureCode::InvalidResponse => Self::InvalidResponse,
+            ContextSubscriptionExecutionFailureCode::Rejected => Self::Rejected,
+            ContextSubscriptionExecutionFailureCode::Unavailable => Self::Unavailable,
+            ContextSubscriptionExecutionFailureCode::CompletionUncertain => {
+                Self::CompletionUncertain
+            }
+            ContextSubscriptionExecutionFailureCode::Canonicalization => Self::Canonicalization,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +332,108 @@ impl McpHostClient for McpHostGrpcClient {
     }
 }
 
+#[derive(Clone)]
+pub struct McpResourceRefreshGrpcClient {
+    client: McpResourceRefreshServiceClient<tonic::transport::Channel>,
+    limits: McpHostInternalRpcLimits,
+}
+
+impl McpResourceRefreshGrpcClient {
+    pub fn new(channel: tonic::transport::Channel, limits: McpHostInternalRpcLimits) -> Self {
+        let maximum = limits.maximum_message_bytes();
+        Self {
+            client: McpResourceRefreshServiceClient::new(channel)
+                .max_encoding_message_size(maximum)
+                .max_decoding_message_size(maximum),
+            limits,
+        }
+    }
+}
+
+#[async_trait]
+impl ContextSubscriptionRefreshBackend for McpResourceRefreshGrpcClient {
+    async fn refresh_subscription_resources(
+        &self,
+        attempt: ContextSubscriptionRefreshAttempt,
+    ) -> Result<ContextSubscriptionRefreshResponse, ContextSubscriptionExecutionError> {
+        attempt.validate_at(Utc::now())?;
+        let envelope = encode_envelope(
+            REFRESH_RESOURCES_OPERATION,
+            &RefreshResourcesWire {
+                schema_version: 1,
+                attempt: attempt.clone(),
+            },
+            self.limits,
+        )
+        .map_err(|_| ContextSubscriptionExecutionError::Canonicalization)?;
+        let mut client = self.client.clone();
+        let response = client
+            .refresh_resources(Request::new(envelope))
+            .await
+            .map_err(|_| ContextSubscriptionExecutionError::CompletionUncertain)?
+            .into_inner();
+        match decode_envelope::<RefreshResourcesWireOutcome>(
+            response,
+            REFRESH_RESOURCES_OUTCOME,
+            self.limits,
+        )
+        .map_err(|_| ContextSubscriptionExecutionError::InvalidResponse)?
+        {
+            RefreshResourcesWireOutcome::Succeeded(response) => {
+                response.validate_for(&attempt, Utc::now())?;
+                Ok(response)
+            }
+            RefreshResourcesWireOutcome::Failed(failure) => Err(failure.into()),
+        }
+    }
+}
+
+pub struct McpResourceRefreshGrpcService<B> {
+    backend: Arc<B>,
+    limits: McpHostInternalRpcLimits,
+}
+
+impl<B> McpResourceRefreshGrpcService<B> {
+    pub fn new(backend: Arc<B>, limits: McpHostInternalRpcLimits) -> Self {
+        Self { backend, limits }
+    }
+}
+
+#[tonic::async_trait]
+impl<B> McpResourceRefreshService for McpResourceRefreshGrpcService<B>
+where
+    B: ContextSubscriptionRefreshBackend + 'static,
+{
+    async fn refresh_resources(
+        &self,
+        request: Request<ClosedMcpHostEnvelope>,
+    ) -> Result<Response<ClosedMcpHostEnvelope>, Status> {
+        let wire: RefreshResourcesWire = decode_envelope(
+            request.into_inner(),
+            REFRESH_RESOURCES_OPERATION,
+            self.limits,
+        )?;
+        if wire.schema_version != 1 || wire.attempt.validate_at(Utc::now()).is_err() {
+            return Err(Status::invalid_argument(
+                "invalid MCP Resource Refresh request",
+            ));
+        }
+        let outcome = match self
+            .backend
+            .refresh_subscription_resources(wire.attempt)
+            .await
+        {
+            Ok(response) => RefreshResourcesWireOutcome::Succeeded(response),
+            Err(failure) => RefreshResourcesWireOutcome::Failed(failure.into()),
+        };
+        Ok(Response::new(encode_envelope(
+            REFRESH_RESOURCES_OUTCOME,
+            &outcome,
+            self.limits,
+        )?))
+    }
+}
+
 pub struct McpHostGrpcService<C> {
     host: Arc<C>,
     limits: McpHostInternalRpcLimits,
@@ -333,6 +508,23 @@ impl tonic::service::Interceptor for CapabilityWorkerWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), CAPABILITY_WORKER_WORKLOAD_IDENTITY)?;
+        Ok(request)
+    }
+}
+
+/// Authorizes the exact Context Worker URI SAN before decoding a Resource Refresh request.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ContextWorkerWorkloadIdentity;
+
+impl tonic::service::Interceptor for ContextWorkerWorkloadIdentity {
+    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        let certificates = request
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        let leaf = certificates
+            .first()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        require_exact_workload_uri(leaf.as_ref(), CONTEXT_WORKER_WORKLOAD_IDENTITY)?;
         Ok(request)
     }
 }
@@ -504,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn workload_identity_accepts_only_one_exact_capability_worker_uri() {
+    fn workload_identity_accepts_only_one_exact_authorized_uri() {
         let mut ca_parameters = CertificateParams::default();
         ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_parameters.key_usages = vec![
@@ -541,6 +733,32 @@ mod tests {
             CAPABILITY_WORKER_WORKLOAD_IDENTITY,
         )
         .is_err());
+        assert!(require_exact_workload_uri(
+            &issue(&[CONTEXT_WORKER_WORKLOAD_IDENTITY]),
+            CONTEXT_WORKER_WORKLOAD_IDENTITY,
+        )
+        .is_ok());
+        assert!(require_exact_workload_uri(
+            &issue(&[CAPABILITY_WORKER_WORKLOAD_IDENTITY]),
+            CONTEXT_WORKER_WORKLOAD_IDENTITY,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn refresh_failure_codes_are_closed_and_round_trip() {
+        for failure in [
+            ContextSubscriptionExecutionError::InvalidAttempt,
+            ContextSubscriptionExecutionError::InvalidEvidence,
+            ContextSubscriptionExecutionError::InvalidResponse,
+            ContextSubscriptionExecutionError::Rejected,
+            ContextSubscriptionExecutionError::Unavailable,
+            ContextSubscriptionExecutionError::CompletionUncertain,
+            ContextSubscriptionExecutionError::Canonicalization,
+        ] {
+            let wire = ContextSubscriptionExecutionFailureCode::from(failure);
+            assert_eq!(ContextSubscriptionExecutionError::from(wire), failure);
+        }
     }
 
     #[tokio::test]

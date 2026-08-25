@@ -46,6 +46,11 @@
 > completion-uncertain固定映射为ReadOnly dependency retry，Host拒绝或非法响应固定映射为terminal rejection。domain fixture证明heartbeat前后
 > execution identity稳定而commit digest改变；fresh PostgreSQL 16 fixture证明旧version零写入且latest fence成功。Host Resource RPC与三进程L3仍待实现。
 
+> 2026-08-26 implementation evidence：r274在现有MCP Host protobuf上增加独立`McpResourceRefreshService.RefreshResources`，沿用bounded
+> canonical JCS + digest envelope但不复用Capability Execute method。client直接实现credential-free Context backend port；server使用独立exact
+> Context Worker SPIFFE audience，在decode前拒绝Capability/Model身份，并以closed success/failure union传播全部CR-193错误。protobuf、unit、真实mTLS
+> identity fixture及strict Clippy通过。production Host adapter/server composition与Egress resource protocol仍待下一批，故L3状态不变。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

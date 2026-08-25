@@ -215,4 +215,8 @@ r273已在Context侧组合durable driver与typed `ContextSubscriptionRefreshBack
 ReadOnly retry分类和expired-lease recovery；CR-193 identity与fresh PostgreSQL heartbeat fixture通过。Host侧仍未提供该port的RPC server/
 Streamable HTTP adapter，故Context Worker→Host→Egress三进程L3保持未完成。
 
+r274交付独立closed protobuf `McpResourceRefreshService`及Rust client/server adapter：Context请求不进入Capability Execute RPC，server只接受exact
+Context Worker URI SAN，且在envelope decode前授权；request/outcome使用bounded canonical JCS、digest和closed错误码。真实mTLS fixture已通过，
+但production Host尚未组合resolver与Resource transport，因此该证据不关闭process L3。
+
 首版remote Streamable HTTP合同无未决设计问题。

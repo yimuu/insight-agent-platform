@@ -2831,6 +2831,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-mcp-host",
  "prost",
