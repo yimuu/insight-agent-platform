@@ -595,8 +595,14 @@ impl ModelOutputMaterializer for InlineMaterializer {
     ) -> Result<ModelOutputValue, ModelAdapterFailure> {
         let value = serde_json::to_value(&success.response).unwrap();
         let content_digest: Sha256Digest = canonical_digest(&value).unwrap().parse().unwrap();
+        let structured_output_value_id = success
+            .response
+            .structured_output
+            .as_ref()
+            .map(|_| id(ResourceKind::RunValue, 41));
         Ok(ModelOutputValue {
             value_id: id(ResourceKind::RunValue, 40),
+            structured_output_value_id,
             classification: execution.request.classification,
             schema_digest: execution
                 .request
@@ -1399,6 +1405,7 @@ async fn production_wire_adapters_share_tool_and_local_schema_contract() {
     ] {
         let mut fixture = wire_fixture(adapter_name);
         enable_tool(&mut fixture);
+        enable_structured_output(&mut fixture);
         let (outcome, wire) = execute_wire_fixture(fixture, events).await;
         let ModelAdapterExecutionOutcome::Succeeded(success) = outcome else {
             panic!("wire adapter did not produce a tool intent");

@@ -13125,6 +13125,21 @@ pub(crate) async fn settle_model_leaf_success_in_transaction(
         .output_value_id
         .as_ref()
         .ok_or(RepositoryError::Conflict("Model terminal output"))?;
+    let result = turn
+        .payload
+        .result
+        .as_ref()
+        .ok_or(RepositoryError::Conflict("Model terminal result"))?;
+    if result.output.value_id != *output_value_id
+        || result.finish_reason != insight_platform_models::CanonicalFinishReason::Completed
+        || result.tool_intent_count != 0
+        || output.value_kind != "model_structured_output"
+        || output.schema_digest != result.output.schema_digest
+    {
+        return Err(RepositoryError::Conflict(
+            "Model structured terminal output",
+        ));
+    }
     settle_external_leaf_success_in_transaction(
         transaction,
         ExternalLeafSuccessOwner {
@@ -13133,7 +13148,7 @@ pub(crate) async fn settle_model_leaf_success_in_transaction(
             node_id: &turn.node_execution_id,
             owner_id: &turn.model_turn_id,
             owner_job_id: model_job_id,
-            output_value_id,
+            output_value_id: &output.value_id,
             kind: ExternalLeafSuccessKind::Model,
         },
         output,

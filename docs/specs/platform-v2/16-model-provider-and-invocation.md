@@ -149,6 +149,10 @@ enum ModelOutcome {
 `CanonicalModelResponse`必须通过schema、safety、byte和token hard limit，并序列化为Inline RunValue。超过上限返回
 `model_output_too_large`，不截断、不自动stage Artifact、不让Provider或Worker伪造成功。
 
+canonical response RunValue与ModelLoop最终structured output RunValue是两个不同的immutable value：前者保存完整response envelope并由
+ModelTurn result引用，后者只保存通过exact output schema验证的structured body并绑定Plan output port。两者必须有独立value ID与content
+digest；不得把response envelope标成Agent output schema后直接暴露给Scope或Return。
+
 terminal winner事务必须验证ModelTurn/Job当前fence、response digest/schema/safety、usage/budget和Receipt，然后
 创建RunValue、推进ModelTurn、关闭Job、settle quota、追加Event/Outbox并唤醒Node。不涉及Artifact Ready或Link。
 

@@ -524,8 +524,13 @@ fn tool_response(fixture: &Fixture) -> CanonicalModelResponse {
 
 fn output(fixture: &Fixture, response: CanonicalModelResponse) -> ModelOutputValue {
     let value = serde_json::to_value(&response).unwrap();
+    let structured_output_value_id = response
+        .structured_output
+        .as_ref()
+        .map(|_| id(ResourceKind::RunValue, 81));
     ModelOutputValue {
         value_id: id(ResourceKind::RunValue, 80),
+        structured_output_value_id,
         classification: DataClassification::Internal,
         schema_digest: fixture
             .request

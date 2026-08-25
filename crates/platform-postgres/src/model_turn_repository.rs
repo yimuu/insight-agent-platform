@@ -2864,7 +2864,7 @@ impl<'a> PgModelTurnTransaction<'a> {
                     )
                 })?;
                 let exact = output
-                    .exact_for(
+                    .structured_output_exact_for(
                         &decision.turn.run_id,
                         &decision.turn.node_execution_id,
                         &command.request,
@@ -3720,6 +3720,31 @@ async fn insert_model_output_value_and_references(
     .bind(database_now)
     .execute(&mut **transaction)
     .await?;
+    if let (Some(value_id), Some(structured)) = (
+        &output.structured_output_value_id,
+        &output.response.structured_output,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.run_values (
+                tenant_id, value_id, run_id, node_id, value_kind, classification,
+                schema_digest, content_digest, inline_value, artifact_id, created_at
+            ) VALUES ($1, $2, $3, $4, 'model_structured_output', $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(turn.tenant_id.to_string())
+        .bind(value_id.to_string())
+        .bind(turn.run_id.to_string())
+        .bind(turn.node_execution_id.to_string())
+        .bind(output.classification.as_str())
+        .bind(structured.schema_digest.to_string())
+        .bind(structured.canonical_digest.to_string())
+        .bind(&structured.value)
+        .bind(Option::<String>::None)
+        .bind(database_now)
+        .execute(&mut **transaction)
+        .await?;
+    }
     Ok(())
 }
 

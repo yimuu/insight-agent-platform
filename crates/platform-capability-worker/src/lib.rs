@@ -1001,7 +1001,7 @@ impl<C, A, H> CapabilityJobCommandExecutor<C> for RegisteredCapabilityJobExecuto
 where
     C: ClaimedCapabilityJob,
     A: CapabilityExecutionAuthority + Send + Sync + 'static,
-    A::Error: Send,
+    A::Error: Send + std::fmt::Debug,
     H: CapabilityHeartbeatAuthority,
 {
     async fn execute(
@@ -1040,7 +1040,10 @@ where
             tokio::select! {
                 result = &mut prepare => match result {
                     Ok(prepared) => break prepared,
-                    Err(_) => return CapabilityExecutionDisposition::Abandoned,
+                    Err(failure) => {
+                        eprintln!("Capability execution prepare abandoned: {failure:?}");
+                        return CapabilityExecutionDisposition::Abandoned;
+                    }
                 },
                 _ = heartbeat.tick() => match self.heartbeat_authority
                     .heartbeat_capability_execution(
@@ -1063,7 +1066,10 @@ where
         }
         match self.worker.commit(prepared).await {
             Ok(_) => CapabilityExecutionDisposition::Settled,
-            Err(_) => CapabilityExecutionDisposition::Abandoned,
+            Err(failure) => {
+                eprintln!("Capability execution commit abandoned: {failure:?}");
+                CapabilityExecutionDisposition::Abandoned
+            }
         }
     }
 }

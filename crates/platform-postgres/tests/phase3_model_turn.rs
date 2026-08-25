@@ -7,8 +7,7 @@ use insight_platform_artifact_rpc::{
 };
 use insight_platform_artifacts::{
     SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerSkillPackageReadError,
-    SchedulerSkillPackageReadRequest, SchedulerTypedPlanLease, SchedulerTypedPlanReadError,
-    SchedulerTypedPlanReadRequest, SchedulerTypedPlanRequestResolver,
+    SchedulerSkillPackageReadRequest, SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest,
 };
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
@@ -191,6 +190,71 @@ fn production_capability_worker_manifest_digest() -> Sha256Digest {
 
 struct ProcessModelWire {
     calls: AtomicUsize,
+}
+
+struct ToolChainModelWire {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ModelProviderWireConnector for ToolChainModelWire {
+    async fn open(
+        &self,
+        request: ModelProviderWireRequest,
+    ) -> Result<ModelProviderWireStream, ModelAdapterFailure> {
+        assert_eq!(request.protocol, ModelProviderWireProtocol::OpenAiResponses);
+        let ordinal = self.calls.fetch_add(1, Ordering::SeqCst);
+        let response = if ordinal == 0 {
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "model": "fixture-model-2026-08",
+                    "system_fingerprint": "fixture-tool-chain",
+                    "output": [{
+                        "id": "fc_tool_chain",
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": "call_tool_chain",
+                        "name": "search",
+                        "arguments": "{\"query\":\"durable tool chain\"}"
+                    }],
+                    "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}
+                }
+            })
+        } else {
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "model": "fixture-model-2026-08",
+                    "system_fingerprint": "fixture-tool-chain",
+                    "output": [{
+                        "id": "msg_tool_chain",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "{\"answer\":\"complete\"}"}]
+                    }],
+                    "usage": {"input_tokens": 70, "output_tokens": 10, "total_tokens": 80}
+                }
+            })
+        };
+        Ok(Box::pin(futures::stream::iter([Ok(
+            ModelProviderWireEvent {
+                event_name: "response.completed".to_owned(),
+                data: response,
+            },
+        )])))
+    }
+
+    async fn cancel(
+        &self,
+        _protocol: ModelProviderWireProtocol,
+        _request: ModelAdapterCancelRequest,
+    ) -> Result<ModelAdapterCancelOutcome, ModelAdapterFailure> {
+        Ok(ModelAdapterCancelOutcome::Accepted)
+    }
 }
 
 #[async_trait::async_trait]
@@ -436,6 +500,75 @@ fn model_orchestration_process_config(artifact_endpoint: String) -> serde_json::
     })
 }
 
+fn model_tool_chain_worker_config(egress_endpoint: String, nats_url: String) -> serde_json::Value {
+    let manifest = production_model_worker_manifest();
+    let manifest_digest = manifest.canonical_digest().unwrap();
+    json!({
+        "schema_version": 1,
+        "worker_manifest": manifest,
+        "installed_adapters": [
+            {
+                "qualified_name": OPENAI_RESPONSES_ADAPTER_NAME,
+                "worker_manifest_digest": manifest_digest,
+                "adapter_contract_digest": digest('3')
+            },
+            {
+                "qualified_name": ANTHROPIC_MESSAGES_ADAPTER_NAME,
+                "worker_manifest_digest": manifest_digest,
+                "adapter_contract_digest": named_digest("anthropic-production-adapter")
+            }
+        ],
+        "database_max_connections": 4,
+        "database_acquire_timeout_milliseconds": 1000,
+        "egress_endpoint": egress_endpoint,
+        "egress_tls_server_name": "egress.test",
+        "egress_connect_timeout_milliseconds": 1000,
+        "egress_request_timeout_milliseconds": 30000,
+        "maximum_rpc_metadata_bytes": 65536,
+        "maximum_rpc_payload_bytes": 1048576,
+        "live_delta": {
+            "servers": [nats_url],
+            "namespace": "model_tool_chain",
+            "connect_timeout_milliseconds": 1000,
+            "publish_timeout_milliseconds": 1000,
+            "reconnect_backoff_milliseconds": 100,
+            "drain_timeout_milliseconds": 1000,
+            "maximum_pending_messages": 16,
+            "maximum_pending_bytes": 1048576
+        },
+        "receipt_ttl_seconds": 60,
+        "claim_scan_milliseconds": 20,
+        "claim_failure_backoff_milliseconds": 5,
+        "drain_grace_milliseconds": 1000
+    })
+}
+
+fn model_tool_chain_capability_worker_config() -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "worker_manifest": production_capability_worker_manifest(),
+        "installed_adapters": [{
+            "adapter_id": "builtin.echo",
+            "adapter_version": "1.0.0",
+            "module_digest": builtin_echo_module_digest(),
+            "entrypoint_id": "echo.inline"
+        }],
+        "database": {
+            "business_max_connections": 4,
+            "critical_control_max_connections": 2,
+            "process_connection_budget": 6,
+            "acquire_timeout_milliseconds": 1000
+        },
+        "timing": {
+            "initial_scan_delay_milliseconds": 0,
+            "receipt_ttl_milliseconds": 60000,
+            "safety_scan_milliseconds": 20,
+            "claim_failure_backoff_milliseconds": 5,
+            "drain_grace_milliseconds": 1000
+        }
+    })
+}
+
 fn write_model_process_config(
     prefix: &Path,
     suffix: &str,
@@ -471,6 +604,57 @@ fn spawn_model_orchestration_worker(
         .unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
+fn spawn_model_tool_chain_worker(
+    binary: &str,
+    config_path: &Path,
+    config_digest: &str,
+    database_url: &str,
+    egress_ca_path: &Path,
+    egress_cert_path: &Path,
+    egress_key_path: &Path,
+    nats_ca_path: &Path,
+    nats_cert_path: &Path,
+    nats_key_path: &Path,
+) -> Child {
+    std::process::Command::new(binary)
+        .env("PLATFORM_MODEL_WORKER_CONFIG", config_path)
+        .env("PLATFORM_MODEL_WORKER_CONFIG_DIGEST", config_digest)
+        .env("PLATFORM_MODEL_WORKER_DATABASE_URL", database_url)
+        .env("PLATFORM_MODEL_WORKER_EGRESS_CA_PATH", egress_ca_path)
+        .env("PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH", egress_cert_path)
+        .env("PLATFORM_MODEL_WORKER_EGRESS_KEY_PATH", egress_key_path)
+        .env("PLATFORM_MODEL_WORKER_NATS_CA_PATH", nats_ca_path)
+        .env("PLATFORM_MODEL_WORKER_NATS_CERT_PATH", nats_cert_path)
+        .env("PLATFORM_MODEL_WORKER_NATS_KEY_PATH", nats_key_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn spawn_model_tool_chain_capability_worker(
+    binary: &str,
+    config_path: &Path,
+    config_digest: &str,
+    database_url: &str,
+) -> Child {
+    std::process::Command::new(binary)
+        .env("PLATFORM_CAPABILITY_NATIVE_WORKER_CONFIG", config_path)
+        .env(
+            "PLATFORM_CAPABILITY_NATIVE_WORKER_CONFIG_DIGEST",
+            config_digest,
+        )
+        .env(
+            "PLATFORM_CAPABILITY_NATIVE_WORKER_DATABASE_URL",
+            database_url,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
 fn observe_process_start(child: &mut Child) -> std::thread::JoinHandle<()> {
     let stderr = child.stderr.take().unwrap();
     let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
@@ -489,8 +673,6 @@ fn observe_process_start(child: &mut Child) -> std::thread::JoinHandle<()> {
     assert!(first.contains("started generation="), "{first}");
     logger
 }
-
-type RunningOrchestrationEvidence = (String, i64, i64, Option<String>, Option<String>);
 
 fn version(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef {
     ExactVersionRef::new(id(kind, suffix), digest(character)).unwrap()
@@ -784,6 +966,7 @@ struct Fixture {
     tool_slot_binding: FrozenSlotBinding,
     capability_interface_revision: ExactVersionRef,
     argument_schema: insight_platform_models::ClosedSchemaDocument,
+    capability_output_schema: insight_platform_models::ClosedSchemaDocument,
     output_schema: insight_platform_models::ClosedSchemaDocument,
     parameter_schema_digest: Sha256Digest,
     truncation_policy: ExactVersionRef,
@@ -1484,6 +1667,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             .unwrap();
 
     let argument_schema = closed_object_schema("query");
+    let capability_output_schema = argument_schema.clone();
     let output_schema = closed_object_schema("answer");
     let interface_revision = version(ResourceKind::CapabilityInterfaceRevision, 0x35, 'e');
     let implementation_revision =
@@ -1504,7 +1688,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                 policy_versions: vec![agent_policy.clone()],
                 qualified_name: "fixture.model_tool".parse().unwrap(),
                 input_schema: argument_schema.clone(),
-                output_schema: output_schema.clone(),
+                output_schema: capability_output_schema.clone(),
                 error_schema: closed_object_schema("error"),
                 artifacts: CapabilityArtifactContract { ports: vec![] },
                 data_policy: CapabilityDataFlowPolicy {
@@ -1896,7 +2080,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             "model_deployment",
             model_deployment.deployment_id.clone(),
             QuotaDimension::ModelCostMicrounits,
-            100_000,
+            2_000_000,
         ),
     ] {
         repository
@@ -2092,6 +2276,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         tool_slot_binding,
         capability_interface_revision: interface_revision,
         argument_schema,
+        capability_output_schema,
         output_schema,
         parameter_schema_digest,
         truncation_policy,
@@ -2126,7 +2311,7 @@ fn command_for_node(fixture: &Fixture, node_id: &ResourceId, base: u16) -> Creat
             capability_deployment: fixture.capability_deployment.clone(),
             interface_revision: fixture.capability_interface_revision.clone(),
             input_schema: fixture.argument_schema.clone(),
-            output_schema_digest: fixture.output_schema.canonical_digest.clone(),
+            output_schema_digest: fixture.capability_output_schema.canonical_digest.clone(),
             effect: Effect::ReadOnly,
         }],
         response_contract: ModelResponseContract {
@@ -2658,8 +2843,13 @@ fn output(
 ) -> ModelOutputValue {
     let value = serde_json::to_value(&response).unwrap();
     let content_digest: Sha256Digest = canonical_digest(&value).unwrap().parse().unwrap();
+    let structured_output_value_id = response
+        .structured_output
+        .as_ref()
+        .map(|_| ResourceId::from_uuid_v7(ResourceKind::RunValue, uuid::Uuid::now_v7()).unwrap());
     ModelOutputValue {
         value_id,
+        structured_output_value_id,
         classification: DataClassification::Internal,
         schema_digest: fixture.output_schema.canonical_digest.clone(),
         content_digest,
@@ -3067,12 +3257,28 @@ async fn model_job_state(pool: &PgPool, job_id: &ResourceId) -> String {
 }
 
 #[test]
-fn production_orchestration_dispatches_exact_model_leaf() {
-    let (Ok(database_url), Ok(orchestration_binary)) = (
+fn production_workers_complete_model_tool_result_return_chain() {
+    let (
+        Ok(database_url),
+        Ok(orchestration_binary),
+        Ok(model_binary),
+        Ok(capability_binary),
+        Ok(nats_url),
+        Ok(nats_ca_path),
+        Ok(nats_cert_path),
+        Ok(nats_key_path),
+    ) = (
         std::env::var("PLATFORM_MODEL_TOOL_CHAIN_TEST_DATABASE_URL"),
         std::env::var("PLATFORM_ORCHESTRATION_WORKER_BIN"),
-    ) else {
-        eprintln!("Model tool-chain database or Orchestration Worker binary is unset; process dispatch skipped");
+        std::env::var("PLATFORM_MODEL_WORKER_BIN"),
+        std::env::var("PLATFORM_CAPABILITY_NATIVE_WORKER_BIN"),
+        std::env::var("PLATFORM_TEST_NATS_URL"),
+        std::env::var("PLATFORM_TEST_NATS_CA_PATH"),
+        std::env::var("PLATFORM_TEST_NATS_CERT_PATH"),
+        std::env::var("PLATFORM_TEST_NATS_KEY_PATH"),
+    )
+    else {
+        eprintln!("Model tool-chain database, Worker binaries, or TLS NATS fixture is unset; process chain skipped");
         return;
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -3094,6 +3300,35 @@ fn production_orchestration_dispatches_exact_model_leaf() {
             seed_ready_model_orchestration(&pool, &repository, &fixture).await;
 
         let tls = model_process_tls();
+        let wire = Arc::new(ToolChainModelWire {
+            calls: AtomicUsize::new(0),
+        });
+        let egress_incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let egress_address = egress_incoming.local_addr().unwrap();
+        let egress_service = EgressBrokerServiceServer::new(EgressBrokerGrpcService::new(
+            wire.clone(),
+            Arc::new(EmptyProcessHttp),
+            Arc::new(EmptyProcessGrpc),
+            EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap(),
+        ));
+        let egress_service = tonic::service::interceptor::InterceptedService::new(
+            egress_service,
+            EgressCallerWorkloadIdentity,
+        );
+        let (egress_shutdown_sender, egress_shutdown_receiver) = tokio::sync::oneshot::channel();
+        let egress_server = tokio::spawn(
+            Server::builder()
+                .tls_config(
+                    ServerTlsConfig::new()
+                        .identity(Identity::from_pem(&tls.server_cert, &tls.server_key))
+                        .client_ca_root(Certificate::from_pem(tls.ca.clone())),
+                )
+                .unwrap()
+                .add_service(egress_service)
+                .serve_with_incoming_shutdown(egress_incoming, async move {
+                    let _ = egress_shutdown_receiver.await;
+                }),
+        );
         let broker = Arc::new(ModelTypedPlanBroker {
             bytes: canonical_json(&serde_json::to_value(&fixture.runtime_plan).unwrap()).unwrap(),
             reads: AtomicUsize::new(0),
@@ -3132,9 +3367,13 @@ fn production_orchestration_dispatches_exact_model_leaf() {
         let ca_path = PathBuf::from(format!("{}-ca.pem", prefix.display()));
         let cert_path = PathBuf::from(format!("{}-scheduler.pem", prefix.display()));
         let key_path = PathBuf::from(format!("{}-scheduler-key.pem", prefix.display()));
+        let model_cert_path = PathBuf::from(format!("{}-model.pem", prefix.display()));
+        let model_key_path = PathBuf::from(format!("{}-model-key.pem", prefix.display()));
         std::fs::write(&ca_path, &tls.ca).unwrap();
         std::fs::write(&cert_path, &tls.scheduler_cert).unwrap();
         std::fs::write(&key_path, &tls.scheduler_key).unwrap();
+        std::fs::write(&model_cert_path, &tls.client_cert).unwrap();
+        std::fs::write(&model_key_path, &tls.client_key).unwrap();
         let config = model_orchestration_process_config(format!("https://{address}/"));
         let (config_path, config_digest) =
             write_model_process_config(&prefix, "orchestration", &config);
@@ -3149,7 +3388,6 @@ fn production_orchestration_dispatches_exact_model_leaf() {
         );
         let worker_log = observe_process_start(&mut worker);
         let started = std::time::Instant::now();
-        let mut diagnosed_running_job = false;
         loop {
             let state: Option<(String, String, String, i32, i64)> = sqlx::query_as(
                 r#"
@@ -3182,49 +3420,6 @@ fn production_orchestration_dispatches_exact_model_leaf() {
             {
                 break;
             }
-            if !diagnosed_running_job && started.elapsed() >= StdDuration::from_millis(500) {
-                let running: Option<RunningOrchestrationEvidence> = sqlx::query_as(
-                        "SELECT state, version, lease_epoch, worker_id, lease_token_digest FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
-                    )
-                    .bind(fixture.tenant_id.to_string())
-                    .bind(source_job_id.to_string())
-                    .fetch_optional(&pool)
-                    .await
-                    .unwrap();
-                if let Some((state, version, lease_epoch, Some(worker_id), Some(token))) = running {
-                    if state == "running" {
-                        diagnosed_running_job = true;
-                        repository
-                            .load_controller_facts(
-                                &RepositoryJobFence {
-                                    tenant_id: fixture.tenant_id.to_string(),
-                                    job_id: source_job_id.to_string(),
-                                    worker_id: worker_id.parse().unwrap(),
-                                    lease_epoch,
-                                    expected_job_version: version,
-                                    lease_token_digest: token.parse().unwrap(),
-                                },
-                                &fixture.runtime_plan,
-                            )
-                            .await
-                            .unwrap();
-                        repository
-                            .resolve_typed_plan_read(SchedulerTypedPlanLease {
-                                tenant_id: fixture.tenant_id.clone(),
-                                run_id: fixture.run_id.clone(),
-                                orchestration_job_id: source_job_id.clone(),
-                                worker_process_generation_id: worker_id.parse().unwrap(),
-                                lease_generation: u64::try_from(lease_epoch).unwrap(),
-                                lease_token_digest: token.parse().unwrap(),
-                                request_digest: named_digest("model-plan-read-diagnostic"),
-                                maximum_bytes: 1_048_576,
-                                deadline: Utc::now() + Duration::seconds(1),
-                            })
-                            .await
-                            .unwrap();
-                    }
-                }
-            }
             assert!(
                 started.elapsed() < StdDuration::from_secs(10),
                 "orchestration dispatch stalled with state={state:?}, artifact_reads={}",
@@ -3243,12 +3438,163 @@ fn production_orchestration_dispatches_exact_model_leaf() {
         .unwrap();
         assert_eq!(model_owner, node_id.to_string());
 
+        let model_config = model_tool_chain_worker_config(
+            format!("https://{egress_address}/"),
+            nats_url,
+        );
+        let (model_config_path, model_config_digest) =
+            write_model_process_config(&prefix, "model", &model_config);
+        let mut model_worker = spawn_model_tool_chain_worker(
+            &model_binary,
+            &model_config_path,
+            &model_config_digest,
+            &database_url,
+            &ca_path,
+            &model_cert_path,
+            &model_key_path,
+            Path::new(&nats_ca_path),
+            Path::new(&nats_cert_path),
+            Path::new(&nats_key_path),
+        );
+        let model_log = observe_process_start(&mut model_worker);
+        let started = std::time::Instant::now();
+        loop {
+            let state: (i64, i64) = sqlx::query_as(
+                r#"
+                SELECT
+                  (SELECT count(*) FROM insight_platform.jobs
+                   WHERE tenant_id = $1 AND run_id = $2
+                     AND work_class = 'model' AND state = 'succeeded'),
+                  (SELECT count(*) FROM insight_platform.jobs
+                   WHERE tenant_id = $1 AND run_id = $2
+                     AND work_class LIKE 'capability_%' AND state = 'ready')
+                "#,
+            )
+            .bind(fixture.tenant_id.to_string())
+            .bind(fixture.run_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if state == (1, 1) {
+                break;
+            }
+            if let Some(status) = model_worker.try_wait().unwrap() {
+                panic!("Model Worker exited before tool fan-out: {status}");
+            }
+            assert!(
+                started.elapsed() < StdDuration::from_secs(10),
+                "Model tool fan-out stalled with state={state:?}, provider_calls={}",
+                wire.calls.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+
+        let capability_config = model_tool_chain_capability_worker_config();
+        let (capability_config_path, capability_config_digest) =
+            write_model_process_config(&prefix, "capability", &capability_config);
+        let mut capability_worker = spawn_model_tool_chain_capability_worker(
+            &capability_binary,
+            &capability_config_path,
+            &capability_config_digest,
+            &database_url,
+        );
+        let capability_log = observe_process_start(&mut capability_worker);
+        let started = std::time::Instant::now();
+        loop {
+            let state: (String, i32) = sqlx::query_as(
+                "SELECT state, active_work_count FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+            )
+            .bind(fixture.tenant_id.to_string())
+            .bind(fixture.run_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if state == ("succeeded".to_owned(), 0) {
+                break;
+            }
+            assert!(
+                started.elapsed() < StdDuration::from_secs(10),
+                "Model tool-result continuation stalled with run={state:?}, provider_calls={}",
+                wire.calls.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        assert_eq!(wire.calls.load(Ordering::SeqCst), 2);
+        let chain_facts: (i64, i64, i64, i64, i64, i64, i64, i64, bool) = sqlx::query_as(
+            r#"
+            SELECT
+              (SELECT count(*) FROM insight_platform.jobs
+               WHERE tenant_id = $1 AND run_id = $2
+                 AND work_class = 'model' AND state = 'succeeded'),
+              (SELECT count(*) FROM insight_platform.jobs
+               WHERE tenant_id = $1 AND run_id = $2
+                 AND work_class = 'capability_native' AND state = 'succeeded'),
+              (SELECT count(*) FROM insight_platform.invocations
+               WHERE tenant_id = $1 AND run_id = $2
+                 AND invocation_kind = 'model' AND state = 'succeeded'),
+              (SELECT count(*) FROM insight_platform.invocations
+               WHERE tenant_id = $1 AND run_id = $2
+                 AND invocation_kind = 'capability' AND state = 'succeeded'),
+              (SELECT count(*) FROM insight_platform.jobs
+               WHERE tenant_id = $1 AND run_id = $2
+                 AND state NOT IN ('succeeded', 'failed', 'cancelled')),
+              (SELECT count(*) FROM insight_platform.run_nodes
+               WHERE tenant_id = $1 AND run_id = $2
+                 AND record_kind = 'node_execution'
+                 AND node_kind = 'return' AND state = 'succeeded'),
+              (SELECT count(*) FROM insight_platform.run_values
+               WHERE tenant_id = $1 AND run_id = $2
+                 AND value_kind = 'model_response'),
+              (SELECT count(*) FROM insight_platform.run_values
+               WHERE tenant_id = $1 AND run_id = $2
+                 AND value_kind = 'model_structured_output'),
+              EXISTS (
+                SELECT 1
+                FROM insight_platform.runs AS run
+                JOIN insight_platform.run_values AS value
+                  ON value.tenant_id = run.tenant_id
+                 AND value.run_id = run.run_id
+                 AND value.value_id = run.output_value_id
+                WHERE run.tenant_id = $1 AND run.run_id = $2
+                  AND value.value_kind = 'model_structured_output'
+                  AND value.schema_digest = $3
+                  AND value.inline_value = '{"answer":"complete"}'::jsonb
+              )
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(fixture.run_id.to_string())
+        .bind(fixture.output_schema.canonical_digest.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(chain_facts, (2, 1, 2, 1, 0, 1, 2, 1, true));
+
+        capability_worker.kill().unwrap();
+        capability_worker.wait().unwrap();
+        capability_log.join().unwrap();
+        model_worker.kill().unwrap();
+        model_worker.wait().unwrap();
+        model_log.join().unwrap();
+
         worker.kill().unwrap();
         worker.wait().unwrap();
         worker_log.join().unwrap();
         let _ = shutdown_sender.send(());
         server.await.unwrap().unwrap();
-        for path in [config_path, ca_path, cert_path, key_path] {
+        let _ = egress_shutdown_sender.send(());
+        egress_server.await.unwrap().unwrap();
+        for path in [
+            config_path,
+            model_config_path,
+            capability_config_path,
+            ca_path,
+            cert_path,
+            key_path,
+            model_cert_path,
+            model_key_path,
+        ] {
             std::fs::remove_file(path).unwrap();
         }
     });
@@ -4286,7 +4632,7 @@ async fn model_turn_fixture() {
     ));
     invocation_transaction.rollback().await.unwrap();
 
-    let tool_result_value = json!({"answer": "tool-result"});
+    let tool_result_value = json!({"query": "tool-result"});
     let tool_result_digest: Sha256Digest = canonical_digest(&tool_result_value)
         .unwrap()
         .parse()
@@ -4307,7 +4653,7 @@ async fn model_turn_fixture() {
             outcome: DispatchOutcome::Completed(CapabilityOutputValue {
                 value_id: tool_result_value_id.clone(),
                 classification: DataClassification::Internal,
-                schema_digest: fixture.output_schema.canonical_digest.clone(),
+                schema_digest: fixture.capability_output_schema.canonical_digest.clone(),
                 content_digest: tool_result_digest,
                 value: ValueRef::Inline {
                     value: tool_result_value,
@@ -4373,7 +4719,7 @@ async fn model_turn_fixture() {
         .unwrap();
     assert_eq!(second_claims.len(), 1);
     let second_claim = second_claims.pop().unwrap();
-    let second_result_value = json!({"answer": "tool-result-2"});
+    let second_result_value = json!({"query": "tool-result-2"});
     let second_result_digest: Sha256Digest = canonical_digest(&second_result_value)
         .unwrap()
         .parse()
@@ -4394,7 +4740,7 @@ async fn model_turn_fixture() {
             outcome: DispatchOutcome::Completed(CapabilityOutputValue {
                 value_id: second_result_value_id.clone(),
                 classification: DataClassification::Internal,
-                schema_digest: fixture.output_schema.canonical_digest.clone(),
+                schema_digest: fixture.capability_output_schema.canonical_digest.clone(),
                 content_digest: second_result_digest,
                 value: ValueRef::Inline {
                     value: second_result_value,

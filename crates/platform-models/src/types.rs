@@ -834,6 +834,7 @@ impl ModelRequestValue {
 #[serde(deny_unknown_fields)]
 pub struct ModelOutputValue {
     pub value_id: ResourceId,
+    pub structured_output_value_id: Option<ResourceId>,
     pub classification: DataClassification,
     pub schema_digest: Sha256Digest,
     pub content_digest: Sha256Digest,
@@ -851,6 +852,12 @@ impl ModelOutputValue {
         limits: ModelTurnLimits,
     ) -> Result<ExactInvocationValueRef, ModelTurnError> {
         if self.value_id.kind() != ResourceKind::RunValue
+            || self
+                .structured_output_value_id
+                .as_ref()
+                .is_some_and(|value_id| value_id.kind() != ResourceKind::RunValue)
+            || self.structured_output_value_id.is_some()
+                != self.response.structured_output.is_some()
             || self.schema_digest != request.response_contract.output_schema_digest
             || self.classification.rank() < request.classification.rank()
         {
@@ -880,6 +887,51 @@ impl ModelOutputValue {
             schema_digest: self.schema_digest.clone(),
             content_digest: self.content_digest.clone(),
             storage,
+        };
+        exact
+            .validate()
+            .map_err(|_| ModelTurnError::InvalidOutputValue)?;
+        Ok(exact)
+    }
+
+    pub fn structured_output_exact_for(
+        &self,
+        run_id: &ResourceId,
+        node_id: &ResourceId,
+        request: &CanonicalModelRequest,
+        limits: ModelTurnLimits,
+    ) -> Result<ExactInvocationValueRef, ModelTurnError> {
+        let value_id = self
+            .structured_output_value_id
+            .as_ref()
+            .ok_or(ModelTurnError::InvalidOutputValue)?;
+        let structured = self
+            .response
+            .structured_output
+            .as_ref()
+            .ok_or(ModelTurnError::InvalidOutputValue)?;
+        if value_id.kind() != ResourceKind::RunValue
+            || structured.schema_digest != self.schema_digest
+            || structured.schema_digest != request.response_contract.output_schema_digest
+            || self.classification.rank() < request.classification.rank()
+        {
+            return Err(ModelTurnError::InvalidOutputValue);
+        }
+        ValueRef::Inline {
+            value: structured.value.clone(),
+        }
+        .validate(limits.inline_value_limits())
+        .map_err(|_| ModelTurnError::InvalidOutputValue)?;
+        let exact = ExactInvocationValueRef {
+            schema_version: 1,
+            value_id: value_id.clone(),
+            run_id: run_id.clone(),
+            producing_node_id: Some(node_id.clone()),
+            value_kind: "model_structured_output".to_owned(),
+            classification: self.classification,
+            schema_digest: structured.schema_digest.clone(),
+            content_digest: structured.canonical_digest.clone(),
+            storage: InvocationValueStorage::Inline,
         };
         exact
             .validate()

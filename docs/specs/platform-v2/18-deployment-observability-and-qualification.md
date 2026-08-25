@@ -255,6 +255,12 @@ Node/Job执行到Run终态；同一fixture重验错manifest零claim、commit-win
 Artifact读取及最终Run output。恢复事务和terminal owner事务分别释放旧/current active-work permit，避免重试泄漏阻止terminal closure。
 至此Run→Remote Context→resume→Return component L3关闭；Model tool-result整链、隔舱容量与L4 rollout仍需独立证据。
 
+fresh PostgreSQL 16 r244进一步以真实Orchestration/Model/Native Capability三个production Worker、mTLS Artifact Scheduler、mTLS Egress与
+TLS NATS跑通Run→Model tool intent→CapabilityInvocation→tool result→第二轮ModelTurn→Return。Provider严格调用2次，Model Job/Invocation
+各2个、Capability Job/Invocation各1个、唯一Return Node成功、无非terminal Job，Run output精确指向独立`model_structured_output`
+RunValue；完整canonical response保留为另一Inline RunValue而不冒充Agent output。该证据关闭Model tool-result production component L3；
+隔舱容量、L4 rollout及其余L4～L6仍是release blocker。
+
 每个production release至少覆盖：
 
 - clean baseline migration、upgrade/rollback rehearsal和backup/restore；

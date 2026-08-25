@@ -567,7 +567,7 @@ impl AnthropicMessagesCodec {
             _ => return Err(permanent("anthropic_messages_unknown_finish_reason")),
         };
 
-        let structured_output =
+        let structured_output = if tool_intents.is_empty() {
             if let Some(schema) = &self.request.request.response_contract.structured_schema {
                 let value = serde_json::from_str(&text)
                     .map_err(|_| permanent("anthropic_messages_invalid_structured_output"))?;
@@ -577,7 +577,10 @@ impl AnthropicMessagesCodec {
                 )
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
         let message = if structured_output.is_none() && !text.is_empty() {
             Some(CanonicalAssistantMessage {
                 parts: vec![CanonicalMessagePart::Text(text)],

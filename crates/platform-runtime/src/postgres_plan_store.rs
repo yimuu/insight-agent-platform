@@ -35,6 +35,7 @@ use insight_platform_postgres::repository::{
 };
 use insight_platform_tasks::TaskDefinition;
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use std::{sync::Arc, time::Duration};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,6 +377,7 @@ fn assemble_default_model_continuation(
         .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
     let encoded_results = serde_json::to_vec(&request.results)
         .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+    let content_digest = digest_bytes(&encoded_results)?;
     let result_bytes = u32::try_from(encoded_results.len())
         .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
     let result_tokens = result_bytes
@@ -400,7 +402,7 @@ fn assemble_default_model_continuation(
                 source_kind: "capability_tool_result".to_owned(),
                 source_id: request.model_turn_id.to_string(),
                 source_digest: source_digest.clone(),
-                content_digest: source_digest.clone(),
+                content_digest,
                 assembly_phase: insight_platform_models::PromptAssemblyPhase::CapabilityToolResult,
                 ordinal: result_ordinal,
                 byte_budget: result_bytes,
@@ -431,6 +433,18 @@ fn assemble_default_model_continuation(
         requested_attempt_limit: request.requested_attempt_limit,
         cost_ceiling_microunits: request.cost_ceiling_microunits,
     })
+}
+
+fn digest_bytes(bytes: &[u8]) -> Result<Sha256Digest, DurablePlanDriverError> {
+    let mut encoded = String::from("sha256:");
+    for byte in Sha256::digest(bytes) {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+    }
+    encoded
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)
 }
 
 impl<M, I> PostgresDurablePlanGenerationStore<M, I>
@@ -1415,7 +1429,10 @@ where
                 .repository
                 .load_plan_terminal_value(&command.fence, &command.materialized.plan)
                 .await
-                .map_err(classify_repository_failure)?;
+                .map_err(|failure| {
+                    eprintln!("Plan terminal value resolution rejected: {failure:?}");
+                    classify_repository_failure(failure)
+                })?;
             let context = ControllerRunValueReadContext::from_started(job, &command.fence)?;
             let materialized = self
                 .materializer
@@ -1472,6 +1489,7 @@ where
                     .await
                     .map_err(classify_repository_failure),
                 Err(failure) => {
+                    eprintln!("Plan terminal commit rejected: {failure:?}");
                     transaction
                         .rollback()
                         .await
@@ -1708,7 +1726,10 @@ where
                     &continuation,
                 )
                 .await
-                .map_err(classify_repository_failure)?;
+                .map_err(|failure| {
+                    eprintln!("Model tool continuation facts rejected: {failure:?}");
+                    classify_repository_failure(failure)
+                })?;
             let model_turn_id = self.new_id(ResourceKind::ModelTurn)?;
             let request_value_id = self.new_id(ResourceKind::RunValue)?;
             let requested_attempt_limit = facts.requested_attempt_limit;
@@ -1724,7 +1745,10 @@ where
                     requested_attempt_limit,
                     cost_ceiling_microunits,
                 })
-                .await?;
+                .await
+                .inspect_err(|failure| {
+                    eprintln!("Model tool continuation assembly rejected: {failure:?}");
+                })?;
             if admission.request.value_id != request_value_id
                 || admission.request.request.model_turn_id != model_turn_id
             {
@@ -1776,6 +1800,7 @@ where
                     .await
                     .map_err(classify_repository_failure),
                 Err(failure) => {
+                    eprintln!("Model tool continuation commit rejected: {failure:?}");
                     transaction
                         .rollback()
                         .await

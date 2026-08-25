@@ -1491,7 +1491,7 @@ where
     R: ModelRequestMaterializer + 'static,
     O: ModelOutputMaterializer + 'static,
     A: ModelExecutionAuthority + Send + Sync + 'static,
-    A::Error: Send,
+    A::Error: Send + std::fmt::Debug,
     H: ModelHeartbeatAuthority,
 {
     async fn execute(
@@ -1515,7 +1515,9 @@ where
                 .request_materializer
                 .materialize(&command.claim.request_input, command.limits)
                 .await
-                .map_err(|_| ())?;
+                .map_err(|failure| {
+                    eprintln!("Model request materialization abandoned: {failure:?}");
+                })?;
             let adapter_job = command
                 .claim
                 .adapter_job(
@@ -1525,8 +1527,12 @@ where
                     command.quota_settlement_entry_ids,
                     command.limits,
                 )
-                .map_err(|_| ())?;
-            self.worker.prepare(adapter_job).await.map_err(|_| ())
+                .map_err(|failure| {
+                    eprintln!("Model adapter command abandoned: {failure:?}");
+                })?;
+            self.worker.prepare(adapter_job).await.map_err(|failure| {
+                eprintln!("Model execution prepare abandoned: {failure:?}");
+            })
         };
         tokio::pin!(prepare);
         let mut heartbeat = tokio::time::interval_at(
@@ -1579,7 +1585,10 @@ where
         }
         match self.worker.commit(prepared).await {
             Ok(_) => ModelExecutionDisposition::Settled,
-            Err(_) => ModelExecutionDisposition::Abandoned,
+            Err(failure) => {
+                eprintln!("Model execution commit abandoned: {failure:?}");
+                ModelExecutionDisposition::Abandoned
+            }
         }
     }
 }
@@ -2057,6 +2066,13 @@ where
             value_id: self
                 .identities
                 .new_resource_id(ResourceKind::RunValue)
+                .map_err(|_| materialization_failure("model_output_identity_failed", true))?,
+            structured_output_value_id: success
+                .response
+                .structured_output
+                .as_ref()
+                .map(|_| self.identities.new_resource_id(ResourceKind::RunValue))
+                .transpose()
                 .map_err(|_| materialization_failure("model_output_identity_failed", true))?,
             classification: execution.request.classification,
             schema_digest: execution
