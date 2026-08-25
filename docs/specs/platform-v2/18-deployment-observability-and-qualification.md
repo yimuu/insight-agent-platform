@@ -246,8 +246,9 @@ adapter和独立Helm role；该role仅允许DNS/PostgreSQL出站，不含Egress�
 第二进程expired-lease恢复、attempt 2及唯一Observation，关闭NativeCatalog process L3；remote Context backend protocol、隔舱容量和L4
 rollout仍待通过。fresh PostgreSQL 16 r241进一步以独立Remote Context Worker、真实mTLS Egress RPC及Egress侧受控协议connector通过
 错Worker manifest零claim/零远端调用、响应后commit-window强杀、expired-lease恢复、attempt 2安全重放及唯一Observation；远端调用总数
-严格为2。该证据关闭Remote Worker→Egress RPC component L3，但不替代production HTTPS last-hop、完整Run→Context→resume→Return整链、
-隔舱容量或L4 rollout证据。随后r242以production RemoteSearch connector、真实TLS socket、独立CA/SAN、固定DNS pin、显式PEM trust及
+严格为2；同一terminal owner transaction使原leaf唯一`succeeded`、Run恢复`running`并只激活一个ready Return resume Node/Job。
+该证据关闭Remote Worker→Egress RPC和Context external-leaf terminal/resume component L3，但不替代production HTTPS last-hop、resume后
+Return的进程执行、隔舱容量或L4 rollout证据。随后r242以production RemoteSearch connector、真实TLS socket、独立CA/SAN、固定DNS pin、显式PEM trust及
 真实HTTP bytes关闭HTTPS wire/protocol L3；test-only loopback许可不进入production build，生产SSRF public-destination guard保持不变。
 完整Run整链、隔舱容量与L4 rollout仍需独立证据。
 

@@ -3566,7 +3566,7 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
         let second_log = observe_context_worker_start(&mut second);
         assert!(second.try_wait().unwrap().is_none());
         wait_context_query_state(&pool, &created.context_query_id, "succeeded").await;
-        let evidence: (i64, i32, bool, i64) = sqlx::query_as(
+        let evidence: (i64, i32, bool, i64, String, String, i64) = sqlx::query_as(
             r#"
             SELECT
               (SELECT count(*) FROM insight_platform.events
@@ -3577,7 +3577,20 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
                 AND job.quota_reservation_id IS NULL,
               (SELECT count(*) FROM insight_platform.run_values
                  WHERE tenant_id = $1 AND run_id = $3
-                   AND value_kind = 'context_observation')
+                   AND value_kind = 'context_observation'),
+              (SELECT state FROM insight_platform.runs
+                 WHERE tenant_id = $1 AND run_id = $3),
+              (SELECT state FROM insight_platform.run_nodes
+                 WHERE tenant_id = $1 AND node_id = $5),
+              (SELECT count(*)
+                 FROM insight_platform.run_nodes AS resume
+                 JOIN insight_platform.jobs AS resume_job
+                   ON resume_job.tenant_id = resume.tenant_id
+                  AND resume_job.node_id = resume.node_id
+                WHERE resume.tenant_id = $1 AND resume.run_id = $3
+                  AND resume.plan_node_key = 'finish'
+                  AND resume.node_kind = 'return'
+                  AND resume.state = 'ready' AND resume_job.state = 'ready')
             FROM insight_platform.jobs AS job
             WHERE job.tenant_id = $1 AND job.job_id = $4
             "#,
@@ -3586,10 +3599,22 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
         .bind(created.context_query_id.to_string())
         .bind(fixture.run_id.to_string())
         .bind(job_id.to_string())
+        .bind(fixture.node_id.to_string())
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(evidence, (1, 2, true, 1));
+        assert_eq!(
+            evidence,
+            (
+                1,
+                2,
+                true,
+                1,
+                "running".to_owned(),
+                "succeeded".to_owned(),
+                1,
+            )
+        );
         second.kill().unwrap();
         second.wait().unwrap();
         second_log.join().unwrap();
@@ -3824,7 +3849,7 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
         let second_log = observe_context_worker_start(&mut second);
         wait_context_query_state(&pool, &created.context_query_id, "succeeded").await;
         wait_remote_context_calls(&remote.calls, 2).await;
-        let evidence: (i64, i32, bool, i64) = sqlx::query_as(
+        let evidence: (i64, i32, bool, i64, String, String, i64) = sqlx::query_as(
             r#"
             SELECT
               (SELECT count(*) FROM insight_platform.events
@@ -3835,7 +3860,20 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
                 AND job.quota_reservation_id IS NULL,
               (SELECT count(*) FROM insight_platform.run_values
                  WHERE tenant_id = $1 AND run_id = $3
-                   AND value_kind = 'context_observation')
+                   AND value_kind = 'context_observation'),
+              (SELECT state FROM insight_platform.runs
+                 WHERE tenant_id = $1 AND run_id = $3),
+              (SELECT state FROM insight_platform.run_nodes
+                 WHERE tenant_id = $1 AND node_id = $5),
+              (SELECT count(*)
+                 FROM insight_platform.run_nodes AS resume
+                 JOIN insight_platform.jobs AS resume_job
+                   ON resume_job.tenant_id = resume.tenant_id
+                  AND resume_job.node_id = resume.node_id
+                WHERE resume.tenant_id = $1 AND resume.run_id = $3
+                  AND resume.plan_node_key = 'finish'
+                  AND resume.node_kind = 'return'
+                  AND resume.state = 'ready' AND resume_job.state = 'ready')
             FROM insight_platform.jobs AS job
             WHERE job.tenant_id = $1 AND job.job_id = $4
             "#,
@@ -3844,10 +3882,22 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
         .bind(created.context_query_id.to_string())
         .bind(fixture.run_id.to_string())
         .bind(job_id.to_string())
+        .bind(fixture.node_id.to_string())
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(evidence, (1, 2, true, 1));
+        assert_eq!(
+            evidence,
+            (
+                1,
+                2,
+                true,
+                1,
+                "running".to_owned(),
+                "succeeded".to_owned(),
+                1,
+            )
+        );
         assert_eq!(remote.calls.load(Ordering::SeqCst), 2);
         second.kill().unwrap();
         second.wait().unwrap();
