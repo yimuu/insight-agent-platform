@@ -16,15 +16,17 @@ use insight_platform_contracts::{
     ValidationSummary, ValueRef, WorkClass, WorkerManifest,
 };
 use insight_platform_invocations::InvocationPolicyDecisionBundle;
+use insight_platform_jobs::WakeSource;
 use insight_platform_orchestrator::{
     AdmitRun, ExactDataPortRef, ExpressionLimits, PlanLimits, PlanNodeKey, RunInputValue,
     RuntimeNode, RuntimePlan,
 };
 use insight_platform_postgres::{
     repository::{
-        NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal, OrchestrationYield,
-        OrchestrationYieldMutationIds, PgRepository, RunRecord, SafetyScanShard, TypedPayload,
-        YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+        NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal, OrchestrationSignalAuthority,
+        OrchestrationWakeMutationIds, OrchestrationYield, OrchestrationYieldMutationIds,
+        PgRepository, ResolveOrchestrationSignalTarget, RunRecord, SafetyScanShard, TypedPayload,
+        WakeOrchestrationJob, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
     },
     verify_schema,
 };
@@ -139,6 +141,7 @@ fn agent_schema() -> ClosedJsonSchema {
 
 fn fixture_plan() -> RuntimePlan {
     let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
+    let signal = PlanNodeKey::new("signal".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 4,
@@ -150,6 +153,15 @@ fn fixture_plan() -> RuntimePlan {
                 entry,
                 RuntimeNode::TimerWait {
                     delay_milliseconds: 3_000,
+                    resume: signal.clone(),
+                },
+            ),
+            (
+                signal,
+                RuntimeNode::SignalWait {
+                    signal_key: "release".to_owned(),
+                    payload: None,
+                    timeout_milliseconds: 60_000,
                     resume: finish.clone(),
                 },
             ),
@@ -472,8 +484,8 @@ impl StartedOrchestrationJobHandler for PostgresHandoffHandler {
 }
 
 #[test]
-fn timer_recovery_worker_process_entry() {
-    if std::env::var("PLATFORM_TIMER_RECOVERY_CHILD").as_deref() != Ok("1") {
+fn wait_recovery_worker_process_entry() {
+    if std::env::var("PLATFORM_WAIT_RECOVERY_CHILD").as_deref() != Ok("1") {
         return;
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -643,7 +655,7 @@ fn timer_recovery_worker_process_entry() {
         coordinator.shutdown().await.unwrap();
         safety.shutdown().await.unwrap();
         bulkheads.close().await;
-        println!("TIMER_RECOVERY_CHILD_RESULT terminal=succeeded");
+        println!("WAIT_RECOVERY_CHILD_RESULT terminal=succeeded");
     });
 }
 
@@ -886,13 +898,13 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         assert!(safety_exit.mutations >= 1);
 
         let executable = std::env::current_exe().unwrap();
-        let spawn_timer_worker = || {
+        let spawn_wait_worker = || {
             Command::new(&executable)
                 .arg("--exact")
-                .arg("timer_recovery_worker_process_entry")
+                .arg("wait_recovery_worker_process_entry")
                 .arg("--nocapture")
                 .arg("--test-threads=1")
-                .env("PLATFORM_TIMER_RECOVERY_CHILD", "1")
+                .env("PLATFORM_WAIT_RECOVERY_CHILD", "1")
                 .env("PLATFORM_TEST_DATABASE_URL", &database_url)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -900,7 +912,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                 .spawn()
                 .unwrap()
         };
-        let mut crash_child = spawn_timer_worker();
+        let mut crash_child = spawn_wait_worker();
         let park_deadline = Instant::now() + Duration::from_secs(5);
         let scheduled_at = loop {
             if crash_child.try_wait().unwrap().is_some() {
@@ -949,13 +961,113 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         if let Ok(until_due) = until_due.to_std() {
             tokio::time::sleep(until_due + Duration::from_millis(100)).await;
         }
-        let recovery_child = spawn_timer_worker();
+        let mut signal_child = spawn_wait_worker();
+        let signal_park_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if signal_child.try_wait().unwrap().is_some() {
+                let failed = signal_child.wait_with_output().unwrap();
+                panic!(
+                    "replacement worker exited before durable Signal park: stdout={} stderr={}",
+                    String::from_utf8_lossy(&failed.stdout),
+                    String::from_utf8_lossy(&failed.stderr),
+                );
+            }
+            let signal_parked: Option<(String, String)> = sqlx::query_as(
+                r#"
+                SELECT job.state, node.state
+                FROM insight_platform.jobs AS job
+                JOIN insight_platform.run_nodes AS node
+                  ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+                WHERE job.tenant_id = $1 AND job.run_id = $2
+                  AND job.wake_kind = 'signal' AND node.plan_node_key = 'signal'
+                "#,
+            )
+            .bind(TENANT_ID)
+            .bind(RUN_ID)
+            .fetch_optional(bulkheads.critical_control_pool())
+            .await
+            .unwrap();
+            if signal_parked.as_ref().is_some_and(|states| {
+                states == &("waiting".to_owned(), "waiting".to_owned())
+            }) {
+                break;
+            }
+            if Instant::now() >= signal_park_deadline {
+                signal_child.kill().unwrap();
+                let failed = signal_child.wait_with_output().unwrap();
+                panic!(
+                    "replacement worker did not durably park the Signal: stdout={} stderr={}",
+                    String::from_utf8_lossy(&failed.stdout),
+                    String::from_utf8_lossy(&failed.stderr),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        signal_child.kill().unwrap();
+        let signal_crashed = signal_child.wait_with_output().unwrap();
+        assert!(!signal_crashed.status.success());
+
+        let idempotency_key_digest = fresh_digest();
+        let request_digest = fresh_digest();
+        let target = bulkheads
+            .critical_control_repository()
+            .resolve_signal_wake_target_for_principal(&ResolveOrchestrationSignalTarget {
+                tenant_id: id(TENANT_ID),
+                principal_id: id(PRINCIPAL_ID),
+                principal_kind: PrincipalKind::AgentRunner,
+                run_id: id(RUN_ID),
+                signal_key: "release".to_owned(),
+                idempotency_key_digest: idempotency_key_digest.clone(),
+                request_digest: request_digest.clone(),
+            })
+            .await
+            .unwrap();
+        let identities = UuidCoordinatorIdentityFactory;
+        let new_id = |kind| identities.new_resource_id(kind).unwrap();
+        let mut signal_transaction = bulkheads
+            .critical_control_repository()
+            .begin_scheduler_transaction()
+            .await
+            .unwrap();
+        signal_transaction
+            .wake_orchestration_job(WakeOrchestrationJob {
+                tenant_id: id(TENANT_ID),
+                job_id: target.job_id,
+                expected_job_version: target.job_version,
+                expected_wake_generation: target.wake_generation,
+                source: WakeSource::Signal,
+                signal_key: Some("release".to_owned()),
+                signal_payload: None,
+                idempotency_key_digest: idempotency_key_digest.clone(),
+                request_digest: request_digest.clone(),
+                receipt_expires_at: Utc::now() + ChronoDuration::hours(1),
+                signal_authority: Some(OrchestrationSignalAuthority {
+                    tenant_id: id(TENANT_ID),
+                    principal_id: id(PRINCIPAL_ID),
+                    principal_kind: PrincipalKind::AgentRunner,
+                    run_id: id(RUN_ID),
+                    idempotency_key_digest,
+                    request_digest,
+                }),
+                mutations: OrchestrationWakeMutationIds {
+                    receipt_id: new_id(ResourceKind::Receipt),
+                    node_event_id: new_id(ResourceKind::Event),
+                    node_outbox_id: new_id(ResourceKind::OutboxEvent),
+                    job_event_id: new_id(ResourceKind::Event),
+                    job_outbox_id: new_id(ResourceKind::OutboxEvent),
+                },
+            })
+            .await
+            .unwrap();
+        signal_transaction.commit().await.unwrap();
+
+        let final_child = spawn_wait_worker();
         let recovered = tokio::time::timeout(
             Duration::from_secs(20),
-            tokio::task::spawn_blocking(move || recovery_child.wait_with_output()),
+            tokio::task::spawn_blocking(move || final_child.wait_with_output()),
         )
         .await
-        .expect("replacement Timer worker process did not exit")
+        .expect("final Signal recovery worker process did not exit")
         .unwrap()
         .unwrap();
         assert!(
@@ -966,7 +1078,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         );
         assert!(
             String::from_utf8_lossy(&recovered.stdout)
-                .contains("TIMER_RECOVERY_CHILD_RESULT terminal=succeeded")
+                .contains("WAIT_RECOVERY_CHILD_RESULT terminal=succeeded")
         );
         let activated = sqlx::query_as::<_, (String, String)>(
             r#"

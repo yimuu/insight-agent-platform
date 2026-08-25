@@ -64,12 +64,12 @@
 > restricted Pod、无ServiceAccount token、default-deny且只开放DNS/PostgreSQL/Artifact Data Worker。binary config test、clippy和Helm
 > positive/negative static boundary已通过；真实多进程kill/recovery和容量资格尚未完成。
 
-> CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer在fresh PostgreSQL 16 r181完成真实多进程L3 kill-window：首个Worker在Job/Node waiting及数据库deadline原子提交后被强制终止，替代Worker仅凭durable state和独立safety scanner恢复，最终Run/Job/Return成功且finish Node唯一。Child/Task/Signal的独立进程kill/recovery L3及Model/Capability/Context external leaf仍待完成。
+> CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer在fresh PostgreSQL 16 r181完成真实多进程L3 kill-window：首个Worker在Job/Node waiting及数据库deadline原子提交后被强制终止，替代Worker仅凭durable state和独立safety scanner恢复，最终Run/Job/Return成功且finish Node唯一。fresh PostgreSQL 16 r189进一步在同一真实链路中由替代Worker推进至SignalWait后强制终止，经认证Signal owner事务唤醒，再由第三个Worker仅凭durable state完成Run，finish Node仍唯一。Child/Task的独立进程kill/recovery L3及Model/Capability/Context external leaf仍待完成。
 
 > 2026-08-25 implementation evidence：public `/v1/runs/{run_id}/signals/{signal_key}`现已进入generated OpenAPI与Gateway；closed typed body、
 > principal/run/signal scoped Idempotency-Key、stable signal key和204 no-store合同由API tests覆盖。Gateway只解析目标，Scheduler owner transaction仍会
 > 在同一PostgreSQL事务重载当前Principal并要求`agent.run`，再重验Run/Job/Wake generation、exact key及可选payload schema/digest；权限撤销、
-> wrong key、重复key不同request均fail closed。fresh PostgreSQL 16 r187已通过上述owner、权限及Receipt replay回归；Signal多进程kill/recovery仍待完成。
+> wrong key、重复key不同request均fail closed。fresh PostgreSQL 16 r187已通过上述owner、权限及Receipt replay回归；r189已通过上述Signal多进程kill/recovery链路。
 | 公开协议 | `insight.platform/v1`、`/v1`，clean cut |
 
 ## 1. 计划原则

@@ -2906,6 +2906,7 @@ dependencies = [
  "insight-platform-artifacts",
  "insight-platform-contracts",
  "insight-platform-invocations",
+ "insight-platform-jobs",
  "insight-platform-models",
  "insight-platform-orchestrator",
  "insight-platform-postgres",

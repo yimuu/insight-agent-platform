@@ -34,4 +34,5 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+insight-platform-jobs.workspace = true
 insight-platform-security.workspace = true
