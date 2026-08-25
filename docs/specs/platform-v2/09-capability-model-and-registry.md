@@ -525,3 +525,7 @@ admission/claim/outcome/Task/reconcile/Receipt/quota fixture通过。Remote prod
 
 fresh PostgreSQL 16 r208进一步用两个真实Native Capability Worker进程验证exact startup registry/Worker manifest、进程强杀、expired
 lease scanner、quota settlement与非幂等reconciliation。该证据关闭Native process L3，不覆盖HTTP/gRPC/MCP remote protocol或L4 rollout。
+
+Remote `platform.json@1.0.0`随后把实际raw-JCS protocol与HTTP/gRPC request/response/error及MCP output mapping逐项绑定到
+domain-separated compiled digest；binary startup和codec constructor对任一漂移声明均拒绝，避免把自由mapping digest误当成已安装
+可执行codec。PostgreSQL owner transaction继续对结果正文执行exact Interface schema与byte-limit复验。真实remote protocol L3仍待完成。

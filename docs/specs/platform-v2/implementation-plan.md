@@ -76,6 +76,9 @@
 > image内存在的`platform.json@1.0.0`静态codec，清单摘要绑定exact Worker manifest；请求使用JCS，响应经backend byte limit与全局
 > JSON depth/property/item hard limit共同约束，错误状态保留给共享Effect/idempotency policy判定retry或uncertain。所有远程网络调用只经
 > mTLS Egress Broker RPC，进程持有分离的business/critical-control PostgreSQL pool，不持有Secret、Sandbox或MCP transport client。
+> 后续收口把该module实际执行的HTTP protocol、HTTP/gRPC request/response/error mapping及MCP output mapping分别固定为
+> domain-separated compiled digest；startup对任一任意或漂移mapping/protocol digest均fail closed，不能再让同一raw-JCS实现替任意
+> authoring contract背书。最终Inline实例仍由PostgreSQL owner transaction按冻结Interface schema与byte limit重验。
 > Helm以digest image/config、双副本/PDB/HPA、restricted pod和仅DNS/PostgreSQL/Egress Broker egress部署，正负静态fixture、worker/
 > adapter tests、strict Clippy与crate-boundary scan通过。该批关闭HTTP/gRPC production composition与静态部署边界；真实HTTP/gRPC
 > 多进程L3及Phase 2 exit gate仍待完成；独立MCP Host RPC由下一批接线。

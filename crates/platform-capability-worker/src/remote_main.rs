@@ -13,9 +13,14 @@ use insight_platform_capability_adapters::{
     McpCapabilityAdapter,
 };
 use insight_platform_capability_worker::{
-    builtin_json_codec_module_digest, install_builtin_grpc_json_codecs,
-    install_builtin_http_json_codecs, install_builtin_mcp_json_codecs, CapabilityWorkerDriver,
-    CapabilityWorkerDriverConfig, CapabilityWorkerDriverTiming, RegisteredCapabilityJobExecutor,
+    builtin_json_codec_module_digest, builtin_json_grpc_error_mapping_digest,
+    builtin_json_grpc_protobuf_contract_digest, builtin_json_grpc_request_mapping_digest,
+    builtin_json_grpc_response_mapping_digest, builtin_json_http_error_mapping_digest,
+    builtin_json_http_protocol_contract_digest, builtin_json_http_request_mapping_digest,
+    builtin_json_http_response_mapping_digest, builtin_json_mcp_output_mapping_digest,
+    install_builtin_grpc_json_codecs, install_builtin_http_json_codecs,
+    install_builtin_mcp_json_codecs, CapabilityWorkerDriver, CapabilityWorkerDriverConfig,
+    CapabilityWorkerDriverTiming, RegisteredCapabilityJobExecutor,
     UuidCapabilityWorkerIdentityFactory, BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
     CAPABILITY_REMOTE_WORKER_ROLE,
 };
@@ -302,6 +307,11 @@ impl ProcessConfig {
                 || configured.codec_version != BUILTIN_JSON_CODEC_VERSION
                 || configured.module_digest != builtin_json_codec_module_digest()
                 || configured.worker_protocol_version != WORKER_PROTOCOL_VERSION
+                || configured.protocol_contract_digest
+                    != builtin_json_http_protocol_contract_digest()
+                || configured.request_mapping_digest != builtin_json_http_request_mapping_digest()
+                || configured.response_mapping_digest != builtin_json_http_response_mapping_digest()
+                || configured.error_mapping_digest != builtin_json_http_error_mapping_digest()
                 || !http.insert(descriptor)
             {
                 return Err(ProcessError::InvalidConfiguration);
@@ -314,6 +324,11 @@ impl ProcessConfig {
                 || configured.codec_version != BUILTIN_JSON_CODEC_VERSION
                 || configured.module_digest != builtin_json_codec_module_digest()
                 || configured.worker_protocol_version != WORKER_PROTOCOL_VERSION
+                || configured.protobuf_contract_digest
+                    != builtin_json_grpc_protobuf_contract_digest()
+                || configured.request_mapping_digest != builtin_json_grpc_request_mapping_digest()
+                || configured.response_mapping_digest != builtin_json_grpc_response_mapping_digest()
+                || configured.error_mapping_digest != builtin_json_grpc_error_mapping_digest()
                 || !valid_grpc_name(&configured.service_name)
                 || !valid_grpc_name(&configured.method_name)
                 || !grpc.insert(descriptor)
@@ -328,6 +343,7 @@ impl ProcessConfig {
                 || configured.codec_version != BUILTIN_JSON_CODEC_VERSION
                 || configured.module_digest != builtin_json_codec_module_digest()
                 || configured.worker_protocol_version != WORKER_PROTOCOL_VERSION
+                || configured.output_mapping_digest != builtin_json_mcp_output_mapping_digest()
                 || configured.protocol_profile_id.kind() != ResourceKind::PolicyRevision
                 || !mcp.insert(descriptor)
             {
@@ -757,10 +773,10 @@ mod tests {
             module_digest: builtin_json_codec_module_digest(),
             worker_protocol_version: WORKER_PROTOCOL_VERSION,
             descriptor_digest: digest('1'),
-            protocol_contract_digest: digest('2'),
-            request_mapping_digest: digest('3'),
-            response_mapping_digest: digest('4'),
-            error_mapping_digest: digest('5'),
+            protocol_contract_digest: builtin_json_http_protocol_contract_digest(),
+            request_mapping_digest: builtin_json_http_request_mapping_digest(),
+            response_mapping_digest: builtin_json_http_response_mapping_digest(),
+            error_mapping_digest: builtin_json_http_error_mapping_digest(),
         }
     }
 
@@ -771,12 +787,12 @@ mod tests {
             module_digest: builtin_json_codec_module_digest(),
             worker_protocol_version: WORKER_PROTOCOL_VERSION,
             descriptor_digest: digest('6'),
-            protobuf_contract_digest: digest('7'),
+            protobuf_contract_digest: builtin_json_grpc_protobuf_contract_digest(),
             service_name: "insight.fixture.v1.Lookup".to_owned(),
             method_name: "Get".to_owned(),
-            request_mapping_digest: digest('8'),
-            response_mapping_digest: digest('9'),
-            error_mapping_digest: digest('a'),
+            request_mapping_digest: builtin_json_grpc_request_mapping_digest(),
+            response_mapping_digest: builtin_json_grpc_response_mapping_digest(),
+            error_mapping_digest: builtin_json_grpc_error_mapping_digest(),
         }
     }
 
@@ -789,7 +805,7 @@ mod tests {
             descriptor_digest: digest('b'),
             remote_tool_name: "fixture_lookup".to_owned(),
             remote_input_schema_digest: digest('c'),
-            output_mapping_digest: digest('d'),
+            output_mapping_digest: builtin_json_mcp_output_mapping_digest(),
             protocol_profile_id: id(ResourceKind::PolicyRevision),
             protocol_profile_digest: digest('e'),
             discovery_semantic_evidence_digest: digest('f'),
@@ -860,6 +876,10 @@ mod tests {
         let mut wrong_codec = config();
         wrong_codec.installed_http_codecs[0].module_digest = digest('f');
         assert!(wrong_codec.validate().is_err());
+
+        let mut wrong_mapping = config();
+        wrong_mapping.installed_grpc_codecs[0].response_mapping_digest = digest('f');
+        assert!(wrong_mapping.validate().is_err());
 
         let mut wrong_manifest = config();
         wrong_manifest.worker_manifest.adapter_runtime_digest = digest('e');

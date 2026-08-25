@@ -57,6 +57,42 @@ pub fn builtin_json_codec_module_digest() -> Sha256Digest {
     domain_digest("builtin-json-codec-module")
 }
 
+pub fn builtin_json_http_protocol_contract_digest() -> Sha256Digest {
+    domain_digest("builtin-json-http-protocol-contract")
+}
+
+pub fn builtin_json_http_request_mapping_digest() -> Sha256Digest {
+    domain_digest("builtin-json-http-request-mapping")
+}
+
+pub fn builtin_json_http_response_mapping_digest() -> Sha256Digest {
+    domain_digest("builtin-json-http-response-mapping")
+}
+
+pub fn builtin_json_http_error_mapping_digest() -> Sha256Digest {
+    domain_digest("builtin-json-http-error-mapping")
+}
+
+pub fn builtin_json_grpc_protobuf_contract_digest() -> Sha256Digest {
+    domain_digest("builtin-json-grpc-protobuf-contract")
+}
+
+pub fn builtin_json_grpc_request_mapping_digest() -> Sha256Digest {
+    domain_digest("builtin-json-grpc-request-mapping")
+}
+
+pub fn builtin_json_grpc_response_mapping_digest() -> Sha256Digest {
+    domain_digest("builtin-json-grpc-response-mapping")
+}
+
+pub fn builtin_json_grpc_error_mapping_digest() -> Sha256Digest {
+    domain_digest("builtin-json-grpc-error-mapping")
+}
+
+pub fn builtin_json_mcp_output_mapping_digest() -> Sha256Digest {
+    domain_digest("builtin-json-mcp-output-mapping")
+}
+
 #[derive(Debug, Clone)]
 pub struct BuiltinJsonHttpCapabilityCodec {
     descriptor: InstalledHttpCodecDescriptor,
@@ -70,6 +106,16 @@ impl BuiltinJsonHttpCapabilityCodec {
             &descriptor.module_digest,
             descriptor.worker_protocol_version,
         )?;
+        if descriptor.protocol_contract_digest != builtin_json_http_protocol_contract_digest()
+            || descriptor.request_mapping_digest != builtin_json_http_request_mapping_digest()
+            || descriptor.response_mapping_digest != builtin_json_http_response_mapping_digest()
+            || descriptor.error_mapping_digest != builtin_json_http_error_mapping_digest()
+        {
+            return Err(permanent_adapter_failure(
+                "builtin_json_http_descriptor",
+                "Built-in HTTP JSON codec descriptor is not the compiled contract",
+            ));
+        }
         Ok(Self { descriptor })
     }
 }
@@ -147,6 +193,12 @@ impl BuiltinJsonMcpToolCapabilityCodec {
             &descriptor.module_digest,
             descriptor.worker_protocol_version,
         )?;
+        if descriptor.output_mapping_digest != builtin_json_mcp_output_mapping_digest() {
+            return Err(permanent_adapter_failure(
+                "builtin_json_mcp_descriptor",
+                "Built-in MCP JSON codec descriptor is not the compiled mapping",
+            ));
+        }
         Ok(Self { descriptor })
     }
 }
@@ -302,6 +354,16 @@ impl BuiltinJsonGrpcCapabilityCodec {
             &descriptor.module_digest,
             descriptor.worker_protocol_version,
         )?;
+        if descriptor.protobuf_contract_digest != builtin_json_grpc_protobuf_contract_digest()
+            || descriptor.request_mapping_digest != builtin_json_grpc_request_mapping_digest()
+            || descriptor.response_mapping_digest != builtin_json_grpc_response_mapping_digest()
+            || descriptor.error_mapping_digest != builtin_json_grpc_error_mapping_digest()
+        {
+            return Err(permanent_adapter_failure(
+                "builtin_json_grpc_descriptor",
+                "Built-in gRPC JSON codec descriptor is not the compiled contract",
+            ));
+        }
         Ok(Self { descriptor })
     }
 }
@@ -1714,10 +1776,10 @@ mod tests {
             module_digest: builtin_json_codec_module_digest(),
             worker_protocol_version: WORKER_PROTOCOL_VERSION,
             descriptor_digest: digest('1'),
-            protocol_contract_digest: digest('2'),
-            request_mapping_digest: digest('3'),
-            response_mapping_digest: digest('4'),
-            error_mapping_digest: digest('5'),
+            protocol_contract_digest: builtin_json_http_protocol_contract_digest(),
+            request_mapping_digest: builtin_json_http_request_mapping_digest(),
+            response_mapping_digest: builtin_json_http_response_mapping_digest(),
+            error_mapping_digest: builtin_json_http_error_mapping_digest(),
         }
     }
 
@@ -1728,12 +1790,12 @@ mod tests {
             module_digest: builtin_json_codec_module_digest(),
             worker_protocol_version: WORKER_PROTOCOL_VERSION,
             descriptor_digest: digest('6'),
-            protobuf_contract_digest: digest('7'),
+            protobuf_contract_digest: builtin_json_grpc_protobuf_contract_digest(),
             service_name: "insight.fixture.v1.Lookup".to_owned(),
             method_name: "Get".to_owned(),
-            request_mapping_digest: digest('8'),
-            response_mapping_digest: digest('9'),
-            error_mapping_digest: digest('a'),
+            request_mapping_digest: builtin_json_grpc_request_mapping_digest(),
+            response_mapping_digest: builtin_json_grpc_response_mapping_digest(),
+            error_mapping_digest: builtin_json_grpc_error_mapping_digest(),
         }
     }
 
@@ -1746,7 +1808,7 @@ mod tests {
             descriptor_digest: digest('b'),
             remote_tool_name: "fixture_lookup".to_owned(),
             remote_input_schema_digest: digest('c'),
-            output_mapping_digest: digest('d'),
+            output_mapping_digest: builtin_json_mcp_output_mapping_digest(),
             protocol_profile_id: id(ResourceKind::PolicyRevision),
             protocol_profile_digest: digest('e'),
             discovery_semantic_evidence_digest: digest('f'),
@@ -1758,6 +1820,18 @@ mod tests {
         let mut wrong = http_json_descriptor();
         wrong.module_digest = digest('f');
         assert!(BuiltinJsonHttpCapabilityCodec::new(wrong).is_err());
+
+        let mut wrong_mapping = http_json_descriptor();
+        wrong_mapping.response_mapping_digest = digest('f');
+        assert!(BuiltinJsonHttpCapabilityCodec::new(wrong_mapping).is_err());
+
+        let mut wrong_protocol = grpc_json_descriptor();
+        wrong_protocol.protobuf_contract_digest = digest('f');
+        assert!(BuiltinJsonGrpcCapabilityCodec::new(wrong_protocol).is_err());
+
+        let mut wrong_mcp_mapping = mcp_json_descriptor();
+        wrong_mcp_mapping.output_mapping_digest = digest('f');
+        assert!(BuiltinJsonMcpToolCapabilityCodec::new(wrong_mcp_mapping).is_err());
 
         let mut http = InstalledHttpCodecRegistry::default();
         install_builtin_http_json_codecs(&mut http, [http_json_descriptor()]).unwrap();
