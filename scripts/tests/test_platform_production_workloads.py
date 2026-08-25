@@ -8,6 +8,7 @@ SCRIPT = pathlib.Path(__file__).parents[1] / "check-platform-production-workload
 SPEC = importlib.util.spec_from_file_location("production_workloads", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+DEPLOYMENT_CONFIG_DIGEST = "sha256:" + "a" * 64
 
 
 def kubernetes_list(*resources):
@@ -52,7 +53,15 @@ def deployment(role, digest):
         "spec": {
             "replicas": 2,
             "selector": {"matchLabels": labels(role)},
-            "template": {"metadata": {"labels": labels(role)}, "spec": pod_spec(role, digest)},
+            "template": {
+                "metadata": {
+                    "labels": labels(role),
+                    "annotations": {
+                        MODULE.CONFIG_DIGEST_ANNOTATION: DEPLOYMENT_CONFIG_DIGEST
+                    },
+                },
+                "spec": pod_spec(role, digest),
+            },
         },
         "status": {
             "observedGeneration": 3,
@@ -106,7 +115,7 @@ def valid_inputs():
     }
     candidate = {
         "component_images": digests,
-        "deployment_config_digest": "sha256:" + "a" * 64,
+        "deployment_config_digest": DEPLOYMENT_CONFIG_DIGEST,
     }
     capacity = {
         "deployment_config_digest": candidate["deployment_config_digest"],
@@ -168,6 +177,17 @@ class ProductionWorkloadTests(unittest.TestCase):
             "registry.example/drift@sha256:" + "f" * 64
         )
         with self.assertRaisesRegex(ValueError, "rollout is not fully updated"):
+            MODULE.validate_workloads(*inputs)
+
+    def test_rejects_pod_template_deployment_configuration_drift(self):
+        inputs = list(copy.deepcopy(valid_inputs()))
+        workload = inputs[2]["items"][0]
+        workload["spec"]["template"]["metadata"]["annotations"][
+            MODULE.CONFIG_DIGEST_ANNOTATION
+        ] = "sha256:" + "f" * 64
+        with self.assertRaisesRegex(
+            ValueError, "deployment configuration digest differs from CandidateManifest"
+        ):
             MODULE.validate_workloads(*inputs)
 
     def test_rejects_shared_identity_and_missing_default_deny(self):

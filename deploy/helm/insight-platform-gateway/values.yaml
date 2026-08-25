@@ -3,6 +3,8 @@ image:
   digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
   pullPolicy: IfNotPresent
 imagePullSecrets: []
+candidate:
+  deploymentConfigDigest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 namespace: platform-public
 port: 8080
 roles:

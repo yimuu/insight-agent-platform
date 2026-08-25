@@ -22,6 +22,7 @@ spec:
         insight.platform/workload-role: sandbox-wasi-executor
         insight.platform/component-role: sandbox_wasi_executor
       annotations:
+        insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
         checksum/config: {{ $config | sha256sum }}
     spec:
       serviceAccountName: {{ include "insight-platform-sandbox.executorName" . }}

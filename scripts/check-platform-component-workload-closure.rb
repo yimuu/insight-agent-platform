@@ -36,6 +36,8 @@ EXPECTED_COUNTS = {
   "egress_secret_broker" => 2
 }.freeze
 DIGEST_IMAGE = /\A[^\s@]+@sha256:[0-9a-f]{64}\z/
+CONFIG_DIGEST = /\Asha256:[0-9a-f]{64}\z/
+CONFIG_DIGEST_ANNOTATION = "insight.platform/deployment-config-digest"
 
 documents = CHARTS.flat_map do |chart|
   path = File.join(ROOT, "deploy", "helm", chart)
@@ -62,12 +64,16 @@ end
 pdbs = documents.select { |item| item["kind"] == "PodDisruptionBudget" }
 hpas = documents.select { |item| item["kind"] == "HorizontalPodAutoscaler" }
 identities = {}
+deployment_config_digests = []
 by_role.each do |role, role_workloads|
   digests = []
   role_workloads.each do |workload|
     namespace = workload.dig("metadata", "namespace")
     name = workload.dig("metadata", "name")
     labels = workload.dig("spec", "template", "metadata", "labels") || {}
+    config_digest = workload.dig("spec", "template", "metadata", "annotations", CONFIG_DIGEST_ANNOTATION)
+    failures << "#{role}/#{name} deployment configuration digest is invalid" unless CONFIG_DIGEST.match?(config_digest.to_s)
+    deployment_config_digests << config_digest
     pod = workload.dig("spec", "template", "spec") || {}
     account = pod["serviceAccountName"]
     identity = [namespace, account]
@@ -107,6 +113,7 @@ by_role.each do |role, role_workloads|
   end
   failures << "#{role} workload pools use different candidate image digests" unless digests.uniq.length == 1
 end
+failures << "workload pools do not share one CandidateManifest deployment configuration digest" unless deployment_config_digests.uniq.length == 1
 
 workload_namespaces = workloads.map { |item| item.dig("metadata", "namespace") }.uniq
 workload_namespaces.each do |namespace|

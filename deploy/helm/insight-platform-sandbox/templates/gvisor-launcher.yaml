@@ -24,6 +24,7 @@ spec:
         insight.platform/workload-role: sandbox-gvisor-executor
         insight.platform/component-role: sandbox_gvisor_executor
       annotations:
+        insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
         checksum/executor-config: {{ $executorConfig | sha256sum }}
         checksum/attestor-config: {{ $attestorConfig | sha256sum }}
     spec:

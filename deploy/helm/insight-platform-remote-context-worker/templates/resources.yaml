@@ -28,6 +28,8 @@ spec:
         {{- include "insight-platform-remote-context-worker.labels" . | nindent 8 }}
         insight.platform/workload-role: context-worker
         insight.platform/component-role: context_worker
+      annotations:
+        insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
     spec:
       serviceAccountName: {{ include "insight-platform-remote-context-worker.name" . }}
       automountServiceAccountToken: false

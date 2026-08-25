@@ -11,6 +11,8 @@ from pathlib import Path
 
 MAX_INPUT_BYTES = 16 * 1024 * 1024
 ROLE_LABEL = "insight.platform/component-role"
+CONFIG_DIGEST_ANNOTATION = "insight.platform/deployment-config-digest"
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 DIGEST_IMAGE = re.compile(r"^[^@\s]+@(?P<digest>sha256:[0-9a-f]{64})$")
 COMPONENT_ROLES = {
     "management_api",
@@ -73,6 +75,11 @@ def identity(resource):
 def role_of(resource):
     labels = resource.get("spec", {}).get("template", {}).get("metadata", {}).get("labels", {})
     return labels.get(ROLE_LABEL)
+
+
+def deployment_config_digest_of(resource):
+    annotations = resource.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations", {})
+    return annotations.get(CONFIG_DIGEST_ANNOTATION)
 
 
 def selector_matches(selector, labels):
@@ -138,7 +145,10 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
     if not isinstance(hpa_targets, dict) or set(hpa_targets) != COMPONENT_ROLES:
         failures.append("capacity HPA closure is incomplete")
         hpa_targets = {}
-    if capacity.get("deployment_config_digest") != candidate.get("deployment_config_digest"):
+    expected_config_digest = candidate.get("deployment_config_digest")
+    if not isinstance(expected_config_digest, str) or not DIGEST.fullmatch(expected_config_digest):
+        failures.append("candidate deployment configuration digest is invalid")
+    if capacity.get("deployment_config_digest") != expected_config_digest:
         failures.append("capacity and candidate deployment configuration digests differ")
 
     workloads = items(deployments, "Deployment") + items(daemonsets, "DaemonSet")
@@ -177,6 +187,11 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
             namespaces.add(namespace)
             spec = workload.get("spec", {})
             template = spec.get("template", {})
+            live_config_digest = deployment_config_digest_of(workload)
+            if live_config_digest != expected_config_digest:
+                failures.append(
+                    f"{role}/{name} deployment configuration digest differs from CandidateManifest"
+                )
             pod_spec = template.get("spec", {})
             pod_labels = template.get("metadata", {}).get("labels", {})
             service_account = pod_spec.get("serviceAccountName")
@@ -298,7 +313,11 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
 
     if failures:
         raise ValueError("\n".join(failures))
-    summary = {"schema_version": 1, "roles": summary_roles}
+    summary = {
+        "schema_version": 1,
+        "deployment_config_digest": expected_config_digest,
+        "roles": summary_roles,
+    }
     canonical = json.dumps(summary, sort_keys=True, separators=(",", ":")).encode()
     return summary, "sha256:" + hashlib.sha256(canonical).hexdigest()
 

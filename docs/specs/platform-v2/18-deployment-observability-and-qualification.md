@@ -288,6 +288,10 @@ fresh PostgreSQL 16 r249通过OAuth start/Receipt first-winner与secret-free per
 discovery/create/session/notification coalescing/refresh/reconcile/termination/recovery的完整L2事务套件。该证据只关闭durable PostgreSQL owner层；
 production Callback API、Cleanup Worker、MCP Host、Egress与真实OAuth/SSE endpoint的多进程L3及kill/restart仍须独立证据。
 
+r250把同一CandidateManifest `deployment_config_digest`冻结到全部17个主workload的PodTemplate注解。全局render检查要求摘要格式合法且跨pool
+唯一，live inventory preflight逐pool要求它与输入CandidateManifest完全相等，并将摘要写入canonical workload evidence；配置摘要漂移负向fixture
+通过。该证据关闭静态manifest及preflight实现缺口，不代表production-equivalent cluster已通过L4，也不替代进程内typed config启动自检。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

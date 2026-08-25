@@ -47,6 +47,8 @@ spec:
   template:
     metadata:
       labels: {{ include "insight-platform-artifact.labels" $context | nindent 8 }}
+      annotations:
+        insight.platform/deployment-config-digest: {{ $root.Values.candidate.deploymentConfigDigest | quote }}
     spec:
       serviceAccountName: {{ include "insight-platform-artifact.name" $context }}
       automountServiceAccountToken: false

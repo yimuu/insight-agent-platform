@@ -33,6 +33,8 @@ spec:
         {{- include "insight-platform-gateway.labels" $ctx | nindent 8 }}
         insight.platform/workload-role: {{ $role }}
         insight.platform/component-role: {{ $component.componentRole }}
+      annotations:
+        insight.platform/deployment-config-digest: {{ $root.Values.candidate.deploymentConfigDigest | quote }}
     spec:
       serviceAccountName: {{ include "insight-platform-gateway.name" $ctx }}
       automountServiceAccountToken: false

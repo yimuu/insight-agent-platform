@@ -225,6 +225,12 @@
 > 拒绝、transport loss、due recovery及Event唯一性。该证据关闭这两条路径的fresh-DB L2，不替代production Callback/Cleanup/MCP Host/Egress
 > 多进程、真实OAuth token endpoint与SSE subscription的L3 kill/restart门禁；后者仍是Phase 3待办。
 
+> 2026-08-26 implementation evidence：r250把CandidateManifest的单一`deployment_config_digest`写入全部11个chart、17个主workload
+> PodTemplate的`insight.platform/deployment-config-digest`不可变注解。跨chart render门禁要求所有15个role/17个pool携带合法且完全相同的
+> sha256摘要；production live inventory preflight再逐pool对照输入CandidateManifest并把该摘要纳入canonical workload evidence。新增配置漂移
+> 负向fixture后workload矩阵7项全部通过。该批关闭“image相同但部署配置漂移仍可能通过”的门禁缺口；它仍是manifest L1与L4 preflight
+> 实现证据，只有production-equivalent cluster真实抓取通过后才构成L4 rollout evidence，且不替代各进程启动时的typed config自校验。
+
 > CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer在fresh PostgreSQL 16 r181完成真实多进程L3 kill-window。fresh PostgreSQL 16 r199进一步把同一链路扩展为Timer→Signal→HumanTask→ChildAgent→Return：四次durable park后分别强制终止Worker，认证Signal/Task owner恢复外部等待，exact-binding child Run在自身Timer后由第五个Worker恢复并终态化，critical-control scanner结算terminal child link、复制typed output、恢复parent，最终parent/child均成功且parent finish Node唯一。该过程还修复terminal-child误用64项claim limit而非专属recovery batch limit，以及一个scanner失败会阻断其余critical-control lane的问题。Timer/Signal/Task/Child的独立进程kill/recovery L3至此闭合；Native Capability已在fresh PostgreSQL 16 r208以真实双进程kill/recovery闭合，Model、Remote Capability与Context external leaf仍待完成。
 
 > 2026-08-25 implementation evidence：public `/v1/runs/{run_id}/signals/{signal_key}`现已进入generated OpenAPI与Gateway；closed typed body、

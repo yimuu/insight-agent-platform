@@ -35,6 +35,8 @@ spec:
         {{- include "insight-platform-orchestration-worker.labels" . | nindent 8 }}
         insight.platform/workload-role: orchestration-worker
         insight.platform/component-role: scheduler_recovery
+      annotations:
+        insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
     spec:
       serviceAccountName: {{ include "insight-platform-orchestration-worker.name" . }}
       automountServiceAccountToken: false
