@@ -17,6 +17,7 @@ use crate::{
     ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits, ResourceId,
     ResourceKind, SandboxAbiVersion, SandboxCleanupPolicy, SandboxEntrypointKind,
     SandboxIsolationClass, SandboxRuntimeFamily, SecretPurpose, Sha256Digest,
+    SkillInstructionAudience, SkillInstructionPhase, SkillPackageEntryKind,
     StructuredOutputContract,
 };
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,14 @@ pub const MAX_RESOURCE_POLICIES: usize = 64;
 pub const MAX_FROZEN_SLOTS: usize = 512;
 pub const MAX_CODE_BYTES: usize = 128;
 pub const MAX_SANDBOX_RUNTIME_BUNDLE_BYTES: u64 = 67_108_864;
+pub const MAX_SKILL_PACKAGE_ENTRIES: usize = 512;
+pub const MAX_SKILL_INSTRUCTION_SECTIONS: usize = 128;
+pub const MAX_SKILL_REQUIREMENTS: usize = 256;
+pub const MAX_SKILL_PURPOSE_CHARS: usize = 1_024;
+pub const MAX_SKILL_PURPOSE_BYTES: usize = 4_096;
+pub const MAX_SKILL_MEDIA_TYPE_BYTES: usize = 128;
+pub const MAX_SKILL_PACKAGE_BYTES: u64 = 16_777_216;
+pub const MAX_SKILL_INSTRUCTION_TOKENS: u32 = 131_072;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -381,10 +390,359 @@ fn validate_agent_interface_schema(
     }
     Ok(())
 }
-authoring_spec!(SkillResourceSpec {
-    instruction_set_digest: Sha256Digest,
-    requirement_set_digest: Sha256Digest,
-});
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillInterface {
+    pub qualified_name: String,
+    pub purpose: String,
+    pub task_input_schema: ClosedJsonSchema,
+    pub produced_guidance_schema: ClosedJsonSchema,
+    pub compatible_agent_interfaces: Vec<ResourceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillPackageEntry {
+    pub path: String,
+    pub kind: SkillPackageEntryKind,
+    pub media_type: String,
+    pub byte_length: u64,
+    pub content_digest: Sha256Digest,
+    pub data_classification: crate::DataClassification,
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillPackageManifest {
+    pub schema_version: u32,
+    pub entries: Vec<SkillPackageEntry>,
+    pub total_byte_length: u64,
+    pub canonical_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillArtifactSliceRef {
+    pub path: String,
+    pub content_digest: Sha256Digest,
+    pub byte_offset: u64,
+    pub byte_length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillInstructionSection {
+    pub section_id: String,
+    pub phase: SkillInstructionPhase,
+    pub audience: SkillInstructionAudience,
+    pub body: SkillArtifactSliceRef,
+    pub max_tokens: u32,
+    pub data_classification: crate::DataClassification,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillCapabilityFeature {
+    Deferred,
+    InputRequired,
+    Callback,
+    Poll,
+    Progress,
+    Cancellation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillModelFeature {
+    ToolUse,
+    ParallelToolUse,
+    StructuredOutput,
+    CombinedToolAndMessage,
+    TextInput,
+    ImageInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillCapabilityRequirement {
+    pub alias: String,
+    pub interface_revision: ExactVersionRef,
+    pub required_effect_ceiling: Effect,
+    pub required_features: Vec<SkillCapabilityFeature>,
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillContextRequirement {
+    pub alias: String,
+    pub interface_revision: ExactVersionRef,
+    pub required_classification_ceiling: crate::DataClassification,
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillModelRequirement {
+    pub alias: String,
+    pub required_features: Vec<SkillModelFeature>,
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillResourceSpec {
+    pub authoring_package: AuthoringPackage,
+    pub contract_digest: Sha256Digest,
+    pub dependency_versions: Vec<ExactVersionRef>,
+    pub policy_versions: Vec<ExactVersionRef>,
+    pub interface: SkillInterface,
+    pub manifest: SkillPackageManifest,
+    pub instruction_sections: Vec<SkillInstructionSection>,
+    pub skill_dependencies: Vec<ExactVersionRef>,
+    pub capability_requirements: Vec<SkillCapabilityRequirement>,
+    pub context_requirements: Vec<SkillContextRequirement>,
+    pub model_requirements: Vec<SkillModelRequirement>,
+    pub instruction_set_digest: Sha256Digest,
+    pub requirement_set_digest: Sha256Digest,
+}
+
+impl SkillResourceSpec {
+    fn validate(&self) -> Result<(), ResourceContractError> {
+        self.authoring_package.validate()?;
+        validate_exact_versions(&self.dependency_versions, MAX_RESOURCE_DEPENDENCIES)?;
+        validate_policy_versions(&self.policy_versions)?;
+        self.interface.validate()?;
+        self.manifest.validate(&self.authoring_package)?;
+        validate_exact_versions(&self.skill_dependencies, MAX_RESOURCE_DEPENDENCIES)?;
+        if self
+            .skill_dependencies
+            .iter()
+            .any(|dependency| dependency.resource_kind != ResourceKind::SkillRevision)
+            || self.instruction_sections.is_empty()
+            || self.instruction_sections.len() > MAX_SKILL_INSTRUCTION_SECTIONS
+            || self.capability_requirements.len() > MAX_SKILL_REQUIREMENTS
+            || self.context_requirements.len() > MAX_SKILL_REQUIREMENTS
+            || self.model_requirements.len() > MAX_SKILL_REQUIREMENTS
+        {
+            return Err(ResourceContractError::InvalidSkillContract);
+        }
+        let entries = self
+            .manifest
+            .entries
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut section_ids = BTreeSet::new();
+        let mut instruction_tokens = 0_u32;
+        for section in &self.instruction_sections {
+            let entry = entries
+                .get(section.body.path.as_str())
+                .ok_or(ResourceContractError::InvalidSkillContract)?;
+            instruction_tokens = instruction_tokens
+                .checked_add(section.max_tokens)
+                .ok_or(ResourceContractError::UnboundedValue)?;
+            if !section_ids.insert(&section.section_id)
+                || !is_code(&section.section_id)
+                || section.max_tokens == 0
+                || instruction_tokens > MAX_SKILL_INSTRUCTION_TOKENS
+                || entry.kind != SkillPackageEntryKind::Instruction
+                || entry.content_digest != section.body.content_digest
+                || entry.data_classification != section.data_classification
+                || section.body.byte_length == 0
+                || section
+                    .body
+                    .byte_offset
+                    .checked_add(section.body.byte_length)
+                    .is_none_or(|end| end > entry.byte_length)
+            {
+                return Err(ResourceContractError::InvalidSkillContract);
+            }
+        }
+        validate_skill_requirements(self)?;
+        let instruction_set_digest: Sha256Digest = canonical_digest(
+            &serde_json::to_value(&self.instruction_sections)
+                .map_err(|_| ResourceContractError::Canonicalization)?,
+        )
+        .map_err(|_| ResourceContractError::Canonicalization)?
+        .parse()
+        .map_err(|_| ResourceContractError::Canonicalization)?;
+        let requirement_set_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "capability": self.capability_requirements,
+            "context": self.context_requirements,
+            "model": self.model_requirements,
+            "skill_dependencies": self.skill_dependencies,
+        }))
+        .map_err(|_| ResourceContractError::Canonicalization)?
+        .parse()
+        .map_err(|_| ResourceContractError::Canonicalization)?;
+        if instruction_set_digest != self.instruction_set_digest
+            || requirement_set_digest != self.requirement_set_digest
+        {
+            return Err(ResourceContractError::InvalidSkillContract);
+        }
+        Ok(())
+    }
+}
+
+impl SkillInterface {
+    fn validate(&self) -> Result<(), ResourceContractError> {
+        if !is_qualified_skill_name(&self.qualified_name)
+            || !is_name(&self.purpose, MAX_SKILL_PURPOSE_CHARS)
+            || self.purpose.len() > MAX_SKILL_PURPOSE_BYTES
+            || self.compatible_agent_interfaces.is_empty()
+            || self.compatible_agent_interfaces.len() > MAX_FROZEN_SLOTS
+            || !self
+                .compatible_agent_interfaces
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || self
+                .compatible_agent_interfaces
+                .iter()
+                .any(|interface| interface.kind() != ResourceKind::AgentInterfaceRevision)
+        {
+            return Err(ResourceContractError::InvalidSkillContract);
+        }
+        self.task_input_schema
+            .validate()
+            .map_err(|_| ResourceContractError::InvalidSkillContract)?;
+        self.produced_guidance_schema
+            .validate()
+            .map_err(|_| ResourceContractError::InvalidSkillContract)
+    }
+}
+
+impl SkillPackageManifest {
+    fn validate(&self, package: &AuthoringPackage) -> Result<(), ResourceContractError> {
+        if self.schema_version != 1
+            || self.entries.is_empty()
+            || self.entries.len() > MAX_SKILL_PACKAGE_ENTRIES
+            || self.total_byte_length == 0
+            || self.total_byte_length > MAX_SKILL_PACKAGE_BYTES
+            || self.canonical_digest != package.manifest_digest
+            || !self
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].path < pair[1].path)
+        {
+            return Err(ResourceContractError::InvalidSkillContract);
+        }
+        let mut total = 0_u64;
+        let mut manifest_count = 0_u8;
+        for entry in &self.entries {
+            total = total
+                .checked_add(entry.byte_length)
+                .ok_or(ResourceContractError::UnboundedValue)?;
+            if entry.kind == SkillPackageEntryKind::Manifest {
+                manifest_count = manifest_count.saturating_add(1);
+            }
+            if !valid_skill_entry(entry) {
+                return Err(ResourceContractError::InvalidSkillContract);
+            }
+        }
+        let digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "entries": self.entries,
+            "schema_version": self.schema_version,
+            "total_byte_length": self.total_byte_length,
+        }))
+        .map_err(|_| ResourceContractError::Canonicalization)?
+        .parse()
+        .map_err(|_| ResourceContractError::Canonicalization)?;
+        if total > self.total_byte_length || manifest_count != 1 || digest != self.canonical_digest
+        {
+            return Err(ResourceContractError::InvalidSkillContract);
+        }
+        Ok(())
+    }
+}
+
+fn valid_skill_entry(entry: &SkillPackageEntry) -> bool {
+    let prefix_matches = match entry.kind {
+        SkillPackageEntryKind::Manifest => entry.path == "skill.json",
+        SkillPackageEntryKind::Instruction => entry.path.starts_with("instructions/"),
+        SkillPackageEntryKind::Reference => entry.path.starts_with("references/"),
+        SkillPackageEntryKind::Example => entry.path.starts_with("examples/"),
+        SkillPackageEntryKind::Asset => entry.path.starts_with("assets/"),
+    };
+    let media_allowed = match entry.kind {
+        SkillPackageEntryKind::Manifest | SkillPackageEntryKind::Example => {
+            entry.media_type == "application/json"
+        }
+        SkillPackageEntryKind::Instruction => entry.media_type == "text/markdown",
+        SkillPackageEntryKind::Reference => matches!(
+            entry.media_type.as_str(),
+            "application/json" | "application/pdf" | "text/markdown" | "text/plain"
+        ),
+        SkillPackageEntryKind::Asset => matches!(
+            entry.media_type.as_str(),
+            "application/json"
+                | "image/jpeg"
+                | "image/png"
+                | "image/webp"
+                | "text/markdown"
+                | "text/plain"
+        ),
+    };
+    prefix_matches
+        && media_allowed
+        && is_relative_path(&entry.path)
+        && !entry.path.contains('\\')
+        && entry
+            .path
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+        && entry.byte_length > 0
+        && entry.byte_length <= MAX_SKILL_PACKAGE_BYTES
+        && !entry.executable
+        && !entry.media_type.is_empty()
+        && entry.media_type.len() <= MAX_SKILL_MEDIA_TYPE_BYTES
+        && entry
+            .media_type
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'+' | b'-' | b'.'))
+}
+
+fn validate_skill_requirements(spec: &SkillResourceSpec) -> Result<(), ResourceContractError> {
+    let mut aliases = BTreeSet::new();
+    for requirement in &spec.capability_requirements {
+        if !aliases.insert(requirement.alias.as_str())
+            || !is_code(&requirement.alias)
+            || requirement.interface_revision.resource_kind
+                != ResourceKind::CapabilityInterfaceRevision
+            || requirement.interface_revision.validate().is_err()
+            || !requirement
+                .required_features
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        {
+            return Err(ResourceContractError::InvalidSkillContract);
+        }
+    }
+    for requirement in &spec.context_requirements {
+        if !aliases.insert(requirement.alias.as_str())
+            || !is_code(&requirement.alias)
+            || requirement.interface_revision.resource_kind
+                != ResourceKind::ContextSourceInterfaceRevision
+            || requirement.interface_revision.validate().is_err()
+        {
+            return Err(ResourceContractError::InvalidSkillContract);
+        }
+    }
+    for requirement in &spec.model_requirements {
+        if !aliases.insert(requirement.alias.as_str())
+            || !is_code(&requirement.alias)
+            || requirement.required_features.is_empty()
+            || !requirement
+                .required_features
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        {
+            return Err(ResourceContractError::InvalidSkillContract);
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1282,7 +1640,20 @@ impl ResourceDocument {
         }
         match self {
             Self::Agent(spec) => common!(spec),
-            Self::Skill(spec) => common!(spec),
+            Self::Skill(spec) => {
+                common!(spec);
+                refs.extend(spec.skill_dependencies.iter());
+                refs.extend(
+                    spec.capability_requirements
+                        .iter()
+                        .map(|requirement| &requirement.interface_revision),
+                );
+                refs.extend(
+                    spec.context_requirements
+                        .iter()
+                        .map(|requirement| &requirement.interface_revision),
+                );
+            }
             Self::CapabilityInterface(spec) => common!(spec),
             Self::CapabilityImplementation(spec) => {
                 common!(spec);
@@ -2315,6 +2686,7 @@ pub enum ResourceContractError {
     KindMismatch,
     InvalidArtifact,
     InvalidAgentContract,
+    InvalidSkillContract,
     InvalidCode,
     InvalidEntrypoint,
     InvalidCapabilityContract,
@@ -2341,6 +2713,9 @@ impl fmt::Display for ResourceContractError {
             Self::InvalidArtifact => formatter.write_str("authoring artifact is invalid"),
             Self::InvalidAgentContract => {
                 formatter.write_str("Agent interface contract has an invalid closed shape")
+            }
+            Self::InvalidSkillContract => {
+                formatter.write_str("Skill package contract has an invalid closed shape")
             }
             Self::InvalidCode => formatter.write_str("bounded code is invalid"),
             Self::InvalidEntrypoint => {
@@ -2598,6 +2973,20 @@ fn is_code(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
 }
 
+fn is_qualified_skill_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_CODE_BYTES
+        && value.split('.').all(|segment| {
+            let mut bytes = segment.bytes();
+            bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+                && bytes.all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+        })
+}
+
 fn is_relative_path(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 512
@@ -2627,6 +3016,17 @@ mod tests {
             .unwrap()
     }
 
+    fn closed_object_schema() -> ClosedJsonSchema {
+        ClosedJsonSchema::build(json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+        }))
+        .unwrap()
+    }
+
     fn qualification_artifact() -> ArtifactRef {
         ArtifactRef::new(
             id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b80"),
@@ -2637,6 +3037,143 @@ mod tests {
             Some("qualification.json".to_owned()),
         )
         .unwrap()
+    }
+
+    fn skill_spec() -> SkillResourceSpec {
+        let entries = vec![
+            SkillPackageEntry {
+                path: "instructions/review.md".to_owned(),
+                kind: SkillPackageEntryKind::Instruction,
+                media_type: "text/markdown".to_owned(),
+                byte_length: 64,
+                content_digest: digest('1'),
+                data_classification: DataClassification::Internal,
+                executable: false,
+            },
+            SkillPackageEntry {
+                path: "skill.json".to_owned(),
+                kind: SkillPackageEntryKind::Manifest,
+                media_type: "application/json".to_owned(),
+                byte_length: 64,
+                content_digest: digest('2'),
+                data_classification: DataClassification::Internal,
+                executable: false,
+            },
+        ];
+        let manifest_digest: Sha256Digest = canonical_digest(&json!({
+            "entries": entries,
+            "schema_version": 1,
+            "total_byte_length": 128,
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+        let sections = vec![SkillInstructionSection {
+            section_id: "review".to_owned(),
+            phase: SkillInstructionPhase::Validation,
+            audience: SkillInstructionAudience::Validator,
+            body: SkillArtifactSliceRef {
+                path: "instructions/review.md".to_owned(),
+                content_digest: digest('1'),
+                byte_offset: 0,
+                byte_length: 64,
+            },
+            max_tokens: 32,
+            data_classification: DataClassification::Internal,
+        }];
+        let instruction_set_digest: Sha256Digest =
+            canonical_digest(&serde_json::to_value(&sections).unwrap())
+                .unwrap()
+                .parse()
+                .unwrap();
+        let requirement_set_digest: Sha256Digest = canonical_digest(&json!({
+            "capability": [],
+            "context": [],
+            "model": [],
+            "skill_dependencies": [],
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+        SkillResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: qualification_artifact(),
+                manifest_digest: manifest_digest.clone(),
+            },
+            contract_digest: digest('3'),
+            dependency_versions: vec![],
+            policy_versions: vec![],
+            interface: SkillInterface {
+                qualified_name: "review.method".to_owned(),
+                purpose: "Review a bounded result".to_owned(),
+                task_input_schema: closed_object_schema(),
+                produced_guidance_schema: closed_object_schema(),
+                compatible_agent_interfaces: vec![id("aif_0198f1c3-8f49-7c3e-b1f3-773c28367b81")],
+            },
+            manifest: SkillPackageManifest {
+                schema_version: 1,
+                entries,
+                total_byte_length: 128,
+                canonical_digest: manifest_digest,
+            },
+            instruction_sections: sections,
+            skill_dependencies: vec![],
+            capability_requirements: vec![],
+            context_requirements: vec![],
+            model_requirements: vec![],
+            instruction_set_digest,
+            requirement_set_digest,
+        }
+    }
+
+    #[test]
+    fn skill_package_is_digest_slice_and_execution_closed() {
+        let spec = skill_spec();
+        ResourceDocument::Skill(spec.clone()).validate().unwrap();
+
+        let mut traversal = spec.clone();
+        traversal.manifest.entries[0].path = "instructions/../escape.md".to_owned();
+        traversal.manifest.canonical_digest = canonical_digest(&json!({
+            "entries": traversal.manifest.entries,
+            "schema_version": traversal.manifest.schema_version,
+            "total_byte_length": traversal.manifest.total_byte_length,
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+        traversal.authoring_package.manifest_digest = traversal.manifest.canonical_digest.clone();
+        assert_eq!(
+            ResourceDocument::Skill(traversal).validate(),
+            Err(ResourceContractError::InvalidSkillContract)
+        );
+
+        let mut executable = spec.clone();
+        executable.manifest.entries[0].executable = true;
+        executable.manifest.canonical_digest = canonical_digest(&json!({
+            "entries": executable.manifest.entries,
+            "schema_version": executable.manifest.schema_version,
+            "total_byte_length": executable.manifest.total_byte_length,
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+        executable.authoring_package.manifest_digest = executable.manifest.canonical_digest.clone();
+        assert_eq!(
+            ResourceDocument::Skill(executable).validate(),
+            Err(ResourceContractError::InvalidSkillContract)
+        );
+
+        let mut escaped_slice = spec;
+        escaped_slice.instruction_sections[0].body.byte_offset = 1;
+        escaped_slice.instruction_set_digest =
+            canonical_digest(&serde_json::to_value(&escaped_slice.instruction_sections).unwrap())
+                .unwrap()
+                .parse()
+                .unwrap();
+        assert_eq!(
+            ResourceDocument::Skill(escaped_slice).validate(),
+            Err(ResourceContractError::InvalidSkillContract)
+        );
     }
 
     fn policy_binding(

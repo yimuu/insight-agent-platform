@@ -8,8 +8,11 @@ use insight_platform_contracts::{
     PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
     ResourceId, ResourceKind, RunBindingsSnapshot, SandboxCleanupPolicy, SandboxEntrypointKind,
     SandboxIsolationClass, SandboxPackageResourceSpec, SandboxProfileDeploymentClosure,
-    SandboxProfileResourceSpec, SandboxRuntimeFamily, Sha256Digest, SkillDeploymentClosure,
-    SkillResourceSpec, TenantConfig, TenantPrincipalPayload, ValidationSummary,
+    SandboxProfileResourceSpec, SandboxRuntimeFamily, Sha256Digest, SkillArtifactSliceRef,
+    SkillDeploymentClosure, SkillInstructionAudience, SkillInstructionPhase,
+    SkillInstructionSection, SkillInterface, SkillPackageEntry, SkillPackageEntryKind,
+    SkillPackageManifest, SkillResourceSpec, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary,
 };
 use insight_platform_postgres::{
     repository::{
@@ -1831,16 +1834,92 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         });
     }
 
+    let skill_entries = vec![
+        SkillPackageEntry {
+            path: "instructions/method.md".to_owned(),
+            kind: SkillPackageEntryKind::Instruction,
+            media_type: "text/markdown".to_owned(),
+            byte_length: 8,
+            content_digest: digest('8'),
+            data_classification: DataClassification::Internal,
+            executable: false,
+        },
+        SkillPackageEntry {
+            path: "skill.json".to_owned(),
+            kind: SkillPackageEntryKind::Manifest,
+            media_type: "application/json".to_owned(),
+            byte_length: 8,
+            content_digest: digest('9'),
+            data_classification: DataClassification::Internal,
+            executable: false,
+        },
+    ];
+    let skill_manifest_digest: Sha256Digest =
+        insight_platform_contracts::canonical_digest(&json!({
+            "entries": skill_entries,
+            "schema_version": 1,
+            "total_byte_length": 16,
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let instruction_sections = vec![SkillInstructionSection {
+        section_id: "method".to_owned(),
+        phase: SkillInstructionPhase::Planning,
+        audience: SkillInstructionAudience::Planner,
+        body: SkillArtifactSliceRef {
+            path: "instructions/method.md".to_owned(),
+            content_digest: digest('8'),
+            byte_offset: 0,
+            byte_length: 8,
+        },
+        max_tokens: 8,
+        data_classification: DataClassification::Internal,
+    }];
+    let instruction_set_digest: Sha256Digest = insight_platform_contracts::canonical_digest(
+        &serde_json::to_value(&instruction_sections).unwrap(),
+    )
+    .unwrap()
+    .parse()
+    .unwrap();
+    let requirement_set_digest: Sha256Digest =
+        insight_platform_contracts::canonical_digest(&json!({
+            "capability": [],
+            "context": [],
+            "model": [],
+            "skill_dependencies": [],
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
     let skill_document = ResourceDocument::Skill(SkillResourceSpec {
         authoring_package: AuthoringPackage {
             artifact: qualification_artifact.clone(),
-            manifest_digest: digest('1'),
+            manifest_digest: skill_manifest_digest.clone(),
         },
         contract_digest: digest('2'),
         dependency_versions: vec![],
         policy_versions: vec![policy_bindings[0].revision.clone()],
-        instruction_set_digest: digest('3'),
-        requirement_set_digest: digest('4'),
+        interface: SkillInterface {
+            qualified_name: "review.method".to_owned(),
+            purpose: "Provide a bounded review method".to_owned(),
+            task_input_schema: agent_schema(),
+            produced_guidance_schema: agent_schema(),
+            compatible_agent_interfaces: vec![id(AGENT_INTERFACE_ID)],
+        },
+        manifest: SkillPackageManifest {
+            schema_version: 1,
+            entries: skill_entries,
+            total_byte_length: 16,
+            canonical_digest: skill_manifest_digest,
+        },
+        instruction_sections,
+        skill_dependencies: vec![],
+        capability_requirements: vec![],
+        context_requirements: vec![],
+        model_requirements: vec![],
+        instruction_set_digest,
+        requirement_set_digest,
     });
     let skill_draft = ResourceDraftPayload {
         display_name: "Qualified deployment skill".to_owned(),
