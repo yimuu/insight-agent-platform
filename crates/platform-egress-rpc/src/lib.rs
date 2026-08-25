@@ -13,6 +13,10 @@ use insight_platform_capability_adapters::{
     CapabilityTransportCancelRequest, GrpcNetworkTransport, GrpcTransportRequest,
     GrpcTransportResponse, HttpNetworkTransport, HttpTransportRequest, HttpTransportResponse,
 };
+use insight_platform_context::{
+    RemoteContextFailure, RemoteContextSearchConnector, RemoteContextSearchRequest,
+    RemoteContextSearchResponse,
+};
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, JsonLimits, ResourceKind, SecretResolutionPolicy,
     Sha256Digest,
@@ -61,6 +65,8 @@ pub const MODEL_WORKER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/work
 pub const CAPABILITY_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/capability-worker";
 pub const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
+pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/context-worker";
 pub const MAX_EGRESS_METADATA_BYTES_HARD: usize = 1_048_576;
 pub const MAX_EGRESS_PAYLOAD_BYTES_HARD: usize = 64 * 1_048_576;
 pub const MAX_EGRESS_RPC_MESSAGE_BYTES_HARD: usize =
@@ -78,6 +84,8 @@ const UNARY_CAPABILITY_GRPC: &str = "capability_grpc.unary/v1";
 const CAPABILITY_GRPC_OUTCOME: &str = "capability_grpc.outcome/v1";
 const CANCEL_CAPABILITY_GRPC: &str = "capability_grpc.cancel/v1";
 const CAPABILITY_GRPC_CANCEL_OUTCOME: &str = "capability_grpc.cancel_outcome/v1";
+const QUERY_REMOTE_CONTEXT: &str = "remote_context.query/v1";
+const REMOTE_CONTEXT_OUTCOME: &str = "remote_context.outcome/v1";
 const EXCHANGE_MCP_OAUTH_AUTHORIZATION_CODE: &str = "mcp_oauth.exchange_authorization_code/v1";
 const MCP_OAUTH_AUTHORIZATION_CODE_OUTCOME: &str = "mcp_oauth.authorization_code_outcome/v1";
 const DELETE_MCP_OAUTH_PKCE_SECRET: &str = "mcp_oauth.delete_pkce_secret/v1";
@@ -502,6 +510,7 @@ impl McpStreamableHttpSubscriptionSink for EgressMcpSubscriptionBridge {
 pub enum EgressCallerRole {
     ModelWorker,
     CapabilityWorker,
+    ContextWorker,
     McpHost,
 }
 
@@ -510,6 +519,7 @@ impl EgressCallerRole {
         match uri {
             MODEL_WORKER_WORKLOAD_IDENTITY => Some(Self::ModelWorker),
             CAPABILITY_WORKER_WORKLOAD_IDENTITY => Some(Self::CapabilityWorker),
+            CONTEXT_WORKER_WORKLOAD_IDENTITY => Some(Self::ContextWorker),
             MCP_HOST_WORKLOAD_IDENTITY => Some(Self::McpHost),
             _ => None,
         }
@@ -571,6 +581,19 @@ fn require_role<T>(request: &Request<T>, expected: EgressCallerRole) -> Result<(
         Err(Status::permission_denied(
             "workload role cannot invoke this Egress operation",
         ))
+    }
+}
+
+fn remote_context_rpc_failure(code: &str, retryable: bool) -> RemoteContextFailure {
+    RemoteContextFailure {
+        code: code.to_owned(),
+        class: if retryable {
+            insight_platform_context::RemoteContextFailureClass::RetryableBeforeDispatch
+        } else {
+            insight_platform_context::RemoteContextFailureClass::RejectedBeforeDispatch
+        },
+        safe_message: "Remote Context Egress RPC failed before dispatch".to_owned(),
+        dispatch_evidence_digest: None,
     }
 }
 
@@ -868,6 +891,47 @@ impl GrpcNetworkTransport for EgressBrokerGrpcClient {
             |client, request| Box::pin(client.cancel_capability_grpc(request)),
         )
         .await
+    }
+}
+
+#[async_trait]
+impl RemoteContextSearchConnector for EgressBrokerGrpcClient {
+    async fn query(
+        &self,
+        request: RemoteContextSearchRequest,
+    ) -> Result<RemoteContextSearchResponse, RemoteContextFailure> {
+        request
+            .validate_at(Utc::now())
+            .map_err(|_| remote_context_rpc_failure("context_egress_rpc_request_invalid", false))?;
+        let envelope = encode_metadata(&request, QUERY_REMOTE_CONTEXT, self.limits)
+            .map_err(|_| remote_context_rpc_failure("context_egress_rpc_request_invalid", false))?;
+        let mut client = self.client.clone();
+        let response = client
+            .query_remote_context(Request::new(envelope))
+            .await
+            .map_err(|_| remote_context_rpc_failure("context_egress_rpc_unavailable", true))?;
+        match decode_metadata::<UnaryOutcome<RemoteContextSearchResponse, RemoteContextFailure>>(
+            response.into_inner(),
+            REMOTE_CONTEXT_OUTCOME,
+            self.limits,
+        )
+        .map_err(|_| remote_context_rpc_failure("context_egress_rpc_response_invalid", true))?
+        {
+            UnaryOutcome::Succeeded(response)
+                if response.validate_for(&request, Utc::now()).is_ok() =>
+            {
+                Ok(response)
+            }
+            UnaryOutcome::Succeeded(_) => Err(remote_context_rpc_failure(
+                "context_egress_rpc_response_invalid",
+                true,
+            )),
+            UnaryOutcome::Failed(failure) if failure.validate().is_ok() => Err(failure),
+            UnaryOutcome::Failed(_) => Err(remote_context_rpc_failure(
+                "context_egress_rpc_response_invalid",
+                true,
+            )),
+        }
     }
 }
 
@@ -1336,6 +1400,7 @@ pub struct EgressBrokerGrpcService<M, H, G> {
     model: Arc<M>,
     http: Arc<H>,
     grpc: Arc<G>,
+    remote_context: Option<Arc<dyn RemoteContextSearchConnector>>,
     mcp_oauth: Option<Arc<dyn McpOAuthCredentialBroker>>,
     mcp_oauth_pkce_cleaner: Option<Arc<dyn McpOAuthPkceSecretCleaner>>,
     mcp_streamable_http: Option<Arc<dyn McpStreamableHttpConnector>>,
@@ -1350,6 +1415,7 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
             model,
             http,
             grpc,
+            remote_context: None,
             mcp_oauth: None,
             mcp_oauth_pkce_cleaner: None,
             mcp_streamable_http: None,
@@ -1357,6 +1423,11 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
             mcp_subscription_bridge: None,
             limits,
         }
+    }
+
+    pub fn with_remote_context(mut self, connector: Arc<dyn RemoteContextSearchConnector>) -> Self {
+        self.remote_context = Some(connector);
+        self
     }
 
     pub fn with_mcp_oauth(
@@ -1534,6 +1605,38 @@ where
         Ok(Response::new(encode_metadata(
             &outcome,
             CAPABILITY_GRPC_CANCEL_OUTCOME,
+            self.limits,
+        )?))
+    }
+
+    async fn query_remote_context(
+        &self,
+        request: Request<ClosedEgressEnvelope>,
+    ) -> Result<Response<ClosedEgressEnvelope>, Status> {
+        require_role(&request, EgressCallerRole::ContextWorker)?;
+        let connector = self
+            .remote_context
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("Remote Context connector is not installed"))?;
+        let request: RemoteContextSearchRequest =
+            decode_metadata(request.into_inner(), QUERY_REMOTE_CONTEXT, self.limits)?;
+        request
+            .validate_at(Utc::now())
+            .map_err(|_| Status::invalid_argument("invalid Remote Context request"))?;
+        let outcome = match connector.query(request).await {
+            Ok(response) => UnaryOutcome::Succeeded(response),
+            Err(failure) => {
+                failure.validate().map_err(|_| {
+                    Status::failed_precondition(
+                        "Remote Context connector returned invalid failure evidence",
+                    )
+                })?;
+                UnaryOutcome::Failed(failure)
+            }
+        };
+        Ok(Response::new(encode_metadata(
+            &outcome,
+            REMOTE_CONTEXT_OUTCOME,
             self.limits,
         )?))
     }
@@ -2641,6 +2744,18 @@ mod tests {
         }
     }
 
+    struct FixtureRemoteContext;
+
+    #[async_trait]
+    impl RemoteContextSearchConnector for FixtureRemoteContext {
+        async fn query(
+            &self,
+            _request: RemoteContextSearchRequest,
+        ) -> Result<RemoteContextSearchResponse, RemoteContextFailure> {
+            unreachable!("role gate fixture does not dispatch Remote Context")
+        }
+    }
+
     struct FixtureOAuth;
 
     #[async_trait]
@@ -2677,6 +2792,8 @@ mod tests {
         model_key_pem: String,
         mcp_certificate_pem: String,
         mcp_key_pem: String,
+        context_certificate_pem: String,
+        context_key_pem: String,
         unknown_certificate_pem: String,
         unknown_key_pem: String,
     }
@@ -2713,6 +2830,7 @@ mod tests {
             client(CAPABILITY_WORKER_WORKLOAD_IDENTITY);
         let (model_certificate_pem, model_key_pem) = client(MODEL_WORKER_WORKLOAD_IDENTITY);
         let (mcp_certificate_pem, mcp_key_pem) = client(MCP_HOST_WORKLOAD_IDENTITY);
+        let (context_certificate_pem, context_key_pem) = client(CONTEXT_WORKER_WORKLOAD_IDENTITY);
         let (unknown_certificate_pem, unknown_key_pem) =
             client("spiffe://insight.platform/workload/api");
         MtlsFixture {
@@ -2725,6 +2843,8 @@ mod tests {
             model_key_pem,
             mcp_certificate_pem,
             mcp_key_pem,
+            context_certificate_pem,
+            context_key_pem,
             unknown_certificate_pem,
             unknown_key_pem,
         }
@@ -2761,7 +2881,8 @@ mod tests {
                 Arc::new(FixtureGrpc),
                 limits,
             )
-            .with_mcp_oauth(Arc::new(FixtureOAuth), Arc::new(FixturePkceCleaner)),
+            .with_mcp_oauth(Arc::new(FixtureOAuth), Arc::new(FixturePkceCleaner))
+            .with_remote_context(Arc::new(FixtureRemoteContext)),
         );
         let service = tonic::service::interceptor::InterceptedService::new(
             service,
@@ -2809,6 +2930,36 @@ mod tests {
             outcome,
             UnaryOutcome::Succeeded(CapabilityTransportCancelOutcome::Accepted)
         ));
+
+        let remote_envelope = encode_metadata(
+            &serde_json::json!({"schema_version": 1}),
+            QUERY_REMOTE_CONTEXT,
+            limits,
+        )
+        .unwrap();
+        assert_eq!(
+            capability
+                .query_remote_context(Request::new(remote_envelope.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let mut context = connect(
+            address,
+            &fixture,
+            &fixture.context_certificate_pem,
+            &fixture.context_key_pem,
+        )
+        .await;
+        assert_eq!(
+            context
+                .query_remote_context(Request::new(remote_envelope))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
 
         let mut model = connect(
             address,
