@@ -137,8 +137,11 @@ async fn run() -> Result<(), ProcessError> {
     let process_generation_id =
         ResourceId::from_uuid_v7(ResourceKind::WorkerProcessGeneration, Uuid::now_v7())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let pools = LocalWorkerPools::new(config.worker_manifest.clone(), process_generation_id)
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let pools = LocalWorkerPools::new(
+        config.worker_manifest.clone(),
+        process_generation_id.clone(),
+    )
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
     let driver = ContextWorkerDriver::new(
         repository,
         pools,
@@ -146,6 +149,7 @@ async fn run() -> Result<(), ProcessError> {
         config.driver_config()?,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    eprintln!("platform-context-worker started generation={process_generation_id}");
     let cancellation = CancellationToken::new();
     let worker_cancellation = cancellation.clone();
     let worker = tokio::spawn(async move { driver.run(worker_cancellation).await });

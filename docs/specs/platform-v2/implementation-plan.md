@@ -137,6 +137,12 @@
 > `-D warnings` clippy均通过。该批完成production process/deployment接线，但真实双进程commit-window kill/recovery fixture与remote backend
 > protocol L3仍待完成，不能据此声明Context L3闭合。
 
+> 2026-08-25 implementation evidence：fresh PostgreSQL 16 r240以真实`platform-context-worker`关闭NativeCatalog process L3。错
+> installed-adapter digest的进程启动后零claim，Job保持ready且attempt/worker/quota均未变化；正确进程在Context terminal commit的数据库
+> trigger窗口被强杀，测试到期其lease后由第二进程通过bounded owner scanner恢复同一Job并完成物理attempt 2。最终仅有一个
+> `context_observation` RunValue、一个`context.lease_recovered` Event，terminal Job清除worker/lease/quota reservation。该证据不覆盖remote
+> Context backend protocol、隔舱容量或L4 rollout。
+
 > 2026-08-25 implementation evidence：runtime新增production orchestration composition，明确把business claim/heartbeat连接与
 > critical-control Plan/RunValue/Skill读取、owner commit及Safety scanner连接分开，并用同一mTLS Artifact Scheduler client组合exact
 > Plan materializer、Capability/Model admission、durable Plan driver、lease-fenced executor和coordinator。独立binary和Helm角色已在

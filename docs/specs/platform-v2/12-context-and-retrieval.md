@@ -593,7 +593,9 @@ Text2SQL `ReadOnlySqlPlan`同时冻结catalog Query/Observation/projection、dat
 Interface/Deployment/Effect；generic Invocation admission在同一事务锁定这些事实，只接受规范名精确为`database.query.readonly`且Effect为
 ReadOnly的已绑定Capability。成功/replay、错误名称/Effect、foreign Run/citation与Observation drift fixture均通过，拒绝路径不留下
 Invocation或Receipt。该证据只是Context/Text2SQL的L1～L2候选实施证据，不替代生产Context backend、SQL adapter、
-public `/v1`或18的L4～L6资格；在production双进程kill/restart fixture通过前，也不把静态adapter进程本身宣称为L3闭合。
+public `/v1`或18的L4～L6资格。fresh PostgreSQL 16 r240已用真实`platform-context-worker`双进程覆盖错installed adapter digest
+零claim/Job保持ready、terminal commit数据库窗口强杀、expired-lease owner恢复、同一Job物理attempt 2、lease/quota清除和唯一
+Observation，NativeCatalog process L3至此闭合；remote backend protocol仍未闭合。
 
 ## 24. 明确推迟的工作
 
@@ -608,7 +610,7 @@ public `/v1`或18的L4～L6资格；在production双进程kill/restart fixture�
 ## 25. 未决问题
 
 CR-181 cross-review已确认Plan v4 Context dispatch/result binding并恢复Accepted；r234已补齐expired-lease L2 owner recovery，独立production
-Context Worker及NativeCatalog受限部署已经接线，真实多进程kill-window与remote backend protocol L3 evidence仍待完成。
+Context Worker及NativeCatalog受限部署已经接线，r240关闭其真实多进程kill-window；remote backend protocol L3 evidence仍待完成。
 
 CR-166已将CanonicalRegion和Context binding exact-match统一到02/12，Dataset build直接使用shared Job。本规范已
 Accepted；Context backend、SQL adapter、Artifact与public API的分层fixture仍待实现。具体索引引擎、embedding provider

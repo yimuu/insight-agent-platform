@@ -225,9 +225,13 @@ impl ContextWorkerDriver {
             let config = self.config;
             active.spawn(async move {
                 let _permit = permit;
-                execute_claim(repository, adapter, config, claim)
-                    .await
-                    .is_ok()
+                match execute_claim(repository, adapter, config, claim).await {
+                    Ok(()) => true,
+                    Err(failure) => {
+                        eprintln!("platform-context-worker abandoned execution: {failure}");
+                        false
+                    }
+                }
             });
         }
         Ok(count)
@@ -664,17 +668,25 @@ impl ContextWorkerError {
 
 impl fmt::Display for ContextWorkerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidConfiguration => "Context Worker configuration is invalid",
-            Self::WrongWorkerManifest => "Context Worker manifest is invalid",
-            Self::LocalCapacity => "Context Worker local capacity failed",
-            Self::CorruptClaim => "Context claim is corrupt",
-            Self::InvalidGeneratedCommand => "Context Worker generated an invalid command",
-            Self::AdapterOutputRejected => "NativeCatalog adapter output was rejected",
-            Self::DrainRequiresTermination => "Context Worker drain requires process termination",
-            Self::Identity(_) => "Context Worker identity generation failed",
-            Self::Repository(_) => "Context durable authority failed",
-        })
+        match self {
+            Self::InvalidConfiguration => {
+                formatter.write_str("Context Worker configuration is invalid")
+            }
+            Self::WrongWorkerManifest => formatter.write_str("Context Worker manifest is invalid"),
+            Self::LocalCapacity => formatter.write_str("Context Worker local capacity failed"),
+            Self::CorruptClaim => formatter.write_str("Context claim is corrupt"),
+            Self::InvalidGeneratedCommand => {
+                formatter.write_str("Context Worker generated an invalid command")
+            }
+            Self::AdapterOutputRejected => {
+                formatter.write_str("NativeCatalog adapter output was rejected")
+            }
+            Self::DrainRequiresTermination => {
+                formatter.write_str("Context Worker drain requires process termination")
+            }
+            Self::Identity(_) => formatter.write_str("Context Worker identity generation failed"),
+            Self::Repository(_) => formatter.write_str("Context durable authority failed"),
+        }
     }
 }
 

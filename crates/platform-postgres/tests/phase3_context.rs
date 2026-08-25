@@ -32,7 +32,8 @@ use insight_platform_contracts::{
     PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, QuotaDimension,
     RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
     RunBindingsSnapshot, SchedulerPriority, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    ValidationSummary, ValueRef, WorkClass, WorkerManifest, WORKER_MANIFEST_VERSION,
+    WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, ExactInvocationValueRef, InvocationOrigin, InvocationPolicyDecision,
@@ -61,7 +62,13 @@ use insight_platform_postgres::{
 use serde::Serialize;
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    io::BufRead as _,
+    path::{Path, PathBuf},
+    process::{Child, Stdio},
+    time::Duration as StdDuration,
+};
 
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     format!(
@@ -644,6 +651,14 @@ async fn seed_policy_versions(
 }
 
 async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
+    seed_fixture_with_native_adapter(pool, repository, None).await
+}
+
+async fn seed_fixture_with_native_adapter(
+    pool: &PgPool,
+    repository: &PgRepository,
+    native_adapter: Option<(Sha256Digest, Sha256Digest)>,
+) -> Fixture {
     let tenant_id = id(ResourceKind::Tenant, 1);
     let other_tenant_id = id(ResourceKind::Tenant, 2);
     let principal_id = id(ResourceKind::Principal, 3);
@@ -810,18 +825,29 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
 
     let catalog_projection_digest = named_digest("catalog-projection");
     let database_identity_digest = named_digest("database");
+    let backend_kind = if native_adapter.is_some() {
+        ContextBackendKind::NativeCatalog
+    } else {
+        ContextBackendKind::SqlCatalog
+    };
+    let backend_contract = native_adapter.as_ref().map_or_else(
+        || ContextBackendContract::SqlCatalog {
+            dialect: "postgres".to_owned(),
+            catalog_projection_digest: catalog_projection_digest.clone(),
+        },
+        |(_, adapter_contract_digest)| ContextBackendContract::NativeCatalog {
+            adapter_contract_digest: adapter_contract_digest.clone(),
+        },
+    );
     let implementation = ContextImplementationResourceSpec {
         authoring_package: authoring(0xa1),
         contract_digest: named_digest("implementation-contract"),
         dependency_versions: vec![interface_revision.clone()],
         policy_versions: vec![],
         interface_revision: interface_revision.clone(),
-        backend_kind: ContextBackendKind::SqlCatalog,
+        backend_kind,
         contract: ContextImplementationContract {
-            backend: ContextBackendContract::SqlCatalog {
-                dialect: "postgres".to_owned(),
-                catalog_projection_digest: catalog_projection_digest.clone(),
-            },
+            backend: backend_contract,
             credential_requirements: vec![],
             limits: ContextBackendLimits {
                 maximum_request_bytes: 65_536,
@@ -848,14 +874,20 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     )
     .await;
 
-    let context_closure = ContextDeploymentClosure {
-        implementation: implementation_revision,
-        interface: interface_revision.clone(),
-        backend: ContextBackendBinding::SqlCatalog {
+    let backend_binding = native_adapter.map_or_else(
+        || ContextBackendBinding::SqlCatalog {
             database_identity_digest: database_identity_digest.clone(),
             dialect: "postgres".to_owned(),
             catalog_scope_digest: named_digest("catalog-scope"),
         },
+        |(installed_adapter_digest, _)| ContextBackendBinding::NativeCatalog {
+            installed_adapter_digest,
+        },
+    );
+    let context_closure = ContextDeploymentClosure {
+        implementation: implementation_revision,
+        interface: interface_revision.clone(),
+        backend: backend_binding,
         secret_bindings: vec![],
         network_policy: None,
         parser_policy: parser_policy.clone(),
@@ -3080,4 +3112,317 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     );
         }))
         .unwrap();
+}
+
+#[test]
+fn production_native_context_worker_recovers_commit_window_process_loss() {
+    let (Ok(database_url), Ok(binary)) = (
+        std::env::var("PLATFORM_CONTEXT_WORKER_TEST_DATABASE_URL"),
+        std::env::var("PLATFORM_CONTEXT_WORKER_BIN"),
+    ) else {
+        eprintln!("Context Worker binary or dedicated PostgreSQL fixture is unset; process recovery skipped");
+        return;
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async move {
+        let pool = PgPoolOptions::new()
+            .max_connections(16)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        verify_schema(&pool).await.unwrap();
+        let repository = PgRepository::new(pool.clone());
+        let installed_adapter_digest = named_digest("production-native-context-adapter");
+        let adapter_contract_digest = named_digest("production-native-context-contract");
+        let fixture = seed_fixture_with_native_adapter(
+            &pool,
+            &repository,
+            Some((
+                installed_adapter_digest.clone(),
+                adapter_contract_digest.clone(),
+            )),
+        )
+        .await;
+        let command = create_command(&fixture, 0x900);
+        let created = match execute_create(&repository, command).await.unwrap() {
+            CommandOutcome::Applied(record) => record,
+            CommandOutcome::Replayed(_) => panic!("fresh native Context create replayed"),
+        };
+        let job_id = id(ResourceKind::Job, 0x920);
+        match execute_prepare(
+            &repository,
+            PrepareContextDispatch {
+                audit: audit(&fixture.tenant_id, &fixture.principal_id, 0x921, "native-prepare"),
+                context_query_id: created.context_query_id.clone(),
+                expected_query_version: created.version,
+                job_id: job_id.clone(),
+                scheduled_at: Utc::now() + Duration::seconds(5),
+            },
+        )
+        .await
+        .unwrap()
+        {
+            CommandOutcome::Applied(_) => {}
+            CommandOutcome::Replayed(_) => panic!("fresh native Context prepare replayed"),
+        }
+        park_direct_context_leaf(
+            &pool,
+            &fixture,
+            &created.context_query_id,
+            &job_id,
+        )
+        .await;
+
+        let config = native_context_process_config(
+            installed_adapter_digest.clone(),
+            adapter_contract_digest,
+        );
+        let prefix = PathBuf::from(format!(
+            "/tmp/platform-context-worker-process-{}",
+            std::process::id()
+        ));
+        let (config_path, config_digest) = write_context_process_config(&prefix, "correct", &config);
+        let mut wrong_config = config.clone();
+        let wrong_digest = named_digest("wrong-installed-native-context-adapter");
+        wrong_config["worker_manifest"]["adapter_runtime_digest"] =
+            serde_json::to_value(wrong_digest.clone()).unwrap();
+        wrong_config["native_catalog"]["installed_adapter_digest"] =
+            serde_json::to_value(wrong_digest).unwrap();
+        let (wrong_path, wrong_config_digest) =
+            write_context_process_config(&prefix, "wrong", &wrong_config);
+
+        let mut wrong = spawn_context_worker(
+            &binary,
+            &wrong_path,
+            &wrong_config_digest,
+            &database_url,
+        );
+        let wrong_log = observe_context_worker_start(&mut wrong);
+        assert!(wrong.try_wait().unwrap().is_none());
+        tokio::time::sleep(StdDuration::from_millis(300)).await;
+        let unclaimed: (String, i32, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT state, attempt_no, worker_id IS NULL, quota_reservation_id IS NULL
+            FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unclaimed, ("ready".to_owned(), 0, true, true));
+        wrong.kill().unwrap();
+        wrong.wait().unwrap();
+        wrong_log.join().unwrap();
+
+        let mut first =
+            spawn_context_worker(&binary, &config_path, &config_digest, &database_url);
+        let first_log = observe_context_worker_start(&mut first);
+        assert!(first.try_wait().unwrap().is_none());
+        sqlx::query(
+            r#"
+            CREATE FUNCTION insight_platform.test_pause_context_commit()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+              IF OLD.state = 'running' AND NEW.state = 'succeeded' AND NEW.work_class = 'context' THEN
+                PERFORM pg_sleep(30);
+              END IF;
+              RETURN NEW;
+            END
+            $$
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER test_pause_context_commit BEFORE UPDATE ON insight_platform.jobs FOR EACH ROW EXECUTE FUNCTION insight_platform.test_pause_context_commit()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE insight_platform.jobs SET scheduled_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'ready'")
+            .bind(fixture.tenant_id.to_string())
+            .bind(job_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        wait_context_job_state(&pool, &job_id, "running").await;
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        first.kill().unwrap();
+        first.wait().unwrap();
+        first_log.join().unwrap();
+        sqlx::query("DROP TRIGGER test_pause_context_commit ON insight_platform.jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP FUNCTION insight_platform.test_pause_context_commit()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'")
+            .bind(fixture.tenant_id.to_string())
+            .bind(job_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut second =
+            spawn_context_worker(&binary, &config_path, &config_digest, &database_url);
+        let second_log = observe_context_worker_start(&mut second);
+        assert!(second.try_wait().unwrap().is_none());
+        wait_context_query_state(&pool, &created.context_query_id, "succeeded").await;
+        let evidence: (i64, i32, bool, i64) = sqlx::query_as(
+            r#"
+            SELECT
+              (SELECT count(*) FROM insight_platform.events
+                 WHERE tenant_id = $1 AND aggregate_id = $2
+                   AND event_type = 'context.lease_recovered'),
+              job.attempt_no,
+              job.worker_id IS NULL AND job.lease_token_digest IS NULL
+                AND job.quota_reservation_id IS NULL,
+              (SELECT count(*) FROM insight_platform.run_values
+                 WHERE tenant_id = $1 AND run_id = $3
+                   AND value_kind = 'context_observation')
+            FROM insight_platform.jobs AS job
+            WHERE job.tenant_id = $1 AND job.job_id = $4
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(created.context_query_id.to_string())
+        .bind(fixture.run_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence, (1, 2, true, 1));
+        second.kill().unwrap();
+        second.wait().unwrap();
+        second_log.join().unwrap();
+        for path in [wrong_path, config_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+    });
+}
+
+fn native_context_process_config(
+    installed_adapter_digest: Sha256Digest,
+    adapter_contract_digest: Sha256Digest,
+) -> serde_json::Value {
+    let manifest = WorkerManifest {
+        manifest_version: WORKER_MANIFEST_VERSION,
+        worker_role: "context-worker".to_owned(),
+        work_class: WorkClass::Context,
+        adapter_runtime_digest: installed_adapter_digest.clone(),
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        max_concurrency: 4,
+        critical_control_reserved_slots: 1,
+    };
+    json!({
+        "schema_version": 1,
+        "worker_manifest": manifest,
+        "native_catalog": {
+            "schema_version": 1,
+            "installed_adapter_digest": installed_adapter_digest,
+            "adapter_contract_digest": adapter_contract_digest,
+            "source_item_identity_digest": named_digest("native-source-item"),
+            "content": "authorized native catalog entry",
+            "structured_fields_schema_digest": named_digest("native-structured-fields"),
+            "score_millionths": 900000,
+            "locator_digest": named_digest("native-locator"),
+            "authorization_evidence_digest": named_digest("native-authorization"),
+            "ranking_evidence_digest": named_digest("native-ranking"),
+            "display_label": "authorized native catalog entry",
+            "classification": "internal"
+        },
+        "database_max_connections": 4,
+        "database_acquire_timeout_milliseconds": 1000,
+        "receipt_ttl_seconds": 60,
+        "scan_interval_milliseconds": 20,
+        "failure_backoff_milliseconds": 5,
+        "drain_grace_milliseconds": 1000
+    })
+}
+
+fn write_context_process_config(
+    prefix: &Path,
+    suffix: &str,
+    value: &serde_json::Value,
+) -> (PathBuf, String) {
+    let path = PathBuf::from(format!("{}-{suffix}.json", prefix.display()));
+    std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+    (path, canonical_digest(value).unwrap())
+}
+
+fn spawn_context_worker(
+    binary: &str,
+    config_path: &Path,
+    config_digest: &str,
+    database_url: &str,
+) -> Child {
+    std::process::Command::new(binary)
+        .env("PLATFORM_CONTEXT_WORKER_CONFIG", config_path)
+        .env("PLATFORM_CONTEXT_WORKER_CONFIG_DIGEST", config_digest)
+        .env("PLATFORM_CONTEXT_WORKER_DATABASE_URL", database_url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn observe_context_worker_start(child: &mut Child) -> std::thread::JoinHandle<()> {
+    let stderr = child.stderr.take().unwrap();
+    let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
+    let logger = std::thread::spawn(move || {
+        for (ordinal, line) in std::io::BufReader::new(stderr).lines().enumerate() {
+            let line = line.unwrap();
+            eprintln!("{line}");
+            if ordinal == 0 {
+                let _ = started_sender.send(line);
+            }
+        }
+    });
+    let first = started_receiver
+        .recv_timeout(StdDuration::from_secs(10))
+        .expect("Context Worker did not report startup");
+    assert!(first.contains("started generation="), "{first}");
+    logger
+}
+
+async fn context_job_state(pool: &PgPool, job_id: &ResourceId) -> String {
+    sqlx::query_scalar("SELECT state FROM insight_platform.jobs WHERE job_id = $1")
+        .bind(job_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn wait_context_job_state(pool: &PgPool, job_id: &ResourceId, expected: &str) {
+    let started = std::time::Instant::now();
+    while context_job_state(pool, job_id).await != expected {
+        assert!(started.elapsed() < StdDuration::from_secs(10));
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+}
+
+async fn wait_context_query_state(pool: &PgPool, query_id: &ResourceId, expected: &str) {
+    let started = std::time::Instant::now();
+    loop {
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM insight_platform.invocations WHERE invocation_id = $1",
+        )
+        .bind(query_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if state == expected {
+            return;
+        }
+        assert!(started.elapsed() < StdDuration::from_secs(10));
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
 }
