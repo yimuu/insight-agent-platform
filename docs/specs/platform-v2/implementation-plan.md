@@ -1,10 +1,15 @@
-# Platform v2 四阶段实现计划（CR-194）
+# Platform v2 四阶段实现计划（CR-195）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-194 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-195 contracts accepted; L3～L6 pending |
 | 日期 | 2026-08-26 |
-| 合同输入 | 00～18、cross-review CR-194、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-195、ADR-0001、ADR-0002、AGENTS.md |
+
+> 2026-08-26 implementation feedback：真实MCP HTTPS protocol fixture接线发现installed endpoint只有exact Trust Policy ref，没有显式CA/
+> pin material，production reqwest会隐式使用默认trust store。CR-195按00～18复核后要求process-installed MCP endpoint携带bounded PEM trust
+> bundle、由startup config digest保护并只按exact Deployment/Policy选择；RPC不携带trust正文。实现必须先补机器合同与TLS正负fixture，再继续
+> 独立Egress subscription L3。
 
 > 2026-08-26 implementation feedback：Resource Refresh Egress接线发现full reconcile所需`resources/list`未进入closed published method
 > registry。CR-194按00～18完成影响复核：list/read共享Resources capability但各自拥有冻结limits，Host从cause/profile选择，Context Worker不能

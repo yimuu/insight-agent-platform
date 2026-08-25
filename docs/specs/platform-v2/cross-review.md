@@ -1,10 +1,28 @@
-# Platform v2 00～18 Cross-review（CR-194）
+# Platform v2 00～18 Cross-review（CR-195）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-194 Accepted |
+| 状态 | Closed / CR-195 Accepted |
 | 日期 | 2026-08-26 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-194 MCP Resource list machine-registry feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-195 MCP explicit TLS trust feedback |
+
+### CR-195 MCP explicit TLS trust-material impact review
+
+真实Streamable HTTP fixture接线确认MCP process-installed endpoint只保存exact Trust Policy ref，实际reqwest client没有对应可执行CA/pin
+material，只能使用默认trust store。这违反04禁止运行时默认补全closure的要求，也使错Trust Policy无法在真实TLS last-hop被证明。
+CR-195把显式bounded PEM trust bundle固定为Egress startup catalog material；bundle不进入业务DB、Deployment或RPC正文。
+
+| Spec | CR-195结论 |
+|---|---|
+| 00～02 | clean `/v1`与Resource/Deployment owner不变；installed catalog将exact Policy编译为content-addressed运行时material |
+| 03、05～12、14～17 | Job/Run/Context/Capability/Sandbox/Artifact/Model/API schema与事务不变；调用方不得携带或覆盖trust正文 |
+| 04 | Egress只使用entry显式bundle与canonical hostname；默认trust、缺失/无效PEM和exact ref漂移均dispatch前拒绝 |
+| 13 | MCP installed endpoint增加bounded trust bundle；Tools/Resources/Subscriptions共享同一TLS last-hop规则 |
+| 18 | L1/L3/L4增加bundle解析/digest、独立CA/SAN、默认trust负向及rollout drift/readiness矩阵 |
+
+00～18已按state ownership、IDs/schema、errors、transactions、events、permissions、capacity、failure recovery与fixtures全量复核。
+CR-195不新增table、aggregate、route、role、WorkClass、Secret路径或第二current-state authority；PEM仅存在于GitOps/startup配置和Egress bounded
+memory，不经Host/Worker/RPC/Event/log传播。00、01、02、04、13、18恢复Accepted / CR-195，Implementation Authorization恢复有效。
 
 ### CR-194 MCP Resource full-reconcile method-registry impact review
 

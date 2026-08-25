@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-189 |
-| 日期 | 2026-08-21 |
+| 状态 | Accepted / CR-195 |
+| 日期 | 2026-08-26 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
 
@@ -21,6 +21,10 @@ ResourceVersion表示可重现的逻辑定义，Deployment表示可运行的exac
 CR-189进一步明确“可运行”必须包含执行目标所需的完整静态解析事实：可执行Context backend冻结required Worker manifest；
 RemoteSearch还冻结canonical endpoint和exact Network/TLS/Trust Policy。只保存endpoint digest、由进程配置反查URL或使用默认TLS信任
 不构成exact Deployment。Secret仍只保存exact binding reference并由Egress最后一跳解析。
+
+CR-195进一步要求首版MCP Streamable HTTP的process-installed endpoint entry把exact Trust Policy编译为bounded显式PEM trust bundle；entry与
+startup config都必须content-addressed，并与exact MCP Deployment、endpoint、Network/TLS/Trust/Auth Policy refs一起校验。该运行时material
+不回写Deployment、不成为第二active binding，也不能由RPC调用方覆盖。
 
 这里的“可运行”包含可被未来Run选择/解析的定义绑定，不等于启动独立进程。Skill Deployment冻结一个exact Skill Revision及其
 requirement resolution；Policy Deployment冻结一个exact Policy Revision及其适用环境/资格闭包；Sandbox Deployment冻结exact

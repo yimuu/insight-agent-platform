@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-193 |
+| 状态 | Accepted / CR-195 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
@@ -12,6 +12,9 @@
 
 > CR-188 impact：MCP Tool Capability的Platform↔MCP参数/结果mapping由09 exact installed codec拥有；MCP Host仍独立拥有
 > Streamable HTTP、authorization、Task/Elicitation与subscription语义。Capability Worker不得仅凭mapping digest构造自由codec。
+
+> CR-195 impact：MCP Egress installed endpoint除exact Policy refs外必须持有bounded显式PEM trust bundle；实际HTTPS client仅信任该bundle并
+> 校验canonical endpoint hostname，不使用默认trust store。Host/Context request仍不携带CA/pin正文，错entry在HTTP bytes发送前拒绝。
 
 ## 1. 决策摘要
 
@@ -56,6 +59,7 @@ Deployment，active head变化不影响已存工作。
 
 Host通过Egress Broker发起credential-free closed request，Egress Broker在最后一跳解析OAuth/Secret并实施
 SSRF、DNS pinning、TLS、redirect和egress policy。Host不获取raw token、client secret、proxy credential或object-store credential。
+MCP endpoint startup catalog把exact Trust Policy编译为显式bounded trust bundle并纳入config digest；Egress HTTPS client不得回退到默认CA集合。
 
 单次request包含exact tenant、Deployment、Discovery generation、protocol、method、request ID、deadline、body schema digest
 和auth binding digest。response在Host trust boundary再验证content type、protocol envelope、schema、bytes和deadline。

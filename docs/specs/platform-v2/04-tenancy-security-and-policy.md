@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-192 |
+| 状态 | Accepted / CR-195 |
 | 日期 | 2026-08-26 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
@@ -17,6 +17,10 @@
 > CR-189：Remote Context Deployment与Run snapshot冻结canonical endpoint、exact Network/TLS/Trust Policy及SecretBinding refs。
 > Context Worker只把这些opaque exact refs交给Egress；Egress在最后一跳重验Policy/gate并解析Secret值。进程本地URL、默认trust store、
 > 自由header或明文Secret都不能补全缺失closure。
+
+> CR-195：MCP Streamable HTTP同样禁止默认trust store。Egress startup catalog必须把exact Trust Policy编译为bounded显式PEM trust
+> bundle并纳入配置digest；每次请求以exact Deployment/Policy refs选择该entry，TLS只信任该bundle并校验canonical endpoint hostname。
+> bundle缺失、PEM无效、entry漂移或调用方尝试覆盖trust material时，必须在HTTP dispatch前fail closed。
 
 ## 1. 决策摘要
 
@@ -219,6 +223,9 @@ proxy或redirect target。
 Egress Broker复核exact Deployment/Job/tenant/policy/auth binding并做DNS pinning、private/metadata/address deny、TLS hostname/pin、
 redirect重验、request/response限制和sanitized error mapping。普通Worker不获得raw credential或直出网路。Sandbox gVisor
 也只能通过declared Egress Broker port；WASI无network。
+
+首版remote HTTPS adapter不得读取操作系统默认CA集合来补全缺失Trust Policy。process-installed entry中的显式trust bundle是唯一证书根输入，
+受bounded parse、startup config digest和exact Deployment/Policy匹配保护；运行时request/protobuf不携带PEM正文。
 
 ## 8. Code 与Skill trust
 

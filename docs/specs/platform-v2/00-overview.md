@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-194 |
+| 状态 | Accepted / CR-195 |
 | 日期 | 2026-08-26 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -27,6 +27,12 @@
 > `resources/read`，但published MCP method machine registry只有`resources/read`，导致Host要么跳过list、要么使用未登记的自由method。
 > CR-194将`resources/list`加入同一closed ReadOnly method registry及per-method limits；refresh transport仍由Host从cause与published profile
 > 选择，Context Worker不得传method，且不增加Capability Invocation、public route、current-state authority或持久化正文。
+
+> 2026-08-26 implementation feedback（CR-195）：真实MCP HTTPS last-hop接线发现process-installed endpoint catalog只保存
+> exact Trust Policy ref，没有可执行的显式trust bundle/pin material；HTTP client只能落回默认trust store，违反04的Egress合同。
+> CR-195要求MCP Egress启动目录为每个exact Deployment安装bounded显式PEM trust bundle并纳入startup config digest，TLS client只使用该
+> bundle与canonical endpoint hostname；缺失、无效、错Deployment/Policy或默认trust fallback必须在发送HTTP bytes前拒绝。无新业务表、
+> Resource字段、public route、Secret路径或current-state authority。
 
 > 2026-08-24 implementation feedback（CR-181）：production Scheduler接入外部叶节点时确认Plan v3仅为
 > `ModelLoop/CapabilityCall/ContextQuery/ChildAgentCall/HumanTask/TimerWait/SignalWait`保存`resume`，无法从冻结Plan

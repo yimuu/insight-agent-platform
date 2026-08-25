@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-193 |
+| 状态 | Accepted / CR-195 |
 | 日期 | 2026-08-26 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -19,6 +19,9 @@
 > CR-189 impact：Context Worker镜像/startup evidence必须枚举bounded exact adapter manifest；RemoteSearch L1～L4增加错endpoint/digest、
 > Network/TLS/Trust Policy kind/digest、Worker manifest、空registry与rollout drift负向fixture，并分别证明claim前零lease/quota mutation及
 > dispatch前零Egress调用。
+
+> CR-195 impact：MCP Streamable HTTP L1校验installed trust bundle的PEM/size/config digest及exact Policy匹配；L3以独立CA/SAN和真实TLS
+> socket证明只接受显式bundle、默认trust store与错bundle均在HTTP业务bytes前失败；L4验证rollout中bundle/config drift使readiness关闭。
 
 ## 1. 决策摘要
 
