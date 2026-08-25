@@ -356,6 +356,13 @@ r287从shared PostgreSQL Outbox authority以数据库时间导出fixed due/expir
 tenant、Outbox/Event、claim owner或失败文本。fresh PostgreSQL 16、strict Clippy、13-panel dashboard、12条symptom-first alert及逐alert runbook
 通过。该证据关闭shared Outbox backlog/recovery的L1接线；其他role authority、跨进程trace、动态payload审计、真实scrape及L4～L6仍未完成。
 
+r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
+以两个Docker target构建exact-digest runtime与gVisor guest，生成并
+签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
+WorkerManifest、唯一baseline migration、contract/config/limit/policy/qualification摘要和可复现commit timestamp。CI静态门禁、生成器负向测试及
+Rust `validate-production-candidate`通过。该批实现可执行的signed candidate producer，但尚无实际外部registry/GitOps运行产物、人工审批
+或production-equivalent L4～L6运行证据，因此`signed_supply_chain`仍不得标记passed。
+
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
 storage与audit closure全部由服务端拥有；upload target是唯一显式Secret-bearing响应例外。Public Gateway不取得storage authority，Artifact Gateway
 不信任自由principal header，两者以exact audience mTLS连接并由Artifact Gateway从PostgreSQL重绑定current principal。

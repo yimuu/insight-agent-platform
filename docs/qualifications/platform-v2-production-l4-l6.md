@@ -2,6 +2,10 @@
 
 状态：Pending / requires production-equivalent runner
 
+仓库已提供`.github/workflows/platform-production-candidate.yml`，要求以exact commit读取GitOps environment closure并生成exact runtime/guest image、签名SBOM/provenance、
+CandidateManifest、baseline与测试报告的signed传递闭包。只有受保护CI environment的实际运行产物及后续目标环境验证可作为本手册输入；
+workflow存在或本地生成器通过不改变本页Pending状态。
+
 本手册执行18的外部资格门禁，不改变产品合同，也不把静态Helm检查或development集群冒充为L4证据。
 
 ## 前置条件

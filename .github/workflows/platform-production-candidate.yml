@@ -1,0 +1,177 @@
+name: platform-production-candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_repository:
+        description: GitOps environment repository in owner/name form
+        required: true
+        type: string
+      environment_commit:
+        description: Exact 40-character Git commit for the environment closure
+        required: true
+        type: string
+      environment_path:
+        description: Relative path to the Platform v2 production closure
+        required: true
+        default: platform-v2
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+env:
+  REGISTRY: ghcr.io
+  RUNTIME_IMAGE: ghcr.io/${{ github.repository }}/platform-runtime
+  SANDBOX_GUEST_IMAGE: ghcr.io/${{ github.repository }}/platform-sandbox-guest
+
+jobs:
+  candidate:
+    name: Build and sign exact candidate
+    runs-on: ubuntu-latest
+    environment: platform-production-candidate
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      - name: Reject mutable or unsafe GitOps inputs
+        env:
+          ENVIRONMENT_REPOSITORY: ${{ inputs.environment_repository }}
+          ENVIRONMENT_COMMIT: ${{ inputs.environment_commit }}
+          ENVIRONMENT_PATH: ${{ inputs.environment_path }}
+        run: |
+          [[ "$ENVIRONMENT_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$ENVIRONMENT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ENVIRONMENT_PATH" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ ]]
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ inputs.environment_repository }}
+          ref: ${{ inputs.environment_commit }}
+          token: ${{ secrets.ENVIRONMENT_REPOSITORY_READ_TOKEN }}
+          path: target/gitops-environment
+          fetch-depth: 1
+      - name: Verify exact GitOps environment commit
+        env:
+          ENVIRONMENT_COMMIT: ${{ inputs.environment_commit }}
+        run: test "$(git -C target/gitops-environment rev-parse HEAD)" = "$ENVIRONMENT_COMMIT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.94.1
+      - name: Build runtime image with registry provenance and SBOM
+        id: runtime
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: runtime
+          push: true
+          tags: ${{ env.RUNTIME_IMAGE }}:candidate-${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Build sandbox guest image with registry provenance and SBOM
+        id: sandbox_guest
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: sandbox-guest
+          push: true
+          tags: ${{ env.SANDBOX_GUEST_IMAGE }}:candidate-${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Sign and verify exact image subjects
+        env:
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
+        run: |
+          cosign sign --yes "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          cosign sign --yes "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}"
+          mkdir -p target/platform-supply-chain
+          syft "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}" -o spdx-json=target/platform-supply-chain/runtime.spdx.json
+          syft "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}" -o spdx-json=target/platform-supply-chain/sandbox-guest.spdx.json
+          cosign attest --yes --type spdxjson --predicate target/platform-supply-chain/runtime.spdx.json "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          cosign attest --yes --type spdxjson --predicate target/platform-supply-chain/sandbox-guest.spdx.json "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}"
+          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}"
+          cosign verify-attestation --type spdxjson --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          cosign verify-attestation --type spdxjson --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}"
+      - name: Sign GitHub build provenance for runtime image
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.RUNTIME_IMAGE }}
+          subject-digest: ${{ steps.runtime.outputs.digest }}
+          push-to-registry: true
+      - name: Sign GitHub build provenance for sandbox guest image
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.SANDBOX_GUEST_IMAGE }}
+          subject-digest: ${{ steps.sandbox_guest.outputs.digest }}
+          push-to-registry: true
+      - name: Sign GitHub SBOM attestations
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.RUNTIME_IMAGE }}
+          subject-digest: ${{ steps.runtime.outputs.digest }}
+          sbom-path: target/platform-supply-chain/runtime.spdx.json
+          push-to-registry: true
+      - name: Sign GitHub sandbox guest SBOM attestation
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.SANDBOX_GUEST_IMAGE }}
+          subject-digest: ${{ steps.sandbox_guest.outputs.digest }}
+          sbom-path: target/platform-supply-chain/sandbox-guest.spdx.json
+          push-to-registry: true
+      - name: Verify signed GitHub attestations resolve to exact subjects
+        env:
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
+        run: |
+          gh attestation verify "oci://${RUNTIME_IMAGE}@${RUNTIME_DIGEST}" --repo "$GITHUB_REPOSITORY"
+          gh attestation verify "oci://${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}" --repo "$GITHUB_REPOSITORY"
+          gh attestation verify "oci://${RUNTIME_IMAGE}@${RUNTIME_DIGEST}" --repo "$GITHUB_REPOSITORY" --predicate-type https://spdx.dev/Document
+          gh attestation verify "oci://${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}" --repo "$GITHUB_REPOSITORY" --predicate-type https://spdx.dev/Document
+      - name: Build deterministic CandidateManifest closure
+        env:
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
+        run: |
+          created_at="$(git show -s --format=%cI "$GITHUB_SHA" | python3 -c 'import datetime,sys; value=datetime.datetime.fromisoformat(sys.stdin.read().strip()); print(value.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))')"
+          python3 scripts/build-platform-production-candidate.py --runtime-image-digest "$RUNTIME_DIGEST" --sandbox-guest-image-digest "$SANDBOX_GUEST_DIGEST" --git-commit "sha1:$GITHUB_SHA" --created-at "$created_at" --output-dir target/platform-candidate \
+            --environment-closure "target/gitops-environment/${{ inputs.environment_path }}"
+          cp crates/platform-postgres/migrations/0001_platform_baseline.sql target/platform-candidate/migration-baseline.sql
+          cp target/platform-supply-chain/*.spdx.json target/platform-candidate/
+          sha256sum target/platform-candidate/migration-baseline.sql > target/platform-candidate/migration-baseline.sha256
+      - name: Run and preserve candidate qualification checks
+        run: |
+          set -o pipefail
+          {
+            python3 scripts/check-platform-candidate-pipeline.py
+            python3 scripts/check-platform-v1-contracts.py
+            python3 scripts/check-platform-postgres-schema.py
+            cargo test --locked -p insight-platform-contracts
+            cargo run --locked -p insight-platform-contracts --bin platform-qualification -- validate-production-candidate contracts/platform-v1/qualification/production-release-profile.json target/platform-candidate/candidate-manifest.json
+          } 2>&1 | tee target/platform-candidate/qualification-tests.txt
+      - name: Sign candidate and transitive artifact closure
+        run: |
+          cosign sign-blob --yes --bundle target/platform-candidate/candidate-manifest.sigstore.json target/platform-candidate/candidate-manifest.json
+          cosign verify-blob --bundle target/platform-candidate/candidate-manifest.sigstore.json --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com target/platform-candidate/candidate-manifest.json
+          python3 scripts/build-platform-release-bundle.py target/platform-candidate
+          cosign sign-blob --yes --bundle target/platform-candidate/release-bundle-manifest.sigstore.json target/platform-candidate/release-bundle-manifest.json
+          cosign verify-blob --bundle target/platform-candidate/release-bundle-manifest.sigstore.json --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com target/platform-candidate/release-bundle-manifest.json
+      - name: Preserve content-addressed candidate bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: platform-production-candidate-${{ github.sha }}
+          path: target/platform-candidate
+          if-no-files-found: error
+          retention-days: 90

@@ -46,8 +46,11 @@ jobs:
           python3 -m unittest \
             scripts/tests/test_platform_production_topology.py \
             scripts/tests/test_platform_gvisor_rbac.py \
-            scripts/tests/test_platform_gvisor_admission.py
+            scripts/tests/test_platform_gvisor_admission.py \
+            scripts/tests/test_platform_candidate_pipeline.py
           bash -n scripts/preflight-platform-production-qualification.sh
+      - name: Check signed candidate pipeline contract
+        run: python3 scripts/check-platform-candidate-pipeline.py
       - name: Check Platform v1 PostgreSQL schema contract
         run: python3 scripts/check-platform-postgres-schema.py && cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract
       - name: Check crate boundaries and dependency feature baseline

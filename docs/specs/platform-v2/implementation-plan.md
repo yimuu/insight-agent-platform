@@ -467,6 +467,13 @@
 > Clippy、13-panel dashboard、12条symptom-first alert及逐alert runbook门禁通过。该批关闭shared Outbox backlog/recovery L1接线；其他role
 > authority/dependency/saturation、跨进程trace、动态payload审计、真实Prometheus scrape及L4仍未闭合。
 
+> 2026-08-26 implementation evidence：r288增加commit-SHA pinned production candidate workflow与确定性生成器；GitOps environment repository
+> 也必须以40位commit SHA只读checkout，其闭包与application Helm/Docker closure共同生成`deployment_config_digest`。两个digest-pinned
+> Docker target分别发布runtime和gVisor guest exact subject，生成并验证keyless image signature、SPDX SBOM及GitHub build provenance；生成器
+> 冻结15个ComponentRole、7个实际WorkerManifest、contract/config/HardLimit/policy/QualificationProfile摘要、唯一baseline migration和commit
+> timestamp。测试报告、migration、SBOM及Candidate signature由canonical release-bundle index传递闭合并再次签名。静态供应链门禁、负向fixture、
+> Platform v1合同检查及Rust production candidate validator通过。该实现提供L6执行入口，不构成registry/GitOps/人工promotion或目标环境gate通过。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

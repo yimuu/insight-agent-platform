@@ -6,6 +6,11 @@
 replacement 的人工审批边界。GitOps repository、registry、CI artifact store和Kubernetes rollout history是发布authority；
 业务数据库不创建 Release/Gate/Candidate 状态。
 
+候选制品由`.github/workflows/platform-production-candidate.yml`产生：所有action与GitOps environment输入固定commit SHA，后者与application
+Helm/Docker closure共同形成deployment config digest；runtime与sandbox guest均以exact digest
+签名并附SPDX SBOM和provenance；CandidateManifest与包含migration、测试报告、SBOM和各签名bundle摘要的release-bundle index分别签名。
+运行人员必须验证该实际CI run来自受保护environment和目标Git commit；仅审查workflow源码不等于供应链门禁通过。
+
 ## 1. 发布输入
 
 promotion请求必须只引用不可变输入：

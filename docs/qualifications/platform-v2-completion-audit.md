@@ -161,6 +161,8 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 - durable MCP OAuth PKCE cleanup worker已进入workspace/runtime image，并具备独立Deployment、PDB、default-deny与精确PostgreSQL/Egress网络边界；
 - OAuth Cleanup Worker在上述authority组合完成后才开放shared HTTP readiness/metrics，且具有独立ServiceMonitor与Prometheus-only ingress；
 - production QualificationProfile、Candidate/Capacity/Evidence validator、拓扑preflight和资格运行手册。
+- commit-SHA pinned production candidate workflow、确定性Candidate/WorkerManifest生成器、exact runtime/guest image签名、SPDX SBOM、
+  GitHub provenance及传递闭合的signed release-bundle index。
 
 ### 仓库内缺口
 
@@ -176,7 +178,8 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
    dependency与saturation对应的panel/alert仍待指标owner接线后补齐。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
    mTLS与live identity enforcement仍须production-equivalent L4验证。
-5. 没有可重现的signed image/SBOM/provenance build pipeline与GitOps environment repository输入。
+5. 可重现的signed image/SBOM/provenance candidate producer已实现并由CI静态/合同测试约束；尚无实际registry run artifact、GitOps
+   environment repository输入及人工promotion证据。
 
 ### 外部门禁
 
@@ -192,7 +195,7 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 1. 补其他role dependency/recovery/permit业务指标、跨进程trace propagation和动态payload采集审计；
 2. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
-3. reproducible signed candidate pipeline；
+3. 在受保护CI environment实际运行signed candidate producer并把exact bundle交给GitOps environment repository；
 4. 外部L4～L6、GitOps clean cut、current文档与规范归档。
 
 如果实现发现domain port不足以支持production handler，必须先按02→06/07/09/10→17/18修订合同并重新cross-review，
