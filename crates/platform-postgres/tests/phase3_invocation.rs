@@ -538,6 +538,7 @@ async fn claim_one(repository: &PgRepository, tenant_id: &ResourceId, base: u16)
         .claim_capability_jobs(ClaimCapabilityJobs {
             work_class: WorkClass::CapabilityNative,
             worker_process_generation_id: worker_id.clone(),
+            worker_manifest_digest: digest('6'),
             limit: 1,
             lease_milliseconds: 30_000,
             slots: vec![CapabilityClaimSlot {
@@ -812,10 +813,23 @@ async fn run_capability_phase3_fixture() {
         resume_mutations: resume_mutations(0x1300),
         failure_mutations: failure_mutations(0x2300),
     };
+    let wrong_manifest_claims = repository
+        .claim_capability_jobs(ClaimCapabilityJobs {
+            work_class: WorkClass::CapabilityNative,
+            worker_process_generation_id: worker_id.clone(),
+            worker_manifest_digest: digest('f'),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            slots: vec![claim_slot.clone()],
+        })
+        .await
+        .unwrap();
+    assert!(wrong_manifest_claims.is_empty());
     let mut claims = repository
         .claim_capability_jobs(ClaimCapabilityJobs {
             work_class: WorkClass::CapabilityNative,
             worker_process_generation_id: worker_id.clone(),
+            worker_manifest_digest: digest('6'),
             limit: 1,
             lease_milliseconds: 30_000,
             slots: vec![claim_slot],

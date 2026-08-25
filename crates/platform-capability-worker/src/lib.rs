@@ -543,6 +543,7 @@ where
             .claim_capability_jobs(ClaimCapabilityJobs {
                 work_class: self.work_class,
                 worker_process_generation_id: self.pools.snapshot().worker_process_generation_id,
+                worker_manifest_digest: self.pools.snapshot().worker_manifest_digest,
                 limit: u16::try_from(claim_limit)
                     .map_err(|_| CapabilityWorkerDriverError::InvalidGeneratedCommand)?,
                 lease_milliseconds: self.config.lease_milliseconds,

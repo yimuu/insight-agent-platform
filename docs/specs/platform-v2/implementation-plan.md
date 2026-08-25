@@ -48,6 +48,10 @@
 > strict Clippy及fresh PostgreSQL 16 r200完整Capability Invocation fixture通过。Capability binary/startup manifest、真实remote protocol L3与
 > L4 rollout drift仍待完成，不能把本证据宣称为production remote backend闭环。
 
+> 2026-08-25 implementation evidence：Capability claim command现携带进程Worker manifest digest，PostgreSQL owner transaction在启动
+> attempt和预留quota前对照exact Deployment。fresh PostgreSQL 16 r201证明错镜像得到空claim、正确manifest仍通过完整Invocation闭环；
+> dispatcher的codec/manifest I/O前二次校验保留。binary/startup publication及跨进程L3仍待完成。
+
 > 2026-08-25 implementation evidence：ModelTurn admission现已把Plan列出的Skill/Capability slots逐项冻结进snapshot与Receipt replay，
 > 并在owner transaction用各slot的exact Selection Policy重新执行共享selector；请求投影即使引用候选集合内的合法但未选中
 > Capability Deployment也会整批回滚。fresh PostgreSQL 16 r178已覆盖两候选`ordered_first`正/负路径及既有tool continuation、quota和

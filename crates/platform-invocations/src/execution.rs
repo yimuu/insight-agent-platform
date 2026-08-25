@@ -397,6 +397,7 @@ impl CapabilityClaimSlot {
 pub struct ClaimCapabilityJobs {
     pub work_class: WorkClass,
     pub worker_process_generation_id: ResourceId,
+    pub worker_manifest_digest: Sha256Digest,
     pub limit: u16,
     pub lease_milliseconds: u64,
     pub slots: Vec<CapabilityClaimSlot>,

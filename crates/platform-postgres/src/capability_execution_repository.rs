@@ -2311,6 +2311,14 @@ impl PgRepository {
                 &current_invocation.payload.admission,
             )
             .await?;
+            if execution_contract
+                .deployment_closure
+                .backend
+                .required_worker_manifest_digest()
+                != Some(&command.worker_manifest_digest)
+            {
+                continue;
+            }
             let input =
                 load_capability_execution_input(&mut transaction, &current_invocation).await?;
             let current_job =

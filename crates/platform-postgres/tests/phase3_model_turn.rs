@@ -3152,6 +3152,7 @@ async fn model_turn_fixture() {
         .claim_capability_jobs(ClaimCapabilityJobs {
             work_class: WorkClass::CapabilityNative,
             worker_process_generation_id: capability_worker_id.clone(),
+            worker_manifest_digest: digest('6'),
             limit: 2,
             lease_milliseconds: 30_000,
             slots: vec![
@@ -3293,6 +3294,7 @@ async fn model_turn_fixture() {
         .claim_capability_jobs(ClaimCapabilityJobs {
             work_class: WorkClass::CapabilityNative,
             worker_process_generation_id: second_worker_id.clone(),
+            worker_manifest_digest: digest('6'),
             limit: 1,
             lease_milliseconds: 30_000,
             slots: vec![CapabilityClaimSlot {

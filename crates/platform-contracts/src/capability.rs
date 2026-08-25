@@ -595,6 +595,28 @@ impl CapabilityBackendBinding {
         }
     }
 
+    pub fn required_worker_manifest_digest(&self) -> Option<&Sha256Digest> {
+        match self {
+            Self::Native {
+                worker_manifest_digest,
+                ..
+            }
+            | Self::Http {
+                worker_manifest_digest,
+                ..
+            }
+            | Self::Grpc {
+                worker_manifest_digest,
+                ..
+            }
+            | Self::Mcp {
+                worker_manifest_digest,
+                ..
+            } => Some(worker_manifest_digest),
+            Self::Sandbox { .. } => None,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), CapabilityContractError> {
         match self {
             Self::Native { .. } => Ok(()),
