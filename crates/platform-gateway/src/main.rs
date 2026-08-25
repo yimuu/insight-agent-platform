@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use axum::{
-    extract::{Extension, Request},
+    extract::{Extension, Request, State},
     http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -147,16 +147,62 @@ fn gateway_operation(path: &str) -> &'static str {
     }
 }
 
-fn install_gateway_metrics() -> Arc<ProcessHttpMetrics> {
+fn install_gateway_metrics(role: ProcessRole) -> Arc<ProcessHttpMetrics> {
     Arc::new(
-        ProcessHttpMetrics::install("public-gateway", GATEWAY_HTTP_OPERATIONS)
+        ProcessHttpMetrics::install(role.component_role(), GATEWAY_HTTP_OPERATIONS)
             .expect("static Gateway metric labels are valid"),
     )
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProcessRole {
+    ManagementApi,
+    RuntimeApi,
+}
+
+impl ProcessRole {
+    const fn component_role(self) -> &'static str {
+        match self {
+            Self::ManagementApi => "management-api",
+            Self::RuntimeApi => "runtime-api",
+        }
+    }
+
+    fn permits_path(self, path: &str) -> bool {
+        if matches!(path, "/livez" | "/readyz" | "/metrics") {
+            return true;
+        }
+        let Some(noun) = path
+            .strip_prefix("/v1/")
+            .and_then(|suffix| suffix.split('/').next())
+        else {
+            return false;
+        };
+        noun == "operations"
+            || match self {
+                Self::ManagementApi => matches!(
+                    noun,
+                    "agents"
+                        | "skills"
+                        | "capabilities"
+                        | "contexts"
+                        | "context-datasets"
+                        | "models"
+                        | "mcp-servers"
+                        | "policies"
+                        | "sandboxes"
+                ),
+                Self::RuntimeApi => matches!(noun, "runs" | "tasks" | "artifacts"),
+            }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessConfig {
     schema_version: u32,
+    role: ProcessRole,
     listen_address: String,
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
@@ -2421,15 +2467,29 @@ fn map_task_repository_error(error: RepositoryError) -> TaskApplicationError {
     }
 }
 
-fn build_router(
+struct RouterDependencies {
     repository: Arc<PgRepository>,
-    artifact_mutation_forwarder: Arc<dyn ArtifactMutationForwarder>,
+    artifact_mutation_forwarder: Option<Arc<dyn ArtifactMutationForwarder>>,
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
     validator_digest: Sha256Digest,
     validation_profile_digest: Sha256Digest,
-    run_event_cursor_codec: Arc<dyn RunEventCursorCodec>,
+    run_event_cursor_codec: Option<Arc<dyn RunEventCursorCodec>>,
     metrics: Arc<ProcessHttpMetrics>,
-) -> Router {
+}
+
+fn build_router(
+    role: ProcessRole,
+    dependencies: RouterDependencies,
+) -> Result<Router, ProcessError> {
+    let RouterDependencies {
+        repository,
+        artifact_mutation_forwarder,
+        verifier,
+        validator_digest,
+        validation_profile_digest,
+        run_event_cursor_codec,
+        metrics,
+    } = dependencies;
     let authentication = PublicAuthenticationState::new(
         Arc::new(verifier),
         Arc::new(PgPrincipalBindings(repository.clone())),
@@ -2439,47 +2499,70 @@ fn build_router(
         Arc::new(PgOperations(repository.clone())),
         Arc::new(SystemOperationClock),
     ));
-    let resource = build_resource_router(ResourceHttpState::new(
-        Arc::new(PgResources {
-            repository: repository.clone(),
-            validator_digest,
-            validation_profile_digest,
-        }),
-        Arc::new(SystemResourceClock),
+    let protected = match role {
+        ProcessRole::ManagementApi => {
+            operation.merge(build_resource_router(ResourceHttpState::new(
+                Arc::new(PgResources {
+                    repository,
+                    validator_digest,
+                    validation_profile_digest,
+                }),
+                Arc::new(SystemResourceClock),
+            )))
+        }
+        ProcessRole::RuntimeApi => {
+            let run_event_cursor_codec =
+                run_event_cursor_codec.ok_or(ProcessError::InvalidConfiguration)?;
+            let artifact_mutation_forwarder =
+                artifact_mutation_forwarder.ok_or(ProcessError::InvalidConfiguration)?;
+            operation
+                .merge(build_run_router(
+                    RunHttpState::new(
+                        Arc::new(PgRuns(repository.clone())),
+                        Arc::new(SystemRunClock),
+                    )
+                    .with_event_cursor_codec(run_event_cursor_codec),
+                ))
+                .merge(build_task_router(TaskHttpState::new(
+                    Arc::new(PgTasks(repository)),
+                    Arc::new(SystemTaskClock),
+                )))
+                .merge(build_artifact_router(ArtifactHttpState::new(
+                    Arc::new(PgArtifacts {
+                        mutation_forwarder: artifact_mutation_forwarder,
+                    }),
+                    Arc::new(SystemArtifactClock),
+                )))
+        }
+    }
+    .route_layer(middleware::from_fn_with_state(
+        authentication,
+        authenticate_public_request,
     ));
-    let run = build_run_router(
-        RunHttpState::new(
-            Arc::new(PgRuns(repository.clone())),
-            Arc::new(SystemRunClock),
-        )
-        .with_event_cursor_codec(run_event_cursor_codec),
-    );
-    let task = build_task_router(TaskHttpState::new(
-        Arc::new(PgTasks(repository.clone())),
-        Arc::new(SystemTaskClock),
-    ));
-    let artifact = build_artifact_router(ArtifactHttpState::new(
-        Arc::new(PgArtifacts {
-            mutation_forwarder: artifact_mutation_forwarder,
-        }),
-        Arc::new(SystemArtifactClock),
-    ));
-    let protected = operation
-        .merge(resource)
-        .merge(run)
-        .merge(task)
-        .merge(artifact)
-        .route_layer(middleware::from_fn_with_state(
-            authentication,
-            authenticate_public_request,
-        ));
-    Router::new()
+    Ok(Router::new()
         .route("/livez", get(live))
         .route("/readyz", get(ready))
         .route("/metrics", get(prometheus_metrics))
         .merge(protected)
+        .layer(middleware::from_fn_with_state(role, enforce_process_role))
         .layer(middleware::from_fn(observe_gateway_request))
-        .layer(Extension(metrics))
+        .layer(Extension(metrics)))
+}
+
+async fn enforce_process_role(
+    State(role): State<ProcessRole>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if role.permits_path(request.uri().path()) {
+        next.run(request).await
+    } else {
+        let mut response = StatusCode::NOT_FOUND.into_response();
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+    }
 }
 
 async fn live() -> Response {
@@ -2635,8 +2718,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .install()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let run_event_cursor_codec = load_run_event_cursor_codec()?;
-    let artifact_mutation_forwarder = Arc::new(MtlsArtifactMutationForwarder::install()?);
+    let (run_event_cursor_codec, artifact_mutation_forwarder) = match config.role {
+        ProcessRole::ManagementApi => (None, None),
+        ProcessRole::RuntimeApi => (
+            Some(load_run_event_cursor_codec()?),
+            Some(Arc::new(MtlsArtifactMutationForwarder::install()?)
+                as Arc<dyn ArtifactMutationForwarder>),
+        ),
+    };
     let database_url = required(DATABASE_URL_ENV)?;
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
@@ -2648,20 +2737,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     verify_schema(&pool).await.map_err(ProcessError::Schema)?;
     let repository = Arc::new(PgRepository::new(pool));
     let listener = tokio::net::TcpListener::bind(&config.listen_address).await?;
-    let metrics = install_gateway_metrics();
+    let metrics = install_gateway_metrics(config.role);
     metrics.mark_ready();
     tracing::info!(listen_address = %config.listen_address, "public gateway ready");
     axum::serve(
         listener,
         build_router(
-            repository,
-            artifact_mutation_forwarder,
-            verifier,
-            config.registry_validator_digest,
-            config.registry_validation_profile_digest,
-            run_event_cursor_codec,
-            metrics,
-        ),
+            config.role,
+            RouterDependencies {
+                repository,
+                artifact_mutation_forwarder,
+                verifier,
+                validator_digest: config.registry_validator_digest,
+                validation_profile_digest: config.registry_validation_profile_digest,
+                run_event_cursor_codec,
+                metrics,
+            },
+        )?,
     )
     .with_graceful_shutdown(shutdown_signal(Duration::from_millis(
         config.shutdown_grace_milliseconds,
@@ -2749,6 +2841,7 @@ mod tests {
     fn process_config_rejects_unbounded_or_ambiguous_values() {
         let mut config = ProcessConfig {
             schema_version: 1,
+            role: ProcessRole::RuntimeApi,
             listen_address: "0.0.0.0:8080".to_owned(),
             database_max_connections: 8,
             database_acquire_timeout_milliseconds: 1_000,
@@ -2795,17 +2888,21 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        let metrics = install_gateway_metrics();
+        let metrics = install_gateway_metrics(ProcessRole::RuntimeApi);
         metrics.mark_ready();
         let router = build_router(
-            Arc::new(PgRepository::new(pool)),
-            unavailable_artifact_forwarder(),
-            oidc_config().install().unwrap(),
-            fixed_digest('1'),
-            fixed_digest('2'),
-            test_run_event_cursor_codec(),
-            Arc::clone(&metrics),
-        );
+            ProcessRole::RuntimeApi,
+            RouterDependencies {
+                repository: Arc::new(PgRepository::new(pool)),
+                artifact_mutation_forwarder: Some(unavailable_artifact_forwarder()),
+                verifier: oidc_config().install().unwrap(),
+                validator_digest: fixed_digest('1'),
+                validation_profile_digest: fixed_digest('2'),
+                run_event_cursor_codec: Some(test_run_event_cursor_codec()),
+                metrics: Arc::clone(&metrics),
+            },
+        )
+        .unwrap();
         let live = router
             .clone()
             .oneshot(
@@ -2847,18 +2944,99 @@ mod tests {
             .await
             .unwrap();
         let body = std::str::from_utf8(&body).unwrap();
-        assert!(
-            body.contains("insight_platform_process_ready{component_role=\"public-gateway\"} 1")
-        );
+        assert!(body.contains("insight_platform_process_ready{component_role=\"runtime-api\"} 1"));
         assert!(body.contains(
-            "insight_platform_http_requests_total{component_role=\"public-gateway\",operation=\"operations\",outcome=\"rejected\"} 1"
+            "insight_platform_http_requests_total{component_role=\"runtime-api\",operation=\"operations\",outcome=\"rejected\"} 1"
         ));
         assert!(!body.contains("job_0198f1cc"));
     }
 
+    #[tokio::test]
+    async fn management_and_runtime_roles_expose_disjoint_business_routes() {
+        let management_pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let management_metrics = install_gateway_metrics(ProcessRole::ManagementApi);
+        let management = build_router(
+            ProcessRole::ManagementApi,
+            RouterDependencies {
+                repository: Arc::new(PgRepository::new(management_pool)),
+                artifact_mutation_forwarder: None,
+                verifier: oidc_config().install().unwrap(),
+                validator_digest: fixed_digest('1'),
+                validation_profile_digest: fixed_digest('2'),
+                run_event_cursor_codec: None,
+                metrics: management_metrics,
+            },
+        )
+        .unwrap();
+        let runtime_pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let runtime_metrics = install_gateway_metrics(ProcessRole::RuntimeApi);
+        let runtime = build_router(
+            ProcessRole::RuntimeApi,
+            RouterDependencies {
+                repository: Arc::new(PgRepository::new(runtime_pool)),
+                artifact_mutation_forwarder: Some(unavailable_artifact_forwarder()),
+                verifier: oidc_config().install().unwrap(),
+                validator_digest: fixed_digest('1'),
+                validation_profile_digest: fixed_digest('2'),
+                run_event_cursor_codec: Some(test_run_event_cursor_codec()),
+                metrics: runtime_metrics,
+            },
+        )
+        .unwrap();
+
+        for (uri, management_status, runtime_status) in [
+            (
+                "/v1/agents/res_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                401,
+                404,
+            ),
+            (
+                "/v1/runs/run_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                404,
+                401,
+            ),
+            (
+                "/v1/tasks/task_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                404,
+                401,
+            ),
+            (
+                "/v1/artifacts/art_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                404,
+                401,
+            ),
+            (
+                "/v1/operations/job_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                401,
+                401,
+            ),
+        ] {
+            let management_response = management
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                management_response.status().as_u16(),
+                management_status,
+                "{uri}"
+            );
+            let runtime_response = runtime
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(runtime_response.status().as_u16(), runtime_status, "{uri}");
+        }
+    }
+
     #[test]
     fn gateway_metrics_use_only_closed_operation_and_outcome_labels() {
-        let metrics = install_gateway_metrics();
+        let metrics = install_gateway_metrics(ProcessRole::RuntimeApi);
         metrics.observe(
             gateway_operation("/v1/runs/run_sensitive"),
             200,

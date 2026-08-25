@@ -3,20 +3,29 @@ image:
   digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
   pullPolicy: IfNotPresent
 imagePullSecrets: []
-
 namespace: platform-public
-replicas: 2
 port: 8080
-
-config:
-  existingConfigMap: insight-platform-gateway-candidate
-  fileKey: gateway.json
-  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-database:
-  existingSecret: insight-platform-gateway-database
-  urlKey: database-url
+roles:
+  management-api:
+    componentRole: management_api
+    replicas: 2
+    config: {existingConfigMap: insight-platform-management-api-candidate, fileKey: gateway.json, digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+    database: {existingSecret: insight-platform-management-api-database, urlKey: database-url}
+    resources:
+      requests: {cpu: 200m, memory: 256Mi, ephemeral-storage: 64Mi}
+      limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 1Gi}
+    autoscaling: {minReplicas: 2, maxReplicas: 10, targetCpuUtilizationPercentage: 70}
+  runtime-api:
+    componentRole: runtime_api
+    replicas: 2
+    config: {existingConfigMap: insight-platform-runtime-api-candidate, fileKey: gateway.json, digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee}
+    database: {existingSecret: insight-platform-runtime-api-database, urlKey: database-url}
+    resources:
+      requests: {cpu: 300m, memory: 384Mi, ephemeral-storage: 64Mi}
+      limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 1Gi}
+    autoscaling: {minReplicas: 2, maxReplicas: 10, targetCpuUtilizationPercentage: 70}
 runEventCursorKey:
-  existingSecret: insight-platform-gateway-run-event-cursor
+  existingSecret: insight-platform-runtime-api-run-event-cursor
   key: cursor-key
   digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 artifactGateway:
@@ -24,40 +33,24 @@ artifactGateway:
   namespaceSelector: {insight.platform/artifact-namespace: "true"}
   podSelector: {app.kubernetes.io/component: artifact-gateway}
   tls:
-    existingSecret: insight-platform-gateway-artifact-client-tls
+    existingSecret: insight-platform-runtime-api-artifact-client-tls
     keys: {ca: ca.pem, certificate: client.pem, privateKey: client-key.pem}
-
 ingress:
   enabled: true
   className: nginx
   host: api.example.invalid
-  tlsSecret: insight-platform-gateway-public-tls
+  tlsSecret: insight-platform-api-public-tls
   namespaceSelector: {insight.platform/ingress-namespace: "true"}
   podSelector: {app.kubernetes.io/component: ingress-controller}
-
 networkPolicy:
   enabled: true
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
   postgresCidrs: [10.10.0.0/24]
-
 monitoring:
   enabled: true
   interval: 30s
   scrapeTimeout: 5s
   namespaceSelector: {insight.platform/monitoring-namespace: "true"}
   podSelector: {app.kubernetes.io/name: prometheus}
-
-resources:
-  requests: {cpu: 200m, memory: 256Mi}
-  limits: {cpu: "2", memory: 1Gi}
-
-podDisruptionBudget:
-  enabled: true
-  minAvailable: 1
-
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 10
-  targetCpuUtilizationPercentage: 70
+podDisruptionBudget: {minAvailable: 1}

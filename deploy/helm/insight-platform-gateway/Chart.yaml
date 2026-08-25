@@ -1,6 +1,6 @@
 apiVersion: v2
 name: insight-platform-gateway
-description: Authenticated public Platform v1 Gateway
+description: Isolated authenticated Platform v1 Management and Runtime APIs
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

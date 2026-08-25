@@ -198,6 +198,13 @@
 > 缺role、mutable/wrong image、未就绪/越界副本、共享identity、缺default-deny、安全资源与HPA漂移。该证据只证明门禁实现与fail-closed
 > fixture，不是production-equivalent cluster的L4通过证据；当前Helm的缺role/隔舱偏差会被明确拒绝，必须逐项修复后才能产生L4 evidence。
 
+> 2026-08-26 implementation evidence：r246把此前同一`platform-gateway`进程/Deployment同时承载Management与Runtime API的拓扑偏差
+> clean-cut为两个显式`management_api | runtime_api`启动角色。进程最外层closed path allowlist在认证/数据库前拒绝错role noun；Management
+> 只组合Resource/Operation且不读取Artifact mTLS或Run event cursor Secret，Runtime只组合Run/Task/Artifact/Operation。Helm生成两个独立
+> Deployment、ServiceAccount、DB Secret、Service、PDB/HPA、NetworkPolicy与ServiceMonitor，Ingress按closed `/v1` noun路由；Runtime独占
+> Artifact出站和Secret mounts。5个Gateway tests（含双向401/404零越权路由矩阵）、Helm lint、角色/副本负向render及静态权限检查通过。
+> 该批关闭15-role inventory中的Management/Runtime物理隔舱实现，不代表其余13 role或真实cluster L4已经通过。
+
 > CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer在fresh PostgreSQL 16 r181完成真实多进程L3 kill-window。fresh PostgreSQL 16 r199进一步把同一链路扩展为Timer→Signal→HumanTask→ChildAgent→Return：四次durable park后分别强制终止Worker，认证Signal/Task owner恢复外部等待，exact-binding child Run在自身Timer后由第五个Worker恢复并终态化，critical-control scanner结算terminal child link、复制typed output、恢复parent，最终parent/child均成功且parent finish Node唯一。该过程还修复terminal-child误用64项claim limit而非专属recovery batch limit，以及一个scanner失败会阻断其余critical-control lane的问题。Timer/Signal/Task/Child的独立进程kill/recovery L3至此闭合；Native Capability已在fresh PostgreSQL 16 r208以真实双进程kill/recovery闭合，Model、Remote Capability与Context external leaf仍待完成。
 
 > 2026-08-25 implementation evidence：public `/v1/runs/{run_id}/signals/{signal_key}`现已进入generated OpenAPI与Gateway；closed typed body、

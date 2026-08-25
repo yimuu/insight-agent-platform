@@ -272,6 +272,10 @@ mutable/wrong image、rollout/replica、ServiceAccount、default-deny、restrict
 RuntimeClass topology fixture全部通过。该本地证据没有运行production-equivalent cluster，因此只证明L4 gate会fail closed，不能将L4标为
 通过；当前部署只有在真实inventory满足同一CandidateManifest/CapacityProfile后才能生成workload digest evidence。
 
+r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
+调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
+的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。
+
 每个production release至少覆盖：
 
 - clean baseline migration、upgrade/rollback rehearsal和backup/restore；

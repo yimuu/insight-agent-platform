@@ -1,5 +1,5 @@
 {{- define "insight-platform-gateway.name" -}}
-{{- printf "%s-gateway" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-%s" .root.Release.Name .role | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "insight-platform-gateway.image" -}}
@@ -7,7 +7,7 @@
 {{- end -}}
 
 {{- define "insight-platform-gateway.labels" -}}
-app.kubernetes.io/name: {{ .Chart.Name }}
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/component: public-gateway
+app.kubernetes.io/name: {{ .root.Chart.Name }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
+app.kubernetes.io/component: {{ .role }}
 {{- end -}}

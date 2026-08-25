@@ -30,6 +30,9 @@ if "/usr/local/bin/platform-gateway" not in dockerfile:
     failures.append("runtime image is missing platform-gateway")
 if "authenticate_public_request" not in source or "read_public_operation" not in source:
     failures.append("Gateway does not compose authentication and Operation authority")
+for role_contract in ("ProcessRole::ManagementApi", "ProcessRole::RuntimeApi"):
+    if role_contract not in source:
+        failures.append(f"Gateway does not close API process role {role_contract}")
 for metric_contract in (
     'route("/metrics", get(prometheus_metrics))',
     "ProcessHttpMetrics::install",
@@ -51,8 +54,22 @@ except (FileNotFoundError, subprocess.CalledProcessError) as error:
     failures.append(f"Gateway Helm contract did not render: {error}")
     rendered = ""
 
+for override, expected in (
+    ("roles.management-api.componentRole=runtime_api", "management-api componentRole is invalid"),
+    ("roles.runtime-api.replicas=1", "runtime-api replicas must be at least 2"),
+):
+    rejected = subprocess.run(
+        ["helm", "template", "platform", str(chart), "--set-string", override],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    if rejected.returncode == 0 or expected not in rejected.stderr:
+        failures.append(f"Gateway Helm contract accepted invalid override {override}")
+
 for required in (
-    "insight.platform/workload-role: public-gateway",
+    "insight.platform/workload-role: management-api",
+    "insight.platform/workload-role: runtime-api",
+    "insight.platform/component-role: management_api",
+    "insight.platform/component-role: runtime_api",
     "insight.platform/public-gateway-namespace: \"true\"",
     "PLATFORM_GATEWAY_CONFIG_DIGEST",
     "PLATFORM_GATEWAY_DATABASE_URL",
@@ -62,10 +79,12 @@ for required in (
     "PLATFORM_GATEWAY_ARTIFACT_CA_PATH",
     "PLATFORM_GATEWAY_ARTIFACT_CERT_PATH",
     "PLATFORM_GATEWAY_ARTIFACT_KEY_PATH",
-    "secretName: insight-platform-gateway-artifact-client-tls",
+    "secretName: insight-platform-runtime-api-artifact-client-tls",
     "app.kubernetes.io/component: artifact-gateway",
-    "secretName: insight-platform-gateway-run-event-cursor",
-    "path: /v1",
+    "secretName: insight-platform-runtime-api-run-event-cursor",
+    "path: /v1/agents",
+    "path: /v1/runs",
+    "path: /v1/artifacts",
     "pathType: Prefix",
     "kind: HorizontalPodAutoscaler",
     "kind: PodDisruptionBudget",
@@ -78,6 +97,29 @@ for required in (
         failures.append(f"Gateway render is missing {required}")
 if rendered.count("name: default-deny") != 1:
     failures.append("Gateway namespace requires exactly one default-deny NetworkPolicy")
+if rendered.count("\nkind: Deployment\n") != 2:
+    failures.append("Management and Runtime API require exactly two Deployments")
+if rendered.count("\nkind: HorizontalPodAutoscaler\n") != 2:
+    failures.append("Management and Runtime API require independent HPAs")
+if rendered.count("\nkind: PodDisruptionBudget\n") != 2:
+    failures.append("Management and Runtime API require independent PDBs")
+
+deployments = [
+    document for document in rendered.split("\n---\n") if "kind: Deployment\n" in document
+]
+management = next((item for item in deployments if "app.kubernetes.io/component: management-api" in item), "")
+runtime = next((item for item in deployments if "app.kubernetes.io/component: runtime-api" in item), "")
+if not management or not runtime:
+    failures.append("Management and Runtime API Deployment identities are incomplete")
+for runtime_only in (
+    "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH",
+    "PLATFORM_GATEWAY_ARTIFACT_ENDPOINT",
+    "artifact-tls",
+):
+    if runtime_only in management:
+        failures.append(f"Management API received Runtime-only authority {runtime_only}")
+    if runtime_only not in runtime:
+        failures.append(f"Runtime API is missing required authority {runtime_only}")
 for forbidden in (
     "AWS_ACCESS_KEY", "AWS_SECRET", "SECRET_MANAGER", "KMS_ENDPOINT",
     "ARTIFACT_STORAGE", "SANDBOX_RUNTIME",

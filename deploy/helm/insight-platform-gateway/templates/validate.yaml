@@ -1,47 +1,48 @@
-{{- if lt (int .Values.replicas) 2 }}
-{{- fail "replicas must be at least 2" }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must be an immutable lowercase sha256 digest" }}
 {{- end }}
 {{- if not .Values.networkPolicy.enabled }}
 {{- fail "networkPolicy.enabled must remain true" }}
 {{- end }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
-{{- fail "image.digest must be an immutable lowercase sha256 digest" }}
+{{- if or (ne (len .Values.roles) 2) (not (hasKey .Values.roles "management-api")) (not (hasKey .Values.roles "runtime-api")) }}
+{{- fail "roles must contain exactly management-api and runtime-api" }}
 {{- end }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) }}
-{{- fail "config.digest must be a lowercase sha256 digest" }}
+{{- range $role, $component := .Values.roles }}
+{{- $expected := ternary "management_api" "runtime_api" (eq $role "management-api") }}
+{{- if ne $component.componentRole $expected }}
+{{- fail (printf "%s componentRole is invalid" $role) }}
 {{- end }}
-{{- if or (empty .Values.config.existingConfigMap) (empty .Values.config.fileKey) }}
-{{- fail "immutable Gateway config reference is required" }}
+{{- if lt (int $component.replicas) 2 }}
+{{- fail (printf "%s replicas must be at least 2" $role) }}
 {{- end }}
-{{- if empty .Values.database.existingSecret }}
-{{- fail "Gateway database Secret is required" }}
+{{- if or (empty $component.config.existingConfigMap) (empty $component.config.fileKey) (not (regexMatch "^sha256:[0-9a-f]{64}$" $component.config.digest)) }}
+{{- fail (printf "%s immutable config reference is invalid" $role) }}
 {{- end }}
-{{- if or (empty .Values.runEventCursorKey.existingSecret) (empty .Values.runEventCursorKey.key) }}
-{{- fail "Gateway Run event cursor Secret reference is required" }}
+{{- if or (empty $component.database.existingSecret) (empty $component.database.urlKey) }}
+{{- fail (printf "%s database Secret is required" $role) }}
 {{- end }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.runEventCursorKey.digest) }}
-{{- fail "Gateway Run event cursor key digest must be lowercase sha256" }}
+{{- if or (lt (int $component.autoscaling.minReplicas) 2) (lt (int $component.autoscaling.maxReplicas) (int $component.autoscaling.minReplicas)) }}
+{{- fail (printf "%s autoscaling bounds are invalid" $role) }}
+{{- end }}
+{{- range $side := list "requests" "limits" }}
+{{- $resources := index $component.resources $side }}
+{{- if or (empty $resources.cpu) (empty $resources.memory) (empty (index $resources "ephemeral-storage")) }}
+{{- fail (printf "%s %s must close cpu, memory and ephemeral-storage" $role $side) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if or (empty .Values.runEventCursorKey.existingSecret) (empty .Values.runEventCursorKey.key) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.runEventCursorKey.digest)) }}
+{{- fail "Runtime API Run event cursor key closure is invalid" }}
 {{- end }}
 {{- if or (not (hasPrefix "https://" .Values.artifactGateway.endpoint)) (empty .Values.artifactGateway.tls.existingSecret) (empty .Values.artifactGateway.tls.keys.ca) (empty .Values.artifactGateway.tls.keys.certificate) (empty .Values.artifactGateway.tls.keys.privateKey) }}
-{{- fail "Gateway to Artifact Gateway requires an HTTPS endpoint and exact mTLS Secret keys" }}
+{{- fail "Runtime API to Artifact Gateway requires an HTTPS endpoint and exact mTLS Secret keys" }}
 {{- end }}
 {{- if empty .Values.networkPolicy.postgresCidrs }}
 {{- fail "networkPolicy.postgresCidrs is required" }}
 {{- end }}
 {{- if and .Values.ingress.enabled (or (empty .Values.ingress.host) (empty .Values.ingress.tlsSecret)) }}
-{{- fail "enabled Gateway Ingress requires exact host and TLS Secret" }}
+{{- fail "enabled API Ingress requires exact host and TLS Secret" }}
 {{- end }}
-{{- if not .Values.monitoring.enabled }}
-{{- fail "monitoring.enabled must remain true for the production Gateway" }}
-{{- end }}
-{{- if or (empty .Values.monitoring.namespaceSelector) (empty .Values.monitoring.podSelector) }}
-{{- fail "Gateway monitoring requires exact namespace and Pod selectors" }}
-{{- end }}
-{{- if or (not (regexMatch "^[1-9][0-9]*s$" .Values.monitoring.interval)) (not (regexMatch "^[1-9][0-9]*s$" .Values.monitoring.scrapeTimeout)) }}
-{{- fail "Gateway monitoring interval and scrape timeout must be positive seconds" }}
-{{- end }}
-{{- if .Values.autoscaling.enabled }}
-{{- if or (lt (int .Values.autoscaling.minReplicas) 2) (lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas)) }}
-{{- fail "autoscaling bounds are invalid" }}
-{{- end }}
+{{- if or (not .Values.monitoring.enabled) (empty .Values.monitoring.namespaceSelector) (empty .Values.monitoring.podSelector) }}
+{{- fail "API monitoring closure is required" }}
 {{- end }}

@@ -352,6 +352,11 @@ operation age/outcome、internal RPC latency/denial和DB pool utilization。tena
 
 ## 17. 验收标准
 
+当前实现证据（r246）：同一code image以closed `management_api | runtime_api` startup role生成两个独立进程；最外层noun allowlist在
+authentication/repository之前拒绝错role route。Management仅安装Resource/Operation，Runtime仅安装Run/Task/Artifact/Operation；前者
+不读取或挂载Artifact mTLS与Run event cursor Secret。Helm为两者生成独立Deployment、ServiceAccount、DB binding、NetworkPolicy、PDB/HPA、
+Service/ServiceMonitor，并由Ingress按closed `/v1` noun分流。该本地unit/render证据不替代production-equivalent cluster的L4 identity测试。
+
 - `/v1`与generic internal proxy提交任一external leaf内部字段均按unknown/forbidden field拒绝；不能借Operation、callback、Task或SSE
   endpoint伪造candidate selection、leaf result binding或resume Job；
 - OpenAPI路由只使用`/v1`，没有`/v2`、双写或legacy fallback；

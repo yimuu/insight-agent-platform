@@ -1,48 +1,51 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- $root := . -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: default-deny, namespace: {{ .Values.namespace }}}
 spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+{{ range $role, $_ := .Values.roles }}
+{{- $ctx := dict "root" $root "role" $role }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata:
-  name: {{ include "insight-platform-gateway.name" . }}
-  namespace: {{ .Values.namespace }}
+metadata: {name: {{ include "insight-platform-gateway.name" $ctx }}, namespace: {{ $root.Values.namespace }}}
 spec:
   podSelector:
-    matchLabels:
-      {{- include "insight-platform-gateway.labels" . | nindent 6 }}
+    matchLabels: {{ include "insight-platform-gateway.labels" $ctx | nindent 6 }}
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
         - namespaceSelector:
-            matchLabels: {{ toYaml .Values.ingress.namespaceSelector | nindent 16 }}
+            matchLabels: {{ toYaml $root.Values.ingress.namespaceSelector | nindent 14 }}
           podSelector:
-            matchLabels: {{ toYaml .Values.ingress.podSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: {{ int .Values.port }}}]
+            matchLabels: {{ toYaml $root.Values.ingress.podSelector | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ int $root.Values.port }}}]
     - from:
         - namespaceSelector:
-            matchLabels: {{ toYaml .Values.monitoring.namespaceSelector | nindent 16 }}
+            matchLabels: {{ toYaml $root.Values.monitoring.namespaceSelector | nindent 14 }}
           podSelector:
-            matchLabels: {{ toYaml .Values.monitoring.podSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: {{ int .Values.port }}}]
+            matchLabels: {{ toYaml $root.Values.monitoring.podSelector | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ int $root.Values.port }}}]
   egress:
     - to:
         - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
+            matchLabels: {{ toYaml $root.Values.networkPolicy.dnsNamespaceSelector | nindent 14 }}
           podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
+            matchLabels: {{ toYaml $root.Values.networkPolicy.dnsPodSelector | nindent 14 }}
       ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
     - to:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.artifactGateway.namespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.artifactGateway.podSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: 8080}]
-    - to:
-        {{- range .Values.networkPolicy.postgresCidrs }}
+        {{- range $root.Values.networkPolicy.postgresCidrs }}
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       ports: [{protocol: TCP, port: 5432}]
+    {{- if eq $role "runtime-api" }}
+    - to:
+        - namespaceSelector:
+            matchLabels: {{ toYaml $root.Values.artifactGateway.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels: {{ toYaml $root.Values.artifactGateway.podSelector | nindent 14 }}
+      ports: [{protocol: TCP, port: 8080}]
+    {{- end }}
+{{ end }}
 {{- end }}
