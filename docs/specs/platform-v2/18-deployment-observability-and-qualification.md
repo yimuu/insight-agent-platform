@@ -236,7 +236,10 @@ process L3；Model tool-result整链与Context external leaf L3仍未通过。
 
 Context recovery前置证据已在fresh PostgreSQL 16 r234通过：Deferred同attempt恢复后模拟Worker lease丢失，bounded owner scanner重验
 fence/payload/reservation，原子结算旧quota与Event/Outbox并创建下一物理attempt，最终Observation唯一。该证据仅关闭L2 durable recovery，
-尚不替代独立production Context Worker、真实backend protocol及kill/restart的L3门禁。
+尚不替代真实backend protocol及kill/restart的L3门禁。后续批次已增加独立`platform-context-worker`、digest-bound NativeCatalog静态
+adapter和独立Helm role；该role仅允许DNS/PostgreSQL出站，不含Egress、Secret、NATS或Sandbox凭据，并以claim前exact adapter digest
+扫描避免配置漂移产生lease/quota mutation。当前仅证明process/deployment composition与启动配置门禁，production双进程kill/restart
+fixture仍待通过。
 
 每个production release至少覆盖：
 

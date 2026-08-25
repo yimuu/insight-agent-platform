@@ -130,6 +130,13 @@
 > quota query计数为2且result bytes只结算一次。该批关闭Context process L3的durable recovery前置门禁；独立production Context Worker、
 > backend protocol与真实多进程kill窗口仍待完成。
 
+> 2026-08-25 implementation evidence：新增独立`platform-context-worker`及NativeCatalog静态adapter。Worker在claim前通过只读扫描精确匹配
+> 冻结`adapter_contract_digest`与`installed_adapter_digest`，命中后才使用现有exact-slot claim，并以独立Context permit、generic Job
+> heartbeat、Context owner terminal commit和bounded expired-lease scanner组合执行。digest-bound process config会拒绝Worker manifest/runtime
+> drift；独立Helm role仅开放DNS/PostgreSQL出站，不挂载Egress、Secret、NATS或Sandbox凭据，部署静态检查、crate boundary、单元测试及
+> `-D warnings` clippy均通过。该批完成production process/deployment接线，但真实双进程commit-window kill/recovery fixture与remote backend
+> protocol L3仍待完成，不能据此声明Context L3闭合。
+
 > 2026-08-25 implementation evidence：runtime新增production orchestration composition，明确把business claim/heartbeat连接与
 > critical-control Plan/RunValue/Skill读取、owner commit及Safety scanner连接分开，并用同一mTLS Artifact Scheduler client组合exact
 > Plan materializer、Capability/Model admission、durable Plan driver、lease-fenced executor和coordinator。独立binary和Helm角色已在

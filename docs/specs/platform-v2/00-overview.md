@@ -289,7 +289,9 @@ fresh PostgreSQL 16 r199又完成Timer到期恢复后进入SignalWait、强制�
 恢复child、由critical-control scanner结算terminal child link与typed output、恢复parent并完成Return，parent finish Node唯一。Timer/Signal/Task/Child的
 多进程kill/recovery至此闭合。后续r208/r217/r221已分别关闭Native、Remote HTTP/gRPC与Remote MCP ToolsCall的Capability process L3；
 r233又以production Model Worker、mTLS Egress/NATS、错manifest零调用、Provider响应后commit-window强杀、expired-lease保守结算与安全重放
-关闭Model provider process L3。Model tool-result整链、ContextQuery及Sandbox-backed Capability仍缺完整production多进程L3，因此不能据此
+关闭Model provider process L3。r234之后又新增独立`platform-context-worker`与仅允许DNS/PostgreSQL出站的NativeCatalog部署角色；其
+read-only候选扫描在claim前精确匹配冻结adapter contract与installed adapter digest，claim/heartbeat/recovery/terminal仍复用durable
+ContextQuery/Job owner合同。该批尚未完成真实多进程kill-window。Model tool-result整链、ContextQuery及Sandbox-backed Capability仍缺完整production多进程L3，因此不能据此
 宣称Phase 2完成。
 
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、

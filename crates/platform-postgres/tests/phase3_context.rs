@@ -2401,6 +2401,15 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         CommandOutcome::Replayed(_) => panic!("first Context prepare replayed"),
     };
     assert_eq!(prepared.job.state, JobState::Ready.as_str());
+    assert!(repository
+        .scan_claimable_native_context_jobs(
+            &named_digest("uninstalled-native-adapter"),
+            &named_digest("wrong-backend-contract"),
+            1,
+        )
+        .await
+        .unwrap()
+        .is_empty());
     let first_claim = claim(&repository, &fixture, job_id.clone(), 0x130).await;
     assert_eq!(first_claim.claimed.query.state, ContextQueryState::InFlight);
     assert_eq!(first_claim.claimed.job.attempt_no, 1);

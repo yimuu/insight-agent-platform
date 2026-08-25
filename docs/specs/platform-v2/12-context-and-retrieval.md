@@ -586,11 +586,14 @@ Context query/item/citation domain与caller-owned PostgreSQL repository已交付
 Deferred/wake同attempt恢复、worker fence、stale signal、quota、citation digest/foreign deployment拒绝及Event/Receipt/Outbox原子性。
 后续r234增加bounded/sharded expired-lease owner recovery，覆盖Deferred恢复后的Worker丢失、旧reservation原子结算、同一Job进入新
 attempt、`context.lease_recovered` Event/Outbox及最终唯一Observation；read-only query按真实物理调用计数，result bytes只在terminal结算。
+后续批次新增独立`platform-context-worker`和NativeCatalog静态adapter：只读候选扫描在任何lease/quota mutation前精确比较冻结的
+`adapter_contract_digest`与`installed_adapter_digest`，命中后才使用exact-slot claim；进程以独立Context本地permit、heartbeat、owner
+commit和bounded expired-lease scanner组合执行。其Helm角色只允许DNS与PostgreSQL出站，不挂载Egress、Secret、NATS或Sandbox凭据。
 Text2SQL `ReadOnlySqlPlan`同时冻结catalog Query/Observation/projection、database identity/dialect及exact Capability
 Interface/Deployment/Effect；generic Invocation admission在同一事务锁定这些事实，只接受规范名精确为`database.query.readonly`且Effect为
 ReadOnly的已绑定Capability。成功/replay、错误名称/Effect、foreign Run/citation与Observation drift fixture均通过，拒绝路径不留下
 Invocation或Receipt。该证据只是Context/Text2SQL的L1～L2候选实施证据，不替代生产Context backend、SQL adapter、
-public `/v1`或18的L4～L6资格。
+public `/v1`或18的L4～L6资格；在production双进程kill/restart fixture通过前，也不把静态adapter进程本身宣称为L3闭合。
 
 ## 24. 明确推迟的工作
 
@@ -605,7 +608,7 @@ public `/v1`或18的L4～L6资格。
 ## 25. 未决问题
 
 CR-181 cross-review已确认Plan v4 Context dispatch/result binding并恢复Accepted；r234已补齐expired-lease L2 owner recovery，独立production
-Context Worker与backend protocol的多进程L3 evidence仍待完成。
+Context Worker及NativeCatalog受限部署已经接线，真实多进程kill-window与remote backend protocol L3 evidence仍待完成。
 
 CR-166已将CanonicalRegion和Context binding exact-match统一到02/12，Dataset build直接使用shared Job。本规范已
 Accepted；Context backend、SQL adapter、Artifact与public API的分层fixture仍待实现。具体索引引擎、embedding provider

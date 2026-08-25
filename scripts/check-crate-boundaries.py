@@ -26,6 +26,7 @@ INTERNAL_ROLES = {
     "insight-platform-callback-api": "callback_api",
     "insight-platform-contracts": "contracts",
     "insight-platform-context": "context_domain",
+    "insight-platform-context-worker": "context_worker",
     "insight-platform-gateway": "public_gateway",
     "insight-platform-egress": "egress_core",
     "insight-platform-egress-broker": "egress_broker",
@@ -88,6 +89,9 @@ ALLOWED_INTERNAL = {
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "observability", "platform_postgres"},
     "contracts": set(),
     "context_domain": {"contracts", "invocations_domain", "jobs_domain"},
+    # The first Context Worker backend is an installed NativeCatalog adapter. It owns only local
+    # Context capacity and durable PostgreSQL composition; it has no Egress or Secret client.
+    "context_worker": {"context_domain", "contracts", "jobs_domain", "platform_postgres", "platform_worker"},
     # The public Gateway is the control-plane composition root. It binds HTTP application ports
     # to owner adapters but does not execute user code or become durable state authority.
     "public_gateway": {"context_domain", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "observability", "orchestrator_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain"},

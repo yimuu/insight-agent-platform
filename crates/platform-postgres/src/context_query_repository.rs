@@ -50,6 +50,12 @@ pub struct ClaimedContextExecution {
     pub failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimableNativeContextJob {
+    pub tenant_id: ResourceId,
+    pub job_id: ResourceId,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExpiredContextRecoverySlot {
     pub quota_entry_ids: [ResourceId; CONTEXT_QUOTA_LINES],
@@ -174,6 +180,59 @@ impl PgRepository {
             limits: self.context_query_limits(),
             scope_environment_limits: self.scope_environment_limits(),
         })
+    }
+
+    /// Discovers ready Context Jobs whose frozen NativeCatalog binding matches this process.
+    ///
+    /// This is deliberately read-only. The subsequent exact-slot claim remains the sole lease,
+    /// quota, and parent-state authority, so a race after discovery is handled as first-winner
+    /// loss without creating a second scheduler authority.
+    pub async fn scan_claimable_native_context_jobs(
+        &self,
+        installed_adapter_digest: &Sha256Digest,
+        adapter_contract_digest: &Sha256Digest,
+        limit: u16,
+    ) -> Result<Vec<ClaimableNativeContextJob>, RepositoryError> {
+        if limit == 0 || limit > 64 {
+            return Err(RepositoryError::InvalidInput(
+                "Native Context claim scan limit is invalid".to_owned(),
+            ));
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT job.tenant_id, job.job_id
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.invocations AS query
+              ON query.tenant_id = job.tenant_id
+             AND query.invocation_id = job.owner_id
+             AND query.invocation_kind = 'context'
+            WHERE job.work_class = 'context'
+              AND job.owner_kind = 'context_query'
+              AND job.state IN ('ready', 'retry_scheduled')
+              AND job.scheduled_at <= clock_timestamp()
+              AND COALESCE(job.retry_at, job.scheduled_at) <= clock_timestamp()
+              AND job.deadline > clock_timestamp()
+              AND job.attempt_no < job.attempt_limit
+              AND query.payload #>> '{admission,implementation,contract,backend,kind}' = 'native_catalog'
+              AND query.payload #>> '{admission,implementation,contract,backend,adapter_contract_digest}' = $2
+              AND query.payload #>> '{admission,context_closure,backend,kind}' = 'native_catalog'
+              AND query.payload #>> '{admission,context_closure,backend,installed_adapter_digest}' = $3
+            ORDER BY job.priority DESC, COALESCE(job.retry_at, job.scheduled_at), job.job_id
+            LIMIT $1
+            "#,
+        )
+        .bind(i64::from(limit))
+        .bind(adapter_contract_digest.to_string())
+        .bind(installed_adapter_digest.to_string())
+        .fetch_all(self.pool())
+        .await?;
+        let mut candidates = Vec::with_capacity(usize::from(limit));
+        for row in rows {
+            let tenant_id = parse_id(&row.try_get::<String, _>("tenant_id")?, "Context tenant")?;
+            let job_id = parse_id(&row.try_get::<String, _>("job_id")?, "Context Job")?;
+            candidates.push(ClaimableNativeContextJob { tenant_id, job_id });
+        }
+        Ok(candidates)
     }
 }
 
