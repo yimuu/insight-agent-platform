@@ -19,6 +19,12 @@
 {{- if or (lt (int .Values.networkPolicy.artifactPort) 1) (gt (int .Values.networkPolicy.artifactPort) 65535) -}}
 {{- fail "Artifact port must be in 1..65535" -}}
 {{- end -}}
+{{- if or (lt (int .Values.observability.port) 1) (gt (int .Values.observability.port) 65535) -}}
+{{- fail "observability port must be in 1..65535" -}}
+{{- end -}}
+{{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) -}}
+{{- fail "monitoring requires exact namespace and Pod selectors" -}}
+{{- end -}}
 {{- if .Values.autoscaling.enabled -}}
 {{- if lt (int .Values.autoscaling.minReplicas) 2 -}}
 {{- fail "Orchestration Worker HPA requires at least two replicas" -}}

@@ -292,6 +292,10 @@ r250把同一CandidateManifest `deployment_config_digest`冻结到全部17个主
 唯一，live inventory preflight逐pool要求它与输入CandidateManifest完全相等，并将摘要写入canonical workload evidence；配置摘要漂移负向fixture
 通过。该证据关闭静态manifest及preflight实现缺口，不代表production-equivalent cluster已通过L4，也不替代进程内typed config启动自检。
 
+r251为Scheduler/Recovery role增加独立HTTP observability listener；startup authority全部成功后才把bounded process metric置Ready，runtime或
+listener提前退出使进程失败。Helm readiness/liveness改为HTTP，并以内部Service、ServiceMonitor及exact Prometheus NetworkPolicy ingress
+暴露低基数指标。该证据只覆盖此role的L1/L3 process wiring；其余role、dashboard/alert/trace以及真实scrape仍未闭合。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

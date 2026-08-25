@@ -11,10 +11,12 @@ name = "platform-orchestration-worker"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
 insight-platform-artifact-rpc.workspace = true
 insight-platform-artifacts.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-orchestrator.workspace = true
+insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-runtime.workspace = true
 insight-platform-worker.workspace = true

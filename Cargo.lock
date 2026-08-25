@@ -2925,9 +2925,11 @@ version = "0.1.0"
 name = "insight-platform-orchestration-worker"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "insight-platform-artifact-rpc",
  "insight-platform-artifacts",
  "insight-platform-contracts",
+ "insight-platform-observability",
  "insight-platform-orchestrator",
  "insight-platform-postgres",
  "insight-platform-runtime",

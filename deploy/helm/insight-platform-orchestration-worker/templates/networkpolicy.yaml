@@ -14,7 +14,15 @@ spec:
     matchLabels:
       {{- include "insight-platform-orchestration-worker.labels" . | nindent 6 }}
   policyTypes: [Ingress, Egress]
-  ingress: []
+  ingress:
+    {{- if .Values.monitoring.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.observability.port }}}]
+    {{- end }}
   egress:
     - to:
         - namespaceSelector:

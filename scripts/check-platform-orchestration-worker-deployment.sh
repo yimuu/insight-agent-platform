@@ -37,6 +37,8 @@ for required in (
     "verify_schema",
     "runtime.is_finished()",
     "runtime.shutdown()",
+    "ProcessHttpMetrics",
+    "observability_router",
 ):
     if required not in source:
         failures.append(f"Orchestration Worker production composition is missing {required}")
@@ -55,6 +57,10 @@ for needle in (
     'kind: Deployment',
     'kind: HorizontalPodAutoscaler',
     'kind: PodDisruptionBudget',
+    'kind: ServiceMonitor',
+    'name: observability',
+    'path: /readyz',
+    'path: /metrics',
     'command: ["/usr/local/bin/platform-orchestration-worker"]',
     'insight.platform/workload-role: orchestration-worker',
     'automountServiceAccountToken: false',
@@ -67,7 +73,7 @@ for needle in (
     if needle not in rendered:
         failures.append(f"rendered Orchestration Worker contract is missing {needle}")
 for forbidden in (
-    'kind: Ingress', 'kind: Service\n', 'hostNetwork: true', 'hostPID: true',
+    'kind: Ingress', 'hostNetwork: true', 'hostPID: true',
     'privileged: true', 'automountServiceAccountToken: true', 'NATS',
     'PLATFORM_ORCHESTRATION_WORKER_EGRESS_', 'PLATFORM_ORCHESTRATION_WORKER_SANDBOX_',
 ):
@@ -84,6 +90,8 @@ negative_values = (
     ("--set", "artifactTls.keys.privateKey=", "Artifact mTLS projected keys"),
     ("--set", "autoscaling.minReplicas=1", "at least two replicas"),
     ("--set", "autoscaling.maxReplicas=1", "maximum must be at least"),
+    ("--set", "observability.port=0", "observability port"),
+    ("--set-json", "networkPolicy.monitoringPodSelector=null", "monitoring requires exact"),
 )
 for flag, assignment, expected in negative_values:
     result = subprocess.run(

@@ -231,6 +231,13 @@
 > 负向fixture后workload矩阵7项全部通过。该批关闭“image相同但部署配置漂移仍可能通过”的门禁缺口；它仍是manifest L1与L4 preflight
 > 实现证据，只有production-equivalent cluster真实抓取通过后才构成L4 rollout evidence，且不替代各进程启动时的typed config自校验。
 
+> 2026-08-26 implementation evidence：r251把shared bounded-label process telemetry接入Scheduler/Recovery的独立
+> `platform-orchestration-worker`。digest-bound closed config新增独立observability listen address；只有数据库schema、Artifact mTLS client、
+> WorkerManifest和runtime成功组合后才置readiness，runtime或metrics server意外退出都会使进程fail closed。`/livez`、`/readyz`、`/metrics`
+> 使用no-store且只输出静态component/operation/outcome维度。Helm改用HTTP probes，新增内部Service、精确Prometheus ingress NetworkPolicy和
+> ServiceMonitor；单元、strict Clippy、Helm正负及全局17-pool闭包通过。该批只关闭Scheduler/Recovery role的process telemetry接线，其他
+> 非HTTP role、dashboard/alerts、trace/redaction和production scrape仍待后续批次。
+
 > CR-183已实现ChildAgent exact input/route/Selection Policy facts、SERIALIZABLE owner事务重算及PostgreSQL durable Plan store dispatch；HumanTask exact Plan owner/store、response Scope binding及owner-derived resume/failure事实已接线；Timer与Signal wait均由exact Plan及数据库时间的owner事务派生。Signal owner验证exact key、可选payload schema/摘要，将payload写为immutable RunValue并绑定当前Scope；Timer due与Signal timeout使用Job typed scheduling列和critical-control bounded scanner，普通wake/timeout deadline窗口互斥。上述first-winner、Receipt replay与扫描恢复已在fresh PostgreSQL 16 r88通过；Timer在fresh PostgreSQL 16 r181完成真实多进程L3 kill-window。fresh PostgreSQL 16 r199进一步把同一链路扩展为Timer→Signal→HumanTask→ChildAgent→Return：四次durable park后分别强制终止Worker，认证Signal/Task owner恢复外部等待，exact-binding child Run在自身Timer后由第五个Worker恢复并终态化，critical-control scanner结算terminal child link、复制typed output、恢复parent，最终parent/child均成功且parent finish Node唯一。该过程还修复terminal-child误用64项claim limit而非专属recovery batch limit，以及一个scanner失败会阻断其余critical-control lane的问题。Timer/Signal/Task/Child的独立进程kill/recovery L3至此闭合；Native Capability已在fresh PostgreSQL 16 r208以真实双进程kill/recovery闭合，Model、Remote Capability与Context external leaf仍待完成。
 
 > 2026-08-25 implementation evidence：public `/v1/runs/{run_id}/signals/{signal_key}`现已进入generated OpenAPI与Gateway；closed typed body、
