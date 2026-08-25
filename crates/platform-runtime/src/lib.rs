@@ -3,6 +3,7 @@
 //! Domain crates remain pure and PostgreSQL remains the durable authority. This crate connects
 //! process-local Worker capacity to durable claim transactions and owns role-scoped runtime I/O.
 
+mod controller_admission;
 mod controller_mutations;
 mod execution;
 mod generation_handler;
@@ -17,6 +18,7 @@ mod sandbox_executor;
 mod sandbox_outcome;
 mod sandbox_recovery;
 
+pub use controller_admission::*;
 pub use controller_mutations::*;
 pub use execution::*;
 pub use generation_handler::*;
