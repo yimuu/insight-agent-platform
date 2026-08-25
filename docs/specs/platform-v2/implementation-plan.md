@@ -1,10 +1,14 @@
-# Platform v2 四阶段实现计划（CR-193）
+# Platform v2 四阶段实现计划（CR-194）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-193 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-194 contracts accepted; L3～L6 pending |
 | 日期 | 2026-08-26 |
-| 合同输入 | 00～18、cross-review CR-193、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-194、ADR-0001、ADR-0002、AGENTS.md |
+
+> 2026-08-26 implementation feedback：Resource Refresh Egress接线发现full reconcile所需`resources/list`未进入closed published method
+> registry。CR-194按00～18完成影响复核：list/read共享Resources capability但各自拥有冻结limits，Host从cause/profile选择，Context Worker不能
+> 指定method；不复用Capability Invocation，不新增public route、aggregate、表或正文持久化。下一实现批须先交付registry/contract fixture。
 
 > 2026-08-26 contract feedback：CR-190 L2接线发现closed owner registry没有subscription refresh Context Job的合法pair。CR-191在03增加
 > 唯一`Context -> McpOperation` pair，并在07/12/13/18冻结source row/payload/WorkClass claim约束；不新增WorkClass、aggregate、table或route。

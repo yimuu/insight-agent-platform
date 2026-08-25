@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-193 |
+| 状态 | Accepted / CR-194 |
 | 日期 | 2026-08-26 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -22,6 +22,11 @@
 > 错当成远端业务identity，导致合法长调用在terminal commit失配。CR-193把`execution_identity_digest`限定为tenant/subscription/Job、
 > worker generation、lease generation/token、physical attempt和exact request的不可变闭包；Host在dispatch时验证当时fence，Context Worker
 > 续租后只更新owner commit fence。evidence不绑定可变Job version/lease expiry。
+
+> 2026-08-26 implementation feedback（CR-194）：CR-192要求full reconcile按冻结profile执行有界`resources/list` +
+> `resources/read`，但published MCP method machine registry只有`resources/read`，导致Host要么跳过list、要么使用未登记的自由method。
+> CR-194将`resources/list`加入同一closed ReadOnly method registry及per-method limits；refresh transport仍由Host从cause与published profile
+> 选择，Context Worker不得传method，且不增加Capability Invocation、public route、current-state authority或持久化正文。
 
 > 2026-08-24 implementation feedback（CR-181）：production Scheduler接入外部叶节点时确认Plan v3仅为
 > `ModelLoop/CapabilityCall/ContextQuery/ChildAgentCall/HumanTask/TimerWait/SignalWait`保存`resume`，无法从冻结Plan

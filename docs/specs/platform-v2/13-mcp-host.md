@@ -119,8 +119,10 @@ Context owner创建的物理刷新Job以closed `Context -> McpOperation` pair绑
 Context Worker执行该Job时只调用Host的typed internal `RefreshResources` RPC。请求携带tenant、subscription、Context Job ID、worker
 generation/fence、exact Context/MCP Deployment、Discovery/Auth/session/event/root evidence、cause、deadline和request digest；不得携带raw
 session/token/Secret、自由endpoint/header或任意MCP method。Host以独立workload audience重载当前subscription、Job state/fence及published
-MCP execution closure，任何漂移均在Egress调用前fail closed。Host随后按冻结protocol profile执行bounded `resources/read`或full reconcile
-list/read，并只返回request/response/resource-set digest、counts、remote revision/cursor、observed time或closed safe failure。
+MCP execution closure，任何漂移均在Egress调用前fail closed。Host随后按冻结protocol profile执行bounded `resources/read`；full reconcile必须
+先执行登记为closed ReadOnly method的`resources/list`，再对冻结root约束下的返回集合执行有界`resources/read`。list/read分别使用published
+method limits；缺少任一method、capability或limit均在Egress调用前fail closed。Host只返回request/response/resource-set digest、counts、
+remote revision/cursor、observed time或closed safe failure。
 
 该RPC是ReadOnly protocol adapter，不是Job owner：Host不claim/heartbeat/terminalize Context Job，不创建Observation/cache，也不因notification
 自行调用它。响应后Host崩溃或RPC completion uncertain允许Context owner用新attempt安全重读；Host仍须执行session/Egress permit、rate/body/time

@@ -235,6 +235,10 @@ Streamable HTTP fake server，在claim后、Host dispatch前后、response后/te
 ReadOnly uncertain产生新attempt、唯一terminal evidence、无Context Observation/cache row、Context/MCP permit与DB pool相互隔离。L4再以mTLS、
 RBAC、NetworkPolicy和Context/MCP各自饱和验证只有允许的Context→Host→Egress路径，且任一lane饱和不使另一lane或API readiness失败。
 
+CR-194 L1增加`resources/list` closed registry、Resources capability与ReadOnly effect、独立per-method limits及unknown/missing limit拒绝；L3的
+full reconcile fake server必须观察一次有界list和对允许集合的有界read，任一步骤响应后强杀均只允许同一ReadOnly Job的新attempt重读，且Host、
+Job/Event/Receipt与日志均不保存remote body或自由URI。
+
 L4 rollout preflight必须从待资格cluster读取live Deployment/DaemonSet、NetworkPolicy、PDB与HPA inventory，并对照同一production
 CandidateManifest和CapacityProfile fail closed验证：closed ComponentRole closure、exact digest image、controller observed generation、全部
 desired replica Ready、replica/autoscaling bounds、per-role ServiceAccount isolation、token automount关闭、restricted pod/container security、

@@ -3888,6 +3888,7 @@ fn require_success_status(
 fn wire_method(method: PublishedMcpMethod) -> &'static str {
     match method {
         PublishedMcpMethod::ToolsCall => "tools/call",
+        PublishedMcpMethod::ResourcesList => "resources/list",
         PublishedMcpMethod::ResourcesRead => "resources/read",
         PublishedMcpMethod::PromptsGet => "prompts/get",
         PublishedMcpMethod::TasksGet => "tasks/get",
@@ -3899,7 +3900,9 @@ fn wire_method(method: PublishedMcpMethod) -> &'static str {
 fn method_negotiated(method: PublishedMcpMethod, capabilities: &McpNegotiatedCapabilities) -> bool {
     match method {
         PublishedMcpMethod::ToolsCall => capabilities.tools,
-        PublishedMcpMethod::ResourcesRead => capabilities.resources,
+        PublishedMcpMethod::ResourcesList | PublishedMcpMethod::ResourcesRead => {
+            capabilities.resources
+        }
         PublishedMcpMethod::PromptsGet => capabilities.prompts,
         PublishedMcpMethod::TasksGet | PublishedMcpMethod::TasksResult => capabilities.tasks,
         PublishedMcpMethod::TasksCancel => capabilities.tasks_cancel,

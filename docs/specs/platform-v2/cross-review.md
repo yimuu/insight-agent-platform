@@ -1,10 +1,28 @@
-# Platform v2 00～18 Cross-review（CR-193）
+# Platform v2 00～18 Cross-review（CR-194）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-193 Accepted |
+| 状态 | Closed / CR-194 Accepted |
 | 日期 | 2026-08-26 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-193 subscription heartbeat/evidence identity feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-194 MCP Resource list machine-registry feedback |
+
+### CR-194 MCP Resource full-reconcile method-registry impact review
+
+CR-192正文要求full reconcile执行有界`resources/list` + `resources/read`集合，但machine `PublishedMcpMethod`仅登记read。若Host直接发送
+`resources/list`会绕过published profile的method limits与capability校验；若只read root则不能满足full reconcile。CR-194把list登记为与read
+同属Resources capability的closed ReadOnly方法，Host根据已冻结cause/profile选择协议序列，Context Worker请求仍不携带method。
+
+| Spec | CR-194结论 |
+|---|---|
+| 00～02、04～11、14～17 | clean `/v1`、plane/resource/Job/Run/Capability/API/Sandbox/Artifact/Model authority与schema不变 |
+| 03 | refresh仍为同一ReadOnly attempt与JobCommit；list/read不产生第二Job、Receipt或current projection |
+| 12 | root refresh只read；full reconcile以profile的独立list/read limits有界执行并仅返回聚合digest/count evidence |
+| 13 | published method registry增加`resources/list`；Host选择method，Egress逐method执行limits且不返回body |
+| 18 | L1覆盖list registry/capability/effect，L3覆盖full reconcile实际list/read及任一步骤不确定后的安全重读 |
+
+00～18已按state ownership、IDs/schema、errors、transactions、events、permissions、capacity、failure recovery和fixtures全量复核。
+CR-194不新增table、aggregate、route、role、WorkClass、Secret路径、Capability Invocation或第二current-state authority；wire list结果仅在Host/Egress
+调用内归一化为bounded evidence。受影响00、03、12、13、18恢复Accepted / CR-194，Implementation Authorization保持有效。
 
 ### CR-193 subscription heartbeat/evidence identity impact review
 

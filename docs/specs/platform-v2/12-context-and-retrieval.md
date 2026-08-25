@@ -536,8 +536,8 @@ worker generation/fence、exact Context/MCP Deployment与Discovery/Auth/session/
 然后调用13的typed internal MCP Resource Refresh RPC。RPC请求不含raw session/token/Secret、自由URL/header或调用方选择的method；MCP Host必须在
 外部I/O前从PostgreSQL重载当前subscription、exact MCP execution closure及Job fence。
 
-首版refresh执行对root resource做有界`resources/read`，full reconcile按冻结root/profile执行有界list/read集合；具体wire method由13的
-published protocol profile决定，不由Context Worker自由选择。成功响应只返回closed evidence：request/response/resource-set digest、
+首版refresh执行对root resource做有界`resources/read`，full reconcile按冻结root/profile及各自method limits执行有界
+`resources/list` + `resources/read`集合；具体wire method由13的published protocol profile决定，不由Context Worker自由选择。成功响应只返回closed evidence：request/response/resource-set digest、
 resource/item/byte count、remote revision或cursor（若有）和observed time。正文、URI locator、session、token与未归一化remote error不得返回或
 持久化。Context owner重验evidence digest与限制后，以`JobCommit` Receipt在单一事务terminalize Job、结算quota并写Event/Outbox。
 

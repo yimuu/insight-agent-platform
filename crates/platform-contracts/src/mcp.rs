@@ -199,6 +199,7 @@ pub enum McpExperimentalFeature {
 #[serde(rename_all = "snake_case")]
 pub enum PublishedMcpMethod {
     ToolsCall,
+    ResourcesList,
     ResourcesRead,
     PromptsGet,
     TasksGet,
@@ -345,7 +346,9 @@ impl McpProtocolPolicyDocument {
         }
         if self.method_limits.keys().any(|method| match method {
             PublishedMcpMethod::ToolsCall => !self.allowed_server_capabilities.tools,
-            PublishedMcpMethod::ResourcesRead => !self.allowed_server_capabilities.resources,
+            PublishedMcpMethod::ResourcesList | PublishedMcpMethod::ResourcesRead => {
+                !self.allowed_server_capabilities.resources
+            }
             PublishedMcpMethod::PromptsGet => !self.allowed_server_capabilities.prompts,
             PublishedMcpMethod::TasksGet
             | PublishedMcpMethod::TasksResult
@@ -893,6 +896,26 @@ mod tests {
             .unwrap()
             .insert("latest".to_owned(), serde_json::json!(true));
         assert!(serde_json::from_value::<McpProtocolPolicyDocument>(wire).is_err());
+    }
+
+    #[test]
+    fn resource_list_is_a_closed_resources_method_with_its_own_limits() {
+        let mut profile = protocol();
+        profile.allowed_server_capabilities.resources = true;
+        profile
+            .method_limits
+            .insert(PublishedMcpMethod::ResourcesList, method_limits());
+        profile.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(PublishedMcpMethod::ResourcesList).unwrap(),
+            serde_json::json!("resources_list")
+        );
+
+        profile.allowed_server_capabilities.resources = false;
+        assert_eq!(
+            profile.validate(),
+            Err(McpContractError::InvalidProtocolProfile)
+        );
     }
 
     #[test]

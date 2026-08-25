@@ -1165,7 +1165,9 @@ fn tasks_enabled(contract: &McpHostExecutionContract) -> bool {
 fn method_was_negotiated(method: PublishedMcpMethod, snapshot: &McpDiscoverySnapshot) -> bool {
     match method {
         PublishedMcpMethod::ToolsCall => snapshot.negotiated_capabilities.tools,
-        PublishedMcpMethod::ResourcesRead => snapshot.negotiated_capabilities.resources,
+        PublishedMcpMethod::ResourcesList | PublishedMcpMethod::ResourcesRead => {
+            snapshot.negotiated_capabilities.resources
+        }
         PublishedMcpMethod::PromptsGet => snapshot.negotiated_capabilities.prompts,
         PublishedMcpMethod::TasksGet | PublishedMcpMethod::TasksResult => {
             snapshot.negotiated_capabilities.tasks
@@ -1177,7 +1179,8 @@ fn method_was_negotiated(method: PublishedMcpMethod, snapshot: &McpDiscoverySnap
 fn effect_allowed_for_method(effect: Effect, method: PublishedMcpMethod) -> bool {
     match method {
         PublishedMcpMethod::ToolsCall => true,
-        PublishedMcpMethod::ResourcesRead
+        PublishedMcpMethod::ResourcesList
+        | PublishedMcpMethod::ResourcesRead
         | PublishedMcpMethod::PromptsGet
         | PublishedMcpMethod::TasksGet
         | PublishedMcpMethod::TasksResult => effect.risk_rank() <= Effect::ReadOnly.risk_rank(),
