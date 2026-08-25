@@ -7,11 +7,13 @@
 
 mod remote;
 mod state;
+mod subscription;
 mod text2sql;
 mod types;
 
 pub use remote::*;
 pub use state::*;
+pub use subscription::*;
 pub use text2sql::*;
 pub use types::*;
 

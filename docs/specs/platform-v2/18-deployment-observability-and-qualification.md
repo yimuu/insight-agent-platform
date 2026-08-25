@@ -368,6 +368,10 @@ r267把shared permit sampler接入同一Sandbox Executor binary的WASI和gVisor�
 available/used并随process cancellation退出。相关executor/owner tests和strict Clippy通过，动态permit coverage达到8/17 pool；Sandbox Controller、
 Artifact、Security/Egress等不同容量authority不能用该series代替，仍待各自owner指标。
 
+r268实现MCP subscription→Context admission的L1 nominal boundary及负向unit fixtures，包含closed exact request、bounded Context Job payload和
+stable acceptance validation。它不写数据库、不启动production worker，也没有覆盖accept commit前后kill、Receipt replay、唯一Context Job或
+MCP/Context pool隔离；上述L2/L3与本规范要求的真实多进程qualification仍是release blocker。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

@@ -622,6 +622,11 @@ public `/v1`或18的L4～L6资格。fresh PostgreSQL 16 r240已用真实`platfor
 零claim/Job保持ready、terminal commit数据库窗口强杀、expired-lease owner恢复、同一Job物理attempt 2、lease/quota清除和唯一
 Observation，NativeCatalog process L3至此闭合；remote backend protocol仍未闭合。
 
+r268实现CR-190的Context subscription refresh admission L1 nominal contract：closed request冻结exact Deployment/Discovery、授权与session/event
+generation、root identity、deadline及canonical digest，shared Context Job payload有独立schema/size validation，acceptance精确绑定request、durable work、
+Job和commit time。unit negative fixtures覆盖字段漂移与oversized identity。该证据尚不包含PostgreSQL owner transaction、实际refresh backend、
+MCP Host生产接线或commit-window L2/L3，因此不满足18.1的durable acceptance验收。
+
 ## 24. 明确推迟的工作
 
 - 跨地域 index replication 与主动容灾；

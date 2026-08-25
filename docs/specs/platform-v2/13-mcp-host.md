@@ -180,4 +180,8 @@ Worker→Host→Egress三进程的durable claim/lease/reconciliation由fresh Pos
 binding在claim与I/O前重验，错codec零调用，正确非幂等ToolsCall返回后Worker强杀且恢复不重放。MCP ToolsCall process L3至此闭合；
 OAuth、Task和subscription真实协议矩阵仍是后续资格待办。
 
+r268已在Context owner边界交付CR-190 closed subscription refresh request、bounded shared Context Job payload和exact acceptance的L1 Rust合同，
+但MCP Host尚未拥有调用该port的production adapter/claim loop，PostgreSQL也尚未实现Job/Receipt/Event/Outbox原子接纳与commit-uncertain replay。
+因此subscription多进程L3及本规范第12节对应验收保持未完成。
+
 首版remote Streamable HTTP合同无未决设计问题。
