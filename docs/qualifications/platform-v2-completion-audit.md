@@ -11,7 +11,7 @@
 
 00～18均已完成CR-192 cross-review（历史CR-173～191结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
 实现与真实PostgreSQL门禁已闭合；Phase 2的production Orchestration、Model、Capability、Context与wait/Subagent主要L3链路已经闭合；
-Phase 3的MCP subscription真实HTTPS多进程L3已闭合，仍缺OAuth Callback/Cleanup/Egress的真实多进程L3及外部Sandbox/Artifact资格。Phase 4 public API和15-role/17-pool静态部署闭包已完成，
+Phase 3的MCP subscription真实HTTPS及OAuth Cleanup/Egress删除链多进程L3已闭合，仍缺OAuth Callback真实token endpoint/exchange L3及外部Sandbox/Artifact资格。Phase 4 public API和15-role/17-pool静态部署闭包已完成，
 完整observability及production-equivalent L4～L6仍未交付。
 
 因此：
@@ -141,7 +141,8 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 ### 仓库内或外部缺口
 
 1. MCP Host production binary/Helm与ToolsCall process L3已闭合；subscription的production Resource Host/Context Worker/独立Egress进程、真实TLS
-   initialize/list/read与三轮kill/recovery已由r281闭合component L3。OAuth Callback/Cleanup/Egress的真实endpoint多进程kill/restart L3仍缺；
+   initialize/list/read与三轮kill/recovery已由r281闭合component L3；OAuth Cleanup Worker与独立Egress的mTLS Secret delete/lease reclaim已由r284闭合。
+   OAuth Callback真实token endpoint/exchange多进程kill/restart L3仍缺；
    Context/MCP/Egress lane saturation、bundle/config rollout和live cluster identity仍归L4～L5。
 2. Context Native/Remote和Capability Native/Remote production composition已闭合；Dataset build/Text2SQL、Artifact和各外部依赖仍须按
    production qualification matrix取得适用的真实协议、故障与隔舱证据。
@@ -190,7 +191,7 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 按上游到下游执行，且每批通过后提交：
 
 1. 补shared Outbox、其他role dependency/recovery/permit业务指标、跨进程trace propagation和动态payload采集审计；
-2. MCP OAuth Callback/Cleanup/Egress真实endpoint的多进程L3 kill/restart；
+2. MCP OAuth Callback与真实token endpoint/exchange的多进程L3 kill/restart；
 3. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
 4. reproducible signed candidate pipeline；
 5. 外部L4～L6、GitOps clean cut、current文档与规范归档。

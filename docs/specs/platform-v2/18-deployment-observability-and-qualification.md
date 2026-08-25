@@ -450,6 +450,11 @@ r283为独立MCP OAuth PKCE Cleanup Worker接入shared process observability。r
 替换原PID探针，同时保持数据库与Egress的exact出口。binary tests、strict Clippy和chart静态正负门禁通过；该process surface不计作新的
 ComponentRole authority，也不替代真实OAuth endpoint、kill/restart、production scrape或L4。
 
+r284在fresh PostgreSQL 16使用production Cleanup Worker、独立Egress测试进程、production Egress RPC service和真实mTLS workload identity
+完成PKCE cleanup crash L3。第一次exact Secret delete进入后强杀Egress/Worker，expired lease由第二个进程以claim epoch 2 reclaim，最终唯一
+`cleanup_completed`且旧fence不能结算；Task terminal payload与SecretBinding均通过current PostgreSQL owner重验。该证据关闭Cleanup/Egress
+删除链的component L3，不替代Callback真实token endpoint/exchange、OAuth rollout、lane saturation、production scrape或L4～L6。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

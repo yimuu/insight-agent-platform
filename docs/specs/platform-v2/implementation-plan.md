@@ -444,6 +444,12 @@
 > 边界。binary tests、strict Clippy和chart正负门禁通过。该批关闭Cleanup Worker process observability/readiness接线，不替代OAuth真实endpoint
 > 多进程kill/restart、真实scrape或L4证据。
 
+> 2026-08-26 implementation evidence：r284在fresh PostgreSQL 16以production Cleanup Worker、独立Egress测试进程、production
+> `EgressBrokerGrpcService`与真实mTLS workload identity gate关闭PKCE cleanup crash component L3。第一次exact Secret delete RPC进入后同时强杀
+> Egress/Worker；lease到期后第二组进程以claim epoch 2恢复并形成唯一`cleanup_completed`，旧claim fence不能结算。fixture使用完整canonical
+> terminal Task payload与current exact SecretBinding authority，不以直接列漂移绕过owner校验。strict Clippy及相关process/RPC tests通过。OAuth
+> Callback真实token endpoint/exchange、其故障窗口、role saturation、production scrape及L4仍是独立门禁。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

@@ -1,24 +1,42 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use insight_platform_capability_adapters::{
+    CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
+    GrpcNetworkTransport, GrpcTransportRequest, GrpcTransportResponse, HttpNetworkTransport,
+    HttpTransportRequest, HttpTransportResponse,
+};
 use insight_platform_contracts::{
-    AllowedMcpServerCapabilities, ArtifactRef, AuthoringPackage, CapabilityEndpointScheme,
-    CommandAudit, DataClassification, DeploymentClosure, ExactDeploymentRef, ExactSecretBindingRef,
-    ExactVersionRef, McpAuthPolicyDocument, McpClientCapabilities, McpMetadataPolicy,
-    McpMethodLimits, McpOAuthClientAuthenticationKind, McpOAuthEndpoint, McpProtocolPolicyDocument,
-    McpServerLimits, McpServerResourceSpec, McpTransportBinding, McpTransportFeatures, Permission,
-    PermissionSet, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind,
-    PublishedMcpMethod, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
-    ResourceId, ResourceKind, SecretBindingPayload, SecretPurpose, SecretResolutionPolicy,
-    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary, MCP_PROTOCOL_BASELINE,
+    canonical_digest, AllowedMcpServerCapabilities, ArtifactRef, AuthoringPackage,
+    CapabilityEndpointScheme, CommandAudit, DataClassification, DeploymentClosure,
+    ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, McpAuthPolicyDocument,
+    McpClientCapabilities, McpMetadataPolicy, McpMethodLimits, McpOAuthClientAuthenticationKind,
+    McpOAuthEndpoint, McpProtocolPolicyDocument, McpServerLimits, McpServerResourceSpec,
+    McpTransportBinding, McpTransportFeatures, Permission, PermissionSet, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PublishedMcpMethod,
+    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, MCP_PROTOCOL_BASELINE,
+};
+use insight_platform_egress_rpc::{
+    proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
+    EgressCallerWorkloadIdentity, EgressInternalRpcLimits,
 };
 use insight_platform_mcp_host::{
-    ClaimDueMcpOAuthPkceCleanups, McpOAuthAuthorizationPreparationBroker,
-    McpOAuthAuthorizationPreparationError, McpOAuthAuthorizationPreparationRequest,
-    McpOAuthAuthorizationStartCommitDisposition, McpOAuthAuthorizationStartConfig,
-    McpOAuthAuthorizationStartIntent, McpOAuthAuthorizationStartService, McpOAuthPkceCleanupCause,
+    AuthorizedMcpOAuthPkceCleanup, ClaimDueMcpOAuthPkceCleanups,
+    McpOAuthAuthorizationPreparationBroker, McpOAuthAuthorizationPreparationError,
+    McpOAuthAuthorizationPreparationRequest, McpOAuthAuthorizationStartCommitDisposition,
+    McpOAuthAuthorizationStartConfig, McpOAuthAuthorizationStartIntent,
+    McpOAuthAuthorizationStartService, McpOAuthAuthorizedGrant, McpOAuthCredentialBroker,
+    McpOAuthCredentialBrokerError, McpOAuthExchangeContract, McpOAuthPkceCleanupCause,
     McpOAuthPkceCleanupHint, McpOAuthPkceCleanupOutbox, McpOAuthPkceCleanupSettlement,
-    PreparedMcpOAuthAuthorization, SensitiveMcpOAuthNonce, SensitiveOAuthValue,
-    MCP_OAUTH_PKCE_SECRET_PURPOSE,
+    McpOAuthPkceSecretCleaner, McpOAuthPkceSecretCleanupDisposition,
+    McpOAuthPkceSecretCleanupError, PreparedMcpOAuthAuthorization, SensitiveMcpOAuthNonce,
+    SensitiveOAuthValue, MCP_OAUTH_PKCE_SECRET_PURPOSE,
+};
+use insight_platform_model_adapters::{
+    ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
+    ModelProviderWireConnector, ModelProviderWireProtocol, ModelProviderWireRequest,
+    ModelProviderWireStream,
 };
 use insight_platform_postgres::{
     repository::{
@@ -26,8 +44,22 @@ use insight_platform_postgres::{
     },
     verify_schema,
 };
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose, SanType,
+};
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::{Child, Stdio},
+    sync::Arc,
+    time::{Duration as StdDuration, Instant},
+};
+use tokio_stream::wrappers::TcpListenerStream;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+
+const OAUTH_CLEANUP_EGRESS_CONFIG_ENV: &str = "PLATFORM_OAUTH_CLEANUP_EGRESS_FIXTURE_CONFIG";
 
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     format!(
@@ -639,6 +671,294 @@ fn competing_intent(
     intent
 }
 
+struct EmptyModel;
+
+#[async_trait]
+impl ModelProviderWireConnector for EmptyModel {
+    async fn open(
+        &self,
+        _request: ModelProviderWireRequest,
+    ) -> Result<ModelProviderWireStream, ModelAdapterFailure> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    async fn cancel(
+        &self,
+        _protocol: ModelProviderWireProtocol,
+        _request: ModelAdapterCancelRequest,
+    ) -> Result<ModelAdapterCancelOutcome, ModelAdapterFailure> {
+        Ok(ModelAdapterCancelOutcome::Unsupported)
+    }
+}
+
+struct EmptyHttp;
+
+#[async_trait]
+impl HttpNetworkTransport for EmptyHttp {
+    async fn round_trip(
+        &self,
+        _request: HttpTransportRequest,
+    ) -> Result<HttpTransportResponse, CapabilityAdapterFailure> {
+        unreachable!("OAuth cleanup fixture does not dispatch HTTP Capability work")
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Unsupported)
+    }
+}
+
+struct EmptyGrpc;
+
+#[async_trait]
+impl GrpcNetworkTransport for EmptyGrpc {
+    async fn unary(
+        &self,
+        _request: GrpcTransportRequest,
+    ) -> Result<GrpcTransportResponse, CapabilityAdapterFailure> {
+        unreachable!("OAuth cleanup fixture does not dispatch gRPC Capability work")
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Unsupported)
+    }
+}
+
+struct RejectedOAuth;
+
+#[async_trait]
+impl McpOAuthCredentialBroker for RejectedOAuth {
+    async fn exchange_authorization_code(
+        &self,
+        _contract: &McpOAuthExchangeContract,
+        _authorization_code: SensitiveOAuthValue,
+        _now: DateTime<Utc>,
+    ) -> Result<McpOAuthAuthorizedGrant, McpOAuthCredentialBrokerError> {
+        Err(McpOAuthCredentialBrokerError::Rejected)
+    }
+}
+
+struct ProcessCleanupSecretCleaner {
+    call_path: PathBuf,
+    stall: bool,
+}
+
+#[async_trait]
+impl McpOAuthPkceSecretCleaner for ProcessCleanupSecretCleaner {
+    async fn delete_exact(
+        &self,
+        authorization: &AuthorizedMcpOAuthPkceCleanup,
+    ) -> Result<McpOAuthPkceSecretCleanupDisposition, McpOAuthPkceSecretCleanupError> {
+        authorization
+            .validate_for(&insight_platform_mcp_host::McpOAuthPkceCleanupRequest {
+                tenant_id: authorization.tenant_id.clone(),
+                task_id: authorization.task_id.clone(),
+                cause: McpOAuthPkceCleanupCause::Authorized,
+                hint: McpOAuthPkceCleanupHint {
+                    schema_version: 1,
+                    secret_binding_id: authorization.secret_binding.secret_binding_id.clone(),
+                    binding_generation: authorization.secret_binding.binding_generation,
+                },
+            })
+            .map_err(|_| McpOAuthPkceSecretCleanupError::Rejected)?;
+        std::fs::write(&self.call_path, b"called")
+            .map_err(|_| McpOAuthPkceSecretCleanupError::TemporarilyUnavailable)?;
+        if self.stall {
+            std::future::pending::<()>().await;
+        }
+        Ok(McpOAuthPkceSecretCleanupDisposition::Deleted)
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OAuthCleanupEgressProcessConfig {
+    listen_address: std::net::SocketAddr,
+    ca_pem: String,
+    server_certificate_pem: String,
+    server_key_pem: String,
+    call_path: PathBuf,
+    ready_path: PathBuf,
+    stall: bool,
+}
+
+async fn run_oauth_cleanup_egress_fixture(config: OAuthCleanupEgressProcessConfig) {
+    let limits = EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap();
+    let service = EgressBrokerServiceServer::new(
+        EgressBrokerGrpcService::new(
+            Arc::new(EmptyModel),
+            Arc::new(EmptyHttp),
+            Arc::new(EmptyGrpc),
+            limits,
+        )
+        .with_mcp_oauth(
+            Arc::new(RejectedOAuth),
+            Arc::new(ProcessCleanupSecretCleaner {
+                call_path: config.call_path,
+                stall: config.stall,
+            }),
+        ),
+    );
+    let service =
+        tonic::service::interceptor::InterceptedService::new(service, EgressCallerWorkloadIdentity);
+    let listener = tokio::net::TcpListener::bind(config.listen_address)
+        .await
+        .unwrap();
+    std::fs::write(config.ready_path, b"ready").unwrap();
+    Server::builder()
+        .tls_config(
+            ServerTlsConfig::new()
+                .identity(Identity::from_pem(
+                    config.server_certificate_pem,
+                    config.server_key_pem,
+                ))
+                .client_ca_root(Certificate::from_pem(config.ca_pem)),
+        )
+        .unwrap()
+        .add_service(service)
+        .serve_with_incoming(TcpListenerStream::new(listener))
+        .await
+        .unwrap();
+}
+
+#[test]
+fn oauth_cleanup_egress_fixture_process() {
+    let Ok(path) = std::env::var(OAUTH_CLEANUP_EGRESS_CONFIG_ENV) else {
+        return;
+    };
+    let config = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_oauth_cleanup_egress_fixture(config));
+}
+
+struct OAuthCleanupTlsFixture {
+    ca: String,
+    server_cert: String,
+    server_key: String,
+    client_cert: String,
+    client_key: String,
+}
+
+fn oauth_cleanup_tls_fixture() -> OAuthCleanupTlsFixture {
+    let mut ca_parameters = CertificateParams::default();
+    ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_parameters.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let ca = CertifiedIssuer::self_signed(ca_parameters, KeyPair::generate().unwrap()).unwrap();
+    let issue = |sans, usage| {
+        let mut parameters = CertificateParams::default();
+        parameters.subject_alt_names = sans;
+        parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        parameters.extended_key_usages = vec![usage];
+        let key = KeyPair::generate().unwrap();
+        let certificate = parameters.signed_by(&key, &ca).unwrap();
+        (certificate.pem(), key.serialize_pem())
+    };
+    let (server_cert, server_key) = issue(
+        vec![SanType::DnsName("egress.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let (client_cert, client_key) = issue(
+        vec![SanType::URI(
+            insight_platform_egress_rpc::MCP_HOST_WORKLOAD_IDENTITY
+                .try_into()
+                .unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
+    OAuthCleanupTlsFixture {
+        ca: ca.pem(),
+        server_cert,
+        server_key,
+        client_cert,
+        client_key,
+    }
+}
+
+fn available_address() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap()
+}
+
+fn wait_for_file(path: &Path, timeout: StdDuration) {
+    let started = Instant::now();
+    while !path.exists() {
+        assert!(
+            started.elapsed() < timeout,
+            "file was not created: {}",
+            path.display()
+        );
+        std::thread::sleep(StdDuration::from_millis(10));
+    }
+}
+
+fn spawn_oauth_cleanup_egress(config_path: &Path) -> Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("oauth_cleanup_egress_fixture_process")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(OAUTH_CLEANUP_EGRESS_CONFIG_ENV, config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) -> Sha256Digest {
+    std::fs::write(path, serde_jcs::to_vec(value).unwrap()).unwrap();
+    canonical_digest(value).unwrap().parse().unwrap()
+}
+
+struct CleanupWorkerSpawn<'a> {
+    binary: &'a str,
+    config_path: &'a Path,
+    config_digest: &'a Sha256Digest,
+    database_url: &'a str,
+    ca_path: &'a Path,
+    client_cert_path: &'a Path,
+    client_key_path: &'a Path,
+}
+
+fn spawn_cleanup_worker(input: CleanupWorkerSpawn<'_>) -> Child {
+    std::process::Command::new(input.binary)
+        .env("PLATFORM_MCP_CLEANUP_CONFIG", input.config_path)
+        .env(
+            "PLATFORM_MCP_CLEANUP_CONFIG_DIGEST",
+            input.config_digest.as_str(),
+        )
+        .env("PLATFORM_MCP_CLEANUP_DATABASE_URL", input.database_url)
+        .env("PLATFORM_MCP_CLEANUP_EGRESS_CA_PATH", input.ca_path)
+        .env(
+            "PLATFORM_MCP_CLEANUP_EGRESS_CERT_PATH",
+            input.client_cert_path,
+        )
+        .env(
+            "PLATFORM_MCP_CLEANUP_EGRESS_KEY_PATH",
+            input.client_key_path,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn kill(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[tokio::test]
 async fn phase4_mcp_oauth_start_is_idempotent_secret_free_and_first_winner() {
     let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
@@ -871,4 +1191,252 @@ async fn phase4_mcp_oauth_cleanup_outbox_claim_is_reclaimable_and_exactly_fenced
     assert!(row
         .get::<Option<DateTime<Utc>>, _>("claim_expires_at")
         .is_none());
+}
+
+#[tokio::test]
+async fn phase4_mcp_oauth_cleanup_process_recovers_egress_and_worker_kill() {
+    let (Ok(database_url), Ok(cleanup_binary)) = (
+        std::env::var("PLATFORM_TEST_DATABASE_URL"),
+        std::env::var("PLATFORM_MCP_CLEANUP_WORKER_BIN"),
+    ) else {
+        eprintln!(
+            "PLATFORM_TEST_DATABASE_URL or PLATFORM_MCP_CLEANUP_WORKER_BIN is unset; process L3 skipped"
+        );
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    verify_schema(&pool).await.unwrap();
+    let repository = PgRepository::new(pool.clone());
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let fixture = fixture(now);
+    seed(&pool, &repository, &fixture).await;
+    let start = McpOAuthAuthorizationStartService::new(
+        McpOAuthAuthorizationStartConfig {
+            callback_binding_digest: fixture
+                .auth_profile
+                .redirect_uri
+                .endpoint_identity_digest
+                .clone(),
+        },
+        Arc::new(repository.clone()),
+        Arc::new(FixedPreparation {
+            pkce_binding: fixture.pkce_binding.clone(),
+        }),
+    );
+    let started = start.start(fixture.intent.clone(), now).await.unwrap();
+    assert_eq!(
+        started.disposition,
+        McpOAuthAuthorizationStartCommitDisposition::Applied
+    );
+    let mut task_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM insight_platform.tasks WHERE tenant_id = $1 AND task_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.intent.task_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let principal = task_payload.get("created_by").cloned().unwrap();
+    task_payload
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_version");
+    task_payload.as_object_mut().unwrap().insert(
+        "resolution".to_owned(),
+        serde_json::json!({
+            "state": "responded",
+            "principal": principal,
+            "response_value_id": null,
+            "response_schema_digest": null,
+        }),
+    );
+    let terminal_task_payload = TypedPayload::new(1, &task_payload).unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.tasks
+        SET state = 'responded', version = version + 1,
+            payload_schema_version = $3, payload = $4, payload_digest = $5,
+            responded_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND task_id = $2 AND state = 'pending'
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.intent.task_id.to_string())
+    .bind(terminal_task_payload.schema_version)
+    .bind(&terminal_task_payload.value)
+    .bind(&terminal_task_payload.digest)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let event_id = id(ResourceKind::Event, 0xc0);
+    let outbox_id = id(ResourceKind::OutboxEvent, 0xc1);
+    let completion = TypedPayload::new(
+        1,
+        &serde_json::json!({
+            "authorization_binding_id": fixture.intent.authorization_binding_id,
+            "callback_ingress_generation_id": id(ResourceKind::WorkerProcessGeneration, 0xc2),
+            "pkce_cleanup": McpOAuthPkceCleanupHint {
+                schema_version: 1,
+                secret_binding_id: fixture.pkce_binding.secret_binding_id.clone(),
+                binding_generation: fixture.pkce_binding.binding_generation,
+            },
+            "state": "responded",
+            "task_id": fixture.intent.task_id,
+        }),
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.events (
+            tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
+            event_type, visibility, payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, 'mcp_authorization', $3, 1,
+                  'mcp.oauth_authorization_completed', 'internal', $4, $5, $6)
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(event_id.to_string())
+    .bind(fixture.intent.authorization_binding_id.to_string())
+    .bind(completion.schema_version)
+    .bind(&completion.value)
+    .bind(&completion.digest)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id) VALUES ($1, $2, $3)",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(outbox_id.to_string())
+    .bind(event_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let temporary = std::env::temp_dir().join(format!(
+        "platform-oauth-cleanup-l3-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir(&temporary).unwrap();
+    let tls = oauth_cleanup_tls_fixture();
+    let ca_path = temporary.join("ca.pem");
+    let client_cert_path = temporary.join("client.pem");
+    let client_key_path = temporary.join("client-key.pem");
+    std::fs::write(&ca_path, &tls.ca).unwrap();
+    std::fs::write(&client_cert_path, &tls.client_cert).unwrap();
+    std::fs::write(&client_key_path, &tls.client_key).unwrap();
+    let egress_address = available_address();
+    let cleanup_config_path = temporary.join("cleanup.json");
+    let cleanup_config = serde_json::json!({
+        "schema_version": 1,
+        "observability_listen_address": available_address().to_string(),
+        "database_max_connections": 4,
+        "database_acquire_timeout_milliseconds": 2_000,
+        "egress_endpoint": format!("https://{egress_address}/"),
+        "egress_tls_server_name": "egress.test",
+        "egress_connect_timeout_milliseconds": 2_000,
+        "egress_request_timeout_milliseconds": 30_000,
+        "maximum_rpc_metadata_bytes": 65_536,
+        "maximum_rpc_payload_bytes": 1_048_576,
+        "poll_interval_milliseconds": 20,
+        "maximum_batch": 64,
+        "maximum_lease_milliseconds": 60_000,
+        "claim_batch": 1,
+        "lease_milliseconds": 300,
+        "retry_base_milliseconds": 20,
+        "retry_maximum_milliseconds": 1_000,
+    });
+    let cleanup_config_digest = write_json(&cleanup_config_path, &cleanup_config);
+    let first_call = temporary.join("first-call");
+    let first_ready = temporary.join("first-ready");
+    let first_egress_config_path = temporary.join("egress-first.json");
+    let first_egress_config = serde_json::to_value(OAuthCleanupEgressProcessConfig {
+        listen_address: egress_address,
+        ca_pem: tls.ca.clone(),
+        server_certificate_pem: tls.server_cert.clone(),
+        server_key_pem: tls.server_key.clone(),
+        call_path: first_call.clone(),
+        ready_path: first_ready.clone(),
+        stall: true,
+    })
+    .unwrap();
+    write_json(&first_egress_config_path, &first_egress_config);
+    let mut first_egress = spawn_oauth_cleanup_egress(&first_egress_config_path);
+    wait_for_file(&first_ready, StdDuration::from_secs(5));
+    let spawn_worker = || {
+        spawn_cleanup_worker(CleanupWorkerSpawn {
+            binary: &cleanup_binary,
+            config_path: &cleanup_config_path,
+            config_digest: &cleanup_config_digest,
+            database_url: &database_url,
+            ca_path: &ca_path,
+            client_cert_path: &client_cert_path,
+            client_key_path: &client_key_path,
+        })
+    };
+    let mut first_worker = spawn_worker();
+    wait_for_file(&first_call, StdDuration::from_secs(10));
+    let first_claim_epoch: i64 = sqlx::query_scalar(
+        "SELECT claim_epoch FROM insight_platform.outbox_events WHERE tenant_id = $1 AND outbox_id = $2 AND state = 'cleanup_claimed'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(outbox_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(first_claim_epoch, 1);
+    kill(&mut first_egress);
+    kill(&mut first_worker);
+    tokio::time::sleep(StdDuration::from_millis(450)).await;
+
+    let second_call = temporary.join("second-call");
+    let second_ready = temporary.join("second-ready");
+    let second_egress_config_path = temporary.join("egress-second.json");
+    let second_egress_config = serde_json::to_value(OAuthCleanupEgressProcessConfig {
+        listen_address: egress_address,
+        ca_pem: tls.ca,
+        server_certificate_pem: tls.server_cert,
+        server_key_pem: tls.server_key,
+        call_path: second_call.clone(),
+        ready_path: second_ready.clone(),
+        stall: false,
+    })
+    .unwrap();
+    write_json(&second_egress_config_path, &second_egress_config);
+    let mut second_egress = spawn_oauth_cleanup_egress(&second_egress_config_path);
+    wait_for_file(&second_ready, StdDuration::from_secs(5));
+    let mut second_worker = spawn_worker();
+    wait_for_file(&second_call, StdDuration::from_secs(10));
+    let started_wait = Instant::now();
+    let terminal = loop {
+        let row = sqlx::query(
+            "SELECT state, claim_epoch, claim_owner, claim_expires_at FROM insight_platform.outbox_events WHERE tenant_id = $1 AND outbox_id = $2",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(outbox_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if row.get::<String, _>("state") == "cleanup_completed" {
+            break row;
+        }
+        assert!(started_wait.elapsed() < StdDuration::from_secs(10));
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+    };
+    kill(&mut second_worker);
+    kill(&mut second_egress);
+    assert_eq!(terminal.get::<i64, _>("claim_epoch"), 2);
+    assert!(terminal.get::<Option<String>, _>("claim_owner").is_none());
+    assert!(terminal
+        .get::<Option<DateTime<Utc>>, _>("claim_expires_at")
+        .is_none());
+    std::fs::remove_dir_all(temporary).unwrap();
 }
