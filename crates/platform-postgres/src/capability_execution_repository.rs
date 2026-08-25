@@ -66,6 +66,7 @@ pub struct ClaimedCapabilityExecution {
     /// Terminal settlement must use a distinct caller-generated pair.
     pub quota_reservation_entry_ids: Vec<ResourceId>,
     pub resume_mutations: Option<insight_platform_contracts::ExternalLeafResumeMutationIds>,
+    pub failure_mutations: Option<insight_platform_contracts::ExternalLeafFailureMutationIds>,
 }
 
 impl ClaimedCapabilityExecution {
@@ -177,6 +178,7 @@ impl ClaimedCapabilityExecution {
             quota_entry_ids: quota_settlement_entry_ids,
             retry_at,
             resume_mutations: self.resume_mutations.clone(),
+            failure_mutations: self.failure_mutations.clone(),
         };
         command
             .validate_at(Utc::now())
@@ -834,10 +836,27 @@ impl PgInvocationTransaction {
                     database_now,
                 )
                 .await?;
+            } else if let DispatchOutcome::PermanentFailure(failure) = &trusted_outcome {
+                let mutations =
+                    command
+                        .failure_mutations
+                        .as_ref()
+                        .ok_or(RepositoryError::InvalidInput(
+                            "Capability Plan leaf failure has no convergence identities".to_owned(),
+                        ))?;
+                crate::repository::settle_capability_leaf_failure_in_transaction(
+                    &mut transaction,
+                    &decision.invocation,
+                    &command.job_id,
+                    &failure.failure,
+                    mutations,
+                    database_now,
+                )
+                .await?;
             } else {
-                if command.resume_mutations.is_some() {
+                if command.resume_mutations.is_some() || command.failure_mutations.is_some() {
                     return Err(RepositoryError::InvalidInput(
-                        "non-success Capability outcome has continuation identities".to_owned(),
+                        "nonterminal Capability outcome has terminal identities".to_owned(),
                     ));
                 }
                 release_capability_plan_leaf_permit(
@@ -847,7 +866,7 @@ impl PgInvocationTransaction {
                 )
                 .await?;
             }
-        } else if command.resume_mutations.is_some() {
+        } else if command.resume_mutations.is_some() || command.failure_mutations.is_some() {
             return Err(RepositoryError::InvalidInput(
                 "non-Plan Capability outcome has continuation identities".to_owned(),
             ));
@@ -2286,6 +2305,7 @@ impl PgRepository {
                     .await?;
             claimed.push(ClaimedCapabilityExecution {
                 resume_mutations: plan_leaf_waiting.then(|| slot.resume_mutations.clone()),
+                failure_mutations: plan_leaf_waiting.then(|| slot.failure_mutations.clone()),
                 invocation,
                 job,
                 execution_contract,

@@ -29,7 +29,8 @@ pub mod worker;
 
 pub use capability::*;
 pub use command::{
-    CommandAudit, CommandContractError, CommandOutcome, ExternalLeafResumeMutationIds,
+    CommandAudit, CommandContractError, CommandOutcome, ExternalLeafFailureMutationIds,
+    ExternalLeafResumeMutationIds,
 };
 pub use context::*;
 pub use id::{ResourceId, ResourceIdError, ResourceKind};

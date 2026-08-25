@@ -2168,6 +2168,101 @@ impl PgRepository {
         Ok(requirements)
     }
 
+    /// Plans the exact mutation shape for a typed failure already committed by an external-leaf
+    /// owner. The convergence Job is the only runnable owner at this point; its payload prevents
+    /// the leaf's `None` dispatch from being evaluated a second time.
+    pub async fn load_committed_failure_mutation_requirements(
+        &self,
+        fence: &JobFence,
+        plan: &RuntimePlan,
+        failure: &Failure,
+    ) -> Result<ControllerMutationRequirements, RepositoryError> {
+        fence.validate()?;
+        failure
+            .validate(1_024)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        plan.validate(self.plan_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let plan_digest = plan.canonical_digest(self.plan_limits)?;
+        let mut transaction = self.pool.begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let observed =
+            load_job_for_update_by_text(&mut transaction, &fence.tenant_id, &fence.job_id).await?;
+        require_orchestration_job(&observed)?;
+        require_exact_running_job_fence(&observed, fence, database_now)?;
+        let payload: OrchestrationJobPayload =
+            decode_typed_payload(&observed.payload, "failure convergence orchestration Job")?;
+        if payload.convergence_failure.as_ref() != Some(failure) {
+            return Err(RepositoryError::Conflict("failure convergence Job payload"));
+        }
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        require_exact_runtime_plan(&mut transaction, &parents.run, plan, &plan_digest).await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, plan).await?;
+        let runtime_node = plan.node(&source_node.plan_node_key)?;
+        let cause = OrchestrationFailureCause::Committed {
+            failure: failure.clone(),
+        };
+        let (derived_failure, _) = derive_orchestration_failure(&cause, runtime_node)?;
+        require_failure_references(&mut transaction, &parents.run, &derived_failure).await?;
+        let error_route = find_matching_error_boundary(
+            &mut transaction,
+            &parents.run,
+            &parents.node_id,
+            plan,
+            &derived_failure,
+            self.plan_limits.maximum_nodes,
+        )
+        .await?;
+        let shape = if error_route.is_none() {
+            if let Some(exit) =
+                load_parallel_leg_exit(&mut transaction, &observed, &parents, &source_node, None)
+                    .await?
+            {
+                Some(exit)
+            } else {
+                load_map_item_exit(&mut transaction, &observed, &parents, &source_node, None)
+                    .await?
+            }
+        } else {
+            None
+        };
+        let remainder_cancellation_scope_ids = if let Some(shape) = &shape {
+            load_controller_remainder_requirements(
+                &mut transaction,
+                &observed,
+                &parents,
+                plan,
+                shape,
+                ChildOutcome::Failed,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        let requirements = if error_route.is_some() {
+            ControllerMutationRequirements {
+                activation_scopes: vec![false],
+                pending_node_count: 0,
+                structural_exit: ControllerStructuralRequirement::None,
+                pending_wake: false,
+                remainder_cancellation_scope_ids,
+            }
+        } else {
+            ControllerMutationRequirements {
+                activation_scopes: Vec::new(),
+                pending_node_count: 0,
+                structural_exit: ControllerStructuralRequirement::Close,
+                pending_wake: shape.is_some(),
+                remainder_cancellation_scope_ids,
+            }
+        };
+        transaction.rollback().await?;
+        Ok(requirements)
+    }
+
     pub async fn read_task_for_principal(
         &self,
         tenant_id: &ResourceId,
@@ -6212,7 +6307,21 @@ impl PgSchedulerTransaction {
             load_controller_source_node(&mut transaction, &observed, &parents, &command.plan)
                 .await?;
         let runtime_node = command.plan.node(&source_node.plan_node_key)?;
-        if let OrchestrationFailureCause::Controller { observation } = &command.cause {
+        if let OrchestrationFailureCause::Committed { failure } = &command.cause {
+            let payload: OrchestrationJobPayload =
+                decode_typed_payload(&observed.payload, "committed failure orchestration Job")?;
+            if matches!(
+                runtime_node,
+                RuntimeNode::ModelLoop { .. }
+                    | RuntimeNode::CapabilityCall { .. }
+                    | RuntimeNode::ContextQuery { .. }
+            ) && payload.convergence_failure.as_ref() != Some(failure)
+            {
+                return Err(RepositoryError::Conflict(
+                    "committed failure convergence evidence",
+                ));
+            }
+        } else if let OrchestrationFailureCause::Controller { observation } = &command.cause {
             require_exact_controller_observation(
                 &mut transaction,
                 &observed,
@@ -11225,6 +11334,7 @@ pub(crate) async fn settle_context_leaf_success_in_transaction(
         root_scope_id: wait.root_scope_id,
         retry_backoff_milliseconds: wait.retry_backoff_milliseconds,
         wake_contract: None,
+        convergence_failure: None,
     };
     let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
     let continuation_job = sqlx::query(
@@ -11347,6 +11457,362 @@ pub(crate) async fn settle_context_leaf_success_in_transaction(
     )
     .await?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct ExternalLeafFailureWait {
+    plan_digest: Sha256Digest,
+    source_orchestration_job_id: ResourceId,
+    root_scope_id: ResourceId,
+    continuation_attempt_limit: i32,
+    retry_backoff_milliseconds: u64,
+    priority: SchedulerPriority,
+    deadline: DateTime<Utc>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_external_leaf_failure_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    run_id: &ResourceId,
+    node_id: &ResourceId,
+    owner_job_id: &ResourceId,
+    owner_kind: &'static str,
+    failure: &Failure,
+    wait: ExternalLeafFailureWait,
+    mutations: &insight_platform_contracts::ExternalLeafFailureMutationIds,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    failure
+        .validate(1_024)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    mutations
+        .validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let run = load_run_for_update(transaction, tenant_id, run_id).await?;
+    let node_row = sqlx::query(
+        r#"
+        SELECT state, version
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'node_execution'
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(node_id.to_string())
+    .bind(run_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("external failure leaf Node"))?;
+    if node_row.try_get::<String, _>("state")? != NodeExecutionState::Waiting.as_str() {
+        return Err(RepositoryError::Conflict(
+            "external failure leaf terminal state",
+        ));
+    }
+    let plan_row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.resource_versions
+        WHERE tenant_id = $1 AND resource_version_id = $2
+          AND resource_version_kind = 'agent_plan_revision' AND content_digest = $3
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(run.bindings.plan.revision_id.to_string())
+    .bind(run.bindings.plan.semantic_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("exact Agent Plan revision"))?;
+    let plan_payload = payload_from_row(
+        &plan_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let published = decode_published_version_payload(&plan_payload)?;
+    let ResourceDocument::Agent(agent) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Agent Plan revision contains a non-Agent document".to_owned(),
+        ));
+    };
+    if agent.typed_plan_digest != wait.plan_digest {
+        return Err(RepositoryError::Conflict(
+            "external failure leaf exact Plan",
+        ));
+    }
+    let source_job = load_job_by_text(
+        transaction,
+        &run.tenant_id,
+        &wait.source_orchestration_job_id.to_string(),
+    )
+    .await?;
+    require_orchestration_job(&source_job)?;
+    let source_payload: OrchestrationJobPayload = decode_typed_payload(
+        &source_job.payload,
+        "external leaf source orchestration Job",
+    )?;
+    if source_job.state != JobState::Succeeded.as_str()
+        || source_job.terminal_at.is_none()
+        || source_job.owner_id != node_id.to_string()
+        || source_job.run_id.as_deref() != Some(run.run_id.as_str())
+        || source_job.attempt_limit != wait.continuation_attempt_limit
+        || source_job.priority != wait.priority
+        || source_job.deadline.min(run.deadline) != wait.deadline
+        || source_payload.root_scope_id != wait.root_scope_id
+        || source_payload.retry_backoff_milliseconds != wait.retry_backoff_milliseconds
+        || source_payload.bindings_digest != run.bindings.canonical_digest
+        || source_payload.convergence_failure.is_some()
+    {
+        return Err(RepositoryError::Conflict(
+            "external failure source orchestration Job contract",
+        ));
+    }
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'ready', version = version + 1, enqueue_round = 0,
+            updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'waiting'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(node_id.to_string())
+    .bind(node_row.try_get::<i64, _>("version")?)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "external failure leaf convergence",
+    ))?;
+    let job_payload = OrchestrationJobPayload {
+        bindings_digest: run.bindings.canonical_digest.clone(),
+        node_execution_id: node_id.clone(),
+        root_scope_id: wait.root_scope_id,
+        retry_backoff_milliseconds: wait.retry_backoff_milliseconds,
+        wake_contract: None,
+        convergence_failure: Some(failure.clone()),
+    };
+    job_payload
+        .validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
+    let convergence_job = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+            payload_schema_version, payload, payload_digest
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            'ready', $5, $6, $7, $8, $9, $10, $11, $12
+        ) RETURNING *
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(mutations.convergence_job_id.to_string())
+    .bind(node_id.to_string())
+    .bind(run_id.to_string())
+    .bind(wait.continuation_attempt_limit)
+    .bind(database_now)
+    .bind(wait.deadline)
+    .bind(scheduler_priority_to_database(wait.priority))
+    .bind(&job_payload.digest)
+    .bind(job_payload.schema_version)
+    .bind(&job_payload.value)
+    .bind(&job_payload.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let convergence_job = job_from_row(convergence_job)?;
+    let mut current = run.current.clone();
+    if run.state == RunState::Waiting.as_str() {
+        current.waiting_reason = None;
+    }
+    current.validate(run_id)?;
+    let current_payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+    let run_row = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN state = 'waiting' THEN 'running' ELSE state END,
+            version = version + 1, active_work_count = active_work_count - 1,
+            current_schema_version = $4,
+            current_payload = $5, current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state IN ('running', 'waiting') AND active_work_count > 0
+          AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(&run.run_id)
+    .bind(run.version)
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "external failure leaf Run handoff",
+    ))?;
+    let resumed_run = run_from_row(run_row)?;
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "convergence_job_id": convergence_job.job_id,
+            "failure": failure,
+            "owner_job_id": owner_job_id,
+            "owner_kind": owner_kind,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        &run.run_id,
+        resumed_run.version,
+        Some(&run.run_id),
+        "run.external_leaf_failure_pending",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.leaf_node_event_id,
+        &mutations.leaf_node_outbox_id,
+        "node_execution",
+        &node_id.to_string(),
+        node_version,
+        Some(&run.run_id),
+        "node.failure_convergence_ready",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.convergence_job_event_id,
+        &mutations.convergence_job_outbox_id,
+        "job",
+        &convergence_job.job_id,
+        convergence_job.version,
+        Some(&run.run_id),
+        "job.ready",
+        &common,
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn settle_context_leaf_failure_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    query: &ContextQueryRecord,
+    context_job_id: &ResourceId,
+    failure: &Failure,
+    mutations: &insight_platform_contracts::ExternalLeafFailureMutationIds,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'node_execution' AND state = 'waiting'
+        "#,
+    )
+    .bind(query.tenant_id.to_string())
+    .bind(query.node_execution_id.to_string())
+    .bind(query.run_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Context failure leaf wait"))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let wait: StoredContextQueryWaitPayload =
+        decode_typed_payload(&payload, "Context failure leaf wait")?;
+    if wait.context_query_id != query.context_query_id || &wait.context_job_id != context_job_id {
+        return Err(RepositoryError::Conflict("Context failure leaf owner"));
+    }
+    settle_external_leaf_failure_in_transaction(
+        transaction,
+        &query.tenant_id,
+        &query.run_id,
+        &query.node_execution_id,
+        context_job_id,
+        "context_query",
+        failure,
+        ExternalLeafFailureWait {
+            plan_digest: wait.plan_digest,
+            source_orchestration_job_id: wait.source_orchestration_job_id,
+            root_scope_id: wait.root_scope_id,
+            continuation_attempt_limit: wait.continuation_attempt_limit,
+            retry_backoff_milliseconds: wait.retry_backoff_milliseconds,
+            priority: wait.priority,
+            deadline: wait.deadline,
+        },
+        mutations,
+        database_now,
+    )
+    .await
+}
+
+pub(crate) async fn settle_capability_leaf_failure_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &CapabilityInvocationRecord,
+    capability_job_id: &ResourceId,
+    failure: &Failure,
+    mutations: &insight_platform_contracts::ExternalLeafFailureMutationIds,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'node_execution' AND state = 'waiting'
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(invocation.node_execution_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Capability failure leaf wait"))?;
+    let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let wait: StoredCapabilityInvocationWaitPayload =
+        decode_typed_payload(&payload, "Capability failure leaf wait")?;
+    if wait.invocation_id != invocation.invocation_id
+        || wait.capability_job_id.as_ref() != Some(capability_job_id)
+    {
+        return Err(RepositoryError::Conflict("Capability failure leaf owner"));
+    }
+    settle_external_leaf_failure_in_transaction(
+        transaction,
+        &invocation.tenant_id,
+        &invocation.run_id,
+        &invocation.node_execution_id,
+        capability_job_id,
+        "capability_invocation",
+        failure,
+        ExternalLeafFailureWait {
+            plan_digest: wait.plan_digest,
+            source_orchestration_job_id: wait.source_orchestration_job_id,
+            root_scope_id: wait.root_scope_id,
+            continuation_attempt_limit: wait.continuation_attempt_limit,
+            retry_backoff_milliseconds: wait.retry_backoff_milliseconds,
+            priority: wait.priority,
+            deadline: wait.deadline,
+        },
+        mutations,
+        database_now,
+    )
+    .await
 }
 
 pub(crate) async fn settle_capability_leaf_success_in_transaction(
@@ -11611,6 +12077,7 @@ pub(crate) async fn settle_capability_leaf_success_in_transaction(
         root_scope_id: wait.root_scope_id,
         retry_backoff_milliseconds: wait.retry_backoff_milliseconds,
         wake_contract: None,
+        convergence_failure: None,
     };
     let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
     let continuation_job = sqlx::query(
@@ -13944,6 +14411,7 @@ async fn mutate_orchestration_controller_step(
             root_scope_id: current_payload.root_scope_id.clone(),
             retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
             wake_contract: None,
+            convergence_failure: None,
         };
         job_payload
             .validate()
@@ -14207,6 +14675,7 @@ async fn mutate_orchestration_controller_step(
                 root_scope_id: current_payload.root_scope_id.clone(),
                 retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
                 wake_contract: None,
+                convergence_failure: None,
             };
             job_payload
                 .validate()
@@ -14826,6 +15295,7 @@ async fn settle_loop_iteration_and_wake_continuation(
         root_scope_id: current_payload.root_scope_id,
         retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
         wake_contract: None,
+        convergence_failure: None,
     };
     job_payload
         .validate()
@@ -15257,6 +15727,7 @@ async fn settle_map_item_and_maybe_wake_settlement(
                 root_scope_id: current_payload.root_scope_id,
                 retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
                 wake_contract: None,
+                convergence_failure: None,
             };
             job_payload
                 .validate()
@@ -15658,6 +16129,7 @@ async fn settle_parallel_leg_and_maybe_wake_join(
                 root_scope_id: current_payload.root_scope_id,
                 retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
                 wake_contract: None,
+                convergence_failure: None,
             };
             job_payload
                 .validate()
@@ -16106,6 +16578,7 @@ async fn activate_error_boundary_handler(
         root_scope_id: current_payload.root_scope_id,
         retry_backoff_milliseconds: current_payload.retry_backoff_milliseconds,
         wake_contract: None,
+        convergence_failure: None,
     };
     job_payload
         .validate()
@@ -17709,6 +18182,7 @@ async fn mutate_deferred_orchestration_child_run(
             root_scope_id: command.child_root_scope_id.clone(),
             retry_backoff_milliseconds: command.child_retry_backoff_milliseconds,
             wake_contract: None,
+            convergence_failure: None,
         },
     )?;
     let child_job = sqlx::query(
@@ -17996,6 +18470,7 @@ async fn mutate_terminal_child_run(
         1,
         &OrchestrationJobPayload {
             wake_contract: None,
+            convergence_failure: None,
             ..source_payload
         },
     )?;
@@ -20824,6 +21299,7 @@ async fn load_replayed_error_boundary_handler(
         root_scope_id: source_job_payload.root_scope_id,
         retry_backoff_milliseconds: source_job_payload.retry_backoff_milliseconds,
         wake_contract: None,
+        convergence_failure: None,
     };
     if handler_job_payload != expected_job_payload || job.request_digest != job.payload.digest {
         return Err(RepositoryError::Conflict(

@@ -25,12 +25,14 @@ use insight_platform_contracts::{
     ContextImplementationResourceSpec, ContextInterfaceLimits, ContextInterfaceResourceSpec,
     ContextLocatorKind, ContextPaginationContract, ContextQueryState, ContextRankingContract,
     DataClassification, DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
-    ExactPolicyBinding, ExactVersionRef, ExternalLeafResumeMutationIds, FrozenSlotBinding,
-    FrozenSlotTarget, JobState, NativeCapabilityContract, Permission, PermissionSet, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
-    ResourceKind, RunBindingsSnapshot, SchedulerPriority, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    ExactPolicyBinding, ExactVersionRef, ExternalLeafFailureMutationIds,
+    ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
+    FrozenSlotBinding, FrozenSlotTarget, JobState, NativeCapabilityContract, Permission,
+    PermissionSet, PlatformFailureCode, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
+    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, QuotaDimension,
+    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
+    RunBindingsSnapshot, SchedulerPriority, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, ExactInvocationValueRef, InvocationOrigin, InvocationPolicyDecision,
@@ -243,6 +245,18 @@ fn resume_mutations(base: u16) -> ExternalLeafResumeMutationIds {
         continuation_node_outbox_id: id(ResourceKind::OutboxEvent, base + 7),
         continuation_job_event_id: id(ResourceKind::Event, base + 8),
         continuation_job_outbox_id: id(ResourceKind::OutboxEvent, base + 9),
+    }
+}
+
+fn failure_mutations(base: u16) -> ExternalLeafFailureMutationIds {
+    ExternalLeafFailureMutationIds {
+        convergence_job_id: id(ResourceKind::Job, base),
+        run_event_id: id(ResourceKind::Event, base + 1),
+        run_outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+        leaf_node_event_id: id(ResourceKind::Event, base + 3),
+        leaf_node_outbox_id: id(ResourceKind::OutboxEvent, base + 4),
+        convergence_job_event_id: id(ResourceKind::Event, base + 5),
+        convergence_job_outbox_id: id(ResourceKind::OutboxEvent, base + 6),
     }
 }
 
@@ -1523,6 +1537,7 @@ async fn seed_running_context_orchestration(
             root_scope_id: scope_id,
             retry_backoff_milliseconds: 100,
             wake_contract: None,
+            convergence_failure: None,
         },
     )
     .unwrap();
@@ -1751,6 +1766,7 @@ async fn park_direct_context_leaf(
             root_scope_id: id(ResourceKind::ScopeInstance, 0x61),
             retry_backoff_milliseconds: 100,
             wake_contract: None,
+            convergence_failure: None,
         },
     )
     .unwrap();
@@ -1811,6 +1827,8 @@ async fn claim(
                 ],
                 event_id: id(ResourceKind::Event, base + 5),
                 outbox_id: id(ResourceKind::OutboxEvent, base + 6),
+                resume_mutations: resume_mutations(base + 0x1000),
+                failure_mutations: failure_mutations(base + 0x2000),
             }],
             lease_policy: LeasePolicy {
                 requested_milliseconds: 30_000,
@@ -2421,6 +2439,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
                     id(ResourceKind::QuotaLedgerEntry, 0x146),
                 ],
                 resume_mutations: Some(resume_mutations(0x900)),
+                failure_mutations: None,
             },
         )
         .await,
@@ -2486,6 +2505,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
                     id(ResourceKind::QuotaLedgerEntry, 0x14f),
                 ],
                 resume_mutations: Some(resume_mutations(0x910)),
+                failure_mutations: None,
             },
         )
         .await,
@@ -2536,6 +2556,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
                 id(ResourceKind::QuotaLedgerEntry, 0x155),
             ],
             resume_mutations: None,
+            failure_mutations: None,
         },
     )
     .await
@@ -2595,6 +2616,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
                 id(ResourceKind::QuotaLedgerEntry, 0x195),
             ],
             resume_mutations: Some(resume_mutations(0x920)),
+            failure_mutations: None,
         };
     let completed = match execute_outcome(&repository, completion_command.clone())
     .await
@@ -2760,6 +2782,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
                     id(ResourceKind::QuotaLedgerEntry, 0x1a6),
                 ],
                 resume_mutations: Some(resume_mutations(0x930)),
+                failure_mutations: None,
             },
         )
         .await,
@@ -2917,6 +2940,89 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
             1,
             3
         )
+    );
+    let owner_claim = claim(
+        &repository,
+        &fixture,
+        applied.context_job.job_id.parse().unwrap(),
+        0x830,
+    )
+    .await;
+    let terminal_failure = Failure {
+        code: FailureCode::Platform {
+            code: PlatformFailureCode::ContextQueryFailed,
+        },
+        class: FailureClass::External,
+        retryability: Retryability::Never,
+        safe_message: Some("context source rejected the query".to_owned()),
+        details_ref: None,
+        source: FailureSource::Context,
+    };
+    let failure_command = CommitContextOutcome {
+        audit: worker_audit(
+            &fixture.tenant_id,
+            &owner_claim.worker_id,
+            0x840,
+            "permanent-failure",
+        ),
+        context_query_id: applied.query.context_query_id.clone(),
+        expected_query_version: owner_claim.claimed.query.version,
+        job_id: applied.context_job.job_id.parse().unwrap(),
+        fence: owner_claim.fence(),
+        outcome: ContextBackendOutcome::PermanentFailure {
+            failure: terminal_failure.clone(),
+        },
+        quota_entry_ids: [
+            id(ResourceKind::QuotaLedgerEntry, 0x843),
+            id(ResourceKind::QuotaLedgerEntry, 0x844),
+            id(ResourceKind::QuotaLedgerEntry, 0x845),
+        ],
+        resume_mutations: None,
+        failure_mutations: Some(owner_claim.claimed.failure_mutations.clone()),
+    };
+    let failed = match execute_outcome(&repository, failure_command.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("first Context permanent failure replayed"),
+    };
+    assert_eq!(failed.query.state, ContextQueryState::Failed);
+    assert_eq!(failed.job.state, JobState::Failed.as_str());
+    assert!(matches!(
+        execute_outcome(&repository, failure_command).await.unwrap(),
+        CommandOutcome::Replayed(record) if record == failed
+    ));
+    let failure_handoff: (String, String, i32, serde_json::Value) = sqlx::query_as(
+        r#"
+        SELECT node.state, job.state, run.active_work_count, job.payload
+        FROM insight_platform.runs AS run
+        JOIN insight_platform.run_nodes AS node
+          ON node.tenant_id = run.tenant_id AND node.node_id = $3
+        JOIN insight_platform.jobs AS job
+          ON job.tenant_id = run.tenant_id AND job.job_id = $4 AND job.node_id = node.node_id
+        WHERE run.tenant_id = $1 AND run.run_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .bind(id(ResourceKind::NodeExecution, 0x804).to_string())
+    .bind(
+        owner_claim
+            .claimed
+            .failure_mutations
+            .convergence_job_id
+            .to_string(),
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(failure_handoff.0, "ready");
+    assert_eq!(failure_handoff.1, "ready");
+    assert_eq!(failure_handoff.2, 0);
+    assert_eq!(
+        failure_handoff.3.get("convergence_failure"),
+        Some(&serde_json::to_value(terminal_failure).unwrap())
     );
         }))
         .unwrap();

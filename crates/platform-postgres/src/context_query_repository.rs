@@ -44,6 +44,8 @@ pub struct ClaimedContextExecution {
     pub query: ContextQueryRecord,
     pub job: JobRecord,
     pub quota_account_ids: Vec<String>,
+    pub resume_mutations: insight_platform_contracts::ExternalLeafResumeMutationIds,
+    pub failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds,
 }
 
 pub struct PgContextQueryTransaction {
@@ -557,6 +559,24 @@ impl PgContextQueryTransaction {
                     .as_ref()
                     .ok_or(RepositoryError::Conflict("Context resume mutations"))?,
                 self.scope_environment_limits,
+                database_now,
+            )
+            .await?;
+        } else if let insight_platform_context::ContextBackendOutcome::PermanentFailure {
+            failure,
+        } = &command.outcome
+        {
+            crate::repository::settle_context_leaf_failure_in_transaction(
+                &mut transaction,
+                &decision.query,
+                &command.job_id,
+                failure,
+                command
+                    .failure_mutations
+                    .as_ref()
+                    .ok_or(RepositoryError::Conflict(
+                        "Context failure convergence mutations",
+                    ))?,
                 database_now,
             )
             .await?;
@@ -1363,6 +1383,8 @@ impl PgRepository {
                 query: next_query,
                 job,
                 quota_account_ids,
+                resume_mutations: slot.resume_mutations.clone(),
+                failure_mutations: slot.failure_mutations.clone(),
             });
         }
         transaction.commit().await?;
@@ -1729,13 +1751,23 @@ async fn require_context_claim_parents(
     if let ContextDatasetView::Generation { exact } = &query.payload.admission.dataset_view {
         load_exact_dataset_generation(transaction, &query.tenant_id, exact).await?;
     }
+    let plan_leaf = node.state == NodeExecutionState::Waiting;
+    let run_state = run.state.parse::<RunState>().ok();
     if query.run_id.to_string() != run.run_id
         || node.run_id != run.run_id
-        || run.state.parse::<RunState>().ok() != Some(RunState::Running)
+        || if plan_leaf {
+            !matches!(run_state, Some(RunState::Running | RunState::Waiting))
+        } else {
+            run_state != Some(RunState::Running)
+        }
         || run.current.control.pause_requested
         || run.current.control.cancel_requested_at.is_some()
         || run.current.control.timeout_requested_at.is_some()
-        || node.state != NodeExecutionState::Running
+        || if plan_leaf {
+            node.state != NodeExecutionState::Waiting
+        } else {
+            node.state != NodeExecutionState::Running
+        }
         || node.node_kind != PlanNodeKind::ContextQuery
         || database_now >= run.deadline
         || database_now >= node.deadline
@@ -1745,6 +1777,39 @@ async fn require_context_claim_parents(
         || resource.gate_state != "enabled"
     {
         return Err(RepositoryError::Conflict("Context dispatch parent"));
+    }
+    if plan_leaf {
+        let mut current = run.current.clone();
+        if run_state == Some(RunState::Waiting) {
+            current.waiting_reason = None;
+        }
+        current
+            .validate(&query.run_id)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE insight_platform.runs
+            SET state = 'running', version = version + 1,
+                active_work_count = active_work_count + 1,
+                current_schema_version = $4, current_payload = $5,
+                current_payload_digest = $6, updated_at = $7
+            WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+              AND state IN ('running', 'waiting') AND terminal_at IS NULL
+            "#,
+        )
+        .bind(&run.tenant_id)
+        .bind(&run.run_id)
+        .bind(run.version)
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .bind(database_now)
+        .execute(&mut **transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(RepositoryError::Conflict("Context Plan leaf claim permit"));
+        }
     }
     Ok(())
 }

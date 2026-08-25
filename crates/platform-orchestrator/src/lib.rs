@@ -2147,6 +2147,11 @@ pub struct OrchestrationJobPayload {
     pub root_scope_id: ResourceId,
     pub retry_backoff_milliseconds: u64,
     pub wake_contract: Option<WakeContract>,
+    /// A durable external-leaf terminal failure awaiting the shared orchestration
+    /// ErrorBoundary/structured-scope convergence path. Such a Job must never dispatch the
+    /// external leaf again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convergence_failure: Option<Failure>,
 }
 
 impl OrchestrationJobPayload {
@@ -2155,6 +2160,11 @@ impl OrchestrationJobPayload {
             || self.root_scope_id.kind() != ResourceKind::ScopeInstance
             || self.retry_backoff_milliseconds == 0
             || self.retry_backoff_milliseconds > 60_000
+            || self
+                .convergence_failure
+                .as_ref()
+                .is_some_and(|failure| failure.validate(1_024).is_err())
+            || (self.convergence_failure.is_some() && self.wake_contract.is_some())
         {
             return Err(OrchestratorError::InvalidRunAdmission);
         }
@@ -2698,6 +2708,7 @@ impl AdmitRun {
             root_scope_id: self.root_scope_id.clone(),
             retry_backoff_milliseconds: self.retry_backoff_milliseconds,
             wake_contract: None,
+            convergence_failure: None,
         }
     }
 }

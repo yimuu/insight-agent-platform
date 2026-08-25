@@ -370,6 +370,7 @@ pub struct CapabilityClaimSlot {
     pub event_id: ResourceId,
     pub outbox_id: ResourceId,
     pub resume_mutations: insight_platform_contracts::ExternalLeafResumeMutationIds,
+    pub failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds,
 }
 
 impl CapabilityClaimSlot {
@@ -384,6 +385,7 @@ impl CapabilityClaimSlot {
             || self.event_id.kind() != ResourceKind::Event
             || self.outbox_id.kind() != ResourceKind::OutboxEvent
             || self.resume_mutations.validate().is_err()
+            || self.failure_mutations.validate().is_err()
         {
             return Err(InvocationError::InvalidIdentity);
         }
@@ -1235,6 +1237,7 @@ pub struct CommitCapabilityOutcome {
     pub quota_entry_ids: Vec<ResourceId>,
     pub outcome: DispatchOutcome,
     pub resume_mutations: Option<insight_platform_contracts::ExternalLeafResumeMutationIds>,
+    pub failure_mutations: Option<insight_platform_contracts::ExternalLeafFailureMutationIds>,
 }
 
 impl CommitCapabilityOutcome {
@@ -1256,6 +1259,11 @@ impl CommitCapabilityOutcome {
                 .resume_mutations
                 .as_ref()
                 .is_some_and(|mutations| mutations.validate().is_err())
+            || self
+                .failure_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || (self.resume_mutations.is_some() && self.failure_mutations.is_some())
         {
             return Err(InvocationError::InvalidCommand);
         }

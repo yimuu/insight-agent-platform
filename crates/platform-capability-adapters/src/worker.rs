@@ -6,7 +6,8 @@ use super::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    CommandOutcome, ExternalLeafResumeMutationIds, ResourceId, ResourceKind,
+    CommandOutcome, ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds, ResourceId,
+    ResourceKind,
 };
 use insight_platform_invocations::{
     CapabilityWorkerAudit, CommitCapabilityCancellationOutcome, CommitCapabilityOutcome,
@@ -31,6 +32,7 @@ pub struct ExecuteCapabilityAdapterJob {
     /// It is consumed only when the adapter returns a safely retryable failure.
     pub retry_at: Option<DateTime<Utc>>,
     pub resume_mutations: Option<ExternalLeafResumeMutationIds>,
+    pub failure_mutations: Option<ExternalLeafFailureMutationIds>,
 }
 
 impl ExecuteCapabilityAdapterJob {
@@ -64,6 +66,15 @@ impl ExecuteCapabilityAdapterJob {
                     || retry_at <= now
                     || retry_at >= self.execution.deadline
             })
+            || self
+                .resume_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || self
+                .failure_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || self.resume_mutations.is_some() != self.failure_mutations.is_some()
         {
             return Err(CapabilityAdapterWorkerContractError::InvalidCommand);
         }
@@ -192,6 +203,12 @@ where
             Err(failure) => failure_outcome(&command, failure)
                 .map_err(CapabilityAdapterWorkerError::Contract)?,
         };
+        let resume_mutations = matches!(&outcome, DispatchOutcome::Completed(_))
+            .then_some(command.resume_mutations)
+            .flatten();
+        let failure_mutations = matches!(&outcome, DispatchOutcome::PermanentFailure(_))
+            .then_some(command.failure_mutations)
+            .flatten();
         self.authority
             .commit_capability_outcome(CommitCapabilityOutcome {
                 audit: command.audit,
@@ -201,7 +218,8 @@ where
                 fence: command.fence,
                 quota_entry_ids: command.quota_entry_ids,
                 outcome,
-                resume_mutations: command.resume_mutations,
+                resume_mutations,
+                failure_mutations,
             })
             .await
             .map_err(CapabilityAdapterWorkerError::Authority)
@@ -371,6 +389,33 @@ mod tests {
             .unwrap()
     }
 
+    fn resume_mutations(base: u16) -> ExternalLeafResumeMutationIds {
+        ExternalLeafResumeMutationIds {
+            continuation_node_execution_id: id(ResourceKind::NodeExecution, base),
+            continuation_job_id: id(ResourceKind::Job, base + 1),
+            run_event_id: id(ResourceKind::Event, base + 2),
+            run_outbox_id: id(ResourceKind::OutboxEvent, base + 3),
+            leaf_node_event_id: id(ResourceKind::Event, base + 4),
+            leaf_node_outbox_id: id(ResourceKind::OutboxEvent, base + 5),
+            continuation_node_event_id: id(ResourceKind::Event, base + 6),
+            continuation_node_outbox_id: id(ResourceKind::OutboxEvent, base + 7),
+            continuation_job_event_id: id(ResourceKind::Event, base + 8),
+            continuation_job_outbox_id: id(ResourceKind::OutboxEvent, base + 9),
+        }
+    }
+
+    fn failure_mutations(base: u16) -> ExternalLeafFailureMutationIds {
+        ExternalLeafFailureMutationIds {
+            convergence_job_id: id(ResourceKind::Job, base),
+            run_event_id: id(ResourceKind::Event, base + 1),
+            run_outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+            leaf_node_event_id: id(ResourceKind::Event, base + 3),
+            leaf_node_outbox_id: id(ResourceKind::OutboxEvent, base + 4),
+            convergence_job_event_id: id(ResourceKind::Event, base + 5),
+            convergence_job_outbox_id: id(ResourceKind::OutboxEvent, base + 6),
+        }
+    }
+
     fn exact(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef {
         ExactVersionRef::new(id(kind, suffix), digest(character)).unwrap()
     }
@@ -510,6 +555,7 @@ mod tests {
             ],
             retry_at: Some(Utc::now() + Duration::seconds(1)),
             resume_mutations: None,
+            failure_mutations: None,
             execution,
         }
     }
@@ -573,6 +619,7 @@ mod tests {
                     },
                 ),
                 resume_mutations: None,
+                failure_mutations: None,
             }))
         }
     }
@@ -712,6 +759,8 @@ mod tests {
         let (worker, authority) = worker(&execution, Err(failure));
         let mut command = command(execution);
         command.retry_at = None;
+        command.resume_mutations = Some(resume_mutations(0x100));
+        command.failure_mutations = Some(failure_mutations(0x200));
         worker.execute(command).await.unwrap();
         let committed = authority.commands.lock().unwrap();
         assert!(matches!(
@@ -720,6 +769,15 @@ mod tests {
                 if failure.failure.class == FailureClass::External
                     && failure.failure.retryability == Retryability::Never
         ));
+        assert!(committed[0].resume_mutations.is_none());
+        assert_eq!(
+            committed[0]
+                .failure_mutations
+                .as_ref()
+                .unwrap()
+                .convergence_job_id,
+            id(ResourceKind::Job, 0x200)
+        );
     }
 
     #[tokio::test]

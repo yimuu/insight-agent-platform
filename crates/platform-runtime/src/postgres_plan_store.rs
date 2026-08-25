@@ -16,8 +16,8 @@ use insight_platform_artifacts::{
     SchedulerRunValueReader, SchedulerRunValueRequestResolver, MAX_SCHEDULER_RUN_VALUE_BYTES,
 };
 use insight_platform_contracts::{
-    canonical_digest, canonical_json, parse_strict_json, ClosedJsonValue, ResourceId, ResourceKind,
-    Sha256Digest, ValueRef, MODEL_JSON_LIMITS,
+    canonical_digest, canonical_json, parse_strict_json, ClosedJsonValue, Failure, ResourceId,
+    ResourceKind, Sha256Digest, ValueRef, MODEL_JSON_LIMITS,
 };
 use insight_platform_orchestrator::{
     derive_candidate_selection, ChildBudget, CommittedExpressionInput, DurableWaitKind,
@@ -1275,6 +1275,75 @@ where
             transaction.apply_orchestration_controller_step(step).await
         };
         match applied {
+            Ok(_) => transaction
+                .commit()
+                .await
+                .map_err(classify_repository_failure),
+            Err(failure) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(classify_repository_failure)?;
+                Err(classify_repository_failure(failure))
+            }
+        }
+    }
+
+    async fn commit_convergence_failure(
+        &self,
+        job: &StartedOrchestrationJob,
+        fence: JobFence,
+        materialized: crate::MaterializedTypedPlan,
+        failure: Failure,
+    ) -> Result<(), DurablePlanDriverError> {
+        let requirements = self
+            .repository
+            .load_committed_failure_mutation_requirements(&fence, &materialized.plan, &failure)
+            .await
+            .map_err(classify_repository_failure)?;
+        let request_digest: Sha256Digest = canonical_digest(&json!({
+            "failure": failure,
+            "job_id": fence.job_id,
+            "lease_generation": fence.lease_epoch,
+            "operation": "orchestration.external_leaf_failure.converge",
+            "plan_digest": materialized.request.artifact.content_digest(),
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let wake_request_digest: Sha256Digest = canonical_digest(&json!({
+            "job_id": fence.job_id,
+            "operation": "orchestration.external_leaf_failure.wake",
+            "request_digest": request_digest,
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let mutations = allocate_controller_step_mutations(
+            self.identities.as_ref(),
+            &requirements,
+            wake_request_digest,
+        )
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let command = FailOrchestrationJob {
+            fence,
+            plan: materialized.plan,
+            cause: OrchestrationFailureCause::Committed { failure },
+            derived_expression: None,
+            idempotency_key_digest: self
+                .identities
+                .new_lease_token_digest()
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            request_digest,
+            receipt_expires_at: job.started().deadline,
+            mutations,
+        };
+        let mut transaction = self
+            .repository
+            .begin_scheduler_transaction()
+            .await
+            .map_err(classify_repository_failure)?;
+        match transaction.fail_orchestration_job(command).await {
             Ok(_) => transaction
                 .commit()
                 .await

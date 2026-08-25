@@ -16,12 +16,13 @@ use insight_platform_contracts::{
     CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
     CapabilityProgressMode, ClosedJsonSchema, CommandAudit, CommandOutcome, DataClassification,
     DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
-    ExactVersionRef, ExternalLeafResumeMutationIds, FrozenSlotBinding, FrozenSlotTarget,
-    InteractionKind, NativeCapabilityContract, Permission, PermissionSet, PolicyDeploymentClosure,
-    PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
-    ResourceKind, RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    ExactVersionRef, ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds,
+    FrozenSlotBinding, FrozenSlotTarget, InteractionKind, NativeCapabilityContract, Permission,
+    PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
+    ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, BackendInputRequest, CapabilityApprovalDecision,
@@ -115,6 +116,18 @@ fn resume_mutations(base: u16) -> ExternalLeafResumeMutationIds {
         continuation_node_outbox_id: id(ResourceKind::OutboxEvent, base + 7),
         continuation_job_event_id: id(ResourceKind::Event, base + 8),
         continuation_job_outbox_id: id(ResourceKind::OutboxEvent, base + 9),
+    }
+}
+
+fn failure_mutations(base: u16) -> ExternalLeafFailureMutationIds {
+    ExternalLeafFailureMutationIds {
+        convergence_job_id: id(ResourceKind::Job, base),
+        run_event_id: id(ResourceKind::Event, base + 1),
+        run_outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+        leaf_node_event_id: id(ResourceKind::Event, base + 3),
+        leaf_node_outbox_id: id(ResourceKind::OutboxEvent, base + 4),
+        convergence_job_event_id: id(ResourceKind::Event, base + 5),
+        convergence_job_outbox_id: id(ResourceKind::OutboxEvent, base + 6),
     }
 }
 
@@ -537,6 +550,7 @@ async fn claim_one(repository: &PgRepository, tenant_id: &ResourceId, base: u16)
                 event_id: id(ResourceKind::Event, base + 4),
                 outbox_id: id(ResourceKind::OutboxEvent, base + 5),
                 resume_mutations: resume_mutations(base + 0x1000),
+                failure_mutations: failure_mutations(base + 0x2000),
             }],
         })
         .await
@@ -796,6 +810,7 @@ async fn run_capability_phase3_fixture() {
         event_id: id(ResourceKind::Event, 0x308),
         outbox_id: id(ResourceKind::OutboxEvent, 0x309),
         resume_mutations: resume_mutations(0x1300),
+        failure_mutations: failure_mutations(0x2300),
     };
     let mut claims = repository
         .claim_capability_jobs(ClaimCapabilityJobs {
@@ -886,6 +901,7 @@ async fn run_capability_phase3_fixture() {
         quota_entry_ids: worker_command.quota_entry_ids.clone(),
         outcome: response.outcome,
         resume_mutations: None,
+        failure_mutations: None,
     };
     let completed = match worker.execute(worker_command).await.unwrap() {
         CommandOutcome::Applied(record) => record,
@@ -1144,6 +1160,7 @@ async fn run_capability_phase3_fixture() {
                 callback_binding_digest: Some(callback_binding_digest.clone()),
             }),
             resume_mutations: None,
+            failure_mutations: None,
         },
     )
     .await
@@ -1318,6 +1335,7 @@ async fn run_capability_phase3_fixture() {
                 deadline: Utc::now() + Duration::minutes(10),
             }),
             resume_mutations: None,
+            failure_mutations: None,
         },
     )
     .await
@@ -1440,6 +1458,7 @@ async fn run_capability_phase3_fixture() {
                 validation_evidence_digest: digest('7'),
             }),
             resume_mutations: None,
+            failure_mutations: None,
         },
     )
     .await
@@ -1483,6 +1502,7 @@ async fn run_capability_phase3_fixture() {
                 manual: true,
             }),
             resume_mutations: None,
+            failure_mutations: None,
         },
     )
     .await
@@ -1654,6 +1674,7 @@ async fn run_capability_phase3_fixture() {
             validation_evidence_digest: digest('4'),
         }),
         resume_mutations: None,
+        failure_mutations: None,
     };
     let (cancel_result, complete_result) = tokio::join!(
         execute_control(&repository, cancel_command),
@@ -1849,6 +1870,7 @@ async fn run_plan_capability_owner(pool: &PgPool, repository: &PgRepository, fix
             root_scope_id: id(ResourceKind::ScopeInstance, 0x31),
             retry_backoff_milliseconds: 100,
             wake_contract: None,
+            convergence_failure: None,
         },
     )
     .unwrap();
@@ -2058,6 +2080,7 @@ async fn run_plan_capability_owner(pool: &PgPool, repository: &PgRepository, fix
             validation_evidence_digest: digest('8'),
         }),
         resume_mutations: Some(continuation_mutations.clone()),
+        failure_mutations: None,
     };
     let completed = match execute_outcome(repository, completion_command.clone())
         .await

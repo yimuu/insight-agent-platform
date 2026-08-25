@@ -7,12 +7,12 @@ use crate::{
 use async_trait::async_trait;
 use insight_platform_contracts::{
     CandidateSelectionPolicyDocument, ClosedJsonValue, ExactDeploymentRef, ExactPolicyBinding,
-    ResourceId,
+    Failure, ResourceId,
 };
 use insight_platform_orchestrator::{
     decide_controller, derive_expression_controller, CommittedExpressionInput, ControllerDecision,
-    ControllerEvaluation, ControllerObservation, DurableWaitKind, ExpressionLimits, PlanNodeKey,
-    RuntimeNode, RuntimePlan,
+    ControllerEvaluation, ControllerObservation, DurableWaitKind, ExpressionLimits,
+    OrchestrationJobPayload, PlanNodeKey, RuntimeNode, RuntimePlan,
 };
 use insight_platform_postgres::repository::{JobFence, ResolvedExpressionInput};
 use std::sync::Arc;
@@ -88,6 +88,14 @@ pub trait DurablePlanGenerationStore: Send + Sync + 'static {
         command: DerivedControllerCommit,
     ) -> Result<(), DurablePlanDriverError>;
 
+    async fn commit_convergence_failure(
+        &self,
+        job: &StartedOrchestrationJob,
+        fence: JobFence,
+        materialized: MaterializedTypedPlan,
+        failure: Failure,
+    ) -> Result<(), DurablePlanDriverError>;
+
     async fn handoff_controller(
         &self,
         job: &StartedOrchestrationJob,
@@ -130,6 +138,32 @@ where
         fence: JobFence,
         materialized: MaterializedTypedPlan,
     ) -> Result<(), DurablePlanDriverError> {
+        let started_payload = &job.started().payload;
+        if started_payload.value.get("convergence_failure").is_some() {
+            if started_payload.schema_version != 1 {
+                return Err(DurablePlanDriverError::InvariantViolation);
+            }
+            let mut payload_value = started_payload.value.clone();
+            let schema_version = payload_value
+                .as_object_mut()
+                .and_then(|object| object.remove("schema_version"))
+                .and_then(|value| value.as_i64());
+            if schema_version != Some(i64::from(started_payload.schema_version)) {
+                return Err(DurablePlanDriverError::InvariantViolation);
+            }
+            let job_payload: OrchestrationJobPayload = serde_json::from_value(payload_value)
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+            job_payload
+                .validate()
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+            let failure = job_payload
+                .convergence_failure
+                .ok_or(DurablePlanDriverError::InvariantViolation)?;
+            return self
+                .store
+                .commit_convergence_failure(job, fence, materialized, failure)
+                .await;
+        }
         let facts = self
             .store
             .load_controller_facts(job, &fence, &materialized.plan)
@@ -288,7 +322,9 @@ mod tests {
     use chrono::{Duration, Utc};
     use insight_platform_artifacts::SchedulerTypedPlanReadRequest;
     use insight_platform_contracts::{
-        ArtifactRef, DataClassification, ResourceKind, SchedulerPriority, Sha256Digest, WorkClass,
+        ArtifactRef, DataClassification, FailureClass, FailureCode, FailureSource,
+        PlatformFailureCode, ResourceKind, Retryability, SchedulerPriority, Sha256Digest,
+        WorkClass,
     };
     use insight_platform_orchestrator::{
         BranchArm, DataPortKey, ExactDataPortRef, TypedExpressionProgram, TypedInstruction,
@@ -316,8 +352,20 @@ mod tests {
     }
 
     fn started() -> StartedOrchestrationJob {
+        started_with_failure(None)
+    }
+
+    fn started_with_failure(convergence_failure: Option<Failure>) -> StartedOrchestrationJob {
         let now = Utc::now();
         let node_id = id(ResourceKind::NodeExecution, "9903");
+        let payload = OrchestrationJobPayload {
+            bindings_digest: digest('c'),
+            node_execution_id: node_id.clone(),
+            root_scope_id: id(ResourceKind::ScopeInstance, "9907"),
+            retry_backoff_milliseconds: 100,
+            wake_contract: None,
+            convergence_failure,
+        };
         let job = JobRecord {
             tenant_id: id(ResourceKind::Tenant, "9901").to_string(),
             job_id: id(ResourceKind::Job, "9902").to_string(),
@@ -347,7 +395,7 @@ mod tests {
             result_digest: None,
             effect_key_digest: None,
             quota_reservation_id: Some(id(ResourceKind::UsageReservation, "9906").to_string()),
-            payload: TypedPayload::new(1, &json!({"kind":"controller"})).unwrap(),
+            payload: TypedPayload::new(1, &payload).unwrap(),
             started_at: Some(now),
             terminal_at: None,
             created_at: now,
@@ -455,6 +503,7 @@ mod tests {
     struct Store {
         facts: DurableControllerFacts,
         committed: Mutex<Option<DerivedControllerCommit>>,
+        converged: Mutex<Option<Failure>>,
     }
 
     #[async_trait]
@@ -474,6 +523,17 @@ mod tests {
             command: DerivedControllerCommit,
         ) -> Result<(), DurablePlanDriverError> {
             *self.committed.lock().unwrap() = Some(command);
+            Ok(())
+        }
+
+        async fn commit_convergence_failure(
+            &self,
+            _job: &StartedOrchestrationJob,
+            _fence: JobFence,
+            _materialized: MaterializedTypedPlan,
+            failure: Failure,
+        ) -> Result<(), DurablePlanDriverError> {
+            *self.converged.lock().unwrap() = Some(failure);
             Ok(())
         }
 
@@ -511,6 +571,7 @@ mod tests {
                 },
             },
             committed: Mutex::new(None),
+            converged: Mutex::new(None),
         });
         let driver =
             ExactPlanGenerationDriver::new(store.clone(), ExpressionLimits::ABSOLUTE).unwrap();
@@ -541,6 +602,56 @@ mod tests {
             }
         );
         assert!(command.evaluation.as_ref().unwrap().validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn committed_external_failure_bypasses_leaf_dispatch_and_uses_convergence_owner() {
+        let failure = Failure {
+            code: FailureCode::Platform {
+                code: PlatformFailureCode::ContextQueryFailed,
+            },
+            class: FailureClass::External,
+            retryability: Retryability::Never,
+            safe_message: Some("context source rejected the query".to_owned()),
+            details_ref: None,
+            source: FailureSource::Context,
+        };
+        let started = started_with_failure(Some(failure.clone()));
+        let (materialized, _) = materialized();
+        let store = Arc::new(Store {
+            facts: DurableControllerFacts {
+                node_execution_id: id(ResourceKind::NodeExecution, "9991"),
+                node_execution_version: 1,
+                plan_node_key: key("never-loaded"),
+                phase: DurableControllerPhase::CommittedFacts {
+                    observation: ControllerObservation::None,
+                },
+            },
+            committed: Mutex::new(None),
+            converged: Mutex::new(None),
+        });
+        let driver =
+            ExactPlanGenerationDriver::new(store.clone(), ExpressionLimits::ABSOLUTE).unwrap();
+        let fence = JobFence {
+            tenant_id: started.started().tenant_id.clone(),
+            job_id: started.started().job_id.clone(),
+            worker_id: started
+                .started()
+                .worker_id
+                .as_deref()
+                .unwrap()
+                .parse()
+                .unwrap(),
+            lease_epoch: 2,
+            expected_job_version: 4,
+            lease_token_digest: digest('a'),
+        };
+        driver
+            .commit_generation(&started, fence, materialized)
+            .await
+            .unwrap();
+        assert_eq!(*store.converged.lock().unwrap(), Some(failure));
+        assert!(store.committed.lock().unwrap().is_none());
     }
 
     #[test]

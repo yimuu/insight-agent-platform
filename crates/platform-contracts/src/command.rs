@@ -91,6 +91,44 @@ impl ExternalLeafResumeMutationIds {
     }
 }
 
+/// Opaque identities preallocated for one external-leaf terminal failure handoff. The leaf owner
+/// derives the typed failure and all convergence semantics; callers provide identities only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalLeafFailureMutationIds {
+    pub convergence_job_id: ResourceId,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub leaf_node_event_id: ResourceId,
+    pub leaf_node_outbox_id: ResourceId,
+    pub convergence_job_event_id: ResourceId,
+    pub convergence_job_outbox_id: ResourceId,
+}
+
+impl ExternalLeafFailureMutationIds {
+    pub fn validate(&self) -> Result<(), CommandContractError> {
+        let expected = [
+            (&self.convergence_job_id, ResourceKind::Job),
+            (&self.run_event_id, ResourceKind::Event),
+            (&self.run_outbox_id, ResourceKind::OutboxEvent),
+            (&self.leaf_node_event_id, ResourceKind::Event),
+            (&self.leaf_node_outbox_id, ResourceKind::OutboxEvent),
+            (&self.convergence_job_event_id, ResourceKind::Event),
+            (&self.convergence_job_outbox_id, ResourceKind::OutboxEvent),
+        ];
+        if expected.iter().any(|(id, kind)| id.kind() != *kind) {
+            return Err(CommandContractError::InvalidMutationIds);
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        if expected
+            .iter()
+            .any(|(id, _)| !unique.insert(id.to_string()))
+        {
+            return Err(CommandContractError::InvalidMutationIds);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandContractError {
     InvalidAudit,
