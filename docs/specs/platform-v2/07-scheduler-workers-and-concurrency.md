@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-184 |
+| 状态 | Accepted / CR-188 |
 | 日期 | 2026-08-25 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
+
+> CR-188 impact：Capability Native/Remote Worker startup manifest必须分别报告exact installed adapter/protocol codec集合；claim在
+> PostgreSQL owner transaction重验Invocation冻结的required Worker manifest，dispatcher再重验exact codec descriptor。现有WorkClass、
+> lease、fairness、permit和drain合同不变。
 
 ## 1. 决策摘要
 
@@ -109,12 +113,16 @@ Worker manifest v1只包含exact WorkClass、ComponentRole、CanonicalRegion、r
 业务并发上限和critical-control reserve。Model首版Inline-only，因而manifest没有Model output
 materialization或weighted-byte专用字段。
 
+Capability Worker的role startup closure在通用Worker manifest之外携带09的bounded installed adapter/codec manifest列表，并把列表的
+canonical digest纳入`runtime/protocol digest`。Native与Remote lane分别报告，不能把同一空列表或另一lane列表复用。Job claim只比较
+Invocation冻结的required Worker manifest digest；具体codec descriptor由dispatcher静态registry二次重验，避免Scheduler解释backend合同。
+
 ## 5. Claim 与启动
 
 claim必须在数据库事务中完成：
 
 1. 按tenant公平性选择Ready Job；
-2. 验证typed owner、deadline、policy、quota与Worker manifest；
+2. 验证typed owner、deadline、policy、quota与Worker manifest；Capability remote还重验Invocation冻结的required manifest；
 3. 领取层级quota bundle；
 4. CAS到`Leased`并增加`lease_generation`；
 5. 返回不含Secret value的immutable execution snapshot。

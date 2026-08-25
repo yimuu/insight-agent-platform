@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-185 |
+| 状态 | Accepted / CR-188 |
 | 日期 | 2026-08-23 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
@@ -12,6 +12,9 @@
 
 > CR-185 impact：Skill package上传只接受11的专用media type与exact Artifact digest；API不提供ZIP/TAR转换、目录展开、
 > generic object read或运行时格式协商。目录authoring client必须在上传前生成canonical frame。
+
+> CR-188 impact：remote Capability Implementation/Deployment publication必须验证09 exact installed codec manifest、descriptor和required
+> Worker manifest；public authoring不能提交运行时模板、可执行模块、Worker override或自由codec identity。
 
 ## 1. 决策摘要
 
@@ -353,6 +356,8 @@ operation age/outcome、internal RPC latency/denial和DB pool utilization。tena
 - 所有mutation缺If-Match、旧ETag、错tenant/owner和unknown schema field均fail closed；
 - Operation ID等于JobId，view直接投影Job，不存在ManagementOperation state/table；
 - ResourceValidation、McpDiscovery、ContextDatasetBuild、ArtifactVerify/Delete的kind-target矩阵正负fixture通过；
+- remote Capability publish对缺失/错kind/错module/错descriptor/错Worker manifest的installed codec closure全部fail closed，且public request
+  不能注入运行时codec或Worker override；
 - Run admission只有完整binding snapshot事务成功才返回201；
 - SSE在NATS丢失/断线后从Event cursor恢复，慢client不使服务内存无界；
 - public/internal route无Secret、object locator、DB payload、lease token或敏感正文泄漏；

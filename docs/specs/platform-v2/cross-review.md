@@ -1,10 +1,36 @@
-# Platform v2 00～18 Cross-review（CR-187）
+# Platform v2 00～18 Cross-review（CR-188）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-187 Accepted |
+| 状态 | Closed / CR-188 Accepted |
 | 日期 | 2026-08-25 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-187 Model Policy authority implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-188 Capability codec implementation feedback |
+
+### CR-188 installed Capability codec authority impact review
+
+production Capability Worker接线确认09的HTTP/gRPC/MCP contract只保存mapping/protocol digest。digest能验证相等性但不能创建codec；
+仓库也只有测试codec，Remote Deployment没有required Worker manifest，因此空registry或任意资格外镜像仍可能claim Job后才失败。
+CR-188把mapping authoring与runtime执行分开：publication/image build验证并编译静态codec，startup以closed installed codec manifest报告
+exact identity/module/descriptor，Deployment冻结exact codec与Worker manifest，claim/dispatch在外部I/O前重验全部闭包。
+
+| Spec | CR-188结论 |
+|---|---|
+| 00 | 登记实现反馈；clean-cut、协议和current/target边界不变 |
+| 01～06 | aggregate、ID、Policy、Plan v4、Run/Node/Scope authority不变 |
+| 07 | Worker startup/claim必须验证closed manifest；WorkClass、queue、lease与permit不变 |
+| 08 | child Run冻结同一exact Deployment，无新递归或父子状态 |
+| 09 | 新增installed protocol codec manifest及remote required Worker manifest binding；无运行时模板/代码下载 |
+| 10 | Invocation admission冻结codec/descriptor/Worker manifest，claim和dispatch逐层重验 |
+| 11～12 | Skill/Context不取得codec执行权威；Context独立Worker不变 |
+| 13 | MCP Tool codec只负责Platform↔MCP typed mapping，Host仍拥有remote Streamable HTTP语义 |
+| 14～16 | Sandbox/Artifact/Model plane、Inline-only与三Artifact role不变 |
+| 17 | publication/Deployment validation拒绝缺失或资格外installed codec；无新public runtime override |
+| 18 | 增加错codec/module/descriptor/Worker manifest、空registry及rollout drift的L1～L4负向证据 |
+
+CR-188不新增表、aggregate、Job、WorkClass、queue、public route或deployment role；manifest属于immutable Deployment/worker startup
+bounded JSON closure。state ownership、IDs、errors、transactions、events、permissions、capacity与failure recovery逐份复核无新增P0/P1。
+Acceptance 31：任一remote Capability物理attempt都能从exact Deployment与已资格Worker镜像唯一解析静态codec，任何缺失或漂移在
+Egress/MCP I/O前fail closed。00～18恢复Accepted / CR-188并继续implementation-plan。
 
 ### CR-187 Model Policy authority impact review
 
@@ -573,7 +599,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-187合同范围没有未关闭P0/P1。Acceptance 30与既有13～29形成单一闭包，00～18状态为Accepted。
+CR-188合同范围没有未关闭P0/P1。Acceptance 31与既有13～30形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

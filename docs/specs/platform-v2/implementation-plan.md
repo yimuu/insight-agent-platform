@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-187）
+# Platform v2 四阶段实现计划（CR-188）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-187 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-188 contracts accepted; L3～L6 pending |
 | 日期 | 2026-08-25 |
-| 合同输入 | 00～18、cross-review CR-181/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-188/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
@@ -38,6 +38,10 @@
 > CR-187 exact Model Policy loader已在fresh PostgreSQL 16 r177验证Model Deployment digest、profile Revision、三个enabled published
 > Policy的exact semantic/payload/rules digest与PolicyKind；wrong Deployment digest fail closed。后续r180已把这些facts接入canonical
 > request与Skill/Capability投影；独立production进程与L3恢复证据仍待完成。
+
+> CR-188已关闭Capability remote codec authority缺口：HTTP/gRPC/MCP mapping authoring只在publication/build阶段编译为静态codec，
+> Deployment冻结exact installed codec identity/module/descriptor及required Worker manifest。实现必须在claim/dispatch外部I/O前重验三者；
+> 空registry、测试codec、资格外镜像或运行时模板解释器都不能计为production remote backend。
 
 > 2026-08-25 implementation evidence：ModelTurn admission现已把Plan列出的Skill/Capability slots逐项冻结进snapshot与Receipt replay，
 > 并在owner transaction用各slot的exact Selection Policy重新执行共享selector；请求投影即使引用候选集合内的合法但未选中

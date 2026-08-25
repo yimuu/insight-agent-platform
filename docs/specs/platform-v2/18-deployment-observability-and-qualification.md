@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-187 |
+| 状态 | Accepted / CR-188 |
 | 日期 | 2026-08-25 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -12,6 +12,9 @@
 
 > CR-185 impact：L1/L2增加Skill frame canonicalization、截断/溢出/trailing bytes、path/digest/length mismatch与错误media拒绝；
 > L3覆盖Scheduler exact slot/deployment/revision/lease经Artifact Data Worker mTLS materialization且无storage credential泄漏。
+
+> CR-188 impact：Capability Worker镜像/startup evidence必须枚举bounded exact installed codec manifest；L1～L4增加错codec identity、module、
+> descriptor、Worker manifest、空registry与rollout drift负向fixture，并证明全部在Egress/MCP I/O前fail closed。
 
 ## 1. 决策摘要
 
@@ -217,6 +220,10 @@ DB pool隔舱、安全identity、chaos/soak/restore与GitOps rollout。
 CR-182 L1覆盖三个mode、canonical candidate ordering、route canonical hash/modulo、unknown mode/version与empty document；L2覆盖
 Scheduler/repository重算一致、route/candidate/policy漂移和整批回滚；L3覆盖多Scheduler进程对相同inputs始终选择同一Deployment。
 
+CR-188 L1覆盖installed codec manifest closed schema、排序/数量、descriptor重算及unknown backend；L2覆盖remote Deployment与Invocation
+冻结codec/Worker manifest及claim first-winner；L3覆盖真实Capability Worker静态registry、heartbeat/kill/recovery并证明空registry、错
+codec/module/descriptor/Worker manifest在Egress/MCP调用计数仍为零时fail closed；L4覆盖镜像rollout manifest drift使readiness/claim关闭。
+
 每个production release至少覆盖：
 
 - clean baseline migration、upgrade/rollback rehearsal和backup/restore；
@@ -228,6 +235,7 @@ Scheduler/repository重算一致、route/candidate/policy漂移和整批回滚�
   admission负向矩阵；
 - Artifact Gateway/Data Worker/Maintenance三role权限矩阵、S3/KMS fault、retention/GC和饱和测试；
 - Model Inline hard limit、tool loop、budget、provider fault和无Artifact fallback测试；
+- Capability HTTP/gRPC/MCP exact installed codec、required Worker manifest、长调用heartbeat、process kill与外部I/O前fail-closed矩阵；
 - 一个隔舱饱和时API/Scheduler/critical-control和其他隔舱仍满足profile SLO；
 - L1/L2覆盖所有expression opcode、type/stack/output bounds与unknown-field；L2真实PostgreSQL覆盖wrong Plan/Artifact/RunValue digest、
   Node version、lease/fence、跨tenant/run和Compute/Scope/Node/Job/Event原子回滚；L3多进程从Artifact Data RPC物化Plan并自行推进

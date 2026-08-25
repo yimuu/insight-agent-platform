@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-184 |
+| 状态 | Accepted / CR-188 |
 | 日期 | 2026-08-25 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
@@ -66,6 +66,7 @@ input/output、approval与terminal business result。
 - tenant、Run、Node、Interface与exact Deployment identity；
 - input schema/output schema digest与validated RunValue identity；
 - backend kind、protocol、endpoint/runtime digest与Credential reference identity；
+- remote backend的exact installed codec identity、descriptor digest与required Worker manifest digest；
 - Effect、idempotency、approval、retry、cancel、timeout与policy digest；
 - Artifact ports、network、Secret和Sandbox profile要求；
 - deadline、quota、HardLimitProfile version和trace identity。
@@ -105,6 +106,9 @@ approval winner与Invocation transition同事务提交。拒绝或过期不创�
 
 Job payload只携带immutable Invocation snapshot identity和expected owner version，不接受自由URL、header、shell command、
 runtime installer或Secret value。
+
+Capability Worker claim必须证明自身closed Worker manifest digest等于Invocation冻结的required manifest；dispatcher再从进程静态registry
+解析09 exact codec identity并重算descriptor digest。mapping digest本身不能实例化codec，错镜像/缺codec在任何Egress/MCP调用前失败。
 
 Sandbox调用直接以Invocation为typed owner创建`work_class=Sandbox`的Job。Controller通过带
 `JobId + lease_generation + worker_process_generation`的closed RPC与Executor交互；Executor不直接写数据库。
@@ -173,6 +177,7 @@ RunValue返回Model loop。
 - MCP Tool首版只走remote Streamable HTTP Host，不产生stdio session child；
 - NATS丢失和Worker崩溃后可从PostgreSQL恢复；
 - non-idempotent timeout不被伪造为安全重试。
+- remote claim的Worker manifest及dispatch的codec identity/module/descriptor任一漂移都在Egress/MCP I/O前fail closed。
 
 ## 12. 分层证据
 
@@ -189,3 +194,4 @@ fault/isolated-capacity tests分层运行。一个低层fixture不同时声明�
 ## 14. 未决问题
 
 CR-181 cross-review已确认Plan v4 dispatch/result binding并恢复Accepted；实现与L2/L3 evidence仍待完成。
+CR-188进一步确认remote installed codec与required Worker manifest是Invocation冻结闭包，不能由Worker运行时选择或caller覆盖。

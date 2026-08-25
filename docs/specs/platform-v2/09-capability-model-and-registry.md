@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
+| 状态 | Accepted / CR-188 |
 | 日期 | 2026-08-20 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 10、11、13、14、15、17、18 |
@@ -236,6 +236,34 @@ Revision只固定adapter/protocol/schema mapping、credential requirement、取�
 endpoint、SecretBinding、network/TLS、具体MCP Deployment或Sandbox runtime/profile。未知backend fail closed；增加
 backend需要协议版本、dispatcher、policy、metrics和conformance更新。
 
+### 8.1 Installed protocol codec authority
+
+HTTP、gRPC与MCP的mapping digest不是可执行程序。首版把mapping authoring输入在publication/镜像构建阶段验证并编译为受信
+Capability Worker镜像内的静态codec；runtime不解释模板、不读取源码Artifact、不下载模块。每个已安装codec必须由startup报告以下
+closed manifest，按`(backend_kind, codec_id, codec_version, descriptor_digest)`严格排序且唯一，最多1024项：
+
+```rust
+struct InstalledCapabilityCodecManifest {
+    schema_version: u32,                 // 固定1
+    backend_kind: CapabilityBackendKind, // 仅http | grpc | mcp
+    codec_id: StableCodecId,
+    codec_version: StableVersion,
+    module_digest: Digest,
+    worker_protocol_version: u32,
+    descriptor_digest: Digest,
+}
+```
+
+`descriptor_digest`是backend closed contract中全部protocol/schema/mapping字段的domain-separated canonical digest；HTTP包含
+method、protocol与request/response/error mapping及idempotency header，gRPC包含protobuf/service/method及三类mapping与
+idempotency metadata，MCP包含tool/schema/output mapping/protocol profile/discovery evidence与task/progress feature。增加或减少任一
+字段必须改变digest。Implementation publication必须找到exact installed manifest并把
+`codec_id/version/module/descriptor/worker_manifest_digest`冻结进Deployment backend binding；不能只比较mapping digest。
+
+Native沿用installed adapter manifest；Sandbox沿用package/runtime binding。Remote Capability Deployment的HTTP、gRPC、MCP binding
+均必须新增`worker_manifest_digest`和上述exact codec identity。claim与dispatch同时比较进程Worker manifest、codec manifest及backend
+descriptor；错lane、错镜像、缺codec或digest漂移在外部I/O前fail closed。
+
 ## 9. Native Backend
 
 Native 实现是随受信任 Worker 构建/安装的静态 adapter：
@@ -285,8 +313,8 @@ struct CapabilityBackendFeatures {
 
 Capability Deployment固定canonical endpoint、SecretBinding、TLS/mTLS、network、redirect/proxy和connection policy。
 
-映射是受验证的 declarative mapping，不执行任意模板代码。HTTP redirect 默认禁止；错误正文不直接成为
-public Failure。
+映射authoring格式是受验证的declarative input；只有publication/build生成并由上述exact installed manifest标识的静态codec可执行。
+runtime不执行任意模板代码。HTTP redirect默认禁止；错误正文不直接成为public Failure。
 
 ## 11. MCP Backend
 
@@ -446,6 +474,8 @@ SecretBinding ID/opaque reference不进入label。publish/activate/suspend产生
 - `allowed_regions`只接受02 CanonicalRegion common schema，覆盖非空、1/32项、canonical bytes排序唯一及33项/重复/乱序；大写、下划线、
   Unicode、provider alias和旧DataRegion合法但CanonicalRegion非法的输入均拒绝，不做归一化；
 - backend 增加时 exhaustive protocol/conformance gate 生效。
+- HTTP/gRPC/MCP Deployment缺失exact installed codec identity/module/descriptor或required Worker manifest时不能publish/claim；空registry、
+  错lane、错镜像与descriptor漂移在外部I/O计数仍为零时fail closed。
 
 ### 21.1 当前实施证据边界（非规范性）
 
@@ -455,7 +485,7 @@ winner与原claim必须在tenant、Invocation/Job、attempt、lease/token、Work
 optimistic version；Native/HTTP/gRPC随后取消同一物理执行。transport cancel observation不等于no-effect proof，write Effect因此进入
 ReconciliationRequired；deadline后只允许在由frozen backend timeout派生且受平台hard limit封顶的cleanup window提交。
 
-12项adapter/worker unit、8项Invocation unit与fresh PostgreSQL 16端到端fixture覆盖exact selection、malformed input、timeout uncertainty、
+15项adapter/worker unit、8项Invocation unit与fresh PostgreSQL 16端到端fixture覆盖exact selection、malformed input、timeout uncertainty、
 unsafe write retry降级、attempt exhaustion、stale Worker identity、terminal/cancellation commit、cancel/completed first-winner和replay。
 Egress另有29项unit，其中8项覆盖Capability HTTP/gRPC exact catalog、DNS public-IP/connection pinning、late Secret、bounded framing/response、
 Effect/idempotency failure与stale exact cancel；不增加表或migration。
@@ -481,3 +511,6 @@ backend/retry约束交集；任一candidate不兼容时Deployment失败，不能
 CR-166已将region nominal统一到02，并删除Model/release installation compatibility合同。本规范已Accepted；
 Capability registry、backend resolution和publication fixture仍待实现。具体HTTP/gRPC wire envelope与Sandbox protocol
 分别由10、14冻结，但必须实现本规范的统一Interface和安全合同。
+
+CR-188已关闭remote codec可执行权威：runtime只执行Deployment冻结且由Worker startup manifest证明的静态installed codec；
+mapping digest不再被误当成可实例化程序。对应machine contract、publication/claim/dispatcher与L1～L4 fixture仍待实现。
