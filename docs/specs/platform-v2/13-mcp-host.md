@@ -145,6 +145,10 @@ redirect漂移或scope扩大全部fail closed。token refresh/revoke由Egress Br
 OAuth installed binding同时冻结exact Auth Policy/profile、local verification JWKS、Deployment Trust Policy和token endpoint PEM roots；TLS client
 关闭默认根信任、redirect和proxy。Callback/Host contract不携带PEM，缺失/无效/错Policy bundle在发送token request bytes前失败。
 
+r286的fresh PostgreSQL 16 component L3以独立CA真实HTTPS token endpoint和mTLS Egress RPC验证上述边界：token store成功、Callback owner
+transaction尚未开始时同时强杀Callback/Egress，替代进程从prepared token metadata恢复且不重发one-time code，最终只有一个Task/Receipt/Event
+终态。该fixture不替代真实Secret Manager rotation、cluster identity、lane saturation或L4～L6。
+
 ## 10. 所有权与持久化
 
 | 事实 | Authority |

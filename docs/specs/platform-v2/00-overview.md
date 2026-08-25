@@ -347,6 +347,11 @@ r281进一步以独立Egress测试进程、production Resource Refresh RPC/conne
 initialize后Egress/Host/Worker强杀、list/read响应后commit-window Worker强杀和第三次expired-lease恢复；3次initialize、2次list/read只产生
 一个completed Event。subscription protocol/crash component L3由此闭合，容量饱和、真实scrape及L4～L6仍保持未完成。
 
+r286实现CR-196并以fresh PostgreSQL 16、真实独立CA HTTPS token endpoint、production OAuth reqwest broker、mTLS Egress RPC及Callback owner
+完成token-store后/数据库commit前的多进程恢复。第一次exchange后同时强杀Callback/Egress，第二组进程从prepared token metadata恢复且不重发
+one-time authorization code；endpoint调用严格为1，最终只有一个responded Task、Receipt和completion Event。OAuth callback/exchange component
+L3由此闭合；Secret Manager rotation、容量饱和、真实scrape及L4～L6仍未完成。
+
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
 storage与audit closure全部由服务端拥有；upload target是唯一显式Secret-bearing响应例外。Public Gateway不取得storage authority，Artifact Gateway
 不信任自由principal header，两者以exact audience mTLS连接并由Artifact Gateway从PostgreSQL重绑定current principal。

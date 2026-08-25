@@ -3011,6 +3011,7 @@ dependencies = [
  "insight-platform-security",
  "insight-platform-tasks",
  "rcgen",
+ "ring",
  "rustls",
  "serde",
  "serde_jcs",

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
@@ -17,21 +18,33 @@ use insight_platform_contracts::{
     SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig,
     TenantPrincipalPayload, ValidationSummary, MCP_PROTOCOL_BASELINE,
 };
+use insight_platform_egress::{
+    DnsResolutionError, EgressDnsResolver, InstalledMcpOAuthJwtAlgorithm,
+    InstalledMcpOAuthVerificationBinding, InstalledMcpOAuthVerificationCatalog,
+    McpOAuthEgressLimits, McpOAuthTokenPreparation, McpOAuthTokenSet, McpOAuthTokenStore,
+    McpOAuthTokenStoreError, McpOAuthTokenVerificationError, McpOAuthTokenVerifier,
+    ReqwestMcpOAuthCredentialBroker, ResolvedSecretMaterial, SecretMaterialResolutionError,
+    SecretMaterialResolver, StoredMcpOAuthTokenSecret, VerifiedMcpOAuthToken,
+};
 use insight_platform_egress_rpc::{
-    proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
-    EgressCallerWorkloadIdentity, EgressInternalRpcLimits,
+    proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcClient,
+    EgressBrokerGrpcService, EgressCallerWorkloadIdentity, EgressInternalRpcLimits,
 };
 use insight_platform_mcp_host::{
-    AuthorizedMcpOAuthPkceCleanup, ClaimDueMcpOAuthPkceCleanups,
-    McpOAuthAuthorizationPreparationBroker, McpOAuthAuthorizationPreparationError,
-    McpOAuthAuthorizationPreparationRequest, McpOAuthAuthorizationStartCommitDisposition,
-    McpOAuthAuthorizationStartConfig, McpOAuthAuthorizationStartIntent,
-    McpOAuthAuthorizationStartService, McpOAuthAuthorizedGrant, McpOAuthCredentialBroker,
+    AeadMcpOAuthStateCodec, AuthenticatedMcpOAuthState, AuthorizedMcpOAuthPkceCleanup,
+    ClaimDueMcpOAuthPkceCleanups, CompleteMcpOAuthCallback, McpOAuthAuthorizationPreparationBroker,
+    McpOAuthAuthorizationPreparationError, McpOAuthAuthorizationPreparationRequest,
+    McpOAuthAuthorizationStartCommitDisposition, McpOAuthAuthorizationStartConfig,
+    McpOAuthAuthorizationStartIntent, McpOAuthAuthorizationStartService, McpOAuthAuthorizedGrant,
+    McpOAuthCallbackAuthority, McpOAuthCallbackAuthorityError, McpOAuthCallbackCommitOutcome,
+    McpOAuthCallbackIngress, McpOAuthCallbackIngressConfig, McpOAuthCredentialBroker,
     McpOAuthCredentialBrokerError, McpOAuthExchangeContract, McpOAuthPkceCleanupCause,
     McpOAuthPkceCleanupHint, McpOAuthPkceCleanupOutbox, McpOAuthPkceCleanupSettlement,
     McpOAuthPkceSecretCleaner, McpOAuthPkceSecretCleanupDisposition,
-    McpOAuthPkceSecretCleanupError, PreparedMcpOAuthAuthorization, SensitiveMcpOAuthNonce,
-    SensitiveOAuthValue, MCP_OAUTH_PKCE_SECRET_PURPOSE,
+    McpOAuthPkceSecretCleanupError, McpOAuthStateCodecConfig, McpOAuthStateIssuer,
+    McpOAuthStateKey, PreparedMcpOAuthAuthorization, SensitiveMcpOAuthNonce,
+    SensitiveMcpOAuthStateKey, SensitiveOAuthValue, UuidMcpOAuthCallbackIdentityFactory,
+    MCP_OAUTH_PKCE_SECRET_PURPOSE,
 };
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
@@ -48,18 +61,28 @@ use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose, SanType,
 };
+use ring::{
+    rand::SystemRandom,
+    signature::{Ed25519KeyPair, KeyPair as RingKeyPair},
+};
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use std::{
     collections::BTreeMap,
+    io::Write as _,
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::Arc,
     time::{Duration as StdDuration, Instant},
 };
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity, Server, ServerTlsConfig};
 
 const OAUTH_CLEANUP_EGRESS_CONFIG_ENV: &str = "PLATFORM_OAUTH_CLEANUP_EGRESS_FIXTURE_CONFIG";
+const OAUTH_EXCHANGE_EGRESS_CONFIG_ENV: &str = "PLATFORM_OAUTH_EXCHANGE_EGRESS_FIXTURE_CONFIG";
+const OAUTH_EXCHANGE_CALLBACK_CONFIG_ENV: &str = "PLATFORM_OAUTH_EXCHANGE_CALLBACK_FIXTURE_CONFIG";
+const OAUTH_TOKEN_ENDPOINT_CONFIG_ENV: &str = "PLATFORM_OAUTH_TOKEN_ENDPOINT_FIXTURE_CONFIG";
 
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     format!(
@@ -397,6 +420,62 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
     }
 }
 
+fn fixture_with_token_endpoint_port(now: DateTime<Utc>, port: u16) -> Fixture {
+    let mut fixture = fixture(now);
+    fixture.auth_profile.allowed_scopes = vec![
+        "openid".to_owned(),
+        "tools.call".to_owned(),
+        "tools.read".to_owned(),
+    ];
+    fixture.intent.requested_scopes = fixture.auth_profile.allowed_scopes.clone();
+    fixture.auth_profile.token_endpoint.endpoint.port = port;
+    fixture.auth_profile.token_endpoint.endpoint_identity_digest = fixture
+        .auth_profile
+        .token_endpoint
+        .endpoint
+        .canonical_digest()
+        .unwrap();
+    let auth_policy = ExactVersionRef::new(
+        id(ResourceKind::PolicyRevision, 9),
+        fixture.auth_profile.canonical_digest().unwrap(),
+    )
+    .unwrap();
+    let installed_policy = fixture
+        .policy_versions
+        .iter_mut()
+        .find(|(revision, _)| revision.revision_id == auth_policy.revision_id)
+        .unwrap();
+    *installed_policy = (
+        auth_policy.clone(),
+        policy_document(
+            0x84,
+            PolicyKind::McpAuth,
+            auth_policy.semantic_digest.clone(),
+            None,
+            Some(fixture.auth_profile.clone()),
+        ),
+    );
+    let mut closure_value = fixture.closure_payload.value.clone();
+    closure_value
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_version");
+    let DeploymentClosure::McpServer(mut closure) =
+        serde_json::from_value::<DeploymentClosure>(closure_value).unwrap()
+    else {
+        panic!("fixture closure must be MCP")
+    };
+    closure.auth_policy = Some(auth_policy);
+    fixture.closure_payload = TypedPayload::new(1, &DeploymentClosure::McpServer(closure)).unwrap();
+    fixture.deployment = ExactDeploymentRef::new(
+        fixture.deployment.deployment_id.clone(),
+        fixture.closure_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
+    fixture.intent.mcp_deployment = fixture.deployment.clone();
+    fixture
+}
+
 async fn insert_resource(
     pool: &PgPool,
     tenant_id: &ResourceId,
@@ -636,6 +715,33 @@ struct FixedPreparation {
     pkce_binding: ExactSecretBindingRef,
 }
 
+struct FixedProcessPreparation {
+    pkce_binding: ExactSecretBindingRef,
+    state: Vec<u8>,
+}
+
+#[async_trait]
+impl McpOAuthAuthorizationPreparationBroker for FixedProcessPreparation {
+    async fn prepare_or_load(
+        &self,
+        request: &McpOAuthAuthorizationPreparationRequest,
+        _now: DateTime<Utc>,
+    ) -> Result<PreparedMcpOAuthAuthorization, McpOAuthAuthorizationPreparationError> {
+        Ok(PreparedMcpOAuthAuthorization {
+            preparation_digest: request.preparation_digest.clone(),
+            state: SensitiveOAuthValue::from_decoded(
+                self.state.clone(),
+                insight_platform_mcp_host::MAX_MCP_OAUTH_STATE_BYTES,
+            )
+            .unwrap(),
+            nonce: SensitiveMcpOAuthNonce::new(b"n".repeat(43)).unwrap(),
+            pkce_challenge: "a".repeat(43),
+            pkce_secret_binding: self.pkce_binding.clone(),
+            storage_evidence_digest: sha('7'),
+        })
+    }
+}
+
 #[async_trait]
 impl McpOAuthAuthorizationPreparationBroker for FixedPreparation {
     async fn prepare_or_load(
@@ -839,6 +945,440 @@ fn oauth_cleanup_egress_fixture_process() {
         .block_on(run_oauth_cleanup_egress_fixture(config));
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OAuthTokenEndpointProcessConfig {
+    listen_address: std::net::SocketAddr,
+    server_certificate_der: Vec<u8>,
+    server_key_der: Vec<u8>,
+    call_path: PathBuf,
+    ready_path: PathBuf,
+}
+
+async fn run_oauth_token_endpoint_fixture(config: OAuthTokenEndpointProcessConfig) {
+    let tls = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(
+                    config.server_certificate_der,
+                )],
+                rustls::pki_types::PrivatePkcs8KeyDer::from(config.server_key_der).into(),
+            )
+            .unwrap(),
+    );
+    let listener = tokio::net::TcpListener::bind(config.listen_address)
+        .await
+        .unwrap();
+    std::fs::write(config.ready_path, b"ready").unwrap();
+    loop {
+        let (stream, _) = listener.accept().await.unwrap();
+        let Ok(mut stream) = TlsAcceptor::from(Arc::clone(&tls)).accept(stream).await else {
+            continue;
+        };
+        let mut request = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 1_024];
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&chunk[..read]);
+            if let Some(position) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                break position + 4;
+            }
+        };
+        let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+        assert!(headers.starts_with("POST /oauth/token HTTP/1.1\r\n"));
+        let content_length = headers
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        while request.len() - header_end < content_length {
+            let mut chunk = [0_u8; 1_024];
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&chunk[..read]);
+        }
+        let body = std::str::from_utf8(&request[header_end..header_end + content_length]).unwrap();
+        assert!(body.contains("code=one-time-code"));
+        assert!(body.contains("code_verifier=pkce-verifier"));
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&config.call_path)
+            .unwrap()
+            .write_all(b"1")
+            .unwrap();
+        let body = br#"{"access_token":"access-secret","refresh_token":"refresh-secret","token_type":"Bearer","expires_in":600,"scope":"openid tools.call tools.read"}"#;
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.shutdown().await.unwrap();
+    }
+}
+
+#[test]
+fn oauth_token_endpoint_fixture_process() {
+    let Ok(path) = std::env::var(OAUTH_TOKEN_ENDPOINT_CONFIG_ENV) else {
+        return;
+    };
+    let config = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_oauth_token_endpoint_fixture(config));
+}
+
+struct ProcessOAuthDns {
+    address: std::net::SocketAddr,
+}
+
+#[async_trait]
+impl EgressDnsResolver for ProcessOAuthDns {
+    async fn resolve(
+        &self,
+        _host: &str,
+        port: u16,
+    ) -> Result<Vec<std::net::SocketAddr>, DnsResolutionError> {
+        Ok(vec![std::net::SocketAddr::new(self.address.ip(), port)])
+    }
+}
+
+struct ProcessOAuthSecrets;
+
+#[async_trait]
+impl SecretMaterialResolver for ProcessOAuthSecrets {
+    async fn resolve(
+        &self,
+        _tenant_id: &ResourceId,
+        binding: &ExactSecretBindingRef,
+    ) -> Result<ResolvedSecretMaterial, SecretMaterialResolutionError> {
+        ResolvedSecretMaterial::new(
+            binding.secret_binding_id.clone(),
+            binding.provider_id.clone(),
+            binding.purpose.clone(),
+            binding.binding_generation,
+            match &binding.resolution_policy {
+                SecretResolutionPolicy::Pinned {
+                    opaque_version_identity_digest,
+                } => opaque_version_identity_digest.clone(),
+                SecretResolutionPolicy::FollowProviderRotation { .. } => sha('f'),
+            },
+            b"pkce-verifier".to_vec(),
+        )
+        .map_err(|_| SecretMaterialResolutionError::InvalidEvidence)
+    }
+}
+
+struct ProcessOAuthVerifier;
+
+#[async_trait]
+impl McpOAuthTokenVerifier for ProcessOAuthVerifier {
+    async fn verify(
+        &self,
+        contract: &McpOAuthExchangeContract,
+        tokens: &McpOAuthTokenSet,
+        now: DateTime<Utc>,
+    ) -> Result<VerifiedMcpOAuthToken, McpOAuthTokenVerificationError> {
+        if tokens.access_token.expose() != b"access-secret" {
+            return Err(McpOAuthTokenVerificationError::Rejected);
+        }
+        Ok(VerifiedMcpOAuthToken {
+            granted_scopes: tokens.granted_scopes.clone(),
+            audience_identity_digest: contract.binding.audience_identity_digest.clone(),
+            issuer_identity_digest: contract
+                .auth_profile
+                .issuer
+                .endpoint_identity_digest
+                .clone(),
+            subject_identity_digest: sha('a'),
+            verification_evidence_digest: sha('b'),
+            expires_at: now + Duration::minutes(5),
+            nonce_verified: true,
+        })
+    }
+}
+
+struct ProcessOAuthTokenStore {
+    marker_path: PathBuf,
+}
+
+impl ProcessOAuthTokenStore {
+    fn stored(
+        preparation: &McpOAuthTokenPreparation,
+        now: DateTime<Utc>,
+    ) -> StoredMcpOAuthTokenSecret {
+        StoredMcpOAuthTokenSecret {
+            schema_version: 1,
+            preparation_digest: preparation.preparation_digest.clone(),
+            token_secret_binding: ExactSecretBindingRef::build(
+                id(ResourceKind::SecretBinding, 0xd0),
+                1,
+                preparation.token_secret_provider_id.clone(),
+                preparation.token_credential_purpose.clone(),
+                SecretResolutionPolicy::Pinned {
+                    opaque_version_identity_digest: sha('c'),
+                },
+            )
+            .unwrap(),
+            granted_scopes: preparation.requested_scopes.clone(),
+            audience_identity_digest: preparation.audience_identity_digest.clone(),
+            issuer_identity_digest: preparation.issuer_identity_digest.clone(),
+            subject_identity_digest: sha('a'),
+            verification_evidence_digest: sha('b'),
+            expires_at: now + Duration::minutes(5),
+            storage_evidence_digest: sha('d'),
+        }
+    }
+}
+
+#[async_trait]
+impl McpOAuthTokenStore for ProcessOAuthTokenStore {
+    async fn load_prepared(
+        &self,
+        preparation: &McpOAuthTokenPreparation,
+        now: DateTime<Utc>,
+    ) -> Result<Option<StoredMcpOAuthTokenSecret>, McpOAuthTokenStoreError> {
+        Ok(self
+            .marker_path
+            .exists()
+            .then(|| Self::stored(preparation, now)))
+    }
+
+    async fn store_prepared(
+        &self,
+        preparation: &McpOAuthTokenPreparation,
+        _tokens: &McpOAuthTokenSet,
+        _verified: &VerifiedMcpOAuthToken,
+        now: DateTime<Utc>,
+    ) -> Result<StoredMcpOAuthTokenSecret, McpOAuthTokenStoreError> {
+        std::fs::write(&self.marker_path, preparation.preparation_digest.as_str())
+            .map_err(|_| McpOAuthTokenStoreError::WriteUncertain)?;
+        Ok(Self::stored(preparation, now))
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OAuthExchangeEgressProcessConfig {
+    listen_address: std::net::SocketAddr,
+    token_endpoint_address: std::net::SocketAddr,
+    ca_pem: String,
+    server_certificate_pem: String,
+    server_key_pem: String,
+    verification_binding: InstalledMcpOAuthVerificationBinding,
+    token_store_marker_path: PathBuf,
+    ready_path: PathBuf,
+}
+
+async fn run_oauth_exchange_egress_fixture(config: OAuthExchangeEgressProcessConfig) {
+    let limits = EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap();
+    let catalog =
+        InstalledMcpOAuthVerificationCatalog::new(vec![config.verification_binding]).unwrap();
+    let broker = ReqwestMcpOAuthCredentialBroker::new(
+        Arc::new(ProcessOAuthSecrets),
+        Arc::new(ProcessOAuthDns {
+            address: config.token_endpoint_address,
+        }),
+        catalog,
+        Arc::new(ProcessOAuthVerifier),
+        Arc::new(ProcessOAuthTokenStore {
+            marker_path: config.token_store_marker_path,
+        }),
+        McpOAuthEgressLimits::default(),
+    )
+    .unwrap()
+    .allow_loopback_for_protocol_fixture();
+    let service = EgressBrokerServiceServer::new(
+        EgressBrokerGrpcService::new(
+            Arc::new(EmptyModel),
+            Arc::new(EmptyHttp),
+            Arc::new(EmptyGrpc),
+            limits,
+        )
+        .with_mcp_oauth(
+            Arc::new(broker),
+            Arc::new(ProcessCleanupSecretCleaner {
+                call_path: config.ready_path.with_extension("unused-cleanup"),
+                stall: false,
+            }),
+        ),
+    );
+    let service =
+        tonic::service::interceptor::InterceptedService::new(service, EgressCallerWorkloadIdentity);
+    let listener = tokio::net::TcpListener::bind(config.listen_address)
+        .await
+        .unwrap();
+    std::fs::write(config.ready_path, b"ready").unwrap();
+    Server::builder()
+        .tls_config(
+            ServerTlsConfig::new()
+                .identity(Identity::from_pem(
+                    config.server_certificate_pem,
+                    config.server_key_pem,
+                ))
+                .client_ca_root(Certificate::from_pem(config.ca_pem)),
+        )
+        .unwrap()
+        .add_service(service)
+        .serve_with_incoming(TcpListenerStream::new(listener))
+        .await
+        .unwrap();
+}
+
+#[test]
+fn oauth_exchange_egress_fixture_process() {
+    let Ok(path) = std::env::var(OAUTH_EXCHANGE_EGRESS_CONFIG_ENV) else {
+        return;
+    };
+    let config = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_oauth_exchange_egress_fixture(config));
+}
+
+struct ProcessCallbackAuthority {
+    repository: PgRepository,
+    before_commit_path: PathBuf,
+    stall_before_commit: bool,
+}
+
+#[async_trait]
+impl McpOAuthCallbackAuthority for ProcessCallbackAuthority {
+    async fn resolve_exchange_contract(
+        &self,
+        identity: &AuthenticatedMcpOAuthState,
+    ) -> Result<McpOAuthExchangeContract, McpOAuthCallbackAuthorityError> {
+        self.repository.resolve_exchange_contract(identity).await
+    }
+
+    async fn commit_callback(
+        &self,
+        command: CompleteMcpOAuthCallback,
+    ) -> Result<McpOAuthCallbackCommitOutcome, McpOAuthCallbackAuthorityError> {
+        std::fs::write(&self.before_commit_path, b"before-commit")
+            .map_err(|_| McpOAuthCallbackAuthorityError::Unavailable)?;
+        if self.stall_before_commit {
+            std::future::pending::<()>().await;
+        }
+        self.repository.commit_callback(command).await
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OAuthExchangeCallbackProcessConfig {
+    database_url: String,
+    egress_endpoint: String,
+    egress_tls_server_name: String,
+    egress_ca_pem: String,
+    egress_client_certificate_pem: String,
+    egress_client_key_pem: String,
+    callback_binding_digest: Sha256Digest,
+    state_key: Vec<u8>,
+    raw_query: String,
+    before_commit_path: PathBuf,
+    outcome_path: PathBuf,
+    ready_path: PathBuf,
+    stall_before_commit: bool,
+}
+
+async fn run_oauth_exchange_callback_fixture(config: OAuthExchangeCallbackProcessConfig) {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&config.database_url)
+        .await
+        .unwrap();
+    verify_schema(&pool).await.unwrap();
+    let authority = Arc::new(ProcessCallbackAuthority {
+        repository: PgRepository::new(pool),
+        before_commit_path: config.before_commit_path,
+        stall_before_commit: config.stall_before_commit,
+    });
+    let states = Arc::new(
+        AeadMcpOAuthStateCodec::new(
+            McpOAuthStateCodecConfig {
+                active_key_id: "callback-key-1".to_owned(),
+                callback_binding_digest: config.callback_binding_digest.clone(),
+                maximum_lifetime_seconds: 600,
+                clock_skew_seconds: 30,
+            },
+            vec![McpOAuthStateKey {
+                key_id: "callback-key-1".to_owned(),
+                key_material: SensitiveMcpOAuthStateKey::new(config.state_key).unwrap(),
+            }],
+        )
+        .unwrap(),
+    );
+    let channel = Endpoint::from_shared(config.egress_endpoint)
+        .unwrap()
+        .connect_timeout(StdDuration::from_secs(2))
+        .timeout(StdDuration::from_secs(30))
+        .tls_config(
+            ClientTlsConfig::new()
+                .domain_name(config.egress_tls_server_name)
+                .ca_certificate(Certificate::from_pem(config.egress_ca_pem))
+                .identity(Identity::from_pem(
+                    config.egress_client_certificate_pem,
+                    config.egress_client_key_pem,
+                )),
+        )
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let broker = Arc::new(EgressBrokerGrpcClient::new(
+        channel,
+        EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap(),
+    ));
+    let ingress = McpOAuthCallbackIngress::new(
+        McpOAuthCallbackIngressConfig {
+            callback_ingress_generation_id: ResourceId::from_uuid_v7(
+                ResourceKind::WorkerProcessGeneration,
+                uuid::Uuid::now_v7(),
+            )
+            .unwrap(),
+            callback_binding_digest: config.callback_binding_digest,
+            receipt_ttl_seconds: 3_600,
+        },
+        states,
+        Arc::new(UuidMcpOAuthCallbackIdentityFactory),
+        authority,
+        broker,
+    )
+    .unwrap();
+    std::fs::write(config.ready_path, b"ready").unwrap();
+    let outcome = ingress
+        .handle_query(config.raw_query.as_bytes(), Utc::now())
+        .await;
+    let body = match outcome {
+        Ok(value) => format!("ok:{:?}", value.disposition),
+        Err(error) => format!("error:{}", error.safe_code()),
+    };
+    std::fs::write(config.outcome_path, body).unwrap();
+}
+
+#[test]
+fn oauth_exchange_callback_fixture_process() {
+    let Ok(path) = std::env::var(OAUTH_EXCHANGE_CALLBACK_CONFIG_ENV) else {
+        return;
+    };
+    let config = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_oauth_exchange_callback_fixture(config));
+}
+
 struct OAuthCleanupTlsFixture {
     ca: String,
     server_cert: String,
@@ -886,6 +1426,29 @@ fn oauth_cleanup_tls_fixture() -> OAuthCleanupTlsFixture {
     }
 }
 
+struct OAuthTokenTlsFixture {
+    ca_pem: String,
+    server_certificate_der: Vec<u8>,
+    server_key_der: Vec<u8>,
+}
+
+fn oauth_token_tls_fixture() -> OAuthTokenTlsFixture {
+    let mut ca_parameters = CertificateParams::default();
+    ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca = CertifiedIssuer::self_signed(ca_parameters, KeyPair::generate().unwrap()).unwrap();
+    let mut server_parameters = CertificateParams::default();
+    server_parameters.subject_alt_names =
+        vec![SanType::DnsName("auth.example.test".try_into().unwrap())];
+    server_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let server_key = KeyPair::generate().unwrap();
+    let server_certificate = server_parameters.signed_by(&server_key, &ca).unwrap();
+    OAuthTokenTlsFixture {
+        ca_pem: ca.pem(),
+        server_certificate_der: server_certificate.der().to_vec(),
+        server_key_der: server_key.serialize_der(),
+    }
+}
+
 fn available_address() -> std::net::SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap()
@@ -910,6 +1473,19 @@ fn spawn_oauth_cleanup_egress(config_path: &Path) -> Child {
         .arg("--nocapture")
         .arg("--test-threads=1")
         .env(OAUTH_CLEANUP_EGRESS_CONFIG_ENV, config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn spawn_fixture_process(test_name: &str, env_name: &str, config_path: &Path) -> Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg(test_name)
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(env_name, config_path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -1438,5 +2014,319 @@ async fn phase4_mcp_oauth_cleanup_process_recovers_egress_and_worker_kill() {
     assert!(terminal
         .get::<Option<DateTime<Utc>>, _>("claim_expires_at")
         .is_none());
+    std::fs::remove_dir_all(temporary).unwrap();
+}
+
+fn oauth_verification_binding(
+    fixture: &Fixture,
+    token_endpoint_trust_roots_pem: String,
+) -> InstalledMcpOAuthVerificationBinding {
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let jwks = serde_json::json!({
+        "keys": [{
+            "alg": "EdDSA",
+            "crv": "Ed25519",
+            "kid": "key-1",
+            "kty": "OKP",
+            "use": "sig",
+            "x": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                key_pair.public_key().as_ref()
+            ),
+        }]
+    });
+    let auth_policy = fixture
+        .policy_versions
+        .iter()
+        .find(|(_, document)| {
+            matches!(
+                document,
+                ResourceDocument::Policy(policy) if policy.policy_kind == PolicyKind::McpAuth
+            )
+        })
+        .map(|(revision, _)| revision.clone())
+        .unwrap();
+    InstalledMcpOAuthVerificationBinding {
+        schema_version: 1,
+        auth_policy,
+        trust_policy: fixture.retention_policy.clone(),
+        auth_profile: fixture.auth_profile.clone(),
+        token_endpoint_trust_roots_pem,
+        algorithms: vec![InstalledMcpOAuthJwtAlgorithm::EdDsa],
+        jwks_digest: canonical_digest(&jwks).unwrap().parse().unwrap(),
+        jwks,
+    }
+}
+
+#[tokio::test]
+async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_commit() {
+    let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
+        eprintln!("PLATFORM_TEST_DATABASE_URL is unset; OAuth exchange process L3 skipped");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    verify_schema(&pool).await.unwrap();
+    let repository = PgRepository::new(pool.clone());
+    let temporary = std::env::temp_dir().join(format!(
+        "platform-oauth-exchange-l3-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir(&temporary).unwrap();
+    let token_address = available_address();
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let fixture = fixture_with_token_endpoint_port(now, token_address.port());
+    seed(&pool, &repository, &fixture).await;
+    let token_binding = ExactSecretBindingRef::build(
+        id(ResourceKind::SecretBinding, 0xd0),
+        1,
+        fixture.auth_profile.token_secret_provider_id.clone(),
+        "mcp.oauth.token".parse().unwrap(),
+        SecretResolutionPolicy::Pinned {
+            opaque_version_identity_digest: sha('c'),
+        },
+    )
+    .unwrap();
+    repository
+        .create_secret_binding(NewSecretBinding {
+            tenant_id: fixture.tenant_id.clone(),
+            secret_binding_id: token_binding.secret_binding_id.clone(),
+            purpose: token_binding.purpose.clone(),
+            provider_id: token_binding.provider_id.clone(),
+            opaque_reference_ciphertext: vec![1, 2, 3],
+            key_id: "fixture-key".to_owned(),
+            reference_digest: sha('d'),
+            payload: SecretBindingPayload {
+                provider_id: token_binding.provider_id.clone(),
+                resolution_policy: token_binding.resolution_policy.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let state_key = vec![0x51; 32];
+    let callback_binding_digest = fixture
+        .auth_profile
+        .redirect_uri
+        .endpoint_identity_digest
+        .clone();
+    let state_codec = AeadMcpOAuthStateCodec::new(
+        McpOAuthStateCodecConfig {
+            active_key_id: "callback-key-1".to_owned(),
+            callback_binding_digest: callback_binding_digest.clone(),
+            maximum_lifetime_seconds: 600,
+            clock_skew_seconds: 30,
+        },
+        vec![McpOAuthStateKey {
+            key_id: "callback-key-1".to_owned(),
+            key_material: SensitiveMcpOAuthStateKey::new(state_key.clone()).unwrap(),
+        }],
+    )
+    .unwrap();
+    let state = state_codec
+        .issue_state(
+            &AuthenticatedMcpOAuthState {
+                tenant_id: fixture.tenant_id.clone(),
+                task_id: fixture.intent.task_id.clone(),
+            },
+            now,
+            now + Duration::minutes(5),
+        )
+        .unwrap();
+    let state_bytes = state.as_bytes().to_vec();
+    let start = McpOAuthAuthorizationStartService::new(
+        McpOAuthAuthorizationStartConfig {
+            callback_binding_digest: callback_binding_digest.clone(),
+        },
+        Arc::new(repository.clone()),
+        Arc::new(FixedProcessPreparation {
+            pkce_binding: fixture.pkce_binding.clone(),
+            state: state_bytes.clone(),
+        }),
+    );
+    assert_eq!(
+        start
+            .start(fixture.intent.clone(), now)
+            .await
+            .unwrap()
+            .disposition,
+        McpOAuthAuthorizationStartCommitDisposition::Applied
+    );
+
+    let token_tls = oauth_token_tls_fixture();
+    let token_calls = temporary.join("token-calls");
+    let token_ready = temporary.join("token-ready");
+    let token_config_path = temporary.join("token.json");
+    write_json(
+        &token_config_path,
+        &serde_json::to_value(OAuthTokenEndpointProcessConfig {
+            listen_address: token_address,
+            server_certificate_der: token_tls.server_certificate_der,
+            server_key_der: token_tls.server_key_der,
+            call_path: token_calls.clone(),
+            ready_path: token_ready.clone(),
+        })
+        .unwrap(),
+    );
+    let mut token_process = spawn_fixture_process(
+        "oauth_token_endpoint_fixture_process",
+        OAUTH_TOKEN_ENDPOINT_CONFIG_ENV,
+        &token_config_path,
+    );
+    wait_for_file(&token_ready, StdDuration::from_secs(5));
+
+    let rpc_tls = oauth_cleanup_tls_fixture();
+    let egress_address = available_address();
+    let token_store_marker = temporary.join("token-stored");
+    let verification_binding = oauth_verification_binding(&fixture, token_tls.ca_pem.clone());
+    let write_egress_config = |path: &Path, ready_path: &Path| {
+        write_json(
+            path,
+            &serde_json::to_value(OAuthExchangeEgressProcessConfig {
+                listen_address: egress_address,
+                token_endpoint_address: token_address,
+                ca_pem: rpc_tls.ca.clone(),
+                server_certificate_pem: rpc_tls.server_cert.clone(),
+                server_key_pem: rpc_tls.server_key.clone(),
+                verification_binding: verification_binding.clone(),
+                token_store_marker_path: token_store_marker.clone(),
+                ready_path: ready_path.to_path_buf(),
+            })
+            .unwrap(),
+        );
+    };
+    let raw_query = format!(
+        "state={}&code=one-time-code",
+        String::from_utf8(state_bytes).unwrap()
+    );
+    let write_callback_config =
+        |path: &Path, ready_path: &Path, before_commit: &Path, outcome: &Path, stall| {
+            write_json(
+                path,
+                &serde_json::to_value(OAuthExchangeCallbackProcessConfig {
+                    database_url: database_url.clone(),
+                    egress_endpoint: format!("https://{egress_address}/"),
+                    egress_tls_server_name: "egress.test".to_owned(),
+                    egress_ca_pem: rpc_tls.ca.clone(),
+                    egress_client_certificate_pem: rpc_tls.client_cert.clone(),
+                    egress_client_key_pem: rpc_tls.client_key.clone(),
+                    callback_binding_digest: callback_binding_digest.clone(),
+                    state_key: state_key.clone(),
+                    raw_query: raw_query.clone(),
+                    before_commit_path: before_commit.to_path_buf(),
+                    outcome_path: outcome.to_path_buf(),
+                    ready_path: ready_path.to_path_buf(),
+                    stall_before_commit: stall,
+                })
+                .unwrap(),
+            );
+        };
+
+    let first_egress_ready = temporary.join("egress-first-ready");
+    let first_egress_config = temporary.join("egress-first.json");
+    write_egress_config(&first_egress_config, &first_egress_ready);
+    let mut first_egress = spawn_fixture_process(
+        "oauth_exchange_egress_fixture_process",
+        OAUTH_EXCHANGE_EGRESS_CONFIG_ENV,
+        &first_egress_config,
+    );
+    wait_for_file(&first_egress_ready, StdDuration::from_secs(5));
+    let first_callback_ready = temporary.join("callback-first-ready");
+    let first_before_commit = temporary.join("callback-first-before-commit");
+    let first_outcome = temporary.join("callback-first-outcome");
+    let first_callback_config = temporary.join("callback-first.json");
+    write_callback_config(
+        &first_callback_config,
+        &first_callback_ready,
+        &first_before_commit,
+        &first_outcome,
+        true,
+    );
+    let mut first_callback = spawn_fixture_process(
+        "oauth_exchange_callback_fixture_process",
+        OAUTH_EXCHANGE_CALLBACK_CONFIG_ENV,
+        &first_callback_config,
+    );
+    wait_for_file(&first_callback_ready, StdDuration::from_secs(5));
+    wait_for_file(&token_store_marker, StdDuration::from_secs(10));
+    wait_for_file(&first_before_commit, StdDuration::from_secs(10));
+    kill(&mut first_callback);
+    kill(&mut first_egress);
+
+    let pending: String = sqlx::query_scalar(
+        "SELECT state FROM insight_platform.tasks WHERE tenant_id = $1 AND task_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.intent.task_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, "pending");
+    assert_eq!(std::fs::read(&token_calls).unwrap(), b"1");
+
+    let second_egress_ready = temporary.join("egress-second-ready");
+    let second_egress_config = temporary.join("egress-second.json");
+    write_egress_config(&second_egress_config, &second_egress_ready);
+    let mut second_egress = spawn_fixture_process(
+        "oauth_exchange_egress_fixture_process",
+        OAUTH_EXCHANGE_EGRESS_CONFIG_ENV,
+        &second_egress_config,
+    );
+    wait_for_file(&second_egress_ready, StdDuration::from_secs(5));
+    let second_callback_ready = temporary.join("callback-second-ready");
+    let second_before_commit = temporary.join("callback-second-before-commit");
+    let second_outcome = temporary.join("callback-second-outcome");
+    let second_callback_config = temporary.join("callback-second.json");
+    write_callback_config(
+        &second_callback_config,
+        &second_callback_ready,
+        &second_before_commit,
+        &second_outcome,
+        false,
+    );
+    let mut second_callback = spawn_fixture_process(
+        "oauth_exchange_callback_fixture_process",
+        OAUTH_EXCHANGE_CALLBACK_CONFIG_ENV,
+        &second_callback_config,
+    );
+    wait_for_file(&second_outcome, StdDuration::from_secs(10));
+    assert!(std::fs::read_to_string(&second_outcome)
+        .unwrap()
+        .starts_with("ok:Authorized"));
+    let _ = second_callback.wait();
+    kill(&mut second_egress);
+    kill(&mut token_process);
+
+    let task_state: String = sqlx::query_scalar(
+        "SELECT state FROM insight_platform.tasks WHERE tenant_id = $1 AND task_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.intent.task_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let receipt_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND operation = 'mcp.oauth.callback'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let completion_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND event_type = 'mcp.oauth_authorization_completed'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(task_state, "responded");
+    assert_eq!((receipt_count, completion_count), (1, 1));
+    assert_eq!(std::fs::read(&token_calls).unwrap(), b"1");
     std::fs::remove_dir_all(temporary).unwrap();
 }

@@ -125,7 +125,7 @@ impl InstalledMcpOAuthJwtAlgorithm {
 ///
 /// JWKs are public material. Their canonical digest is frozen separately so a config renderer or
 /// secret injector cannot silently alter the trust root while retaining the same Auth Policy.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstalledMcpOAuthVerificationBinding {
     pub schema_version: u32,

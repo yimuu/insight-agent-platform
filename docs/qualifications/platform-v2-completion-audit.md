@@ -9,9 +9,9 @@
 
 ## 1. 结论
 
-00～18均已完成CR-192 cross-review（历史CR-173～191结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
+00～18均已完成CR-196 cross-review（历史CR-173～195结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
 实现与真实PostgreSQL门禁已闭合；Phase 2的production Orchestration、Model、Capability、Context与wait/Subagent主要L3链路已经闭合；
-Phase 3的MCP subscription真实HTTPS及OAuth Cleanup/Egress删除链多进程L3已闭合，仍缺OAuth Callback真实token endpoint/exchange L3及外部Sandbox/Artifact资格。Phase 4 public API和15-role/17-pool静态部署闭包已完成，
+Phase 3的MCP subscription真实HTTPS、OAuth Cleanup/Egress删除链及Callback/token exchange多进程L3已闭合，仍缺外部Sandbox/Artifact资格。Phase 4 public API和15-role/17-pool静态部署闭包已完成，
 完整observability及production-equivalent L4～L6仍未交付。
 
 因此：
@@ -25,7 +25,7 @@ Phase 3的MCP subscription真实HTTPS及OAuth Cleanup/Egress删除链多进程L3
 
 | 范围 | 当前证据 | 结论 |
 |---|---|---|
-| 合同 | 00～18 CR-192 cross-review闭合；Plan v4 external leaf、MCP subscription→Context durable admission、closed owner pair及refresh execution/outcome均冻结；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
+| 合同 | 00～18 CR-196 cross-review闭合；Plan v4 external leaf、MCP subscription→Context durable admission、closed owner pair、refresh execution/outcome及OAuth token TLS trust均冻结；generated contracts checker通过 | 合同可作为实现输入，不证明实现/资格完成 |
 | Persistence | schema contract v7、唯一`0001_platform_baseline.sql`；PG16/17 fresh baseline与事务/并发测试 | Phase 1 persistence闭合 |
 | Rust workspace | workspace all-target/all-feature tests与Clippy `-D warnings`通过 | L1～L3范围内有效 |
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
@@ -142,7 +142,7 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 1. MCP Host production binary/Helm与ToolsCall process L3已闭合；subscription的production Resource Host/Context Worker/独立Egress进程、真实TLS
    initialize/list/read与三轮kill/recovery已由r281闭合component L3；OAuth Cleanup Worker与独立Egress的mTLS Secret delete/lease reclaim已由r284闭合。
-   OAuth Callback真实token endpoint/exchange多进程kill/restart L3仍缺；
+   r286又以真实独立CA HTTPS token endpoint、mTLS Egress RPC和Callback owner关闭token-store后/commit前双进程强杀恢复，并证明one-time code不重发；
    Context/MCP/Egress lane saturation、bundle/config rollout和live cluster identity仍归L4～L5。
 2. Context Native/Remote和Capability Native/Remote production composition已闭合；Dataset build/Text2SQL、Artifact和各外部依赖仍须按
    production qualification matrix取得适用的真实协议、故障与隔舱证据。
@@ -191,10 +191,9 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 按上游到下游执行，且每批通过后提交：
 
 1. 补shared Outbox、其他role dependency/recovery/permit业务指标、跨进程trace propagation和动态payload采集审计；
-2. MCP OAuth Callback与真实token endpoint/exchange的多进程L3 kill/restart；
-3. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
-4. reproducible signed candidate pipeline；
-5. 外部L4～L6、GitOps clean cut、current文档与规范归档。
+2. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
+3. reproducible signed candidate pipeline；
+4. 外部L4～L6、GitOps clean cut、current文档与规范归档。
 
 如果实现发现domain port不足以支持production handler，必须先按02→06/07/09/10→17/18修订合同并重新cross-review，
 不得在binary中以自由JSON、in-memory authority或host process execution绕过缺口。

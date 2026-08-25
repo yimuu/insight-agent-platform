@@ -458,6 +458,11 @@ r284在fresh PostgreSQL 16使用production Cleanup Worker、独立Egress测试�
 `cleanup_completed`且旧fence不能结算；Task terminal payload与SecretBinding均通过current PostgreSQL owner重验。该证据关闭Cleanup/Egress
 删除链的component L3，不替代Callback真实token endpoint/exchange、OAuth rollout、lane saturation、production scrape或L4～L6。
 
+r286以真实独立CA HTTPS token endpoint、production OAuth reqwest broker、mTLS Egress RPC、Callback ingress owner与fresh PostgreSQL 16
+完成OAuth callback/exchange crash component L3。token store成功而Callback commit未开始时强杀Callback/Egress，替代进程从prepared metadata
+恢复且不重发one-time code；endpoint调用严格为1，Task/Receipt/Event各只有一个终态。该证据不替代真实Secret Manager rotation、OAuth
+config rollout、lane saturation、production scrape或L4～L6。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

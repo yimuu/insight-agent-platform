@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-196 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-196 implemented; external L3 and L4～L6 pending |
 | 日期 | 2026-08-26 |
 | 合同输入 | 00～18、cross-review CR-196、ADR-0001、ADR-0002、AGENTS.md |
 
@@ -453,6 +453,13 @@
 > Egress/Worker；lease到期后第二组进程以claim epoch 2恢复并形成唯一`cleanup_completed`，旧claim fence不能结算。fixture使用完整canonical
 > terminal Task payload与current exact SecretBinding authority，不以直接列漂移绕过owner校验。strict Clippy及相关process/RPC tests通过。OAuth
 > Callback真实token endpoint/exchange、其故障窗口、role saturation、production scrape及L4仍是独立门禁。
+
+> 2026-08-26 implementation evidence：r286实现CR-196并关闭OAuth Callback/token exchange crash component L3。OAuth installed binding同时
+> 安装exact Trust Policy与bounded PEM roots，production reqwest关闭默认roots并按canonical hostname/DNS pin访问真实独立CA HTTPS token endpoint。
+> fresh PostgreSQL 16三进程fixture在token已由Egress store、Callback尚未提交owner transaction的窗口同时强杀Callback与Egress；第二组进程
+> 从持久化prepared token metadata恢复，同一authorization code未再次发送，token endpoint总调用数严格为1，最终只有一个responded Task、
+> callback Receipt与completion Event。错/缺PEM、Auth/Trust漂移在DNS、Secret、transport和store前fail closed。该证据关闭OAuth callback/exchange
+> component L3；真实Secret Manager rotation、lane saturation、production scrape及L4～L6仍保持独立门禁。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
