@@ -284,6 +284,10 @@ r248完成checked-in Helm的15个ComponentRole/17个隔离pool静态闭包：Con
 每个namespace保持exact default-deny。跨11个chart的全局render检查和各受影响role原有静态检查通过。该证据只证明待部署manifest闭包，
 live rollout、identity、mTLS/RBAC/NetworkPolicy enforcement仍须r245 preflight在production-equivalent cluster实际通过。
 
+fresh PostgreSQL 16 r249通过OAuth start/Receipt first-winner与secret-free persistence、PKCE cleanup outbox reclaim/fence，以及subscription
+discovery/create/session/notification coalescing/refresh/reconcile/termination/recovery的完整L2事务套件。该证据只关闭durable PostgreSQL owner层；
+production Callback API、Cleanup Worker、MCP Host、Egress与真实OAuth/SSE endpoint的多进程L3及kill/restart仍须独立证据。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。
