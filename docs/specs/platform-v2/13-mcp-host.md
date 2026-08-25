@@ -170,6 +170,8 @@ CR-181不增加MCP current-state authority；wrong Invocation/Context owner、Pl
 2026-08-25 implementation evidence：独立`platform-mcp-host` production binary已在真实进程fixture中验证两段分离mTLS身份。ReadOnly
 ToolsCall到达Egress Broker后强杀Host，Capability Worker侧只得到`CompletionUnknown`；重启同一binary后按安全重放规则提交同一冻结
 contract/request并成功，Egress总调用数为2。该证据只关闭Host自身的process restart与completion-unknown边界；PostgreSQL Remote
-Worker→Host→Egress三进程的durable claim/lease/reconciliation、OAuth、Task和subscription真实协议矩阵仍是L3待办。
+Worker→Host→Egress三进程的durable claim/lease/reconciliation由fresh PostgreSQL 16 r221补齐：exact protocol/auth/discovery/Capability
+binding在claim与I/O前重验，错codec零调用，正确非幂等ToolsCall返回后Worker强杀且恢复不重放。MCP ToolsCall process L3至此闭合；
+OAuth、Task和subscription真实协议矩阵仍是后续资格待办。
 
 首版remote Streamable HTTP合同无未决设计问题。

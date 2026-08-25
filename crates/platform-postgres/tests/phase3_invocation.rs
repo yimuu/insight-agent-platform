@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use insight_platform_artifacts::ArtifactReferenceSnapshot;
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityAdapterRequest, CapabilityAdapterResponse,
     CapabilityAdapterWorker, CapabilityDispatcher, CapabilityTransportCancelOutcome,
@@ -8,7 +9,8 @@ use insight_platform_capability_adapters::{
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, AdministrativeGate, AgentDeploymentClosure,
-    AgentResourceSpec, ArtifactRef, AuthoringPackage, CandidateSelectionMode,
+    AgentResourceSpec, AllowedMcpServerCapabilities, ArtifactPurpose, ArtifactRef,
+    ArtifactReferenceKind, AuthoringPackage, CandidateSelectionMode,
     CandidateSelectionPolicyDocument, CanonicalHttpEndpoint, CapabilityArtifactContract,
     CapabilityArtifactDirection, CapabilityArtifactPort, CapabilityBackendBinding,
     CapabilityBackendContract, CapabilityBackendFeatures, CapabilityBackendKind,
@@ -18,19 +20,25 @@ use insight_platform_contracts::{
     CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
     CapabilityProgressMode, ClosedJsonSchema, CommandAudit, CommandOutcome, DataClassification,
     DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
-    ExactVersionRef, ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds,
-    FrozenSlotBinding, FrozenSlotTarget, GrpcCapabilityContract, HttpCapabilityContract,
-    HttpCapabilityMethod, InstalledCapabilityCodecRef, InteractionKind, NativeCapabilityContract,
-    Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
-    RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
-    ValueRef, WorkClass, INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION, WORKER_MANIFEST_VERSION,
-    WORKER_PROTOCOL_VERSION,
+    ExactSecretBindingRef, ExactVersionRef, ExternalLeafFailureMutationIds,
+    ExternalLeafResumeMutationIds, FrozenSlotBinding, FrozenSlotTarget, GrpcCapabilityContract,
+    HttpCapabilityContract, HttpCapabilityMethod, InstalledCapabilityCodecRef, InteractionKind,
+    McpAuthPolicyDocument, McpAuthorizationPrincipalKind, McpClientCapabilities,
+    McpDiscoverySnapshot, McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities,
+    McpOAuthClientAuthenticationKind, McpOAuthEndpoint, McpProtocolPolicyDocument, McpServerLimits,
+    McpServerResourceSpec, McpToolCapabilityContract, McpTransportBinding, McpTransportFeatures,
+    NativeCapabilityContract, Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublishedMcpMethod, PublishedVersionPayload, QuotaDimension, RegistryResourceKind,
+    ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, SecretBindingPayload,
+    SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef, WorkClass, INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION,
+    MCP_PROTOCOL_BASELINE, WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
     EgressCallerWorkloadIdentity, EgressInternalRpcLimits, CAPABILITY_WORKER_WORKLOAD_IDENTITY,
+    MCP_HOST_WORKLOAD_IDENTITY,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, BackendInputRequest, CapabilityApprovalDecision,
@@ -40,11 +48,18 @@ use insight_platform_invocations::{
     CommitCapabilityOutcome, ControlCapabilityInvocation, DispatchOutcome, EncryptedRemoteState,
     InvocationApprovalRequirement, InvocationOrigin, InvocationPolicyDecision,
     InvocationPolicyDecisionBundle, InvocationPolicyDisposition, InvocationTransaction,
-    PrepareCapabilityDispatch, ReconciliationResolution, RecordCapabilityProgress, RemoteWait,
-    ResolveCapabilityApproval, ResolveCapabilityInput, ResolveCapabilityReconciliation,
-    WakeCapabilityInvocation,
+    McpCapabilityRuntimeRequest, PrepareCapabilityDispatch, ReconciliationResolution,
+    RecordCapabilityProgress, RemoteWait, ResolveCapabilityApproval, ResolveCapabilityInput,
+    ResolveCapabilityReconciliation, WakeCapabilityInvocation,
 };
 use insight_platform_jobs::{JobFence, WakeSource};
+use insight_platform_mcp_host::{
+    McpAuthorizationBindingRecord, McpDiscoveryAdmission, McpDiscoveryOperationPayload,
+    McpDiscoveryResultBinding, McpDiscoverySnapshotRecord, McpOperationOutcome,
+    McpRemoteTaskCancelOutcome, McpStreamableHttpConnector, McpStreamableHttpRequest,
+    McpTransportFailure, NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission,
+    NewMcpDiscoverySnapshotRecord,
+};
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
     ModelProviderWireConnector, ModelProviderWireProtocol, ModelProviderWireRequest,
@@ -66,7 +81,7 @@ use insight_platform_postgres::{
 use insight_platform_postgres::{
     repository::{
         DeferOrchestrationCapabilityMutationIds, DeferOrchestrationToCapabilityInvocation,
-        JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewTenant,
+        JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewSecretBinding, NewTenant,
         NewTenantPrincipal, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
         ResolvedExpressionInput, SafetyScanShard, TypedPayload, MAX_ORCHESTRATION_QUOTA_LINES,
     },
@@ -170,10 +185,45 @@ impl GrpcNetworkTransport for CountingGrpcTransport {
     }
 }
 
+struct CountingMcpTransport {
+    calls: AtomicUsize,
+    output_schema_digest: Sha256Digest,
+}
+
+#[async_trait::async_trait]
+impl McpStreamableHttpConnector for CountingMcpTransport {
+    async fn execute(
+        &self,
+        request: McpStreamableHttpRequest,
+    ) -> Result<McpOperationOutcome, McpTransportFailure> {
+        assert!(request.deadline > Utc::now());
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(McpOperationOutcome::Completed {
+            result: insight_platform_contracts::ClosedJsonValue::build(
+                self.output_schema_digest.clone(),
+                json!({"accepted": true}),
+            )
+            .unwrap(),
+            evidence_digest: digest('d'),
+        })
+    }
+
+    async fn cancel_remote_task(
+        &self,
+        _request: McpStreamableHttpRequest,
+    ) -> Result<McpRemoteTaskCancelOutcome, McpTransportFailure> {
+        Ok(McpRemoteTaskCancelOutcome::Accepted)
+    }
+}
+
 struct ProcessMtlsFixture {
     ca_pem: String,
     server_certificate_pem: String,
     server_key_pem: String,
+    mcp_host_certificate_pem: String,
+    mcp_host_key_pem: String,
+    mcp_host_client_certificate_pem: String,
+    mcp_host_client_key_pem: String,
     capability_certificate_pem: String,
     capability_key_pem: String,
 }
@@ -200,6 +250,14 @@ fn process_mtls_fixture() -> ProcessMtlsFixture {
         vec![SanType::DnsName("egress.test".try_into().unwrap())],
         ExtendedKeyUsagePurpose::ServerAuth,
     );
+    let (mcp_host_certificate_pem, mcp_host_key_pem) = issue(
+        vec![SanType::DnsName("mcp.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let (mcp_host_client_certificate_pem, mcp_host_client_key_pem) = issue(
+        vec![SanType::URI(MCP_HOST_WORKLOAD_IDENTITY.try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
     let (capability_certificate_pem, capability_key_pem) = issue(
         vec![SanType::URI(
             CAPABILITY_WORKER_WORKLOAD_IDENTITY.try_into().unwrap(),
@@ -210,6 +268,10 @@ fn process_mtls_fixture() -> ProcessMtlsFixture {
         ca_pem: ca.pem(),
         server_certificate_pem,
         server_key_pem,
+        mcp_host_certificate_pem,
+        mcp_host_key_pem,
+        mcp_host_client_certificate_pem,
+        mcp_host_client_key_pem,
         capability_certificate_pem,
         capability_key_pem,
     }
@@ -249,6 +311,86 @@ fn digest(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
         .unwrap()
+}
+
+fn mcp_oauth_endpoint(host: &str, path: &str) -> McpOAuthEndpoint {
+    let endpoint = CanonicalHttpEndpoint {
+        scheme: CapabilityEndpointScheme::Https,
+        host: host.to_owned(),
+        port: 443,
+        base_path: path.to_owned(),
+    };
+    McpOAuthEndpoint {
+        endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
+        endpoint,
+    }
+}
+
+fn mcp_method_limits() -> McpMethodLimits {
+    McpMethodLimits {
+        maximum_request_bytes: 16_384,
+        maximum_response_bytes: 65_536,
+        maximum_metadata_entries: 32,
+        maximum_progress_events: 32,
+        maximum_pages: 16,
+        minimum_poll_milliseconds: 10,
+        maximum_poll_milliseconds: 5_000,
+    }
+}
+
+fn mcp_protocol_document() -> McpProtocolPolicyDocument {
+    McpProtocolPolicyDocument {
+        schema_version: 1,
+        offered_versions: vec![MCP_PROTOCOL_BASELINE.to_owned()],
+        transport_features: McpTransportFeatures {
+            streamable_http_get: true,
+            streamable_http_sse: true,
+            resumable_stream: true,
+            session_affinity: true,
+        },
+        client_capabilities: McpClientCapabilities {
+            elicitation_form: false,
+            elicitation_url: false,
+            tasks_elicitation_create: false,
+            sampling: false,
+            roots: false,
+        },
+        allowed_server_capabilities: AllowedMcpServerCapabilities {
+            tools: true,
+            resources: false,
+            prompts: false,
+            logging: false,
+            tasks: false,
+            subscriptions: false,
+        },
+        experimental_features: vec![],
+        method_limits: BTreeMap::from([(PublishedMcpMethod::ToolsCall, mcp_method_limits())]),
+        metadata_policy: McpMetadataPolicy {
+            maximum_server_name_bytes: 128,
+            maximum_server_version_bytes: 64,
+            maximum_instruction_bytes: 4_096,
+            maximum_object_name_bytes: 128,
+            maximum_description_bytes: 8_192,
+            maximum_icon_bytes: 1_048_576,
+        },
+    }
+}
+
+fn mcp_server_limits() -> McpServerLimits {
+    McpServerLimits {
+        maximum_message_bytes: 65_536,
+        maximum_response_bytes: 1_048_576,
+        maximum_headers: 32,
+        maximum_sse_event_bytes: 8_192,
+        maximum_in_flight: 8,
+        maximum_connections: 4,
+        maximum_sessions: 4,
+        maximum_session_milliseconds: 3_600_000,
+        idle_timeout_milliseconds: 30_000,
+        initialize_timeout_milliseconds: 30_000,
+        request_timeout_milliseconds: 60_000,
+        total_timeout_milliseconds: 120_000,
+    }
 }
 
 fn builtin_echo_module_digest() -> Sha256Digest {
@@ -2203,6 +2345,386 @@ struct RemoteHttpProcessFixture {
     manifest_digest: Sha256Digest,
     node_id: ResourceId,
     grpc_deployment: ExactDeploymentRef,
+    mcp_deployment: ExactDeploymentRef,
+    mcp_authorization_binding_id: ResourceId,
+}
+
+struct RemoteMcpFacts {
+    deployment: ExactDeploymentRef,
+    authorization_binding_id: ResourceId,
+    snapshot: McpDiscoverySnapshot,
+    auth_policy: ExactVersionRef,
+    protocol_policy: ExactVersionRef,
+    tool_contract: McpToolCapabilityContract,
+}
+
+async fn seed_remote_mcp_facts(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+    package: &AuthoringPackage,
+    validation: &ValidationSummary,
+    remote_policies: &[ExactVersionRef],
+) -> RemoteMcpFacts {
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let policy_resource = id(ResourceKind::Policy, 0x980);
+    let server_resource = id(ResourceKind::McpServer, 0x983);
+    insert_resource(
+        pool,
+        &fixture.tenant_id,
+        &policy_resource,
+        RegistryResourceKind::Policy,
+        &fixture.principal_id,
+    )
+    .await;
+    insert_resource(
+        pool,
+        &fixture.tenant_id,
+        &server_resource,
+        RegistryResourceKind::McpServer,
+        &fixture.principal_id,
+    )
+    .await;
+
+    let protocol = mcp_protocol_document();
+    let protocol_policy = ExactVersionRef::new(
+        id(ResourceKind::PolicyRevision, 0x981),
+        protocol.canonical_digest().unwrap(),
+    )
+    .unwrap();
+    let auth_document = McpAuthPolicyDocument {
+        schema_version: 1,
+        issuer: mcp_oauth_endpoint("auth.fixture.test", "/"),
+        authorization_endpoint: mcp_oauth_endpoint("auth.fixture.test", "/oauth/authorize"),
+        token_endpoint: mcp_oauth_endpoint("auth.fixture.test", "/oauth/token"),
+        client_id: "insight-platform".to_owned(),
+        client_authentication: McpOAuthClientAuthenticationKind::None,
+        client_credential_purpose: None,
+        pkce_secret_provider_id: id(ResourceKind::SecretProvider, 0x987),
+        token_secret_provider_id: id(ResourceKind::SecretProvider, 0x987),
+        redirect_uri: mcp_oauth_endpoint("platform.fixture.test", "/v1/mcp/oauth/callback"),
+        resource_indicator: mcp_oauth_endpoint("mcp.fixture.test", "/mcp"),
+        allowed_scopes: vec!["tools.call".to_owned(), "tools.read".to_owned()],
+        maximum_token_response_bytes: 65_536,
+        connect_timeout_milliseconds: 5_000,
+        total_timeout_milliseconds: 30_000,
+        maximum_clock_skew_seconds: 60,
+    };
+    let auth_policy = ExactVersionRef::new(
+        id(ResourceKind::PolicyRevision, 0x982),
+        auth_document.canonical_digest().unwrap(),
+    )
+    .unwrap();
+    for (revision, revision_number, kind, rules_digest, mcp_protocol, mcp_auth) in [
+        (
+            protocol_policy.clone(),
+            1,
+            PolicyKind::Protocol,
+            protocol_policy.semantic_digest.clone(),
+            Some(protocol.clone()),
+            None,
+        ),
+        (
+            auth_policy.clone(),
+            2,
+            PolicyKind::McpAuth,
+            auth_policy.semantic_digest.clone(),
+            None,
+            Some(auth_document),
+        ),
+    ] {
+        insert_version(
+            pool,
+            &fixture.tenant_id,
+            &policy_resource,
+            &revision,
+            revision_number,
+            &fixture.principal_id,
+            PublishedVersionPayload {
+                document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
+                    authoring_package: package.clone(),
+                    contract_digest: digest('4'),
+                    dependency_versions: vec![],
+                    policy_versions: vec![],
+                    policy_kind: kind,
+                    rules_digest,
+                    selection: None,
+                    scheduling: None,
+                    retention: None,
+                    model_safety: None,
+                    model_budget: None,
+                    model_public_projection: None,
+                    mcp_protocol,
+                    mcp_auth: mcp_auth.map(Box::new),
+                    sandbox_isolation: None,
+                    sandbox_resource: None,
+                    sandbox_network: None,
+                    sandbox_artifact_io: None,
+                    sandbox_secret_resolution: None,
+                })),
+                validation: validation.clone(),
+            },
+        )
+        .await;
+    }
+
+    let token_purpose = "mcp.oauth.token".parse::<SecretPurpose>().unwrap();
+    let server_revision =
+        ExactVersionRef::new(id(ResourceKind::McpServerRevision, 0x984), digest('6')).unwrap();
+    insert_version(
+        pool,
+        &fixture.tenant_id,
+        &server_resource,
+        &server_revision,
+        1,
+        &fixture.principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::McpServer(McpServerResourceSpec {
+                authoring_package: package.clone(),
+                contract_digest: digest('7'),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                transport: insight_platform_contracts::McpTransportKind::StreamableHttp,
+                protocol_policy: protocol_policy.clone(),
+                deployment_credential_requirements: vec![],
+                authorization_credential_purpose: Some(token_purpose.clone()),
+                limits: mcp_server_limits(),
+            }),
+            validation: validation.clone(),
+        },
+    )
+    .await;
+
+    let endpoint = auth_document_resource_endpoint();
+    let mcp_closure = insight_platform_contracts::McpDeploymentClosure {
+        server_revision: server_revision.clone(),
+        server_identity_digest: endpoint.canonical_digest().unwrap(),
+        transport: McpTransportBinding::StreamableHttp {
+            endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
+            endpoint,
+            network_policy: remote_policies[0].clone(),
+            tls_policy: remote_policies[1].clone(),
+        },
+        protocol_policy: protocol_policy.clone(),
+        trust_policy: remote_policies[2].clone(),
+        auth_policy: Some(auth_policy.clone()),
+        secret_bindings: vec![],
+        conformance_evidence: package.artifact.clone(),
+    };
+    let mcp_payload = TypedPayload::new(1, &DeploymentClosure::McpServer(mcp_closure)).unwrap();
+    let mcp_deployment_id = id(ResourceKind::McpDeployment, 0x985);
+    insert_deployment(
+        pool,
+        &fixture.tenant_id,
+        &mcp_deployment_id,
+        &server_resource,
+        &server_revision.revision_id,
+        &fixture.principal_id,
+        &mcp_payload,
+    )
+    .await;
+    let deployment =
+        ExactDeploymentRef::new(mcp_deployment_id, mcp_payload.digest.parse().unwrap()).unwrap();
+
+    let token_binding = ExactSecretBindingRef::build(
+        id(ResourceKind::SecretBinding, 0x986),
+        1,
+        id(ResourceKind::SecretProvider, 0x987),
+        token_purpose.clone(),
+        SecretResolutionPolicy::Pinned {
+            opaque_version_identity_digest: digest('8'),
+        },
+    )
+    .unwrap();
+    repository
+        .create_secret_binding(NewSecretBinding {
+            tenant_id: fixture.tenant_id.clone(),
+            secret_binding_id: token_binding.secret_binding_id.clone(),
+            purpose: token_purpose,
+            provider_id: token_binding.provider_id.clone(),
+            opaque_reference_ciphertext: vec![9, 8, 7],
+            key_id: "fixture-key".to_owned(),
+            reference_digest: digest('9'),
+            payload: SecretBindingPayload {
+                provider_id: token_binding.provider_id.clone(),
+                resolution_policy: token_binding.resolution_policy.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    let authorization = McpAuthorizationBindingRecord::create(
+        NewMcpAuthorizationBinding {
+            tenant_id: fixture.tenant_id.clone(),
+            authorization_binding_id: id(ResourceKind::McpAuthorizationBinding, 0x988),
+            mcp_deployment: deployment.clone(),
+            principal_kind: McpAuthorizationPrincipalKind::PerUser,
+            principal_id: fixture.principal_id.clone(),
+            principal_identity_kind: PrincipalKind::AgentRunner,
+            principal_binding_generation: 1,
+            audience_identity_digest: auth_document_resource_endpoint()
+                .canonical_digest()
+                .unwrap(),
+            granted_scopes: vec!["tools.call".to_owned(), "tools.read".to_owned()],
+            token_secret_binding: token_binding,
+            expires_at: now + Duration::hours(4),
+        },
+        now,
+    )
+    .unwrap();
+    let authorization_payload = TypedPayload::from_versioned(1, &authorization, 262_144).unwrap();
+    sqlx::query(
+        "INSERT INTO insight_platform.resources (tenant_id, resource_id, resource_kind, lifecycle_state, gate_state, version, payload_schema_version, payload, payload_digest) VALUES ($1, $2, 'mcp_authorization_binding', 'active', 'enabled', 1, $3, $4, $5)",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(authorization.authorization_binding_id.to_string())
+    .bind(authorization_payload.schema_version)
+    .bind(&authorization_payload.value)
+    .bind(&authorization_payload.digest)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let authorization_context = authorization.execution_context(now).unwrap();
+    let source_operation_id = id(ResourceKind::McpOperation, 0x989);
+    let snapshot_id = id(ResourceKind::McpDiscoverySnapshot, 0x98b);
+    let artifact_link_id = id(ResourceKind::ArtifactLink, 0x98c);
+    let snapshot = McpDiscoverySnapshot::build(
+        snapshot_id.clone(),
+        deployment.clone(),
+        server_revision.clone(),
+        protocol_policy.clone(),
+        authorization_context.canonical_digest.clone(),
+        MCP_PROTOCOL_BASELINE.to_owned(),
+        McpNegotiatedCapabilities {
+            tools: true,
+            resources: false,
+            prompts: false,
+            logging: false,
+            tasks: false,
+            tasks_list: false,
+            tasks_cancel: false,
+            tasks_tools_call: false,
+            elicitation: false,
+            sampling: false,
+            roots: false,
+            subscriptions: false,
+        },
+        package.artifact.clone(),
+        now - Duration::seconds(2),
+        now + Duration::hours(2),
+    )
+    .unwrap();
+    let admission = McpDiscoveryAdmission::build(NewMcpDiscoveryAdmission {
+        operation_id: source_operation_id.clone(),
+        job_id: id(ResourceKind::Job, 0x98a),
+        tenant_id: fixture.tenant_id.clone(),
+        mcp_deployment: deployment.clone(),
+        server_revision,
+        protocol_profile: protocol_policy.clone(),
+        authorization_binding_id: authorization.authorization_binding_id.clone(),
+        authorization_generation: authorization.generation,
+        authorization_context_digest: authorization_context.canonical_digest.clone(),
+        principal_id: fixture.principal_id.clone(),
+        requested_at: now - Duration::seconds(3),
+        deadline: now + Duration::hours(2),
+    })
+    .unwrap();
+    let operation_payload = McpDiscoveryOperationPayload::pending(admission)
+        .unwrap()
+        .complete(McpDiscoveryResultBinding {
+            snapshot_id: snapshot_id.clone(),
+            snapshot_digest: snapshot.canonical_digest.clone(),
+            objects_artifact: package.artifact.clone(),
+            artifact_link_id: artifact_link_id.clone(),
+        })
+        .unwrap();
+    let operation_payload = TypedPayload::from_versioned(1, &operation_payload, 1_048_576).unwrap();
+    sqlx::query(
+        "INSERT INTO insight_platform.invocations (tenant_id, invocation_id, invocation_kind, owner_kind, owner_id, logical_key, deployment_id, state, payload_schema_version, payload, payload_digest, deadline, terminal_at, created_at, updated_at) VALUES ($1, $2, 'mcp_discovery', 'mcp_operation', $2, 'remote-mcp-process-discovery', $3, 'succeeded', $4, $5, $6, $7, $8, $8, $8)",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(source_operation_id.to_string())
+    .bind(deployment.deployment_id.to_string())
+    .bind(operation_payload.schema_version)
+    .bind(operation_payload.value)
+    .bind(operation_payload.digest)
+    .bind(now + Duration::hours(2))
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    let reference = ArtifactReferenceSnapshot {
+        schema_version: 1,
+        artifact_id: package.artifact.artifact_id().clone(),
+        owner_id: source_operation_id.clone(),
+        reference_kind: ArtifactReferenceKind::Evidence,
+        purpose: ArtifactPurpose::McpResource,
+        created_by: fixture.principal_id.clone(),
+    };
+    let link_payload = TypedPayload::from_versioned(1, &reference, 262_144).unwrap();
+    sqlx::query(
+        "INSERT INTO insight_platform.artifact_links (tenant_id, artifact_link_id, link_kind, owner_kind, owner_id, target_artifact_id, link_key_digest, state, payload_schema_version, payload, payload_digest) VALUES ($1, $2, 'reference', 'mcp_operation', $3, $4, $5, 'active', $6, $7, $8)",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(artifact_link_id.to_string())
+    .bind(source_operation_id.to_string())
+    .bind(package.artifact.artifact_id().to_string())
+    .bind(reference.link_key_digest().unwrap().to_string())
+    .bind(link_payload.schema_version)
+    .bind(link_payload.value)
+    .bind(link_payload.digest)
+    .execute(pool)
+    .await
+    .unwrap();
+    let snapshot_record = McpDiscoverySnapshotRecord::build(NewMcpDiscoverySnapshotRecord {
+        tenant_id: fixture.tenant_id.clone(),
+        source_operation_id,
+        artifact_link_id,
+        snapshot: snapshot.clone(),
+        completed_at: now,
+    })
+    .unwrap();
+    let snapshot_payload = TypedPayload::from_versioned(1, &snapshot_record, 1_048_576).unwrap();
+    sqlx::query(
+        "INSERT INTO insight_platform.resources (tenant_id, resource_id, resource_kind, lifecycle_state, gate_state, version, payload_schema_version, payload, payload_digest) VALUES ($1, $2, 'mcp_discovery_snapshot', 'active', 'enabled', 1, $3, $4, $5)",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(snapshot_id.to_string())
+    .bind(snapshot_payload.schema_version)
+    .bind(snapshot_payload.value)
+    .bind(snapshot_payload.digest)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    RemoteMcpFacts {
+        deployment,
+        authorization_binding_id: authorization.authorization_binding_id,
+        snapshot: snapshot.clone(),
+        auth_policy,
+        protocol_policy: protocol_policy.clone(),
+        tool_contract: McpToolCapabilityContract {
+            remote_tool_name: "fixture_lookup".to_owned(),
+            remote_input_schema_digest: fixture.input_schema_digest.clone(),
+            output_mapping_digest: builtin_json_mcp_output_mapping_digest(),
+            protocol_profile: protocol_policy,
+            discovery_semantic_evidence_digest: snapshot.objects_digest,
+            supports_task: false,
+            supports_progress: true,
+        },
+    }
+}
+
+fn auth_document_resource_endpoint() -> CanonicalHttpEndpoint {
+    CanonicalHttpEndpoint {
+        scheme: CapabilityEndpointScheme::Https,
+        host: "mcp.fixture.test".to_owned(),
+        port: 443,
+        base_path: "/mcp".to_owned(),
+    }
 }
 
 async fn prepare_remote_http_process_fixture(
@@ -2304,6 +2826,17 @@ async fn prepare_remote_http_process_fixture(
     };
     let grpc_backend_contract = CapabilityBackendContract::Grpc(grpc_contract.clone());
     let grpc_descriptor_digest = grpc_backend_contract.descriptor_digest().unwrap();
+    let mcp = seed_remote_mcp_facts(
+        pool,
+        repository,
+        fixture,
+        &package,
+        &validation,
+        &remote_policies,
+    )
+    .await;
+    let mcp_backend_contract = CapabilityBackendContract::Mcp(mcp.tool_contract.clone());
+    let mcp_descriptor_digest = mcp_backend_contract.descriptor_digest().unwrap();
     let installed_http = json!({
         "codec_id": "platform.json",
         "codec_version": "1.0.0",
@@ -2333,13 +2866,13 @@ async fn prepare_remote_http_process_fixture(
         "codec_version": "1.0.0",
         "module_digest": builtin_json_module_digest(),
         "worker_protocol_version": WORKER_PROTOCOL_VERSION,
-        "descriptor_digest": digest('7'),
-        "remote_tool_name": "fixture_lookup",
-        "remote_input_schema_digest": fixture.input_schema_digest,
+        "descriptor_digest": mcp_descriptor_digest,
+        "remote_tool_name": mcp.tool_contract.remote_tool_name.clone(),
+        "remote_input_schema_digest": mcp.tool_contract.remote_input_schema_digest.clone(),
         "output_mapping_digest": builtin_json_mcp_output_mapping_digest(),
-        "protocol_profile_id": fixture.policy.revision_id,
-        "protocol_profile_digest": fixture.policy.semantic_digest,
-        "discovery_semantic_evidence_digest": digest('8')
+        "protocol_profile_id": mcp.protocol_policy.revision_id.clone(),
+        "protocol_profile_digest": mcp.protocol_policy.semantic_digest.clone(),
+        "discovery_semantic_evidence_digest": mcp.tool_contract.discovery_semantic_evidence_digest.clone()
     });
     let installed_closure = json!({
         "schema_version": 1,
@@ -2420,7 +2953,7 @@ async fn prepare_remote_http_process_fixture(
                     },
                 },
             ),
-            validation,
+            validation: validation.clone(),
         },
     )
     .await;
@@ -2448,7 +2981,7 @@ async fn prepare_remote_http_process_fixture(
         },
         secret_bindings: vec![],
         policies: vec![fixture.policy.clone()],
-        conformance_evidence: package.artifact,
+        conformance_evidence: package.artifact.clone(),
     };
     capability_closure.validate().unwrap();
     let capability_payload = TypedPayload::new(
@@ -2600,6 +3133,110 @@ async fn prepare_remote_http_process_fixture(
     let grpc_deployment =
         ExactDeploymentRef::new(grpc_deployment_id, grpc_payload.digest.parse().unwrap()).unwrap();
 
+    let mcp_implementation_exact = ExactVersionRef::new(
+        id(ResourceKind::CapabilityImplementationRevision, 0x990),
+        digest('e'),
+    )
+    .unwrap();
+    insert_version(
+        pool,
+        &fixture.tenant_id,
+        &id(ResourceKind::CapabilityImplementation, 0x18),
+        &mcp_implementation_exact,
+        4,
+        &fixture.principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::CapabilityImplementation(
+                CapabilityImplementationResourceSpec {
+                    authoring_package: package.clone(),
+                    contract_digest: digest('f'),
+                    dependency_versions: vec![],
+                    policy_versions: vec![mcp.protocol_policy.clone(), mcp.auth_policy.clone()],
+                    interface_revision: ExactVersionRef::new(
+                        id(ResourceKind::CapabilityInterfaceRevision, 0x17),
+                        digest('e'),
+                    )
+                    .unwrap(),
+                    backend_kind: CapabilityBackendKind::Mcp,
+                    backend_contract: mcp_backend_contract.clone(),
+                    backend_contract_digest: mcp_backend_contract.canonical_digest().unwrap(),
+                    credential_requirements: vec![],
+                    backend_limits: CapabilityBackendLimits {
+                        maximum_request_bytes: 1_048_576,
+                        maximum_response_bytes: 1_048_576,
+                        maximum_diagnostic_bytes: 65_536,
+                        connect_timeout_milliseconds: 100,
+                        first_byte_timeout_milliseconds: 500,
+                        idle_timeout_milliseconds: 1_000,
+                        total_timeout_milliseconds: 5_000,
+                    },
+                    features: CapabilityBackendFeatures {
+                        deferred: false,
+                        input_required: false,
+                        callback: false,
+                        poll: false,
+                        progress: true,
+                        cancellation: true,
+                        max_remote_state_bytes: 0,
+                        max_poll_count: 0,
+                    },
+                },
+            ),
+            validation: validation.clone(),
+        },
+    )
+    .await;
+    let mcp_codec = InstalledCapabilityCodecRef {
+        schema_version: INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION,
+        backend_kind: CapabilityBackendKind::Mcp,
+        codec_id: "platform.json".to_owned(),
+        codec_version: "1.0.0".to_owned(),
+        module_digest: builtin_json_module_digest(),
+        worker_protocol_version: WORKER_PROTOCOL_VERSION,
+        descriptor_digest: mcp_descriptor_digest,
+    };
+    let mcp_capability_closure = CapabilityDeploymentClosure {
+        implementation: mcp_implementation_exact,
+        interface: ExactVersionRef::new(
+            id(ResourceKind::CapabilityInterfaceRevision, 0x17),
+            digest('e'),
+        )
+        .unwrap(),
+        backend: CapabilityBackendBinding::Mcp {
+            codec: mcp_codec,
+            worker_manifest_digest: manifest_digest.clone(),
+            mcp_deployment: mcp.deployment.clone(),
+            discovery_snapshot_id: mcp.snapshot.snapshot_id.clone(),
+            discovery_snapshot_digest: mcp.snapshot.canonical_digest.clone(),
+            authorization_policy: mcp.auth_policy.clone(),
+        },
+        secret_bindings: vec![],
+        policies: vec![fixture.policy.clone()],
+        conformance_evidence: package.artifact.clone(),
+    };
+    mcp_capability_closure.validate().unwrap();
+    let mcp_capability_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::CapabilityInterface(mcp_capability_closure),
+    )
+    .unwrap();
+    let mcp_capability_deployment_id = id(ResourceKind::CapabilityDeployment, 0x991);
+    insert_deployment(
+        pool,
+        &fixture.tenant_id,
+        &mcp_capability_deployment_id,
+        &id(ResourceKind::CapabilityInterface, 0x16),
+        &id(ResourceKind::CapabilityInterfaceRevision, 0x17),
+        &fixture.principal_id,
+        &mcp_capability_payload,
+    )
+    .await;
+    let mcp_deployment = ExactDeploymentRef::new(
+        mcp_capability_deployment_id,
+        mcp_capability_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
+
     for (account_id, scope_kind, scope_id, metric) in [
         (
             id(ResourceKind::QuotaAccount, 0x930),
@@ -2617,6 +3254,12 @@ async fn prepare_remote_http_process_fixture(
             id(ResourceKind::QuotaAccount, 0x935),
             "capability_deployment",
             grpc_deployment.deployment_id.clone(),
+            QuotaDimension::CapabilityConcurrentInvocations,
+        ),
+        (
+            id(ResourceKind::QuotaAccount, 0x992),
+            "capability_deployment",
+            mcp_deployment.deployment_id.clone(),
             QuotaDimension::CapabilityConcurrentInvocations,
         ),
     ] {
@@ -2781,6 +3424,8 @@ async fn prepare_remote_http_process_fixture(
         manifest_digest,
         node_id,
         grpc_deployment,
+        mcp_deployment,
+        mcp_authorization_binding_id: mcp.authorization_binding_id,
     }
 }
 
@@ -2795,6 +3440,7 @@ async fn run_remote_http_worker_process_recovery(
         );
         return;
     };
+    let mcp_host_binary = std::env::var("PLATFORM_MCP_HOST_BIN").ok();
     let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
     let tls = process_mtls_fixture();
     let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -2805,13 +3451,20 @@ async fn run_remote_http_worker_process_recovery(
     let grpc = Arc::new(CountingGrpcTransport {
         calls: AtomicUsize::new(0),
     });
+    let mcp = Arc::new(CountingMcpTransport {
+        calls: AtomicUsize::new(0),
+        output_schema_digest: fixture.output_schema_digest.clone(),
+    });
     let limits = EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap();
-    let service = EgressBrokerServiceServer::new(EgressBrokerGrpcService::new(
-        Arc::new(EmptyModelWire),
-        Arc::clone(&http),
-        Arc::clone(&grpc),
-        limits,
-    ));
+    let service = EgressBrokerServiceServer::new(
+        EgressBrokerGrpcService::new(
+            Arc::new(EmptyModelWire),
+            Arc::clone(&http),
+            Arc::clone(&grpc),
+            limits,
+        )
+        .with_mcp_streamable_http(mcp.clone()),
+    );
     let service =
         tonic::service::interceptor::InterceptedService::new(service, EgressCallerWorkloadIdentity);
     let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
@@ -3149,6 +3802,189 @@ async fn run_remote_http_worker_process_recovery(
     assert_eq!(grpc.calls.load(Ordering::SeqCst), 1);
     grpc_second.kill().unwrap();
     grpc_second.wait().unwrap();
+
+    if let Some(mcp_host_binary) = mcp_host_binary {
+        let host_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host_address = host_listener.local_addr().unwrap();
+        drop(host_listener);
+        let host_config_path = PathBuf::from(format!("{temp_prefix}-mcp-host.json"));
+        let host_cert_path = PathBuf::from(format!("{temp_prefix}-mcp-host.pem"));
+        let host_key_path = PathBuf::from(format!("{temp_prefix}-mcp-host-key.pem"));
+        let host_egress_cert_path =
+            PathBuf::from(format!("{temp_prefix}-mcp-host-egress-client.pem"));
+        let host_egress_key_path =
+            PathBuf::from(format!("{temp_prefix}-mcp-host-egress-client-key.pem"));
+        std::fs::write(&host_cert_path, &tls.mcp_host_certificate_pem).unwrap();
+        std::fs::write(&host_key_path, &tls.mcp_host_key_pem).unwrap();
+        std::fs::write(&host_egress_cert_path, &tls.mcp_host_client_certificate_pem).unwrap();
+        std::fs::write(&host_egress_key_path, &tls.mcp_host_client_key_pem).unwrap();
+        let host_config = json!({
+            "schema_version": 1,
+            "listen_address": host_address.to_string(),
+            "tls_server_name": "mcp.test",
+            "maximum_rpc_message_bytes": 1048576,
+            "egress": {
+                "endpoint": format!("https://{address}/"),
+                "tls_server_name": "egress.test",
+                "connect_timeout_milliseconds": 1000,
+                "request_timeout_milliseconds": 30000,
+                "maximum_rpc_metadata_bytes": 65536,
+                "maximum_rpc_payload_bytes": 1048576
+            },
+            "drain_grace_milliseconds": 1000
+        });
+        std::fs::write(&host_config_path, serde_json::to_vec(&host_config).unwrap()).unwrap();
+        let host_config_digest = canonical_digest(&host_config).unwrap();
+        let mut host = std::process::Command::new(&mcp_host_binary)
+            .env("PLATFORM_MCP_HOST_CONFIG", &host_config_path)
+            .env("PLATFORM_MCP_HOST_CONFIG_DIGEST", &host_config_digest)
+            .env("PLATFORM_MCP_HOST_SERVER_CLIENT_CA_PATH", &ca_path)
+            .env("PLATFORM_MCP_HOST_SERVER_CERT_PATH", &host_cert_path)
+            .env("PLATFORM_MCP_HOST_SERVER_KEY_PATH", &host_key_path)
+            .env("PLATFORM_MCP_HOST_EGRESS_CA_PATH", &ca_path)
+            .env("PLATFORM_MCP_HOST_EGRESS_CERT_PATH", &host_egress_cert_path)
+            .env("PLATFORM_MCP_HOST_EGRESS_KEY_PATH", &host_egress_key_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let host_startup = read_process_stderr_line(host.stderr.take().unwrap()).await;
+        assert!(
+            host_startup.contains("platform-mcp-host started"),
+            "{host_startup}"
+        );
+
+        let mcp_node_id = id(ResourceKind::NodeExecution, 0x993);
+        rebind_run_capability_candidate(
+            pool,
+            fixture,
+            remote.mcp_deployment.clone(),
+            mcp_node_id.clone(),
+            11,
+            "remote-mcp-process-recovery",
+        )
+        .await;
+        let run_version: i64 = sqlx::query_scalar(
+            "SELECT version FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(fixture.run_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let mut mcp_admission = command_for_node(fixture, &mcp_node_id, 0x994);
+        mcp_admission.expected_run_version = u64::try_from(run_version).unwrap();
+        mcp_admission.mcp_runtime = Some(McpCapabilityRuntimeRequest {
+            mcp_operation_id: id(ResourceKind::McpOperation, 0x995),
+            authorization_binding_id: remote.mcp_authorization_binding_id.clone(),
+        });
+        let mcp_admitted = match execute_admit(repository, mcp_admission).await.unwrap() {
+            CommandOutcome::Applied(record) => record,
+            CommandOutcome::Replayed(_) => panic!("remote MCP process recovery admission replayed"),
+        };
+        let mcp_job_id = id(ResourceKind::Job, 0x996);
+        match execute_prepare(
+            repository,
+            PrepareCapabilityDispatch {
+                audit: audit(
+                    &fixture.tenant_id,
+                    &fixture.principal_id,
+                    PrincipalKind::AgentRunner,
+                    0x997,
+                    '5',
+                    '6',
+                ),
+                invocation_id: mcp_admitted.invocation_id.clone(),
+                expected_invocation_version: mcp_admitted.version,
+                job_id: mcp_job_id.clone(),
+                scheduled_at: Utc::now() - Duration::seconds(1),
+            },
+        )
+        .await
+        .unwrap()
+        {
+            CommandOutcome::Applied(_) => {}
+            CommandOutcome::Replayed(_) => panic!("remote MCP process recovery prepare replayed"),
+        }
+
+        let mut mcp_config = remote.config.clone();
+        mcp_config["mcp_host"]["endpoint"] =
+            serde_json::Value::String(format!("https://{host_address}/"));
+        let mut wrong_mcp_config = mcp_config.clone();
+        wrong_mcp_config["installed_mcp_codecs"][0]["descriptor_digest"] =
+            serde_json::to_value(digest('f')).unwrap();
+        let wrong_mcp_runtime: Sha256Digest = canonical_digest(&json!({
+            "schema_version": 1,
+            "http": wrong_mcp_config["installed_http_codecs"].clone(),
+            "grpc": wrong_mcp_config["installed_grpc_codecs"].clone(),
+            "mcp": wrong_mcp_config["installed_mcp_codecs"].clone()
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+        wrong_mcp_config["worker_manifest"]["adapter_runtime_digest"] =
+            serde_json::to_value(wrong_mcp_runtime).unwrap();
+        let (wrong_mcp_path, wrong_mcp_digest) = write_config("wrong-mcp", &wrong_mcp_config);
+        let mut wrong_mcp = spawn_worker(&wrong_mcp_path, &wrong_mcp_digest);
+        let wrong_mcp_startup = read_process_stderr_line(wrong_mcp.stderr.take().unwrap()).await;
+        assert!(
+            wrong_mcp_startup.contains("started generation="),
+            "{wrong_mcp_startup}"
+        );
+        tokio::time::sleep(StdDuration::from_millis(750)).await;
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+            )
+            .bind(fixture.tenant_id.to_string())
+            .bind(mcp_job_id.to_string())
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            "ready"
+        );
+        assert_eq!(mcp.calls.load(Ordering::SeqCst), 0);
+        wrong_mcp.kill().unwrap();
+        wrong_mcp.wait().unwrap();
+
+        let (mcp_config_path, mcp_config_digest) = write_config("mcp", &mcp_config);
+        let mut mcp_first = spawn_worker(&mcp_config_path, &mcp_config_digest);
+        let mcp_startup = read_process_stderr_line(mcp_first.stderr.take().unwrap()).await;
+        assert!(mcp_startup.contains("started generation="), "{mcp_startup}");
+        install_remote_commit_pause(pool).await;
+        wait_for_atomic_count(&mcp.calls, 1, StdDuration::from_secs(10)).await;
+        wait_for_database_state(pool, &mcp_job_id, "running", StdDuration::from_secs(10)).await;
+        mcp_first.kill().unwrap();
+        mcp_first.wait().unwrap();
+        remove_remote_commit_pause(pool).await;
+        expire_running_capability_job(pool, fixture, &mcp_job_id).await;
+        let mut mcp_second = spawn_worker(&mcp_config_path, &mcp_config_digest);
+        wait_for_invocation_state(
+            pool,
+            &mcp_admitted.invocation_id,
+            "reconciliation_required",
+            StdDuration::from_secs(10),
+        )
+        .await;
+        assert_eq!(mcp.calls.load(Ordering::SeqCst), 1);
+        mcp_second.kill().unwrap();
+        mcp_second.wait().unwrap();
+        host.kill().unwrap();
+        host.wait().unwrap();
+        for path in [
+            wrong_mcp_path,
+            mcp_config_path,
+            host_config_path,
+            host_cert_path,
+            host_key_path,
+            host_egress_cert_path,
+            host_egress_key_path,
+        ] {
+            std::fs::remove_file(path).unwrap();
+        }
+    } else {
+        eprintln!("PLATFORM_MCP_HOST_BIN is unset; remote MCP process recovery fixture skipped");
+    }
 
     let _ = shutdown_sender.send(());
     server.await.unwrap().unwrap();
@@ -4712,6 +5548,7 @@ async fn insert_version(
                 ResourceKind::CapabilityImplementation => {
                     RegistryResourceKind::CapabilityImplementation
                 }
+                ResourceKind::McpServer => RegistryResourceKind::McpServer,
                 _ => panic!("unexpected fixture Resource kind"),
             },
             &exact.revision_id,

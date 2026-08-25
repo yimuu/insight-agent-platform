@@ -2,8 +2,9 @@
 //!
 //! The process owns bounded local permits and protocol codecs. PostgreSQL remains the durable
 //! Invocation/Job authority and all network traffic crosses the independently deployed mTLS Egress
-//! Broker. MCP is intentionally not composed here: its independent protocol-host RPC boundary is a
-//! separate Phase 3 role.
+//! Broker. MCP uses the same durable worker owner but crosses an independent mTLS MCP Host RPC
+//! boundary; the worker never owns Streamable HTTP, OAuth, session, Task, or subscription wire
+//! semantics.
 
 use insight_platform_capability_adapters::{
     CapabilityAdapterWorker, CapabilityDispatcher, GrpcCapabilityAdapter, GrpcNetworkTransport,

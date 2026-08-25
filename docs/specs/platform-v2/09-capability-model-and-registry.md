@@ -530,6 +530,7 @@ Remote `platform.json@1.0.0`随后把实际raw-JCS protocol与HTTP/gRPC request/
 domain-separated compiled digest；binary startup和codec constructor对任一漂移声明均拒绝，避免把自由mapping digest误当成已安装
 可执行codec。PostgreSQL owner transaction继续对结果正文执行exact Interface schema与byte-limit复验。fresh PostgreSQL 16 r217进一步
 以真实Remote Worker与mTLS Egress RPC分别验证HTTP/gRPC错manifest零claim/零外部调用、响应后commit-window强杀及第二进程恢复；
-两个非幂等Invocation都只进入人工reconciliation，且各自远端调用保持一次。Remote HTTP/gRPC process L3至此闭合；MCP process L3与
-L4 rollout仍待完成。MCP Host production binary已另行通过双mTLS、Egress到达后强杀、completion-unknown及重启安全重放fixture；该
-Host局部证据不替代PostgreSQL Remote Worker→Host→Egress的完整claim/lease/reconciliation矩阵。
+两个非幂等Invocation都只进入人工reconciliation，且各自远端调用保持一次。Remote HTTP/gRPC process L3至此闭合。fresh PostgreSQL
+16 r221进一步以production Remote Worker→production MCP Host→mTLS Egress验证MCP exact protocol/auth/discovery/codec closure、错codec
+零调用、commit-window强杀及第二进程只进入人工reconciliation且远端调用保持一次，关闭MCP ToolsCall process L3；OAuth/subscription
+真实协议矩阵与L4 rollout仍待完成。

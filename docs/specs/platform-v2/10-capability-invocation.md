@@ -196,6 +196,7 @@ fault/isolated-capacity tests分层运行。一个低层fixture不同时声明�
 CR-181 cross-review已确认Plan v4 dispatch/result binding并恢复Accepted。fresh PostgreSQL 16 r208已通过Native exact manifest双进程
 kill/expired-lease recovery、quota settlement与non-idempotent reconciliation L3；r217进一步以真实Remote Worker+mTLS Egress RPC分别
 通过HTTP/gRPC错manifest零claim/零外部调用、响应后commit-window kill及第二进程只收敛到non-idempotent reconciliation且不重放远端
-调用。MCP Host production binary已通过双mTLS、到达Egress后强杀、`CompletionUnknown`及重启安全重放的进程fixture；这不替代
-PostgreSQL Remote Worker→Host→Egress三进程的claim/lease/reconciliation证据。Remote MCP整链、Model/Context整链L3及L4～L6仍待完成。
+调用。MCP Host production binary已通过双mTLS、到达Egress后强杀、`CompletionUnknown`及重启安全重放的进程fixture；fresh PostgreSQL
+16 r221再以production Remote Worker→Host→Egress关闭MCP ToolsCall的exact binding、错codec零调用、commit-window强杀、expired-lease
+恢复及非幂等不重放矩阵。Remote HTTP/gRPC/MCP ToolsCall process L3已闭合；Model/Context整链L3及OAuth/subscription、L4～L6仍待完成。
 CR-188进一步确认remote installed codec与required Worker manifest是Invocation冻结闭包，不能由Worker运行时选择或caller覆盖。

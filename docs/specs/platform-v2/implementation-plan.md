@@ -83,7 +83,10 @@
 > adapter tests、strict Clippy与crate-boundary scan通过。后续fresh PostgreSQL 16 r217以真实mTLS Egress RPC、分别漂移HTTP/gRPC codec
 > manifest的进程、正确Remote Worker commit-window强杀和第二进程expired-lease恢复关闭HTTP/gRPC非幂等路径L3：错manifest时Job保持
 > ready且对应外部调用为零；已返回响应的进程被杀后Invocation只进入`reconciliation_required`且两种远端调用分别保持一次。
-> MCP真实多进程L3及Phase 2 exit gate仍待完成；独立MCP Host RPC由下一批接线。
+> 后续fresh PostgreSQL 16 r221以production Remote Worker→production MCP Host→mTLS Egress三进程链完成MCP ToolsCall同一矩阵：exact
+> protocol/auth/discovery/Capability bindings由PostgreSQL解析，错MCP codec的Worker保持Job ready且远端调用为零；正确Worker在Host返回后
+> commit-window强杀，第二Worker只收敛到`reconciliation_required`，Streamable HTTP调用保持一次。Remote HTTP/gRPC/MCP ToolsCall process
+> L3至此闭合；Model/Context external leaf及Phase 2整链exit gate仍待完成。
 
 > 2026-08-25 implementation evidence：Remote MCP现有独立`platform-mcp-host` production进程及closed protobuf RPC。Capability
 > Worker只通过mTLS client调用Host，服务端在解码前要求唯一Capability Worker URI SAN；同一私有CA签发的Model Worker身份在真实
@@ -94,7 +97,8 @@
 > stdio、Sandbox或host process权限；正负静态部署fixture、RPC/Host/adapter/worker tests与strict Clippy通过。production binary进程fixture
 > 进一步以Capability Worker→Host和Host→Egress两段独立mTLS身份验证Host边界：ReadOnly ToolsCall到达Egress后强杀Host，调用方只能得到
 > `CompletionUnknown`；重启同一binary后安全重放同一冻结contract/request成功，Egress调用总数严格为2。该证据关闭Host自身的进程恢复
-> 基座，但PostgreSQL Remote Worker→Host→Egress三进程kill/recovery矩阵、OAuth/subscription协议矩阵及Phase 3 exit gate仍待完成。
+> 基座。fresh PostgreSQL 16 r221随后通过PostgreSQL Remote Worker→Host→Egress三进程exact binding、错codec零调用、commit-window强杀、
+> expired-lease恢复与非幂等不重放矩阵，关闭MCP ToolsCall process L3；OAuth/subscription真实协议、隔舱饱和及Phase 3 exit gate仍待完成。
 
 > 2026-08-25 implementation evidence：ModelTurn admission现已把Plan列出的Skill/Capability slots逐项冻结进snapshot与Receipt replay，
 > 并在owner transaction用各slot的exact Selection Policy重新执行共享selector；请求投影即使引用候选集合内的合法但未选中
