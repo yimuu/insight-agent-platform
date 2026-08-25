@@ -96,6 +96,13 @@
 > TLS失败且HTTP业务request计数为零。Egress/Broker全套测试、strict Clippy与合同检查通过。该证据关闭CR-195 L1与真实HTTPS last-hop L3切片，
 > 但尚未把Egress放入r279的独立OS进程恢复矩阵。
 
+> 2026-08-26 implementation evidence：r281把r279/r280组合为fresh PostgreSQL 16独立协议进程L3。测试进程以单独OS进程组合production
+> Egress Resource Refresh RPC与`ReqwestMcpStreamableHttpConnector`，并运行独立CA/SAN的真实TLS fake MCP server；production Resource Host与
+> subscription Context Worker保持各自进程。第一次HTTPS initialize到达后强杀Egress、Host与Worker；重启Egress/Host后，第二次完整
+> initialize/initialized/list/exact-root-read返回时暂停terminal commit并强杀Worker；第三个Worker以expired lease恢复成功。方法日志严格为3次
+> initialize、2次initialized/list/read，最终唯一completed Event。该证据关闭subscription Resource Refresh的真实wire与dispatch/response-commit
+> crash L3；test-only loopback feature不进入production binary。role saturation、真实Prometheus scrape和L4 rollout仍是独立门禁。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

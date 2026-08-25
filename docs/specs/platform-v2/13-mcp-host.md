@@ -246,4 +246,9 @@ r280实现CR-195显式trust material：installed endpoint拒绝空、超限或�
 真实TLS socket以独立CA和canonical SAN完成full reconcile的四步wire；错CA在HTTP业务bytes计数为零时失败。该证据关闭MCP HTTPS trust last-hop，
 但独立Egress OS进程与r279 crash-window的组合fixture仍待完成。
 
+r281以独立Egress测试进程组合production Resource Refresh RPC/connector，并通过独立CA/SAN真实TLS fake MCP server与production Host/Context
+Worker完成三进程恢复：首次initialize后强杀Egress/Host/Worker，第二次list/read响应后在terminal commit前强杀Worker，第三次恢复成功；
+wire只read冻结root而不read服务器返回的其他URI，方法计数为3/2/2/2且只有一个completed Event。subscription protocol/crash component L3
+至此闭合；test-only loopback许可未进入production binary，容量饱和与L4 rollout仍由18单独验收。
+
 首版remote Streamable HTTP合同无未决设计问题。

@@ -37,6 +37,13 @@ use insight_platform_contracts::{
     WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_jobs::{JobFence as DomainJobFence, LeasePolicy};
+use insight_platform_egress::{
+    AeadMcpRemoteTaskStateCodec, DnsResolutionError, EgressDnsResolver,
+    InstalledMcpStreamableHttpEndpoint, InstalledMcpStreamableHttpEndpointCatalog,
+    McpRemoteTaskStateKey, McpStreamableHttpEgressLimits, ReqwestMcpStreamableHttpConnector,
+    ResolvedSecretMaterial, SecretMaterialResolutionError, SecretMaterialResolver,
+    SensitiveMcpRemoteTaskStateKey,
+};
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
     EgressCallerWorkloadIdentity, EgressInternalRpcLimits, MCP_HOST_WORKLOAD_IDENTITY,
@@ -65,6 +72,11 @@ use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose, SanType,
 };
+use rustls::{
+    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+    ServerConfig,
+};
+use serde::{Deserialize, Serialize};
 use insight_platform_postgres::{
     mcp_repository::{
         ClaimContextSubscriptionRefreshJobs, CommitContextSubscriptionRefresh,
@@ -82,6 +94,8 @@ use insight_platform_sandbox::SandboxExecutionPolicyClosure;
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use std::{
     collections::BTreeMap,
+    io::Write as _,
+    net::SocketAddr,
     path::PathBuf,
     process::{Child, Stdio},
     sync::{
@@ -90,7 +104,9 @@ use std::{
     },
     time::Duration as StdDuration,
 };
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::Notify;
+use tokio_rustls::TlsAcceptor;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
@@ -324,6 +340,311 @@ impl McpResourceRefreshConnector for ProcessRefreshConnector {
     }
 }
 
+const PROTOCOL_EGRESS_CONFIG_ENV: &str = "PLATFORM_SUBSCRIPTION_EGRESS_FIXTURE_CONFIG";
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtocolEgressFixtureConfig {
+    egress_address: SocketAddr,
+    mcp_address: SocketAddr,
+    ca_pem: String,
+    egress_server_cert: String,
+    egress_server_key: String,
+    mcp_server_cert: String,
+    mcp_server_key: String,
+    endpoint: InstalledMcpStreamableHttpEndpoint,
+    control_prefix: String,
+    resource_uri: String,
+}
+
+struct ProtocolFixtureDns(SocketAddr);
+
+#[async_trait]
+impl EgressDnsResolver for ProtocolFixtureDns {
+    async fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>, DnsResolutionError> {
+        if host != "mcp.example.test" || port != self.0.port() {
+            return Err(DnsResolutionError::NoAddresses);
+        }
+        Ok(vec![self.0])
+    }
+}
+
+struct ProtocolFixtureSecrets;
+
+#[async_trait]
+impl SecretMaterialResolver for ProtocolFixtureSecrets {
+    async fn resolve(
+        &self,
+        _tenant_id: &ResourceId,
+        binding: &ExactSecretBindingRef,
+    ) -> Result<ResolvedSecretMaterial, SecretMaterialResolutionError> {
+        ResolvedSecretMaterial::new(
+            binding.secret_binding_id.clone(),
+            binding.provider_id.clone(),
+            binding.purpose.clone(),
+            binding.binding_generation,
+            named_digest("token-version"),
+            b"subscription-protocol-token".to_vec(),
+        )
+        .map_err(|_| SecretMaterialResolutionError::InvalidEvidence)
+    }
+}
+
+fn protocol_control_path(prefix: &str, name: &str) -> PathBuf {
+    PathBuf::from(format!("{prefix}-{name}"))
+}
+
+async fn read_http_request(
+    stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Option<(String, serde_json::Value)> {
+    let mut request = Vec::new();
+    let header_end = loop {
+        let mut chunk = [0_u8; 1_024];
+        let read = stream.read(&mut chunk).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.len() > 131_072 {
+            return None;
+        }
+        if let Some(position) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+            break position + 4;
+        }
+    };
+    let headers = String::from_utf8(request[..header_end].to_vec()).ok()?;
+    let lower = headers.to_ascii_lowercase();
+    if !headers.starts_with("POST /mcp HTTP/1.1\r\n")
+        || !lower.contains("host: mcp.example.test:")
+        || !lower.contains("authorization: bearer subscription-protocol-token")
+    {
+        return None;
+    }
+    let content_length = lower
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length: "))?
+        .parse::<usize>()
+        .ok()?;
+    while request.len() - header_end < content_length {
+        let mut chunk = [0_u8; 1_024];
+        let read = stream.read(&mut chunk).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        request.extend_from_slice(&chunk[..read]);
+    }
+    let body = serde_json::from_slice(&request[header_end..header_end + content_length]).ok()?;
+    Some((headers, body))
+}
+
+async fn serve_protocol_request(
+    stream: tokio::net::TcpStream,
+    tls: Arc<ServerConfig>,
+    config: ProtocolEgressFixtureConfig,
+    initialize_attempts: Arc<AtomicUsize>,
+    log_lock: Arc<tokio::sync::Mutex<()>>,
+) {
+    let Ok(mut stream) = TlsAcceptor::from(tls).accept(stream).await else {
+        return;
+    };
+    let Some((_headers, body)) = read_http_request(&mut stream).await else {
+        return;
+    };
+    let Some(method) = body.get("method").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    {
+        let _guard = log_lock.lock().await;
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(protocol_control_path(&config.control_prefix, "methods.log"))
+            .unwrap();
+        writeln!(log, "{method}").unwrap();
+    }
+    let attempt = if method == "initialize" {
+        let attempt = initialize_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        std::fs::write(
+            protocol_control_path(&config.control_prefix, &format!("attempt-{attempt}.started")),
+            b"started",
+        )
+        .unwrap();
+        if attempt == 1 {
+            tokio::time::sleep(StdDuration::from_secs(30)).await;
+        } else if attempt == 2 {
+            let release = protocol_control_path(&config.control_prefix, "attempt-2.release");
+            while !release.exists() {
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        }
+        Some(attempt)
+    } else {
+        None
+    };
+    let id = body.get("id").cloned();
+    let (status, session, response_body) = match method {
+        "initialize" => (
+            "200 OK",
+            Some(format!("protocol-session-{}", attempt.unwrap())),
+            serde_json::to_vec(&serde_json::json!({
+                "id": id,
+                "jsonrpc": "2.0",
+                "result": {
+                    "capabilities": {"resources": {"subscribe": true}},
+                    "protocolVersion": MCP_PROTOCOL_BASELINE,
+                    "serverInfo": {"name": "process-fixture", "version": "1"}
+                }
+            }))
+            .unwrap(),
+        ),
+        "notifications/initialized" => ("202 Accepted", None, Vec::new()),
+        "resources/list" => (
+            "200 OK",
+            None,
+            serde_json::to_vec(&serde_json::json!({
+                "id": id,
+                "jsonrpc": "2.0",
+                "result": {"resources": [
+                    {"name": "other", "uri": "mcp://untrusted.example/other"},
+                    {"name": "root", "uri": config.resource_uri}
+                ]}
+            }))
+            .unwrap(),
+        ),
+        "resources/read" => (
+            "200 OK",
+            None,
+            serde_json::to_vec(&serde_json::json!({
+                "id": id,
+                "jsonrpc": "2.0",
+                "result": {"contents": [{
+                    "mimeType": "text/plain",
+                    "text": "independent process body canary",
+                    "uri": config.resource_uri
+                }]}
+            }))
+            .unwrap(),
+        ),
+        _ => return,
+    };
+    let session_header = session
+        .map(|value| format!("mcp-session-id: {value}\r\n"))
+        .unwrap_or_default();
+    let response = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{session_header}content-length: {}\r\nconnection: close\r\n\r\n",
+        response_body.len()
+    );
+    if stream.write_all(response.as_bytes()).await.is_ok() {
+        let _ = stream.write_all(&response_body).await;
+        let _ = stream.shutdown().await;
+    }
+}
+
+async fn run_protocol_egress_fixture(config: ProtocolEgressFixtureConfig) {
+    let server_certificate = CertificateDer::from_pem_slice(config.mcp_server_cert.as_bytes())
+        .unwrap();
+    let server_key = PrivateKeyDer::from_pem_slice(config.mcp_server_key.as_bytes()).unwrap();
+    let tls = Arc::new(
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![server_certificate], server_key)
+            .unwrap(),
+    );
+    let mcp_listener = tokio::net::TcpListener::bind(config.mcp_address).await.unwrap();
+    let fake_config = config.clone();
+    let fake_server = tokio::spawn(async move {
+        let existing_attempts = std::fs::read_to_string(protocol_control_path(
+            &fake_config.control_prefix,
+            "methods.log",
+        ))
+        .map(|log| log.lines().filter(|method| *method == "initialize").count())
+        .unwrap_or(0);
+        let attempts = Arc::new(AtomicUsize::new(existing_attempts));
+        let log_lock = Arc::new(tokio::sync::Mutex::new(()));
+        loop {
+            let (stream, _) = mcp_listener.accept().await.unwrap();
+            tokio::spawn(serve_protocol_request(
+                stream,
+                Arc::clone(&tls),
+                fake_config.clone(),
+                Arc::clone(&attempts),
+                Arc::clone(&log_lock),
+            ));
+        }
+    });
+    let remote_tasks = Arc::new(
+        AeadMcpRemoteTaskStateCodec::new(
+            "protocol-fixture-key".to_owned(),
+            vec![McpRemoteTaskStateKey {
+                key_id: "protocol-fixture-key".to_owned(),
+                key_reference_digest: named_digest("protocol-fixture-key"),
+                key_material: SensitiveMcpRemoteTaskStateKey::new(vec![7; 32]).unwrap(),
+            }],
+        )
+        .unwrap(),
+    );
+    let connector = Arc::new(
+        ReqwestMcpStreamableHttpConnector::new(
+            InstalledMcpStreamableHttpEndpointCatalog::new(vec![config.endpoint.clone()]).unwrap(),
+            Arc::new(ProtocolFixtureSecrets),
+            Arc::new(ProtocolFixtureDns(config.mcp_address)),
+            remote_tasks,
+            McpStreamableHttpEgressLimits::default(),
+        )
+        .unwrap()
+        .allow_loopback_for_protocol_fixture(),
+    );
+    let limits = EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap();
+    let service = EgressBrokerServiceServer::new(
+        EgressBrokerGrpcService::new(
+            Arc::new(EmptyModel),
+            Arc::new(EmptyHttp),
+            Arc::new(EmptyGrpc),
+            limits,
+        )
+        .with_mcp_resource_refresh(connector),
+    );
+    let service = tonic::service::interceptor::InterceptedService::new(
+        service,
+        EgressCallerWorkloadIdentity,
+    );
+    eprintln!("subscription protocol Egress fixture started");
+    Server::builder()
+        .tls_config(
+            ServerTlsConfig::new()
+                .identity(Identity::from_pem(
+                    config.egress_server_cert,
+                    config.egress_server_key,
+                ))
+                .client_ca_root(Certificate::from_pem(config.ca_pem)),
+        )
+        .unwrap()
+        .add_service(service)
+        .serve(config.egress_address)
+        .await
+        .unwrap();
+    fake_server.abort();
+}
+
+#[test]
+fn subscription_egress_protocol_fixture_process() {
+    let Ok(path) = std::env::var(PROTOCOL_EGRESS_CONFIG_ENV) else {
+        return;
+    };
+    let config: ProtocolEgressFixtureConfig =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_protocol_egress_fixture(config));
+}
+
 struct ProcessTlsFixture {
     ca: String,
     egress_server_cert: String,
@@ -334,6 +655,8 @@ struct ProcessTlsFixture {
     resource_host_client_key: String,
     context_worker_client_cert: String,
     context_worker_client_key: String,
+    mcp_server_cert: String,
+    mcp_server_key: String,
 }
 
 fn process_tls_fixture() -> ProcessTlsFixture {
@@ -374,6 +697,10 @@ fn process_tls_fixture() -> ProcessTlsFixture {
         )],
         ExtendedKeyUsagePurpose::ClientAuth,
     );
+    let (mcp_server_cert, mcp_server_key) = issue(
+        vec![SanType::DnsName("mcp.example.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
     ProcessTlsFixture {
         ca: ca.pem(),
         egress_server_cert,
@@ -384,6 +711,8 @@ fn process_tls_fixture() -> ProcessTlsFixture {
         resource_host_client_key,
         context_worker_client_cert,
         context_worker_client_key,
+        mcp_server_cert,
+        mcp_server_key,
     }
 }
 
@@ -710,9 +1039,21 @@ struct Fixture {
     subscription_id: ResourceId,
     job_id: ResourceId,
     deadline: DateTime<Utc>,
+    mcp_endpoint: insight_platform_contracts::CanonicalHttpEndpoint,
+    protocol_policy: ExactVersionRef,
+    network_policy: ExactVersionRef,
+    tls_policy: ExactVersionRef,
+    trust_policy: ExactVersionRef,
+    auth_policy: ExactVersionRef,
+    token_purpose: SecretPurpose,
 }
 
-async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> Fixture {
+async fn seed(
+    pool: &PgPool,
+    repository: &PgRepository,
+    now: DateTime<Utc>,
+    mcp_port: u16,
+) -> Fixture {
     let tenant_id = id(ResourceKind::Tenant, 1);
     let other_tenant_id = id(ResourceKind::Tenant, 2);
     let principal_id = id(ResourceKind::Principal, 3);
@@ -781,6 +1122,10 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
         protocol.canonical_digest().unwrap(),
     )
     .unwrap();
+    let mut resource_indicator = oauth_endpoint("mcp.example.test", "/mcp");
+    resource_indicator.endpoint.port = mcp_port;
+    resource_indicator.endpoint_identity_digest =
+        resource_indicator.endpoint.canonical_digest().unwrap();
     let auth_profile = McpAuthPolicyDocument {
         schema_version: 1,
         issuer: oauth_endpoint("auth.example.test", "/"),
@@ -792,7 +1137,7 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
         pkce_secret_provider_id: id(ResourceKind::SecretProvider, 0x2d),
         token_secret_provider_id: id(ResourceKind::SecretProvider, 0x2e),
         redirect_uri: oauth_endpoint("platform.example.test", "/v1/mcp/oauth/callback"),
-        resource_indicator: oauth_endpoint("mcp.example.test", "/mcp"),
+        resource_indicator,
         allowed_scopes: vec![
             "resources.read".to_owned(),
             "resources.subscribe".to_owned(),
@@ -1038,15 +1383,16 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
         &trust_policy,
     )
     .await;
-    let mcp_endpoint = endpoint("mcp.example.test", "/mcp");
+    let mut mcp_endpoint = endpoint("mcp.example.test", "/mcp");
+    mcp_endpoint.port = mcp_port;
     let mcp_closure = insight_platform_contracts::McpDeploymentClosure {
         server_revision: server_revision.clone(),
         server_identity_digest: mcp_endpoint.canonical_digest().unwrap(),
         transport: McpTransportBinding::StreamableHttp {
             endpoint_identity_digest: mcp_endpoint.canonical_digest().unwrap(),
-            endpoint: mcp_endpoint,
-            network_policy,
-            tls_policy,
+            endpoint: mcp_endpoint.clone(),
+            network_policy: network_policy.clone(),
+            tls_policy: tls_policy.clone(),
         },
         protocol_policy: protocol_policy.clone(),
         trust_policy: trust_policy.clone(),
@@ -1079,7 +1425,7 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
         .create_secret_binding(NewSecretBinding {
             tenant_id: tenant_id.clone(),
             secret_binding_id: token_binding.secret_binding_id.clone(),
-            purpose: token_purpose,
+            purpose: token_purpose.clone(),
             provider_id: token_binding.provider_id.clone(),
             opaque_reference_ciphertext: vec![9, 8, 7],
             key_id: "fixture-key".to_owned(),
@@ -1167,7 +1513,7 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
         tenant_id: tenant_id.clone(),
         mcp_deployment: mcp_deployment.clone(),
         server_revision: server_revision.clone(),
-        protocol_profile: protocol_policy,
+        protocol_profile: protocol_policy.clone(),
         authorization_binding_id: authorization.authorization_binding_id.clone(),
         authorization_generation: authorization.generation,
         authorization_context_digest: authorization_context.canonical_digest.clone(),
@@ -1306,6 +1652,13 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
         subscription_id: id(ResourceKind::McpOperation, 0x49),
         job_id: id(ResourceKind::Job, 0x4a),
         deadline: now + Duration::hours(1),
+        mcp_endpoint,
+        protocol_policy,
+        network_policy,
+        tls_policy,
+        trust_policy,
+        auth_policy,
+        token_purpose,
     }
 }
 
@@ -1626,6 +1979,8 @@ struct ProcessFixtureFiles {
     resource_host_client_key: PathBuf,
     context_worker_client_cert: PathBuf,
     context_worker_client_key: PathBuf,
+    mcp_server_cert: PathBuf,
+    mcp_server_key: PathBuf,
 }
 
 impl ProcessFixtureFiles {
@@ -1644,6 +1999,8 @@ impl ProcessFixtureFiles {
             resource_host_client_key: path("resource-host-client-key.pem"),
             context_worker_client_cert: path("context-worker-client.pem"),
             context_worker_client_key: path("context-worker-client-key.pem"),
+            mcp_server_cert: path("mcp-server.pem"),
+            mcp_server_key: path("mcp-server-key.pem"),
         };
         for (path, contents) in [
             (&files.ca, &tls.ca),
@@ -1653,6 +2010,8 @@ impl ProcessFixtureFiles {
             (&files.resource_host_client_key, &tls.resource_host_client_key),
             (&files.context_worker_client_cert, &tls.context_worker_client_cert),
             (&files.context_worker_client_key, &tls.context_worker_client_key),
+            (&files.mcp_server_cert, &tls.mcp_server_cert),
+            (&files.mcp_server_key, &tls.mcp_server_key),
         ] {
             std::fs::write(path, contents).unwrap();
         }
@@ -1806,7 +2165,19 @@ async fn remove_context_commit_pause(pool: &PgPool) {
     sqlx::query("DROP FUNCTION insight_platform.test_pause_subscription_context_commit()")
         .execute(pool)
         .await
-        .unwrap();
+    .unwrap();
+}
+
+async fn expire_running_context_job(pool: &PgPool, fixture: &Fixture, job_id: &ResourceId) {
+    let updated = sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
 }
 
 async fn run_subscription_process_l3(
@@ -2037,6 +2408,248 @@ async fn run_subscription_process_l3(
     egress_server.await.unwrap().unwrap();
 }
 
+async fn wait_for_control_file(path: &std::path::Path, timeout: StdDuration) {
+    let started = std::time::Instant::now();
+    while !path.exists() {
+        assert!(started.elapsed() < timeout, "control file was not created: {}", path.display());
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+}
+
+fn spawn_protocol_egress_process(config_path: &std::path::Path) -> Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("subscription_egress_protocol_fixture_process")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(PROTOCOL_EGRESS_CONFIG_ENV, config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+async fn run_subscription_protocol_process_l3(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+    active_subscription: &McpSubscriptionRecord,
+    database_url: &str,
+    resource_host_binary: &str,
+    context_worker_binary: &str,
+) {
+    let admission = context_reconcile_admission(active_subscription, 0x380);
+    let accepted = repository
+        .admit_context_subscription_refresh(admission)
+        .await
+        .unwrap();
+    let tls = process_tls_fixture();
+    let files = ProcessFixtureFiles::new(&tls);
+    let egress_address = available_address();
+    let mcp_address = SocketAddr::from(([127, 0, 0, 1], fixture.mcp_endpoint.port));
+    let control_prefix = format!("{}-protocol", files.prefix);
+    for name in [
+        "methods.log",
+        "attempt-1.started",
+        "attempt-2.started",
+        "attempt-2.release",
+        "attempt-3.started",
+    ] {
+        let _ = std::fs::remove_file(protocol_control_path(&control_prefix, name));
+    }
+    let endpoint = InstalledMcpStreamableHttpEndpoint {
+        schema_version: 1,
+        deployment: fixture.mcp_deployment.clone(),
+        endpoint: fixture.mcp_endpoint.clone(),
+        endpoint_identity_digest: fixture.mcp_endpoint.canonical_digest().unwrap(),
+        server_identity_digest: fixture.mcp_endpoint.canonical_digest().unwrap(),
+        protocol_policy: fixture.protocol_policy.clone(),
+        network_policy: fixture.network_policy.clone(),
+        tls_policy: fixture.tls_policy.clone(),
+        trust_policy: fixture.trust_policy.clone(),
+        auth_policy: fixture.auth_policy.clone(),
+        token_credential_purpose: fixture.token_purpose.clone(),
+        trusted_root_pem: tls.ca.clone(),
+    };
+    let protocol_config = ProtocolEgressFixtureConfig {
+        egress_address,
+        mcp_address,
+        ca_pem: tls.ca.clone(),
+        egress_server_cert: tls.egress_server_cert.clone(),
+        egress_server_key: tls.egress_server_key.clone(),
+        mcp_server_cert: tls.mcp_server_cert.clone(),
+        mcp_server_key: tls.mcp_server_key.clone(),
+        endpoint,
+        control_prefix: control_prefix.clone(),
+        resource_uri: active_subscription.payload.binding.resource_uri.clone(),
+    };
+    let protocol_config_path = PathBuf::from(format!("{}-protocol-egress.json", files.prefix));
+    std::fs::write(
+        &protocol_config_path,
+        serde_json::to_vec(&protocol_config).unwrap(),
+    )
+    .unwrap();
+
+    let resource_host_address = available_address();
+    let resource_host_config = serde_json::json!({
+        "schema_version": 1,
+        "listen_address": resource_host_address.to_string(),
+        "observability_listen_address": available_address().to_string(),
+        "maximum_rpc_message_bytes": 1048576,
+        "database_max_connections": 4,
+        "database_acquire_timeout_milliseconds": 5000,
+        "egress": {
+            "endpoint": format!("https://{egress_address}/"),
+            "tls_server_name": "egress.test",
+            "connect_timeout_milliseconds": 1000,
+            "request_timeout_milliseconds": 30000,
+            "maximum_rpc_metadata_bytes": 65536,
+            "maximum_rpc_payload_bytes": 1048576
+        },
+        "drain_grace_milliseconds": 1000
+    });
+    let (resource_host_config_path, resource_host_config_digest) =
+        files.write_config("protocol-resource-host", &resource_host_config);
+    let context_worker_config = serde_json::json!({
+        "schema_version": 1,
+        "observability_listen_address": available_address().to_string(),
+        "worker_manifest": context_worker_manifest(),
+        "database_max_connections": 4,
+        "database_acquire_timeout_milliseconds": 5000,
+        "receipt_ttl_seconds": 3600,
+        "scan_interval_milliseconds": 20,
+        "failure_backoff_milliseconds": 5,
+        "drain_grace_milliseconds": 1000,
+        "host": {
+            "endpoint": format!("https://{resource_host_address}/"),
+            "tls_server_name": "resource-host.test",
+            "connect_timeout_milliseconds": 1000,
+            "request_timeout_milliseconds": 30000,
+            "maximum_rpc_message_bytes": 1048576
+        }
+    });
+    let (context_worker_config_path, context_worker_config_digest) =
+        files.write_config("protocol-context-worker", &context_worker_config);
+    let spawn_host = || {
+        spawn_resource_host(ResourceHostSpawn {
+            binary: resource_host_binary,
+            database_url,
+            files: &files,
+            config_path: &resource_host_config_path,
+            config_digest: &resource_host_config_digest,
+        })
+    };
+    let spawn_worker = || {
+        spawn_subscription_context_worker(ContextWorkerSpawn {
+            binary: context_worker_binary,
+            database_url,
+            files: &files,
+            config_path: &context_worker_config_path,
+            config_digest: &context_worker_config_digest,
+        })
+    };
+
+    let mut egress = spawn_protocol_egress_process(&protocol_config_path);
+    let (startup, first_egress_stderr) = monitor_process_stderr(egress.stderr.take().unwrap()).await;
+    assert!(startup.contains("subscription protocol Egress fixture started"), "{startup}");
+    let mut host = spawn_host();
+    let (startup, first_host_stderr) = monitor_process_stderr(host.stderr.take().unwrap()).await;
+    assert!(startup.contains("platform-mcp-resource-host started"), "{startup}");
+    let mut first_worker = spawn_worker();
+    let (startup, first_worker_stderr) =
+        monitor_process_stderr(first_worker.stderr.take().unwrap()).await;
+    assert!(startup.contains("platform-subscription-context-worker started"), "{startup}");
+    wait_for_control_file(
+        &protocol_control_path(&control_prefix, "attempt-1.started"),
+        StdDuration::from_secs(10),
+    )
+    .await;
+    egress.kill().unwrap();
+    egress.wait().unwrap();
+    first_egress_stderr.await.unwrap();
+    host.kill().unwrap();
+    host.wait().unwrap();
+    first_host_stderr.await.unwrap();
+    first_worker.kill().unwrap();
+    first_worker.wait().unwrap();
+    first_worker_stderr.await.unwrap();
+    expire_running_context_job(pool, fixture, &accepted.job_id).await;
+
+    let mut egress = spawn_protocol_egress_process(&protocol_config_path);
+    let (startup, second_egress_stderr) = monitor_process_stderr(egress.stderr.take().unwrap()).await;
+    assert!(startup.contains("subscription protocol Egress fixture started"), "{startup}");
+    let mut host = spawn_host();
+    let (startup, second_host_stderr) = monitor_process_stderr(host.stderr.take().unwrap()).await;
+    assert!(startup.contains("platform-mcp-resource-host started"), "{startup}");
+    let mut second_worker = spawn_worker();
+    let (startup, second_worker_stderr) =
+        monitor_process_stderr(second_worker.stderr.take().unwrap()).await;
+    assert!(startup.contains("platform-subscription-context-worker started"), "{startup}");
+    wait_for_control_file(
+        &protocol_control_path(&control_prefix, "attempt-2.started"),
+        StdDuration::from_secs(10),
+    )
+    .await;
+    install_context_commit_pause(pool).await;
+    std::fs::write(
+        protocol_control_path(&control_prefix, "attempt-2.release"),
+        b"release",
+    )
+    .unwrap();
+    wait_for_context_job_state(
+        pool,
+        &fixture.tenant_id,
+        &accepted.job_id,
+        "running",
+        StdDuration::from_secs(10),
+    )
+    .await;
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    second_worker.kill().unwrap();
+    second_worker.wait().unwrap();
+    second_worker_stderr.await.unwrap();
+    remove_context_commit_pause(pool).await;
+    expire_running_context_job(pool, fixture, &accepted.job_id).await;
+
+    let mut third_worker = spawn_worker();
+    let (startup, third_worker_stderr) =
+        monitor_process_stderr(third_worker.stderr.take().unwrap()).await;
+    assert!(startup.contains("platform-subscription-context-worker started"), "{startup}");
+    wait_for_context_job_state(
+        pool,
+        &fixture.tenant_id,
+        &accepted.job_id,
+        "succeeded",
+        StdDuration::from_secs(15),
+    )
+    .await;
+    let completed_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND aggregate_id = $2 AND event_type = 'context.subscription_refresh.completed'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(accepted.job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(completed_events, 1);
+    let methods = std::fs::read_to_string(protocol_control_path(&control_prefix, "methods.log"))
+        .unwrap();
+    assert_eq!(methods.lines().filter(|method| *method == "initialize").count(), 3);
+    assert_eq!(methods.lines().filter(|method| *method == "notifications/initialized").count(), 2);
+    assert_eq!(methods.lines().filter(|method| *method == "resources/list").count(), 2);
+    assert_eq!(methods.lines().filter(|method| *method == "resources/read").count(), 2);
+
+    third_worker.kill().unwrap();
+    third_worker.wait().unwrap();
+    third_worker_stderr.await.unwrap();
+    host.kill().unwrap();
+    host.wait().unwrap();
+    second_host_stderr.await.unwrap();
+    egress.kill().unwrap();
+    egress.wait().unwrap();
+    second_egress_stderr.await.unwrap();
+}
+
 #[test]
 fn mcp_subscription_is_durable_fenced_coalesced_and_tenant_scoped() {
     std::thread::Builder::new()
@@ -2067,7 +2680,7 @@ async fn mcp_subscription_fixture() {
     verify_schema(&pool).await.unwrap();
     let repository = PgRepository::new(pool.clone());
     let now = Utc::now();
-    let fixture = seed(&pool, &repository, now).await;
+    let fixture = seed(&pool, &repository, now, available_address().port()).await;
     let context_quota_account_id = id(ResourceKind::QuotaAccount, 0x5f0);
     repository
         .create_quota_account(NewQuotaAccount {
@@ -2811,7 +3424,19 @@ async fn mcp_subscription_fixture() {
         std::env::var("PLATFORM_MCP_RESOURCE_HOST_BIN"),
         std::env::var("PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_BIN"),
     ) {
-        run_subscription_process_l3(
+        if std::env::var("PLATFORM_RUN_IN_PROCESS_SUBSCRIPTION_FIXTURE").as_deref() == Ok("1") {
+            run_subscription_process_l3(
+                &pool,
+                &repository,
+                &fixture,
+                &reconciled,
+                &database_url,
+                &resource_host_binary,
+                &context_worker_binary,
+            )
+            .await;
+        }
+        run_subscription_protocol_process_l3(
             &pool,
             &repository,
             &fixture,

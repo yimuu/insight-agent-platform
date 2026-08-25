@@ -338,6 +338,10 @@ Egress尚运行在测试进程内且未接真实Streamable HTTP fake server，�
 r280随后实现CR-195：MCP installed endpoint携带显式bounded PEM trust bundle，实际POST/SSE client只信任该bundle；独立CA/SAN真实TLS
 fixture跑通full reconcile list/read，错CA在零HTTP业务request时失败。该证据不等于Egress已进入独立OS进程恢复矩阵，也不推进L4～L6状态。
 
+r281进一步以独立Egress测试进程、production Resource Refresh RPC/connector、production Host/Context Worker及真实TLS fake MCP server完成
+initialize后Egress/Host/Worker强杀、list/read响应后commit-window Worker强杀和第三次expired-lease恢复；3次initialize、2次list/read只产生
+一个completed Event。subscription protocol/crash component L3由此闭合，容量饱和、真实scrape及L4～L6仍保持未完成。
+
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
 storage与audit closure全部由服务端拥有；upload target是唯一显式Secret-bearing响应例外。Public Gateway不取得storage authority，Artifact Gateway
 不信任自由principal header，两者以exact audience mTLS连接并由Artifact Gateway从PostgreSQL重绑定current principal。

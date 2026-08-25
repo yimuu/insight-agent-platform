@@ -1352,7 +1352,7 @@ pub struct ReqwestMcpStreamableHttpConnector {
     remote_tasks: Arc<AeadMcpRemoteTaskStateCodec>,
     limits: McpStreamableHttpEgressLimits,
     permits: Arc<Semaphore>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "protocol-fixtures"))]
     allow_loopback_for_protocol_fixture: bool,
 }
 
@@ -1391,13 +1391,15 @@ impl ReqwestMcpStreamableHttpConnector {
             remote_tasks,
             limits,
             permits: Arc::new(Semaphore::new(limits.maximum_in_flight)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "protocol-fixtures"))]
             allow_loopback_for_protocol_fixture: false,
         })
     }
 
-    #[cfg(test)]
-    fn allow_loopback_for_protocol_fixture(mut self) -> Self {
+    /// Enables loopback only in explicit protocol-fixture builds. Production binaries do not
+    /// enable this feature and retain the public-destination-only guard.
+    #[cfg(any(test, feature = "protocol-fixtures"))]
+    pub fn allow_loopback_for_protocol_fixture(mut self) -> Self {
         self.allow_loopback_for_protocol_fixture = true;
         self
     }
@@ -1406,7 +1408,7 @@ impl ReqwestMcpStreamableHttpConnector {
         if is_public_destination_ip(address.ip()) {
             return true;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "protocol-fixtures"))]
         if self.allow_loopback_for_protocol_fixture && address.ip().is_loopback() {
             return true;
         }

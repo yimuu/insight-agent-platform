@@ -9,6 +9,10 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+protocol-fixtures = []
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
