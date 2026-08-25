@@ -167,4 +167,9 @@ production-equivalent mTLS/NetworkPolicy/saturation tests分层运行。开发fi
 
 CR-181不增加MCP current-state authority；wrong Invocation/Context owner、Plan/binding digest或output schema必须fail closed。
 
+2026-08-25 implementation evidence：独立`platform-mcp-host` production binary已在真实进程fixture中验证两段分离mTLS身份。ReadOnly
+ToolsCall到达Egress Broker后强杀Host，Capability Worker侧只得到`CompletionUnknown`；重启同一binary后按安全重放规则提交同一冻结
+contract/request并成功，Egress总调用数为2。该证据只关闭Host自身的process restart与completion-unknown边界；PostgreSQL Remote
+Worker→Host→Egress三进程的durable claim/lease/reconciliation、OAuth、Task和subscription真实协议矩阵仍是L3待办。
+
 首版remote Streamable HTTP合同无未决设计问题。

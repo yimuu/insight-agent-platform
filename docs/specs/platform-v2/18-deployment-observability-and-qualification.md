@@ -227,7 +227,8 @@ codec/module/descriptor/Worker manifest在Egress/MCP调用计数仍为零时fail
 当前分层证据：fresh PostgreSQL 16 r208已通过Native exact startup registry/Worker manifest双进程强杀、expired-lease owner recovery、
 quota settlement与non-idempotent reconciliation，关闭Native部分L3；r217以真实Remote Worker+mTLS Egress RPC分别通过HTTP/gRPC
 错manifest零claim/零外部调用、响应后commit-window强杀、第二进程expired-lease恢复及非幂等调用不重放，关闭Remote HTTP/gRPC L3。
-MCP跨进程矩阵和L4 rollout仍未通过。
+MCP Host production binary已通过Capability Worker→Host→Egress双mTLS、Egress到达后强杀、`CompletionUnknown`及重启安全重放的进程
+fixture，关闭Host自身恢复基座；PostgreSQL Remote Worker→Host→Egress三进程durable矩阵和L4 rollout仍未通过。
 
 每个production release至少覆盖：
 

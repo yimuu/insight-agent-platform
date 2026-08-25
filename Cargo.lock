@@ -2817,10 +2817,16 @@ dependencies = [
 name = "insight-platform-mcp-service"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "insight-platform-capability-adapters",
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
  "insight-platform-mcp-host",
  "insight-platform-mcp-rpc",
+ "insight-platform-model-adapters",
+ "rcgen",
  "serde",
  "serde_json",
  "tokio",

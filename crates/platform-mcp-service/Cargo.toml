@@ -21,3 +21,11 @@ tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+insight-platform-capability-adapters.workspace = true
+insight-platform-model-adapters.workspace = true
+rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }

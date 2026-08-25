@@ -91,8 +91,10 @@
 > `McpHostService`与Remote Streamable HTTP transport，所有网络/Secret最后一跳仍只经mTLS Egress Broker。Capability Worker已安装独立
 > MCP port、从PostgreSQL解析exact execution contract，并把Host响应丢失按post-dispatch unknown交由共享Effect/idempotency policy，避免
 > 非幂等写被误判为安全失败。Host Helm为双副本/PDB/HPA/restricted pod，仅允许Remote Worker入站及DNS/Egress Broker出站，无DB、
-> stdio、Sandbox或host process权限；正负静态部署fixture、RPC/Host/adapter/worker tests与strict Clippy通过。真实MCP远端协议、Host/
-> Worker kill-recovery跨进程L3及Phase 3 exit gate仍待完成。
+> stdio、Sandbox或host process权限；正负静态部署fixture、RPC/Host/adapter/worker tests与strict Clippy通过。production binary进程fixture
+> 进一步以Capability Worker→Host和Host→Egress两段独立mTLS身份验证Host边界：ReadOnly ToolsCall到达Egress后强杀Host，调用方只能得到
+> `CompletionUnknown`；重启同一binary后安全重放同一冻结contract/request成功，Egress调用总数严格为2。该证据关闭Host自身的进程恢复
+> 基座，但PostgreSQL Remote Worker→Host→Egress三进程kill/recovery矩阵、OAuth/subscription协议矩阵及Phase 3 exit gate仍待完成。
 
 > 2026-08-25 implementation evidence：ModelTurn admission现已把Plan列出的Skill/Capability slots逐项冻结进snapshot与Receipt replay，
 > 并在owner transaction用各slot的exact Selection Policy重新执行共享selector；请求投影即使引用候选集合内的合法但未选中

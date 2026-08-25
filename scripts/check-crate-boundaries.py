@@ -130,6 +130,10 @@ ALLOWED_INTERNAL = {
 # permitting that edge in the shipped dependency graph. Every resolved dep-kind must be `dev`;
 # adding the same crate as a normal or build dependency remains a boundary failure.
 ALLOWED_DEV_INTERNAL = {
+    # The MCP service production-process fixture stands up the real Egress RPC service and must
+    # implement its three leaf connector traits. These edges are test-only; the shipped Host still
+    # reaches provider/MCP networks solely through the egress_rpc dependency.
+    "mcp_service": {"capability_adapters", "model_adapters"},
     "platform_postgres": {"egress_rpc"},
 }
 
