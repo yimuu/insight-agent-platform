@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     ArtifactRef, DataClassification, PrincipalKind, ResourceId, ResourceKind, Sha256Digest,
+    SKILL_PACKAGE_MEDIA_TYPE,
 };
 use std::fmt;
 
@@ -401,6 +402,7 @@ impl SchedulerSkillPackageReadRequest {
             || self.skill_revision_id.kind() != ResourceKind::SkillRevision
             || self.lease_generation == 0
             || self.artifact.validate().is_err()
+            || self.artifact.media_type() != SKILL_PACKAGE_MEDIA_TYPE
             || self.maximum_bytes == 0
             || self.maximum_bytes > MAX_SCHEDULER_SKILL_PACKAGE_BYTES
             || u64::try_from(self.maximum_bytes)
@@ -868,7 +870,7 @@ mod tests {
                 id(ResourceKind::Artifact, 7),
                 digest('c'),
                 17,
-                "application/octet-stream",
+                SKILL_PACKAGE_MEDIA_TYPE,
                 DataClassification::Internal,
                 Some("skill.package".to_owned()),
             )

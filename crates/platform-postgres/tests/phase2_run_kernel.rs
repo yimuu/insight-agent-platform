@@ -1,9 +1,9 @@
 use chrono::{Duration, Utc};
 use insight_platform_artifacts::{
-    ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, SchedulerRunValueLease,
-    SchedulerRunValueRequestResolver, SchedulerSkillPackageLease,
+    encode_canonical_skill_package, ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError,
+    SchedulerRunValueLease, SchedulerRunValueRequestResolver, SchedulerSkillPackageLease,
     SchedulerSkillPackageRequestResolver, SchedulerTypedPlanLease,
-    SchedulerTypedPlanRequestResolver,
+    SchedulerTypedPlanRequestResolver, SkillPackageContent, MAX_SCHEDULER_SKILL_PACKAGE_BYTES,
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, pinned_nominal_reference,
@@ -18,7 +18,7 @@ use insight_platform_contracts::{
     SchedulingPolicyDocument, Sha256Digest, SkillArtifactSliceRef, SkillDeploymentClosure,
     SkillInstructionAudience, SkillInstructionPhase, SkillInstructionSection, SkillInterface,
     SkillPackageEntry, SkillPackageEntryKind, SkillPackageManifest, SkillResourceSpec,
-    TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef,
+    TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef, SKILL_PACKAGE_MEDIA_TYPE,
 };
 use insight_platform_jobs::WakeSource;
 use insight_platform_orchestrator::{
@@ -54,8 +54,9 @@ use insight_platform_postgres::{
 use insight_platform_security::BindTenantSchedulingPolicy;
 use insight_platform_tasks::{TaskDefinition, TaskState};
 use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 const TENANT_ID: &str = "ten_0198f1c3-9a00-7c3e-b1f3-773c28367001";
 const TENANT_B_ID: &str = "ten_0198f1c3-9a00-7c3e-b1f3-773c28367002";
@@ -76,6 +77,9 @@ const AGENT_DEPLOYMENT_ID: &str = "adep_0198f1c3-9a00-7c3e-b1f3-773c2836700a";
 const SKILL_ID: &str = "skl_0198f1c3-9a00-7c3e-b1f3-773c28367201";
 const SKILL_REVISION_ID: &str = "srev_0198f1c3-9a00-7c3e-b1f3-773c28367202";
 const SKILL_DEPLOYMENT_ID: &str = "skdep_0198f1c3-9a00-7c3e-b1f3-773c28367203";
+const SKILL_PACKAGE_ARTIFACT_ID: &str = "art_0198f1c3-9a00-7c3e-b1f3-773c28367204";
+const SKILL_PACKAGE_BLOB_ID: &str = "blb_0198f1c3-9a00-7c3e-b1f3-773c28367205";
+const SKILL_PACKAGE_ENCRYPTION_DOMAIN_ID: &str = "enc_0198f1c3-9a00-7c3e-b1f3-773c28367206";
 const CHILD_AGENT_ID: &str = "agt_0198f1c3-9a00-7c3e-b1f3-773c2836700b";
 const CHILD_AGENT_INTERFACE_ID: &str = "aif_0198f1c3-9a00-7c3e-b1f3-773c2836701b";
 const CHILD_AGENT_PLAN_ID: &str = "arev_0198f1c3-9a00-7c3e-b1f3-773c2836702b";
@@ -98,6 +102,15 @@ fn digest(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
         .unwrap()
+}
+
+fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
+    let mut value = String::with_capacity(71);
+    value.push_str("sha256:");
+    for byte in Sha256::digest(bytes) {
+        write!(&mut value, "{byte:02x}").unwrap();
+    }
+    value.parse().unwrap()
 }
 
 fn agent_schema() -> ClosedJsonSchema {
@@ -1104,7 +1117,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         skill_slot_id: "review_skill".to_owned(),
         skill_deployment_id: id(SKILL_DEPLOYMENT_ID),
         request_digest: digest('8'),
-        maximum_bytes: typed_plan_bytes.len(),
+        maximum_bytes: MAX_SCHEDULER_SKILL_PACKAGE_BYTES,
         deadline: Utc::now() + Duration::milliseconds(400),
     };
     let skill_package_read = repository
@@ -1114,7 +1127,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(skill_package_read.skill_revision_id, id(SKILL_REVISION_ID));
     assert_eq!(
         skill_package_read.artifact.artifact_id(),
-        &id(TYPED_PLAN_ARTIFACT_ID)
+        &id(SKILL_PACKAGE_ARTIFACT_ID)
     );
     assert_eq!(
         repository
@@ -1122,7 +1135,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             .await
             .unwrap()
             .blob_id,
-        id(TYPED_PLAN_BLOB_ID)
+        id(SKILL_PACKAGE_BLOB_ID)
     );
     let mut wrong_skill_slot = skill_package_lease.clone();
     wrong_skill_slot.skill_slot_id = "missing_skill".to_owned();
@@ -10198,13 +10211,23 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         },
     )
     .unwrap();
+    let skill_contents = vec![
+        SkillPackageContent {
+            path: "instructions/review.md".to_owned(),
+            bytes: b"Review bounded output".to_vec(),
+        },
+        SkillPackageContent {
+            path: "skill.json".to_owned(),
+            bytes: b"{}".to_vec(),
+        },
+    ];
     let skill_entries = vec![
         SkillPackageEntry {
             path: "instructions/review.md".to_owned(),
             kind: SkillPackageEntryKind::Instruction,
             media_type: "text/markdown".to_owned(),
-            byte_length: 1,
-            content_digest: digest('a'),
+            byte_length: u64::try_from(skill_contents[0].bytes.len()).unwrap(),
+            content_digest: digest_bytes(&skill_contents[0].bytes),
             data_classification: DataClassification::Internal,
             executable: false,
         },
@@ -10212,16 +10235,20 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             path: "skill.json".to_owned(),
             kind: SkillPackageEntryKind::Manifest,
             media_type: "application/json".to_owned(),
-            byte_length: 1,
-            content_digest: digest('b'),
+            byte_length: u64::try_from(skill_contents[1].bytes.len()).unwrap(),
+            content_digest: digest_bytes(&skill_contents[1].bytes),
             data_classification: DataClassification::Internal,
             executable: false,
         },
     ];
+    let skill_expanded_bytes = skill_entries
+        .iter()
+        .map(|entry| entry.byte_length)
+        .sum::<u64>();
     let skill_manifest_digest: Sha256Digest = canonical_digest(&json!({
         "entries": skill_entries,
         "schema_version": 1,
-        "total_byte_length": typed_plan_bytes.len(),
+        "total_byte_length": skill_expanded_bytes,
     }))
     .unwrap()
     .parse()
@@ -10232,9 +10259,9 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         audience: SkillInstructionAudience::Validator,
         body: SkillArtifactSliceRef {
             path: "instructions/review.md".to_owned(),
-            content_digest: digest('a'),
-            byte_offset: 0,
-            byte_length: 1,
+            content_digest: skill_entries[0].content_digest.clone(),
+            byte_offset: 7,
+            byte_length: 7,
         },
         max_tokens: 8,
         data_classification: DataClassification::Internal,
@@ -10253,18 +10280,27 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     .unwrap()
     .parse()
     .unwrap();
+    let skill_manifest = SkillPackageManifest {
+        schema_version: 1,
+        entries: skill_entries,
+        total_byte_length: skill_expanded_bytes,
+        canonical_digest: skill_manifest_digest.clone(),
+    };
+    let skill_package_bytes =
+        encode_canonical_skill_package(&skill_manifest, &skill_contents).unwrap();
+    let skill_package_digest = digest_bytes(&skill_package_bytes);
     let skill_payload = TypedPayload::new(
         1,
         &PublishedVersionPayload {
             document: ResourceDocument::Skill(SkillResourceSpec {
                 authoring_package: AuthoringPackage {
                     artifact: ArtifactRef::new(
-                        id(TYPED_PLAN_ARTIFACT_ID),
-                        typed_plan_digest.clone(),
-                        u64::try_from(typed_plan_bytes.len()).unwrap(),
-                        "application/json",
+                        id(SKILL_PACKAGE_ARTIFACT_ID),
+                        skill_package_digest.clone(),
+                        u64::try_from(skill_package_bytes.len()).unwrap(),
+                        SKILL_PACKAGE_MEDIA_TYPE,
                         DataClassification::Internal,
-                        Some("typed-plan.json".to_owned()),
+                        Some("review.skill".to_owned()),
                     )
                     .unwrap(),
                     manifest_digest: skill_manifest_digest.clone(),
@@ -10279,12 +10315,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
                     produced_guidance_schema: agent_schema(),
                     compatible_agent_interfaces: vec![id(AGENT_INTERFACE_ID)],
                 },
-                manifest: SkillPackageManifest {
-                    schema_version: 1,
-                    entries: skill_entries,
-                    total_byte_length: u64::try_from(typed_plan_bytes.len()).unwrap(),
-                    canonical_digest: skill_manifest_digest,
-                },
+                manifest: skill_manifest,
                 instruction_sections: skill_sections,
                 skill_dependencies: vec![],
                 capability_requirements: vec![],
@@ -10443,6 +10474,57 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     .bind(typed_plan_metadata.schema_version)
     .bind(&typed_plan_metadata.value)
     .bind(&typed_plan_metadata.digest)
+    .bind(POLICY_REVISION_ID)
+    .bind(Utc::now() + Duration::days(30))
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    let skill_package_metadata =
+        TypedPayload::new(1, &json!({"display_name": "review.skill"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest,
+            security_domain_digest, object_reference_ciphertext, object_generation, key_id,
+            encryption_domain_id, content_digest, size_bytes, state, verified_at,
+            created_at, updated_at
+        ) VALUES ($1, $2, 'fixture', $3, $4, $5, 'skill-package-generation-1',
+                  'fixture-key', $6, $7, $8, 'verified', statement_timestamp(),
+                  statement_timestamp(), statement_timestamp())
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(SKILL_PACKAGE_BLOB_ID)
+    .bind(digest('e').to_string())
+    .bind(digest('f').to_string())
+    .bind(vec![10_u8, 11, 12])
+    .bind(SKILL_PACKAGE_ENCRYPTION_DOMAIN_ID)
+    .bind(skill_package_digest.to_string())
+    .bind(i64::try_from(skill_package_bytes.len()).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, metadata_schema_version, metadata,
+            metadata_digest, retention_policy_revision_id, retain_until, created_by
+        ) VALUES ($1, $2, $3, 'authoring_document', 'internal', $4, $5,
+                  $6, $6, 'ready', $7, $8, $9, $10, $11, $12)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(SKILL_PACKAGE_ARTIFACT_ID)
+    .bind(SKILL_PACKAGE_BLOB_ID)
+    .bind(i64::try_from(skill_package_bytes.len()).unwrap())
+    .bind(skill_package_digest.to_string())
+    .bind(SKILL_PACKAGE_MEDIA_TYPE)
+    .bind(skill_package_metadata.schema_version)
+    .bind(&skill_package_metadata.value)
+    .bind(&skill_package_metadata.digest)
     .bind(POLICY_REVISION_ID)
     .bind(Utc::now() + Duration::days(30))
     .bind(PRINCIPAL_ID)

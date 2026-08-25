@@ -70,6 +70,8 @@ const POLICY_DEPLOYMENT_4_ID: &str = "pdep_0198f1c3-8f49-7c3e-b1f3-773c28367ce6"
 const SKILL_ID: &str = "skl_0198f1c3-8f49-7c3e-b1f3-773c28367ce7";
 const SKILL_VERSION_ID: &str = "srev_0198f1c3-8f49-7c3e-b1f3-773c28367ce8";
 const SKILL_DEPLOYMENT_ID: &str = "skdep_0198f1c3-8f49-7c3e-b1f3-773c28367ce9";
+const SKILL_PACKAGE_ARTIFACT_ID: &str = "art_0198f1c3-8f49-7c3e-b1f3-773c28367ced";
+const SKILL_PACKAGE_BLOB_ID: &str = "iblb_0198f1c3-8f49-7c3e-b1f3-773c28367cee";
 const SANDBOX_PROFILE_ID: &str = "sxp_0198f1c3-8f49-7c3e-b1f3-773c28367cea";
 const SANDBOX_PROFILE_VERSION_ID: &str = "sxrev_0198f1c3-8f49-7c3e-b1f3-773c28367ceb";
 const SANDBOX_PROFILE_DEPLOYMENT_ID: &str = "sxdep_0198f1c3-8f49-7c3e-b1f3-773c28367cec";
@@ -735,6 +737,53 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     .bind(ARTIFACT_ID)
     .bind(ARTIFACT_BLOB_ID)
     .bind(digest('5').to_string())
+    .bind(artifact_metadata.schema_version)
+    .bind(&artifact_metadata.value)
+    .bind(&artifact_metadata.digest)
+    .bind(RETENTION_REVISION_ID)
+    .bind(Utc::now() + Duration::days(30))
+    .bind(PRINCIPAL_ID)
+    .execute(&mut *bootstrap)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest,
+            security_domain_digest, object_reference_ciphertext, object_generation, key_id,
+            encryption_domain_id, content_digest, size_bytes, state, verified_at,
+            created_at, updated_at
+        ) SELECT $1, $2, 'fixture', $3, $4, $5, 'generation-skill', 'fixture-key',
+                 $6, $7, 96, 'verified', observed_at, observed_at, observed_at
+          FROM (SELECT clock_timestamp() AS observed_at) AS clock
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(SKILL_PACKAGE_BLOB_ID)
+    .bind(digest('d').to_string())
+    .bind(digest('e').to_string())
+    .bind(vec![7_u8, 8, 9])
+    .bind(ENCRYPTION_DOMAIN_ID)
+    .bind(digest('c').to_string())
+    .execute(&mut *bootstrap)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, metadata_schema_version, metadata,
+            metadata_digest, retention_policy_revision_id, retain_until, created_by
+        ) VALUES ($1, $2, $3, 'authoring_document', 'internal', 96, $4,
+                  $5, $5, 'ready', $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(SKILL_PACKAGE_ARTIFACT_ID)
+    .bind(SKILL_PACKAGE_BLOB_ID)
+    .bind(digest('c').to_string())
+    .bind(insight_platform_contracts::SKILL_PACKAGE_MEDIA_TYPE)
     .bind(artifact_metadata.schema_version)
     .bind(&artifact_metadata.value)
     .bind(&artifact_metadata.digest)
@@ -1894,7 +1943,15 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         .unwrap();
     let skill_document = ResourceDocument::Skill(SkillResourceSpec {
         authoring_package: AuthoringPackage {
-            artifact: qualification_artifact.clone(),
+            artifact: ArtifactRef::new(
+                id(SKILL_PACKAGE_ARTIFACT_ID),
+                digest('c'),
+                96,
+                insight_platform_contracts::SKILL_PACKAGE_MEDIA_TYPE,
+                DataClassification::Internal,
+                None,
+            )
+            .unwrap(),
             manifest_digest: skill_manifest_digest.clone(),
         },
         contract_digest: digest('2'),

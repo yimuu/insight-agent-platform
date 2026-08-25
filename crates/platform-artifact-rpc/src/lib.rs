@@ -1660,7 +1660,7 @@ mod tests {
                 id(ResourceKind::Artifact),
                 digest_bytes(bytes),
                 u64::try_from(bytes.len()).unwrap(),
-                "application/octet-stream",
+                insight_platform_contracts::SKILL_PACKAGE_MEDIA_TYPE,
                 DataClassification::Internal,
                 Some("skill.package".to_owned()),
             )

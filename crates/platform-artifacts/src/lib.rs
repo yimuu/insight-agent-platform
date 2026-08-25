@@ -6,9 +6,11 @@
 #![allow(async_fn_in_trait)]
 
 mod read;
+mod skill_package;
 mod work;
 
 pub use read::*;
+pub use skill_package::*;
 pub use work::*;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};

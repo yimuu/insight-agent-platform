@@ -36,6 +36,7 @@ pub const MAX_SKILL_PURPOSE_BYTES: usize = 4_096;
 pub const MAX_SKILL_MEDIA_TYPE_BYTES: usize = 128;
 pub const MAX_SKILL_PACKAGE_BYTES: u64 = 16_777_216;
 pub const MAX_SKILL_INSTRUCTION_TOKENS: u32 = 131_072;
+pub const SKILL_PACKAGE_MEDIA_TYPE: &str = "application/vnd.insight.skill-package";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -511,6 +512,9 @@ pub struct SkillResourceSpec {
 impl SkillResourceSpec {
     fn validate(&self) -> Result<(), ResourceContractError> {
         self.authoring_package.validate()?;
+        if self.authoring_package.artifact.media_type() != SKILL_PACKAGE_MEDIA_TYPE {
+            return Err(ResourceContractError::InvalidSkillContract);
+        }
         validate_exact_versions(&self.dependency_versions, MAX_RESOURCE_DEPENDENCIES)?;
         validate_policy_versions(&self.policy_versions)?;
         self.interface.validate()?;
@@ -649,7 +653,7 @@ impl SkillPackageManifest {
         .map_err(|_| ResourceContractError::Canonicalization)?
         .parse()
         .map_err(|_| ResourceContractError::Canonicalization)?;
-        if total > self.total_byte_length || manifest_count != 1 || digest != self.canonical_digest
+        if total != self.total_byte_length || manifest_count != 1 || digest != self.canonical_digest
         {
             return Err(ResourceContractError::InvalidSkillContract);
         }
@@ -3097,7 +3101,15 @@ mod tests {
         .unwrap();
         SkillResourceSpec {
             authoring_package: AuthoringPackage {
-                artifact: qualification_artifact(),
+                artifact: ArtifactRef::new(
+                    id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b80"),
+                    digest('f'),
+                    128,
+                    SKILL_PACKAGE_MEDIA_TYPE,
+                    DataClassification::Internal,
+                    Some("review.skill".to_owned()),
+                )
+                .unwrap(),
                 manifest_digest: manifest_digest.clone(),
             },
             contract_digest: digest('3'),
