@@ -86,6 +86,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   "process_registration_attestor_tls_server_name" .Values.controller.attestor.tlsServerName
   "process_registration_attestor_identity_digest" .Values.controller.attestor.identityDigest
   "nats_endpoint" .Values.executor.natsEndpoint
+  "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.executor.observabilityPort))
   "receipt_ttl_seconds" (int .Values.executor.receiptTtlSeconds)
   "claim_scan_milliseconds" (int .Values.executor.claimScanMilliseconds)
   "claim_failure_backoff_milliseconds" (int .Values.executor.claimFailureBackoffMilliseconds)
@@ -136,6 +137,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   "process_registration_attestor_tls_server_name" .Values.controller.attestor.tlsServerName
   "process_registration_attestor_identity_digest" .Values.controller.attestor.identityDigest
   "nats_endpoint" .Values.executor.natsEndpoint
+  "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.gvisor.observabilityPort))
   "receipt_ttl_seconds" (int .Values.gvisor.receiptTtlSeconds)
   "claim_scan_milliseconds" (int .Values.gvisor.claimScanMilliseconds)
   "claim_failure_backoff_milliseconds" (int .Values.gvisor.claimFailureBackoffMilliseconds)

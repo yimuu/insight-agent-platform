@@ -12,4 +12,32 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
       app.kubernetes.io/component: controller
   endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "insight-platform-sandbox.executorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+spec:
+  namespaceSelector: {matchNames: [{{ .Values.namespaces.executor }}]}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: executor-wasi
+  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "insight-platform-sandbox.gvisorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+spec:
+  namespaceSelector: {matchNames: [{{ .Values.namespaces.executor }}]}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: executor-gvisor
+  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
 {{- end }}

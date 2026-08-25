@@ -3114,10 +3114,12 @@ version = "0.1.0"
 dependencies = [
  "async-nats",
  "async-trait",
+ "axum",
  "chrono",
  "hyper-util",
  "insight-platform-contracts",
  "insight-platform-jobs",
+ "insight-platform-observability",
  "insight-platform-sandbox",
  "insight-platform-sandbox-gvisor",
  "insight-platform-sandbox-rpc",

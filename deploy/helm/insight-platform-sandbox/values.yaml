@@ -46,6 +46,7 @@ controller:
     limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}
 
 executor:
+  observabilityPort: 9090
   serviceAccount:
     annotations: {}
   nodeSelector:
@@ -78,6 +79,7 @@ executor:
 gvisor:
   replicas: 2
   autoscaling: {minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
+  observabilityPort: 9090
   serviceAccount:
     annotations: {}
   guestServiceAccount: sandbox-guest

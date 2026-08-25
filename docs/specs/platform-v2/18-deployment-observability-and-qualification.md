@@ -322,6 +322,11 @@ process-attestor authority、executor identity interceptor及TLS RPC service组�
 Service/NetworkPolicy只向精确Prometheus identity开放metrics端口。该证据不包含WASI/gVisor Executor或attestor接线，也不替代真实runsc、
 production scrape和L4 enforcement。
 
+r258为WASI Executor与gVisor Launcher接入shared process observability。两种backend分别在exact WorkerManifest/backend、node-local registration、
+Controller mTLS、backend registry、NATS control与HTTP listener组合后Ready；driver、control或listener提前退出都会取消并bounded drain其余任务。
+两个pool的metrics Service与Prometheus ingress不增加WASI host authority或gVisor Kubernetes API权限。该证据不包含node/POD-local attestor
+observability、真实runsc、production scrape或L4 enforcement。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

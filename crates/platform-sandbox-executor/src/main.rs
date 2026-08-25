@@ -3,6 +3,9 @@ use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
     ResourceKind, SandboxIsolationClass, Sha256Digest, WorkClass, WorkerManifest,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_sandbox::{
     InstalledSandboxBackendDescriptor, InstalledSandboxBackendRegistry,
     RegisterWasiExecutorProcessGeneration, SandboxCommandLimits, SandboxExecutionControlRouter,
@@ -27,7 +30,7 @@ use insight_platform_sandbox_wasi::{
 };
 use insight_platform_worker::LocalWorkerPools;
 use serde::Deserialize;
-use std::{error::Error, fmt, path::PathBuf, sync::Arc, time::Duration};
+use std::{error::Error, fmt, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use url::Url;
@@ -58,6 +61,7 @@ struct ExecutorProcessConfig {
     process_registration_attestor_tls_server_name: String,
     process_registration_attestor_identity_digest: Sha256Digest,
     nats_endpoint: String,
+    observability_listen_address: String,
     receipt_ttl_seconds: u64,
     claim_scan_milliseconds: u64,
     claim_failure_backoff_milliseconds: u64,
@@ -109,6 +113,13 @@ impl ExecutorBackendProcessConfig {
         }
     }
 
+    fn observability_component(&self) -> &'static str {
+        match self {
+            Self::Wasi { .. } => "sandbox-wasi-executor",
+            Self::Gvisor { .. } => "sandbox-gvisor-executor",
+        }
+    }
+
     fn validate(&self) -> bool {
         match self {
             Self::Wasi { runtime_version } => runtime_version == WASI_ABI_V1_RUNTIME_VERSION,
@@ -149,6 +160,10 @@ impl ExecutorProcessConfig {
     }
 
     fn validate(&self) -> Result<(), ProcessError> {
+        let observability: SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         self.worker_manifest
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -161,6 +176,7 @@ impl ExecutorProcessConfig {
             || !closed_unix_socket_path(&self.process_registration_attestor_socket_path)
             || !stable_dns_name(&self.process_registration_attestor_tls_server_name)
             || !closed_service_endpoint(&self.nats_endpoint, "tls")
+            || observability.port() == 0
             || self.receipt_ttl_seconds == 0
             || self.claim_scan_milliseconds == 0
             || self.claim_failure_backoff_milliseconds == 0
@@ -343,13 +359,34 @@ async fn run() -> Result<(), ProcessError> {
     .await
     .map_err(|_| ProcessError::NatsUnavailable)?;
 
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install(
+            config.backend.observability_component(),
+            PROCESS_OBSERVABILITY_OPERATIONS,
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let observability_listener =
+        tokio::net::TcpListener::bind(&config.observability_listen_address)
+            .await
+            .map_err(|_| ProcessError::ObservabilityUnavailable)?;
+
     let shutdown = CancellationToken::new();
     let mut driver_task = tokio::spawn(driver.run(shutdown.child_token()));
     let mut control_task = tokio::spawn(listener.run(shutdown.child_token()));
+    let observability_shutdown = shutdown.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut observability_task = tokio::spawn(async move {
+        axum::serve(observability_listener, router)
+            .with_graceful_shutdown(observability_shutdown.cancelled_owned())
+            .await
+    });
+    metrics.mark_ready();
     let trigger = tokio::select! {
         signal = tokio::signal::ctrl_c() => SupervisorTrigger::Signal(signal.is_ok()),
         joined = &mut driver_task => SupervisorTrigger::Driver(joined),
         joined = &mut control_task => SupervisorTrigger::Control(joined),
+        joined = &mut observability_task => SupervisorTrigger::Observability(joined),
     };
     shutdown.cancel();
     let grace = Duration::from_millis(config.drain_grace_milliseconds);
@@ -357,7 +394,8 @@ async fn run() -> Result<(), ProcessError> {
         SupervisorTrigger::Signal(signal_received) => {
             let drained = tokio::time::timeout(grace, async {
                 map_driver_join((&mut driver_task).await)?;
-                map_control_join((&mut control_task).await)
+                map_control_join((&mut control_task).await)?;
+                map_observability_join((&mut observability_task).await)
             })
             .await
             .map_err(|_| ProcessError::DrainRequiresProcessTermination)?;
@@ -371,13 +409,34 @@ async fn run() -> Result<(), ProcessError> {
         SupervisorTrigger::Driver(joined) => {
             let primary =
                 map_driver_join(joined).and(Err(ProcessError::ExecutorExitedUnexpectedly));
-            await_control_shutdown(&mut control_task, grace).await?;
+            tokio::time::timeout(grace, async {
+                map_control_join((&mut control_task).await)?;
+                map_observability_join((&mut observability_task).await)
+            })
+            .await
+            .map_err(|_| ProcessError::DrainRequiresProcessTermination)??;
             primary
         }
         SupervisorTrigger::Control(joined) => {
             let primary =
                 map_control_join(joined).and(Err(ProcessError::ControlExitedUnexpectedly));
-            await_driver_shutdown(&mut driver_task, grace).await?;
+            tokio::time::timeout(grace, async {
+                map_driver_join((&mut driver_task).await)?;
+                map_observability_join((&mut observability_task).await)
+            })
+            .await
+            .map_err(|_| ProcessError::DrainRequiresProcessTermination)??;
+            primary
+        }
+        SupervisorTrigger::Observability(joined) => {
+            let primary = map_observability_join(joined)
+                .and(Err(ProcessError::ObservabilityExitedUnexpectedly));
+            tokio::time::timeout(grace, async {
+                map_driver_join((&mut driver_task).await)?;
+                map_control_join((&mut control_task).await)
+            })
+            .await
+            .map_err(|_| ProcessError::DrainRequiresProcessTermination)??;
             primary
         }
     }
@@ -397,31 +456,7 @@ enum SupervisorTrigger {
     Control(
         Result<Result<(), insight_platform_sandbox::SandboxControlError>, tokio::task::JoinError>,
     ),
-}
-
-async fn await_driver_shutdown(
-    task: &mut tokio::task::JoinHandle<
-        Result<
-            insight_platform_sandbox_executor::SandboxExecutorCycleReport,
-            insight_platform_sandbox_executor::SandboxExecutorDriverError,
-        >,
-    >,
-    grace: Duration,
-) -> Result<(), ProcessError> {
-    tokio::time::timeout(grace, task)
-        .await
-        .map_err(|_| ProcessError::DrainRequiresProcessTermination)
-        .and_then(map_driver_join)
-}
-
-async fn await_control_shutdown(
-    task: &mut tokio::task::JoinHandle<Result<(), insight_platform_sandbox::SandboxControlError>>,
-    grace: Duration,
-) -> Result<(), ProcessError> {
-    tokio::time::timeout(grace, task)
-        .await
-        .map_err(|_| ProcessError::DrainRequiresProcessTermination)
-        .and_then(map_control_join)
+    Observability(Result<Result<(), std::io::Error>, tokio::task::JoinError>),
 }
 
 async fn connect_authority(config: &ExecutorProcessConfig) -> Result<Channel, ProcessError> {
@@ -612,6 +647,16 @@ fn map_control_join(
     }
 }
 
+fn map_observability_join(
+    result: Result<Result<(), std::io::Error>, tokio::task::JoinError>,
+) -> Result<(), ProcessError> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(ProcessError::ObservabilityUnavailable),
+        Err(_) => Err(ProcessError::ExecutorPanicked),
+    }
+}
+
 #[derive(Debug)]
 enum ProcessError {
     MissingConfiguration(&'static str),
@@ -626,6 +671,8 @@ enum ProcessError {
     ExecutorPanicked,
     ExecutorExitedUnexpectedly,
     ControlExitedUnexpectedly,
+    ObservabilityUnavailable,
+    ObservabilityExitedUnexpectedly,
     DrainRequiresProcessTermination,
 }
 
@@ -661,6 +708,12 @@ impl fmt::Display for ProcessError {
             }
             Self::ControlExitedUnexpectedly => {
                 formatter.write_str("Sandbox control listener exited before shutdown")
+            }
+            Self::ObservabilityUnavailable => {
+                formatter.write_str("Sandbox observability listener is unavailable")
+            }
+            Self::ObservabilityExitedUnexpectedly => {
+                formatter.write_str("Sandbox observability listener exited before shutdown")
             }
             Self::DrainRequiresProcessTermination => {
                 formatter.write_str("Sandbox drain grace expired; process termination is required")
@@ -706,6 +759,7 @@ mod tests {
                 .to_owned(),
             process_registration_attestor_identity_digest: digest('c'),
             nats_endpoint: "tls://nats.platform.svc:4222".to_owned(),
+            observability_listen_address: "127.0.0.1:9090".to_owned(),
             receipt_ttl_seconds: 600,
             claim_scan_milliseconds: 500,
             claim_failure_backoff_milliseconds: 100,

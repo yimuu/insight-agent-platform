@@ -13,6 +13,12 @@
 {{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) }}
 {{- fail "monitoring requires exact namespace and Pod selectors" }}
 {{- end }}
+{{- if or (lt (int .Values.executor.observabilityPort) 1) (gt (int .Values.executor.observabilityPort) 65535) (has (int .Values.executor.observabilityPort) (list (int .Values.controller.port) (int .Values.attestor.controllerPort))) }}
+{{- fail "WASI Executor observability port must be distinct and in 1..65535" }}
+{{- end }}
+{{- if or (lt (int .Values.gvisor.observabilityPort) 1) (gt (int .Values.gvisor.observabilityPort) 65535) (has (int .Values.gvisor.observabilityPort) (list (int .Values.controller.port) (int .Values.attestor.controllerPort))) }}
+{{- fail "gVisor Executor observability port must be distinct and in 1..65535" }}
+{{- end }}
 {{- if not (empty .Values.controller.serviceAccount) }}
 {{- fail "Controller ServiceAccount customization is forbidden" }}
 {{- end }}

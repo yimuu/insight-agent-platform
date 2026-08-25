@@ -59,9 +59,10 @@ spec:
             - {name: PLATFORM_SANDBOX_NATS_CA_PATH, value: /etc/insight/nats-tls/{{ .Values.natsTls.rootCertificateKey }}}
             - {name: PLATFORM_SANDBOX_NATS_CERT_PATH, value: /etc/insight/nats-tls/{{ .Values.natsTls.clientCertificateKey }}}
             - {name: PLATFORM_SANDBOX_NATS_KEY_PATH, value: /etc/insight/nats-tls/{{ .Values.natsTls.clientPrivateKeyKey }}}
-          startupProbe: {exec: {command: ["sh", "-ec", "kill -0 1 && test -S /run/insight-sandbox-attestor/registration.sock"]}, failureThreshold: 30, periodSeconds: 2}
-          readinessProbe: {exec: {command: ["sh", "-ec", "kill -0 1 && test -S /run/insight-sandbox-attestor/registration.sock"]}, periodSeconds: 5, timeoutSeconds: 2}
-          livenessProbe: {exec: {command: ["sh", "-ec", "kill -0 1"]}, periodSeconds: 10, timeoutSeconds: 2}
+          ports: [{name: observability, containerPort: {{ int .Values.executor.observabilityPort }}, protocol: TCP}]
+          startupProbe: {httpGet: {path: /livez, port: observability}, failureThreshold: 30, periodSeconds: 2}
+          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2}
+          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2}
           resources: {{ toYaml .Values.executor.resources | nindent 12 }}
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
@@ -75,6 +76,21 @@ spec:
         - {name: nats-tls, secret: {secretName: {{ .Values.natsTls.existingSecret }}, defaultMode: 0440}}
         - {name: socket, hostPath: {path: {{ .Values.attestor.hostPaths.socketDirectory }}, type: Directory}}
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-sandbox.executorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor-wasi
+spec:
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: executor-wasi
+  ports: [{name: observability, port: {{ int .Values.executor.observabilityPort }}, targetPort: observability}]
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
