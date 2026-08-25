@@ -352,6 +352,10 @@ r286实现CR-196并以fresh PostgreSQL 16、真实独立CA HTTPS token endpoint�
 one-time authorization code；endpoint调用严格为1，最终只有一个responded Task、Receipt和completion Event。OAuth callback/exchange component
 L3由此闭合；Secret Manager rotation、容量饱和、真实scrape及L4～L6仍未完成。
 
+r287从shared PostgreSQL Outbox authority以数据库时间导出fixed due/expired-claim/dead count与oldest lag；采样不读取Event payload，也不输出
+tenant、Outbox/Event、claim owner或失败文本。fresh PostgreSQL 16、strict Clippy、13-panel dashboard、12条symptom-first alert及逐alert runbook
+通过。该证据关闭shared Outbox backlog/recovery的L1接线；其他role authority、跨进程trace、动态payload审计、真实scrape及L4～L6仍未完成。
+
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
 storage与audit closure全部由服务端拥有；upload target是唯一显式Secret-bearing响应例外。Public Gateway不取得storage authority，Artifact Gateway
 不信任自由principal header，两者以exact audience mTLS连接并由Artifact Gateway从PostgreSQL重绑定current principal。

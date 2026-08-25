@@ -85,4 +85,30 @@ spec:
             summary: Scheduler PostgreSQL observation is failing
             description: The read-only durable queue observation cannot read PostgreSQL authority.
             runbook_url: {{ printf "%s#insightplatformpostgresobservationfailing" .Values.alerts.runbookBaseUrl | quote }}
+    - name: insight-platform.outbox
+      rules:
+        - alert: InsightPlatformDueOutboxLagHigh
+          expr: max by (component_role) (insight_platform_outbox_lag_seconds{component_role="scheduler-recovery",queue="due"}) > {{ .Values.alerts.maximumDueOutboxLagSeconds }} and max by (component_role) (insight_platform_outbox_events{component_role="scheduler-recovery",queue="due"}) > 0
+          for: {{ .Values.alerts.durableLagFor }}
+          labels: {severity: warning, owner: platform-runtime}
+          annotations:
+            summary: Durable Outbox delivery remains due
+            description: Publishable Outbox events have exceeded the bounded delivery-lag threshold.
+            runbook_url: {{ printf "%s#insightplatformdueoutboxlaghigh" .Values.alerts.runbookBaseUrl | quote }}
+        - alert: InsightPlatformExpiredOutboxClaimLagHigh
+          expr: max by (component_role) (insight_platform_outbox_lag_seconds{component_role="scheduler-recovery",queue="expired_claim"}) > {{ .Values.alerts.maximumExpiredOutboxClaimLagSeconds }} and max by (component_role) (insight_platform_outbox_events{component_role="scheduler-recovery",queue="expired_claim"}) > 0
+          for: {{ .Values.alerts.durableLagFor }}
+          labels: {severity: critical, owner: platform-runtime}
+          annotations:
+            summary: Expired Outbox claims remain unrecovered
+            description: Expired Outbox claim leases have exceeded the bounded recovery-lag threshold.
+            runbook_url: {{ printf "%s#insightplatformexpiredoutboxclaimlaghigh" .Values.alerts.runbookBaseUrl | quote }}
+        - alert: InsightPlatformOutboxDeadEventsPresent
+          expr: max by (component_role) (insight_platform_outbox_events{component_role="scheduler-recovery",queue="dead"}) > 0
+          for: {{ .Values.alerts.outboxDeadFor }}
+          labels: {severity: critical, owner: platform-runtime}
+          annotations:
+            summary: Durable Outbox contains dead events
+            description: At least one Outbox event reached a closed dead state and requires operator reconciliation.
+            runbook_url: {{ printf "%s#insightplatformoutboxdeadeventspresent" .Values.alerts.runbookBaseUrl | quote }}
 {{- end }}

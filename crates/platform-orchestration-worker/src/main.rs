@@ -7,12 +7,15 @@ use insight_platform_contracts::{
     ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
 use insight_platform_observability::{
-    process_observability_router, DurableJobQueueSnapshot, OrchestrationOperationalMetrics,
-    OrchestrationOperationalSnapshot, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, DurableJobQueueSnapshot, DurableOutboxSnapshot,
+    OrchestrationOperationalMetrics, OrchestrationOperationalSnapshot, ProcessHttpMetrics,
+    PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_orchestrator::{ExpressionLimits, PlanLimits};
 use insight_platform_postgres::{
-    operational_metrics::observe_durable_job_queue, repository::SafetyScanShard, verify_schema,
+    operational_metrics::{observe_durable_job_queue, observe_durable_outbox},
+    repository::SafetyScanShard,
+    verify_schema,
 };
 use insight_platform_runtime::postgres::{
     PostgresConnectionBulkheadConfig, PostgresConnectionBulkheads,
@@ -351,6 +354,16 @@ async fn run() -> Result<(), ProcessError> {
                         due_oldest_age_seconds: snapshot.due_oldest_age_seconds,
                         expired_leases: snapshot.expired_leases,
                         expired_oldest_lag_seconds: snapshot.expired_oldest_lag_seconds,
+                    }),
+                    Err(_) => operational_metrics.observe_database_failure(),
+                }
+                match observe_durable_outbox(bulkheads.critical_control_pool()).await {
+                    Ok(snapshot) => operational_metrics.observe_durable_outbox(DurableOutboxSnapshot {
+                        due_events: snapshot.due_events,
+                        due_oldest_age_seconds: snapshot.due_oldest_age_seconds,
+                        expired_claims: snapshot.expired_claims,
+                        expired_oldest_lag_seconds: snapshot.expired_oldest_lag_seconds,
+                        dead_events: snapshot.dead_events,
                     }),
                     Err(_) => operational_metrics.observe_database_failure(),
                 }

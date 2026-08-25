@@ -448,6 +448,11 @@ production sampler、fresh PostgreSQL 16、owner tests与strict Clippy通过；d
 PostgreSQL observation failure三条带runbook的symptom alert。该证据只关闭Orchestration durable backlog/recovery lag及对应dependency observation
 的L1接线；Outbox、其他role authority、真实Prometheus scrape和L4～L6仍待完成。
 
+r287为shared PostgreSQL Outbox authority增加bounded只读采样，按数据库时间输出fixed `due`、`expired_claim`、`dead` count与适用oldest lag；
+不读取Event payload且不暴露tenant、Outbox/Event、claim owner或失败文本。fresh PostgreSQL 16、strict Clippy、13-panel dashboard、12条
+symptom-first alert与逐alert runbook门禁通过。该证据关闭shared Outbox backlog/recovery L1接线，不替代其他role authority、跨进程trace、
+动态payload审计、真实Prometheus scrape或L4～L6。
+
 r283为独立MCP OAuth PKCE Cleanup Worker接入shared process observability。readiness位于closed config、PostgreSQL/schema、mTLS Egress client
 和durable cleanup owner之后，HTTP listener提前退出会使process失败；Helm以HTTP probe、独立Service/ServiceMonitor及Prometheus-only ingress
 替换原PID探针，同时保持数据库与Egress的exact出口。binary tests、strict Clippy和chart静态正负门禁通过；该process surface不计作新的

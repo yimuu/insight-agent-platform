@@ -35,8 +35,8 @@ Phase 3的MCP subscription真实HTTPS、OAuth Cleanup/Egress删除链及Callback
 | Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；各owner按Run冻结exact Policy/Revision重算并拒绝伪造结果 | L1/L2 owner闭合，production Model/Capability/Context dispatch已在对应L3链路重验exact binding |
 | 已有部署 | 11个chart覆盖全部15个ComponentRole、17个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
 | HTTP observability | shared bounded-label owner；全部17个ComponentRole workload pool、Sandbox两种process attestor及OAuth Cleanup Worker具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency | process wiring与静态部署闭合，不代表真实scrape或完整业务observability |
-| Dashboard/alerts | 独立chart提供role-filtered process/HTTP及Orchestration业务dashboard、9条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代完整业务SLI或真实alert delivery |
-| Worker/queue telemetry | Orchestration、Model、Capability Native/Remote、Context Native/Remote、Sandbox WASI/gVisor共8个pool从各自LocalWorkerPools导出business/critical-control available/used permit；Orchestration另有active jobs、claim/recovery outcome及PostgreSQL authority的due/expired-lease count、oldest lag与observation health | Orchestration durable backlog/recovery lag和8/17 pool permit L1 telemetry闭合；shared Outbox、其余role authority及saturation仍待接线 |
+| Dashboard/alerts | 独立chart提供role-filtered process/HTTP、Orchestration及Outbox业务dashboard、12条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代完整业务SLI或真实alert delivery |
+| Worker/queue telemetry | Orchestration、Model、Capability Native/Remote、Context Native/Remote、Sandbox WASI/gVisor共8个pool从各自LocalWorkerPools导出business/critical-control available/used permit；Orchestration另有active jobs、claim/recovery outcome及PostgreSQL authority的due/expired-lease Job与due/expired-claim/dead Outbox count、oldest lag及observation health | Orchestration Job和shared Outbox backlog/recovery lag及8/17 pool permit L1 telemetry闭合；其余role authority及saturation仍待接线 |
 | Telemetry redaction | production Rust source静态门禁拒绝identity、Secret、prompt/response、object key及URL进入structured tracing或插值日志；现有LLM/SSE/MCP OAuth/conversation/worker启动日志已清理 | source-level L1负向合同；不替代动态payload审计、trace propagation、RBAC/retention或production验证 |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator；live topology/workload preflight对照Candidate/Capacity并拒绝rollout、image、config、identity、安全和容量漂移 | 可验证证据形状与preflight行为，不证明任一外部门禁通过 |
@@ -168,11 +168,11 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
    但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
 2. 全部17个ComponentRole workload pool及Sandbox process attestor已有shared process metrics；Orchestration、Model、Capability Native/Remote、
    Context Native/Remote、Sandbox WASI/gVisor共8个pool已有动态permit指标，Orchestration另有claim/recovery指标，production tracing/log字段已有
-   静态脱敏门禁；Orchestration现另有PostgreSQL authority的due/expired-lease backlog/lag与observation health；仍缺shared Outbox、其余role
+   静态脱敏门禁；Orchestration现另有PostgreSQL authority的due/expired-lease Job及due/expired-claim/dead Outbox backlog/lag与observation health；仍缺其余role
    backlog/dependency health、其余9个pool的role saturation、跨进程trace
    propagation、动态payload采集审计和production scrape证据。
-3. 全部17个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP/Orchestration dashboard、六条symptom-first PrometheusRule及逐alert
-   runbook已扩展到11个panel和9条alert，包含Orchestration due/expired-lease lag及PostgreSQL observation failure；shared Outbox、其他role backlog/
+3. 全部17个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP/Orchestration/Outbox dashboard及逐alert
+   runbook已扩展到13个panel和12条alert，包含Orchestration Job、shared Outbox lag/dead queue及PostgreSQL observation failure；其他role backlog/
    dependency与saturation对应的panel/alert仍待指标owner接线后补齐。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
    mTLS与live identity enforcement仍须production-equivalent L4验证。
@@ -190,7 +190,7 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 按上游到下游执行，且每批通过后提交：
 
-1. 补shared Outbox、其他role dependency/recovery/permit业务指标、跨进程trace propagation和动态payload采集审计；
+1. 补其他role dependency/recovery/permit业务指标、跨进程trace propagation和动态payload采集审计；
 2. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
 3. reproducible signed candidate pipeline；
 4. 外部L4～L6、GitOps clean cut、current文档与规范归档。

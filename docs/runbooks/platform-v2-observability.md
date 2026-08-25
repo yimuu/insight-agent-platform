@@ -64,3 +64,22 @@ Confirm the scheduler critical-control PostgreSQL pool can acquire a connection 
 read-only queries. Correlate failures with readiness and recovery scan failures. The exporter keeps
 the last valid gauge snapshot, so do not interpret an unchanged backlog as healthy while this alert
 is active. Follow the dependency recovery runbook and retain the reserved connection boundary.
+
+## InsightPlatformDueOutboxLagHigh
+
+Compare the due count and oldest lag with publisher readiness, NATS reachability, PostgreSQL
+latency, and recent rollout events. Do not delete, publish, or advance Outbox rows manually. Repair
+the publisher or transport dependency and let the fenced Outbox owner preserve ordering and replay.
+
+## InsightPlatformExpiredOutboxClaimLagHigh
+
+Check publisher process loss, database time, claim fencing, and critical-control availability.
+Never clear `claim_owner`, increment epochs, or move `next_publish_at` by direct SQL; recovery must
+reclaim through the Outbox owner so a late publisher cannot become a second winner.
+
+## InsightPlatformOutboxDeadEventsPresent
+
+Identify the fixed dead queue and correlate its first appearance with safe failure-code aggregates
+and dependency incidents without exporting Event payloads or identities. Follow the owning domain's
+reconciliation procedure, retain the dead record as audit evidence, and escalate any unsupported
+event kind rather than replaying it outside the owner contract.

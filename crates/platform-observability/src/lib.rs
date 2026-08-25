@@ -375,6 +375,15 @@ pub struct DurableJobQueueSnapshot {
     pub expired_oldest_lag_seconds: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DurableOutboxSnapshot {
+    pub due_events: u64,
+    pub due_oldest_age_seconds: f64,
+    pub expired_claims: u64,
+    pub expired_oldest_lag_seconds: f64,
+    pub dead_events: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct OrchestrationOperationalMetrics {
     business_capacity: AtomicU64,
@@ -392,6 +401,11 @@ pub struct OrchestrationOperationalMetrics {
     durable_due_oldest_age_milliseconds: AtomicU64,
     durable_expired_leases: AtomicU64,
     durable_expired_oldest_lag_milliseconds: AtomicU64,
+    durable_outbox_due_events: AtomicU64,
+    durable_outbox_due_oldest_age_milliseconds: AtomicU64,
+    durable_outbox_expired_claims: AtomicU64,
+    durable_outbox_expired_oldest_lag_milliseconds: AtomicU64,
+    durable_outbox_dead_events: AtomicU64,
     database_observation_successes: AtomicU64,
     database_observation_failures: AtomicU64,
 }
@@ -441,6 +455,25 @@ impl OrchestrationOperationalMetrics {
 
     pub fn observe_database_failure(&self) {
         self.database_observation_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn observe_durable_outbox(&self, snapshot: DurableOutboxSnapshot) {
+        self.durable_outbox_due_events
+            .store(snapshot.due_events, Ordering::Release);
+        self.durable_outbox_due_oldest_age_milliseconds.store(
+            seconds_to_milliseconds(snapshot.due_oldest_age_seconds),
+            Ordering::Release,
+        );
+        self.durable_outbox_expired_claims
+            .store(snapshot.expired_claims, Ordering::Release);
+        self.durable_outbox_expired_oldest_lag_milliseconds.store(
+            seconds_to_milliseconds(snapshot.expired_oldest_lag_seconds),
+            Ordering::Release,
+        );
+        self.durable_outbox_dead_events
+            .store(snapshot.dead_events, Ordering::Release);
+        self.database_observation_successes
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -517,6 +550,34 @@ impl OrchestrationOperationalMetrics {
         ] {
             let _ = writeln!(output, "insight_platform_durable_jobs{{component_role=\"{role}\",queue=\"{queue}\"}} {count}");
             let _ = writeln!(output, "insight_platform_durable_job_lag_seconds{{component_role=\"{role}\",queue=\"{queue}\"}} {}", lag_milliseconds as f64 / 1_000.0);
+        }
+        output.push_str(
+            "# HELP insight_platform_outbox_events Durable Outbox backlog from PostgreSQL authority by fixed queue.\n\
+             # TYPE insight_platform_outbox_events gauge\n\
+             # HELP insight_platform_outbox_lag_seconds Oldest durable Outbox delay from PostgreSQL authority by fixed queue.\n\
+             # TYPE insight_platform_outbox_lag_seconds gauge\n",
+        );
+        for (queue, count, lag_milliseconds) in [
+            (
+                "due",
+                self.durable_outbox_due_events.load(Ordering::Acquire),
+                self.durable_outbox_due_oldest_age_milliseconds
+                    .load(Ordering::Acquire),
+            ),
+            (
+                "expired_claim",
+                self.durable_outbox_expired_claims.load(Ordering::Acquire),
+                self.durable_outbox_expired_oldest_lag_milliseconds
+                    .load(Ordering::Acquire),
+            ),
+            (
+                "dead",
+                self.durable_outbox_dead_events.load(Ordering::Acquire),
+                0,
+            ),
+        ] {
+            let _ = writeln!(output, "insight_platform_outbox_events{{component_role=\"{role}\",queue=\"{queue}\"}} {count}");
+            let _ = writeln!(output, "insight_platform_outbox_lag_seconds{{component_role=\"{role}\",queue=\"{queue}\"}} {}", lag_milliseconds as f64 / 1_000.0);
         }
         output.push_str(
             "# HELP insight_platform_dependency_observations_total Bounded dependency observation outcomes.\n\
@@ -670,6 +731,13 @@ mod tests {
             expired_oldest_lag_seconds: 3.25,
         });
         operational.observe_database_failure();
+        operational.observe_durable_outbox(DurableOutboxSnapshot {
+            due_events: 4,
+            due_oldest_age_seconds: 8.5,
+            expired_claims: 2,
+            expired_oldest_lag_seconds: 1.25,
+            dead_events: 1,
+        });
         let metrics = ProcessHttpMetrics::install_with_orchestration(
             "scheduler-recovery",
             PROCESS_OBSERVABILITY_OPERATIONS,
@@ -684,8 +752,13 @@ mod tests {
         assert!(rendered.contains("queue=\"due\"} 9"));
         assert!(rendered.contains("queue=\"expired_lease\"} 2"));
         assert!(rendered.contains("queue=\"due\"} 12.5"));
-        assert!(rendered.contains("dependency=\"postgresql\",outcome=\"success\"} 1"));
+        assert!(rendered.contains("dependency=\"postgresql\",outcome=\"success\"} 2"));
         assert!(rendered.contains("dependency=\"postgresql\",outcome=\"failure\"} 1"));
+        assert!(rendered.contains(
+            "insight_platform_outbox_events{component_role=\"scheduler-recovery\",queue=\"due\"} 4"
+        ));
+        assert!(rendered.contains("queue=\"expired_claim\"} 1.25"));
+        assert!(rendered.contains("queue=\"dead\"} 1"));
         assert!(!rendered.contains("worker_process_generation"));
     }
 

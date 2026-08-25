@@ -461,6 +461,12 @@
 > callback Receipt与completion Event。错/缺PEM、Auth/Trust漂移在DNS、Secret、transport和store前fail closed。该证据关闭OAuth callback/exchange
 > component L3；真实Secret Manager rotation、lane saturation、production scrape及L4～L6仍保持独立门禁。
 
+> 2026-08-26 implementation evidence：r287从shared PostgreSQL Outbox authority接入bounded只读operational observation，使用数据库时间导出
+> fixed `due`、`expired_claim`、`dead`计数及适用的oldest lag，不读取Event payload且不暴露tenant、Outbox/Event/claim owner或失败文本。
+> Orchestration critical-control sampler保留最后有效gauge并将查询结果计入fixed PostgreSQL observation outcome。fresh PostgreSQL 16、strict
+> Clippy、13-panel dashboard、12条symptom-first alert及逐alert runbook门禁通过。该批关闭shared Outbox backlog/recovery L1接线；其他role
+> authority/dependency/saturation、跨进程trace、动态payload审计、真实Prometheus scrape及L4仍未闭合。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

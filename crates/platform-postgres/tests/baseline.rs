@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use insight_platform_contracts::{SchedulerPriority, TenantConfig};
 use insight_platform_postgres::{
-    operational_metrics::observe_durable_job_queue,
+    operational_metrics::{observe_durable_job_queue, observe_durable_outbox},
     repository::{
         ClaimJobs, CommitJob, HeartbeatJob, JobCommitOutcome, JobFence, JobTerminalState, NewJob,
         NewQuotaAccount, NewTenant, PgRepository, QuotaMutationOutcome, RepositoryError,
@@ -230,6 +230,12 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
     .await
     .unwrap();
     assert_eq!(outbox_count, 1);
+    let outbox = observe_durable_outbox(&pool).await.unwrap();
+    assert_eq!(outbox.due_events, 1);
+    assert!(outbox.due_oldest_age_seconds >= 0.0);
+    assert_eq!(outbox.expired_claims, 0);
+    assert_eq!(outbox.expired_oldest_lag_seconds, 0.0);
+    assert_eq!(outbox.dead_events, 0);
 
     repository
         .create_quota_account(NewQuotaAccount {
