@@ -5,28 +5,30 @@ use crate::{
         decode_deployment_closure, decode_typed_payload, decode_versioned_payload, job_from_row,
         job_projection, load_deployment, load_job_for_update_by_text, load_resource,
         load_run_for_update, payload_from_row, require_ready_run_artifact,
-        require_tenant_permission, settle_context_leaf_success_in_transaction,
-        terminalize_command_receipt, DeploymentRecord, JobRecord, PgRepository, RepositoryError,
-        RunRecord, TypedPayload,
+        require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page,
+        settle_context_leaf_success_in_transaction, terminalize_command_receipt,
+        validate_safety_scan_request, DeploymentRecord, JobRecord, PgRepository, RepositoryError,
+        RunRecord, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
     },
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::ArtifactReferenceSnapshot;
 use insight_platform_context::{
     decide_claim_context_dispatch, decide_context_outcome, decide_context_query_admission,
-    decide_prepare_context_dispatch, decide_start_context_dispatch, decide_wake_context_dispatch,
-    ClaimContextJobs, CommitContextOutcome, ContextAdmissionFacts, ContextDatasetView,
-    ContextJobPayload, ContextLeaseIdentity, ContextObservationOutput, ContextQueryError,
-    ContextQueryLimits, ContextQueryPayload, ContextQueryRecord, ContextQueryStore,
-    ContextQueryTransaction, ContextSignalAudit, ContextWorkerAudit, CreateContextQuery,
-    PrepareContextDispatch, PreparedContextDispatch, WakeContextDispatch, CONTEXT_QUOTA_LINES,
+    decide_expired_context_lease, decide_prepare_context_dispatch, decide_start_context_dispatch,
+    decide_wake_context_dispatch, ClaimContextJobs, CommitContextOutcome, ContextAdmissionFacts,
+    ContextDatasetView, ContextJobPayload, ContextLeaseIdentity, ContextObservationOutput,
+    ContextQueryError, ContextQueryLimits, ContextQueryPayload, ContextQueryRecord,
+    ContextQueryStore, ContextQueryTransaction, ContextSignalAudit, ContextWorkerAudit,
+    CreateContextQuery, ExpiredContextLeaseObservation, PrepareContextDispatch,
+    PreparedContextDispatch, WakeContextDispatch, CONTEXT_QUOTA_LINES,
 };
 use insight_platform_contracts::{
-    ArtifactPurpose, ArtifactReferenceKind, CommandOutcome, ContextConsistencyPolicy,
-    ContextDatasetGenerationSpec, ContextQueryState, DeploymentClosure, EntityLifecycle,
-    ExactDatasetGenerationRef, JobState, NodeExecutionState, Permission, PlanNodeKind,
-    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
-    ResourceKind, RunState, Sha256Digest, ValueRef, WorkClass,
+    canonical_digest, ArtifactPurpose, ArtifactReferenceKind, CommandOutcome,
+    ContextConsistencyPolicy, ContextDatasetGenerationSpec, ContextQueryState, DeploymentClosure,
+    EntityLifecycle, ExactDatasetGenerationRef, JobState, NodeExecutionState, Permission,
+    PlanNodeKind, PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument,
+    ResourceId, ResourceKind, RunState, Sha256Digest, ValueRef, WorkClass,
 };
 use insight_platform_jobs::JobProjection;
 use insight_platform_orchestrator::ScopeEnvironmentLimits;
@@ -46,6 +48,86 @@ pub struct ClaimedContextExecution {
     pub quota_account_ids: Vec<String>,
     pub resume_mutations: insight_platform_contracts::ExternalLeafResumeMutationIds,
     pub failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpiredContextRecoverySlot {
+    pub quota_entry_ids: [ResourceId; CONTEXT_QUOTA_LINES],
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+}
+
+impl ExpiredContextRecoverySlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        let unique = self
+            .quota_entry_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        if unique.len() != CONTEXT_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+        {
+            return Err(RepositoryError::InvalidInput(
+                "expired Context recovery identity is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveExpiredContextJobs {
+    pub shard: SafetyScanShard,
+    pub after: Option<SafetyScanCursor>,
+    pub limit: u16,
+    pub retry_backoff_milliseconds: u64,
+    pub slots: Vec<ExpiredContextRecoverySlot>,
+}
+
+impl DriveExpiredContextJobs {
+    fn validate(&self, maximum_batch: u16, maximum_shards: u16) -> Result<(), RepositoryError> {
+        validate_safety_scan_request(
+            self.shard,
+            self.after.as_ref(),
+            ResourceKind::Job,
+            self.limit,
+            self.slots.len(),
+            maximum_batch,
+            maximum_shards,
+        )?;
+        if self.retry_backoff_milliseconds == 0 {
+            return Err(RepositoryError::InvalidInput(
+                "expired Context recovery request is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for id in slot
+                .quota_entry_ids
+                .iter()
+                .chain([&slot.event_id, &slot.outbox_id])
+            {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "expired Context recovery identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredContextExecution {
+    pub query: ContextQueryRecord,
+    pub job: JobRecord,
 }
 
 pub struct PgContextQueryTransaction {
@@ -1255,6 +1337,215 @@ pub(crate) async fn load_context_job(
 }
 
 impl PgRepository {
+    pub async fn drive_expired_context_jobs(
+        &self,
+        command: DriveExpiredContextJobs,
+    ) -> Result<SafetyScanPage<RecoveredContextExecution>, RepositoryError> {
+        command.validate(self.recovery_batch_limit(), self.recovery_shard_limit())?;
+        let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(self.pool())
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT job.*, job.lease_expires_at AS scan_sort_at
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.invocations AS query
+              ON query.tenant_id = job.tenant_id AND query.invocation_id = job.owner_id
+            WHERE job.work_class = 'context' AND job.owner_kind = 'context_query'
+              AND job.state = 'running' AND job.terminal_at IS NULL
+              AND job.lease_expires_at <= $1 AND job.attempt_no < job.attempt_limit
+              AND job.deadline > $1 AND query.state = 'in_flight' AND query.terminal_at IS NULL
+              AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
+              AND ($5::timestamptz IS NULL OR
+                   (job.lease_expires_at, job.tenant_id, job.job_id) >
+                   ($5::timestamptz, $6::text, $7::text))
+            ORDER BY job.lease_expires_at, job.tenant_id, job.job_id
+            LIMIT $2
+            "#,
+        )
+        .bind(scan_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard.index))
+        .bind(i64::from(command.shard.count))
+        .bind(command.after.as_ref().map(|cursor| cursor.sort_at))
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.tenant_id.to_string()),
+        )
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.item_id.to_string()),
+        )
+        .fetch_all(self.pool())
+        .await?;
+        let scanned_count = rows.len();
+        let last_cursor = rows
+            .last()
+            .map(|row| safety_scan_cursor_from_row(row, "job_id", ResourceKind::Job))
+            .transpose()?;
+        let candidates = rows
+            .into_iter()
+            .map(job_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut recovered = Vec::with_capacity(candidates.len());
+        for (observed, slot) in candidates.into_iter().zip(&command.slots) {
+            match self
+                .recover_expired_context_job(
+                    &observed,
+                    slot,
+                    scan_now,
+                    command.retry_backoff_milliseconds,
+                )
+                .await
+            {
+                Ok(Some(record)) => recovered.push(record),
+                Ok(None)
+                | Err(RepositoryError::Conflict(_))
+                | Err(RepositoryError::StaleFence)
+                | Err(RepositoryError::LeaseExpired) => {}
+                Err(failure) => return Err(failure),
+            }
+        }
+        Ok(safety_scan_page(
+            recovered,
+            scanned_count,
+            command.limit,
+            last_cursor,
+        ))
+    }
+
+    async fn recover_expired_context_job(
+        &self,
+        observed: &JobRecord,
+        slot: &ExpiredContextRecoverySlot,
+        scan_now: DateTime<Utc>,
+        retry_backoff_milliseconds: u64,
+    ) -> Result<Option<RecoveredContextExecution>, RepositoryError> {
+        let mut transaction = self.pool().begin().await?;
+        let quota_lines = lock_context_quota_bundle(&mut transaction, observed).await?;
+        let tenant_id = parse_id(&observed.tenant_id, "expired Context tenant")?;
+        let query_id = parse_id(&observed.owner_id, "expired ContextQuery")?;
+        let job_id = parse_id(&observed.job_id, "expired Context Job")?;
+        let current_query = load_context_query(
+            &mut transaction,
+            &tenant_id,
+            &query_id,
+            true,
+            self.context_query_limits(),
+        )
+        .await?;
+        let current_job = load_context_job(&mut transaction, &tenant_id, &job_id, true).await?;
+        let database_now = database_now(&mut transaction).await?;
+        if database_now < scan_now
+            || current_job.version != observed.version
+            || current_job.lease_epoch != observed.lease_epoch
+            || current_job.lease_token_digest != observed.lease_token_digest
+            || current_job.lease_expires_at != observed.lease_expires_at
+            || current_job.payload.digest != observed.payload.digest
+            || current_job.quota_reservation_id != observed.quota_reservation_id
+            || current_job
+                .lease_expires_at
+                .is_none_or(|expires_at| expires_at > database_now)
+        {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let projection = job_projection(&current_job)?;
+        let payload: ContextJobPayload =
+            decode_versioned_payload(&current_job.payload, "Context Job")?;
+        let retry_at = database_now
+            .checked_add_signed(Duration::milliseconds(
+                i64::try_from(retry_backoff_milliseconds).map_err(|_| {
+                    RepositoryError::InvalidInput("Context retry backoff exceeds bigint".to_owned())
+                })?,
+            ))
+            .filter(|retry_at| *retry_at < current_query.deadline)
+            .ok_or(RepositoryError::Conflict("expired Context retry deadline"))?;
+        let observation_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "context_query_id": query_id,
+            "job_id": job_id,
+            "lease_generation": projection.lease_generation,
+            "observed_job_version": projection.version,
+            "reason": "worker_lease_expired",
+            "schema_version": 1,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::NominalTypeError| {
+            RepositoryError::InvalidInput(failure.to_string())
+        })?;
+        let decision = decide_expired_context_lease(
+            &current_query,
+            &projection,
+            &payload,
+            &ExpiredContextLeaseObservation {
+                observed_job_version: projection.version,
+                observed_lease_generation: projection.lease_generation,
+                retry_at,
+                observation_digest: observation_digest.clone(),
+            },
+            database_now,
+            self.context_query_limits(),
+        )?;
+        settle_context_quota(
+            &mut transaction,
+            &current_job,
+            &quota_lines,
+            &slot.quota_entry_ids,
+            decision.consumed_query,
+            decision.settled_result_bytes,
+            &payload.binding.request_digest,
+        )
+        .await?;
+        let job = update_context_job(
+            &mut transaction,
+            &current_job,
+            &decision.job,
+            &decision.job_payload,
+            None,
+            database_now,
+        )
+        .await?;
+        update_context_query(
+            &mut transaction,
+            &current_query,
+            &decision.query,
+            self.context_query_limits(),
+        )
+        .await?;
+        append_scheduler_event(
+            &mut transaction,
+            &current_job.tenant_id,
+            &slot.event_id,
+            &slot.outbox_id,
+            "context_query",
+            &query_id.to_string(),
+            as_i64(decision.query.version, "ContextQuery version")?,
+            Some(&decision.query.run_id.to_string()),
+            "context.lease_recovered",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "attempt_count": decision.job.attempt_count,
+                    "job_id": job_id,
+                    "lease_generation": decision.job.lease_generation,
+                    "observation_digest": observation_digest,
+                    "state": decision.query.state,
+                }),
+            )?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(Some(RecoveredContextExecution {
+            query: decision.query,
+            job,
+        }))
+    }
+
     pub async fn claim_context_jobs(
         &self,
         command: ClaimContextJobs,

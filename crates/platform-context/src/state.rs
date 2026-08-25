@@ -14,9 +14,9 @@ use insight_platform_contracts::{
 };
 use insight_platform_invocations::{ExactInvocationValueRef, InvocationValueStorage};
 use insight_platform_jobs::{
-    decide_claim, decide_claim_continuation, decide_owner_cancelling, decide_owner_terminal,
-    decide_resume, decide_retry, decide_start, decide_terminal, decide_wait, decide_wake, JobFence,
-    JobOwnerRef, JobProjection, LeasePolicy, WakeContract, WakeSource,
+    decide_claim, decide_claim_continuation, decide_expired_lease, decide_owner_cancelling,
+    decide_owner_terminal, decide_resume, decide_retry, decide_start, decide_terminal, decide_wait,
+    decide_wake, JobFence, JobOwnerRef, JobProjection, LeasePolicy, WakeContract, WakeSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -839,6 +839,70 @@ pub struct ContextOutcomeDecision {
     pub consumed_query: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredContextLeaseObservation {
+    pub observed_job_version: u64,
+    pub observed_lease_generation: u64,
+    pub retry_at: DateTime<Utc>,
+    pub observation_digest: Sha256Digest,
+}
+
+/// Recovers a read-only Context dispatch whose Worker lease expired without a committed outcome.
+/// The physical query is conservatively counted, its reservation is released, and the same Job
+/// becomes retryable under a new lease generation.
+pub fn decide_expired_context_lease(
+    current_query: &ContextQueryRecord,
+    current_job: &JobProjection,
+    current_payload: &ContextJobPayload,
+    observation: &ExpiredContextLeaseObservation,
+    database_now: DateTime<Utc>,
+    limits: ContextQueryLimits,
+) -> Result<ContextOutcomeDecision, ContextQueryError> {
+    current_query.validate(limits)?;
+    current_payload.validate_for(current_query, current_job, limits)?;
+    if current_query.state != ContextQueryState::InFlight
+        || current_query.payload.current_job_id.as_ref() != Some(&current_job.job_id)
+        || current_job.state != JobState::Running
+        || current_job.attempt_count >= current_job.attempt_limit
+        || database_now >= current_query.deadline
+    {
+        return Err(ContextQueryError::FirstWinnerLost);
+    }
+    let job = decide_expired_lease(
+        current_job,
+        observation.observed_job_version,
+        observation.observed_lease_generation,
+        database_now,
+        JobState::RetryScheduled,
+        Some(observation.retry_at),
+    )
+    .map_err(|_| ContextQueryError::FirstWinnerLost)?;
+    let consumed_query = !current_payload.query_consumed;
+    let mut query = current_query.clone();
+    query.state = ContextQueryState::RetryScheduled;
+    query.retry_at = Some(observation.retry_at);
+    query.version = increment(query.version)?;
+    query.updated_at = database_now;
+    let mut job_payload = current_payload.clone();
+    job_payload.wake_contract = None;
+    job_payload.remote_state_digest = None;
+    job_payload.resume_same_attempt = false;
+    job_payload.query_consumed = false;
+    job_payload.physical_outcome = Some(ContextPhysicalOutcomeEvidence::RetryScheduled {
+        failure_digest: observation.observation_digest.clone(),
+    });
+    query.validate(limits)?;
+    job_payload.validate_for(&query, &job, limits)?;
+    Ok(ContextOutcomeDecision {
+        query,
+        job,
+        job_payload,
+        output: None,
+        settled_result_bytes: 0,
+        consumed_query,
+    })
+}
+
 pub fn decide_context_outcome(
     current_query: &ContextQueryRecord,
     current_job: &JobProjection,
@@ -1621,6 +1685,78 @@ mod tests {
             observation,
             validation_evidence_digest: named_digest("validation-evidence"),
         }
+    }
+
+    #[test]
+    fn expired_read_only_dispatch_settles_and_retries_under_a_new_attempt() {
+        let fixture = fixture();
+        let query = decide_context_query_admission(&fixture.command, fixture.facts, fixture.limits)
+            .unwrap();
+        let prepared = decide_prepare_context_dispatch(
+            &query,
+            &PrepareContextDispatch {
+                audit: audit(
+                    &query.tenant_id,
+                    &query.payload.admission.principal.principal_id,
+                    93,
+                ),
+                context_query_id: query.context_query_id.clone(),
+                expected_query_version: query.version,
+                job_id: id(ResourceKind::Job, 94),
+                scheduled_at: query.created_at,
+            },
+            query.created_at,
+            fixture.limits,
+        )
+        .unwrap();
+        let worker = ContextLeaseIdentity {
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 95),
+            lease_token_digest: named_digest("expired-lease"),
+        };
+        let (_, leased, payload) = decide_claim_context_dispatch(
+            &prepared.query,
+            &prepared.job,
+            &prepared.job_payload,
+            &worker,
+            query.created_at,
+            LeasePolicy {
+                requested_milliseconds: 1_000,
+                hard_maximum_milliseconds: fixture.limits.maximum_lease_milliseconds(),
+            },
+            fixture.limits,
+        )
+        .unwrap();
+        let (running_query, running_job, running_payload) = decide_start_context_dispatch(
+            &prepared.query,
+            &leased,
+            &payload,
+            &fence(&leased),
+            query.created_at,
+            fixture.limits,
+        )
+        .unwrap();
+        let recovered_at = query.created_at + Duration::seconds(2);
+        let decision = decide_expired_context_lease(
+            &running_query,
+            &running_job,
+            &running_payload,
+            &ExpiredContextLeaseObservation {
+                observed_job_version: running_job.version,
+                observed_lease_generation: running_job.lease_generation,
+                retry_at: recovered_at + Duration::milliseconds(10),
+                observation_digest: named_digest("expired-observation"),
+            },
+            recovered_at,
+            fixture.limits,
+        )
+        .unwrap();
+
+        assert_eq!(decision.query.state, ContextQueryState::RetryScheduled);
+        assert_eq!(decision.job.state, JobState::RetryScheduled);
+        assert!(decision.job.lease.is_none());
+        assert!(decision.consumed_query);
+        assert_eq!(decision.settled_result_bytes, 0);
+        assert!(!decision.job_payload.query_consumed);
     }
 
     #[test]

@@ -123,6 +123,13 @@
 > 强杀、第二进程expired-lease恢复、安全重放及structured Inline terminal commit；Provider调用总数严格为2。Model provider process L3
 > 至此闭合；Model tool-result整链、Context external leaf及Phase 2 exit gate仍待完成。
 
+> 2026-08-25 implementation evidence：Context owner新增bounded/sharded expired-lease scanner。在quota→ContextQuery→Job锁序内重验
+> exact version/generation/token/expiry/payload/reservation，原子结算已发出的read-only query、清除旧lease/reservation、写
+> `context.lease_recovered` Event/Outbox并把同一Job置为`retry_scheduled`；Deferred后同attempt恢复时不会重复结算已经消费的query，下一
+> 物理attempt才重新预留。fresh PostgreSQL 16 r234覆盖Deferred→resume→lease expiry→owner recovery→新attempt→唯一Observation terminal，
+> quota query计数为2且result bytes只结算一次。该批关闭Context process L3的durable recovery前置门禁；独立production Context Worker、
+> backend protocol与真实多进程kill窗口仍待完成。
+
 > 2026-08-25 implementation evidence：runtime新增production orchestration composition，明确把business claim/heartbeat连接与
 > critical-control Plan/RunValue/Skill读取、owner commit及Safety scanner连接分开，并用同一mTLS Artifact Scheduler client组合exact
 > Plan materializer、Capability/Model admission、durable Plan driver、lease-fenced executor和coordinator。独立binary和Helm角色已在

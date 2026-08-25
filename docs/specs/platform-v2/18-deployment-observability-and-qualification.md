@@ -234,6 +234,10 @@ commit-window强杀、expired-lease恢复与非幂等不重放，关闭MCP Tools
 commit-window强杀、第二进程expired-lease恢复、冻结ceiling保守结算、安全重放与structured Inline terminal commit，关闭Model provider
 process L3；Model tool-result整链与Context external leaf L3仍未通过。
 
+Context recovery前置证据已在fresh PostgreSQL 16 r234通过：Deferred同attempt恢复后模拟Worker lease丢失，bounded owner scanner重验
+fence/payload/reservation，原子结算旧quota与Event/Outbox并创建下一物理attempt，最终Observation唯一。该证据仅关闭L2 durable recovery，
+尚不替代独立production Context Worker、真实backend protocol及kill/restart的L3门禁。
+
 每个production release至少覆盖：
 
 - clean baseline migration、upgrade/rollback rehearsal和backup/restore；

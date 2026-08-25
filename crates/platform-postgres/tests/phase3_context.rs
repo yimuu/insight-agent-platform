@@ -46,12 +46,15 @@ use insight_platform_orchestrator::{
     RuntimePlan, ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits,
 };
 use insight_platform_postgres::{
-    context_query_repository::{ClaimedContextExecution, PreparedContextExecution},
+    context_query_repository::{
+        ClaimedContextExecution, DriveExpiredContextJobs, ExpiredContextRecoverySlot,
+        PreparedContextExecution,
+    },
     repository::{
         ClaimJobs, DeferOrchestrationContextMutationIds, DeferOrchestrationToContextQuery,
         JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewTenant,
         NewTenantPrincipal, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
-        ResolvedExpressionInput, TypedPayload,
+        ResolvedExpressionInput, SafetyScanShard, TypedPayload,
     },
     verify_schema,
 };
@@ -2593,6 +2596,43 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     assert_eq!(woken.job.state, JobState::Ready.as_str());
     let resumed = claim(&repository, &fixture, job_id.clone(), 0x170).await;
     assert_eq!(resumed.claimed.job.attempt_no, 1);
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let recovered = repository
+        .drive_expired_context_jobs(DriveExpiredContextJobs {
+            shard: SafetyScanShard::whole(),
+            after: None,
+            limit: 1,
+            retry_backoff_milliseconds: 5,
+            slots: vec![ExpiredContextRecoverySlot {
+                quota_entry_ids: [
+                    id(ResourceKind::QuotaLedgerEntry, 0x183),
+                    id(ResourceKind::QuotaLedgerEntry, 0x184),
+                    id(ResourceKind::QuotaLedgerEntry, 0x185),
+                ],
+                event_id: id(ResourceKind::Event, 0x186),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x187),
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.records.len(), 1);
+    assert_eq!(
+        recovered.records[0].query.state,
+        ContextQueryState::RetryScheduled
+    );
+    assert_eq!(recovered.records[0].job.state, JobState::RetryScheduled.as_str());
+    assert!(recovered.records[0].job.worker_id.is_none());
+    assert!(recovered.records[0].job.quota_reservation_id.is_none());
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let replayed = claim(&repository, &fixture, job_id.clone(), 0x1a0).await;
+    assert_eq!(replayed.claimed.job.attempt_no, 2);
     park_direct_context_leaf(
         &pool,
         &fixture,
@@ -2603,17 +2643,17 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
 
     let completed_output = output(
         &fixture,
-        &resumed.claimed.query,
+        &replayed.claimed.query,
         Utc::now(),
         id(ResourceKind::RunValue, 0x182),
     );
     let expected_result_bytes = completed_output.observation.total_bytes;
     let completion_command = CommitContextOutcome {
-            audit: worker_audit(&fixture.tenant_id, &resumed.worker_id, 0x190, "complete"),
+            audit: worker_audit(&fixture.tenant_id, &replayed.worker_id, 0x190, "complete"),
             context_query_id: created.context_query_id.clone(),
-            expected_query_version: resumed.claimed.query.version,
+            expected_query_version: replayed.claimed.query.version,
             job_id: job_id.clone(),
-            fence: resumed.fence(),
+            fence: replayed.fence(),
             outcome: ContextBackendOutcome::Completed(Box::new(completed_output)),
             quota_entry_ids: [
                 id(ResourceKind::QuotaLedgerEntry, 0x193),
@@ -2632,7 +2672,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     };
     assert_eq!(completed.query.state, ContextQueryState::Succeeded);
     assert_eq!(completed.job.state, JobState::Succeeded.as_str());
-    assert_eq!(completed.job.attempt_no, 1);
+    assert_eq!(completed.job.attempt_no, 2);
     assert!(matches!(
         execute_outcome(&repository, completion_command).await.unwrap(),
         CommandOutcome::Replayed(record) if record == completed
@@ -2824,7 +2864,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
             .find(|(metric, _, _)| metric == QuotaDimension::ContextQueries.as_str())
             .unwrap()
             .2,
-        1
+        2
     );
     assert_eq!(
         u64::try_from(
