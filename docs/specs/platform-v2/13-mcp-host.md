@@ -186,4 +186,7 @@ r268已在Context owner边界交付CR-190 closed subscription refresh request、
 但MCP Host尚未拥有调用该port的production adapter/claim loop，PostgreSQL也尚未实现Job/Receipt/Event/Outbox原子接纳与commit-uncertain replay。
 因此subscription多进程L3及本规范第12节对应验收保持未完成。
 
+r270已补齐PostgreSQL owner transaction与notification Receipt replay/唯一Context Job L2 fixture，并让既有MCP completion消费owner返回的
+durable work digest；Host production adapter、full reconcile L2、独立claim/refresh进程及commit-window L3仍未完成。
+
 首版remote Streamable HTTP合同无未决设计问题。

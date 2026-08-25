@@ -1,5 +1,10 @@
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::ArtifactReferenceSnapshot;
+use insight_platform_context::{
+    AdmitContextSubscriptionRefresh, ContextSubscriptionAdmissionAudit,
+    ContextSubscriptionRefreshCause, ContextSubscriptionRefreshRequest,
+    CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+};
 use insight_platform_contracts::{
     canonical_digest, AllowedMcpServerCapabilities, ArtifactPurpose, ArtifactRef,
     ArtifactReferenceKind, AuthoringPackage, CapabilityEndpointScheme, CodeTrustClass,
@@ -1283,6 +1288,52 @@ fn notification(
     }
 }
 
+fn context_refresh_admission(
+    record: &McpSubscriptionRecord,
+    base: u16,
+) -> AdmitContextSubscriptionRefresh {
+    let pending = record.payload.pending_invalidation.as_ref().unwrap();
+    let binding = &record.payload.binding;
+    let cause = match pending.class {
+        McpNotificationClass::ResourceUpdated => ContextSubscriptionRefreshCause::ResourceUpdated,
+        McpNotificationClass::ResourceListChanged => {
+            ContextSubscriptionRefreshCause::ResourceListChanged
+        }
+        McpNotificationClass::ToolListChanged => ContextSubscriptionRefreshCause::ToolListChanged,
+        McpNotificationClass::PromptListChanged => {
+            ContextSubscriptionRefreshCause::PromptListChanged
+        }
+    };
+    let mut request = ContextSubscriptionRefreshRequest {
+        schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+        tenant_id: record.tenant_id.clone(),
+        subscription_id: record.subscription_id.clone(),
+        context_deployment: binding.context_deployment.clone(),
+        mcp_deployment: binding.mcp_deployment.clone(),
+        discovery_snapshot_id: binding.discovery_snapshot_id.clone(),
+        discovery_snapshot_digest: binding.discovery_snapshot_digest.clone(),
+        resource_uri: binding.resource_uri.clone(),
+        resource_uri_digest: binding.resource_uri_digest.clone(),
+        authorization_generation: binding.authorization_generation,
+        session_generation: pending.session_generation,
+        event_generation: pending.event_generation,
+        event_key_digest: pending.event_key_digest.clone(),
+        body_digest: pending.body_digest.clone(),
+        cause,
+        deadline: record.deadline,
+        request_digest: named_digest("context-refresh-placeholder"),
+    };
+    request.request_digest = request.canonical_request_digest().unwrap();
+    AdmitContextSubscriptionRefresh {
+        request,
+        audit: ContextSubscriptionAdmissionAudit {
+            schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+            request_id: id(ResourceKind::ServerRequest, base),
+            correlation_digest: named_digest(&format!("context-refresh-correlation-{base}")),
+        },
+    }
+}
+
 #[test]
 fn mcp_subscription_is_durable_fenced_coalesced_and_tenant_scoped() {
     std::thread::Builder::new()
@@ -1521,6 +1572,82 @@ async fn mcp_subscription_fixture() {
         2
     );
 
+    let admission = context_refresh_admission(&replay.record, 0x278);
+    let accepted = repository
+        .admit_context_subscription_refresh(admission.clone())
+        .await
+        .unwrap();
+    let replayed_acceptance = repository
+        .admit_context_subscription_refresh(admission.clone())
+        .await
+        .unwrap();
+    assert_eq!(replayed_acceptance, accepted);
+    let admitted_job = sqlx::query(
+        r#"
+        SELECT work_class, owner_kind, owner_id, invocation_id, state,
+               request_digest, payload_digest
+        FROM insight_platform.jobs
+        WHERE tenant_id = $1 AND job_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(accepted.job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        admitted_job.try_get::<String, _>("work_class").unwrap(),
+        "context"
+    );
+    assert_eq!(
+        admitted_job.try_get::<String, _>("owner_kind").unwrap(),
+        "mcp_operation"
+    );
+    assert_eq!(
+        admitted_job.try_get::<String, _>("owner_id").unwrap(),
+        fixture.subscription_id.to_string()
+    );
+    assert_eq!(
+        admitted_job
+            .try_get::<Option<String>, _>("invocation_id")
+            .unwrap(),
+        Some(fixture.subscription_id.to_string())
+    );
+    assert_eq!(admitted_job.try_get::<String, _>("state").unwrap(), "ready");
+    assert_eq!(
+        admitted_job.try_get::<String, _>("request_digest").unwrap(),
+        admission.request.request_digest.to_string()
+    );
+    assert_eq!(
+        admitted_job.try_get::<String, _>("payload_digest").unwrap(),
+        accepted.durable_work_digest.to_string()
+    );
+    let mut stale_admission = admission;
+    stale_admission.request.session_generation += 1;
+    stale_admission.request.request_digest =
+        stale_admission.request.canonical_request_digest().unwrap();
+    assert!(repository
+        .admit_context_subscription_refresh(stale_admission)
+        .await
+        .is_err());
+    let admitted_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.jobs WHERE tenant_id = $1 AND work_class = 'context' AND owner_kind = 'mcp_operation' AND owner_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.subscription_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(admitted_count, 1);
+    let admission_event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND event_type = 'context.subscription_refresh_admitted'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(admission_event_count, 1);
+
     let refresh_worker = id(ResourceKind::WorkerProcessGeneration, 0x280);
     let refresh_fence =
         claim_and_start(&repository, &fixture, &refresh_worker, "refresh-lease").await;
@@ -1532,7 +1659,7 @@ async fn mcp_subscription_fixture() {
         expected_subscription_version: replay.record.version,
         expected_session_generation: 1,
         expected_event_generation: 2,
-        refresh_evidence_digest: named_digest("refresh-evidence"),
+        refresh_evidence_digest: accepted.durable_work_digest,
     };
     refresh.audit.request_digest = refresh.request_digest().unwrap();
     let refreshed = match repository

@@ -14,6 +14,12 @@
 > `registries.json`，同步更新root contract manifest和独立合同checker；unit fixture同时证明该pair合法而反向`Mcp -> ContextQuery`仍被拒绝。
 > generated-contract、fixture conformance与strict Clippy通过。该证据只闭合owner registry，不代表PostgreSQL admission或worker claim已实现。
 
+> 2026-08-26 implementation evidence：r270实现CR-190/191 Context subscription owner transaction。它以数据库时间验证closed request，先按
+> exact request digest claim `Command` Receipt，再锁定同tenant active `mcp_subscription` row并重验Context/MCP Deployment、Discovery、
+> authorization/session/event、root URI/digest与当前published closure；同一事务创建`Context -> McpOperation` ready Job、Event、Outbox并保存
+> versioned stable acceptance。fresh PostgreSQL 16 fixture证明notification接受与Receipt replay返回同一Job/digest，stale generation整批回滚且
+> 只有一个Context Job/Event，MCP completion消费owner生成的durable work digest。reconcile正向fixture、Context worker handler与Host adapter/L3仍待实现。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

@@ -372,6 +372,10 @@ r268实现MCP subscription→Context admission的L1 nominal boundary及负向uni
 stable acceptance validation。它不写数据库、不启动production worker，也没有覆盖accept commit前后kill、Receipt replay、唯一Context Job或
 MCP/Context pool隔离；上述L2/L3与本规范要求的真实多进程qualification仍是release blocker。
 
+r270在fresh PostgreSQL 16上覆盖notification admission的Job/Receipt/Event/Outbox原子提交、exact replay、唯一Context Job、stale generation
+整批回滚及MCP completion引用durable work digest。full reconcile、wrong-class claim、Context handler、Host/Context独立进程kill-window和permit
+隔离仍待L2/L3，因此不推进qualification状态。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

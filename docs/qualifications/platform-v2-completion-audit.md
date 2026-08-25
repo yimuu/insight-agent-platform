@@ -142,8 +142,8 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 1. MCP Host production binary/Helm与ToolsCall process L3已闭合；OAuth Callback/Cleanup/Egress和subscription的真实endpoint多进程
    kill/restart L3仍缺，fresh PostgreSQL r249只证明既有durable owner层；r268已实现CR-190 subscription→Context closed request、bounded Job
-   payload与exact acceptance的L1 nominal contract，r269已闭合`Context -> McpOperation` machine owner pair；但PostgreSQL owner transaction、
-   production target/claim loop及对应L2/L3尚未实现。
+   payload与exact acceptance的L1 nominal contract，r269已闭合`Context -> McpOperation` machine owner pair；r270完成notification的PostgreSQL
+   owner transaction、Receipt replay与唯一Job L2，但full reconcile fixture、production target/claim loop及对应L3尚未实现。
 2. Context Native/Remote和Capability Native/Remote production composition已闭合；Dataset build/Text2SQL、Artifact和各外部依赖仍须按
    production qualification matrix取得适用的真实协议、故障与隔舱证据。
 3. S3/KMS/Secret Manager只有adapter/fixture和deployment contract，没有production-equivalent fault/rotation/restore证据。

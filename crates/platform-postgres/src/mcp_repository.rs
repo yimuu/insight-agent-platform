@@ -9,13 +9,18 @@ use crate::repository::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_artifacts::ArtifactReferenceSnapshot;
+use insight_platform_context::{
+    AcceptedContextSubscriptionRefresh, AdmitContextSubscriptionRefresh,
+    ContextSubscriptionAdmissionAuthority, ContextSubscriptionAdmissionError,
+    ContextSubscriptionRefreshCause, ContextSubscriptionRefreshJobPayload,
+};
 use insight_platform_contracts::{
     checked_in_hard_limit_profile, ArtifactPurpose, ArtifactReferenceKind, CommandOutcome,
     ContextBackendBinding, ContextBackendContract, DeploymentClosure, EntityLifecycle,
     ExactDeploymentRef, JobState, McpAuthorizationPrincipalKind, McpAuthorizationState,
-    McpDeploymentClosure, McpProtocolPolicyDocument, McpServerExecutionContract, Permission,
-    PolicyKind, PrincipalIdentityState, PrincipalKind, RegistryResourceKind, ResourceDocument,
-    ResourceId, Sha256Digest,
+    McpDeploymentClosure, McpProtocolPolicyDocument, McpServerExecutionContract, McpSessionState,
+    Permission, PolicyKind, PrincipalIdentityState, PrincipalKind, RegistryResourceKind,
+    ResourceDocument, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_jobs::{
     decide_expired_lease as decide_expired_job_lease,
@@ -63,6 +68,7 @@ use insight_platform_tasks::{
     TaskState,
 };
 use sqlx::{Acquire, Postgres, Row, Transaction};
+use uuid::Uuid;
 
 const MCP_AUTHORIZATION_RESOURCE_KIND: &str = "mcp_authorization_binding";
 const MCP_DISCOVERY_RESOURCE_KIND: &str = "mcp_discovery_snapshot";
@@ -1855,6 +1861,393 @@ async fn claim_mcp_discovery_create_receipt(
         ));
     }
     Ok(Some(operation_id))
+}
+
+impl PgRepository {
+    pub async fn admit_context_subscription_refresh(
+        &self,
+        command: AdmitContextSubscriptionRefresh,
+    ) -> Result<AcceptedContextSubscriptionRefresh, RepositoryError> {
+        command
+            .validate_at(Utc::now())
+            .map_err(invalid_context_subscription_admission)?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command
+            .validate_at(database_now)
+            .map_err(invalid_context_subscription_admission)?;
+
+        if let Some(accepted) =
+            claim_context_subscription_admission_receipt(&mut transaction, &command, database_now)
+                .await?
+        {
+            accepted
+                .validate_for(&command.request, database_now)
+                .map_err(invalid_context_subscription_admission)?;
+            transaction.commit().await?;
+            return Ok(accepted);
+        }
+
+        let record = load_mcp_subscription(
+            &mut transaction,
+            &command.request.tenant_id,
+            &command.request.subscription_id,
+            true,
+            database_now,
+        )
+        .await?;
+        validate_context_subscription_admission_source(
+            &mut transaction,
+            &record,
+            &command,
+            database_now,
+        )
+        .await?;
+
+        let job_id = new_internal_id(ResourceKind::Job)?;
+        let event_id = new_internal_id(ResourceKind::Event)?;
+        let outbox_id = new_internal_id(ResourceKind::OutboxEvent)?;
+        let job_payload =
+            ContextSubscriptionRefreshJobPayload::from_request(command.request.clone());
+        job_payload
+            .validate_at(database_now)
+            .map_err(invalid_context_subscription_admission)?;
+        let durable_work_digest = job_payload
+            .canonical_digest()
+            .map_err(invalid_context_subscription_admission)?;
+        let typed_job = TypedPayload::from_versioned(1, &job_payload, 1_048_576)?;
+        let attempt_limit = i32::try_from(self.context_query_limits().maximum_attempts())
+            .map_err(|_| RepositoryError::InvalidInput("Context attempt limit".to_owned()))?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.jobs (
+                tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+                state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
+                deadline, priority, request_digest, payload_schema_version, payload,
+                payload_digest, created_at, updated_at
+            ) VALUES ($1, $2, 'context', 'mcp_operation', $3, $3,
+                      'ready', 1, 0, $4, 0, $5, $6, 0, $7, $8, $9, $10, $5, $5)
+            "#,
+        )
+        .bind(command.request.tenant_id.to_string())
+        .bind(job_id.to_string())
+        .bind(command.request.subscription_id.to_string())
+        .bind(attempt_limit)
+        .bind(database_now)
+        .bind(command.request.deadline)
+        .bind(command.request.request_digest.to_string())
+        .bind(typed_job.schema_version)
+        .bind(&typed_job.value)
+        .bind(&typed_job.digest)
+        .execute(&mut *transaction)
+        .await?;
+
+        let accepted = AcceptedContextSubscriptionRefresh {
+            schema_version: insight_platform_context::CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+            request_digest: command.request.request_digest.clone(),
+            durable_work_digest,
+            job_id,
+            accepted_at: database_now,
+        };
+        accepted
+            .validate_for(&command.request, database_now)
+            .map_err(invalid_context_subscription_admission)?;
+        append_scheduler_event(
+            &mut transaction,
+            &command.request.tenant_id.to_string(),
+            &event_id,
+            &outbox_id,
+            "mcp_operation",
+            &command.request.subscription_id.to_string(),
+            as_i64(record.version, "MCP subscription version")?,
+            None,
+            "context.subscription_refresh_admitted",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "context_deployment": command.request.context_deployment,
+                    "durable_work_digest": accepted.durable_work_digest,
+                    "job_id": accepted.job_id,
+                    "request_digest": accepted.request_digest,
+                    "subscription_id": command.request.subscription_id,
+                }),
+            )?,
+        )
+        .await?;
+        complete_context_subscription_admission_receipt(&mut transaction, &command, &accepted)
+            .await?;
+        transaction.commit().await?;
+        Ok(accepted)
+    }
+}
+
+async fn claim_context_subscription_admission_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitContextSubscriptionRefresh,
+    database_now: DateTime<Utc>,
+) -> Result<Option<AcceptedContextSubscriptionRefresh>, RepositoryError> {
+    let receipt_id = new_internal_id(ResourceKind::Receipt)?;
+    let payload = TypedPayload::new(
+        1,
+        &serde_json::json!({
+            "correlation_digest": command.audit.correlation_digest,
+            "request_id": command.audit.request_id,
+        }),
+    )?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest,
+            state, payload_schema_version, payload, payload_digest, expires_at,
+            created_at
+        ) VALUES ($1, $2, 'command', 'mcp_operation', $3, $3,
+                  'context.subscription_refresh.admit', $4, $4, 'processing',
+                  $5, $6, $7, $8, $9)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(command.request.tenant_id.to_string())
+    .bind(receipt_id.to_string())
+    .bind(command.request.subscription_id.to_string())
+    .bind(command.request.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(command.request.deadline)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(None);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state, response_reference_id,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'mcp_operation' AND scope_id = $2
+          AND dedupe_owner_id = $2
+          AND operation = 'context.subscription_refresh.admit'
+          AND idempotency_key_digest = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(command.request.tenant_id.to_string())
+    .bind(command.request.subscription_id.to_string())
+    .bind(command.request.request_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != command.request.request_digest.to_string()
+        || row.try_get::<String, _>("state")? != "succeeded"
+    {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    let stored = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let accepted: AcceptedContextSubscriptionRefresh =
+        decode_versioned_payload(&stored, "Context subscription admission Receipt")?;
+    if row.try_get::<Option<String>, _>("response_reference_id")?
+        != Some(accepted.job_id.to_string())
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Context subscription admission Receipt result drifted".to_owned(),
+        ));
+    }
+    Ok(Some(accepted))
+}
+
+async fn validate_context_subscription_admission_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    record: &McpSubscriptionRecord,
+    command: &AdmitContextSubscriptionRefresh,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let request = &command.request;
+    let binding = &record.payload.binding;
+    if record.tenant_id != request.tenant_id
+        || record.subscription_id != request.subscription_id
+        || record.state != McpSubscriptionState::Active
+        || !matches!(
+            record.payload.session.state,
+            McpSessionState::Ready | McpSessionState::Degraded
+        )
+        || record.deadline != request.deadline
+        || binding.context_deployment != request.context_deployment
+        || binding.mcp_deployment != request.mcp_deployment
+        || binding.discovery_snapshot_id != request.discovery_snapshot_id
+        || binding.discovery_snapshot_digest != request.discovery_snapshot_digest
+        || binding.resource_uri != request.resource_uri
+        || binding.resource_uri_digest != request.resource_uri_digest
+        || binding.authorization_generation != request.authorization_generation
+        || record.payload.session.generation != request.session_generation
+    {
+        return Err(RepositoryError::Conflict(
+            "Context subscription admission source",
+        ));
+    }
+    match &request.cause {
+        ContextSubscriptionRefreshCause::FullReconcile {
+            observed_subscription_version,
+        } => {
+            if record.payload.pending_invalidation.is_some()
+                || *observed_subscription_version != record.version
+                || request.event_generation != record.version
+                || request.event_key_digest != binding.resource_uri_digest
+                || request.body_digest != binding.discovery_snapshot_digest
+            {
+                return Err(RepositoryError::Conflict(
+                    "Context subscription reconcile evidence",
+                ));
+            }
+        }
+        cause => {
+            let pending =
+                record
+                    .payload
+                    .pending_invalidation
+                    .as_ref()
+                    .ok_or(RepositoryError::Conflict(
+                        "Context subscription notification evidence",
+                    ))?;
+            let cause_matches = matches!(
+                (cause, pending.class),
+                (
+                    ContextSubscriptionRefreshCause::ResourceUpdated,
+                    insight_platform_mcp_host::McpNotificationClass::ResourceUpdated
+                ) | (
+                    ContextSubscriptionRefreshCause::ResourceListChanged,
+                    insight_platform_mcp_host::McpNotificationClass::ResourceListChanged
+                ) | (
+                    ContextSubscriptionRefreshCause::ToolListChanged,
+                    insight_platform_mcp_host::McpNotificationClass::ToolListChanged
+                ) | (
+                    ContextSubscriptionRefreshCause::PromptListChanged,
+                    insight_platform_mcp_host::McpNotificationClass::PromptListChanged
+                )
+            );
+            if !cause_matches
+                || pending.session_generation != request.session_generation
+                || pending.event_generation != request.event_generation
+                || pending.event_key_digest != request.event_key_digest
+                || pending.body_digest != request.body_digest
+                || (pending.class
+                    == insight_platform_mcp_host::McpNotificationClass::ResourceUpdated
+                    && pending.resource_uri_digest.as_ref() != Some(&request.resource_uri_digest))
+            {
+                return Err(RepositoryError::Conflict(
+                    "Context subscription notification evidence",
+                ));
+            }
+        }
+    }
+
+    let contract = resolve_mcp_execution_contract(
+        transaction,
+        &McpExecutionContractQuery {
+            schema_version: 1,
+            tenant_id: binding.tenant_id.clone(),
+            mcp_deployment: binding.mcp_deployment.clone(),
+            discovery_snapshot_id: binding.discovery_snapshot_id.clone(),
+            discovery_snapshot_digest: binding.discovery_snapshot_digest.clone(),
+            authorization_binding_id: binding.authorization_binding_id.clone(),
+            authorization_generation: binding.authorization_generation,
+            authorization_context_digest: binding.authorization_context_digest.clone(),
+            principal_id: binding.principal_id.clone(),
+        },
+        database_now,
+    )
+    .await?;
+    validate_mcp_subscription_context_binding(
+        transaction,
+        &request.tenant_id,
+        &request.context_deployment,
+        &contract,
+    )
+    .await
+}
+
+async fn complete_context_subscription_admission_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitContextSubscriptionRefresh,
+    accepted: &AcceptedContextSubscriptionRefresh,
+) -> Result<(), RepositoryError> {
+    let payload = TypedPayload::from_versioned(1, accepted, 262_144)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = 'scheduled', response_reference_id = $4,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            completed_at = $8
+        WHERE tenant_id = $1 AND receipt_kind = 'command'
+          AND scope_kind = 'mcp_operation' AND scope_id = $2
+          AND dedupe_owner_id = $2
+          AND operation = 'context.subscription_refresh.admit'
+          AND idempotency_key_digest = $3 AND request_digest = $3
+          AND state = 'processing'
+        "#,
+    )
+    .bind(command.request.tenant_id.to_string())
+    .bind(command.request.subscription_id.to_string())
+    .bind(command.request.request_digest.to_string())
+    .bind(accepted.job_id.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(accepted.accepted_at)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict(
+            "Context subscription admission Receipt",
+        ));
+    }
+    Ok(())
+}
+
+fn new_internal_id(kind: ResourceKind) -> Result<ResourceId, RepositoryError> {
+    ResourceId::from_uuid_v7(kind, Uuid::now_v7())
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))
+}
+
+fn invalid_context_subscription_admission(
+    failure: ContextSubscriptionAdmissionError,
+) -> RepositoryError {
+    RepositoryError::InvalidInput(failure.to_string())
+}
+
+fn map_context_subscription_admission_error(
+    failure: RepositoryError,
+) -> ContextSubscriptionAdmissionError {
+    match failure {
+        RepositoryError::Database(_) => ContextSubscriptionAdmissionError::CommitUncertain,
+        RepositoryError::CorruptRow(_) => ContextSubscriptionAdmissionError::Unavailable,
+        RepositoryError::InvalidInput(_)
+        | RepositoryError::NotFound(_)
+        | RepositoryError::Conflict(_)
+        | RepositoryError::StaleFence
+        | RepositoryError::LeaseExpired
+        | RepositoryError::QuotaExceeded
+        | RepositoryError::PermissionDenied
+        | RepositoryError::IdempotencyConflict => ContextSubscriptionAdmissionError::Rejected,
+    }
+}
+
+#[async_trait]
+impl ContextSubscriptionAdmissionAuthority for PgRepository {
+    async fn admit_context_subscription_refresh(
+        &self,
+        command: AdmitContextSubscriptionRefresh,
+    ) -> Result<AcceptedContextSubscriptionRefresh, ContextSubscriptionAdmissionError> {
+        PgRepository::admit_context_subscription_refresh(self, command)
+            .await
+            .map_err(map_context_subscription_admission_error)
+    }
 }
 
 #[async_trait]

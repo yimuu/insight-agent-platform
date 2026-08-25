@@ -16,41 +16,15 @@ pub const MAX_CONTEXT_SUBSCRIPTION_ADMISSION_CLOCK_SKEW_SECONDS: i64 = 60;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContextSubscriptionRefreshCause {
-    ResourceUpdated {
-        resource_uri: String,
-        resource_uri_digest: Sha256Digest,
-    },
+    ResourceUpdated,
     ResourceListChanged,
     ToolListChanged,
     PromptListChanged,
-    FullReconcile {
-        resource_uri: String,
-        resource_uri_digest: Sha256Digest,
-        observed_subscription_version: u64,
-    },
+    FullReconcile { observed_subscription_version: u64 },
 }
 
 impl ContextSubscriptionRefreshCause {
     fn validate(&self) -> Result<(), ContextSubscriptionAdmissionError> {
-        match self {
-            Self::ResourceUpdated {
-                resource_uri,
-                resource_uri_digest: _,
-            }
-            | Self::FullReconcile {
-                resource_uri,
-                resource_uri_digest: _,
-                observed_subscription_version: _,
-            } => {
-                if resource_uri.is_empty()
-                    || resource_uri.len() > MAX_CONTEXT_SUBSCRIPTION_RESOURCE_URI_BYTES
-                    || resource_uri.chars().any(char::is_control)
-                {
-                    return Err(ContextSubscriptionAdmissionError::InvalidRequest);
-                }
-            }
-            Self::ResourceListChanged | Self::ToolListChanged | Self::PromptListChanged => {}
-        }
         if matches!(
             self,
             Self::FullReconcile {
@@ -76,6 +50,8 @@ pub struct ContextSubscriptionRefreshRequest {
     pub mcp_deployment: ExactDeploymentRef,
     pub discovery_snapshot_id: ResourceId,
     pub discovery_snapshot_digest: Sha256Digest,
+    pub resource_uri: String,
+    pub resource_uri_digest: Sha256Digest,
     pub authorization_generation: u64,
     pub session_generation: u64,
     pub event_generation: u64,
@@ -110,6 +86,9 @@ impl ContextSubscriptionRefreshRequest {
             || self.context_deployment.resource_kind != ResourceKind::ContextDeployment
             || self.mcp_deployment.resource_kind != ResourceKind::McpDeployment
             || self.discovery_snapshot_id.kind() != ResourceKind::McpDiscoverySnapshot
+            || self.resource_uri.is_empty()
+            || self.resource_uri.len() > MAX_CONTEXT_SUBSCRIPTION_RESOURCE_URI_BYTES
+            || self.resource_uri.chars().any(char::is_control)
             || self.authorization_generation == 0
             || self.session_generation == 0
             || self.event_generation == 0
@@ -194,6 +173,7 @@ impl ContextSubscriptionRefreshJobPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptedContextSubscriptionRefresh {
+    pub schema_version: u32,
     pub request_digest: Sha256Digest,
     pub durable_work_digest: Sha256Digest,
     pub job_id: ResourceId,
@@ -206,7 +186,8 @@ impl AcceptedContextSubscriptionRefresh {
         request: &ContextSubscriptionRefreshRequest,
         now: DateTime<Utc>,
     ) -> Result<(), ContextSubscriptionAdmissionError> {
-        if self.request_digest != request.request_digest
+        if self.schema_version != CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION
+            || self.request_digest != request.request_digest
             || self.job_id.kind() != ResourceKind::Job
             || self.accepted_at
                 > now + Duration::seconds(MAX_CONTEXT_SUBSCRIPTION_ADMISSION_CLOCK_SKEW_SECONDS)
@@ -294,15 +275,14 @@ mod tests {
             .unwrap(),
             discovery_snapshot_id: id(ResourceKind::McpDiscoverySnapshot, 5),
             discovery_snapshot_digest: digest("discovery"),
+            resource_uri: "mcp://knowledge/root".to_owned(),
+            resource_uri_digest: digest("resource-uri"),
             authorization_generation: 7,
             session_generation: 8,
             event_generation: 9,
             event_key_digest: digest("event-key"),
             body_digest: digest("body"),
-            cause: ContextSubscriptionRefreshCause::ResourceUpdated {
-                resource_uri: "mcp://knowledge/root".to_owned(),
-                resource_uri_digest: digest("resource-uri"),
-            },
+            cause: ContextSubscriptionRefreshCause::ResourceUpdated,
             deadline: now + Duration::minutes(5),
             request_digest: digest("placeholder"),
         };
@@ -323,6 +303,7 @@ mod tests {
         );
 
         let acceptance = AcceptedContextSubscriptionRefresh {
+            schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
             request_digest: request.request_digest.clone(),
             durable_work_digest: payload.canonical_digest().unwrap(),
             job_id: id(ResourceKind::Job, 6),
@@ -342,10 +323,7 @@ mod tests {
         );
 
         let mut oversized = request(now);
-        oversized.cause = ContextSubscriptionRefreshCause::ResourceUpdated {
-            resource_uri: "x".repeat(MAX_CONTEXT_SUBSCRIPTION_RESOURCE_URI_BYTES + 1),
-            resource_uri_digest: digest("oversized"),
-        };
+        oversized.resource_uri = "x".repeat(MAX_CONTEXT_SUBSCRIPTION_RESOURCE_URI_BYTES + 1);
         oversized.request_digest = oversized.canonical_request_digest().unwrap();
         assert_eq!(
             oversized.validate_at(now),
