@@ -46,6 +46,7 @@ pub const MAX_MCP_OAUTH_TOKEN_BYTES_HARD: usize = 65_536;
 pub const MAX_MCP_OAUTH_TOKEN_LIFETIME_SECONDS_HARD: i64 = 2_592_000;
 pub const MAX_INSTALLED_MCP_OAUTH_VERIFICATION_BINDINGS: usize = 64;
 pub const MAX_MCP_OAUTH_VERIFICATION_KEYS: usize = 32;
+pub const MAX_MCP_OAUTH_TRUST_ROOTS_PEM_BYTES: usize = 262_144;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,7 +130,9 @@ impl InstalledMcpOAuthJwtAlgorithm {
 pub struct InstalledMcpOAuthVerificationBinding {
     pub schema_version: u32,
     pub auth_policy: ExactVersionRef,
+    pub trust_policy: ExactVersionRef,
     pub auth_profile: McpAuthPolicyDocument,
+    pub token_endpoint_trust_roots_pem: String,
     pub algorithms: Vec<InstalledMcpOAuthJwtAlgorithm>,
     pub jwks: serde_json::Value,
     pub jwks_digest: Sha256Digest,
@@ -139,6 +142,7 @@ pub struct InstalledMcpOAuthVerificationBinding {
 struct ValidatedMcpOAuthVerificationBinding {
     config: InstalledMcpOAuthVerificationBinding,
     keys: JwkSet,
+    tls_roots: Vec<reqwest::Certificate>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +184,7 @@ impl InstalledMcpOAuthVerificationCatalog {
             .get(&contract.binding.auth_policy.semantic_digest)
             .ok_or(McpOAuthCredentialBrokerError::Rejected)?;
         if binding.config.auth_policy != contract.binding.auth_policy
+            || binding.config.trust_policy != contract.deployment_closure.trust_policy
             || binding.config.auth_profile != contract.auth_profile
         {
             return Err(McpOAuthCredentialBrokerError::Rejected);
@@ -193,9 +198,20 @@ fn validate_verification_binding(
 ) -> Result<ValidatedMcpOAuthVerificationBinding, McpOAuthEgressConfigurationError> {
     let invalid = || McpOAuthEgressConfigurationError::InvalidVerificationCatalog;
     binding.auth_profile.validate().map_err(|_| invalid())?;
+    let tls_roots = if binding.token_endpoint_trust_roots_pem.is_empty()
+        || binding.token_endpoint_trust_roots_pem.len() > MAX_MCP_OAUTH_TRUST_ROOTS_PEM_BYTES
+    {
+        return Err(invalid());
+    } else {
+        reqwest::Certificate::from_pem_bundle(binding.token_endpoint_trust_roots_pem.as_bytes())
+            .map_err(|_| invalid())?
+    };
     if binding.schema_version != 1
         || binding.auth_policy.resource_kind != ResourceKind::PolicyRevision
         || binding.auth_policy.validate().is_err()
+        || binding.trust_policy.resource_kind != ResourceKind::PolicyRevision
+        || binding.trust_policy.validate().is_err()
+        || tls_roots.is_empty()
         || binding.auth_profile.canonical_digest().as_ref()
             != Ok(&binding.auth_policy.semantic_digest)
         || binding
@@ -248,6 +264,7 @@ fn validate_verification_binding(
     Ok(ValidatedMcpOAuthVerificationBinding {
         config: binding,
         keys,
+        tls_roots,
     })
 }
 
@@ -1131,6 +1148,7 @@ struct McpOAuthTokenHttpRequest {
     connect_timeout: Duration,
     total_timeout: Duration,
     maximum_response_bytes: usize,
+    tls_roots: Vec<reqwest::Certificate>,
 }
 
 struct McpOAuthTokenHttpResponse {
@@ -1167,6 +1185,7 @@ impl McpOAuthTokenHttpTransport for ReqwestMcpOAuthTokenHttpTransport {
             .timeout(request.total_timeout)
             .pool_max_idle_per_host(0)
             .resolve_to_addrs(&request.dns_host, &request.addresses)
+            .tls_certs_only(request.tls_roots)
             .build()
             .map_err(|_| McpOAuthCredentialBrokerError::TemporarilyUnavailable)?;
         let outbound = client
@@ -1339,6 +1358,7 @@ impl ReqwestMcpOAuthCredentialBroker {
         authorization_code: &SensitiveOAuthValue,
         now: DateTime<Utc>,
     ) -> Result<McpOAuthTokenHttpRequest, McpOAuthCredentialBrokerError> {
+        let verification = self.verification_catalog.resolve(contract)?;
         let endpoint = &contract.auth_profile.token_endpoint.endpoint;
         let (dns_host, addresses) = self.resolve_addresses(endpoint).await?;
         let pkce = self
@@ -1413,6 +1433,7 @@ impl ReqwestMcpOAuthCredentialBroker {
             connect_timeout,
             total_timeout,
             maximum_response_bytes: contract.auth_profile.maximum_token_response_bytes as usize,
+            tls_roots: verification.tls_roots.clone(),
         })
     }
 }
@@ -1694,6 +1715,9 @@ mod tests {
         MCP_OAUTH_PKCE_SECRET_PURPOSE,
     };
     use jsonwebtoken::{encode, EncodingKey, Header};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair as RcgenKeyPair,
+    };
     use ring::{
         rand::SystemRandom,
         signature::{Ed25519KeyPair, KeyPair},
@@ -1919,6 +1943,10 @@ mod tests {
     fn verification_binding_fixture(
         contract: &McpOAuthExchangeContract,
     ) -> (InstalledMcpOAuthVerificationBinding, EncodingKey) {
+        let mut ca_parameters = CertificateParams::default();
+        ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca =
+            CertifiedIssuer::self_signed(ca_parameters, RcgenKeyPair::generate().unwrap()).unwrap();
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
         let encoding = EncodingKey::from_ed_der(pkcs8.as_ref());
         let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
@@ -1939,7 +1967,9 @@ mod tests {
             InstalledMcpOAuthVerificationBinding {
                 schema_version: 1,
                 auth_policy: contract.binding.auth_policy.clone(),
+                trust_policy: contract.deployment_closure.trust_policy.clone(),
                 auth_profile: contract.auth_profile.clone(),
+                token_endpoint_trust_roots_pem: ca.pem(),
                 algorithms: vec![InstalledMcpOAuthJwtAlgorithm::EdDsa],
                 jwks,
                 jwks_digest,
@@ -2122,6 +2152,7 @@ mod tests {
                 vec![SocketAddr::new(Ipv4Addr::new(8, 8, 8, 8).into(), 443)]
             );
             assert_eq!(request.headers.len(), 2);
+            assert_eq!(request.tls_roots.len(), 1);
             let form = std::str::from_utf8(&request.body).unwrap();
             assert!(form.contains("code=one-time-code"));
             assert!(form.contains("code_verifier=pkce-verifier"));
@@ -2246,12 +2277,26 @@ mod tests {
     }
 
     #[test]
-    fn installed_jwks_catalog_rejects_drift_and_noncanonical_key_order() {
+    fn installed_verification_catalog_rejects_drift_invalid_tls_roots_and_key_order() {
         let contract = contract(Utc::now());
         let (mut drifted, _) = verification_binding_fixture(&contract);
         drifted.auth_profile.client_id = "drifted-client".to_owned();
         assert!(matches!(
             InstalledMcpOAuthVerificationCatalog::new(vec![drifted]),
+            Err(McpOAuthEgressConfigurationError::InvalidVerificationCatalog)
+        ));
+
+        let (mut missing_roots, _) = verification_binding_fixture(&contract);
+        missing_roots.token_endpoint_trust_roots_pem.clear();
+        assert!(matches!(
+            InstalledMcpOAuthVerificationCatalog::new(vec![missing_roots]),
+            Err(McpOAuthEgressConfigurationError::InvalidVerificationCatalog)
+        ));
+
+        let (mut invalid_roots, _) = verification_binding_fixture(&contract);
+        invalid_roots.token_endpoint_trust_roots_pem = "not a PEM bundle".to_owned();
+        assert!(matches!(
+            InstalledMcpOAuthVerificationCatalog::new(vec![invalid_roots]),
             Err(McpOAuthEgressConfigurationError::InvalidVerificationCatalog)
         ));
 
@@ -2265,6 +2310,62 @@ mod tests {
             InstalledMcpOAuthVerificationCatalog::new(vec![unsorted]),
             Err(McpOAuthEgressConfigurationError::InvalidVerificationCatalog)
         ));
+    }
+
+    #[tokio::test]
+    async fn broker_rejects_uninstalled_trust_policy_before_any_side_effect() {
+        let now = Utc::now();
+        let installed_contract = contract(now);
+        let mut request_contract = installed_contract.clone();
+        request_contract.deployment_closure.trust_policy =
+            exact(ResourceKind::PolicyRevision, 22, 'a');
+        request_contract.validate_at(now).unwrap();
+
+        let verifier = Arc::new(FixtureVerifier {
+            called: AtomicBool::new(false),
+        });
+        let store = Arc::new(FixtureStore {
+            load_calls: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            prepared: Mutex::new(None),
+        });
+        let transport = Arc::new(FixtureOAuthTransport {
+            called: AtomicUsize::new(0),
+        });
+        let secrets = Arc::new(FixtureSecrets {
+            calls: AtomicUsize::new(0),
+        });
+        let dns = Arc::new(FixtureDns {
+            address: Ipv4Addr::new(8, 8, 8, 8),
+            calls: AtomicUsize::new(0),
+        });
+        let broker = ReqwestMcpOAuthCredentialBroker::with_transport(
+            secrets.clone(),
+            dns.clone(),
+            verification_catalog(&installed_contract),
+            verifier.clone(),
+            store.clone(),
+            transport.clone(),
+            McpOAuthEgressLimits::default(),
+        )
+        .unwrap();
+        let parsed = parse_mcp_oauth_callback_query(b"state=s&code=one-time-code").unwrap();
+        let McpOAuthCallbackWireOutcome::AuthorizationCode(code) = parsed.outcome else {
+            panic!("fixture must contain a code");
+        };
+
+        assert_eq!(
+            broker
+                .exchange_authorization_code(&request_contract, code, now)
+                .await,
+            Err(McpOAuthCredentialBrokerError::Rejected)
+        );
+        assert_eq!(transport.called.load(Ordering::SeqCst), 0);
+        assert_eq!(secrets.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(dns.calls.load(Ordering::SeqCst), 0);
+        assert!(!verifier.called.load(Ordering::SeqCst));
+        assert_eq!(store.load_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.store_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
