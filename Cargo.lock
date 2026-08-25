@@ -2604,6 +2604,7 @@ dependencies = [
 name = "insight-platform-context"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "insight-platform-contracts",
  "insight-platform-invocations",

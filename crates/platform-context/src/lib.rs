@@ -5,10 +5,12 @@
 
 #![allow(async_fn_in_trait)]
 
+mod remote;
 mod state;
 mod text2sql;
 mod types;
 
+pub use remote::*;
 pub use state::*;
 pub use text2sql::*;
 pub use types::*;
