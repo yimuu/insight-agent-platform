@@ -60,6 +60,12 @@
 > closure；任一漂移返回closed rejection且协议port尚未调用。fresh PostgreSQL 16 fixture在heartbeat后用latest fence成功解析并继续完成原有
 > terminal/replay矩阵，strict Clippy通过。Egress Resource wire adapter与production server composition仍待实现。
 
+> 2026-08-26 implementation evidence：r276交付独立Host→Egress Resource Refresh wire及真实Streamable HTTP执行。closed request冻结
+> exact endpoint/policy/auth/discovery、Context Job execution identity、root、cause、deadline与list/read独立limits；没有Invocation ID、自由method、
+> header或Secret。full reconcile有界分页`resources/list`后只匹配冻结exact root，再`resources/read`；remote正文仅在Egress内计算聚合digest/count/
+> byte evidence后丢弃。Egress RPC只接受MCP Host workload，post-dispatch失败保持uncertain。Host/Egress/RPC全套、真实mTLS及strict Clippy通过；
+> production MCP Host/Context Worker process composition和kill-window仍待实现，L3状态不变。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

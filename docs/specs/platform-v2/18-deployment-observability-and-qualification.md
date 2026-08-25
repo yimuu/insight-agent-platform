@@ -409,6 +409,10 @@ r274新增Resource Refresh protobuf/client/server L1，并以真实mTLS证明Hos
 r275以fresh PostgreSQL 16验证Host resolver只接受heartbeat后的latest Context fence并重载当前subscription/session/auth/closure；该L2证明
 fail-closed authority lookup，但尚无真实Host→Egress调用或多进程kill-window，L3状态不变。
 
+r276增加Host→Egress closed Resource Refresh transport、MCP Host-only Egress RPC与真实Streamable HTTP list/exact-root-read unit evidence；
+fixture证明服务器列出的非冻结URI不会成为read target，成功只返回digest/count/byte evidence。该批没有production进程组合与kill-window，
+因此只关闭CR-194 L1和协议adapter，不推进L3。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

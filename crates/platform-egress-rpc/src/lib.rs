@@ -25,7 +25,9 @@ use insight_platform_mcp_host::{
     AuthorizedMcpOAuthPkceCleanup, McpOAuthAuthorizedGrant, McpOAuthCredentialBroker,
     McpOAuthCredentialBrokerError, McpOAuthExchangeContract, McpOAuthPkceSecretCleaner,
     McpOAuthPkceSecretCleanupDisposition, McpOAuthPkceSecretCleanupError, McpOperationOutcome,
-    McpRemoteTaskCancelOutcome, McpStreamableHttpConnector, McpStreamableHttpRequest,
+    McpRemoteTaskCancelOutcome, McpResourceRefreshConnector,
+    McpResourceRefreshTransportEvidence, McpResourceRefreshTransportRequest,
+    McpStreamableHttpConnector, McpStreamableHttpRequest,
     McpStreamableHttpSubscriptionConnector, McpStreamableHttpSubscriptionNotification,
     McpStreamableHttpSubscriptionRequest, McpStreamableHttpSubscriptionSink,
     McpStreamableHttpSubscriptionSinkError, McpStreamableHttpSubscriptionTermination,
@@ -92,6 +94,8 @@ const DELETE_MCP_OAUTH_PKCE_SECRET: &str = "mcp_oauth.delete_pkce_secret/v1";
 const MCP_OAUTH_PKCE_SECRET_DELETE_OUTCOME: &str = "mcp_oauth.pkce_secret_delete_outcome/v1";
 const EXECUTE_MCP_STREAMABLE_HTTP: &str = "mcp_streamable_http.execute/v1";
 const MCP_STREAMABLE_HTTP_OUTCOME: &str = "mcp_streamable_http.outcome/v1";
+const REFRESH_MCP_RESOURCES: &str = "mcp_resource_refresh.execute/v1";
+const MCP_RESOURCE_REFRESH_OUTCOME: &str = "mcp_resource_refresh.outcome/v1";
 const CANCEL_MCP_REMOTE_TASK: &str = "mcp_streamable_http.cancel_remote_task/v1";
 const MCP_REMOTE_TASK_CANCEL_OUTCOME: &str = "mcp_streamable_http.cancel_outcome/v1";
 const ESTABLISH_MCP_STREAMABLE_HTTP_SUBSCRIPTION: &str =
@@ -1084,6 +1088,63 @@ impl McpStreamableHttpConnector for EgressBrokerGrpcClient {
 }
 
 #[async_trait]
+impl McpResourceRefreshConnector for EgressBrokerGrpcClient {
+    async fn refresh_resources(
+        &self,
+        request: McpResourceRefreshTransportRequest,
+    ) -> Result<McpResourceRefreshTransportEvidence, McpTransportFailure> {
+        request
+            .validate_at(Utc::now())
+            .map_err(|_| mcp_rpc_rejected("mcp_resource_refresh_rpc_request_invalid"))?;
+        let request_identity = request.execution_identity_digest.clone();
+        let envelope = encode_metadata(&request, REFRESH_MCP_RESOURCES, self.limits)
+            .map_err(|_| mcp_rpc_rejected("mcp_resource_refresh_rpc_request_invalid"))?;
+        let mut client = self.client.clone();
+        let response = client
+            .refresh_mcp_resources(Request::new(envelope))
+            .await
+            .map_err(|status| mcp_rpc_status_failure(status, request_identity.clone()))?;
+        match decode_metadata::<
+            UnaryOutcome<McpResourceRefreshTransportEvidence, McpTransportFailure>,
+        >(
+            response.into_inner(),
+            MCP_RESOURCE_REFRESH_OUTCOME,
+            self.limits,
+        )
+        .map_err(|_| {
+            mcp_rpc_uncertain(
+                "mcp_resource_refresh_rpc_response_invalid",
+                request_identity.clone(),
+            )
+        })? {
+            UnaryOutcome::Succeeded(evidence)
+                if evidence.execution_identity_digest == request.execution_identity_digest
+                    && evidence.request_digest == request.request_digest
+                    && evidence.observed_at <= request.deadline
+                    && evidence.resource_count <= request.maximum_resources
+                    && evidence.item_count <= request.maximum_items
+                    && evidence.byte_count <= request.maximum_total_bytes =>
+            {
+                Ok(evidence)
+            }
+            UnaryOutcome::Succeeded(_) => Err(mcp_rpc_uncertain(
+                "mcp_resource_refresh_rpc_response_invalid",
+                request_identity,
+            )),
+            UnaryOutcome::Failed(failure) => {
+                failure.validate_wire_shape().map_err(|_| {
+                    mcp_rpc_uncertain(
+                        "mcp_resource_refresh_rpc_response_invalid",
+                        request_identity,
+                    )
+                })?;
+                Err(failure)
+            }
+        }
+    }
+}
+
+#[async_trait]
 impl McpStreamableHttpSubscriptionConnector for EgressBrokerGrpcClient {
     async fn establish_subscription(
         &self,
@@ -1404,6 +1465,7 @@ pub struct EgressBrokerGrpcService<M, H, G> {
     mcp_oauth: Option<Arc<dyn McpOAuthCredentialBroker>>,
     mcp_oauth_pkce_cleaner: Option<Arc<dyn McpOAuthPkceSecretCleaner>>,
     mcp_streamable_http: Option<Arc<dyn McpStreamableHttpConnector>>,
+    mcp_resource_refresh: Option<Arc<dyn McpResourceRefreshConnector>>,
     mcp_streamable_http_subscription: Option<Arc<dyn McpStreamableHttpSubscriptionConnector>>,
     mcp_subscription_bridge: Option<Arc<EgressMcpSubscriptionBridge>>,
     limits: EgressInternalRpcLimits,
@@ -1419,6 +1481,7 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
             mcp_oauth: None,
             mcp_oauth_pkce_cleaner: None,
             mcp_streamable_http: None,
+            mcp_resource_refresh: None,
             mcp_streamable_http_subscription: None,
             mcp_subscription_bridge: None,
             limits,
@@ -1445,6 +1508,14 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
         connector: Arc<dyn McpStreamableHttpConnector>,
     ) -> Self {
         self.mcp_streamable_http = Some(connector);
+        self
+    }
+
+    pub fn with_mcp_resource_refresh(
+        mut self,
+        connector: Arc<dyn McpResourceRefreshConnector>,
+    ) -> Self {
+        self.mcp_resource_refresh = Some(connector);
         self
     }
 
@@ -1735,6 +1806,51 @@ where
         Ok(Response::new(encode_metadata(
             &outcome,
             MCP_STREAMABLE_HTTP_OUTCOME,
+            self.limits,
+        )?))
+    }
+
+    async fn refresh_mcp_resources(
+        &self,
+        request: Request<ClosedEgressEnvelope>,
+    ) -> Result<Response<ClosedEgressEnvelope>, Status> {
+        require_role(&request, EgressCallerRole::McpHost)?;
+        let connector = self.mcp_resource_refresh.as_ref().ok_or_else(|| {
+            Status::unavailable("MCP Resource Refresh connector is not installed")
+        })?;
+        let request: McpResourceRefreshTransportRequest =
+            decode_metadata(request.into_inner(), REFRESH_MCP_RESOURCES, self.limits)?;
+        request
+            .validate_at(Utc::now())
+            .map_err(|_| Status::invalid_argument("invalid MCP Resource Refresh request"))?;
+        let outcome = match connector.refresh_resources(request.clone()).await {
+            Ok(evidence)
+                if evidence.execution_identity_digest == request.execution_identity_digest
+                    && evidence.request_digest == request.request_digest
+                    && evidence.observed_at <= request.deadline
+                    && evidence.resource_count <= request.maximum_resources
+                    && evidence.item_count <= request.maximum_items
+                    && evidence.byte_count <= request.maximum_total_bytes =>
+            {
+                UnaryOutcome::Succeeded(evidence)
+            }
+            Ok(_) => {
+                return Err(Status::failed_precondition(
+                    "MCP Resource Refresh connector returned invalid evidence",
+                ))
+            }
+            Err(failure) => {
+                failure.validate_wire_shape().map_err(|_| {
+                    Status::failed_precondition(
+                        "MCP Resource Refresh connector returned invalid failure evidence",
+                    )
+                })?;
+                UnaryOutcome::Failed(failure)
+            }
+        };
+        Ok(Response::new(encode_metadata(
+            &outcome,
+            MCP_RESOURCE_REFRESH_OUTCOME,
             self.limits,
         )?))
     }

@@ -225,4 +225,8 @@ r275实现Host refresh application service与PostgreSQL resolver：RPC进入协�
 admission、active subscription/session及exact MCP execution closure。fresh PostgreSQL heartbeat fixture通过；Egress Resource adapter和production
 binary接线仍未完成。
 
+r276交付独立Host→Egress Resource Refresh RPC与Streamable HTTP protocol adapter。Egress从process-installed exact catalog解析endpoint和Secret，
+按冻结limits执行initialize、full-reconcile list和exact-root read，正文只产生digest/count evidence；服务器返回的其他URI不会成为后续read target。
+全套unit/真实mTLS/strict Clippy已通过。production Host binary、Context Worker binary与三进程kill-window尚未组合，故L3仍未关闭。
+
 首版remote Streamable HTTP合同无未决设计问题。

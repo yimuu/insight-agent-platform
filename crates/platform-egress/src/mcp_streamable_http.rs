@@ -16,6 +16,8 @@ use insight_platform_contracts::{
 use insight_platform_mcp_host::{
     EncryptedMcpState, EstablishedMcpSubscription, McpElicitationAction, McpElicitationResponse,
     McpOperationOutcome, McpRemoteTaskCancelOutcome, McpRemoteTaskLimits,
+    McpResourceRefreshConnector, McpResourceRefreshTransportEvidence,
+    McpResourceRefreshTransportRequest,
     McpStreamableHttpConnector, McpStreamableHttpRequest, McpStreamableHttpSubscriptionConnector,
     McpStreamableHttpSubscriptionNotification, McpStreamableHttpSubscriptionRequest,
     McpStreamableHttpSubscriptionSink, McpStreamableHttpSubscriptionSinkError,
@@ -910,6 +912,19 @@ impl InstalledMcpStreamableHttpEndpoint {
             && request.auth_policy.as_ref() == Some(&self.auth_policy)
             && request.token_secret_binding.purpose == self.token_credential_purpose
     }
+
+    fn matches_resource_refresh(&self, request: &McpResourceRefreshTransportRequest) -> bool {
+        self.deployment == request.deployment
+            && self.endpoint == request.endpoint
+            && self.endpoint_identity_digest == request.endpoint_identity_digest
+            && self.server_identity_digest == request.server_identity_digest
+            && self.protocol_policy == request.protocol_policy
+            && self.network_policy == request.network_policy
+            && self.tls_policy == request.tls_policy
+            && self.trust_policy == request.trust_policy
+            && request.auth_policy.as_ref() == Some(&self.auth_policy)
+            && request.token_secret_binding.purpose == self.token_credential_purpose
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -977,6 +992,21 @@ impl InstalledMcpStreamableHttpEndpointCatalog {
             })
             .cloned()
             .ok_or_else(|| rejected("mcp_egress_subscription_endpoint_not_installed"))
+    }
+
+    fn resolve_resource_refresh(
+        &self,
+        request: &McpResourceRefreshTransportRequest,
+    ) -> Result<InstalledMcpStreamableHttpEndpoint, McpTransportFailure> {
+        let key = (
+            request.deployment.deployment_id.clone(),
+            request.deployment.deployment_digest.clone(),
+        );
+        self.entries
+            .get(&key)
+            .filter(|entry| entry.matches_resource_refresh(request))
+            .cloned()
+            .ok_or_else(|| rejected("mcp_egress_resource_refresh_endpoint_not_installed"))
     }
 }
 
@@ -1390,6 +1420,50 @@ impl ReqwestMcpStreamableHttpConnector {
     async fn resolve_headers(
         &self,
         request: &McpStreamableHttpRequest,
+    ) -> Result<HeaderMap, McpTransportFailure> {
+        let resolved = self
+            .secrets
+            .resolve(&request.tenant_id, &request.token_secret_binding)
+            .await
+            .map_err(|failure| match failure {
+                SecretMaterialResolutionError::Unavailable => {
+                    retryable("mcp_egress_secret_unavailable")
+                }
+                SecretMaterialResolutionError::NotFound
+                | SecretMaterialResolutionError::Revoked
+                | SecretMaterialResolutionError::InvalidEvidence => {
+                    rejected("mcp_egress_secret_rejected")
+                }
+            })?;
+        if !resolved.validate_for(
+            &request.token_secret_binding,
+            self.limits.maximum_secret_material_bytes,
+        ) {
+            return Err(rejected("mcp_egress_secret_rejected"));
+        }
+        let mut bearer = Vec::with_capacity(7 + resolved.material.as_bytes().len());
+        bearer.extend_from_slice(b"Bearer ");
+        bearer.extend_from_slice(resolved.material.as_bytes());
+        let parsed = HeaderValue::from_bytes(&bearer);
+        bearer.fill(0);
+        let mut authorization = parsed.map_err(|_| rejected("mcp_egress_secret_rejected"))?;
+        authorization.set_sensitive(true);
+        let protocol_version = HeaderValue::from_str(&request.protocol_version)
+            .map_err(|_| rejected("mcp_egress_invalid_protocol_version"))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        headers.insert(AUTHORIZATION, authorization);
+        headers.insert(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
+        Ok(headers)
+    }
+
+    async fn resolve_resource_refresh_headers(
+        &self,
+        request: &McpResourceRefreshTransportRequest,
     ) -> Result<HeaderMap, McpTransportFailure> {
         let resolved = self
             .secrets
@@ -2266,6 +2340,399 @@ impl McpStreamableHttpConnector for ReqwestMcpStreamableHttpConnector {
     }
 }
 
+#[async_trait]
+impl McpResourceRefreshConnector for ReqwestMcpStreamableHttpConnector {
+    async fn refresh_resources(
+        &self,
+        request: McpResourceRefreshTransportRequest,
+    ) -> Result<McpResourceRefreshTransportEvidence, McpTransportFailure> {
+        validate_resource_refresh_request(&request, Utc::now())?;
+        let entry = self.catalog.resolve_resource_refresh(&request)?;
+        let _permit = self.acquire().await?;
+        let (dns_host, addresses) = self.resolve_addresses(&entry.endpoint).await?;
+        let headers = self.resolve_resource_refresh_headers(&request).await?;
+        let external_identity = resource_refresh_external_identity(&request, &addresses)?;
+        let remaining = (request.deadline - Utc::now())
+            .to_std()
+            .map_err(|_| rejected("mcp_egress_resource_refresh_deadline_elapsed"))?;
+        let initialize_timeout = remaining.min(Duration::from_millis(
+            request.initialize_timeout_milliseconds,
+        ));
+        let request_timeout =
+            remaining.min(Duration::from_millis(request.request_timeout_milliseconds));
+        let idle_timeout = remaining.min(Duration::from_millis(request.idle_timeout_milliseconds));
+        if initialize_timeout.is_zero() || request_timeout.is_zero() || idle_timeout.is_zero() {
+            return Err(rejected("mcp_egress_resource_refresh_deadline_elapsed"));
+        }
+
+        let initialize_id = format!(
+            "{}:{}:refresh:initialize",
+            request.job_id, request.attempt_number
+        );
+        let initialize_body = canonical_json(&resource_refresh_initialize_request(
+            &request,
+            &initialize_id,
+        ))
+        .map_err(|_| rejected("mcp_egress_resource_refresh_request_not_canonical"))?;
+        if initialize_body.len() > request.read_limits.maximum_request_bytes as usize {
+            return Err(rejected(
+                "mcp_egress_resource_refresh_initialize_request_too_large",
+            ));
+        }
+        let initialize = self
+            .post(
+                &entry,
+                &dns_host,
+                &addresses,
+                &headers,
+                None,
+                initialize_body,
+                initialize_timeout,
+                idle_timeout,
+                request.read_limits.maximum_response_bytes as usize,
+                request.maximum_sse_event_bytes as usize,
+                request.maximum_headers as usize,
+                Some(&initialize_id),
+                false,
+                0,
+                external_identity.clone(),
+            )
+            .await?;
+        if initialize.status == StatusCode::UNAUTHORIZED
+            || initialize.status == StatusCode::FORBIDDEN
+        {
+            return Err(reauthorization(&initialize.headers));
+        }
+        require_success_status(initialize.status, &external_identity)?;
+        let initialize_wire = response_json(
+            &initialize,
+            request.read_limits.maximum_response_bytes,
+            &external_identity,
+        )?;
+        validate_initialize_response(
+            &initialize_wire,
+            &initialize_id,
+            &request.protocol_version,
+            &request.negotiated_capabilities,
+        )?;
+        let session = SensitiveSessionId::from_headers(&initialize.headers)?;
+
+        let initialized = canonical_json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .map_err(|_| rejected("mcp_egress_resource_refresh_request_not_canonical"))?;
+        let initialize_request_limit = request
+            .list_limits
+            .map_or(request.read_limits.maximum_request_bytes, |limits| {
+                limits
+                    .maximum_request_bytes
+                    .max(request.read_limits.maximum_request_bytes)
+            });
+        if initialized.len() > initialize_request_limit as usize {
+            return Err(rejected(
+                "mcp_egress_resource_refresh_initialized_request_too_large",
+            ));
+        }
+        let acknowledged = self
+            .post(
+                &entry,
+                &dns_host,
+                &addresses,
+                &headers,
+                session.as_ref(),
+                initialized,
+                initialize_timeout,
+                idle_timeout,
+                request.read_limits.maximum_response_bytes as usize,
+                request.maximum_sse_event_bytes as usize,
+                request.maximum_headers as usize,
+                None,
+                false,
+                0,
+                external_identity.clone(),
+            )
+            .await?;
+        if acknowledged.status != StatusCode::ACCEPTED || !acknowledged.body.is_empty() {
+            return Err(uncertain(
+                "mcp_egress_resource_refresh_initialized_not_accepted",
+                external_identity,
+            ));
+        }
+
+        let mut response_digests = Vec::new();
+        let mut byte_count = 0_u64;
+        let mut listed_resource_count = 0_u32;
+        let mut root_present = true;
+        if let Some(list_limits) = request.list_limits {
+            root_present = false;
+            let mut cursor: Option<String> = None;
+            for page in 0..list_limits.maximum_pages {
+                let operation_id = format!(
+                    "{}:{}:refresh:list:{}",
+                    request.job_id,
+                    request.attempt_number,
+                    u32::from(page) + 1
+                );
+                let params = cursor
+                    .as_ref()
+                    .map_or_else(|| serde_json::json!({}), |cursor| serde_json::json!({"cursor": cursor}));
+                let result = self
+                    .resource_refresh_call(
+                        &entry,
+                        &dns_host,
+                        &addresses,
+                        &headers,
+                        session.as_ref(),
+                        &operation_id,
+                        "resources/list",
+                        params,
+                        list_limits.maximum_request_bytes,
+                        list_limits.maximum_response_bytes,
+                        request_timeout,
+                        idle_timeout,
+                        request.maximum_sse_event_bytes,
+                        request.maximum_headers,
+                        external_identity.clone(),
+                    )
+                    .await?;
+                let encoded = canonical_json(&result)
+                    .map_err(|_| uncertain("mcp_egress_resource_list_invalid", external_identity.clone()))?;
+                byte_count = byte_count.saturating_add(encoded.len() as u64);
+                if byte_count > request.maximum_total_bytes {
+                    return Err(uncertain(
+                        "mcp_egress_resource_refresh_bytes_exceeded",
+                        external_identity,
+                    ));
+                }
+                response_digests.push(digest_value(&result)?);
+                let object = result.as_object().ok_or_else(|| {
+                    uncertain("mcp_egress_resource_list_invalid", external_identity.clone())
+                })?;
+                let resources = object
+                    .get("resources")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        uncertain("mcp_egress_resource_list_invalid", external_identity.clone())
+                    })?;
+                listed_resource_count = listed_resource_count.saturating_add(
+                    u32::try_from(resources.len()).unwrap_or(u32::MAX),
+                );
+                if listed_resource_count > request.maximum_resources {
+                    return Err(uncertain(
+                        "mcp_egress_resource_list_limit_exceeded",
+                        external_identity,
+                    ));
+                }
+                for resource in resources {
+                    let uri = resource
+                        .as_object()
+                        .and_then(|resource| resource.get("uri"))
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            uncertain(
+                                "mcp_egress_resource_list_invalid",
+                                external_identity.clone(),
+                            )
+                        })?;
+                    if uri == request.resource_uri {
+                        root_present = true;
+                    }
+                }
+                cursor = object
+                    .get("nextCursor")
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .filter(|cursor| {
+                                !cursor.is_empty()
+                                    && cursor.len() <= 2_048
+                                    && !cursor.chars().any(char::is_control)
+                            })
+                            .map(str::to_owned)
+                            .ok_or_else(|| {
+                                uncertain(
+                                    "mcp_egress_resource_list_cursor_invalid",
+                                    external_identity.clone(),
+                                )
+                            })
+                    })
+                    .transpose()?;
+                if cursor.is_none() {
+                    break;
+                }
+                if page + 1 == list_limits.maximum_pages {
+                    return Err(uncertain(
+                        "mcp_egress_resource_list_page_limit_exceeded",
+                        external_identity,
+                    ));
+                }
+            }
+        }
+
+        let mut item_count = 0_u32;
+        if root_present {
+            let operation_id = format!(
+                "{}:{}:refresh:read",
+                request.job_id, request.attempt_number
+            );
+            let result = self
+                .resource_refresh_call(
+                    &entry,
+                    &dns_host,
+                    &addresses,
+                    &headers,
+                    session.as_ref(),
+                    &operation_id,
+                    "resources/read",
+                    serde_json::json!({"uri": request.resource_uri}),
+                    request.read_limits.maximum_request_bytes,
+                    request.read_limits.maximum_response_bytes,
+                    request_timeout,
+                    idle_timeout,
+                    request.maximum_sse_event_bytes,
+                    request.maximum_headers,
+                    external_identity.clone(),
+                )
+                .await?;
+            let contents = result
+                .as_object()
+                .and_then(|object| object.get("contents"))
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    uncertain("mcp_egress_resource_read_invalid", external_identity.clone())
+                })?;
+            item_count = u32::try_from(contents.len()).map_err(|_| {
+                uncertain(
+                    "mcp_egress_resource_read_item_limit_exceeded",
+                    external_identity.clone(),
+                )
+            })?;
+            if item_count > request.maximum_items {
+                return Err(uncertain(
+                    "mcp_egress_resource_read_item_limit_exceeded",
+                    external_identity,
+                ));
+            }
+            let encoded = canonical_json(&result)
+                .map_err(|_| uncertain("mcp_egress_resource_read_invalid", external_identity.clone()))?;
+            byte_count = byte_count.saturating_add(encoded.len() as u64);
+            if byte_count > request.maximum_total_bytes {
+                return Err(uncertain(
+                    "mcp_egress_resource_refresh_bytes_exceeded",
+                    external_identity,
+                ));
+            }
+            response_digests.push(digest_value(&result)?);
+        }
+        let resources = root_present
+            .then(|| request.resource_uri.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let observed_at = Utc::now();
+        if observed_at > request.deadline {
+            return Err(uncertain(
+                "mcp_egress_resource_refresh_deadline_elapsed",
+                external_identity,
+            ));
+        }
+        Ok(McpResourceRefreshTransportEvidence {
+            schema_version: request.schema_version,
+            execution_identity_digest: request.execution_identity_digest,
+            request_digest: request.request_digest,
+            response_digest: digest_value(&serde_json::json!({
+                "response_digests": response_digests,
+                "schema_version": 1,
+            }))?,
+            resource_set_digest: digest_value(&serde_json::json!({
+                "resources": resources,
+                "schema_version": 1,
+            }))?,
+            resource_count: u32::from(root_present),
+            item_count,
+            byte_count,
+            remote_revision: None,
+            cursor: None,
+            observed_at,
+        })
+    }
+}
+
+impl ReqwestMcpStreamableHttpConnector {
+    #[allow(clippy::too_many_arguments)]
+    async fn resource_refresh_call(
+        &self,
+        entry: &InstalledMcpStreamableHttpEndpoint,
+        dns_host: &str,
+        addresses: &[SocketAddr],
+        headers: &HeaderMap,
+        session: Option<&SensitiveSessionId>,
+        operation_id: &str,
+        method: &str,
+        params: Value,
+        maximum_request_bytes: u32,
+        maximum_response_bytes: u32,
+        request_timeout: Duration,
+        idle_timeout: Duration,
+        maximum_sse_event_bytes: u32,
+        maximum_headers: u16,
+        external_identity: Sha256Digest,
+    ) -> Result<Value, McpTransportFailure> {
+        let body = canonical_json(&serde_json::json!({
+            "id": operation_id,
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }))
+        .map_err(|_| rejected("mcp_egress_resource_refresh_request_not_canonical"))?;
+        if body.len() > maximum_request_bytes as usize {
+            return Err(rejected("mcp_egress_resource_refresh_request_too_large"));
+        }
+        let response = self
+            .post(
+                entry,
+                dns_host,
+                addresses,
+                headers,
+                session,
+                body,
+                request_timeout,
+                idle_timeout,
+                maximum_response_bytes as usize,
+                maximum_sse_event_bytes as usize,
+                maximum_headers as usize,
+                Some(operation_id),
+                false,
+                0,
+                external_identity.clone(),
+            )
+            .await?;
+        if response.status == StatusCode::UNAUTHORIZED || response.status == StatusCode::FORBIDDEN
+        {
+            return Err(reauthorization(&response.headers));
+        }
+        let wire = response_json(&response, maximum_response_bytes, &external_identity)?;
+        if !response.status.is_success() && !is_matching_jsonrpc_error(&wire, operation_id) {
+            return Err(uncertain(
+                "mcp_egress_resource_refresh_http_failure",
+                external_identity,
+            ));
+        }
+        matching_result(&wire, operation_id).cloned().ok_or_else(|| {
+            if is_matching_jsonrpc_error(&wire, operation_id) {
+                McpTransportFailure::Permanent(safe_failure(
+                    "mcp_egress_resource_refresh_jsonrpc_error",
+                ))
+            } else {
+                uncertain(
+                    "mcp_egress_resource_refresh_invalid_response",
+                    external_identity,
+                )
+            }
+        })
+    }
+}
+
 /// Production connector for durable MCP Resource subscriptions. Protocol setup shares the same
 /// exact endpoint, DNS, TLS and late-Secret boundary as ordinary operations, but long-lived GET
 /// streams use an independent permit pool and only emit typed generation-bound observations.
@@ -3093,6 +3560,47 @@ fn validate_request(
     Ok(())
 }
 
+fn validate_resource_refresh_request(
+    request: &McpResourceRefreshTransportRequest,
+    now: DateTime<Utc>,
+) -> Result<(), McpTransportFailure> {
+    request
+        .validate_at(now)
+        .map_err(|_| rejected("mcp_egress_resource_refresh_request_invalid"))?;
+    let limits = request
+        .list_limits
+        .into_iter()
+        .chain(std::iter::once(request.read_limits));
+    if request.endpoint.scheme != CapabilityEndpointScheme::Https
+        || request.resource_uri_digest
+            != canonical_digest(&Value::String(request.resource_uri.clone()))
+                .ok()
+                .and_then(|digest| digest.parse().ok())
+                .ok_or_else(|| rejected("mcp_egress_resource_refresh_request_invalid"))?
+        || limits.into_iter().any(|limits| {
+            limits.maximum_request_bytes == 0
+                || limits.maximum_request_bytes > MAX_MCP_HTTP_REQUEST_BYTES_HARD
+                || limits.maximum_response_bytes == 0
+                || limits.maximum_response_bytes > MAX_MCP_HTTP_RESPONSE_BYTES_HARD
+                || limits.maximum_pages == 0
+                || limits.maximum_pages > 1_000
+        })
+        || request.maximum_headers == 0
+        || request.maximum_headers > MAX_MCP_HTTP_HEADERS_HARD
+        || request.maximum_sse_event_bytes == 0
+        || request.maximum_sse_event_bytes > MAX_MCP_HTTP_RESPONSE_BYTES_HARD
+        || request.idle_timeout_milliseconds == 0
+        || request.idle_timeout_milliseconds > MAX_MCP_HTTP_TIMEOUT_MILLISECONDS_HARD
+        || request.initialize_timeout_milliseconds == 0
+        || request.initialize_timeout_milliseconds > MAX_MCP_HTTP_TIMEOUT_MILLISECONDS_HARD
+        || request.request_timeout_milliseconds == 0
+        || request.request_timeout_milliseconds > MAX_MCP_HTTP_TIMEOUT_MILLISECONDS_HARD
+    {
+        return Err(rejected("mcp_egress_resource_refresh_request_invalid"));
+    }
+    Ok(())
+}
+
 fn validate_subscription_request(
     request: &McpStreamableHttpSubscriptionRequest,
     now: DateTime<Utc>,
@@ -3308,6 +3816,49 @@ fn valid_remote_task_limits(limits: McpRemoteTaskLimits) -> bool {
 fn initialize_request(request: &McpStreamableHttpRequest, id: &str) -> Value {
     let mut capabilities = Map::new();
     let clients: &McpClientCapabilities = &request.client_capabilities;
+    if clients.elicitation_form || clients.elicitation_url {
+        let mut elicitation = Map::new();
+        if clients.elicitation_form {
+            elicitation.insert("form".to_owned(), Value::Object(Map::new()));
+        }
+        if clients.elicitation_url {
+            elicitation.insert("url".to_owned(), Value::Object(Map::new()));
+        }
+        capabilities.insert("elicitation".to_owned(), Value::Object(elicitation));
+    }
+    if clients.tasks_elicitation_create {
+        capabilities.insert(
+            "tasks".to_owned(),
+            serde_json::json!({"requests": {"elicitation": {"create": {}}}}),
+        );
+    }
+    if clients.sampling {
+        capabilities.insert("sampling".to_owned(), Value::Object(Map::new()));
+    }
+    if clients.roots {
+        capabilities.insert(
+            "roots".to_owned(),
+            serde_json::json!({"listChanged": false}),
+        );
+    }
+    serde_json::json!({
+        "id": id,
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+            "capabilities": capabilities,
+            "clientInfo": {"name": "insight-platform-mcp-host", "version": "1"},
+            "protocolVersion": request.protocol_version,
+        }
+    })
+}
+
+fn resource_refresh_initialize_request(
+    request: &McpResourceRefreshTransportRequest,
+    id: &str,
+) -> Value {
+    let clients = &request.client_capabilities;
+    let mut capabilities = Map::new();
     if clients.elicitation_form || clients.elicitation_url {
         let mut elicitation = Map::new();
         if clients.elicitation_form {
@@ -3952,6 +4503,23 @@ fn external_identity(
     }))
 }
 
+fn resource_refresh_external_identity(
+    request: &McpResourceRefreshTransportRequest,
+    addresses: &[SocketAddr],
+) -> Result<Sha256Digest, McpTransportFailure> {
+    digest_value(&serde_json::json!({
+        "addresses": addresses.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "authorization_binding_id": request.authorization_binding_id,
+        "authorization_generation": request.authorization_generation,
+        "deployment": request.deployment,
+        "endpoint_identity_digest": request.endpoint_identity_digest,
+        "execution_identity_digest": request.execution_identity_digest,
+        "job_id": request.job_id,
+        "schema_version": 1,
+        "subscription_id": request.subscription_id,
+    }))
+}
+
 fn remote_task_identity(
     request: &McpStreamableHttpRequest,
     task_id: &str,
@@ -4044,6 +4612,7 @@ impl fmt::Debug for ReqwestMcpStreamableHttpConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insight_platform_context::ContextSubscriptionRefreshCause;
     use insight_platform_contracts::{SecretResolutionPolicy, MCP_PROTOCOL_BASELINE};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -4591,6 +5160,146 @@ mod tests {
         Arc::new(FixtureSecrets {
             calls: AtomicUsize::new(0),
         })
+    }
+
+    fn resource_refresh_request(fixture: &Fixture) -> McpResourceRefreshTransportRequest {
+        let resource_uri = "mcp://catalog.example/items/42".to_owned();
+        McpResourceRefreshTransportRequest {
+            schema_version: 1,
+            tenant_id: fixture.request.tenant_id.clone(),
+            deployment: fixture.request.deployment.clone(),
+            endpoint: fixture.request.endpoint.clone(),
+            endpoint_identity_digest: fixture.request.endpoint_identity_digest.clone(),
+            server_identity_digest: fixture.request.server_identity_digest.clone(),
+            protocol_policy: fixture.request.protocol_policy.clone(),
+            network_policy: fixture.request.network_policy.clone(),
+            tls_policy: fixture.request.tls_policy.clone(),
+            trust_policy: fixture.request.trust_policy.clone(),
+            auth_policy: fixture.request.auth_policy.clone(),
+            authorization_binding_id: fixture.request.authorization_binding_id.clone(),
+            authorization_generation: fixture.request.authorization_generation,
+            principal_binding_generation: fixture.request.principal_binding_generation,
+            token_secret_binding: fixture.request.token_secret_binding.clone(),
+            protocol_version: fixture.request.protocol_version.clone(),
+            client_capabilities: fixture.request.client_capabilities.clone(),
+            negotiated_capabilities: McpNegotiatedCapabilities {
+                resources: true,
+                ..fixture.request.negotiated_capabilities.clone()
+            },
+            subscription_id: id(ResourceKind::McpOperation, 0x61),
+            job_id: id(ResourceKind::Job, 0x62),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x63),
+            lease_generation: 4,
+            attempt_number: 2,
+            discovery_snapshot_id: fixture.request.discovery_snapshot_id.clone(),
+            discovery_snapshot_digest: fixture.request.discovery_snapshot_digest.clone(),
+            execution_identity_digest: digest('c'),
+            request_digest: digest('d'),
+            resource_uri_digest: canonical_digest(&Value::String(resource_uri.clone()))
+                .unwrap()
+                .parse()
+                .unwrap(),
+            resource_uri,
+            cause: ContextSubscriptionRefreshCause::FullReconcile {
+                observed_subscription_version: 7,
+            },
+            deadline: Utc::now() + chrono::Duration::seconds(30),
+            list_limits: Some(insight_platform_mcp_host::McpResourceRefreshMethodLimits {
+                maximum_request_bytes: 4_096,
+                maximum_response_bytes: 16_384,
+                maximum_pages: 4,
+            }),
+            read_limits: insight_platform_mcp_host::McpResourceRefreshMethodLimits {
+                maximum_request_bytes: 4_096,
+                maximum_response_bytes: 16_384,
+                maximum_pages: 1,
+            },
+            maximum_resources: 16,
+            maximum_items: 32,
+            maximum_total_bytes: 65_536,
+            maximum_headers: 32,
+            maximum_sse_event_bytes: 8_192,
+            idle_timeout_milliseconds: 2_000,
+            initialize_timeout_milliseconds: 2_000,
+            request_timeout_milliseconds: 5_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn full_resource_refresh_lists_then_reads_only_the_frozen_root() {
+        let fixture = fixture();
+        let request = resource_refresh_request(&fixture);
+        let initialize_id = format!("{}:{}:refresh:initialize", request.job_id, request.attempt_number);
+        let list_id = format!("{}:{}:refresh:list:1", request.job_id, request.attempt_number);
+        let read_id = format!("{}:{}:refresh:read", request.job_id, request.attempt_number);
+        let transport = Arc::new(FixtureHttpTransport::new(vec![
+            response(
+                StatusCode::OK,
+                headers(Some("application/json"), Some("refresh-session-canary")),
+                serde_json::to_vec(&serde_json::json!({
+                    "id": initialize_id,
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "capabilities": {"resources": {}, "tools": {}},
+                        "protocolVersion": MCP_PROTOCOL_BASELINE,
+                        "serverInfo": {"name": "fixture", "version": "1"}
+                    }
+                }))
+                .unwrap(),
+            ),
+            response(StatusCode::ACCEPTED, HeaderMap::new(), Vec::new()),
+            response(
+                StatusCode::OK,
+                headers(Some("application/json"), None),
+                serde_json::to_vec(&serde_json::json!({
+                    "id": list_id,
+                    "jsonrpc": "2.0",
+                    "result": {"resources": [
+                        {"name": "other", "uri": "mcp://untrusted.example/other"},
+                        {"name": "root", "uri": request.resource_uri}
+                    ]}
+                }))
+                .unwrap(),
+            ),
+            response(
+                StatusCode::OK,
+                headers(Some("application/json"), None),
+                serde_json::to_vec(&serde_json::json!({
+                    "id": read_id,
+                    "jsonrpc": "2.0",
+                    "result": {"contents": [
+                        {"mimeType": "text/plain", "text": "secret body canary", "uri": request.resource_uri},
+                        {"blob": "AAEC", "uri": request.resource_uri}
+                    ]}
+                }))
+                .unwrap(),
+            ),
+        ]));
+        let connector = connector(&fixture, secrets(), public_dns(), transport.clone());
+        let evidence = connector.refresh_resources(request.clone()).await.unwrap();
+        assert_eq!(evidence.execution_identity_digest, request.execution_identity_digest);
+        assert_eq!(evidence.request_digest, request.request_digest);
+        assert_eq!(evidence.resource_count, 1);
+        assert_eq!(evidence.item_count, 2);
+        assert!(evidence.byte_count > 0);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 4);
+        let observed = transport.observed.lock().unwrap();
+        let bodies = observed
+            .iter()
+            .map(|request| serde_json::from_slice::<Value>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(bodies[2].get("method").and_then(Value::as_str), Some("resources/list"));
+        assert_eq!(bodies[3].get("method").and_then(Value::as_str), Some("resources/read"));
+        assert_eq!(
+            bodies[3]
+                .pointer("/params/uri")
+                .and_then(Value::as_str),
+            Some(request.resource_uri.as_str())
+        );
+        assert!(observed.iter().all(|request| {
+            !String::from_utf8_lossy(&request.body).contains("untrusted.example/other")
+                || String::from_utf8_lossy(&request.body).contains("resources/list")
+        }));
     }
 
     #[tokio::test]
