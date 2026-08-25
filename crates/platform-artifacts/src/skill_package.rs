@@ -70,17 +70,25 @@ impl BrokeredSchedulerSkillInstructionMaterializer {
         skill: &SkillResourceSpec,
         section_id: &str,
     ) -> Result<MaterializedSkillInstruction, SchedulerSkillInstructionMaterializeError> {
+        self.materialize_all(lease, skill_revision, skill)
+            .await?
+            .into_iter()
+            .find(|materialized| materialized.section_id == section_id)
+            .ok_or(SchedulerSkillInstructionMaterializeError::NotFound)
+    }
+
+    pub async fn materialize_all(
+        &self,
+        lease: SchedulerSkillPackageLease,
+        skill_revision: &ExactVersionRef,
+        skill: &SkillResourceSpec,
+    ) -> Result<Vec<MaterializedSkillInstruction>, SchedulerSkillInstructionMaterializeError> {
         if skill_revision.resource_kind != ResourceKind::SkillRevision
             || skill.authoring_package.artifact.media_type()
                 != insight_platform_contracts::SKILL_PACKAGE_MEDIA_TYPE
         {
             return Err(SchedulerSkillInstructionMaterializeError::Integrity);
         }
-        let section = skill
-            .instruction_sections
-            .iter()
-            .find(|section| section.section_id == section_id)
-            .ok_or(SchedulerSkillInstructionMaterializeError::NotFound)?;
         let request = self
             .resolver
             .resolve_skill_package_read(lease)
@@ -97,7 +105,12 @@ impl BrokeredSchedulerSkillInstructionMaterializer {
             .read_exact(request)
             .await
             .map_err(map_read_error)?;
-        materialize_skill_instruction(&bytes, &skill.manifest, section).map_err(map_frame_error)
+        skill
+            .instruction_sections
+            .iter()
+            .map(|section| materialize_skill_instruction(&bytes, &skill.manifest, section))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_frame_error)
     }
 }
 
