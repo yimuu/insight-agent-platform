@@ -71,6 +71,7 @@ helm template platform "$chart" --include-crds >"$rendered"
 negative_values=(
   "--set|roles.gateway.replicas=1"
   "--set|roles.gateway.observabilityPort=8080"
+  "--set|roles.data-worker.observabilityPort=9443"
   "--set-json|networkPolicy.monitoringPodSelector=null"
   "--set|image.digest=latest"
   "--set|roles.extra.replicas=2"
@@ -106,7 +107,7 @@ failures << "must render exactly three Artifact Services" unless services.length
 failures << "must render exactly three Artifact ServiceAccounts" unless accounts.length == 3
 failures << "must render one PDB per role" unless pdbs.length == 3
 failures << "must render one HPA per role" unless hpas.length == 3
-failures << "must render the Artifact Gateway ServiceMonitor" unless service_monitors.length == 1
+failures << "must render Artifact Gateway/Data Worker ServiceMonitors" unless service_monitors.length == 2
 failures << "must render default deny and one policy per role" unless policies.length == 4
 
 expected = {
@@ -146,13 +147,16 @@ expected.each do |role, (command, database_env)|
     failures << "Artifact Gateway lost read-only TLS mount" unless tls_mount && tls_mount["readOnly"] == true
     failures << "Artifact Gateway lost HTTP readiness" unless container.dig("readinessProbe", "httpGet", "path") == "/readyz"
   end
+  if role == "data-worker"
+    failures << "Artifact Data Worker lost HTTP readiness" unless container.dig("readinessProbe", "httpGet", "path") == "/readyz"
+  end
 end
 failures << "Artifact roles share a database Secret" unless identities.flat_map(&:first).uniq.length == 4
 failures << "Artifact roles share a storage identity" unless identities.map(&:last).uniq.length == 3
 
 data_policy = policies.find { |doc| doc.dig("metadata", "name") == "insight-platform-artifact-data-worker" }
 data_ports = data_policy.to_h.dig("spec", "ingress").to_a.flat_map { |entry| entry.fetch("ports", []).map { |port| port["port"] } }.sort
-failures << "Data Worker ingress must split Scheduler/Controller and guest listeners" unless data_ports == [9443, 9443, 9444]
+failures << "Data Worker ingress must split monitoring, Scheduler/Controller, and guest listeners" unless data_ports == [9090, 9443, 9443, 9444]
 maintenance_policy = policies.find { |doc| doc.dig("metadata", "name") == "insight-platform-artifact-maintenance" }
 failures << "Maintenance must deny all ingress" unless maintenance_policy.to_h.dig("spec", "ingress") == []
 

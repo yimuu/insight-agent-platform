@@ -27,6 +27,7 @@ roles:
     command: /usr/local/bin/platform-artifact-data-worker
     replicas: 2
     ports: [{name: controller-grpc, port: 9443}, {name: guest-grpc, port: 9444}]
+    observabilityPort: 9090
     config: {existingConfigMap: insight-platform-artifact-data-worker-config, fileKey: artifact-data-worker.json, digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
     database:
       readExistingSecret: insight-platform-artifact-data-reader-database

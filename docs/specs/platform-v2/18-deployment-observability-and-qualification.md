@@ -336,6 +336,10 @@ r260为Artifact Gateway接入shared process observability。readiness位于restr
 exact Public Gateway mTLS listener与独立HTTP listener组合之后；任一server提前退出使进程fail closed。业务与metrics端口使用不同
 NetworkPolicy source，未增加Data Worker或Maintenance authority。该证据不包含真实S3/KMS、production scrape或L4 enforcement。
 
+r261为Artifact Data Worker接入shared process observability。readiness位于独立read/work PostgreSQL、AWS provider catalog、bounded
+Scheduler/Sandbox/guest broker、双TLS RPC、scan worker及HTTP listener组合之后；任一组件提前退出使进程fail closed。Scheduler/Controller、
+gVisor guest与Prometheus仍由不同端口和source selector隔离。该证据不包含真实S3/KMS、production scrape或L4 enforcement。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

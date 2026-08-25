@@ -32,6 +32,9 @@ use insight_platform_artifacts::{
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_sandbox::{
     AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapAuthority, GvisorGuestBootstrapError,
@@ -41,7 +44,8 @@ use scan_worker::{run_scan_worker, IntegrityArtifactScanner, ScanWorkerConfig};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{
-    error::Error, fmt, io::Read as _, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration,
+    error::Error, fmt, future::IntoFuture, io::Read as _, net::SocketAddr, path::PathBuf,
+    sync::Arc, time::Duration,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
@@ -143,6 +147,7 @@ struct ArtifactBrokerProcessConfig {
     audience: ArtifactBrokerAudience,
     controller_listen_address: String,
     guest_listen_address: String,
+    observability_listen_address: String,
     guest_identity: GvisorGuestIdentityConfig,
     read_database_max_connections: u32,
     work_database_max_connections: u32,
@@ -232,6 +237,10 @@ impl ArtifactBrokerProcessConfig {
             .guest_listen_address
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let observability_address: SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         self.artifact_provider_catalog
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -250,6 +259,9 @@ impl ArtifactBrokerProcessConfig {
         let required_read_bytes = sandbox_input_bytes.max(sandbox_runtime_bundle_bytes);
         if self.schema_version != 1
             || controller_address == guest_address
+            || observability_address.port() == 0
+            || observability_address == controller_address
+            || observability_address == guest_address
             || self.guest_identity.clone().install().is_err()
             || !(2..=64).contains(&self.read_database_max_connections)
             || !(2..=64).contains(&self.work_database_max_connections)
@@ -450,6 +462,8 @@ async fn run() -> Result<(), ProcessError> {
     let (controller_shutdown_sender, controller_shutdown_receiver) =
         tokio::sync::oneshot::channel();
     let (guest_shutdown_sender, guest_shutdown_receiver) = tokio::sync::oneshot::channel();
+    let (observability_shutdown_sender, observability_shutdown_receiver) =
+        tokio::sync::oneshot::channel();
     let (scan_shutdown_sender, scan_shutdown_receiver) = tokio::sync::watch::channel(false);
     let controller_server = Server::builder()
         .tls_config(controller_tls)
@@ -472,29 +486,51 @@ async fn run() -> Result<(), ProcessError> {
         config.scan_worker.clone(),
         scan_shutdown_receiver,
     );
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("artifact-data-worker", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let observability_listener =
+        tokio::net::TcpListener::bind(&config.observability_listen_address)
+            .await
+            .map_err(|_| ProcessError::ObservabilityUnavailable)?;
+    let observability = axum::serve(
+        observability_listener,
+        process_observability_router(Arc::clone(&metrics)),
+    )
+    .with_graceful_shutdown(async {
+        let _ = observability_shutdown_receiver.await;
+    })
+    .into_future();
     tokio::pin!(controller_server);
     tokio::pin!(guest_server);
     tokio::pin!(scan_worker);
+    tokio::pin!(observability);
+    metrics.mark_ready();
     tokio::select! {
         result = &mut controller_server => result.map_err(|_| ProcessError::RpcUnavailable),
         result = &mut guest_server => result.map_err(|_| ProcessError::RpcUnavailable),
         result = &mut scan_worker => result.map_err(|_| ProcessError::WorkerUnavailable),
+        result = &mut observability => result.map_err(|_| ProcessError::ObservabilityUnavailable),
         signal = shutdown_signal() => {
             signal?;
             let _ = controller_shutdown_sender.send(());
             let _ = guest_shutdown_sender.send(());
+            let _ = observability_shutdown_sender.send(());
             let _ = scan_shutdown_sender.send(true);
             tokio::time::timeout(
                 Duration::from_millis(config.shutdown_grace_milliseconds),
                 async {
-                    let (controller, guest, worker) = tokio::join!(
+                    let (controller, guest, worker, metrics_server) = tokio::join!(
                         &mut controller_server,
                         &mut guest_server,
                         &mut scan_worker,
+                        &mut observability,
                     );
                     controller.map_err(|_| ProcessError::RpcUnavailable)?;
                     guest.map_err(|_| ProcessError::RpcUnavailable)?;
-                    worker.map_err(|_| ProcessError::WorkerUnavailable)
+                    worker.map_err(|_| ProcessError::WorkerUnavailable)?;
+                    metrics_server.map_err(|_| ProcessError::ObservabilityUnavailable)
                 },
             )
             .await
@@ -567,6 +603,7 @@ enum ProcessError {
     InvalidTls,
     RpcUnavailable,
     WorkerUnavailable,
+    ObservabilityUnavailable,
     SignalUnavailable,
     ShutdownDeadlineExceeded,
 }
@@ -583,6 +620,9 @@ impl fmt::Display for ProcessError {
             Self::InvalidTls => formatter.write_str("invalid TLS configuration"),
             Self::RpcUnavailable => formatter.write_str("Artifact RPC unavailable"),
             Self::WorkerUnavailable => formatter.write_str("Artifact worker unavailable"),
+            Self::ObservabilityUnavailable => {
+                formatter.write_str("Artifact observability unavailable")
+            }
             Self::SignalUnavailable => formatter.write_str("shutdown signal unavailable"),
             Self::ShutdownDeadlineExceeded => formatter.write_str("shutdown deadline exceeded"),
         }
@@ -601,6 +641,7 @@ mod tests {
             "audience": "data_worker",
             "controller_listen_address": "0.0.0.0:9443",
             "guest_listen_address": "0.0.0.0:9444",
+            "observability_listen_address": "0.0.0.0:9090",
             "guest_identity": {
                 "issuer": "https://kubernetes.default.svc.cluster.local",
                 "audience": "insight-platform-gvisor-guest",
