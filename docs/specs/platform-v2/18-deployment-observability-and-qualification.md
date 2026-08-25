@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-188 |
+| 状态 | Accepted / CR-189 |
 | 日期 | 2026-08-25 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -15,6 +15,10 @@
 
 > CR-188 impact：Capability Worker镜像/startup evidence必须枚举bounded exact installed codec manifest；L1～L4增加错codec identity、module、
 > descriptor、Worker manifest、空registry与rollout drift负向fixture，并证明全部在Egress/MCP I/O前fail closed。
+
+> CR-189 impact：Context Worker镜像/startup evidence必须枚举bounded exact adapter manifest；RemoteSearch L1～L4增加错endpoint/digest、
+> Network/TLS/Trust Policy kind/digest、Worker manifest、空registry与rollout drift负向fixture，并分别证明claim前零lease/quota mutation及
+> dispatch前零Egress调用。
 
 ## 1. 决策摘要
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-173 |
+| 状态 | Accepted / CR-189 |
 | 日期 | 2026-08-21 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
@@ -17,6 +17,10 @@ Resource -> immutable ResourceVersion -> Deployment -> tenant active binding
 
 ResourceVersion表示可重现的逻辑定义，Deployment表示可运行的exact环境绑定。Run admission一次性冻结
 所需Deployment和ResourceVersion闭包，active head与GitOps rollout变化不修改已存Run。
+
+CR-189进一步明确“可运行”必须包含执行目标所需的完整静态解析事实：可执行Context backend冻结required Worker manifest；
+RemoteSearch还冻结canonical endpoint和exact Network/TLS/Trust Policy。只保存endpoint digest、由进程配置反查URL或使用默认TLS信任
+不构成exact Deployment。Secret仍只保存exact binding reference并由Egress最后一跳解析。
 
 这里的“可运行”包含可被未来Run选择/解析的定义绑定，不等于启动独立进程。Skill Deployment冻结一个exact Skill Revision及其
 requirement resolution；Policy Deployment冻结一个exact Policy Revision及其适用环境/资格闭包；Sandbox Deployment冻结exact

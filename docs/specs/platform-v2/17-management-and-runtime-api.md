@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-188 |
+| 状态 | Accepted / CR-189 |
 | 日期 | 2026-08-23 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
@@ -15,6 +15,9 @@
 
 > CR-188 impact：remote Capability Implementation/Deployment publication必须验证09 exact installed codec manifest、descriptor和required
 > Worker manifest；public authoring不能提交运行时模板、可执行模块、Worker override或自由codec identity。
+
+> CR-189 impact：Context Deployment publication必须验证required Worker manifest；RemoteSearch同时验证canonical endpoint digest与exact
+> Network/TLS/Trust Policy kind/digest。public Run/query接口不接受runtime URL、Policy、Secret、adapter或Worker override。
 
 ## 1. 决策摘要
 

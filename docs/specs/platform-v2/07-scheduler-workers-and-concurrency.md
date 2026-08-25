@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-188 |
+| 状态 | Accepted / CR-189 |
 | 日期 | 2026-08-25 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
@@ -10,6 +10,10 @@
 > CR-188 impact：Capability Native/Remote Worker startup manifest必须分别报告exact installed adapter/protocol codec集合；claim在
 > PostgreSQL owner transaction重验Invocation冻结的required Worker manifest，dispatcher再重验exact codec descriptor。现有WorkClass、
 > lease、fairness、permit和drain合同不变。
+
+> CR-189 impact：Context Worker适用同一双层门禁。claim在lease/quota mutation前匹配Context Deployment required Worker manifest；
+> remote dispatcher在Egress I/O前再次匹配installed adapter、canonical endpoint digest及Network/TLS/Trust closure。漂移实例停止claim
+> 并使readiness失败，不能先占额度再发现配置不兼容。
 
 ## 1. 决策摘要
 

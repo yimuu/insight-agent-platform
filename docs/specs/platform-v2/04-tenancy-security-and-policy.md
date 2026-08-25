@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-187 |
+| 状态 | Accepted / CR-189 |
 | 日期 | 2026-08-20 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
@@ -13,6 +13,10 @@
 
 > CR-182：CandidateSelectionEvidence本身不能定义选择语义；Selection Policy Revision必须持有下述closed executable document，
 > 空document或自由表达式均拒绝。
+
+> CR-189：Remote Context Deployment与Run snapshot冻结canonical endpoint、exact Network/TLS/Trust Policy及SecretBinding refs。
+> Context Worker只把这些opaque exact refs交给Egress；Egress在最后一跳重验Policy/gate并解析Secret值。进程本地URL、默认trust store、
+> 自由header或明文Secret都不能补全缺失closure。
 
 ## 1. 决策摘要
 

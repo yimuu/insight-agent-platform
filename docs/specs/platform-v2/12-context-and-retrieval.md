@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-184 |
+| 状态 | Accepted / CR-189 |
 | 日期 | 2026-08-25 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
@@ -145,9 +145,12 @@ struct ContextDeployment {
     context_deployment_id: DeploymentId,
     interface_revision_id: ResourceVersionId,
     implementation_revision_id: ResourceVersionId,
+    required_worker_manifest_digest: Digest,
     backend_binding: ContextBackendBinding,
     secret_bindings: Vec<ExactSecretBindingRef>,
     network_policy_revision_id: Option<ResourceVersionId>,
+    tls_policy_revision_id: Option<ResourceVersionId>,
+    trust_policy_revision_id: Option<ResourceVersionId>,
     parser_profile_revision_id: ResourceVersionId,
     ranking_profile_revision_id: ResourceVersionId,
     data_policy_revision_ids: Vec<ResourceVersionId>,
@@ -180,6 +183,12 @@ enum ConsistencyPolicy {
     LatestAtQueryStart,
     ExternalObservation,
 }
+
+struct ExactRemoteSearchBinding {
+    endpoint: CanonicalHttpEndpoint,
+    endpoint_identity_digest: Digest,
+    region: CanonicalRegion,
+}
 ```
 
 `PinnedGeneration` 与 `PinAtRunAdmission` 提供平台可重读 snapshot。`LatestAtQueryStart` 在每次 ContextQuery 创建
@@ -195,10 +204,10 @@ digest、remote revision/watermark（若有）、观察时间和 bounded normali
 RunBindings 固定 ContextBinding，不表示底层数据永远不变。一致性模式与本次 observed generation/token 必须
 同时出现在 Run diagnostic 和 citation 中，客户端不能把 `ExternalObservation` 宣称为 reproducible snapshot。
 
-Context Deployment是02定义的环境绑定：它固定Implementation、实际source identity/backend deployment、
+Context Deployment是02定义的环境绑定：它固定Implementation、required Worker manifest、实际source identity/backend deployment、
 SecretBinding、Network、parser/chunker/embedding/ranking/data policy和绑定exact环境的conformance evidence。backend binding variant必须
 与Implementation contract一致；例如McpResources绑定exact MCP Deployment与Discovery Snapshot，RemoteSearch绑定
-canonical endpoint，ManagedIndex绑定exact index service/region。RunBindings中的ContextBinding只引用exact Deployment
+canonical endpoint、endpoint digest、region及exact Network/TLS/Trust Policy，ManagedIndex绑定exact index service/region。RunBindings中的ContextBinding只引用exact Deployment
 并增加本Run的consistency/dataset/projection选择；runtime不得从Implementation Revision重新解析source、credential、
 network或active head。
 
@@ -206,7 +215,9 @@ network或active head。
 字符集不同的`DataRegion`。同一exact binding内的region逐字段比较，不做provider alias或大小写归一化。
 
 Deployment validation除backend variant一致外，还必须执行contract/binding字段级兼容校验；例如`SqlCatalog`的dialect必须
-与Implementation contract完全一致。只比较`backend_kind`不能证明exact binding，任何不匹配均在publish/admission时fail closed。
+与Implementation contract完全一致；RemoteSearch的endpoint canonical digest必须等于binding identity，Policy必须是正确kind且当前gate
+允许该Deployment，required Worker manifest必须属于已资格静态adapter registry。只比较`backend_kind`不能证明exact binding，任何不匹配
+均在publish/admission时fail closed。
 
 ContextBinding由Agent Deployment resolution事务创建且不可变；它是`AgentDeploymentClosure`中带`xcb` identity和canonical
 digest的closed snapshot，不是独立current row、Resource或生命周期。`owner_agent_deployment_id`必须是预留的`adep`并与

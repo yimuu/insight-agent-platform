@@ -1,10 +1,41 @@
-# Platform v2 00～18 Cross-review（CR-188）
+# Platform v2 00～18 Cross-review（CR-189）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-188 Accepted |
+| 状态 | Closed / CR-189 Accepted |
 | 日期 | 2026-08-25 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-188 Capability codec implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-189 remote Context implementation feedback |
+
+### CR-189 remote Context exact transport authority impact review
+
+production RemoteSearch接线确认12正文要求Context Deployment冻结canonical endpoint，但machine binding此前只保存
+`endpoint_identity_digest + region`，无法从Run closure唯一恢复目标；Context closure还缺少exact TLS/trust Policy，且所有Context
+backend都没有required Worker manifest。若由进程配置补齐URL或默认信任，会绕过02 exact Deployment、04 Egress last-hop Policy和07
+rollout drift门禁。CR-189补全已声明但漏入machine wire的执行闭包，不改变Context Interface、Query/Observation、Job或current-state owner。
+
+| Spec | CR-189结论 |
+|---|---|
+| 00 | 登记remote Context实现反馈；clean-cut、protocol版本和current/target边界不变 |
+| 01 | Control/Durable/Execution plane与Context独立Worker边界不变 |
+| 02 | runnable Context Deployment必须冻结required Worker manifest；RemoteSearch同时冻结canonical endpoint及exact Network/TLS/Trust Policy |
+| 03 | ContextQuery/Job/Receipt/Event/Outbox authority、锁序与恢复不变 |
+| 04 | Context Worker只提交opaque exact policy/Secret binding；Egress最后一跳重验并解析Secret，Worker不取得Secret值 |
+| 05～06 | Plan v4 slot、RunBindings与external leaf owner transaction不变，只复制补全后的exact Deployment closure |
+| 07 | Context startup manifest和claim在lease/quota mutation前匹配required manifest；dispatcher在I/O前再次匹配endpoint/policy closure |
+| 08～11 | Subagent、Capability、Skill合同不变；不把Context改成Capability |
+| 12 | `RemoteSearch` machine binding补齐endpoint，Context Deployment closure补齐Network/TLS/Trust与required Worker manifest |
+| 13 | MCP Resources仍由exact MCP Deployment/Host拥有transport/OAuth，不复用RemoteSearch自由URL |
+| 14～16 | Sandbox、Artifact、Model authority与Inline-only不变 |
+| 17 | publication/Deployment validation拒绝缺失、kind错误或digest漂移；public API无runtime URL/Policy/Worker override |
+| 18 | L1～L4增加错endpoint digest、Policy kind/digest、Worker manifest、空registry和rollout drift零外部I/O证据 |
+
+CR-189不新增表、aggregate、Job、WorkClass、queue、public route或deployment role。endpoint与Policy只存在于immutable Context
+Deployment closure，ContextQuery admission复制其exact snapshot；PostgreSQL仍是claim/lease/quota authority，Egress仍是唯一网络与Secret
+last hop。00～18按state ownership、IDs、JSON schemas、errors、transactions、events、permissions、capacity、recovery和fixture逐份复核，
+无新增P0/P1。Acceptance 32：任一remote Context物理attempt都能仅从Run冻结的Context Deployment与已资格Worker镜像唯一解析
+endpoint、Network/TLS/Trust/Secret和adapter mapping；任一缺失或漂移必须在lease/quota mutation或外部I/O前按所属门禁fail closed。
+
+00～18恢复Accepted / CR-189并继续implementation-plan。
 
 ### CR-188 installed Capability codec authority impact review
 
@@ -217,12 +248,13 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00 | Accepted / CR-185 | target协议、authority与current-behavior边界闭合 |
-| 01～03 | Accepted / CR-173/176（CR-181影响复核） | owner、ID、Resource与persistence authority不变 |
-| 04 | Accepted / CR-183 | exact candidate selection program/evidence与owner重验闭合 |
-| 05～07、10、12、16 | Accepted / CR-184 | external leaf owner terminal与exact resume闭合 |
-| 08～09、13～14 | Accepted / CR-182 impact review | domain owner只消费exact dispatch/result snapshot，无第二authority |
-| 11、15、17～18 | Accepted / CR-185 | canonical Skill frame、Artifact验证、API输入与L1～L3证据闭合 |
+| 00、02、04、07、12、17～18 | Accepted / CR-189 | remote Context exact endpoint/Policy/Worker closure与既有authority闭合 |
+| 01、03 | Accepted / CR-173/176（CR-189影响复核） | plane、persistence、事务与恢复authority不变 |
+| 05～06 | Accepted / CR-184（CR-189影响复核） | Plan v4 external leaf与Run snapshot只复制补全后的exact closure |
+| 08、14 | Accepted / CR-182/181（CR-189影响复核） | Subagent与Sandbox execution plane不变 |
+| 09～10、13 | Accepted / CR-188（CR-189影响复核） | Capability/MCP owner不被Context transport替代 |
+| 11、15 | Accepted / CR-185（CR-189影响复核） | Skill/Artifact authority不变 |
+| 16 | Accepted / CR-187（CR-189影响复核） | Model provider/Inline authority不变 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Accepted | gVisor改为受限Launcher + admission-locked single-Job Pod；Job authority不变 |
 | implementation-plan | In Progress | L1～L3与public contract已恢复；L4～L6、CapacityProfile和GitOps cutover仍待外部资格环境 |

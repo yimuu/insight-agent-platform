@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-188 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-189 contracts accepted; L3～L6 pending |
 | 日期 | 2026-08-25 |
 | 合同输入 | 00～18、cross-review CR-188/实现反馈复核、ADR-0001、ADR-0002、AGENTS.md |
 
@@ -142,6 +142,11 @@
 > trigger窗口被强杀，测试到期其lease后由第二进程通过bounded owner scanner恢复同一Job并完成物理attempt 2。最终仅有一个
 > `context_observation` RunValue、一个`context.lease_recovered` Event，terminal Job清除worker/lease/quota reservation。该证据不覆盖remote
 > Context backend protocol、隔舱容量或L4 rollout。
+
+> 2026-08-25 contract feedback：RemoteSearch machine binding只保存endpoint digest/region，无法满足12正文已经要求的canonical endpoint
+> freeze，也没有exact TLS/trust Policy或required Context Worker manifest。CR-189按02→04→07→12→17→18补齐immutable Deployment closure，
+> 并完成00～18 cross-review；不新增表、aggregate、Job、WorkClass、route或role。后续remote Context实现必须消费该Accepted合同，禁止以
+> 进程本地自由URL、默认trust store或明文Secret绕过。
 
 > 2026-08-25 implementation evidence：runtime新增production orchestration composition，明确把business claim/heartbeat连接与
 > critical-control Plan/RunValue/Skill读取、owner commit及Safety scanner连接分开，并用同一mTLS Artifact Scheduler client组合exact
