@@ -353,6 +353,115 @@ struct RemoteSearchWireItem {
     classification: insight_platform_contracts::DataClassification,
 }
 
+fn encode_remote_search_body(
+    request: &RemoteContextSearchRequest,
+    maximum_request_bytes: u32,
+) -> Result<Vec<u8>, RemoteContextFailure> {
+    let query = match &request.query_input {
+        insight_platform_contracts::ValueRef::Inline { value } => value,
+        insight_platform_contracts::ValueRef::Artifact { .. } => {
+            return Err(before_dispatch(
+                "context_egress_artifact_input_unsupported",
+                false,
+            ));
+        }
+    };
+    let body = canonical_json(
+        &serde_json::to_value(RemoteSearchWireRequest {
+            schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
+            query,
+            normalized_query_digest: &request.normalized_query_digest,
+            normalized_filter_digest: &request.normalized_filter_digest,
+            requested_projection: &request.requested_projection,
+            page_size: request.page_size,
+            cursor_digest: &request.cursor_digest,
+        })
+        .map_err(|_| before_dispatch("context_egress_request_invalid", false))?,
+    )
+    .map_err(|_| before_dispatch("context_egress_request_invalid", false))?;
+    if body.len() > maximum_request_bytes as usize {
+        return Err(before_dispatch("context_egress_request_too_large", false));
+    }
+    Ok(body)
+}
+
+fn normalize_remote_search_response(
+    request: &RemoteContextSearchRequest,
+    bytes: &[u8],
+    evidence: Sha256Digest,
+) -> Result<RemoteContextSearchResponse, RemoteContextFailure> {
+    let response_digest: Sha256Digest = canonical_digest(
+        &parse_strict_json(
+            bytes,
+            JsonLimits {
+                max_bytes: request.maximum_response_bytes as usize,
+                max_depth: 32,
+                max_items_per_array: usize::try_from(request.page_size).unwrap_or(0),
+                max_properties_per_object: 16,
+                max_string_bytes: request.maximum_response_bytes as usize,
+            },
+        )
+        .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?,
+    )
+    .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?
+    .parse()
+    .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?;
+    let wire: RemoteSearchWireResponse = serde_json::from_slice(bytes)
+        .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?;
+    if wire.schema_version != REMOTE_CONTEXT_PROTOCOL_VERSION
+        || wire.items.len() > request.page_size as usize
+        || wire
+            .items
+            .iter()
+            .any(|item| item.classification.rank() > request.maximum_classification.rank())
+    {
+        return Err(after_dispatch(
+            "context_egress_response_invalid",
+            false,
+            evidence,
+        ));
+    }
+    let authorization_evidence_digest = closed_digest(&serde_json::json!({
+        "context_deployment": request.context_deployment,
+        "network_policy": request.network_policy,
+        "tls_policy": request.tls_policy,
+        "trust_policy": request.trust_policy,
+        "response_digest": response_digest,
+    }));
+    let items = wire
+        .items
+        .into_iter()
+        .map(|item| RemoteContextItem {
+            source_item_identity_digest: closed_digest(&item.source_identity),
+            content: item.content,
+            structured_fields: item.structured_fields,
+            score_millionths: item.score_millionths,
+            locator_digest: closed_digest(&item.locator),
+            authorization_evidence_digest: authorization_evidence_digest.clone(),
+            display_label: item.display_label,
+            classification: item.classification,
+        })
+        .collect();
+    let observed_at = Utc::now();
+    let normalized = RemoteContextSearchResponse {
+        schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
+        items,
+        next_cursor_digest: wire.next_cursor_digest,
+        backend_request_digest: request.normalized_query_digest.clone(),
+        backend_response_digest: response_digest.clone(),
+        ranking_evidence_digest: closed_digest(&serde_json::json!({
+            "mapping": request.result_mapping_digest,
+            "response": response_digest,
+        })),
+        remote_revision_digest: wire.remote_revision_digest,
+        observed_at,
+    };
+    normalized
+        .validate_for(request, observed_at)
+        .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence))?;
+    Ok(normalized)
+}
+
 #[async_trait]
 impl RemoteContextSearchConnector for ReqwestRemoteContextSearchConnector {
     async fn query(
@@ -368,31 +477,7 @@ impl RemoteContextSearchConnector for ReqwestRemoteContextSearchConnector {
             .try_acquire_owned()
             .map_err(|_| before_dispatch("context_egress_capacity", true))?;
         let entry = self.catalog.resolve(&request)?;
-        let query = match &request.query_input {
-            insight_platform_contracts::ValueRef::Inline { value } => value,
-            insight_platform_contracts::ValueRef::Artifact { .. } => {
-                return Err(before_dispatch(
-                    "context_egress_artifact_input_unsupported",
-                    false,
-                ));
-            }
-        };
-        let body = canonical_json(
-            &serde_json::to_value(RemoteSearchWireRequest {
-                schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
-                query,
-                normalized_query_digest: &request.normalized_query_digest,
-                normalized_filter_digest: &request.normalized_filter_digest,
-                requested_projection: &request.requested_projection,
-                page_size: request.page_size,
-                cursor_digest: &request.cursor_digest,
-            })
-            .map_err(|_| before_dispatch("context_egress_request_invalid", false))?,
-        )
-        .map_err(|_| before_dispatch("context_egress_request_invalid", false))?;
-        if body.len() > entry.maximum_request_bytes as usize {
-            return Err(before_dispatch("context_egress_request_too_large", false));
-        }
+        let body = encode_remote_search_body(&request, entry.maximum_request_bytes)?;
         let headers = self.headers(&request, &entry).await?;
         let (dns_host, addresses) = self.addresses(&entry).await?;
         let root = reqwest::Certificate::from_pem(entry.trusted_root_pem.as_bytes())
@@ -468,79 +553,7 @@ impl RemoteContextSearchConnector for ReqwestRemoteContextSearchConnector {
             }
             bytes.extend_from_slice(&item);
         }
-        let response_digest: Sha256Digest = canonical_digest(
-            &parse_strict_json(
-                &bytes,
-                JsonLimits {
-                    max_bytes: request.maximum_response_bytes as usize,
-                    max_depth: 32,
-                    max_items_per_array: usize::try_from(request.page_size).unwrap_or(0),
-                    max_properties_per_object: 16,
-                    max_string_bytes: request.maximum_response_bytes as usize,
-                },
-            )
-            .map_err(|_| {
-                after_dispatch("context_egress_response_invalid", false, evidence.clone())
-            })?,
-        )
-        .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?
-        .parse()
-        .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?;
-        let wire: RemoteSearchWireResponse = serde_json::from_slice(&bytes).map_err(|_| {
-            after_dispatch("context_egress_response_invalid", false, evidence.clone())
-        })?;
-        if wire.schema_version != REMOTE_CONTEXT_PROTOCOL_VERSION
-            || wire.items.len() > request.page_size as usize
-            || wire
-                .items
-                .iter()
-                .any(|item| item.classification.rank() > request.maximum_classification.rank())
-        {
-            return Err(after_dispatch(
-                "context_egress_response_invalid",
-                false,
-                evidence,
-            ));
-        }
-        let authorization_evidence_digest = closed_digest(&serde_json::json!({
-            "context_deployment": request.context_deployment,
-            "network_policy": request.network_policy,
-            "tls_policy": request.tls_policy,
-            "trust_policy": request.trust_policy,
-            "response_digest": response_digest,
-        }));
-        let items = wire
-            .items
-            .into_iter()
-            .map(|item| RemoteContextItem {
-                source_item_identity_digest: closed_digest(&item.source_identity),
-                content: item.content,
-                structured_fields: item.structured_fields,
-                score_millionths: item.score_millionths,
-                locator_digest: closed_digest(&item.locator),
-                authorization_evidence_digest: authorization_evidence_digest.clone(),
-                display_label: item.display_label,
-                classification: item.classification,
-            })
-            .collect();
-        let observed_at = Utc::now();
-        let normalized = RemoteContextSearchResponse {
-            schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
-            items,
-            next_cursor_digest: wire.next_cursor_digest,
-            backend_request_digest: request.normalized_query_digest.clone(),
-            backend_response_digest: response_digest.clone(),
-            ranking_evidence_digest: closed_digest(&serde_json::json!({
-                "mapping": request.result_mapping_digest,
-                "response": response_digest,
-            })),
-            remote_revision_digest: wire.remote_revision_digest,
-            observed_at,
-        };
-        normalized
-            .validate_for(&request, observed_at)
-            .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence))?;
-        Ok(normalized)
+        normalize_remote_search_response(&request, &bytes, evidence)
     }
 }
 
@@ -713,5 +726,74 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn remote_search_wire_is_canonical_bounded_and_closed() {
+        let (installed, request) = fixture();
+        let body = encode_remote_search_body(&request, installed.maximum_request_bytes).unwrap();
+        assert_eq!(
+            body,
+            canonical_json(&serde_json::json!({
+                "cursor_digest": null,
+                "normalized_filter_digest": request.normalized_filter_digest,
+                "normalized_query_digest": request.normalized_query_digest,
+                "page_size": 10,
+                "query": {"query": "bounded"},
+                "requested_projection": ["title"],
+                "schema_version": 1
+            }))
+            .unwrap()
+        );
+        assert!(matches!(
+            encode_remote_search_body(&request, 8),
+            Err(RemoteContextFailure {
+                code,
+                class: RemoteContextFailureClass::RejectedBeforeDispatch,
+                dispatch_evidence_digest: None,
+                ..
+            }) if code == "context_egress_request_too_large"
+        ));
+
+        let evidence = digest('a');
+        let response = canonical_json(&serde_json::json!({
+            "schema_version": 1,
+            "items": [{
+                "source_identity": "record-1",
+                "content": {"title": "bounded result"},
+                "structured_fields": {},
+                "score_millionths": 900000,
+                "locator": "opaque-record-1",
+                "display_label": "bounded result",
+                "classification": "internal"
+            }],
+            "next_cursor_digest": null,
+            "remote_revision_digest": digest('b')
+        }))
+        .unwrap();
+        let normalized =
+            normalize_remote_search_response(&request, &response, evidence.clone()).unwrap();
+        assert_eq!(normalized.items.len(), 1);
+        assert_eq!(
+            normalized.backend_request_digest,
+            request.normalized_query_digest
+        );
+        assert_eq!(
+            normalized.items[0].classification,
+            DataClassification::Internal
+        );
+
+        let unknown = br#"{"items":[],"next_cursor_digest":null,"remote_revision_digest":null,"schema_version":1,"unexpected":true}"#;
+        assert!(matches!(
+            normalize_remote_search_response(&request, unknown, evidence.clone()),
+            Err(RemoteContextFailure {
+                code,
+                class: RemoteContextFailureClass::PermanentAfterDispatch,
+                dispatch_evidence_digest: Some(_),
+                ..
+            }) if code == "context_egress_response_invalid"
+        ));
+        let duplicate = br#"{"schema_version":1,"schema_version":1,"items":[],"next_cursor_digest":null,"remote_revision_digest":null}"#;
+        assert!(normalize_remote_search_response(&request, duplicate, evidence).is_err());
     }
 }

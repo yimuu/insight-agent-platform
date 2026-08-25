@@ -84,7 +84,6 @@ impl RemoteContextSearchRequest {
                 .all(|pair| pair[0] < pair[1])
             || self.page_size == 0
             || usize::try_from(self.page_size).map_or(true, |size| size > MAX_REMOTE_CONTEXT_ITEMS)
-            || (self.cursor_digest.is_none() && self.normalized_filter_digest.as_str().is_empty())
             || self.maximum_response_bytes == 0
             || self.maximum_response_bytes > 64 * 1_048_576
             || self.deadline <= now
