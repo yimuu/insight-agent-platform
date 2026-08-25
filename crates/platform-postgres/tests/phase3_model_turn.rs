@@ -19,9 +19,15 @@ use insight_platform_contracts::{
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, ProviderDataHandlingContract,
     ProviderModelIdentity, ProviderRequestLimits, ProviderTrainingPolicy, PublishedVersionPayload,
     QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
-    RunBindingsSnapshot, SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest,
-    StructuredOutputContract, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef,
-    WorkClass, WORKER_PROTOCOL_VERSION,
+    RunBindingsSnapshot, SchedulingPolicyDocument, SecretBindingPayload, SecretPurpose,
+    SecretResolutionPolicy, Sha256Digest, StructuredOutputContract, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+};
+use insight_platform_invocations::{
+    CapabilityClaimSlot, CapabilityOutputValue, CapabilityWorkerAudit, ClaimCapabilityJobs,
+    CommitCapabilityOutcome, DispatchOutcome, InvocationPolicyDecision,
+    InvocationPolicyDecisionBundle, InvocationPolicyDisposition, InvocationTransaction,
+    SafeBackendFailure,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_models::{
@@ -45,14 +51,18 @@ use insight_platform_postgres::{
         ClaimedModelExecution, ControlledModelExecution, PreparedModelExecution,
     },
     repository::{
+        ClaimOrchestrationJobs, ContinueModelToolResultsToModelTurn,
         DeferOrchestrationModelMutationIds, DeferOrchestrationToModelTurn,
-        JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewSecretBinding, NewTenant,
-        NewTenantPrincipal, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
-        ResolvedExpressionInput, TypedPayload,
+        DispatchModelToolCapabilities, JobFence as RepositoryJobFence,
+        ModelToolCapabilityAdmission, ModelToolCapabilityMutationIds, NewPrincipal,
+        NewQuotaAccount, NewSecretBinding, NewTenant, NewTenantPrincipal, OrchestrationClaimSlot,
+        OrchestrationYieldMutationIds, PgRepository, RepositoryError, ResolvedExpressionInput,
+        StartOrchestrationJob, TypedPayload,
     },
     verify_schema,
 };
 use insight_platform_registry::CreateDeployment;
+use insight_platform_security::BindTenantSchedulingPolicy;
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::collections::BTreeMap;
@@ -141,6 +151,23 @@ fn worker_audit(
         outbox_id: id(ResourceKind::OutboxEvent, base + 2),
         idempotency_key_digest: digest(idempotency),
         request_digest: digest(request),
+        receipt_expires_at: Utc::now() + Duration::hours(2),
+    }
+}
+
+fn capability_worker_audit(
+    tenant_id: &ResourceId,
+    worker_id: &ResourceId,
+    base: u16,
+) -> CapabilityWorkerAudit {
+    CapabilityWorkerAudit {
+        tenant_id: tenant_id.clone(),
+        worker_process_generation_id: worker_id.clone(),
+        receipt_id: id(ResourceKind::Receipt, base),
+        event_id: id(ResourceKind::Event, base + 1),
+        outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+        idempotency_key_digest: named_digest("model-tool-worker-idempotency"),
+        request_digest: named_digest("model-tool-worker-request"),
         receipt_expires_at: Utc::now() + Duration::hours(2),
     }
 }
@@ -299,6 +326,7 @@ async fn claim_one(repository: &PgRepository, base: u16) -> ClaimEvidence {
                 outbox_id: id(ResourceKind::OutboxEvent, base + 7),
                 resume_mutations: None,
                 failure_mutations: None,
+                tool_continuation_mutations: None,
             }],
         })
         .await
@@ -595,6 +623,8 @@ async fn seed_policy_versions(
                     policy_versions: vec![],
                     policy_kind: if index == 8 {
                         PolicyKind::Selection
+                    } else if index == 12 {
+                        PolicyKind::Scheduling
                     } else {
                         PolicyKind::Retry
                     },
@@ -606,6 +636,15 @@ async fn seed_policy_versions(
                         }
                         .canonical_digest()
                         .unwrap()
+                    } else if index == 12 {
+                        SchedulingPolicyDocument {
+                            version: 1,
+                            weight: 1,
+                            burst: 4,
+                            aging_rounds: 4,
+                        }
+                        .canonical_digest()
+                        .unwrap()
                     } else {
                         digest('e')
                     },
@@ -614,7 +653,12 @@ async fn seed_policy_versions(
                         mode: CandidateSelectionMode::OnlyCandidate,
                         route_schema_digest: None,
                     }),
-                    scheduling: None,
+                    scheduling: (index == 12).then_some(SchedulingPolicyDocument {
+                        version: 1,
+                        weight: 1,
+                        burst: 4,
+                        aging_rounds: 4,
+                    }),
                     retention: None,
                     mcp_protocol: None,
                     mcp_auth: None,
@@ -660,9 +704,11 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             principal_kind: PrincipalKind::AgentRunner,
             payload: TenantPrincipalPayload {
                 permissions: PermissionSet::new(vec![
+                    Permission::CapabilityInvoke,
                     Permission::ModelInvoke,
                     Permission::ModelDeploy,
                     Permission::RuntimeControl,
+                    Permission::TenantManage,
                 ])
                 .unwrap(),
             },
@@ -705,6 +751,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let truncation_policy = policy(0x29, 'a');
     let agent_policy = policy(0x2a, 'b');
     let execution_profile = policy(0x2b, 'c');
+    let scheduling_policy = policy(0x2c, 'd');
     let policies = vec![
         protocol_policy.clone(),
         network_policy.clone(),
@@ -718,6 +765,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         truncation_policy.clone(),
         agent_policy.clone(),
         execution_profile.clone(),
+        scheduling_policy.clone(),
     ];
     seed_policy_versions(pool, &tenant_id, &principal_id, &policy_resource, &policies).await;
 
@@ -781,6 +829,15 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         },
     };
     let implementation_authoring = authoring(0xa5, '5');
+    insert_ready_artifact(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &agent_policy.revision_id,
+        &implementation_authoring.artifact,
+        0xa5,
+    )
+    .await;
     let native_contract = CapabilityBackendContract::Native(NativeCapabilityContract {
         adapter_id: "builtin.model_tool_fixture".to_owned(),
         adapter_version: "1.0.0".to_owned(),
@@ -1090,6 +1147,34 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         capability_payload.digest.parse().unwrap(),
     )
     .unwrap();
+    for (account_id, scope_kind, scope_id, metric) in [
+        (
+            id(ResourceKind::QuotaAccount, 0x44),
+            "tenant",
+            tenant_id.clone(),
+            QuotaDimension::WorkClassConcurrentOperations,
+        ),
+        (
+            id(ResourceKind::QuotaAccount, 0x45),
+            "capability_deployment",
+            capability_deployment.deployment_id.clone(),
+            QuotaDimension::CapabilityConcurrentInvocations,
+        ),
+    ] {
+        repository
+            .create_quota_account(NewQuotaAccount {
+                tenant_id: tenant_id.to_string(),
+                quota_account_id: account_id.to_string(),
+                scope_kind: scope_kind.to_owned(),
+                scope_id: scope_id.to_string(),
+                work_class: WorkClass::CapabilityNative.as_str().to_owned(),
+                metric: metric.as_str().to_owned(),
+                limit_value: 8,
+                payload: TypedPayload::new(1, &json!({"fixture": "model-tool"})).unwrap(),
+            })
+            .await
+            .unwrap();
+    }
 
     let agent_interface = version(ResourceKind::AgentInterfaceRevision, 0x38, '8');
     let agent_plan = version(ResourceKind::AgentPlanRevision, 0x39, '9');
@@ -1152,6 +1237,53 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         .unwrap(),
         revision: selection_policy.clone(),
     };
+    let scheduling_policy_deployment_id = id(ResourceKind::PolicyDeployment, 0x3e);
+    let scheduling_policy_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: scheduling_policy,
+            applicability_digest: digest('f'),
+            qualification_evidence: authoring(0xb9, '9').artifact,
+        }),
+    )
+    .unwrap();
+    insert_deployment(
+        pool,
+        &tenant_id,
+        &scheduling_policy_deployment_id,
+        &policy_resource,
+        &id(ResourceKind::PolicyRevision, 0x2c),
+        &principal_id,
+        &scheduling_policy_payload,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE insight_platform.resources SET active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(policy_resource.to_string())
+    .bind(scheduling_policy_deployment_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let scheduling_policy_deployment = ExactDeploymentRef::new(
+        scheduling_policy_deployment_id,
+        scheduling_policy_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
+    let mut security = repository.begin_security_transaction().await.unwrap();
+    assert!(matches!(
+        security
+            .bind_tenant_scheduling_policy(BindTenantSchedulingPolicy {
+                audit: audit(&tenant_id, &principal_id, 0xc0, 'c', 'd'),
+                expected_tenant_version: 1,
+                policy: scheduling_policy_deployment,
+            })
+            .await
+            .unwrap(),
+        CommandOutcome::Applied(_)
+    ));
+    security.commit().await.unwrap();
     let agent_policy_binding = ExactPolicyBinding {
         deployment: ExactDeploymentRef::new(id(ResourceKind::PolicyDeployment, 0x3c), digest('d'))
             .unwrap(),
@@ -1258,7 +1390,12 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         tenant_id.clone(),
         principal_id.clone(),
         PrincipalKind::AgentRunner,
-        PermissionSet::new(vec![Permission::ModelInvoke, Permission::RuntimeControl]).unwrap(),
+        PermissionSet::new(vec![
+            Permission::CapabilityInvoke,
+            Permission::ModelInvoke,
+            Permission::RuntimeControl,
+        ])
+        .unwrap(),
         1,
         1,
         1,
@@ -1513,6 +1650,7 @@ async fn seed_running_model_orchestration(
     pool: &PgPool,
     repository: &PgRepository,
     fixture: &Fixture,
+    base: u16,
 ) -> (RepositoryJobFence, DeferOrchestrationToModelTurn) {
     let input_value = json!({"prompt": "fixture"});
     let input_digest: Sha256Digest = canonical_digest(&input_value).unwrap().parse().unwrap();
@@ -1555,7 +1693,7 @@ async fn seed_running_model_orchestration(
     .execute(pool)
     .await
     .unwrap();
-    let node_id = id(ResourceKind::NodeExecution, 0x800);
+    let node_id = id(ResourceKind::NodeExecution, base);
     let node_payload = TypedPayload::new(1, &json!({"fixture": "model-owner"})).unwrap();
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(pool)
@@ -1570,7 +1708,7 @@ async fn seed_running_model_orchestration(
             deadline, started_at, created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, 'node_execution', $4,
-            'model', 3, 'model-owner', 'model_loop', 'running',
+            'model', 3, ('model-owner-' || $2), 'model_loop', 'running',
             1, 1, $5, $6, $7, $8, $9, $9, $9
         )
         "#,
@@ -1589,19 +1727,21 @@ async fn seed_running_model_orchestration(
     .unwrap();
 
     let quota_account_id = id(ResourceKind::QuotaAccount, 0x801);
-    repository
-        .create_quota_account(NewQuotaAccount {
-            tenant_id: fixture.tenant_id.to_string(),
-            quota_account_id: quota_account_id.to_string(),
-            scope_kind: "tenant".to_owned(),
-            scope_id: fixture.tenant_id.to_string(),
-            work_class: WorkClass::Orchestration.as_str().to_owned(),
-            metric: "concurrent_jobs".to_owned(),
-            limit_value: 4,
-            payload: TypedPayload::new(1, &json!({"fixture": "model-owner"})).unwrap(),
-        })
-        .await
-        .unwrap();
+    if base == 0x800 {
+        repository
+            .create_quota_account(NewQuotaAccount {
+                tenant_id: fixture.tenant_id.to_string(),
+                quota_account_id: quota_account_id.to_string(),
+                scope_kind: "tenant".to_owned(),
+                scope_id: fixture.tenant_id.to_string(),
+                work_class: WorkClass::Orchestration.as_str().to_owned(),
+                metric: "concurrent_jobs".to_owned(),
+                limit_value: 4,
+                payload: TypedPayload::new(1, &json!({"fixture": "model-owner"})).unwrap(),
+            })
+            .await
+            .unwrap();
+    }
     sqlx::query(
         "UPDATE insight_platform.quota_accounts SET reserved_value = 1 WHERE tenant_id = $1 AND quota_account_id = $2",
     )
@@ -1610,7 +1750,7 @@ async fn seed_running_model_orchestration(
     .execute(pool)
     .await
     .unwrap();
-    let reservation_id = id(ResourceKind::UsageReservation, 0x802);
+    let reservation_id = id(ResourceKind::UsageReservation, base + 2);
     sqlx::query(
         r#"
         INSERT INTO insight_platform.quota_ledger (
@@ -1620,15 +1760,15 @@ async fn seed_running_model_orchestration(
         "#,
     )
     .bind(fixture.tenant_id.to_string())
-    .bind(id(ResourceKind::QuotaLedgerEntry, 0x803).to_string())
+    .bind(id(ResourceKind::QuotaLedgerEntry, base + 3).to_string())
     .bind(quota_account_id.to_string())
     .bind(reservation_id.to_string())
     .bind(named_digest("model-owner-reserve").to_string())
     .execute(pool)
     .await
     .unwrap();
-    let source_job_id = id(ResourceKind::Job, 0x804);
-    let worker_id = id(ResourceKind::WorkerProcessGeneration, 0x805);
+    let source_job_id = id(ResourceKind::Job, base + 4);
+    let worker_id = id(ResourceKind::WorkerProcessGeneration, base + 5);
     let lease_token_digest = named_digest("model-owner-lease");
     let bindings_digest: Sha256Digest = sqlx::query_scalar::<_, String>(
         "SELECT bindings_digest FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
@@ -1649,6 +1789,7 @@ async fn seed_running_model_orchestration(
             retry_backoff_milliseconds: 100,
             wake_contract: None,
             convergence_failure: None,
+            model_tool_continuation: None,
         },
     )
     .unwrap();
@@ -1692,7 +1833,7 @@ async fn seed_running_model_orchestration(
         expected_job_version: 2,
         lease_token_digest,
     };
-    let create = command_for_node(fixture, &node_id, 0x830);
+    let create = command_for_node(fixture, &node_id, base + 0x30);
     let selection_document = CandidateSelectionPolicyDocument {
         schema_version: 1,
         mode: CandidateSelectionMode::OnlyCandidate,
@@ -1708,29 +1849,29 @@ async fn seed_running_model_orchestration(
     .unwrap();
     let mutations = DeferOrchestrationModelMutationIds {
         source: OrchestrationYieldMutationIds {
-            receipt_id: id(ResourceKind::Receipt, 0x840),
-            quota_entry_ids: (0x841..=0x844)
+            receipt_id: id(ResourceKind::Receipt, base + 0x40),
+            quota_entry_ids: (base + 0x41..=base + 0x44)
                 .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
                 .collect(),
-            run_event_id: id(ResourceKind::Event, 0x845),
-            run_outbox_id: id(ResourceKind::OutboxEvent, 0x846),
-            node_event_id: id(ResourceKind::Event, 0x847),
-            node_outbox_id: id(ResourceKind::OutboxEvent, 0x848),
-            job_event_id: id(ResourceKind::Event, 0x849),
-            job_outbox_id: id(ResourceKind::OutboxEvent, 0x84a),
+            run_event_id: id(ResourceKind::Event, base + 0x45),
+            run_outbox_id: id(ResourceKind::OutboxEvent, base + 0x46),
+            node_event_id: id(ResourceKind::Event, base + 0x47),
+            node_outbox_id: id(ResourceKind::OutboxEvent, base + 0x48),
+            job_event_id: id(ResourceKind::Event, base + 0x49),
+            job_outbox_id: id(ResourceKind::OutboxEvent, base + 0x4a),
         },
-        model_create_receipt_id: id(ResourceKind::Receipt, 0x84b),
-        model_create_event_id: id(ResourceKind::Event, 0x84c),
-        model_create_outbox_id: id(ResourceKind::OutboxEvent, 0x84d),
-        model_prepare_receipt_id: id(ResourceKind::Receipt, 0x84e),
-        model_prepare_event_id: id(ResourceKind::Event, 0x84f),
-        model_prepare_outbox_id: id(ResourceKind::OutboxEvent, 0x850),
+        model_create_receipt_id: id(ResourceKind::Receipt, base + 0x4b),
+        model_create_event_id: id(ResourceKind::Event, base + 0x4c),
+        model_create_outbox_id: id(ResourceKind::OutboxEvent, base + 0x4d),
+        model_prepare_receipt_id: id(ResourceKind::Receipt, base + 0x4e),
+        model_prepare_event_id: id(ResourceKind::Event, base + 0x4f),
+        model_prepare_outbox_id: id(ResourceKind::OutboxEvent, base + 0x50),
     };
     let command = DeferOrchestrationToModelTurn {
         fence: fence.clone(),
         plan: fixture.runtime_plan.clone(),
         model_turn_id: create.model_turn_id,
-        model_job_id: id(ResourceKind::Job, 0x851),
+        model_job_id: id(ResourceKind::Job, base + 0x51),
         input: ResolvedExpressionInput {
             run_value_id: id(ResourceKind::RunValue, 0x54),
             producing_node_id: None,
@@ -1827,6 +1968,20 @@ fn tool_response(fixture: &Fixture, query: serde_json::Value) -> CanonicalModelR
     }
 }
 
+fn two_tool_response(fixture: &Fixture) -> CanonicalModelResponse {
+    let mut response = tool_response(fixture, json!({"query": "fanout-1"}));
+    response.tool_intents.push(ModelToolIntent {
+        call_id: "call_2".to_owned(),
+        projected_tool_name: "search".to_owned(),
+        arguments: ClosedJsonValue::build(
+            fixture.argument_schema.canonical_digest.clone(),
+            json!({"query": "fanout-2"}),
+        )
+        .unwrap(),
+    });
+    response
+}
+
 fn final_response(fixture: &Fixture) -> CanonicalModelResponse {
     let mut response = tool_response(fixture, json!({"query": "unused"}));
     response.structured_output = Some(
@@ -1866,6 +2021,24 @@ fn failure_mutations(base: u16) -> insight_platform_contracts::ExternalLeafFailu
         convergence_job_event_id: id(ResourceKind::Event, base + 5),
         convergence_job_outbox_id: id(ResourceKind::OutboxEvent, base + 6),
     }
+}
+
+fn allowed_tool_policy(fixture: &Fixture) -> InvocationPolicyDecisionBundle {
+    let FrozenSlotTarget::Capability {
+        selection_policy, ..
+    } = &fixture.tool_slot_binding.target
+    else {
+        unreachable!()
+    };
+    InvocationPolicyDecisionBundle::build(
+        vec![InvocationPolicyDecision {
+            policy: selection_policy.revision.clone(),
+            disposition: InvocationPolicyDisposition::Allowed,
+            evidence_digest: named_digest("model-tool-policy-allowed"),
+        }],
+        None,
+    )
+    .unwrap()
 }
 
 fn output(
@@ -2101,6 +2274,7 @@ async fn model_turn_fixture() {
         ))),
         resume_mutations: None,
         failure_mutations: None,
+        tool_continuation_mutations: None,
     };
     assert!(matches!(
         execute_outcome(&repository, invalid).await,
@@ -2158,6 +2332,7 @@ async fn model_turn_fixture() {
         },
         resume_mutations: None,
         failure_mutations: None,
+        tool_continuation_mutations: None,
     };
     let retried = match execute_outcome(&repository, retry).await.unwrap() {
         CommandOutcome::Applied(record) => record,
@@ -2197,6 +2372,7 @@ async fn model_turn_fixture() {
         ))),
         resume_mutations: None,
         failure_mutations: None,
+        tool_continuation_mutations: None,
     };
     let completed = match execute_outcome(&repository, completed_command.clone())
         .await
@@ -2290,6 +2466,7 @@ async fn model_turn_fixture() {
         },
         resume_mutations: None,
         failure_mutations: None,
+        tool_continuation_mutations: None,
     };
     assert!(execute_outcome(&repository, stale).await.is_err());
     let stale_rows: i64 = sqlx::query_scalar(
@@ -2328,6 +2505,7 @@ async fn model_turn_fixture() {
         ))),
         resume_mutations: None,
         failure_mutations: None,
+        tool_continuation_mutations: None,
     };
     let control_racer = ControlModelTurn {
         audit: audit(&fixture.tenant_id, &fixture.principal_id, 0x360, 'b', 'c'),
@@ -2408,7 +2586,7 @@ async fn model_turn_fixture() {
     assert_eq!(race_receipts, 1);
 
     let (_source_fence, owner_command) =
-        seed_running_model_orchestration(&pool, &repository, &fixture).await;
+        seed_running_model_orchestration(&pool, &repository, &fixture, 0x800).await;
     let owner_request = owner_command.request.request.clone();
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let deferred = match scheduler
@@ -2467,6 +2645,17 @@ async fn model_turn_fixture() {
                 outbox_id: id(ResourceKind::OutboxEvent, 0x867),
                 resume_mutations: Some(owner_resume_mutations.clone()),
                 failure_mutations: Some(owner_failure_mutations),
+                tool_continuation_mutations: Some(
+                    insight_platform_models::ModelToolContinuationMutationIds {
+                        continuation_job_id: id(ResourceKind::Job, 0x890),
+                        run_event_id: id(ResourceKind::Event, 0x891),
+                        run_outbox_id: id(ResourceKind::OutboxEvent, 0x892),
+                        node_event_id: id(ResourceKind::Event, 0x893),
+                        node_outbox_id: id(ResourceKind::OutboxEvent, 0x894),
+                        continuation_job_event_id: id(ResourceKind::Event, 0x895),
+                        continuation_job_outbox_id: id(ResourceKind::OutboxEvent, 0x896),
+                    },
+                ),
             }],
         })
         .await
@@ -2478,12 +2667,42 @@ async fn model_turn_fixture() {
         Some(&owner_resume_mutations)
     );
     assert!(owner_claim.failure_mutations.is_some());
+    assert!(owner_claim.tool_continuation_mutations.is_some());
     let owner_fence = JobFence {
         expected_version: u64::try_from(owner_claim.job.version).unwrap(),
         worker_process_generation_id: owner_worker_id.clone(),
         lease_generation: u64::try_from(owner_claim.job.lease_epoch).unwrap(),
         token_digest: owner_lease_token,
     };
+    let mut tool_transaction = repository.begin_model_turn_transaction().await.unwrap();
+    let tool_handoff = tool_transaction
+        .commit_model_outcome(CommitModelOutcome {
+            audit: worker_audit(&fixture.tenant_id, &owner_worker_id, 0x8a0, '3', '4'),
+            model_turn_id: owner_claim.turn.model_turn_id.clone(),
+            job_id: owner_claim.job.job_id.parse().unwrap(),
+            expected_turn_version: owner_claim.turn.version,
+            fence: owner_fence.clone(),
+            usage_reservation_id: owner_reservation_id.clone(),
+            quota_entry_ids: (0x8a3..=0x8a6)
+                .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                .collect(),
+            request: owner_request.clone(),
+            outcome: ModelDispatchOutcome::Succeeded(Box::new(output(
+                &fixture,
+                tool_response(&fixture, json!({"query": "durable handoff"})),
+                id(ResourceKind::RunValue, 0x8a7),
+            ))),
+            resume_mutations: None,
+            failure_mutations: None,
+            tool_continuation_mutations: owner_claim.tool_continuation_mutations.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        tool_handoff,
+        CommandOutcome::Applied(record) if record.turn.state == ModelTurnState::Succeeded
+    ));
+    tool_transaction.rollback().await.unwrap();
     let owner_completed = execute_outcome(
         &repository,
         CommitModelOutcome {
@@ -2504,6 +2723,7 @@ async fn model_turn_fixture() {
             ))),
             resume_mutations: owner_claim.resume_mutations,
             failure_mutations: None,
+            tool_continuation_mutations: None,
         },
     )
     .await
@@ -2537,4 +2757,672 @@ async fn model_turn_fixture() {
         owner_states,
         ("succeeded".to_owned(), "ready".to_owned(), 1)
     );
+
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET state = 'cancelled', terminal_at = clock_timestamp(), updated_at = clock_timestamp() WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(owner_resume_mutations.continuation_job_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.run_nodes SET state = 'cancelled', terminal_at = clock_timestamp(), updated_at = clock_timestamp() WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(owner_resume_mutations.continuation_node_execution_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (_, tool_owner_command) =
+        seed_running_model_orchestration(&pool, &repository, &fixture, 0x900).await;
+    let tool_owner_request = tool_owner_command.request.request.clone();
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let tool_owner = match scheduler
+        .defer_orchestration_to_model_turn(tool_owner_command)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh tool owner dispatch replayed"),
+    };
+    scheduler.commit().await.unwrap();
+    let tool_worker_id = id(ResourceKind::WorkerProcessGeneration, 0x960);
+    let tool_lease_token = named_digest("model-tool-worker-lease");
+    let tool_reservation_id = id(ResourceKind::UsageReservation, 0x961);
+    let tool_continuation_job_id = id(ResourceKind::Job, 0x990);
+    let tool_continuation_mutations = insight_platform_models::ModelToolContinuationMutationIds {
+        continuation_job_id: tool_continuation_job_id.clone(),
+        run_event_id: id(ResourceKind::Event, 0x991),
+        run_outbox_id: id(ResourceKind::OutboxEvent, 0x992),
+        node_event_id: id(ResourceKind::Event, 0x993),
+        node_outbox_id: id(ResourceKind::OutboxEvent, 0x994),
+        continuation_job_event_id: id(ResourceKind::Event, 0x995),
+        continuation_job_outbox_id: id(ResourceKind::OutboxEvent, 0x996),
+    };
+    let mut claims = repository
+        .claim_model_jobs(ClaimModelJobs {
+            worker_process_generation_id: tool_worker_id.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            slots: vec![ModelClaimSlot {
+                lease_token_digest: tool_lease_token.clone(),
+                usage_reservation_id: tool_reservation_id.clone(),
+                quota_entry_ids: (0x962..=0x965)
+                    .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                    .collect(),
+                event_id: id(ResourceKind::Event, 0x966),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x967),
+                resume_mutations: Some(resume_mutations(0x970)),
+                failure_mutations: Some(failure_mutations(0x980)),
+                tool_continuation_mutations: Some(tool_continuation_mutations.clone()),
+            }],
+        })
+        .await
+        .unwrap();
+    let tool_claim = claims.pop().unwrap();
+    let tool_output_id = id(ResourceKind::RunValue, 0x9a7);
+    let fanout_response = two_tool_response(&fixture);
+    execute_outcome(
+        &repository,
+        CommitModelOutcome {
+            audit: worker_audit(&fixture.tenant_id, &tool_worker_id, 0x9a0, '5', '6'),
+            model_turn_id: tool_claim.turn.model_turn_id.clone(),
+            job_id: tool_claim.job.job_id.parse().unwrap(),
+            expected_turn_version: tool_claim.turn.version,
+            fence: JobFence {
+                expected_version: u64::try_from(tool_claim.job.version).unwrap(),
+                worker_process_generation_id: tool_worker_id,
+                lease_generation: u64::try_from(tool_claim.job.lease_epoch).unwrap(),
+                token_digest: tool_lease_token,
+            },
+            usage_reservation_id: tool_reservation_id,
+            quota_entry_ids: (0x9a3..=0x9a6)
+                .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                .collect(),
+            request: tool_owner_request,
+            outcome: ModelDispatchOutcome::Succeeded(Box::new(output(
+                &fixture,
+                fanout_response.clone(),
+                tool_output_id,
+            ))),
+            resume_mutations: None,
+            failure_mutations: None,
+            tool_continuation_mutations: Some(tool_continuation_mutations),
+        },
+    )
+    .await
+    .unwrap();
+
+    let orchestration_worker = id(ResourceKind::WorkerProcessGeneration, 0x9b0);
+    let orchestration_token = named_digest("model-tool-orchestration-lease");
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let mut claimed = scheduler
+        .claim_orchestration_jobs(ClaimOrchestrationJobs {
+            worker_id: orchestration_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            slots: vec![OrchestrationClaimSlot {
+                lease_token_digest: orchestration_token.clone(),
+                quota_reservation_id: id(ResourceKind::UsageReservation, 0x9b1),
+                quota_entry_ids: (0x9b2..=0x9b5)
+                    .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                    .collect(),
+                run_event_id: id(ResourceKind::Event, 0x9b6),
+                run_outbox_id: id(ResourceKind::OutboxEvent, 0x9b7),
+                node_event_id: id(ResourceKind::Event, 0x9b8),
+                node_outbox_id: id(ResourceKind::OutboxEvent, 0x9b9),
+                job_event_id: id(ResourceKind::Event, 0x9ba),
+                job_outbox_id: id(ResourceKind::OutboxEvent, 0x9bb),
+            }],
+        })
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    let claimed = claimed.pop().unwrap();
+    assert_eq!(claimed.job.job_id, tool_continuation_job_id.to_string());
+    let start = StartOrchestrationJob {
+        fence: RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: claimed.job.job_id.clone(),
+            worker_id: orchestration_worker.clone(),
+            lease_epoch: claimed.job.lease_epoch,
+            expected_job_version: claimed.job.version,
+            lease_token_digest: orchestration_token.clone(),
+        },
+        receipt_id: id(ResourceKind::Receipt, 0x9bc),
+        idempotency_key_digest: named_digest("model-tool-orchestration-start"),
+        request_digest: named_digest("model-tool-orchestration-start-request"),
+        receipt_expires_at: fixture.deadline,
+        job_event_id: id(ResourceKind::Event, 0x9bd),
+        job_outbox_id: id(ResourceKind::OutboxEvent, 0x9be),
+        node_event_id: id(ResourceKind::Event, 0x9bf),
+        node_outbox_id: id(ResourceKind::OutboxEvent, 0x9c0),
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let started = match scheduler
+        .start_orchestration_job(start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh tool continuation start replayed"),
+    };
+    scheduler.commit().await.unwrap();
+    let fence = RepositoryJobFence {
+        expected_job_version: started.version,
+        ..start.fence
+    };
+    let continuation = insight_platform_orchestrator::ModelToolContinuation {
+        model_turn_id: tool_owner.turn.model_turn_id,
+        response_value_id: id(ResourceKind::RunValue, 0x9a7),
+        response_digest: canonical_digest(&serde_json::to_value(&fanout_response).unwrap())
+            .unwrap()
+            .parse()
+            .unwrap(),
+        round_ordinal: 1,
+        tool_intent_count: 2,
+        results: Vec::new(),
+    };
+    let facts = repository
+        .load_model_tool_continuation_facts(&fence, &fixture.runtime_plan, &continuation)
+        .await
+        .unwrap();
+    assert_eq!(facts.calls.len(), 2);
+    let calls = facts
+        .calls
+        .iter()
+        .enumerate()
+        .map(|(ordinal, fact)| {
+            let base = if ordinal == 0 { 0x9d0 } else { 0x9f0 };
+            let call_id_digest: Sha256Digest = canonical_digest(&json!({"call_id": fact.call_id}))
+                .unwrap()
+                .parse()
+                .unwrap();
+            ModelToolCapabilityAdmission {
+                call_id: fact.call_id.clone(),
+                call_id_digest,
+                projected_tool_name: fact.projected_tool_name.clone(),
+                slot_id: fact.slot_id.clone(),
+                selected_candidate_ordinal: fact.selected_candidate_ordinal,
+                selected_deployment: fact.selected_deployment.clone(),
+                input_value_id: id(ResourceKind::RunValue, base),
+                arguments: fact.arguments.clone(),
+                invocation_id: id(ResourceKind::CapabilityInvocation, base + 1),
+                capability_job_id: id(ResourceKind::Job, base + 2),
+                policy_decisions: allowed_tool_policy(&fixture),
+                approval_task_id: None,
+                mcp_runtime: None,
+                requested_attempt_limit: 3,
+                requested_retry_backoff_milliseconds: 100,
+                idempotency_key_digest: named_digest(&format!(
+                    "model-tool-capability-idempotency-{ordinal}"
+                )),
+                mutations: ModelToolCapabilityMutationIds {
+                    admit_receipt_id: id(ResourceKind::Receipt, base + 3),
+                    admit_event_id: id(ResourceKind::Event, base + 4),
+                    admit_outbox_id: id(ResourceKind::OutboxEvent, base + 5),
+                    prepare_receipt_id: id(ResourceKind::Receipt, base + 6),
+                    prepare_event_id: id(ResourceKind::Event, base + 7),
+                    prepare_outbox_id: id(ResourceKind::OutboxEvent, base + 8),
+                    sibling_cancel_event_id: id(ResourceKind::Event, base + 9),
+                    sibling_cancel_outbox_id: id(ResourceKind::OutboxEvent, base + 10),
+                },
+            }
+        })
+        .collect();
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let dispatched = scheduler
+        .dispatch_model_tool_capabilities(DispatchModelToolCapabilities {
+            fence,
+            plan: fixture.runtime_plan.clone(),
+            continuation,
+            calls,
+            request_digest: named_digest("model-tool-fanout"),
+            receipt_expires_at: fixture.deadline,
+            source_mutations: OrchestrationYieldMutationIds {
+                receipt_id: id(ResourceKind::Receipt, 0x9e0),
+                quota_entry_ids: (0x9e1..=0x9e4)
+                    .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                    .collect(),
+                run_event_id: id(ResourceKind::Event, 0x9e5),
+                run_outbox_id: id(ResourceKind::OutboxEvent, 0x9e6),
+                node_event_id: id(ResourceKind::Event, 0x9e7),
+                node_outbox_id: id(ResourceKind::OutboxEvent, 0x9e8),
+                job_event_id: id(ResourceKind::Event, 0x9e9),
+                job_outbox_id: id(ResourceKind::OutboxEvent, 0x9ea),
+            },
+        })
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    let CommandOutcome::Applied(dispatched) = dispatched else {
+        panic!("fresh Model tool fanout replayed")
+    };
+    assert_eq!(dispatched.invocations.len(), 2);
+    assert_eq!(dispatched.capability_jobs.len(), 2);
+    assert_eq!(dispatched.source_job.state, JobState::Succeeded.as_str());
+    assert_eq!(dispatched.run.state, "waiting");
+    assert_eq!(dispatched.run.active_work_count, 0);
+    let origin = &dispatched.invocations[0].payload.admission.origin_key;
+    assert!(matches!(
+        origin,
+        insight_platform_invocations::InvocationOrigin::ModelToolCall { model_turn_id, .. }
+            if model_turn_id == &dispatched.invocations[0].owner_id
+    ));
+
+    let capability_worker_id = id(ResourceKind::WorkerProcessGeneration, 0xa00);
+    let capability_lease = named_digest("model-tool-capability-lease");
+    let capability_resume = resume_mutations(0xa20);
+    let capability_failure = failure_mutations(0xa40);
+    let mut claims = repository
+        .claim_capability_jobs(ClaimCapabilityJobs {
+            work_class: WorkClass::CapabilityNative,
+            worker_process_generation_id: capability_worker_id.clone(),
+            limit: 2,
+            lease_milliseconds: 30_000,
+            slots: vec![
+                CapabilityClaimSlot {
+                    lease_token_digest: capability_lease.clone(),
+                    quota_reservation_id: id(ResourceKind::UsageReservation, 0xa01),
+                    quota_entry_ids: vec![
+                        id(ResourceKind::QuotaLedgerEntry, 0xa02),
+                        id(ResourceKind::QuotaLedgerEntry, 0xa03),
+                    ],
+                    event_id: id(ResourceKind::Event, 0xa04),
+                    outbox_id: id(ResourceKind::OutboxEvent, 0xa05),
+                    resume_mutations: capability_resume.clone(),
+                    failure_mutations: capability_failure,
+                },
+                CapabilityClaimSlot {
+                    lease_token_digest: named_digest("unclaimed-model-tool-capability-lease"),
+                    quota_reservation_id: id(ResourceKind::UsageReservation, 0xa51),
+                    quota_entry_ids: vec![
+                        id(ResourceKind::QuotaLedgerEntry, 0xa52),
+                        id(ResourceKind::QuotaLedgerEntry, 0xa53),
+                    ],
+                    event_id: id(ResourceKind::Event, 0xa54),
+                    outbox_id: id(ResourceKind::OutboxEvent, 0xa55),
+                    resume_mutations: resume_mutations(0xa56),
+                    failure_mutations: failure_mutations(0xa70),
+                },
+            ],
+        })
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), 1);
+    let capability_claim = claims.pop().unwrap();
+    assert_eq!(
+        capability_claim.resume_mutations,
+        Some(capability_resume.clone())
+    );
+    let mut invocation_transaction = repository.begin_invocation_transaction().await.unwrap();
+    let failed = invocation_transaction
+        .commit_capability_outcome(CommitCapabilityOutcome {
+            audit: capability_worker_audit(&fixture.tenant_id, &capability_worker_id, 0xa06),
+            invocation_id: capability_claim.invocation.invocation_id.clone(),
+            job_id: capability_claim.job.job_id.parse().unwrap(),
+            expected_invocation_version: capability_claim.invocation.version,
+            fence: capability_claim.fence.clone(),
+            quota_entry_ids: vec![
+                id(ResourceKind::QuotaLedgerEntry, 0xa09),
+                id(ResourceKind::QuotaLedgerEntry, 0xa0a),
+            ],
+            outcome: DispatchOutcome::PermanentFailure(SafeBackendFailure {
+                failure: insight_platform_contracts::Failure {
+                    code: insight_platform_contracts::FailureCode::Platform {
+                        code: insight_platform_contracts::PlatformFailureCode::CapabilityFailed,
+                    },
+                    class: insight_platform_contracts::FailureClass::External,
+                    retryability: insight_platform_contracts::Retryability::Never,
+                    safe_message: Some("fixture capability failure".to_owned()),
+                    details_ref: None,
+                    source: insight_platform_contracts::FailureSource::Capability,
+                },
+                evidence_digest: named_digest("model-tool-permanent-failure"),
+            }),
+            resume_mutations: None,
+            failure_mutations: capability_claim.failure_mutations.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        failed,
+        CommandOutcome::Applied(record)
+            if record.invocation.state == insight_platform_contracts::InvocationState::Failed
+    ));
+    invocation_transaction.rollback().await.unwrap();
+
+    let tool_result_value = json!({"answer": "tool-result"});
+    let tool_result_digest: Sha256Digest = canonical_digest(&tool_result_value)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let tool_result_value_id = id(ResourceKind::RunValue, 0xa10);
+    let mut invocation_transaction = repository.begin_invocation_transaction().await.unwrap();
+    let completed = invocation_transaction
+        .commit_capability_outcome(CommitCapabilityOutcome {
+            audit: capability_worker_audit(&fixture.tenant_id, &capability_worker_id, 0xa06),
+            invocation_id: capability_claim.invocation.invocation_id.clone(),
+            job_id: capability_claim.job.job_id.parse().unwrap(),
+            expected_invocation_version: capability_claim.invocation.version,
+            fence: capability_claim.fence,
+            quota_entry_ids: vec![
+                id(ResourceKind::QuotaLedgerEntry, 0xa09),
+                id(ResourceKind::QuotaLedgerEntry, 0xa0a),
+            ],
+            outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+                value_id: tool_result_value_id.clone(),
+                classification: DataClassification::Internal,
+                schema_digest: fixture.output_schema.canonical_digest.clone(),
+                content_digest: tool_result_digest,
+                value: ValueRef::Inline {
+                    value: tool_result_value,
+                },
+                artifact_link_id: None,
+                validation_evidence_digest: named_digest("model-tool-validation"),
+            }),
+            resume_mutations: capability_claim.resume_mutations,
+            failure_mutations: None,
+        })
+        .await
+        .unwrap();
+    invocation_transaction.commit().await.unwrap();
+    assert!(matches!(
+        completed,
+        CommandOutcome::Applied(record)
+            if record.invocation.state == insight_platform_contracts::InvocationState::Succeeded
+    ));
+    let partial_result: (String, i32, i64) = sqlx::query_as(
+        r#"
+        SELECT node.state, run.active_work_count,
+               (SELECT count(*) FROM insight_platform.jobs AS continuation
+                WHERE continuation.tenant_id = node.tenant_id
+                  AND continuation.job_id = $3)
+        FROM insight_platform.run_nodes AS node
+        JOIN insight_platform.runs AS run
+          ON run.tenant_id = node.tenant_id AND run.run_id = node.run_id
+        WHERE node.tenant_id = $1 AND node.node_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(tool_owner.node_id.clone())
+    .bind(capability_resume.continuation_job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(partial_result, ("waiting".to_owned(), 0, 0));
+
+    let second_worker_id = id(ResourceKind::WorkerProcessGeneration, 0xa60);
+    let second_lease = named_digest("model-tool-capability-second-lease");
+    let second_resume = resume_mutations(0xa70);
+    let mut second_claims = repository
+        .claim_capability_jobs(ClaimCapabilityJobs {
+            work_class: WorkClass::CapabilityNative,
+            worker_process_generation_id: second_worker_id.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            slots: vec![CapabilityClaimSlot {
+                lease_token_digest: second_lease,
+                quota_reservation_id: id(ResourceKind::UsageReservation, 0xa61),
+                quota_entry_ids: vec![
+                    id(ResourceKind::QuotaLedgerEntry, 0xa62),
+                    id(ResourceKind::QuotaLedgerEntry, 0xa63),
+                ],
+                event_id: id(ResourceKind::Event, 0xa64),
+                outbox_id: id(ResourceKind::OutboxEvent, 0xa65),
+                resume_mutations: second_resume.clone(),
+                failure_mutations: failure_mutations(0xa90),
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(second_claims.len(), 1);
+    let second_claim = second_claims.pop().unwrap();
+    let second_result_value = json!({"answer": "tool-result-2"});
+    let second_result_digest: Sha256Digest = canonical_digest(&second_result_value)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let second_result_value_id = id(ResourceKind::RunValue, 0xaa0);
+    let mut invocation_transaction = repository.begin_invocation_transaction().await.unwrap();
+    let second_completed = invocation_transaction
+        .commit_capability_outcome(CommitCapabilityOutcome {
+            audit: capability_worker_audit(&fixture.tenant_id, &second_worker_id, 0xa66),
+            invocation_id: second_claim.invocation.invocation_id.clone(),
+            job_id: second_claim.job.job_id.parse().unwrap(),
+            expected_invocation_version: second_claim.invocation.version,
+            fence: second_claim.fence,
+            quota_entry_ids: vec![
+                id(ResourceKind::QuotaLedgerEntry, 0xa69),
+                id(ResourceKind::QuotaLedgerEntry, 0xa6a),
+            ],
+            outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+                value_id: second_result_value_id.clone(),
+                classification: DataClassification::Internal,
+                schema_digest: fixture.output_schema.canonical_digest.clone(),
+                content_digest: second_result_digest,
+                value: ValueRef::Inline {
+                    value: second_result_value,
+                },
+                artifact_link_id: None,
+                validation_evidence_digest: named_digest("model-tool-validation-second"),
+            }),
+            resume_mutations: second_claim.resume_mutations,
+            failure_mutations: None,
+        })
+        .await
+        .unwrap();
+    invocation_transaction.commit().await.unwrap();
+    assert!(matches!(
+        second_completed,
+        CommandOutcome::Applied(record)
+            if record.invocation.state == insight_platform_contracts::InvocationState::Succeeded
+    ));
+    let result_job: (String, String, i32) = sqlx::query_as(
+        r#"
+        SELECT job.state, node.state, run.active_work_count
+        FROM insight_platform.jobs AS job
+        JOIN insight_platform.run_nodes AS node
+          ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+        JOIN insight_platform.runs AS run
+          ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
+        WHERE job.tenant_id = $1 AND job.job_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(second_resume.continuation_job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(result_job, ("ready".to_owned(), "ready".to_owned(), 0));
+
+    let result_orchestration_worker = id(ResourceKind::WorkerProcessGeneration, 0xb00);
+    let result_orchestration_lease = named_digest("model-tool-result-orchestration-lease");
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let mut claims = scheduler
+        .claim_orchestration_jobs(ClaimOrchestrationJobs {
+            worker_id: result_orchestration_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            slots: vec![OrchestrationClaimSlot {
+                lease_token_digest: result_orchestration_lease.clone(),
+                quota_reservation_id: id(ResourceKind::UsageReservation, 0xb01),
+                quota_entry_ids: (0xb02..=0xb05)
+                    .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                    .collect(),
+                run_event_id: id(ResourceKind::Event, 0xb06),
+                run_outbox_id: id(ResourceKind::OutboxEvent, 0xb07),
+                node_event_id: id(ResourceKind::Event, 0xb08),
+                node_outbox_id: id(ResourceKind::OutboxEvent, 0xb09),
+                job_event_id: id(ResourceKind::Event, 0xb0a),
+                job_outbox_id: id(ResourceKind::OutboxEvent, 0xb0b),
+            }],
+        })
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    let result_claim = claims.pop().unwrap();
+    assert_eq!(
+        result_claim.job.job_id,
+        second_resume.continuation_job_id.to_string()
+    );
+    let start = StartOrchestrationJob {
+        fence: RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: result_claim.job.job_id.clone(),
+            worker_id: result_orchestration_worker,
+            lease_epoch: result_claim.job.lease_epoch,
+            expected_job_version: result_claim.job.version,
+            lease_token_digest: result_orchestration_lease,
+        },
+        receipt_id: id(ResourceKind::Receipt, 0xb0c),
+        idempotency_key_digest: named_digest("model-tool-result-start"),
+        request_digest: named_digest("model-tool-result-start-request"),
+        receipt_expires_at: fixture.deadline,
+        job_event_id: id(ResourceKind::Event, 0xb0d),
+        job_outbox_id: id(ResourceKind::OutboxEvent, 0xb0e),
+        node_event_id: id(ResourceKind::Event, 0xb0f),
+        node_outbox_id: id(ResourceKind::OutboxEvent, 0xb10),
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let started = match scheduler
+        .start_orchestration_job(start.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh Model tool result start replayed"),
+    };
+    scheduler.commit().await.unwrap();
+    let result_fence = RepositoryJobFence {
+        expected_job_version: started.version,
+        ..start.fence
+    };
+    let mut job_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(second_resume.continuation_job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    job_payload
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_version");
+    let job_payload: OrchestrationJobPayload = serde_json::from_value(job_payload).unwrap();
+    let result_continuation = job_payload.model_tool_continuation.unwrap();
+    assert_eq!(result_continuation.results.len(), 2);
+    assert_eq!(
+        result_continuation.results[0].output_value_id,
+        tool_result_value_id
+    );
+    assert_eq!(
+        result_continuation.results[1].output_value_id,
+        second_result_value_id
+    );
+    let result_facts = repository
+        .load_model_tool_result_continuation_facts(
+            &result_fence,
+            &fixture.runtime_plan,
+            &result_continuation,
+        )
+        .await
+        .unwrap();
+    let next_model_turn_id = id(ResourceKind::ModelTurn, 0xb20);
+    let next_request_value_id = id(ResourceKind::RunValue, 0xb21);
+    let mut next_request = result_facts.previous_request.request.clone();
+    next_request.model_turn_id = next_model_turn_id.clone();
+    let result_source_value = serde_json::to_value(&result_facts.results).unwrap();
+    let result_source_digest: Sha256Digest = canonical_digest(&result_source_value)
+        .unwrap()
+        .parse()
+        .unwrap();
+    next_request.messages.push(CanonicalMessage {
+        role: CanonicalMessageRole::Tool,
+        parts: result_facts
+            .results
+            .iter()
+            .cloned()
+            .map(CanonicalMessagePart::ToolResult)
+            .collect(),
+        classification: DataClassification::Internal,
+        source: ModelContentSource {
+            source_kind: "capability_tool_result".to_owned(),
+            source_digest: result_source_digest.clone(),
+            trusted_instruction: false,
+        },
+    });
+    next_request.input_token_estimate += 1;
+    next_request.source_map_digest = canonical_digest(&json!({
+        "previous_source_map_digest": next_request.source_map_digest,
+        "tool_result_source_digest": result_source_digest,
+    }))
+    .unwrap()
+    .parse()
+    .unwrap();
+    let next_request_json = serde_json::to_value(&next_request).unwrap();
+    let next_request_digest: Sha256Digest = canonical_digest(&next_request_json)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let next_request = ModelRequestValue {
+        value_id: next_request_value_id,
+        classification: DataClassification::Internal,
+        schema_digest: result_facts.previous_request.schema_digest,
+        content_digest: next_request_digest,
+        value: ValueRef::Inline {
+            value: next_request_json,
+        },
+        request: next_request,
+    };
+    let next_mutations = DeferOrchestrationModelMutationIds {
+        source: OrchestrationYieldMutationIds {
+            receipt_id: id(ResourceKind::Receipt, 0xb30),
+            quota_entry_ids: (0xb31..=0xb34)
+                .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                .collect(),
+            run_event_id: id(ResourceKind::Event, 0xb35),
+            run_outbox_id: id(ResourceKind::OutboxEvent, 0xb36),
+            node_event_id: id(ResourceKind::Event, 0xb37),
+            node_outbox_id: id(ResourceKind::OutboxEvent, 0xb38),
+            job_event_id: id(ResourceKind::Event, 0xb39),
+            job_outbox_id: id(ResourceKind::OutboxEvent, 0xb3a),
+        },
+        model_create_receipt_id: id(ResourceKind::Receipt, 0xb3b),
+        model_create_event_id: id(ResourceKind::Event, 0xb3c),
+        model_create_outbox_id: id(ResourceKind::OutboxEvent, 0xb3d),
+        model_prepare_receipt_id: id(ResourceKind::Receipt, 0xb3e),
+        model_prepare_event_id: id(ResourceKind::Event, 0xb3f),
+        model_prepare_outbox_id: id(ResourceKind::OutboxEvent, 0xb40),
+    };
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let continued = scheduler
+        .continue_model_tool_results_to_model_turn(ContinueModelToolResultsToModelTurn {
+            fence: result_fence,
+            plan: fixture.runtime_plan.clone(),
+            continuation: result_continuation,
+            model_turn_id: next_model_turn_id,
+            model_job_id: id(ResourceKind::Job, 0xb22),
+            request: next_request,
+            requested_attempt_limit: result_facts.requested_attempt_limit,
+            cost_ceiling_microunits: result_facts.cost_ceiling_microunits,
+            idempotency_key_digest: named_digest("model-tool-next-turn-idempotency"),
+            request_digest: named_digest("model-tool-next-turn-request"),
+            receipt_expires_at: fixture.deadline,
+            mutations: next_mutations,
+        })
+        .await
+        .unwrap();
+    scheduler.commit().await.unwrap();
+    let CommandOutcome::Applied(continued) = continued else {
+        panic!("fresh Model tool continuation replayed")
+    };
+    assert_eq!(continued.turn.round_ordinal, 2);
+    assert_eq!(continued.turn.state, ModelTurnState::Ready);
+    assert_eq!(continued.model_job.state, JobState::Ready.as_str());
+    assert_eq!(continued.run.state, "waiting");
+    assert_eq!(continued.run.active_work_count, 0);
 }

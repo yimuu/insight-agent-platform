@@ -9,7 +9,8 @@ use insight_platform_postgres::repository::{
     ControllerStructuralRequirement, DeferOrchestrationCapabilityMutationIds,
     DeferOrchestrationChildMutationIds, DeferOrchestrationContextMutationIds,
     DeferOrchestrationModelMutationIds, DeferOrchestrationTaskMutationIds,
-    OrchestrationTerminalMutationIds, OrchestrationYieldMutationIds, MAX_ORCHESTRATION_QUOTA_LINES,
+    ModelToolCapabilityMutationIds, OrchestrationTerminalMutationIds,
+    OrchestrationYieldMutationIds, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 
 pub fn allocate_orchestration_terminal_mutations(
@@ -161,6 +162,21 @@ pub fn allocate_capability_invocation_mutations(
         invocation_prepare_receipt_id: new_id(identities, ResourceKind::Receipt)?,
         invocation_prepare_event_id: new_id(identities, ResourceKind::Event)?,
         invocation_prepare_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+    })
+}
+
+pub fn allocate_model_tool_capability_mutations(
+    identities: &impl CoordinatorIdentityFactory,
+) -> Result<ModelToolCapabilityMutationIds, IdentityFactoryError> {
+    Ok(ModelToolCapabilityMutationIds {
+        admit_receipt_id: new_id(identities, ResourceKind::Receipt)?,
+        admit_event_id: new_id(identities, ResourceKind::Event)?,
+        admit_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        prepare_receipt_id: new_id(identities, ResourceKind::Receipt)?,
+        prepare_event_id: new_id(identities, ResourceKind::Event)?,
+        prepare_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        sibling_cancel_event_id: new_id(identities, ResourceKind::Event)?,
+        sibling_cancel_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
     })
 }
 

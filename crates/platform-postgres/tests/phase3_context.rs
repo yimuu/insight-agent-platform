@@ -1538,6 +1538,7 @@ async fn seed_running_context_orchestration(
             retry_backoff_milliseconds: 100,
             wake_contract: None,
             convergence_failure: None,
+            model_tool_continuation: None,
         },
     )
     .unwrap();
@@ -1767,6 +1768,7 @@ async fn park_direct_context_leaf(
             retry_backoff_milliseconds: 100,
             wake_contract: None,
             convergence_failure: None,
+            model_tool_continuation: None,
         },
     )
     .unwrap();

@@ -796,6 +796,40 @@ pub struct ModelClaimSlot {
     pub outbox_id: ResourceId,
     pub resume_mutations: Option<ExternalLeafResumeMutationIds>,
     pub failure_mutations: Option<ExternalLeafFailureMutationIds>,
+    pub tool_continuation_mutations: Option<ModelToolContinuationMutationIds>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelToolContinuationMutationIds {
+    pub continuation_job_id: ResourceId,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
+    pub node_event_id: ResourceId,
+    pub node_outbox_id: ResourceId,
+    pub continuation_job_event_id: ResourceId,
+    pub continuation_job_outbox_id: ResourceId,
+}
+
+impl ModelToolContinuationMutationIds {
+    pub fn validate(&self) -> Result<(), ModelTurnError> {
+        let expected = [
+            (&self.continuation_job_id, ResourceKind::Job),
+            (&self.run_event_id, ResourceKind::Event),
+            (&self.run_outbox_id, ResourceKind::OutboxEvent),
+            (&self.node_event_id, ResourceKind::Event),
+            (&self.node_outbox_id, ResourceKind::OutboxEvent),
+            (&self.continuation_job_event_id, ResourceKind::Event),
+            (&self.continuation_job_outbox_id, ResourceKind::OutboxEvent),
+        ];
+        let unique = expected
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .collect::<BTreeSet<_>>();
+        if expected.iter().any(|(id, kind)| id.kind() != *kind) || unique.len() != expected.len() {
+            return Err(ModelTurnError::InvalidIdentity);
+        }
+        Ok(())
+    }
 }
 
 impl ModelClaimSlot {
@@ -805,12 +839,17 @@ impl ModelClaimSlot {
             || self.event_id.kind() != ResourceKind::Event
             || self.outbox_id.kind() != ResourceKind::OutboxEvent
             || self.resume_mutations.is_some() != self.failure_mutations.is_some()
+            || self.resume_mutations.is_some() != self.tool_continuation_mutations.is_some()
             || self
                 .resume_mutations
                 .as_ref()
                 .is_some_and(|mutations| mutations.validate().is_err())
             || self
                 .failure_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || self
+                .tool_continuation_mutations
                 .as_ref()
                 .is_some_and(|mutations| mutations.validate().is_err())
         {
@@ -1072,6 +1111,7 @@ pub struct CommitModelOutcome {
     pub outcome: ModelDispatchOutcome,
     pub resume_mutations: Option<ExternalLeafResumeMutationIds>,
     pub failure_mutations: Option<ExternalLeafFailureMutationIds>,
+    pub tool_continuation_mutations: Option<ModelToolContinuationMutationIds>,
 }
 
 impl CommitModelOutcome {
@@ -1092,13 +1132,30 @@ impl CommitModelOutcome {
                 )
             || self.failure_mutations.is_some()
                 && !matches!(self.outcome, ModelDispatchOutcome::PermanentFailure { .. })
-            || (self.resume_mutations.is_some() && self.failure_mutations.is_some())
+            || self.tool_continuation_mutations.is_some()
+                && !matches!(
+                    &self.outcome,
+                    ModelDispatchOutcome::Succeeded(output) if !output.response.tool_intents.is_empty()
+                )
+            || [
+                self.resume_mutations.is_some(),
+                self.failure_mutations.is_some(),
+                self.tool_continuation_mutations.is_some(),
+            ]
+            .into_iter()
+            .filter(|present| *present)
+            .count()
+                > 1
             || self
                 .resume_mutations
                 .as_ref()
                 .is_some_and(|mutations| mutations.validate().is_err())
             || self
                 .failure_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || self
+                .tool_continuation_mutations
                 .as_ref()
                 .is_some_and(|mutations| mutations.validate().is_err())
         {

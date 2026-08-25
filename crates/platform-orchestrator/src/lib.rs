@@ -2152,6 +2152,72 @@ pub struct OrchestrationJobPayload {
     /// external leaf again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub convergence_failure: Option<Failure>,
+    /// An exact terminal Model response that contains tool intents and must be consumed by the
+    /// durable orchestration controller rather than dispatched as a fresh Model activation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_tool_continuation: Option<ModelToolContinuation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelToolContinuation {
+    pub model_turn_id: ResourceId,
+    pub response_value_id: ResourceId,
+    pub response_digest: Sha256Digest,
+    pub round_ordinal: u16,
+    pub tool_intent_count: u16,
+    /// Empty while the controller still has to fan out tool intents. Once every invocation has
+    /// committed, the terminal winner fills this exact, call-ordered result set and wakes the
+    /// controller to assemble the next ModelTurn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<ModelToolResultReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelToolResultReference {
+    pub call_id: String,
+    pub invocation_id: ResourceId,
+    pub output_value_id: ResourceId,
+    pub schema_digest: Sha256Digest,
+    pub content_digest: Sha256Digest,
+    pub classification: DataClassification,
+}
+
+impl ModelToolResultReference {
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        if self.call_id.is_empty()
+            || self.call_id.len() > 128
+            || self.invocation_id.kind() != ResourceKind::CapabilityInvocation
+            || self.output_value_id.kind() != ResourceKind::RunValue
+        {
+            return Err(OrchestratorError::InvalidRunAdmission);
+        }
+        Ok(())
+    }
+}
+
+impl ModelToolContinuation {
+    pub fn validate(&self) -> Result<(), OrchestratorError> {
+        if self.model_turn_id.kind() != ResourceKind::ModelTurn
+            || self.response_value_id.kind() != ResourceKind::RunValue
+            || self.round_ordinal == 0
+            || self.tool_intent_count == 0
+            || (!self.results.is_empty()
+                && self.results.len() != usize::from(self.tool_intent_count))
+            || self.results.iter().any(|result| result.validate().is_err())
+            || self
+                .results
+                .iter()
+                .map(|result| &result.call_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.results.len()
+        {
+            return Err(OrchestratorError::InvalidRunAdmission);
+        }
+        Ok(())
+    }
 }
 
 impl OrchestrationJobPayload {
@@ -2164,7 +2230,19 @@ impl OrchestrationJobPayload {
                 .convergence_failure
                 .as_ref()
                 .is_some_and(|failure| failure.validate(1_024).is_err())
-            || (self.convergence_failure.is_some() && self.wake_contract.is_some())
+            || self
+                .model_tool_continuation
+                .as_ref()
+                .is_some_and(|continuation| continuation.validate().is_err())
+            || [
+                self.wake_contract.is_some(),
+                self.convergence_failure.is_some(),
+                self.model_tool_continuation.is_some(),
+            ]
+            .into_iter()
+            .filter(|present| *present)
+            .count()
+                > 1
         {
             return Err(OrchestratorError::InvalidRunAdmission);
         }
@@ -2709,6 +2787,7 @@ impl AdmitRun {
             retry_backoff_milliseconds: self.retry_backoff_milliseconds,
             wake_contract: None,
             convergence_failure: None,
+            model_tool_continuation: None,
         }
     }
 }

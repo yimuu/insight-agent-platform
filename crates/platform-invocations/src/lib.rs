@@ -1394,6 +1394,7 @@ pub struct ResolveCapabilityApproval {
     pub eligible_principal_rule_digest: Sha256Digest,
     pub decision: CapabilityApprovalDecision,
     pub dispatch_mutations: Option<CapabilityApprovalDispatchMutationIds>,
+    pub failure_mutations: Option<insight_platform_contracts::ExternalLeafFailureMutationIds>,
 }
 
 impl ResolveCapabilityApproval {
@@ -1410,8 +1411,14 @@ impl ResolveCapabilityApproval {
                 .dispatch_mutations
                 .as_ref()
                 .is_some_and(|mutations| mutations.validate().is_err())
+            || self
+                .failure_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
             || (self.decision != CapabilityApprovalDecision::Approve
                 && self.dispatch_mutations.is_some())
+            || (self.decision == CapabilityApprovalDecision::Approve
+                && self.failure_mutations.is_some())
         {
             return Err(InvocationError::InvalidCommand);
         }
@@ -1923,6 +1930,7 @@ mod tests {
             eligible_principal_rule_digest: digest_value('c'),
             decision: CapabilityApprovalDecision::Approve,
             dispatch_mutations: None,
+            failure_mutations: None,
         };
         let mut cancel_command = command.clone();
         cancel_command.decision = CapabilityApprovalDecision::Cancel;

@@ -797,7 +797,7 @@ impl PgInvocationTransaction {
         update_capability_invocation(&mut transaction, &current_invocation, &decision.invocation)
             .await?;
 
-        let plan_leaf_waiting: bool = sqlx::query_scalar(
+        let owner_node_waiting: bool = sqlx::query_scalar(
             r#"
             SELECT state = 'waiting'
             FROM insight_platform.run_nodes
@@ -810,6 +810,16 @@ impl PgInvocationTransaction {
         .bind(current_invocation.run_id.to_string())
         .fetch_one(&mut *transaction)
         .await?;
+        let plan_leaf_waiting = owner_node_waiting
+            && matches!(
+                current_invocation.payload.admission.origin_key,
+                insight_platform_invocations::InvocationOrigin::PlanNode { .. }
+            );
+        let model_tool_waiting = owner_node_waiting
+            && matches!(
+                current_invocation.payload.admission.origin_key,
+                insight_platform_invocations::InvocationOrigin::ModelToolCall { .. }
+            );
         if plan_leaf_waiting {
             if matches!(trusted_outcome, DispatchOutcome::Completed(_)) {
                 let mutations =
@@ -850,6 +860,7 @@ impl PgInvocationTransaction {
                     &command.job_id,
                     &failure.failure,
                     mutations,
+                    true,
                     database_now,
                 )
                 .await?;
@@ -857,6 +868,61 @@ impl PgInvocationTransaction {
                 if command.resume_mutations.is_some() || command.failure_mutations.is_some() {
                     return Err(RepositoryError::InvalidInput(
                         "nonterminal Capability outcome has terminal identities".to_owned(),
+                    ));
+                }
+                release_capability_plan_leaf_permit(
+                    &mut transaction,
+                    &decision.invocation,
+                    database_now,
+                )
+                .await?;
+            }
+        } else if model_tool_waiting {
+            if matches!(trusted_outcome, DispatchOutcome::Completed(_)) {
+                let mutations =
+                    command
+                        .resume_mutations
+                        .as_ref()
+                        .ok_or(RepositoryError::InvalidInput(
+                            "Model tool completion has no settlement identities".to_owned(),
+                        ))?;
+                let exact_output =
+                    decision.invocation.payload.result.as_ref().ok_or_else(|| {
+                        RepositoryError::CorruptRow(
+                            "Model tool success has no exact output".to_owned(),
+                        )
+                    })?;
+                crate::repository::settle_model_tool_success_in_transaction(
+                    &mut transaction,
+                    &decision.invocation,
+                    &command.job_id,
+                    &exact_output.output,
+                    mutations,
+                    database_now,
+                )
+                .await?;
+            } else if let DispatchOutcome::PermanentFailure(failure) = &trusted_outcome {
+                let mutations =
+                    command
+                        .failure_mutations
+                        .as_ref()
+                        .ok_or(RepositoryError::InvalidInput(
+                            "Model tool failure has no convergence identities".to_owned(),
+                        ))?;
+                crate::repository::settle_model_tool_failure_in_transaction(
+                    &mut transaction,
+                    &decision.invocation,
+                    &command.job_id,
+                    &failure.failure,
+                    mutations,
+                    true,
+                    database_now,
+                )
+                .await?;
+            } else {
+                if command.resume_mutations.is_some() || command.failure_mutations.is_some() {
+                    return Err(RepositoryError::InvalidInput(
+                        "nonterminal Model tool outcome has terminal identities".to_owned(),
                     ));
                 }
                 release_capability_plan_leaf_permit(
@@ -2106,12 +2172,48 @@ impl PgRepository {
         let database_now = database_now(&mut transaction).await?;
         let rows = sqlx::query(
             r#"
-            SELECT * FROM insight_platform.jobs
-            WHERE work_class = $1 AND state IN ('ready', 'retry_scheduled')
-              AND terminal_at IS NULL AND worker_id IS NULL
-              AND scheduled_at <= $2 AND (retry_at IS NULL OR retry_at <= $2)
-              AND deadline > $2
-            ORDER BY priority DESC, COALESCE(retry_at, scheduled_at), job_id
+            SELECT ranked.*
+            FROM (
+                SELECT candidate.*,
+                       row_number() OVER (
+                           PARTITION BY candidate.tenant_id, candidate.node_id
+                           ORDER BY candidate.priority DESC,
+                                    COALESCE(candidate.retry_at, candidate.scheduled_at),
+                                    candidate.job_id
+                       ) AS node_rank
+                FROM insight_platform.jobs AS candidate
+                JOIN insight_platform.run_nodes AS owner_node
+                  ON owner_node.tenant_id = candidate.tenant_id
+                 AND owner_node.node_id = candidate.node_id
+                WHERE candidate.work_class = $1
+                  AND candidate.state IN ('ready', 'retry_scheduled')
+                  AND candidate.terminal_at IS NULL AND candidate.worker_id IS NULL
+                  AND candidate.scheduled_at <= $2
+                  AND (candidate.retry_at IS NULL OR candidate.retry_at <= $2)
+                  AND candidate.deadline > $2
+                  AND (
+                      owner_node.node_kind <> 'model_loop'
+                      OR candidate.owner_id = (
+                          SELECT call.value ->> 'invocation_id'
+                          FROM jsonb_array_elements(owner_node.payload -> 'calls')
+                               WITH ORDINALITY AS call(value, ordinal)
+                          WHERE NOT (call.value ? 'result')
+                          ORDER BY call.ordinal
+                          LIMIT 1
+                      )
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM insight_platform.jobs AS active
+                      WHERE active.tenant_id = candidate.tenant_id
+                        AND active.node_id = candidate.node_id
+                        AND active.work_class IN ('capability_native', 'capability_remote')
+                        AND active.state IN ('leased', 'running', 'cancelling')
+                        AND active.terminal_at IS NULL
+                  )
+            ) AS ranked
+            WHERE ranked.node_rank = 1
+            ORDER BY ranked.priority DESC,
+                     COALESCE(ranked.retry_at, ranked.scheduled_at), ranked.job_id
             LIMIT $3
             "#,
         )
@@ -2188,8 +2290,13 @@ impl PgRepository {
                     "Capability Job parent binding does not match its Invocation".to_owned(),
                 ));
             }
-            let plan_leaf_waiting =
-                node.state == insight_platform_contracts::NodeExecutionState::Waiting;
+            let external_leaf_waiting = node.state
+                == insight_platform_contracts::NodeExecutionState::Waiting
+                && matches!(
+                    current_invocation.payload.admission.origin_key,
+                    insight_platform_invocations::InvocationOrigin::PlanNode { .. }
+                        | insight_platform_invocations::InvocationOrigin::ModelToolCall { .. }
+                );
             require_claim_parents(
                 &mut transaction,
                 &current_invocation,
@@ -2304,8 +2411,8 @@ impl PgRepository {
                 load_capability_invocation(&mut transaction, &tenant_id, &invocation_id, false)
                     .await?;
             claimed.push(ClaimedCapabilityExecution {
-                resume_mutations: plan_leaf_waiting.then(|| slot.resume_mutations.clone()),
-                failure_mutations: plan_leaf_waiting.then(|| slot.failure_mutations.clone()),
+                resume_mutations: external_leaf_waiting.then(|| slot.resume_mutations.clone()),
+                failure_mutations: external_leaf_waiting.then(|| slot.failure_mutations.clone()),
                 invocation,
                 job,
                 execution_contract,
@@ -2718,13 +2825,14 @@ async fn require_claim_parents(
         .parse::<ResourceId>()
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     let resource = load_resource(transaction, &invocation.tenant_id, &resource_id).await?;
-    let plan_leaf = matches!(
+    let external_leaf = matches!(
         invocation.payload.admission.origin_key,
         insight_platform_invocations::InvocationOrigin::PlanNode { .. }
+            | insight_platform_invocations::InvocationOrigin::ModelToolCall { .. }
     ) && node.state == insight_platform_contracts::NodeExecutionState::Waiting;
     let run_state = run.state.parse::<RunState>().ok();
     if invocation.run_id.to_string() != run.run_id
-        || if plan_leaf {
+        || if external_leaf {
             !matches!(run_state, Some(RunState::Running | RunState::Waiting))
         } else {
             run_state != Some(RunState::Running)
@@ -2732,7 +2840,7 @@ async fn require_claim_parents(
         || run.current.control.pause_requested
         || run.current.control.cancel_requested_at.is_some()
         || run.current.control.timeout_requested_at.is_some()
-        || if plan_leaf {
+        || if external_leaf {
             node.state != insight_platform_contracts::NodeExecutionState::Waiting
         } else {
             node.state != insight_platform_contracts::NodeExecutionState::Running
@@ -2752,7 +2860,7 @@ async fn require_claim_parents(
     {
         return Err(RepositoryError::Conflict("Capability dispatch parent"));
     }
-    if plan_leaf {
+    if external_leaf {
         let mut current = run.current.clone();
         if run_state == Some(RunState::Waiting) {
             current.waiting_reason = None;
@@ -2783,7 +2891,7 @@ async fn require_claim_parents(
         .await?;
         if updated.rows_affected() != 1 {
             return Err(RepositoryError::Conflict(
-                "Capability Plan leaf claim permit",
+                "Capability external leaf claim permit",
             ));
         }
     }
@@ -2947,7 +3055,7 @@ pub(crate) async fn load_capability_job(
     Ok(record)
 }
 
-async fn update_capability_job(
+pub(crate) async fn update_capability_job(
     transaction: &mut Transaction<'_, Postgres>,
     current: &JobRecord,
     next: &insight_platform_jobs::JobProjection,

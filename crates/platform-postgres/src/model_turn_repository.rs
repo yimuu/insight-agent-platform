@@ -64,6 +64,8 @@ pub struct ClaimedModelExecution {
     pub quota_entry_ids: Vec<ResourceId>,
     pub resume_mutations: Option<insight_platform_contracts::ExternalLeafResumeMutationIds>,
     pub failure_mutations: Option<insight_platform_contracts::ExternalLeafFailureMutationIds>,
+    pub tool_continuation_mutations:
+        Option<insight_platform_models::ModelToolContinuationMutationIds>,
 }
 
 impl ClaimedModelExecution {
@@ -152,6 +154,7 @@ impl ClaimedModelExecution {
             quota_entry_ids: quota_settlement_entry_ids,
             resume_mutations: self.resume_mutations.clone(),
             failure_mutations: self.failure_mutations.clone(),
+            tool_continuation_mutations: self.tool_continuation_mutations.clone(),
             execution,
         };
         command
@@ -1553,6 +1556,9 @@ impl PgRepository {
                 quota_entry_ids: slot.quota_entry_ids.clone(),
                 resume_mutations: plan_leaf.then(|| slot.resume_mutations.clone()).flatten(),
                 failure_mutations: plan_leaf.then(|| slot.failure_mutations.clone()).flatten(),
+                tool_continuation_mutations: plan_leaf
+                    .then(|| slot.tool_continuation_mutations.clone())
+                    .flatten(),
             });
         }
         transaction.commit().await?;
@@ -2076,6 +2082,21 @@ impl<'a> PgModelTurnTransaction<'a> {
             database_now,
             self.limits,
         )?;
+        let plan_leaf_waiting: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+                  AND record_kind = 'node_execution' AND node_kind = 'model_loop'
+                  AND state = 'waiting' AND terminal_at IS NULL
+            )
+            "#,
+        )
+        .bind(decision.turn.tenant_id.to_string())
+        .bind(decision.turn.node_execution_id.to_string())
+        .bind(decision.turn.run_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
         settle_model_quota(
             &mut transaction,
             &current_job,
@@ -2093,7 +2114,12 @@ impl<'a> PgModelTurnTransaction<'a> {
                 database_now,
             )
             .await?;
-            if let Some(mutations) = command.resume_mutations.as_ref() {
+            if output.response.tool_intents.is_empty() && plan_leaf_waiting {
+                let mutations = command.resume_mutations.as_ref().ok_or_else(|| {
+                    RepositoryError::InvalidInput(
+                        "Model Plan leaf completion has no continuation identities".to_owned(),
+                    )
+                })?;
                 let exact = output
                     .exact_for(
                         &decision.turn.run_id,
@@ -2112,6 +2138,30 @@ impl<'a> PgModelTurnTransaction<'a> {
                     database_now,
                 )
                 .await?;
+            } else if !output.response.tool_intents.is_empty() && plan_leaf_waiting {
+                let mutations = command
+                    .tool_continuation_mutations
+                    .as_ref()
+                    .ok_or_else(|| {
+                        RepositoryError::InvalidInput(
+                            "Model Plan tool response has no continuation identities".to_owned(),
+                        )
+                    })?;
+                crate::repository::handoff_model_tool_continuation_in_transaction(
+                    &mut transaction,
+                    &decision.turn,
+                    &command.job_id,
+                    output,
+                    mutations,
+                    database_now,
+                )
+                .await?;
+            } else if command.resume_mutations.is_some()
+                || command.tool_continuation_mutations.is_some()
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "non-Plan Model success has continuation identities".to_owned(),
+                ));
             }
         }
         let job = update_model_job(
@@ -2123,18 +2173,27 @@ impl<'a> PgModelTurnTransaction<'a> {
         )
         .await?;
         update_model_turn(&mut transaction, &current_turn, &decision.turn, self.limits).await?;
-        if let (ModelDispatchOutcome::PermanentFailure { failure, .. }, Some(mutations)) =
-            (&command.outcome, command.failure_mutations.as_ref())
-        {
-            crate::repository::settle_model_leaf_failure_in_transaction(
-                &mut transaction,
-                &decision.turn,
-                &command.job_id,
-                &failure.failure,
-                mutations,
-                database_now,
-            )
-            .await?;
+        if let ModelDispatchOutcome::PermanentFailure { failure, .. } = &command.outcome {
+            if plan_leaf_waiting {
+                let mutations = command.failure_mutations.as_ref().ok_or_else(|| {
+                    RepositoryError::InvalidInput(
+                        "Model Plan leaf failure has no convergence identities".to_owned(),
+                    )
+                })?;
+                crate::repository::settle_model_leaf_failure_in_transaction(
+                    &mut transaction,
+                    &decision.turn,
+                    &command.job_id,
+                    &failure.failure,
+                    mutations,
+                    database_now,
+                )
+                .await?;
+            } else if command.failure_mutations.is_some() {
+                return Err(RepositoryError::InvalidInput(
+                    "non-Plan Model failure has convergence identities".to_owned(),
+                ));
+            }
         }
         let (event_type, disposition) = match &command.outcome {
             ModelDispatchOutcome::Succeeded(output) if output.response.tool_intents.is_empty() => {

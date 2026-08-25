@@ -50,9 +50,9 @@ use insight_platform_api::{
 use insight_platform_context::RequestContextDatasetBuild;
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ActiveTarget, AdministrativeGate, CommandAudit,
-    DeploymentClosure, EntityLifecycle, ExactDeploymentRef, JsonLimits, OperationViewV1,
-    PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId, ResourceKind, RunBindingsSnapshot,
-    Sha256Digest, ValueRef, MAX_ARTIFACT_BYTES,
+    DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExternalLeafFailureMutationIds,
+    JsonLimits, OperationViewV1, PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId,
+    ResourceKind, RunBindingsSnapshot, Sha256Digest, ValueRef, MAX_ARTIFACT_BYTES,
 };
 use insight_platform_invocations::{
     CapabilityApprovalDecision, CapabilityApprovalDispatchMutationIds, InvocationTransaction,
@@ -812,6 +812,19 @@ impl TaskApplication for PgTasks {
                             receipt_id: new_task_id(ResourceKind::Receipt)?,
                             event_id: new_task_id(ResourceKind::Event)?,
                             outbox_id: new_task_id(ResourceKind::OutboxEvent)?,
+                        })
+                    })
+                    .transpose()?,
+                failure_mutations: (decision != CapabilityApprovalDecision::Approve)
+                    .then(|| {
+                        Ok(ExternalLeafFailureMutationIds {
+                            convergence_job_id: new_task_id(ResourceKind::Job)?,
+                            run_event_id: new_task_id(ResourceKind::Event)?,
+                            run_outbox_id: new_task_id(ResourceKind::OutboxEvent)?,
+                            leaf_node_event_id: new_task_id(ResourceKind::Event)?,
+                            leaf_node_outbox_id: new_task_id(ResourceKind::OutboxEvent)?,
+                            convergence_job_event_id: new_task_id(ResourceKind::Event)?,
+                            convergence_job_outbox_id: new_task_id(ResourceKind::OutboxEvent)?,
                         })
                     })
                     .transpose()?,

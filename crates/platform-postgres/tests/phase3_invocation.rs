@@ -1871,6 +1871,7 @@ async fn run_plan_capability_owner(pool: &PgPool, repository: &PgRepository, fix
             retry_backoff_milliseconds: 100,
             wake_contract: None,
             convergence_failure: None,
+            model_tool_continuation: None,
         },
     )
     .unwrap();
@@ -2029,6 +2030,7 @@ async fn run_plan_capability_owner(pool: &PgPool, repository: &PgRepository, fix
             event_id: id(ResourceKind::Event, 0x8221),
             outbox_id: id(ResourceKind::OutboxEvent, 0x8222),
         }),
+        failure_mutations: None,
     };
     let approved = match execute_approval(repository, approval_command.clone())
         .await
@@ -2247,6 +2249,7 @@ fn approval_resolution(
             CapabilityApprovalDecision::Reject
         },
         dispatch_mutations: None,
+        failure_mutations: None,
     }
 }
 

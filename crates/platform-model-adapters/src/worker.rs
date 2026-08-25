@@ -11,8 +11,8 @@ use insight_platform_contracts::{
 use insight_platform_jobs::JobFence;
 use insight_platform_models::{
     model_failure, AccountingQuality, CommitModelOutcome, ModelAttemptMeasurement,
-    ModelDispatchOutcome, ModelObservation, ModelOutputValue, ModelUsage, ModelWorkerAudit,
-    SafeModelFailure, MODEL_QUOTA_LINES,
+    ModelDispatchOutcome, ModelObservation, ModelOutputValue, ModelToolContinuationMutationIds,
+    ModelUsage, ModelWorkerAudit, SafeModelFailure, MODEL_QUOTA_LINES,
 };
 use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
@@ -26,6 +26,7 @@ pub struct ExecuteModelAdapterJob {
     pub quota_entry_ids: Vec<ResourceId>,
     pub resume_mutations: Option<ExternalLeafResumeMutationIds>,
     pub failure_mutations: Option<ExternalLeafFailureMutationIds>,
+    pub tool_continuation_mutations: Option<ModelToolContinuationMutationIds>,
 }
 
 impl ExecuteModelAdapterJob {
@@ -50,12 +51,17 @@ impl ExecuteModelAdapterJob {
             || self.quota_entry_ids.iter().collect::<BTreeSet<_>>().len()
                 != self.quota_entry_ids.len()
             || self.resume_mutations.is_some() != self.failure_mutations.is_some()
+            || self.resume_mutations.is_some() != self.tool_continuation_mutations.is_some()
             || self
                 .resume_mutations
                 .as_ref()
                 .is_some_and(|mutations| mutations.validate().is_err())
             || self
                 .failure_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || self
+                .tool_continuation_mutations
                 .as_ref()
                 .is_some_and(|mutations| mutations.validate().is_err())
         {
@@ -209,6 +215,12 @@ where
         let failure_mutations = matches!(&outcome, ModelDispatchOutcome::PermanentFailure { .. })
             .then_some(command.failure_mutations)
             .flatten();
+        let tool_continuation_mutations = matches!(
+            &outcome,
+            ModelDispatchOutcome::Succeeded(output) if !output.response.tool_intents.is_empty()
+        )
+        .then_some(command.tool_continuation_mutations)
+        .flatten();
         Ok(PreparedModelAdapterCommit {
             command: CommitModelOutcome {
                 audit: command.audit,
@@ -222,6 +234,7 @@ where
                 outcome,
                 resume_mutations,
                 failure_mutations,
+                tool_continuation_mutations,
             },
         })
     }

@@ -699,6 +699,17 @@ fn worker_command(execution: ModelAdapterExecutionRequest) -> ExecuteModelAdapte
             convergence_job_event_id: id(ResourceKind::Event, 65),
             convergence_job_outbox_id: id(ResourceKind::OutboxEvent, 66),
         }),
+        tool_continuation_mutations: Some(
+            insight_platform_models::ModelToolContinuationMutationIds {
+                continuation_job_id: id(ResourceKind::Job, 67),
+                run_event_id: id(ResourceKind::Event, 68),
+                run_outbox_id: id(ResourceKind::OutboxEvent, 69),
+                node_event_id: id(ResourceKind::Event, 70),
+                node_outbox_id: id(ResourceKind::OutboxEvent, 71),
+                continuation_job_event_id: id(ResourceKind::Event, 72),
+                continuation_job_outbox_id: id(ResourceKind::OutboxEvent, 73),
+            },
+        ),
         quota_entry_ids: (45..49)
             .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
             .collect(),

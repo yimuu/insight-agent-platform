@@ -12,7 +12,7 @@ use insight_platform_contracts::{
 use insight_platform_orchestrator::{
     decide_controller, derive_expression_controller, CommittedExpressionInput, ControllerDecision,
     ControllerEvaluation, ControllerObservation, DurableWaitKind, ExpressionLimits,
-    OrchestrationJobPayload, PlanNodeKey, RuntimeNode, RuntimePlan,
+    ModelToolContinuation, OrchestrationJobPayload, PlanNodeKey, RuntimeNode, RuntimePlan,
 };
 use insight_platform_postgres::repository::{JobFence, ResolvedExpressionInput};
 use std::sync::Arc;
@@ -108,6 +108,14 @@ pub trait DurablePlanGenerationStore: Send + Sync + 'static {
         failure: Failure,
     ) -> Result<(), DurablePlanDriverError>;
 
+    async fn commit_model_tool_continuation(
+        &self,
+        job: &StartedOrchestrationJob,
+        fence: JobFence,
+        materialized: MaterializedTypedPlan,
+        continuation: ModelToolContinuation,
+    ) -> Result<(), DurablePlanDriverError>;
+
     async fn handoff_controller(
         &self,
         job: &StartedOrchestrationJob,
@@ -151,7 +159,12 @@ where
         materialized: MaterializedTypedPlan,
     ) -> Result<(), DurablePlanDriverError> {
         let started_payload = &job.started().payload;
-        if started_payload.value.get("convergence_failure").is_some() {
+        if started_payload.value.get("convergence_failure").is_some()
+            || started_payload
+                .value
+                .get("model_tool_continuation")
+                .is_some()
+        {
             if started_payload.schema_version != 1 {
                 return Err(DurablePlanDriverError::InvariantViolation);
             }
@@ -168,12 +181,18 @@ where
             job_payload
                 .validate()
                 .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
-            let failure = job_payload
-                .convergence_failure
+            if let Some(failure) = job_payload.convergence_failure {
+                return self
+                    .store
+                    .commit_convergence_failure(job, fence, materialized, failure)
+                    .await;
+            }
+            let continuation = job_payload
+                .model_tool_continuation
                 .ok_or(DurablePlanDriverError::InvariantViolation)?;
             return self
                 .store
-                .commit_convergence_failure(job, fence, materialized, failure)
+                .commit_model_tool_continuation(job, fence, materialized, continuation)
                 .await;
         }
         let facts = self
@@ -385,6 +404,7 @@ mod tests {
             retry_backoff_milliseconds: 100,
             wake_contract: None,
             convergence_failure,
+            model_tool_continuation: None,
         };
         let job = JobRecord {
             tenant_id: id(ResourceKind::Tenant, "9901").to_string(),
@@ -554,6 +574,16 @@ mod tests {
             failure: Failure,
         ) -> Result<(), DurablePlanDriverError> {
             *self.converged.lock().unwrap() = Some(failure);
+            Ok(())
+        }
+
+        async fn commit_model_tool_continuation(
+            &self,
+            _job: &StartedOrchestrationJob,
+            _fence: JobFence,
+            _materialized: MaterializedTypedPlan,
+            _continuation: ModelToolContinuation,
+        ) -> Result<(), DurablePlanDriverError> {
             Ok(())
         }
 

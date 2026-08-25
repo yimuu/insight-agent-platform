@@ -1681,6 +1681,17 @@ where
                 convergence_job_event_id: self.new_id(ResourceKind::Event)?,
                 convergence_job_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
             }),
+            tool_continuation_mutations: Some(
+                insight_platform_models::ModelToolContinuationMutationIds {
+                    continuation_job_id: self.new_id(ResourceKind::Job)?,
+                    run_event_id: self.new_id(ResourceKind::Event)?,
+                    run_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                    node_event_id: self.new_id(ResourceKind::Event)?,
+                    node_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                    continuation_job_event_id: self.new_id(ResourceKind::Event)?,
+                    continuation_job_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                },
+            ),
         })
     }
 

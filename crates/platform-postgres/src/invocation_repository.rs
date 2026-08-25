@@ -15,9 +15,10 @@ use insight_platform_context::{
 use insight_platform_contracts::{
     canonical_digest, canonical_json, ArtifactPurpose, ArtifactRef, ArtifactReferenceKind,
     CapabilityBackendBinding, ClosedJsonSchema, CommandOutcome, DataClassification,
-    DeploymentClosure, EntityLifecycle, InvocationState, NodeExecutionState, Permission,
-    PlanNodeKind, PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId,
-    ResourceKind, RunState, Sha256Digest,
+    DeploymentClosure, EntityLifecycle, Failure, FailureClass, FailureCode, FailureSource,
+    InvocationState, NodeExecutionState, Permission, PlanNodeKind, PlatformFailureCode,
+    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    Retryability, RunState, Sha256Digest,
 };
 use insight_platform_invocations::{
     decide_approval_transition, decide_capability_admission, AdmitCapabilityInvocation,
@@ -516,21 +517,47 @@ impl InvocationTransaction for PgInvocationTransaction {
                 "payload",
                 "payload_digest",
             )?;
-            let wait: crate::repository::StoredCapabilityInvocationWaitPayload =
-                crate::repository::decode_typed_payload(
-                    &wait_payload,
-                    "Capability approval leaf wait",
-                )?;
-            if wait.invocation_id != current.invocation_id {
-                return Err(RepositoryError::Conflict(
-                    "Capability approval leaf binding",
-                ));
-            }
-            let job_id = wait.capability_job_id.ok_or_else(|| {
-                RepositoryError::CorruptRow(
-                    "Capability approval leaf has no planned Job".to_owned(),
-                )
-            })?;
+            let job_id = match &current.payload.admission.origin_key {
+                insight_platform_invocations::InvocationOrigin::PlanNode { .. } => {
+                    let wait: crate::repository::StoredCapabilityInvocationWaitPayload =
+                        crate::repository::decode_typed_payload(
+                            &wait_payload,
+                            "Capability approval leaf wait",
+                        )?;
+                    if wait.invocation_id != current.invocation_id {
+                        return Err(RepositoryError::Conflict(
+                            "Capability approval leaf binding",
+                        ));
+                    }
+                    wait.capability_job_id.ok_or_else(|| {
+                        RepositoryError::CorruptRow(
+                            "Capability approval leaf has no planned Job".to_owned(),
+                        )
+                    })?
+                }
+                insight_platform_invocations::InvocationOrigin::ModelToolCall {
+                    model_call_id_digest,
+                    ..
+                } => {
+                    let wait: crate::repository::StoredModelToolBatchWaitPayload =
+                        crate::repository::decode_typed_payload(
+                            &wait_payload,
+                            "Model tool approval batch wait",
+                        )?;
+                    let call = wait
+                        .calls
+                        .iter()
+                        .find(|call| {
+                            call.invocation_id == current.invocation_id
+                                && &call.call_id_digest == model_call_id_digest
+                                && call.result.is_none()
+                        })
+                        .ok_or(RepositoryError::Conflict(
+                            "Model tool approval call binding",
+                        ))?;
+                    call.capability_job_id.clone()
+                }
+            };
             let request_digest: Sha256Digest = canonical_digest(&serde_json::json!({
                 "approval_task_id": command.approval_task_id,
                 "invocation_id": command.invocation_id,
@@ -574,6 +601,93 @@ impl InvocationTransaction for PgInvocationTransaction {
             }
             None
         };
+        if command.decision != CapabilityApprovalDecision::Approve && plan_leaf_waiting {
+            let mutations = command.failure_mutations.as_ref().ok_or_else(|| {
+                RepositoryError::InvalidInput(
+                    "Capability approval rejection has no convergence identities".to_owned(),
+                )
+            })?;
+            let failure = next.payload.failure.clone().unwrap_or(Failure {
+                code: FailureCode::Platform {
+                    code: PlatformFailureCode::InteractionFailed,
+                },
+                class: FailureClass::Cancelled,
+                retryability: Retryability::Never,
+                safe_message: None,
+                details_ref: None,
+                source: FailureSource::Interaction,
+            });
+            let wait_payload = payload_from_row(
+                &node_row,
+                "payload_schema_version",
+                "payload",
+                "payload_digest",
+            )?;
+            match &current.payload.admission.origin_key {
+                insight_platform_invocations::InvocationOrigin::PlanNode { .. } => {
+                    let wait: crate::repository::StoredCapabilityInvocationWaitPayload =
+                        crate::repository::decode_typed_payload(
+                            &wait_payload,
+                            "Capability approval rejection wait",
+                        )?;
+                    if wait.invocation_id != current.invocation_id {
+                        return Err(RepositoryError::Conflict(
+                            "Capability approval rejection binding",
+                        ));
+                    }
+                    let job_id = wait.capability_job_id.ok_or_else(|| {
+                        RepositoryError::CorruptRow(
+                            "Capability approval rejection has no planned Job".to_owned(),
+                        )
+                    })?;
+                    crate::repository::settle_capability_leaf_failure_in_transaction(
+                        &mut transaction,
+                        &next,
+                        &job_id,
+                        &failure,
+                        mutations,
+                        false,
+                        database_now,
+                    )
+                    .await?;
+                }
+                insight_platform_invocations::InvocationOrigin::ModelToolCall {
+                    model_call_id_digest,
+                    ..
+                } => {
+                    let wait: crate::repository::StoredModelToolBatchWaitPayload =
+                        crate::repository::decode_typed_payload(
+                            &wait_payload,
+                            "Model tool approval rejection batch",
+                        )?;
+                    let call = wait
+                        .calls
+                        .iter()
+                        .find(|call| {
+                            call.invocation_id == current.invocation_id
+                                && &call.call_id_digest == model_call_id_digest
+                                && call.result.is_none()
+                        })
+                        .ok_or(RepositoryError::Conflict(
+                            "Model tool approval rejection call",
+                        ))?;
+                    crate::repository::settle_model_tool_failure_in_transaction(
+                        &mut transaction,
+                        &next,
+                        &call.capability_job_id,
+                        &failure,
+                        mutations,
+                        false,
+                        database_now,
+                    )
+                    .await?;
+                }
+            }
+        } else if command.failure_mutations.is_some() {
+            return Err(RepositoryError::InvalidInput(
+                "Capability approval failure identities are not applicable".to_owned(),
+            ));
+        }
         append_command_event(
             &mut transaction,
             &command.audit,
