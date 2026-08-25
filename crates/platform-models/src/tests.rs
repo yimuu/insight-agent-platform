@@ -15,6 +15,17 @@ use insight_platform_contracts::{
 use insight_platform_jobs::{JobFence, LeasePolicy};
 use serde_json::json;
 
+#[test]
+fn model_inline_value_limit_uses_the_shared_hard_limit_profile() {
+    let profile = insight_platform_contracts::checked_in_hard_limit_profile();
+    let limits = ModelTurnLimits::from_profile(&profile).unwrap();
+
+    assert_eq!(
+        limits.inline_value_limits().max_bytes,
+        usize::try_from(profile.run_scheduler.inline_value_bytes.hard_max).unwrap()
+    );
+}
+
 struct Fixture {
     now: chrono::DateTime<Utc>,
     limits: ModelTurnLimits,

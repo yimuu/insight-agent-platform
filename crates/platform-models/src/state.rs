@@ -15,8 +15,8 @@ use insight_platform_contracts::{
 };
 use insight_platform_invocations::{ExactInvocationValueRef, InvocationSelectionEvidence};
 use insight_platform_jobs::{
-    decide_claim, decide_owner_cancelling, decide_owner_terminal, decide_retry, decide_start,
-    decide_terminal, JobFence, JobOwnerRef, JobProjection, LeasePolicy,
+    decide_claim, decide_expired_lease, decide_owner_cancelling, decide_owner_terminal,
+    decide_retry, decide_start, decide_terminal, JobFence, JobOwnerRef, JobProjection, LeasePolicy,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -909,6 +909,7 @@ impl ModelClaimSlot {
 #[derive(Debug, Clone)]
 pub struct ClaimModelJobs {
     pub worker_process_generation_id: ResourceId,
+    pub worker_manifest_digest: Sha256Digest,
     pub limit: u16,
     pub lease_milliseconds: u64,
     pub slots: Vec<ModelClaimSlot>,
@@ -1247,6 +1248,85 @@ pub struct ModelOutcomeDecision {
     pub job_payload: ModelJobPayload,
     pub output: Option<Box<ModelOutputValue>>,
     pub settlement: ModelQuotaSettlement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredModelLeaseObservation {
+    pub observed_job_version: u64,
+    pub observed_lease_generation: u64,
+    pub retry_at: DateTime<Utc>,
+    pub observation_digest: Sha256Digest,
+}
+
+/// Recovers a dispatched Model request whose Worker lease expired without a durable outcome.
+/// The old attempt is conservatively charged at its frozen ceiling because Provider execution
+/// may have happened, then the same durable Job is made retryable with its lease cleared.
+pub fn decide_expired_model_lease(
+    current_turn: &ModelTurnRecord,
+    current_job: &JobProjection,
+    current_payload: &ModelJobPayload,
+    observation: &ExpiredModelLeaseObservation,
+    database_now: DateTime<Utc>,
+    limits: ModelTurnLimits,
+) -> Result<ModelOutcomeDecision, ModelTurnError> {
+    current_turn.validate(limits)?;
+    current_payload.validate_for(current_turn, current_job, limits)?;
+    let usage_reservation_id = current_payload
+        .active_usage_reservation_id
+        .as_ref()
+        .ok_or(ModelTurnError::InvalidJob)?;
+    if current_turn.state != ModelTurnState::InFlight
+        || current_turn.payload.current_job_id.as_ref() != Some(&current_job.job_id)
+        || current_job.state != insight_platform_contracts::JobState::Running
+        || current_job.attempt_count >= current_job.attempt_limit
+        || database_now >= current_turn.deadline
+    {
+        return Err(ModelTurnError::FirstWinnerLost);
+    }
+    let job = decide_expired_lease(
+        current_job,
+        observation.observed_job_version,
+        observation.observed_lease_generation,
+        database_now,
+        insight_platform_contracts::JobState::RetryScheduled,
+        Some(observation.retry_at),
+    )
+    .map_err(|_| ModelTurnError::FirstWinnerLost)?;
+    let measurement =
+        ModelAttemptMeasurement::conservative_dispatched(&current_turn.payload.admission, limits)?;
+    let (usage, quality) = measurement.validate_for(&current_turn.payload.admission, limits)?;
+    let settlement =
+        ModelQuotaSettlement::from_usage(usage, current_turn.payload.admission.quota_ceiling)?;
+    let mut turn = current_turn.clone();
+    turn.state = ModelTurnState::RetryScheduled;
+    turn.retry_at = Some(observation.retry_at);
+    turn.payload.attempts.push(ModelAttemptAccounting {
+        attempt_no: current_job.attempt_count,
+        lease_generation: current_job.lease_generation,
+        usage_reservation_id: usage_reservation_id.clone(),
+        outcome: ModelAttemptOutcomeKind::RetryScheduled,
+        usage,
+        accounting_quality: quality,
+        request_sent: true,
+        observation_digest: observation.observation_digest.clone(),
+        settled_at: database_now,
+    });
+    turn.version = increment(turn.version)?;
+    turn.updated_at = database_now;
+    let mut job_payload = current_payload.clone();
+    job_payload.active_usage_reservation_id = None;
+    job_payload.physical_outcome = Some(ModelPhysicalOutcomeEvidence::RetryScheduled {
+        failure_digest: observation.observation_digest.clone(),
+    });
+    turn.validate(limits)?;
+    job_payload.validate_for(&turn, &job, limits)?;
+    Ok(ModelOutcomeDecision {
+        turn,
+        job,
+        job_payload,
+        output: None,
+        settlement,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

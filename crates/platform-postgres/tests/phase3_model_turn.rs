@@ -1,4 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
+use insight_platform_capability_adapters::{
+    CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
+    GrpcNetworkTransport, GrpcTransportRequest, GrpcTransportResponse, HttpNetworkTransport,
+    HttpTransportRequest, HttpTransportResponse,
+};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, AdministrativeGate, AgentDeploymentClosure,
     AgentResourceSpec, ArtifactRef, AuthoringPackage, CandidateSelectionMode,
@@ -9,20 +14,25 @@ use insight_platform_contracts::{
     CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
     CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
     CommandAudit, CommandOutcome, ContextWindowContract, DataClassification, DataRegion,
-    DecimalMoney, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
-    ExactPolicyBinding, ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding,
-    FrozenSlotTarget, InstalledModelAdapter, JobState, ModelBudgetPolicyDocument,
-    ModelCatalogEvidence, ModelDeploymentClosure, ModelIdentityStability, ModelLimits,
-    ModelModalities, ModelProfileResourceSpec, ModelProviderDeploymentClosure,
-    ModelProviderResourceSpec, ModelPublicProjectionPolicyDocument, ModelSafetyPolicyDocument,
-    ModelToolContract, ModelTurnState, ModelUsageContract, NativeCapabilityContract, Permission,
-    PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, ProviderDataHandlingContract,
-    ProviderModelIdentity, ProviderRequestLimits, ProviderTrainingPolicy, PublishedVersionPayload,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
-    RunBindingsSnapshot, SchedulingPolicyDocument, SecretBindingPayload, SecretPurpose,
-    SecretResolutionPolicy, Sha256Digest, StructuredOutputContract, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
+    ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
+    InstalledModelAdapter, JobState, ModelBudgetPolicyDocument, ModelCatalogEvidence,
+    ModelDeploymentClosure, ModelIdentityStability, ModelLimits, ModelModalities,
+    ModelProfileResourceSpec, ModelProviderDeploymentClosure, ModelProviderResourceSpec,
+    ModelPublicProjectionPolicyDocument, ModelSafetyPolicyDocument, ModelToolContract,
+    ModelTurnState, ModelUsageContract, NativeCapabilityContract, Permission, PermissionSet,
+    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
+    PrincipalKind, PrincipalSnapshot, ProviderDataHandlingContract, ProviderModelIdentity,
+    ProviderRequestLimits, ProviderTrainingPolicy, PublishedVersionPayload, QuotaDimension,
+    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot,
+    SchedulingPolicyDocument, SecretBindingPayload, SecretPurpose, SecretResolutionPolicy,
+    Sha256Digest, StructuredOutputContract, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef, WorkClass, WorkerManifest, WORKER_MANIFEST_VERSION,
+    WORKER_PROTOCOL_VERSION,
+};
+use insight_platform_egress_rpc::{
+    proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
+    EgressCallerWorkloadIdentity, EgressInternalRpcLimits, MODEL_WORKER_WORKLOAD_IDENTITY,
 };
 use insight_platform_invocations::{
     CapabilityClaimSlot, CapabilityOutputValue, CapabilityWorkerAudit, ClaimCapabilityJobs,
@@ -31,6 +41,12 @@ use insight_platform_invocations::{
     SafeBackendFailure,
 };
 use insight_platform_jobs::JobFence;
+use insight_platform_model_adapters::{
+    ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
+    ModelProviderWireConnector, ModelProviderWireEvent, ModelProviderWireProtocol,
+    ModelProviderWireRequest, ModelProviderWireStream, ANTHROPIC_MESSAGES_ADAPTER_NAME,
+    OPENAI_RESPONSES_ADAPTER_NAME,
+};
 use insight_platform_models::{
     model_failure, AccountingQuality, CanonicalFinishReason, CanonicalMessage,
     CanonicalMessagePart, CanonicalMessageRole, CanonicalModelRequest, CanonicalModelResponse,
@@ -64,10 +80,25 @@ use insight_platform_postgres::{
 };
 use insight_platform_registry::CreateDeployment;
 use insight_platform_security::BindTenantSchedulingPolicy;
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose, SanType,
+};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    process::Stdio,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration as StdDuration,
+};
+use tonic::transport::server::TcpIncoming;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     format!(
@@ -98,6 +129,156 @@ fn named_digest(label: &str) -> Sha256Digest {
         .unwrap()
         .parse()
         .unwrap()
+}
+
+fn production_model_worker_manifest() -> WorkerManifest {
+    WorkerManifest {
+        manifest_version: WORKER_MANIFEST_VERSION,
+        worker_role: "model-worker".to_owned(),
+        work_class: WorkClass::Model,
+        adapter_runtime_digest: named_digest("production-model-adapter-runtime"),
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        max_concurrency: 2,
+        critical_control_reserved_slots: 1,
+    }
+}
+
+fn production_model_worker_manifest_digest() -> Sha256Digest {
+    production_model_worker_manifest()
+        .canonical_digest()
+        .unwrap()
+}
+
+struct ProcessModelWire {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ModelProviderWireConnector for ProcessModelWire {
+    async fn open(
+        &self,
+        request: ModelProviderWireRequest,
+    ) -> Result<ModelProviderWireStream, ModelAdapterFailure> {
+        assert_eq!(request.protocol, ModelProviderWireProtocol::OpenAiResponses);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let events = vec![
+            ModelProviderWireEvent {
+                event_name: "response.created".to_owned(),
+                data: json!({"type": "response.created", "response": {}}),
+            },
+            ModelProviderWireEvent {
+                event_name: "response.completed".to_owned(),
+                data: json!({
+                    "type": "response.completed",
+                    "response": {
+                        "status": "completed",
+                        "model": "fixture-model-2026-08",
+                        "system_fingerprint": "fixture-fingerprint",
+                        "output": [{
+                            "id": "msg_process",
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "{\"answer\":\"recovered\"}"}]
+                        }],
+                        "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}
+                    }
+                }),
+            },
+        ];
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+
+    async fn cancel(
+        &self,
+        _protocol: ModelProviderWireProtocol,
+        _request: ModelAdapterCancelRequest,
+    ) -> Result<ModelAdapterCancelOutcome, ModelAdapterFailure> {
+        Ok(ModelAdapterCancelOutcome::Accepted)
+    }
+}
+
+struct EmptyProcessHttp;
+
+#[async_trait::async_trait]
+impl HttpNetworkTransport for EmptyProcessHttp {
+    async fn round_trip(
+        &self,
+        _request: HttpTransportRequest,
+    ) -> Result<HttpTransportResponse, CapabilityAdapterFailure> {
+        unreachable!()
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Accepted)
+    }
+}
+
+struct EmptyProcessGrpc;
+
+#[async_trait::async_trait]
+impl GrpcNetworkTransport for EmptyProcessGrpc {
+    async fn unary(
+        &self,
+        _request: GrpcTransportRequest,
+    ) -> Result<GrpcTransportResponse, CapabilityAdapterFailure> {
+        unreachable!()
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Accepted)
+    }
+}
+
+struct ModelProcessTls {
+    ca: String,
+    server_cert: String,
+    server_key: String,
+    client_cert: String,
+    client_key: String,
+}
+
+fn model_process_tls() -> ModelProcessTls {
+    let mut parameters = CertificateParams::default();
+    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    parameters.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let ca = CertifiedIssuer::self_signed(parameters, KeyPair::generate().unwrap()).unwrap();
+    let issue = |sans, usage| {
+        let mut parameters = CertificateParams::default();
+        parameters.subject_alt_names = sans;
+        parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        parameters.extended_key_usages = vec![usage];
+        let key = KeyPair::generate().unwrap();
+        let certificate = parameters.signed_by(&key, &ca).unwrap();
+        (certificate.pem(), key.serialize_pem())
+    };
+    let (server_cert, server_key) = issue(
+        vec![SanType::DnsName("egress.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let (client_cert, client_key) = issue(
+        vec![SanType::URI(
+            MODEL_WORKER_WORKLOAD_IDENTITY.try_into().unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
+    ModelProcessTls {
+        ca: ca.pem(),
+        server_cert,
+        server_key,
+        client_cert,
+        client_key,
+    }
 }
 
 fn version(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef {
@@ -325,6 +506,7 @@ async fn claim_one(repository: &PgRepository, base: u16) -> ClaimEvidence {
     let mut claims = repository
         .claim_model_jobs(ClaimModelJobs {
             worker_process_generation_id: worker_id.clone(),
+            worker_manifest_digest: production_model_worker_manifest_digest(),
             limit: 1,
             lease_milliseconds: 30_000,
             slots: vec![ModelClaimSlot {
@@ -854,15 +1036,17 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         dependency_versions: vec![protocol_policy.clone()],
         policy_versions: vec![protocol_policy.clone()],
         installed_adapter: InstalledModelAdapter {
-            qualified_name: "fixture.responses/v1".to_owned(),
-            worker_manifest_digest: digest('2'),
+            qualified_name: OPENAI_RESPONSES_ADAPTER_NAME.to_owned(),
+            worker_manifest_digest: production_model_worker_manifest_digest(),
             adapter_contract_digest: digest('3'),
         },
         protocol_policy: protocol_policy.clone(),
         credential_requirements: vec!["provider.api_key".parse::<SecretPurpose>().unwrap()],
         request_limits: ProviderRequestLimits {
             maximum_request_bytes: 1_048_576,
-            maximum_response_bytes: 1_048_576,
+            // Leave bounded room for the canonical ModelOutputValue envelope inside
+            // the shared 1 MiB Inline RunValue contract.
+            maximum_response_bytes: 524_288,
             maximum_messages: 32,
             maximum_parts: 64,
             maximum_tools: 8,
@@ -991,8 +1175,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             provider_reports_usage: true,
             reports_cached_input_tokens: false,
             reports_reasoning_tokens: false,
-            reports_cost: true,
-            cost_currency: Some("USD".to_owned()),
+            // OpenAI Responses reports token usage but not an authoritative monetary cost.
+            reports_cost: false,
+            cost_currency: None,
             estimator_contract_digest: digest('a'),
         },
         data_handling: ProviderDataHandlingContract {
@@ -2037,7 +2222,7 @@ fn tool_response(fixture: &Fixture, query: serde_json::Value) -> CanonicalModelR
             output_tokens: Some(20),
             cached_input_tokens: None,
             reasoning_tokens: None,
-            provider_reported_cost: Some(DecimalMoney::new("USD", 123, 6).unwrap()),
+            provider_reported_cost: None,
             accounting_quality: AccountingQuality::ProviderReported,
         },
         observation: ModelObservation {
@@ -2140,7 +2325,7 @@ fn output(
 fn measurement(
     input_tokens: u64,
     output_tokens: u64,
-    cost_microunits: i64,
+    _cost_microunits: i64,
 ) -> ModelAttemptMeasurement {
     ModelAttemptMeasurement {
         usage: Some(ModelUsage {
@@ -2148,7 +2333,7 @@ fn measurement(
             output_tokens: Some(output_tokens),
             cached_input_tokens: None,
             reasoning_tokens: None,
-            provider_reported_cost: Some(DecimalMoney::new("USD", cost_microunits, 6).unwrap()),
+            provider_reported_cost: None,
             accounting_quality: AccountingQuality::ProviderReported,
         }),
         observation: ModelObservation {
@@ -2235,6 +2420,339 @@ async fn assert_model_deployment_closures_fail_closed(
     ));
 }
 
+async fn run_model_worker_process_recovery(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+) {
+    let (Ok(binary), Ok(nats_url), Ok(nats_ca), Ok(nats_cert), Ok(nats_key)) = (
+        std::env::var("PLATFORM_MODEL_WORKER_BIN"),
+        std::env::var("PLATFORM_TEST_NATS_URL"),
+        std::env::var("PLATFORM_TEST_NATS_CA_PATH"),
+        std::env::var("PLATFORM_TEST_NATS_CERT_PATH"),
+        std::env::var("PLATFORM_TEST_NATS_KEY_PATH"),
+    ) else {
+        eprintln!("Model Worker binary or TLS NATS fixture is unset; process recovery skipped");
+        return;
+    };
+    let tls = model_process_tls();
+    let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = incoming.local_addr().unwrap();
+    let wire = Arc::new(ProcessModelWire {
+        calls: AtomicUsize::new(0),
+    });
+    let service = EgressBrokerServiceServer::new(EgressBrokerGrpcService::new(
+        wire.clone(),
+        Arc::new(EmptyProcessHttp),
+        Arc::new(EmptyProcessGrpc),
+        EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap(),
+    ));
+    let service =
+        tonic::service::interceptor::InterceptedService::new(service, EgressCallerWorkloadIdentity);
+    let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(
+        Server::builder()
+            .tls_config(
+                ServerTlsConfig::new()
+                    .identity(Identity::from_pem(&tls.server_cert, &tls.server_key))
+                    .client_ca_root(Certificate::from_pem(tls.ca.clone())),
+            )
+            .unwrap()
+            .add_service(service)
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = shutdown_receiver.await;
+            }),
+    );
+
+    let node_id = id(ResourceKind::NodeExecution, 0xc00);
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let node_payload = TypedPayload::new(1, &json!({"fixture": "model-process-recovery"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, logical_key, node_kind, state,
+            generation, version, payload_schema_version, payload, payload_digest,
+            deadline, started_at, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, 'node_execution', $4,
+                  'model-process-recovery', 12, 'model-process-recovery', 'model_loop', 'running',
+                  1, 1, $5, $6, $7, $8, $9, $9, $9)
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(node_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .bind(fixture.scope_id.to_string())
+    .bind(node_payload.schema_version)
+    .bind(&node_payload.value)
+    .bind(&node_payload.digest)
+    .bind(fixture.deadline)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    let command = command_for_node(fixture, &node_id, 0xc10);
+    let admitted = match execute_create(repository, command.clone()).await.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh Model process admission replayed"),
+    };
+    let job_id = id(ResourceKind::Job, 0xc20);
+    match execute_prepare(
+        repository,
+        PrepareModelDispatch {
+            audit: audit(&fixture.tenant_id, &fixture.principal_id, 0xc21, '1', '2'),
+            model_turn_id: command.model_turn_id.clone(),
+            expected_turn_version: admitted.version,
+            job_id: job_id.clone(),
+            // Keep the work ineligible until the production process has passed its
+            // strict startup schema verification. The commit-window trigger below
+            // is test-only schema state and must be installed after that check.
+            scheduled_at: Utc::now() + Duration::seconds(5),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(_) => {}
+        CommandOutcome::Replayed(_) => panic!("fresh Model process prepare replayed"),
+    }
+
+    let prefix = format!("/tmp/platform-model-worker-process-{}", std::process::id());
+    let ca_path = PathBuf::from(format!("{prefix}-egress-ca.pem"));
+    let cert_path = PathBuf::from(format!("{prefix}-egress-client.pem"));
+    let key_path = PathBuf::from(format!("{prefix}-egress-client-key.pem"));
+    std::fs::write(&ca_path, &tls.ca).unwrap();
+    std::fs::write(&cert_path, &tls.client_cert).unwrap();
+    std::fs::write(&key_path, &tls.client_key).unwrap();
+    let manifest = production_model_worker_manifest();
+    let manifest_digest = manifest.canonical_digest().unwrap();
+    let config = json!({
+        "schema_version": 1,
+        "worker_manifest": manifest,
+        "installed_adapters": [
+            {
+                "qualified_name": OPENAI_RESPONSES_ADAPTER_NAME,
+                "worker_manifest_digest": manifest_digest,
+                "adapter_contract_digest": digest('3')
+            },
+            {
+                "qualified_name": ANTHROPIC_MESSAGES_ADAPTER_NAME,
+                "worker_manifest_digest": manifest_digest,
+                "adapter_contract_digest": named_digest("anthropic-production-adapter")
+            }
+        ],
+        "database_max_connections": 4,
+        "database_acquire_timeout_milliseconds": 1000,
+        "egress_endpoint": format!("https://{address}/"),
+        "egress_tls_server_name": "egress.test",
+        "egress_connect_timeout_milliseconds": 1000,
+        "egress_request_timeout_milliseconds": 30000,
+        "maximum_rpc_metadata_bytes": 65536,
+        "maximum_rpc_payload_bytes": 1048576,
+        "live_delta": {
+            "servers": [nats_url],
+            "namespace": "model_process_recovery",
+            "connect_timeout_milliseconds": 1000,
+            "publish_timeout_milliseconds": 1000,
+            "reconnect_backoff_milliseconds": 100,
+            "drain_timeout_milliseconds": 1000,
+            "maximum_pending_messages": 16,
+            "maximum_pending_bytes": 1048576
+        },
+        "receipt_ttl_seconds": 60,
+        "claim_scan_milliseconds": 20,
+        "claim_failure_backoff_milliseconds": 5,
+        "drain_grace_milliseconds": 1000
+    });
+    let write_config = |suffix: &str, value: &serde_json::Value| {
+        let path = PathBuf::from(format!("{prefix}-{suffix}.json"));
+        std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+        (path, canonical_digest(value).unwrap())
+    };
+    let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
+    let spawn_worker = |path: &PathBuf, digest: &str| {
+        std::process::Command::new(&binary)
+            .env("PLATFORM_MODEL_WORKER_CONFIG", path)
+            .env("PLATFORM_MODEL_WORKER_CONFIG_DIGEST", digest)
+            .env("PLATFORM_MODEL_WORKER_DATABASE_URL", &database_url)
+            .env("PLATFORM_MODEL_WORKER_EGRESS_CA_PATH", &ca_path)
+            .env("PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH", &cert_path)
+            .env("PLATFORM_MODEL_WORKER_EGRESS_KEY_PATH", &key_path)
+            .env("PLATFORM_MODEL_WORKER_NATS_CA_PATH", &nats_ca)
+            .env("PLATFORM_MODEL_WORKER_NATS_CERT_PATH", &nats_cert)
+            .env("PLATFORM_MODEL_WORKER_NATS_KEY_PATH", &nats_key)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let mut wrong_config = config.clone();
+    let wrong_manifest = WorkerManifest {
+        adapter_runtime_digest: digest('f'),
+        ..production_model_worker_manifest()
+    };
+    let wrong_manifest_digest = wrong_manifest.canonical_digest().unwrap();
+    wrong_config["worker_manifest"] = serde_json::to_value(wrong_manifest).unwrap();
+    for adapter in wrong_config["installed_adapters"].as_array_mut().unwrap() {
+        adapter["worker_manifest_digest"] =
+            serde_json::to_value(wrong_manifest_digest.clone()).unwrap();
+    }
+    let (wrong_path, wrong_digest) = write_config("wrong", &wrong_config);
+    let mut wrong = spawn_worker(&wrong_path, &wrong_digest);
+    let wrong_startup = read_model_process_line(wrong.stderr.take().unwrap()).await;
+    assert!(
+        wrong_startup.contains("started generation="),
+        "{wrong_startup}"
+    );
+    tokio::time::sleep(StdDuration::from_millis(500)).await;
+    assert_eq!(wire.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(model_job_state(pool, &job_id).await, "ready");
+    wrong.kill().unwrap();
+    wrong.wait().unwrap();
+
+    let (config_path, config_digest) = write_config("correct", &config);
+    let mut first = spawn_worker(&config_path, &config_digest);
+    let startup = read_model_process_line(first.stderr.take().unwrap()).await;
+    assert!(startup.contains("started generation="), "{startup}");
+
+    sqlx::query(
+        r#"
+        CREATE FUNCTION insight_platform.test_pause_model_commit()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF OLD.state = 'running' AND NEW.state = 'succeeded' AND NEW.work_class = 'model' THEN
+            PERFORM pg_sleep(30);
+          END IF;
+          RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER test_pause_model_commit BEFORE UPDATE ON insight_platform.jobs FOR EACH ROW EXECUTE FUNCTION insight_platform.test_pause_model_commit()")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET scheduled_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'ready'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    wait_model_calls(&wire.calls, 1).await;
+    wait_model_job_state(pool, &job_id, "running").await;
+    first.kill().unwrap();
+    first.wait().unwrap();
+    sqlx::query("DROP TRIGGER test_pause_model_commit ON insight_platform.jobs")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION insight_platform.test_pause_model_commit()")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'")
+        .bind(fixture.tenant_id.to_string())
+        .bind(job_id.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut second = spawn_worker(&config_path, &config_digest);
+    wait_model_turn_state(pool, &command.model_turn_id, "succeeded").await;
+    assert_eq!(wire.calls.load(Ordering::SeqCst), 2);
+    let recovery_facts: (i64, i64, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT count(*) FROM insight_platform.events
+             WHERE tenant_id = $1 AND aggregate_id = $2
+               AND event_type = 'model.lease_recovered'),
+          jsonb_array_length(invocation.payload->'attempts')::bigint,
+          job.worker_id IS NULL AND job.lease_token_digest IS NULL
+            AND job.quota_reservation_id IS NULL,
+          invocation.payload->'attempts'->0->>'outcome' = 'retry_scheduled'
+            AND (invocation.payload->'attempts'->0->>'request_sent')::boolean
+        FROM insight_platform.invocations AS invocation
+        JOIN insight_platform.jobs AS job
+          ON job.tenant_id = invocation.tenant_id AND job.owner_id = invocation.invocation_id
+        WHERE invocation.tenant_id = $1 AND invocation.invocation_id = $2
+          AND job.job_id = $3
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(command.model_turn_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(recovery_facts, (1, 2, true, true));
+    second.kill().unwrap();
+    second.wait().unwrap();
+    let _ = shutdown_sender.send(());
+    server.await.unwrap().unwrap();
+    for path in [wrong_path, config_path, ca_path, cert_path, key_path] {
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+async fn read_model_process_line(stderr: std::process::ChildStderr) -> String {
+    tokio::task::spawn_blocking(move || {
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(stderr), &mut line).unwrap();
+        line
+    })
+    .await
+    .unwrap()
+}
+
+async fn model_job_state(pool: &PgPool, job_id: &ResourceId) -> String {
+    sqlx::query_scalar("SELECT state FROM insight_platform.jobs WHERE job_id = $1")
+        .bind(job_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn wait_model_job_state(pool: &PgPool, job_id: &ResourceId, expected: &str) {
+    let started = std::time::Instant::now();
+    while model_job_state(pool, job_id).await != expected {
+        assert!(started.elapsed() < StdDuration::from_secs(10));
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+}
+
+async fn wait_model_turn_state(pool: &PgPool, turn_id: &ResourceId, expected: &str) {
+    let started = std::time::Instant::now();
+    loop {
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM insight_platform.invocations WHERE invocation_id = $1",
+        )
+        .bind(turn_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if state == expected {
+            return;
+        }
+        assert!(started.elapsed() < StdDuration::from_secs(10));
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+}
+
+async fn wait_model_calls(calls: &AtomicUsize, expected: usize) {
+    let started = std::time::Instant::now();
+    while calls.load(Ordering::SeqCst) != expected {
+        assert!(started.elapsed() < StdDuration::from_secs(10));
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+}
+
 #[test]
 fn model_turn_is_exact_atomic_quota_accounted_and_first_winner() {
     std::thread::Builder::new()
@@ -2302,7 +2820,6 @@ async fn model_turn_fixture() {
         Err(RepositoryError::Conflict("exact Model Deployment"))
     ));
     assert_model_deployment_closures_fail_closed(&repository, &fixture).await;
-
     let mut nonselected_tool = command_for_node(&fixture, &fixture.primary_node_id, 0x0d0);
     nonselected_tool.request.request.tools[0].capability_deployment =
         fixture.alternate_capability_deployment.clone();
@@ -2551,7 +3068,7 @@ async fn model_turn_fixture() {
         metric == QuotaDimension::ModelTokens.as_str() && *used == 80
     }));
     assert!(quota_totals.iter().any(|(metric, _, used)| {
-        metric == QuotaDimension::ModelCostMicrounits.as_str() && *used == 133
+        metric == QuotaDimension::ModelCostMicrounits.as_str() && *used == 0
     }));
     assert!(quota_totals.iter().any(|(metric, _, used)| {
         metric == QuotaDimension::WorkClassConcurrentOperations.as_str() && *used == 0
@@ -2573,6 +3090,11 @@ async fn model_turn_fixture() {
     .await
     .unwrap();
     assert_eq!(output_rows, (1, 4));
+
+    // This production-process matrix conservatively charges an unknown first Provider
+    // attempt, so run it after the focused quota assertions above and before the
+    // orchestration continuation deliberately moves the Run to waiting.
+    run_model_worker_process_recovery(&pool, &repository, &fixture).await;
 
     let stale_receipt = id(ResourceKind::Receipt, 0x190);
     let mut stale_fence = second_claim.fence();
@@ -2765,6 +3287,7 @@ async fn model_turn_fixture() {
     let mut owner_claims = repository
         .claim_model_jobs(ClaimModelJobs {
             worker_process_generation_id: owner_worker_id.clone(),
+            worker_manifest_digest: production_model_worker_manifest_digest(),
             limit: 1,
             lease_milliseconds: 30_000,
             slots: vec![ModelClaimSlot {
@@ -2936,6 +3459,7 @@ async fn model_turn_fixture() {
     let mut claims = repository
         .claim_model_jobs(ClaimModelJobs {
             worker_process_generation_id: tool_worker_id.clone(),
+            worker_manifest_digest: production_model_worker_manifest_digest(),
             limit: 1,
             lease_milliseconds: 30_000,
             slots: vec![ModelClaimSlot {

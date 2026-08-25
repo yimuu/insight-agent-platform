@@ -29,7 +29,7 @@
 
 > CR-186 L1 pure assembler、Model/provider contract tests以及fresh PostgreSQL 16 ModelTurn持久化/tool continuation/first-winner
 > 回归已通过；exact Agent/Plan/Skill材料与Capability投影已接入production Scheduler admission，Context observation尚待ContextQuery
-> continuation接线，且production进程组合与kill/recovery未完成，不能把本证据宣称为完整ModelLoop L3。
+> continuation接线；后续r233已关闭provider process kill/recovery，但tool-result整链仍未完成，不能把本证据宣称为完整ModelLoop L3。
 
 > CR-187已关闭production Model admission的Policy来源缺口：Safety/Budget/PublicProjection均为closed nominal Policy document，
 > Model Deployment冻结exact Safety Revision；production provider必须从这些exact documents推导安全指令、attempt/token/cost与overflow，
@@ -37,7 +37,7 @@
 
 > CR-187 exact Model Policy loader已在fresh PostgreSQL 16 r177验证Model Deployment digest、profile Revision、三个enabled published
 > Policy的exact semantic/payload/rules digest与PolicyKind；wrong Deployment digest fail closed。后续r180已把这些facts接入canonical
-> request与Skill/Capability投影；独立production进程与L3恢复证据仍待完成。
+> request与Skill/Capability投影；后续r233已补齐独立production provider进程与L3恢复证据，tool-result整链仍待完成。
 
 > CR-188已关闭Capability remote codec authority缺口：HTTP/gRPC/MCP mapping authoring只在publication/build阶段编译为静态codec，
 > Deployment冻结exact installed codec identity/module/descriptor及required Worker manifest。实现必须在claim/dispatch外部I/O前重验三者；
@@ -107,12 +107,21 @@
 
 > 2026-08-25 implementation evidence：production `PostgresControllerModelAdmissionProvider`已实现exact Agent/Profile/Provider/Model Policy
 > facts读取、Plan node/input逐项绑定、Skill package materialization、Capability selector/tool schema投影、四方预算交集与Inline canonical
-> request构造；fresh PostgreSQL 16 r180已验证assembly facts只返回`ordered_first`选中的Capability及ModelTurn全回归。provider进程组合与
-> kill/recovery ModelLoop L3尚未完成，因此本批仍不能宣称完整production链路。
+> request构造；fresh PostgreSQL 16 r180已验证assembly facts只返回`ordered_first`选中的Capability及ModelTurn全回归。后续r233已关闭
+> provider进程组合与kill/recovery；tool-result整链仍未完成，因此不能宣称完整ModelLoop production链路。
 
 > 2026-08-25 implementation evidence：Model continuation不再使用私有链式source-map hash；每轮从全部冻结message source重建并校验
 > canonical source-map entries、content digest、ordinal、byte/token budget与classification，再派生完整digest和input token estimate。
 > Model与runtime单元测试及`-D warnings` clippy已通过；跨进程tool-result kill/recovery仍归L3待办。
+
+> 2026-08-25 implementation evidence：production Model claim现携带进程Worker manifest digest，PostgreSQL owner在attempt/quota
+> mutation前对照冻结的installed adapter manifest。Model Worker同时新增bounded expired-lease recovery：在quota→ModelTurn→Job锁序
+> 内重验version/generation/token/expiry/payload/reservation，按未知已dispatch请求的冻结ceiling保守结算旧reservation，原子写
+> `model.lease_recovered` Event/Outbox并将同一Job置为`retry_scheduled`。恢复使用共享1 MiB Inline RunValue hard limit，不再错误截为
+> 64 KiB；OpenAI fixture也按其只报告token usage、不报告authoritative monetary cost的真实合同冻结。fresh PostgreSQL 16 r233以真实
+> `platform-model-worker`、mTLS Egress Broker RPC及mTLS NATS完成错manifest零Provider调用/Job保持ready、Provider响应后的commit-window
+> 强杀、第二进程expired-lease恢复、安全重放及structured Inline terminal commit；Provider调用总数严格为2。Model provider process L3
+> 至此闭合；Model tool-result整链、Context external leaf及Phase 2 exit gate仍待完成。
 
 > 2026-08-25 implementation evidence：runtime新增production orchestration composition，明确把business claim/heartbeat连接与
 > critical-control Plan/RunValue/Skill读取、owner commit及Safety scanner连接分开，并用同一mTLS Artifact Scheduler client组合exact

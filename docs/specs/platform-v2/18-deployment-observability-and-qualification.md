@@ -230,7 +230,9 @@ quota settlement与non-idempotent reconciliation，关闭Native部分L3；r217�
 MCP Host production binary已通过Capability Worker→Host→Egress双mTLS、Egress到达后强杀、`CompletionUnknown`及重启安全重放的进程
 fixture；fresh PostgreSQL 16 r221进一步通过production Remote Worker→Host→Egress exact protocol/auth/discovery binding、错codec零调用、
 commit-window强杀、expired-lease恢复与非幂等不重放，关闭MCP ToolsCall process L3。OAuth/subscription真实协议、隔舱容量与L4 rollout
-仍未通过。
+仍未通过。fresh PostgreSQL 16 r233进一步以production Model Worker、mTLS Egress/NATS完成错manifest零Provider调用、Provider响应后
+commit-window强杀、第二进程expired-lease恢复、冻结ceiling保守结算、安全重放与structured Inline terminal commit，关闭Model provider
+process L3；Model tool-result整链与Context external leaf L3仍未通过。
 
 每个production release至少覆盖：
 

@@ -24,8 +24,11 @@ use insight_platform_models::{
     NormalizedModelFrame, MODEL_QUOTA_LINES,
 };
 use insight_platform_postgres::{
-    model_turn_repository::{ClaimedModelExecution, ControlledModelExecution},
-    repository::{PgRepository, RepositoryError},
+    model_turn_repository::{
+        ClaimedModelExecution, ControlledModelExecution, DriveExpiredModelJobs,
+        ExpiredModelRecoverySlot,
+    },
+    repository::{PgRepository, RepositoryError, SafetyScanShard},
 };
 use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
@@ -650,6 +653,13 @@ pub trait ModelClaimAuthority: Send + Sync + 'static {
         &self,
         command: ClaimModelJobs,
     ) -> Result<Vec<Self::Claim>, ModelClaimFailure>;
+
+    async fn recover_expired_model_jobs(
+        &self,
+        _command: DriveExpiredModelJobs,
+    ) -> Result<usize, ModelClaimFailure> {
+        Ok(0)
+    }
 }
 
 #[async_trait]
@@ -662,6 +672,26 @@ impl ModelClaimAuthority for PgRepository {
     ) -> Result<Vec<Self::Claim>, ModelClaimFailure> {
         PgRepository::claim_model_jobs(self, command)
             .await
+            .map_err(|failure| match failure {
+                insight_platform_postgres::repository::RepositoryError::Database(_) => {
+                    ModelClaimFailure::Unavailable
+                }
+                insight_platform_postgres::repository::RepositoryError::Conflict(_)
+                | insight_platform_postgres::repository::RepositoryError::StaleFence
+                | insight_platform_postgres::repository::RepositoryError::LeaseExpired => {
+                    ModelClaimFailure::FirstWinnerLost
+                }
+                _ => ModelClaimFailure::Invariant,
+            })
+    }
+
+    async fn recover_expired_model_jobs(
+        &self,
+        command: DriveExpiredModelJobs,
+    ) -> Result<usize, ModelClaimFailure> {
+        PgRepository::drive_expired_model_jobs(self, command)
+            .await
+            .map(|page| page.records.len())
             .map_err(|failure| match failure {
                 insight_platform_postgres::repository::RepositoryError::Database(_) => {
                     ModelClaimFailure::Unavailable
@@ -1286,6 +1316,7 @@ pub struct ModelWorkerDriverTiming {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelWorkerDriverConfig {
     requested_claim_size: usize,
+    recovery_batch_size: u16,
     claim_batch_hard_limit: ClaimBatchHardLimit,
     lease_milliseconds: u64,
     heartbeat_interval: Duration,
@@ -1310,6 +1341,12 @@ impl ModelWorkerDriverConfig {
                         "Model claim batch exceeds local address space".to_owned(),
                     )
                 })?,
+            recovery_batch_size: u16::try_from(profile.control_data.recovery_batch.q1_default)
+                .map_err(|_| {
+                    ModelWorkerDriverError::InvalidConfig(
+                        "Model recovery batch exceeds u16".to_owned(),
+                    )
+                })?,
             claim_batch_hard_limit: ClaimBatchHardLimit::from_profile(profile)
                 .map_err(ModelWorkerDriverError::LocalPool)?,
             lease_milliseconds: profile.run_scheduler.lease_milliseconds.q1_default,
@@ -1327,6 +1364,7 @@ impl ModelWorkerDriverConfig {
 
     fn validate(self) -> Result<(), ModelWorkerDriverError> {
         if self.requested_claim_size == 0
+            || self.recovery_batch_size == 0
             || self.lease_milliseconds == 0
             || self.heartbeat_interval.is_zero()
             || self.heartbeat_interval >= Duration::from_millis(self.lease_milliseconds / 3)
@@ -1611,10 +1649,12 @@ where
             .iter()
             .map(|slot| slot.lease_token_digest.clone())
             .collect::<BTreeSet<_>>();
+        let claim_pool = self.pools.snapshot();
         let claimed = self
             .claim_authority
             .claim_model_jobs(ClaimModelJobs {
-                worker_process_generation_id: self.pools.snapshot().worker_process_generation_id,
+                worker_process_generation_id: claim_pool.worker_process_generation_id.clone(),
+                worker_manifest_digest: claim_pool.worker_manifest_digest.clone(),
                 limit: u16::try_from(claim_limit)
                     .map_err(|_| ModelWorkerDriverError::InvalidGeneratedCommand)?,
                 lease_milliseconds: self.config.lease_milliseconds,
@@ -1625,8 +1665,7 @@ where
         if claimed.is_empty() {
             return Ok(0);
         }
-        let pool = self.pools.snapshot();
-        let bindings = validate_claims(&claimed, &pool, &expected_tokens)?;
+        let bindings = validate_claims(&claimed, &claim_pool, &expected_tokens)?;
         let permits = reservation
             .bind_claimed_jobs(
                 bindings
@@ -1651,6 +1690,33 @@ where
             });
         }
         Ok(count)
+    }
+
+    pub async fn recover_once(&self) -> Result<usize, ModelWorkerDriverError> {
+        let slots = (0..self.config.recovery_batch_size)
+            .map(|_| self.recovery_slot())
+            .collect::<Result<Vec<_>, _>>()?;
+        self.claim_authority
+            .recover_expired_model_jobs(DriveExpiredModelJobs {
+                shard: SafetyScanShard::whole(),
+                after: None,
+                limit: self.config.recovery_batch_size,
+                retry_backoff_milliseconds: u64::try_from(
+                    self.config.timing.claim_failure_backoff.as_millis(),
+                )
+                .map_err(|_| ModelWorkerDriverError::InvalidGeneratedCommand)?,
+                slots,
+            })
+            .await
+            .map_err(ModelWorkerDriverError::Claim)
+    }
+
+    fn recovery_slot(&self) -> Result<ExpiredModelRecoverySlot, ModelWorkerDriverError> {
+        Ok(ExpiredModelRecoverySlot {
+            quota_entry_ids: self.quota_entry_ids()?,
+            event_id: self.new_id(ResourceKind::Event)?,
+            outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+        })
     }
 
     fn claim_slot(&self) -> Result<ModelClaimSlot, ModelWorkerDriverError> {
@@ -1778,6 +1844,13 @@ where
                 }
                 _ = self.pools.wait_for_business_capacity(), if self.pools.snapshot().business_available == 0 => {}
                 _ = scan.tick() => {
+                    match self.recover_once().await {
+                        Ok(_) => {}
+                        Err(ModelWorkerDriverError::Claim(
+                            ModelClaimFailure::Unavailable | ModelClaimFailure::FirstWinnerLost,
+                        )) => {}
+                        Err(failure) => return Err(failure),
+                    }
                     match self.drive_once(&mut active).await {
                         Ok(claimed) => report.claimed = report.claimed.saturating_add(claimed as u64),
                         Err(ModelWorkerDriverError::Claim(

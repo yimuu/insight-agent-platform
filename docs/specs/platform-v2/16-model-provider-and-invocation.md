@@ -235,6 +235,8 @@ production-equivalent saturation/fault qualification分层运行。开发fixture
 
 ## 17. 未决问题
 
-CR-181 cross-review已确认Plan v4 ModelLoop dispatch/tool/result并恢复Accepted；实现与L2/L3 evidence仍待完成。
+CR-181 cross-review已确认Plan v4 ModelLoop dispatch/tool/result并恢复Accepted。fresh PostgreSQL 16 r233已完成production Model Worker
+到mTLS Egress/NATS的provider process L3：错manifest在attempt/quota与外部I/O前fail closed；Provider响应后进程强杀由第二进程按共享
+Job过期租约合同恢复，保守结算未知尝试并安全重放，最终只提交一个structured Inline结果。Model tool-result整链与Context协同L3仍待完成。
 
 首版Inline-only Model合同无未决设计问题。具体provider adapter与model catalog作为发布Resource增量增加。

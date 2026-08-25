@@ -45,8 +45,7 @@ impl ModelTurnLimits {
         let to_usize =
             |value: u64| usize::try_from(value).map_err(|_| ModelTurnError::InvalidLimits);
         let to_u32 = |value: u64| u32::try_from(value).map_err(|_| ModelTurnError::InvalidLimits);
-        let maximum_inline_bytes =
-            to_usize(profile.run_scheduler.inline_value_bytes.hard_max)?.min(65_536);
+        let maximum_inline_bytes = to_usize(profile.run_scheduler.inline_value_bytes.hard_max)?;
         let limits = Self {
             maximum_attempts: to_u32(profile.run_scheduler.attempts_per_work.q1_default)?,
             maximum_request_bytes: to_usize(profile.model_context_mcp.request_bytes.hard_max)?,

@@ -4,11 +4,13 @@ use crate::{
         append_command_event, append_scheduler_event, claim_command_receipt,
         decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
         load_deployment, load_exact_frozen_selection_policy, load_job_for_update_by_text,
-        load_resource, load_run_for_update, require_tenant_permission, terminalize_command_receipt,
-        JobRecord, PgRepository, RepositoryError, RunRecord, TypedPayload,
+        load_resource, load_run_for_update, require_tenant_permission, safety_scan_cursor_from_row,
+        safety_scan_page, terminalize_command_receipt, validate_safety_scan_request, JobRecord,
+        PgRepository, RepositoryError, RunRecord, SafetyScanCursor, SafetyScanPage,
+        SafetyScanShard, TypedPayload,
     },
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
     canonical_digest, AgentResourceSpec, ArtifactRef, CommandOutcome, DeploymentClosure,
     EntityLifecycle, ExactDeploymentRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
@@ -23,10 +25,11 @@ use insight_platform_invocations::InvocationValueStorage;
 use insight_platform_jobs::{JobFence, JobProjection, LeasePolicy};
 use insight_platform_model_adapters::{ModelAdapterExecutionRequest, ModelExecutionAuthority};
 use insight_platform_models::{
-    decide_model_cancellation_outcome, decide_model_control, decide_model_outcome,
-    decide_model_turn_admission, decide_prepare_model_dispatch, decide_start_model_dispatch,
-    CanonicalMessagePart, ClaimModelJobs, CommitModelCancellationOutcome, CommitModelOutcome,
-    ControlModelTurn, CreateModelTurn, ModelAdmissionFacts, ModelControlKind, ModelDispatchOutcome,
+    decide_expired_model_lease, decide_model_cancellation_outcome, decide_model_control,
+    decide_model_outcome, decide_model_turn_admission, decide_prepare_model_dispatch,
+    decide_start_model_dispatch, CanonicalMessagePart, ClaimModelJobs,
+    CommitModelCancellationOutcome, CommitModelOutcome, ControlModelTurn, CreateModelTurn,
+    ExpiredModelLeaseObservation, ModelAdmissionFacts, ModelControlKind, ModelDispatchOutcome,
     ModelExecutionInput, ModelExecutionInputMaterial, ModelJobPayload, ModelOutputValue,
     ModelQuotaCeiling, ModelQuotaSettlement, ModelRequestValue, ModelToolProjection,
     ModelTurnLimits, ModelTurnPayload, ModelTurnRecord, ModelTurnStore, ModelTurnTransaction,
@@ -38,6 +41,87 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedModelExecution {
+    pub turn: ModelTurnRecord,
+    pub job: JobRecord,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpiredModelRecoverySlot {
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+}
+
+impl ExpiredModelRecoverySlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        let unique = self
+            .quota_entry_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        if self.quota_entry_ids.len() != MODEL_QUOTA_LINES
+            || unique.len() != MODEL_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+        {
+            return Err(RepositoryError::InvalidInput(
+                "expired Model recovery identity is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveExpiredModelJobs {
+    pub shard: SafetyScanShard,
+    pub after: Option<SafetyScanCursor>,
+    pub limit: u16,
+    pub retry_backoff_milliseconds: u64,
+    pub slots: Vec<ExpiredModelRecoverySlot>,
+}
+
+impl DriveExpiredModelJobs {
+    fn validate(&self, maximum_batch: u16, maximum_shards: u16) -> Result<(), RepositoryError> {
+        validate_safety_scan_request(
+            self.shard,
+            self.after.as_ref(),
+            ResourceKind::Job,
+            self.limit,
+            self.slots.len(),
+            maximum_batch,
+            maximum_shards,
+        )?;
+        if self.retry_backoff_milliseconds == 0 {
+            return Err(RepositoryError::InvalidInput(
+                "expired Model recovery request is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for id in slot
+                .quota_entry_ids
+                .iter()
+                .chain([&slot.event_id, &slot.outbox_id])
+            {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "expired Model recovery identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredModelExecution {
     pub turn: ModelTurnRecord,
     pub job: JobRecord,
 }
@@ -1750,6 +1834,224 @@ impl PgRepository {
         Ok(executions)
     }
 
+    pub async fn drive_expired_model_jobs(
+        &self,
+        command: DriveExpiredModelJobs,
+    ) -> Result<SafetyScanPage<RecoveredModelExecution>, RepositoryError> {
+        command.validate(self.recovery_batch_limit(), self.recovery_shard_limit())?;
+        let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(self.pool())
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT job.*, job.lease_expires_at AS scan_sort_at
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.invocations AS turn
+              ON turn.tenant_id = job.tenant_id AND turn.invocation_id = job.owner_id
+            WHERE job.work_class = 'model' AND job.owner_kind = 'model_turn'
+              AND job.state = 'running' AND job.terminal_at IS NULL
+              AND job.lease_expires_at <= $1 AND job.attempt_no < job.attempt_limit
+              AND job.deadline > $1 AND turn.state = 'in_flight' AND turn.terminal_at IS NULL
+              AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
+              AND ($5::timestamptz IS NULL OR
+                   (job.lease_expires_at, job.tenant_id, job.job_id) >
+                   ($5::timestamptz, $6::text, $7::text))
+            ORDER BY job.lease_expires_at, job.tenant_id, job.job_id
+            LIMIT $2
+            "#,
+        )
+        .bind(scan_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard.index))
+        .bind(i64::from(command.shard.count))
+        .bind(command.after.as_ref().map(|cursor| cursor.sort_at))
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.tenant_id.to_string()),
+        )
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.item_id.to_string()),
+        )
+        .fetch_all(self.pool())
+        .await?;
+        let scanned_count = rows.len();
+        let last_cursor = rows
+            .last()
+            .map(|row| safety_scan_cursor_from_row(row, "job_id", ResourceKind::Job))
+            .transpose()?;
+        let candidates = rows
+            .into_iter()
+            .map(job_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut recovered = Vec::with_capacity(candidates.len());
+        for (observed, slot) in candidates.into_iter().zip(&command.slots) {
+            match self
+                .recover_expired_model_job(
+                    &observed,
+                    slot,
+                    scan_now,
+                    command.retry_backoff_milliseconds,
+                )
+                .await
+            {
+                Ok(Some(record)) => recovered.push(record),
+                Ok(None)
+                | Err(RepositoryError::Conflict(_))
+                | Err(RepositoryError::StaleFence)
+                | Err(RepositoryError::LeaseExpired) => {}
+                Err(failure) => return Err(failure),
+            }
+        }
+        Ok(safety_scan_page(
+            recovered,
+            scanned_count,
+            command.limit,
+            last_cursor,
+        ))
+    }
+
+    async fn recover_expired_model_job(
+        &self,
+        observed: &JobRecord,
+        slot: &ExpiredModelRecoverySlot,
+        scan_now: DateTime<Utc>,
+        retry_backoff_milliseconds: u64,
+    ) -> Result<Option<RecoveredModelExecution>, RepositoryError> {
+        let mut transaction = self.pool().begin().await?;
+        let quota_lines = lock_model_quota_bundle(&mut transaction, observed).await?;
+        let tenant_id = parse_required_id(
+            Some(&observed.tenant_id),
+            ResourceKind::Tenant,
+            "expired Model tenant",
+        )?;
+        let model_turn_id = parse_required_id(
+            Some(&observed.owner_id),
+            ResourceKind::ModelTurn,
+            "expired ModelTurn",
+        )?;
+        let job_id = parse_required_id(
+            Some(&observed.job_id),
+            ResourceKind::Job,
+            "expired Model Job",
+        )?;
+        let current_turn = load_model_turn(
+            &mut transaction,
+            &tenant_id,
+            &model_turn_id,
+            true,
+            self.model_turn_limits(),
+        )
+        .await?;
+        let current_job = load_model_job(&mut transaction, &tenant_id, &job_id, true).await?;
+        let database_now = database_now(&mut transaction).await?;
+        if database_now < scan_now
+            || current_job.version != observed.version
+            || current_job.lease_epoch != observed.lease_epoch
+            || current_job.lease_token_digest != observed.lease_token_digest
+            || current_job.lease_expires_at != observed.lease_expires_at
+            || current_job.payload.digest != observed.payload.digest
+            || current_job.quota_reservation_id != observed.quota_reservation_id
+            || current_job
+                .lease_expires_at
+                .is_none_or(|expires_at| expires_at > database_now)
+        {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let projection = job_projection(&current_job)?;
+        let payload: ModelJobPayload = decode_versioned_payload(&current_job.payload, "Model Job")?;
+        let retry_at = database_now
+            .checked_add_signed(Duration::milliseconds(
+                i64::try_from(retry_backoff_milliseconds).map_err(|_| {
+                    RepositoryError::InvalidInput("Model retry backoff exceeds bigint".to_owned())
+                })?,
+            ))
+            .filter(|retry_at| *retry_at < current_turn.deadline)
+            .ok_or_else(|| RepositoryError::Conflict("expired Model retry deadline"))?;
+        let observation_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "job_id": job_id,
+            "lease_generation": projection.lease_generation,
+            "model_turn_id": model_turn_id,
+            "observed_job_version": projection.version,
+            "reason": "worker_lease_expired",
+            "schema_version": 1,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::NominalTypeError| {
+            RepositoryError::InvalidInput(failure.to_string())
+        })?;
+        let decision = decide_expired_model_lease(
+            &current_turn,
+            &projection,
+            &payload,
+            &ExpiredModelLeaseObservation {
+                observed_job_version: projection.version,
+                observed_lease_generation: projection.lease_generation,
+                retry_at,
+                observation_digest: observation_digest.clone(),
+            },
+            database_now,
+            self.model_turn_limits(),
+        )?;
+        settle_model_quota(
+            &mut transaction,
+            &current_job,
+            &quota_lines,
+            &slot.quota_entry_ids,
+            decision.settlement,
+            &current_turn.payload.admission.request_digest,
+        )
+        .await?;
+        let job = update_model_job(
+            &mut transaction,
+            &current_job,
+            &decision.job,
+            &decision.job_payload,
+            database_now,
+        )
+        .await?;
+        update_model_turn(
+            &mut transaction,
+            &current_turn,
+            &decision.turn,
+            self.model_turn_limits(),
+        )
+        .await?;
+        append_scheduler_event(
+            &mut transaction,
+            &current_job.tenant_id,
+            &slot.event_id,
+            &slot.outbox_id,
+            "model_turn",
+            &model_turn_id.to_string(),
+            as_i64(decision.turn.version, "ModelTurn version")?,
+            Some(&decision.turn.run_id.to_string()),
+            "model.lease_recovered",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "attempt_count": decision.job.attempt_count,
+                    "job_id": job_id,
+                    "lease_generation": decision.job.lease_generation,
+                    "observation_digest": observation_digest,
+                    "state": decision.turn.state,
+                }),
+            )?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(Some(RecoveredModelExecution {
+            turn: decision.turn,
+            job,
+        }))
+    }
+
     pub async fn claim_model_jobs(
         &self,
         command: ClaimModelJobs,
@@ -1831,6 +2133,16 @@ impl PgRepository {
                 self.model_turn_limits(),
             )
             .await?;
+            if current_turn
+                .payload
+                .admission
+                .provider
+                .installed_adapter
+                .worker_manifest_digest
+                != command.worker_manifest_digest
+            {
+                continue;
+            }
             require_model_claim_parents(&mut transaction, &current_turn, &run, &node, database_now)
                 .await?;
             let request_input = load_model_execution_input(&mut transaction, &current_turn).await?;
