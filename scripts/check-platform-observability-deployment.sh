@@ -13,6 +13,8 @@ for mutation in \
   '--set alerts.runbookBaseUrl=http://unsafe.example/runbook' \
   '--set-json alerts.labels=null' \
   '--set alerts.maximumFailureRatio=1' \
+  '--set alerts.maximumRecoveryFailureRatio=1' \
+  '--set alerts.minimumRecoveryRate=0' \
   '--set-json dashboard.labels=null'; do
   # shellcheck disable=SC2086
   if helm template platform "$chart" $mutation >/dev/null 2>&1; then
@@ -31,8 +33,10 @@ failures << "must render one PrometheusRule and one dashboard" unless rules.leng
 
 alerts = rules.flat_map { |document| document.dig("spec", "groups").to_a.flat_map { |group| group["rules"].to_a } }
 expected = %w[
+  InsightPlatformCriticalControlPermitsExhausted
   InsightPlatformHttpFailureRatioHigh
   InsightPlatformHttpLatencyHigh
+  InsightPlatformRecoveryFailureRatioHigh
   InsightPlatformTelemetryMissing
   InsightPlatformWorkloadNotReady
 ]
@@ -51,7 +55,7 @@ end
 unless dashboards.empty?
   begin
     dashboard = JSON.parse(dashboards.first.dig("data", "insight-platform-runtime.json").to_s)
-    failures << "dashboard lacks the four minimum symptom panels" unless dashboard.fetch("panels", []).length >= 4
+    failures << "dashboard lacks the eight minimum symptom panels" unless dashboard.fetch("panels", []).length >= 8
   rescue JSON::ParserError => error
     failures << "dashboard JSON is invalid: #{error.message}"
   end

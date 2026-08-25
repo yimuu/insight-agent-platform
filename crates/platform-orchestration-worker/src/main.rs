@@ -7,7 +7,8 @@ use insight_platform_contracts::{
     ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, OrchestrationOperationalMetrics,
+    OrchestrationOperationalSnapshot, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_orchestrator::{ExpressionLimits, PlanLimits};
 use insight_platform_postgres::{repository::SafetyScanShard, verify_schema};
@@ -17,7 +18,8 @@ use insight_platform_runtime::postgres::{
 use insight_platform_runtime::{
     start_production_orchestration, CoordinatorTiming, OrchestrationCoordinatorConfig,
     OrchestrationExecutorConfig, OrchestrationExecutorTiming, OrchestrationSafetyConfig,
-    ProductionOrchestrationConfig, SafetyDriverTiming, SchedulerPlanMaterializerConfig,
+    ProductionOrchestrationConfig, RunningProductionOrchestration, SafetyDriverTiming,
+    SchedulerPlanMaterializerConfig,
 };
 use insight_platform_worker::LocalWorkerPools;
 use serde::Deserialize;
@@ -284,6 +286,7 @@ async fn run() -> Result<(), ProcessError> {
         process_generation_id.clone(),
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let observability_pools = pools.clone();
     let runtime = start_production_orchestration(
         bulkheads.business_repository(),
         bulkheads.critical_control_repository(),
@@ -292,9 +295,15 @@ async fn run() -> Result<(), ProcessError> {
         config.runtime_config()?,
     )
     .map_err(|_| ProcessError::RuntimeFailed)?;
+    let operational_metrics = Arc::new(OrchestrationOperationalMetrics::default());
+    update_operational_metrics(&operational_metrics, &observability_pools, &runtime);
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("scheduler-recovery", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_orchestration(
+            "scheduler-recovery",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            Arc::clone(&operational_metrics),
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -333,6 +342,7 @@ async fn run() -> Result<(), ProcessError> {
                 return Err(ProcessError::ObservabilityFailed);
             }
             _ = health.tick() => {
+                update_operational_metrics(&operational_metrics, &observability_pools, &runtime);
                 if runtime.is_finished() {
                     runtime.shutdown().await.map_err(|_| ProcessError::RuntimeFailed)?;
                     bulkheads.close().await;
@@ -341,6 +351,31 @@ async fn run() -> Result<(), ProcessError> {
             }
         }
     }
+}
+
+fn update_operational_metrics(
+    metrics: &OrchestrationOperationalMetrics,
+    pools: &LocalWorkerPools,
+    runtime: &RunningProductionOrchestration,
+) {
+    let pool = pools.snapshot();
+    let coordinator = runtime.coordinator.snapshot();
+    let recovery = runtime.safety.snapshot();
+    metrics.update(OrchestrationOperationalSnapshot {
+        business_capacity: u64::try_from(pool.business_capacity).unwrap_or(u64::MAX),
+        business_available: u64::try_from(pool.business_available).unwrap_or(u64::MAX),
+        critical_control_capacity: u64::try_from(pool.critical_control_capacity)
+            .unwrap_or(u64::MAX),
+        critical_control_available: u64::try_from(pool.critical_control_available)
+            .unwrap_or(u64::MAX),
+        active_jobs: coordinator.active_jobs,
+        jobs_claimed: coordinator.jobs_claimed,
+        claim_failures: coordinator.claim_failures,
+        recovery_scan_attempts: recovery.scan_attempts,
+        recovery_scan_failures: recovery.scan_failures,
+        recovery_capacity_skips: recovery.capacity_skips,
+        recovery_mutations: recovery.mutations,
+    });
 }
 
 async fn connect_artifact(

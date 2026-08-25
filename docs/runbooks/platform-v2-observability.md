@@ -29,3 +29,17 @@ the failure begins with a candidate rollout; otherwise apply the dependency reco
 Confirm request volume, saturation and downstream dependency latency before changing replicas.
 Use the qualified CapacityProfile limits for scaling and permit changes. Do not bypass queue,
 admission, hard-limit, or isolation controls to reduce latency.
+
+## InsightPlatformCriticalControlPermitsExhausted
+
+Confirm the `scheduler-recovery` Pod is Ready and compare business versus critical-control permit
+availability. Inspect recovery scan duration and PostgreSQL critical-control pool health. Do not
+lend business permits to recovery or increase concurrency outside an approved CapacityProfile;
+remove the blocking dependency or use the qualified GitOps scaling path.
+
+## InsightPlatformRecoveryFailureRatioHigh
+
+Compare attempted and failed recovery scans with PostgreSQL availability, lease expiry volume and
+recent rollout events. Determine whether every recovery family is failing or one bounded scan is
+affected before changing replicas. Preserve fencing and owner transactions; never repair recovery
+state with direct row edits.

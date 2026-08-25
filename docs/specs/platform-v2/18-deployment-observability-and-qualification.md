@@ -354,6 +354,11 @@ r264移除LLM、SSE、MCP OAuth、conversation及worker startup production telem
 并新增source-level CI门禁，拒绝规范列出的identity、Secret、prompt/response、object key及URL字段进入structured tracing或插值日志。
 相关crate tests与strict Clippy通过。该负向静态证据不替代跨进程trace propagation、动态payload采集审计、RBAC/retention或production验证。
 
+r265将Orchestration已有Coordinator、Safety Recovery和LocalWorkerPools快照接入shared metrics owner，固定导出active jobs、claim/recovery outcome及
+business/critical-control permit available/used；该surface不把process-local wake hint表述成durable queue depth/age。dashboard扩展到8个panel，新增
+critical-control permit持续耗尽与recovery scan failure ratio两条带runbook告警。静态与unit门禁通过；其他role saturation、durable queue/outbox/
+recovery lag、dependency health及production scrape仍待真实owner接线和资格验证。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

@@ -114,12 +114,29 @@ pub struct ProcessHttpMetrics {
     requests: Vec<AtomicU64>,
     duration_microseconds: Vec<AtomicU64>,
     duration_buckets: Vec<AtomicU64>,
+    orchestration: Option<Arc<OrchestrationOperationalMetrics>>,
 }
 
 impl ProcessHttpMetrics {
     pub fn install(
         component_role: &'static str,
         operations: &'static [&'static str],
+    ) -> Result<Self, MetricsInstallError> {
+        Self::install_inner(component_role, operations, None)
+    }
+
+    pub fn install_with_orchestration(
+        component_role: &'static str,
+        operations: &'static [&'static str],
+        orchestration: Arc<OrchestrationOperationalMetrics>,
+    ) -> Result<Self, MetricsInstallError> {
+        Self::install_inner(component_role, operations, Some(orchestration))
+    }
+
+    fn install_inner(
+        component_role: &'static str,
+        operations: &'static [&'static str],
+        orchestration: Option<Arc<OrchestrationOperationalMetrics>>,
     ) -> Result<Self, MetricsInstallError> {
         if !valid_label(component_role) {
             return Err(MetricsInstallError::InvalidComponentRole);
@@ -148,6 +165,7 @@ impl ProcessHttpMetrics {
             requests: atomics(series),
             duration_microseconds: atomics(series),
             duration_buckets: atomics(series * (BUCKETS_MILLISECONDS.len() + 1)),
+            orchestration,
         })
     }
 
@@ -244,7 +262,132 @@ impl ProcessHttpMetrics {
                 );
             }
         }
+        if let Some(orchestration) = &self.orchestration {
+            orchestration.render_prometheus(role, &mut output);
+        }
         output
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OrchestrationOperationalSnapshot {
+    pub business_capacity: u64,
+    pub business_available: u64,
+    pub critical_control_capacity: u64,
+    pub critical_control_available: u64,
+    pub active_jobs: u64,
+    pub jobs_claimed: u64,
+    pub claim_failures: u64,
+    pub recovery_scan_attempts: u64,
+    pub recovery_scan_failures: u64,
+    pub recovery_capacity_skips: u64,
+    pub recovery_mutations: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct OrchestrationOperationalMetrics {
+    business_capacity: AtomicU64,
+    business_available: AtomicU64,
+    critical_control_capacity: AtomicU64,
+    critical_control_available: AtomicU64,
+    active_jobs: AtomicU64,
+    jobs_claimed: AtomicU64,
+    claim_failures: AtomicU64,
+    recovery_scan_attempts: AtomicU64,
+    recovery_scan_failures: AtomicU64,
+    recovery_capacity_skips: AtomicU64,
+    recovery_mutations: AtomicU64,
+}
+
+impl OrchestrationOperationalMetrics {
+    pub fn update(&self, snapshot: OrchestrationOperationalSnapshot) {
+        self.business_capacity
+            .store(snapshot.business_capacity, Ordering::Release);
+        self.business_available
+            .store(snapshot.business_available, Ordering::Release);
+        self.critical_control_capacity
+            .store(snapshot.critical_control_capacity, Ordering::Release);
+        self.critical_control_available
+            .store(snapshot.critical_control_available, Ordering::Release);
+        self.active_jobs
+            .store(snapshot.active_jobs, Ordering::Release);
+        self.jobs_claimed
+            .store(snapshot.jobs_claimed, Ordering::Release);
+        self.claim_failures
+            .store(snapshot.claim_failures, Ordering::Release);
+        self.recovery_scan_attempts
+            .store(snapshot.recovery_scan_attempts, Ordering::Release);
+        self.recovery_scan_failures
+            .store(snapshot.recovery_scan_failures, Ordering::Release);
+        self.recovery_capacity_skips
+            .store(snapshot.recovery_capacity_skips, Ordering::Release);
+        self.recovery_mutations
+            .store(snapshot.recovery_mutations, Ordering::Release);
+    }
+
+    fn render_prometheus(&self, role: &str, output: &mut String) {
+        use fmt::Write as _;
+
+        output.push_str(
+            "# HELP insight_platform_worker_permits Process-local worker permits by fixed lane and state.\n\
+             # TYPE insight_platform_worker_permits gauge\n",
+        );
+        for (lane, capacity, available) in [
+            (
+                "business",
+                self.business_capacity.load(Ordering::Acquire),
+                self.business_available.load(Ordering::Acquire),
+            ),
+            (
+                "critical_control",
+                self.critical_control_capacity.load(Ordering::Acquire),
+                self.critical_control_available.load(Ordering::Acquire),
+            ),
+        ] {
+            let used = capacity.saturating_sub(available);
+            let _ = writeln!(output, "insight_platform_worker_permits{{component_role=\"{role}\",lane=\"{lane}\",state=\"available\"}} {available}");
+            let _ = writeln!(output, "insight_platform_worker_permits{{component_role=\"{role}\",lane=\"{lane}\",state=\"used\"}} {used}");
+        }
+        output.push_str(
+            "# HELP insight_platform_orchestration_active_jobs Jobs currently executing in the coordinator.\n\
+             # TYPE insight_platform_orchestration_active_jobs gauge\n",
+        );
+        let _ = writeln!(
+            output,
+            "insight_platform_orchestration_active_jobs{{component_role=\"{role}\"}} {}",
+            self.active_jobs.load(Ordering::Acquire)
+        );
+        output.push_str(
+            "# HELP insight_platform_orchestration_claims_total Durable orchestration claim outcomes.\n\
+             # TYPE insight_platform_orchestration_claims_total counter\n",
+        );
+        for (outcome, value) in [
+            ("claimed", self.jobs_claimed.load(Ordering::Acquire)),
+            ("failure", self.claim_failures.load(Ordering::Acquire)),
+        ] {
+            let _ = writeln!(output, "insight_platform_orchestration_claims_total{{component_role=\"{role}\",outcome=\"{outcome}\"}} {value}");
+        }
+        output.push_str(
+            "# HELP insight_platform_recovery_operations_total Critical-control recovery operations by fixed outcome.\n\
+             # TYPE insight_platform_recovery_operations_total counter\n",
+        );
+        for (outcome, value) in [
+            (
+                "scan_attempted",
+                self.recovery_scan_attempts.load(Ordering::Acquire),
+            ),
+            (
+                "scan_failed",
+                self.recovery_scan_failures.load(Ordering::Acquire),
+            ),
+            (
+                "capacity_skipped",
+                self.recovery_capacity_skips.load(Ordering::Acquire),
+            ),
+            ("mutated", self.recovery_mutations.load(Ordering::Acquire)),
+        ] {
+            let _ = writeln!(output, "insight_platform_recovery_operations_total{{component_role=\"{role}\",outcome=\"{outcome}\"}} {value}");
+        }
     }
 }
 
@@ -320,5 +463,35 @@ mod tests {
         let response = router.oneshot(request("/metrics")).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+    }
+
+    #[test]
+    fn orchestration_metrics_export_only_fixed_operational_dimensions() {
+        let operational = Arc::new(OrchestrationOperationalMetrics::default());
+        operational.update(OrchestrationOperationalSnapshot {
+            business_capacity: 8,
+            business_available: 3,
+            critical_control_capacity: 2,
+            critical_control_available: 1,
+            active_jobs: 5,
+            jobs_claimed: 13,
+            claim_failures: 2,
+            recovery_scan_attempts: 21,
+            recovery_scan_failures: 1,
+            recovery_capacity_skips: 4,
+            recovery_mutations: 7,
+        });
+        let metrics = ProcessHttpMetrics::install_with_orchestration(
+            "scheduler-recovery",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            operational,
+        )
+        .unwrap();
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains("lane=\"business\",state=\"available\"} 3"));
+        assert!(rendered.contains("lane=\"business\",state=\"used\"} 5"));
+        assert!(rendered.contains("outcome=\"claimed\"} 13"));
+        assert!(rendered.contains("outcome=\"scan_failed\"} 1"));
+        assert!(!rendered.contains("worker_process_generation"));
     }
 }

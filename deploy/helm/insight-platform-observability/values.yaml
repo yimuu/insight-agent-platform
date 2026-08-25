@@ -12,7 +12,11 @@ alerts:
   scrapeMissingFor: 10m
   errorRatioFor: 10m
   latencyFor: 15m
+  permitExhaustedFor: 10m
+  recoveryFailureFor: 10m
   minimumRequestRate: 0.1
+  minimumRecoveryRate: 0.01
   maximumFailureRatio: 0.05
+  maximumRecoveryFailureRatio: 0.1
   maximumP95Seconds: 2
   runbookBaseUrl: https://runbooks.insight.platform/platform-v2-observability

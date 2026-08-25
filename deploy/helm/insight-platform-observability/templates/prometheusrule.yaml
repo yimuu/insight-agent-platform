@@ -43,4 +43,22 @@ spec:
             summary: Platform HTTP p95 latency is elevated
             description: A component role has sustained high request latency at meaningful traffic volume.
             runbook_url: {{ printf "%s#insightplatformhttplatencyhigh" .Values.alerts.runbookBaseUrl | quote }}
+    - name: insight-platform.orchestration
+      rules:
+        - alert: InsightPlatformCriticalControlPermitsExhausted
+          expr: min by (component_role) (insight_platform_worker_permits{component_role="scheduler-recovery",lane="critical_control",state="available"}) == 0
+          for: {{ .Values.alerts.permitExhaustedFor }}
+          labels: {severity: critical, owner: platform-runtime}
+          annotations:
+            summary: Scheduler critical-control permits are exhausted
+            description: Recovery and reconciliation have no reserved process-local permit available.
+            runbook_url: {{ printf "%s#insightplatformcriticalcontrolpermitsexhausted" .Values.alerts.runbookBaseUrl | quote }}
+        - alert: InsightPlatformRecoveryFailureRatioHigh
+          expr: (sum by (component_role) (rate(insight_platform_recovery_operations_total{outcome="scan_failed"}[{{ .Values.alerts.evaluationWindow }}])) / clamp_min(sum by (component_role) (rate(insight_platform_recovery_operations_total{outcome="scan_attempted"}[{{ .Values.alerts.evaluationWindow }}])), 0.000001)) > {{ .Values.alerts.maximumRecoveryFailureRatio }} and sum by (component_role) (rate(insight_platform_recovery_operations_total{outcome="scan_attempted"}[{{ .Values.alerts.evaluationWindow }}])) > {{ .Values.alerts.minimumRecoveryRate }}
+          for: {{ .Values.alerts.recoveryFailureFor }}
+          labels: {severity: warning, owner: platform-runtime}
+          annotations:
+            summary: Scheduler recovery scan failure ratio is elevated
+            description: Critical-control recovery scans are failing persistently at meaningful scan volume.
+            runbook_url: {{ printf "%s#insightplatformrecoveryfailureratiohigh" .Values.alerts.runbookBaseUrl | quote }}
 {{- end }}
