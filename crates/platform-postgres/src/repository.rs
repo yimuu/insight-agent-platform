@@ -13,7 +13,7 @@ use insight_platform_contracts::{
     ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure,
     FailureClass, FailureCode, FailureSource, FrozenSlotTarget, HardLimitProfile,
     InstallationPrincipalBinding, InvocationState, JobState, JsonLimits, NodeExecutionState,
-    Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
+    Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind, PolicyReferenceRole,
     PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
     PublicRunEventType, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
     ResourceDraftPayload, ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState,
@@ -34085,6 +34085,33 @@ pub(crate) async fn validate_deployment_closure_exists(
                 &context.secret_bindings,
                 &implementation.contract.credential_requirements,
             )?;
+            for (reference, role) in [
+                (&context.parser_policy, PolicyReferenceRole::Parser),
+                (&context.chunker_policy, PolicyReferenceRole::Chunker),
+                (&context.ranking_policy, PolicyReferenceRole::Ranking),
+                (&context.data_policy, PolicyReferenceRole::Data),
+            ]
+            .into_iter()
+            .chain(
+                context
+                    .network_policy
+                    .iter()
+                    .map(|reference| (reference, PolicyReferenceRole::Network)),
+            )
+            .chain(
+                context
+                    .tls_policy
+                    .iter()
+                    .map(|reference| (reference, PolicyReferenceRole::Tls)),
+            )
+            .chain(
+                context
+                    .trust_policy
+                    .iter()
+                    .map(|reference| (reference, PolicyReferenceRole::Trust)),
+            ) {
+                require_exact_policy_kind(transaction, tenant_id, reference, role).await?;
+            }
             require_ready_run_artifact(transaction, tenant_id, &context.conformance_evidence)
                 .await?;
         }
@@ -34299,6 +34326,30 @@ pub(crate) async fn validate_deployment_closure_exists(
         }
     }
     validate_active_secret_bindings(transaction, tenant_id, closure.secret_bindings()).await?;
+    Ok(())
+}
+
+async fn require_exact_policy_kind(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    reference: &ExactVersionRef,
+    role: PolicyReferenceRole,
+) -> Result<(), RepositoryError> {
+    let published = crate::invocation_repository::load_enabled_exact_published_version(
+        transaction,
+        tenant_id,
+        reference,
+        RegistryResourceKind::Policy,
+    )
+    .await?;
+    let ResourceDocument::Policy(policy) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Policy revision contains the wrong document".to_owned(),
+        ));
+    };
+    if policy.policy_kind != role.expected_kind() {
+        return Err(RepositoryError::Conflict("Deployment Policy role"));
+    }
     Ok(())
 }
 
