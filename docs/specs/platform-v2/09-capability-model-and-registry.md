@@ -518,7 +518,10 @@ mapping digest不再被误当成可实例化程序。
 2026-08-25 implementation evidence：Rust owner已加入closed installed codec reference与domain-separated完整backend descriptor digest；
 HTTP/gRPC/MCP Deployment binding冻结required Worker manifest，三个dispatcher在transport前同时重验manifest、codec identity/module与
 descriptor。16项adapter test包含manifest/module/descriptor漂移且transport调用计数为零；fresh PostgreSQL 16 r200完整Invocation
-admission/claim/outcome/Task/reconcile/Receipt/quota fixture通过。production binary/startup manifest publication与L3/L4仍待完成。
+admission/claim/outcome/Task/reconcile/Receipt/quota fixture通过。Remote production binary/protocol L3与L4仍待完成。
 
 后续fresh PostgreSQL 16 r201进一步把required Worker manifest放入claim command并由owner transaction在attempt/quota reservation前
 对照exact Deployment；错误镜像返回空claim，正确manifest仍通过完整Invocation回归。dispatcher二次校验继续保留，形成claim与I/O双闸。
+
+fresh PostgreSQL 16 r208进一步用两个真实Native Capability Worker进程验证exact startup registry/Worker manifest、进程强杀、expired
+lease scanner、quota settlement与非幂等reconciliation。该证据关闭Native process L3，不覆盖HTTP/gRPC/MCP remote protocol或L4 rollout。

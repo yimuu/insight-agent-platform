@@ -9,33 +9,37 @@ use crate::{
         append_command_event, append_scheduler_event, claim_command_receipt,
         decode_versioned_payload, job_from_row, job_projection, load_deployment, load_resource,
         load_run_for_update, load_task_for_update, require_ready_run_artifact,
-        require_tenant_permission, task_projection, terminalize_command_receipt, JobRecord,
-        PgRepository, RepositoryError, TaskRecord, TypedPayload,
+        require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page, task_projection,
+        terminalize_command_receipt, validate_safety_scan_request, JobRecord, PgRepository,
+        RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TaskRecord,
+        TypedPayload,
     },
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::ArtifactReferenceSnapshot;
 use insight_platform_capability_adapters::{
     CancelCapabilityAdapterJob, CapabilityAdapterContinuation, CapabilityAdapterRequest,
     CapabilityExecutionAuthority, ExecuteCapabilityAdapterJob,
 };
 use insight_platform_contracts::{
-    ArtifactPurpose, ArtifactReferenceKind, CapabilityBackendKind, CapabilityProgressDurability,
-    CommandOutcome, EntityLifecycle, InvocationState, JobState, Permission, QuotaDimension,
-    ResourceId, ResourceKind, RunState, Sha256Digest, ValueRef, WorkClass,
-    MAX_CAPABILITY_TIMEOUT_MILLISECONDS,
+    canonical_digest, ArtifactPurpose, ArtifactReferenceKind, CapabilityBackendKind,
+    CapabilityProgressDurability, CommandOutcome, EntityLifecycle, Failure, FailureClass,
+    FailureCode, FailureSource, InvocationState, JobState, Permission, PlatformFailureCode,
+    QuotaDimension, ResourceId, ResourceKind, Retryability, RunState, Sha256Digest, ValueRef,
+    WorkClass, MAX_CAPABILITY_TIMEOUT_MILLISECONDS,
 };
 use insight_platform_invocations::{
     decide_cancellation_outcome, decide_capability_wake, decide_control,
     decide_detached_input_response, decide_detached_job_control, decide_dispatch_outcome,
-    decide_input_response, decide_prepare_dispatch, decide_progress,
+    decide_expired_dispatch, decide_input_response, decide_prepare_dispatch, decide_progress,
     decide_reconciliation_resolution, decide_start_dispatch, CapabilityCancellationObservation,
     CapabilityControlKind, CapabilityDetachedPending, CapabilityJobPayload, CapabilitySignalAudit,
     CapabilityWakeDisposition, CapabilityWorkerAudit, ClaimCapabilityJobs,
     CommitCapabilityCancellationOutcome, CommitCapabilityOutcome, ControlCapabilityInvocation,
-    DetachedSandboxSourceKind, DispatchOutcome, PrepareCapabilityDispatch,
-    ReconciliationResolution, RecordCapabilityProgress, ResolveCapabilityInput,
-    ResolveCapabilityReconciliation, WakeCapabilityInvocation, CAPABILITY_QUOTA_LINES,
+    DetachedSandboxSourceKind, DispatchOutcome, ExpiredCapabilityLeaseObservation,
+    PrepareCapabilityDispatch, ReconciliationResolution, RecordCapabilityProgress,
+    ResolveCapabilityInput, ResolveCapabilityReconciliation, WakeCapabilityInvocation,
+    CAPABILITY_QUOTA_LINES,
 };
 use insight_platform_jobs::{JobFence, LeasePolicy};
 use insight_platform_sandbox::{
@@ -67,6 +71,118 @@ pub struct ClaimedCapabilityExecution {
     pub quota_reservation_entry_ids: Vec<ResourceId>,
     pub resume_mutations: Option<insight_platform_contracts::ExternalLeafResumeMutationIds>,
     pub failure_mutations: Option<insight_platform_contracts::ExternalLeafFailureMutationIds>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpiredCapabilityRecoverySlot {
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+    pub failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds,
+}
+
+impl ExpiredCapabilityRecoverySlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.quota_entry_ids.len() != CAPABILITY_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || self.quota_entry_ids[0] == self.quota_entry_ids[1]
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.failure_mutations.validate().is_err()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "expired Capability recovery identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = self
+            .quota_entry_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        if !unique.insert(self.event_id.to_string()) || !unique.insert(self.outbox_id.to_string()) {
+            return Err(RepositoryError::InvalidInput(
+                "expired Capability recovery identities must be unique".to_owned(),
+            ));
+        }
+        for id in [
+            &self.failure_mutations.convergence_job_id,
+            &self.failure_mutations.run_event_id,
+            &self.failure_mutations.run_outbox_id,
+            &self.failure_mutations.leaf_node_event_id,
+            &self.failure_mutations.leaf_node_outbox_id,
+            &self.failure_mutations.convergence_job_event_id,
+            &self.failure_mutations.convergence_job_outbox_id,
+        ] {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "expired Capability recovery identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveExpiredCapabilityJobs {
+    pub work_class: WorkClass,
+    pub shard: SafetyScanShard,
+    pub after: Option<SafetyScanCursor>,
+    pub limit: u16,
+    pub slots: Vec<ExpiredCapabilityRecoverySlot>,
+}
+
+impl DriveExpiredCapabilityJobs {
+    fn validate(&self, maximum_batch: u16, maximum_shards: u16) -> Result<(), RepositoryError> {
+        if !matches!(
+            self.work_class,
+            WorkClass::CapabilityNative | WorkClass::CapabilityRemote
+        ) {
+            return Err(RepositoryError::InvalidInput(
+                "expired Capability recovery work class is invalid".to_owned(),
+            ));
+        }
+        validate_safety_scan_request(
+            self.shard,
+            self.after.as_ref(),
+            ResourceKind::Job,
+            self.limit,
+            self.slots.len(),
+            maximum_batch,
+            maximum_shards,
+        )?;
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for id in slot.quota_entry_ids.iter().chain([
+                &slot.event_id,
+                &slot.outbox_id,
+                &slot.failure_mutations.convergence_job_id,
+                &slot.failure_mutations.run_event_id,
+                &slot.failure_mutations.run_outbox_id,
+                &slot.failure_mutations.leaf_node_event_id,
+                &slot.failure_mutations.leaf_node_outbox_id,
+                &slot.failure_mutations.convergence_job_event_id,
+                &slot.failure_mutations.convergence_job_outbox_id,
+            ]) {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "expired Capability recovery identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredCapabilityExecution {
+    pub invocation: insight_platform_invocations::CapabilityInvocationRecord,
+    pub job: JobRecord,
 }
 
 impl ClaimedCapabilityExecution {
@@ -2159,6 +2275,301 @@ impl PgInvocationTransaction {
 }
 
 impl PgRepository {
+    pub async fn drive_expired_capability_jobs(
+        &self,
+        command: DriveExpiredCapabilityJobs,
+    ) -> Result<SafetyScanPage<RecoveredCapabilityExecution>, RepositoryError> {
+        command.validate(self.recovery_batch_limit(), self.recovery_shard_limit())?;
+        let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(self.pool())
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT job.*, job.lease_expires_at AS scan_sort_at
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.invocations AS invocation
+              ON invocation.tenant_id = job.tenant_id
+             AND invocation.invocation_id = job.invocation_id
+            WHERE job.work_class = $1 AND job.owner_kind = 'capability_invocation'
+              AND job.state = 'running' AND job.terminal_at IS NULL
+              AND job.lease_expires_at <= $2
+              AND invocation.state = 'in_flight' AND invocation.terminal_at IS NULL
+              AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $5) = $4
+              AND (
+                  $6::timestamptz IS NULL OR
+                  (job.lease_expires_at, job.tenant_id, job.job_id) >
+                      ($6::timestamptz, $7::text, $8::text)
+              )
+            ORDER BY job.lease_expires_at, job.tenant_id, job.job_id
+            LIMIT $3
+            "#,
+        )
+        .bind(command.work_class.as_str())
+        .bind(scan_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard.index))
+        .bind(i64::from(command.shard.count))
+        .bind(command.after.as_ref().map(|cursor| cursor.sort_at))
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.tenant_id.to_string()),
+        )
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.item_id.to_string()),
+        )
+        .fetch_all(self.pool())
+        .await?;
+        let scanned_count = rows.len();
+        let last_cursor = rows
+            .last()
+            .map(|row| safety_scan_cursor_from_row(row, "job_id", ResourceKind::Job))
+            .transpose()?;
+        let candidates = rows
+            .into_iter()
+            .map(job_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut recovered = Vec::with_capacity(candidates.len());
+        for (observed, slot) in candidates.into_iter().zip(&command.slots) {
+            match self
+                .recover_expired_capability_job(&observed, slot, scan_now)
+                .await
+            {
+                Ok(Some(record)) => recovered.push(record),
+                Ok(None)
+                | Err(RepositoryError::Conflict(_))
+                | Err(RepositoryError::StaleFence)
+                | Err(RepositoryError::LeaseExpired) => {}
+                Err(failure) => return Err(failure),
+            }
+        }
+        Ok(safety_scan_page(
+            recovered,
+            scanned_count,
+            command.limit,
+            last_cursor,
+        ))
+    }
+
+    async fn recover_expired_capability_job(
+        &self,
+        observed: &JobRecord,
+        slot: &ExpiredCapabilityRecoverySlot,
+        scan_now: DateTime<Utc>,
+    ) -> Result<Option<RecoveredCapabilityExecution>, RepositoryError> {
+        let mut transaction = self.pool().begin().await?;
+        // Quota is the first mutable authority in the global owner lock order.
+        let quota_accounts = lock_capability_quota_bundle(&mut transaction, observed).await?;
+        let tenant_id = parse_required_id(
+            Some(&observed.tenant_id),
+            ResourceKind::Tenant,
+            "expired Capability tenant",
+        )?;
+        let run_id = parse_required_id(
+            observed.run_id.as_deref(),
+            ResourceKind::Run,
+            "expired Capability Run",
+        )?;
+        let node_id = parse_required_id(
+            observed.node_id.as_deref(),
+            ResourceKind::NodeExecution,
+            "expired Capability Node",
+        )?;
+        let invocation_id = parse_required_id(
+            observed.invocation_id.as_deref(),
+            ResourceKind::CapabilityInvocation,
+            "expired Capability Invocation",
+        )?;
+        let job_id = parse_required_id(
+            Some(&observed.job_id),
+            ResourceKind::Job,
+            "expired Capability Job",
+        )?;
+        let run = load_run_for_update(&mut transaction, &tenant_id, &run_id).await?;
+        let node = load_capability_node_for_update(&mut transaction, &tenant_id, &node_id).await?;
+        let invocation =
+            load_capability_invocation(&mut transaction, &tenant_id, &invocation_id, true).await?;
+        let current = load_capability_job(&mut transaction, &tenant_id, &job_id, true).await?;
+        let database_now = database_now(&mut transaction).await?;
+        if database_now < scan_now
+            || current.version != observed.version
+            || current.lease_epoch != observed.lease_epoch
+            || current.lease_token_digest != observed.lease_token_digest
+            || current.lease_expires_at != observed.lease_expires_at
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+            || current
+                .lease_expires_at
+                .is_none_or(|expires| expires > database_now)
+            || current.state != JobState::Running.as_str()
+            || invocation.state != InvocationState::InFlight
+            || invocation.run_id != run_id
+            || invocation.node_execution_id != node_id
+            || run.terminal_at.is_some()
+            || node.run_id != run.run_id
+            || !matches!(
+                node.state,
+                insight_platform_contracts::NodeExecutionState::Running
+                    | insight_platform_contracts::NodeExecutionState::Waiting
+            )
+        {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let projection = job_projection(&current)?;
+        let payload: CapabilityJobPayload =
+            decode_versioned_payload(&current.payload, "Capability Job")?;
+        let retry_backoff_milliseconds = i64::try_from(
+            invocation.payload.admission.retry_backoff_milliseconds,
+        )
+        .map_err(|_| RepositoryError::CorruptRow("retry backoff exceeds bigint".to_owned()))?;
+        let retry_at = database_now
+            .checked_add_signed(Duration::milliseconds(retry_backoff_milliseconds))
+            .filter(|retry_at| *retry_at < invocation.deadline);
+        let observation_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "invocation_id": invocation.invocation_id,
+            "job_id": projection.job_id,
+            "lease_generation": projection.lease_generation,
+            "observed_job_version": projection.version,
+            "reason": "worker_lease_expired",
+            "schema_version": 1,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::NominalTypeError| {
+            RepositoryError::InvalidInput(failure.to_string())
+        })?;
+        let decision = decide_expired_dispatch(
+            &invocation,
+            &projection,
+            &payload,
+            database_now,
+            ExpiredCapabilityLeaseObservation {
+                observed_job_version: u64::try_from(current.version)
+                    .map_err(|_| RepositoryError::CorruptRow("negative Job version".to_owned()))?,
+                observed_lease_generation: u64::try_from(current.lease_epoch).map_err(|_| {
+                    RepositoryError::CorruptRow("negative Job lease generation".to_owned())
+                })?,
+                retry_at,
+                observation_digest: observation_digest.clone(),
+            },
+        )?;
+        settle_capability_quota(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &slot.quota_entry_ids,
+            &invocation.payload.admission.canonical_digest,
+        )
+        .await?;
+        let job = update_capability_job(
+            &mut transaction,
+            &current,
+            &decision.job,
+            &decision.job_payload,
+            database_now,
+        )
+        .await?;
+        update_capability_invocation(&mut transaction, &invocation, &decision.invocation).await?;
+        let external_leaf = node.state == insight_platform_contracts::NodeExecutionState::Waiting
+            && matches!(
+                invocation.payload.admission.origin_key,
+                insight_platform_invocations::InvocationOrigin::PlanNode { .. }
+                    | insight_platform_invocations::InvocationOrigin::ModelToolCall { .. }
+            );
+        if external_leaf {
+            if decision.invocation.state == InvocationState::TimedOut {
+                let failure = Failure {
+                    code: FailureCode::Platform {
+                        code: PlatformFailureCode::DeadlineExceeded,
+                    },
+                    class: FailureClass::Deadline,
+                    retryability: Retryability::Never,
+                    safe_message: Some("Capability execution deadline exceeded".to_owned()),
+                    details_ref: None,
+                    source: FailureSource::Capability,
+                };
+                match invocation.payload.admission.origin_key {
+                    insight_platform_invocations::InvocationOrigin::PlanNode { .. } => {
+                        crate::repository::settle_capability_leaf_failure_in_transaction(
+                            &mut transaction,
+                            &decision.invocation,
+                            &job_id,
+                            &failure,
+                            &slot.failure_mutations,
+                            true,
+                            database_now,
+                        )
+                        .await?;
+                    }
+                    insight_platform_invocations::InvocationOrigin::ModelToolCall { .. } => {
+                        crate::repository::settle_model_tool_failure_in_transaction(
+                            &mut transaction,
+                            &decision.invocation,
+                            &job_id,
+                            &failure,
+                            &slot.failure_mutations,
+                            true,
+                            database_now,
+                        )
+                        .await?;
+                    }
+                }
+            } else {
+                release_capability_plan_leaf_permit(
+                    &mut transaction,
+                    &decision.invocation,
+                    database_now,
+                )
+                .await?;
+            }
+        }
+        let disposition = match decision.invocation.state {
+            InvocationState::RetryScheduled => "retry_scheduled",
+            InvocationState::ReconciliationRequired => "reconciliation_required",
+            InvocationState::TimedOut => "timed_out",
+            _ => {
+                return Err(RepositoryError::CorruptRow(
+                    "expired Capability recovery selected an unsupported state".to_owned(),
+                ))
+            }
+        };
+        append_scheduler_event(
+            &mut transaction,
+            &current.tenant_id,
+            &slot.event_id,
+            &slot.outbox_id,
+            "capability_invocation",
+            &invocation.invocation_id.to_string(),
+            as_i64(decision.invocation.version, "Invocation version")?,
+            Some(&invocation.run_id.to_string()),
+            "capability.lease_expired",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "disposition": disposition,
+                    "job_id": job.job_id,
+                    "lease_generation": current.lease_epoch,
+                    "observation_digest": observation_digest,
+                    "settled_quota_account_ids": quota_accounts
+                        .iter()
+                        .map(|account| account.quota_account_id.clone())
+                        .collect::<Vec<_>>(),
+                }),
+            )?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(Some(RecoveredCapabilityExecution {
+            invocation: decision.invocation,
+            job,
+        }))
+    }
+
     pub async fn claim_capability_jobs(
         &self,
         command: ClaimCapabilityJobs,

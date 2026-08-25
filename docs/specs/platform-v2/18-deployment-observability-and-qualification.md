@@ -224,6 +224,9 @@ CR-188 L1覆盖installed codec manifest closed schema、排序/数量、descript
 冻结codec/Worker manifest及claim first-winner；L3覆盖真实Capability Worker静态registry、heartbeat/kill/recovery并证明空registry、错
 codec/module/descriptor/Worker manifest在Egress/MCP调用计数仍为零时fail closed；L4覆盖镜像rollout manifest drift使readiness/claim关闭。
 
+当前分层证据：fresh PostgreSQL 16 r208已通过Native exact startup registry/Worker manifest双进程强杀、expired-lease owner recovery、
+quota settlement与non-idempotent reconciliation，关闭Native部分L3；Remote HTTP/gRPC/MCP跨进程零外部调用负向矩阵和L4 rollout仍未通过。
+
 每个production release至少覆盖：
 
 - clean baseline migration、upgrade/rollback rehearsal和backup/restore；

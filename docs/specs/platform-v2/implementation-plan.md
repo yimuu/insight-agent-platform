@@ -45,24 +45,32 @@
 
 > 2026-08-25 implementation evidence：CR-188 Rust owner与HTTP/gRPC/MCP dispatcher已冻结并重验exact installed codec、完整backend
 > descriptor及required Worker manifest；manifest/module/descriptor漂移在transport调用计数为零时fail closed。相关contract/adapter tests、
-> strict Clippy及fresh PostgreSQL 16 r200完整Capability Invocation fixture通过。Capability binary/startup manifest、真实remote protocol L3与
-> L4 rollout drift仍待完成，不能把本证据宣称为production remote backend闭环。
+> strict Clippy及fresh PostgreSQL 16 r200完整Capability Invocation fixture通过。Native binary/startup manifest已在后续r207闭合；真实remote
+> protocol L3与L4 rollout drift仍待完成，不能把本证据宣称为production remote backend闭环。
 
 > 2026-08-25 implementation evidence：Capability claim command现携带进程Worker manifest digest，PostgreSQL owner transaction在启动
 > attempt和预留quota前对照exact Deployment。fresh PostgreSQL 16 r201证明错镜像得到空claim、正确manifest仍通过完整Invocation闭环；
-> dispatcher的codec/manifest I/O前二次校验保留。binary/startup publication及跨进程L3仍待完成。
+> dispatcher的codec/manifest I/O前二次校验保留。Native binary/startup及kill/recovery在后续r207闭合，Remote仍待完成。
 
 > 2026-08-25 implementation evidence：credential-free Capability adapter request现携带Invocation已冻结的exact output schema digest，
 > 消除production adapter硬编码result schema的测试缝隙。Capability Worker新增静态`builtin.echo` Native adapter：仅接受Inline、生成新
 > nominal RunValue ID、保持content/classification并绑定exact output schema；Artifact输入fail closed。adapter/worker tests与strict Clippy
-> 通过；它只为Native真实进程L3提供受限实现，不代表remote backend或Artifact materialization完成。
+> 通过；它是Native真实进程L3使用的受限实现，不代表remote backend或Artifact materialization完成。
 
 > 2026-08-25 implementation evidence：Native Capability Worker已有独立production binary与Helm role。进程以strict JSON加canonical
 > config digest启动，要求配置枚举的唯一`builtin.echo` descriptor与镜像内静态registry逐字段一致，并把该清单摘要绑定到exact Worker
 > manifest；claim/heartbeat使用分离且总额封闭的business/critical-control PostgreSQL pool，启动前重验baseline schema，SIGTERM进入bounded
 > drain。Helm锁定digest image/config、双副本/PDB/HPA、restricted pod且只允许DNS/PostgreSQL egress；正向render与错digest、单副本、空
-> PostgreSQL CIDR、错误HPA负向fixture，以及worker tests、strict Clippy、crate-boundary scan均通过。真实多进程kill/recovery L3尚未完成，
-> 因此本证据只关闭Native production composition与静态部署边界，不关闭Phase 2 exit gate。
+> PostgreSQL CIDR、错误HPA负向fixture，以及worker tests、strict Clippy、crate-boundary scan均通过。该批只关闭Native production
+> composition与静态部署边界；真实多进程kill/recovery由随后r208证据关闭，但仍不关闭Phase 2 exit gate。
+
+> 2026-08-25 implementation evidence：Capability owner新增bounded/sharded expired-lease scanner；它在quota→Run→Node→Invocation→Job
+> 锁序内重验exact version/generation/token/expiry/payload/reservation，原子结算两条quota、清除旧lease，并只按冻结Effect、idempotency、
+> attempt/deadline把安全工作放入新物理attempt或把未知写副作用放入`ReconciliationRequired`。fresh PostgreSQL 16 r204覆盖非幂等
+> owner恢复与授权人工结算；r208使用两个真实`platform-capability-native-worker`进程、exact builtin/startup manifest与真实commit事务
+> kill窗口，证明第一个进程强杀后第二个进程从PostgreSQL恢复，旧reservation恰有两条reserve/两条settle且Job不保留quota/lease。
+> Native Capability process kill/recovery L3至此闭合；Remote HTTP/gRPC/MCP真实协议、错codec外部调用零计数的跨进程L3仍待完成，Phase 2
+> Model/Context及整链exit gate仍未关闭。
 
 > 2026-08-25 implementation evidence：ModelTurn admission现已把Plan列出的Skill/Capability slots逐项冻结进snapshot与Receipt replay，
 > 并在owner transaction用各slot的exact Selection Policy重新执行共享selector；请求投影即使引用候选集合内的合法但未选中

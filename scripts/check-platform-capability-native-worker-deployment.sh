@@ -8,6 +8,7 @@ import subprocess
 root = pathlib.Path.cwd()
 manifest = (root / "crates/platform-capability-worker/Cargo.toml").read_text(encoding="utf-8")
 source = (root / "crates/platform-capability-worker/src/main.rs").read_text(encoding="utf-8")
+library = (root / "crates/platform-capability-worker/src/lib.rs").read_text(encoding="utf-8")
 dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 chart = root / "deploy/helm/insight-platform-capability-native-worker"
 failures = []
@@ -47,6 +48,14 @@ for required in (
 for forbidden in ("reqwest", "async_nats", "aws_sdk", "SecretManager", "KmsClient"):
     if forbidden in source:
         failures.append(f"Native Capability Worker owns a forbidden external client: {forbidden}")
+for required in (
+    "recover_expired_capability_jobs",
+    "DriveExpiredCapabilityJobs",
+    "initial_scan_delay",
+    "report.recovered",
+):
+    if required not in library:
+        failures.append(f"Native Capability Worker recovery loop is missing {required}")
 
 try:
     subprocess.run(

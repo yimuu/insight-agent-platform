@@ -21,8 +21,13 @@ use insight_platform_invocations::{
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_postgres::{
-    capability_execution_repository::ClaimedCapabilityExecution,
-    repository::{HeartbeatJob, JobFence as RepositoryJobFence, PgRepository, RepositoryError},
+    capability_execution_repository::{
+        ClaimedCapabilityExecution, DriveExpiredCapabilityJobs, ExpiredCapabilityRecoverySlot,
+    },
+    repository::{
+        HeartbeatJob, JobFence as RepositoryJobFence, PgRepository, RepositoryError,
+        SafetyScanShard,
+    },
 };
 use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
@@ -287,6 +292,11 @@ pub trait CapabilityClaimAuthority: Send + Sync + 'static {
         &self,
         command: ClaimCapabilityJobs,
     ) -> Result<Vec<Self::Claim>, CapabilityClaimFailure>;
+
+    async fn recover_expired_capability_jobs(
+        &self,
+        command: DriveExpiredCapabilityJobs,
+    ) -> Result<usize, CapabilityClaimFailure>;
 }
 
 #[async_trait]
@@ -299,6 +309,16 @@ impl CapabilityClaimAuthority for PgRepository {
     ) -> Result<Vec<Self::Claim>, CapabilityClaimFailure> {
         PgRepository::claim_capability_jobs(self, command)
             .await
+            .map_err(map_repository_failure)
+    }
+
+    async fn recover_expired_capability_jobs(
+        &self,
+        command: DriveExpiredCapabilityJobs,
+    ) -> Result<usize, CapabilityClaimFailure> {
+        PgRepository::drive_expired_capability_jobs(self, command)
+            .await
+            .map(|page| page.records.len())
             .map_err(map_repository_failure)
     }
 }
@@ -508,6 +528,7 @@ fn retry_at(binding: &CapabilityClaimBinding) -> Option<DateTime<Utc>> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapabilityWorkerDriverTiming {
+    pub initial_scan_delay: Duration,
     pub safety_scan_interval: Duration,
     pub claim_failure_backoff: Duration,
     pub drain_grace: Duration,
@@ -516,6 +537,7 @@ pub struct CapabilityWorkerDriverTiming {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapabilityWorkerDriverConfig {
     requested_claim_size: usize,
+    recovery_batch_size: u16,
     claim_batch_hard_limit: ClaimBatchHardLimit,
     lease_milliseconds: u64,
     heartbeat_interval: Duration,
@@ -539,6 +561,12 @@ impl CapabilityWorkerDriverConfig {
                         "claim batch exceeds address space".to_owned(),
                     )
                 })?,
+            recovery_batch_size: u16::try_from(profile.control_data.recovery_batch.q1_default)
+                .map_err(|_| {
+                    CapabilityWorkerDriverError::InvalidConfig(
+                        "recovery batch exceeds protocol limit".to_owned(),
+                    )
+                })?,
             claim_batch_hard_limit: ClaimBatchHardLimit::from_profile(profile)
                 .map_err(CapabilityWorkerDriverError::LocalPool)?,
             lease_milliseconds: profile.run_scheduler.lease_milliseconds.q1_default,
@@ -554,6 +582,8 @@ impl CapabilityWorkerDriverConfig {
 
     fn validate(self) -> Result<(), CapabilityWorkerDriverError> {
         if self.requested_claim_size == 0
+            || self.recovery_batch_size == 0
+            || self.timing.initial_scan_delay > Duration::from_secs(60)
             || self.lease_milliseconds < 3
             || self.heartbeat_interval.is_zero()
             || self.heartbeat_interval >= Duration::from_millis(self.lease_milliseconds / 3)
@@ -680,6 +710,39 @@ where
         Ok(count)
     }
 
+    pub async fn recover_once(&self) -> Result<usize, CapabilityWorkerDriverError> {
+        let slots = (0..self.config.recovery_batch_size)
+            .map(|_| self.recovery_slot())
+            .collect::<Result<Vec<_>, _>>()?;
+        self.claim_authority
+            .recover_expired_capability_jobs(DriveExpiredCapabilityJobs {
+                work_class: self.work_class,
+                shard: SafetyScanShard::whole(),
+                after: None,
+                limit: self.config.recovery_batch_size,
+                slots,
+            })
+            .await
+            .map_err(CapabilityWorkerDriverError::Claim)
+    }
+
+    fn recovery_slot(&self) -> Result<ExpiredCapabilityRecoverySlot, CapabilityWorkerDriverError> {
+        Ok(ExpiredCapabilityRecoverySlot {
+            quota_entry_ids: self.quota_entry_ids()?,
+            event_id: self.new_id(ResourceKind::Event)?,
+            outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds {
+                convergence_job_id: self.new_id(ResourceKind::Job)?,
+                run_event_id: self.new_id(ResourceKind::Event)?,
+                run_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                leaf_node_event_id: self.new_id(ResourceKind::Event)?,
+                leaf_node_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                convergence_job_event_id: self.new_id(ResourceKind::Event)?,
+                convergence_job_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            },
+        })
+    }
+
     fn claim_slot(&self) -> Result<CapabilityClaimSlot, CapabilityWorkerDriverError> {
         Ok(CapabilityClaimSlot {
             lease_token_digest: self.new_digest()?,
@@ -777,8 +840,12 @@ where
     ) -> Result<CapabilityWorkerCycleReport, CapabilityWorkerDriverError> {
         let mut active = JoinSet::new();
         let mut report = CapabilityWorkerCycleReport::default();
-        let mut scan =
-            tokio::time::interval_at(Instant::now(), self.config.timing.safety_scan_interval);
+        let mut scan = tokio::time::interval_at(
+            Instant::now()
+                .checked_add(self.config.timing.initial_scan_delay)
+                .unwrap_or_else(Instant::now),
+            self.config.timing.safety_scan_interval,
+        );
         scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -786,8 +853,17 @@ where
                 _ = cancellation.cancelled() => break,
                 joined = active.join_next(), if !active.is_empty() => observe_join(joined, &mut report),
                 _ = self.pools.wait_for_business_capacity(), if self.pools.snapshot().business_available == 0 => {}
-                _ = scan.tick() => match self.drive_once(&mut active).await {
-                    Ok(claimed) => report.claimed = report.claimed.saturating_add(claimed as u64),
+                _ = scan.tick() => match self.recover_once().await {
+                    Ok(recovered) => {
+                        report.recovered = report.recovered.saturating_add(recovered as u64);
+                        match self.drive_once(&mut active).await {
+                            Ok(claimed) => report.claimed = report.claimed.saturating_add(claimed as u64),
+                            Err(CapabilityWorkerDriverError::Claim(
+                                CapabilityClaimFailure::Unavailable | CapabilityClaimFailure::FirstWinnerLost,
+                            )) => {}
+                            Err(failure) => return Err(failure),
+                        }
+                    }
                     Err(CapabilityWorkerDriverError::Claim(
                         CapabilityClaimFailure::Unavailable | CapabilityClaimFailure::FirstWinnerLost,
                     )) => tokio::select! {
@@ -862,6 +938,7 @@ fn observe_join(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapabilityWorkerCycleReport {
     pub claimed: u64,
+    pub recovered: u64,
     pub settled: u64,
     pub abandoned: u64,
 }
@@ -936,6 +1013,7 @@ mod tests {
             &checked_in_hard_limit_profile(),
             Duration::from_secs(60),
             CapabilityWorkerDriverTiming {
+                initial_scan_delay: Duration::ZERO,
                 safety_scan_interval: Duration::from_millis(10),
                 claim_failure_backoff: Duration::from_millis(1),
                 drain_grace: Duration::from_secs(1),
@@ -1004,6 +1082,13 @@ mod tests {
             };
             *self.observed.lock().unwrap() = Some(command);
             Ok(vec![claim])
+        }
+
+        async fn recover_expired_capability_jobs(
+            &self,
+            _command: DriveExpiredCapabilityJobs,
+        ) -> Result<usize, CapabilityClaimFailure> {
+            Ok(0)
         }
     }
 

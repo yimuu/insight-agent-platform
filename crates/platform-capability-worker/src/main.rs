@@ -67,6 +67,7 @@ struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TimingConfig {
+    initial_scan_delay_milliseconds: u64,
     receipt_ttl_milliseconds: u64,
     safety_scan_milliseconds: u64,
     claim_failure_backoff_milliseconds: u64,
@@ -142,6 +143,9 @@ impl ProcessConfig {
             &checked_in_hard_limit_profile(),
             Duration::from_millis(self.timing.receipt_ttl_milliseconds),
             CapabilityWorkerDriverTiming {
+                initial_scan_delay: Duration::from_millis(
+                    self.timing.initial_scan_delay_milliseconds,
+                ),
                 safety_scan_interval: Duration::from_millis(self.timing.safety_scan_milliseconds),
                 claim_failure_backoff: Duration::from_millis(
                     self.timing.claim_failure_backoff_milliseconds,
@@ -356,6 +360,7 @@ mod tests {
                 acquire_timeout_milliseconds: 1_000,
             },
             timing: TimingConfig {
+                initial_scan_delay_milliseconds: 0,
                 receipt_ttl_milliseconds: 60_000,
                 safety_scan_milliseconds: 100,
                 claim_failure_backoff_milliseconds: 10,

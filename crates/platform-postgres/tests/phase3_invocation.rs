@@ -22,7 +22,7 @@ use insight_platform_contracts::{
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
     QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
     RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
-    ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    ValueRef, WorkClass, WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, BackendInputRequest, CapabilityApprovalDecision,
@@ -45,7 +45,8 @@ use insight_platform_orchestrator::{
 };
 use insight_platform_postgres::{
     capability_execution_repository::{
-        ClaimedCapabilityExecution, ControlledCapabilityExecution, PreparedCapabilityExecution,
+        ClaimedCapabilityExecution, ControlledCapabilityExecution, DriveExpiredCapabilityJobs,
+        ExpiredCapabilityRecoverySlot, PreparedCapabilityExecution,
     },
     repository::JobRecord,
 };
@@ -54,13 +55,15 @@ use insight_platform_postgres::{
         DeferOrchestrationCapabilityMutationIds, DeferOrchestrationToCapabilityInvocation,
         JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewTenant,
         NewTenantPrincipal, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
-        ResolvedExpressionInput, TypedPayload, MAX_ORCHESTRATION_QUOTA_LINES,
+        ResolvedExpressionInput, SafetyScanShard, TypedPayload, MAX_ORCHESTRATION_QUOTA_LINES,
     },
     verify_schema,
 };
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{collections::BTreeMap, sync::Arc};
+use std::{path::PathBuf, process::Stdio, time::Duration as StdDuration};
 
 #[derive(Clone)]
 struct CompletingNativeAdapter {
@@ -102,6 +105,45 @@ fn digest(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
         .unwrap()
+}
+
+fn builtin_echo_module_digest() -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"insight.platform/v1/capability-worker/builtin\0");
+    hasher.update(b"builtin-echo-module");
+    let encoded = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{encoded}").parse().unwrap()
+}
+
+fn native_adapter_runtime_digest() -> Sha256Digest {
+    canonical_digest(&json!([{
+        "adapter_id": "builtin.echo",
+        "adapter_version": "1.0.0",
+        "entrypoint_id": "echo.inline",
+        "module_digest": builtin_echo_module_digest(),
+    }]))
+    .unwrap()
+    .parse()
+    .unwrap()
+}
+
+fn native_worker_manifest_digest() -> Sha256Digest {
+    canonical_digest(&json!({
+        "manifest_version": WORKER_MANIFEST_VERSION,
+        "worker_role": "capability.native",
+        "work_class": "capability_native",
+        "adapter_runtime_digest": native_adapter_runtime_digest(),
+        "protocol_version": WORKER_PROTOCOL_VERSION,
+        "max_concurrency": 2,
+        "critical_control_reserved_slots": 1
+    }))
+    .unwrap()
+    .parse()
+    .unwrap()
 }
 
 fn resume_mutations(base: u16) -> ExternalLeafResumeMutationIds {
@@ -538,7 +580,7 @@ async fn claim_one(repository: &PgRepository, tenant_id: &ResourceId, base: u16)
         .claim_capability_jobs(ClaimCapabilityJobs {
             work_class: WorkClass::CapabilityNative,
             worker_process_generation_id: worker_id.clone(),
-            worker_manifest_digest: digest('6'),
+            worker_manifest_digest: native_worker_manifest_digest(),
             limit: 1,
             lease_milliseconds: 30_000,
             slots: vec![CapabilityClaimSlot {
@@ -628,6 +670,7 @@ struct Fixture {
     uncertain_node_id: ResourceId,
     cancel_node_id: ResourceId,
     cancel_worker_node_id: ResourceId,
+    process_recovery_node_id: ResourceId,
     inline_value_id: ResourceId,
     artifact_value_id: ResourceId,
     artifact_id: ResourceId,
@@ -829,7 +872,7 @@ async fn run_capability_phase3_fixture() {
         .claim_capability_jobs(ClaimCapabilityJobs {
             work_class: WorkClass::CapabilityNative,
             worker_process_generation_id: worker_id.clone(),
-            worker_manifest_digest: digest('6'),
+            worker_manifest_digest: native_worker_manifest_digest(),
             limit: 1,
             lease_milliseconds: 30_000,
             slots: vec![claim_slot],
@@ -862,7 +905,7 @@ async fn run_capability_phase3_fixture() {
     let completion_audit = worker_audit(&fixture.tenant_id, &worker_id, 0x310, '4', '5');
     assert!(matches!(
         claimed.adapter_job(
-            digest('6'),
+            native_worker_manifest_digest(),
             completion_audit.clone(),
             claimed.quota_reservation_entry_ids.clone(),
             None,
@@ -871,7 +914,7 @@ async fn run_capability_phase3_fixture() {
     ));
     let worker_command = claimed
         .adapter_job(
-            digest('6'),
+            native_worker_manifest_digest(),
             completion_audit.clone(),
             vec![
                 id(ResourceKind::QuotaLedgerEntry, 0x313),
@@ -1279,7 +1322,10 @@ async fn run_capability_phase3_fixture() {
     assert_eq!(second_claim.claimed.job.job_id, deferred_job_id.to_string());
     assert_eq!(second_claim.claimed.job.attempt_no, 1);
     assert!(second_claim.claimed.job.lease_epoch > deferred.job.lease_epoch);
-    let resumed_execution = second_claim.claimed.adapter_execution(digest('6')).unwrap();
+    let resumed_execution = second_claim
+        .claimed
+        .adapter_execution(native_worker_manifest_digest())
+        .unwrap();
     let resumed_continuation = resumed_execution
         .continuation
         .expect("the claimed Job must recover its encrypted remote continuation");
@@ -1427,7 +1473,10 @@ async fn run_capability_phase3_fixture() {
     assert_eq!(third_claim.claimed.job.job_id, deferred_job_id.to_string());
     assert_eq!(third_claim.claimed.job.attempt_no, 1);
     assert!(third_claim.claimed.job.lease_epoch > second_claim.claimed.job.lease_epoch);
-    let input_resume_execution = third_claim.claimed.adapter_execution(digest('6')).unwrap();
+    let input_resume_execution = third_claim
+        .claimed
+        .adapter_execution(native_worker_manifest_digest())
+        .unwrap();
     let input_resume = input_resume_execution
         .continuation
         .expect("the claimed Job must recover encrypted state and the winning input RunValue");
@@ -1487,44 +1536,38 @@ async fn run_capability_phase3_fixture() {
     );
     assert_eq!(continued_completion.job.attempt_no, 1);
 
-    // Uncertain non-idempotent effects release execution quota and require an authorized manual
-    // disposition; they are never silently retried.
-    let (_, uncertain_job_id, uncertain_claim) =
+    // A killed worker's expired non-idempotent attempt releases execution quota and requires an
+    // authorized manual disposition; the safety scanner never silently retries it.
+    let (_, uncertain_job_id, _uncertain_claim) =
         admit_prepare_and_claim(&repository, &fixture, &fixture.uncertain_node_id, 0x600).await;
-    let uncertain = match execute_outcome(
-        &repository,
-        CommitCapabilityOutcome {
-            audit: worker_audit(
-                &fixture.tenant_id,
-                &uncertain_claim.worker_id,
-                0x650,
-                '8',
-                '9',
-            ),
-            invocation_id: uncertain_claim.claimed.invocation.invocation_id.clone(),
-            job_id: uncertain_job_id.clone(),
-            expected_invocation_version: uncertain_claim.claimed.invocation.version,
-            fence: uncertain_claim.fence(),
-            quota_entry_ids: vec![
-                id(ResourceKind::QuotaLedgerEntry, 0x653),
-                id(ResourceKind::QuotaLedgerEntry, 0x654),
-            ],
-            outcome: DispatchOutcome::Uncertain(CapabilityUncertainty {
-                observation_digest: digest('a'),
-                policy_path_digest: digest('b'),
-                external_identity_digest: digest('c'),
-                manual: true,
-            }),
-            resume_mutations: None,
-            failure_mutations: None,
-        },
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2",
     )
+    .bind(fixture.tenant_id.to_string())
+    .bind(uncertain_job_id.to_string())
+    .execute(&pool)
     .await
-    .unwrap()
-    {
-        CommandOutcome::Applied(record) => record,
-        CommandOutcome::Replayed(_) => panic!("fresh uncertainty replayed"),
-    };
+    .unwrap();
+    let recovered = repository
+        .drive_expired_capability_jobs(DriveExpiredCapabilityJobs {
+            work_class: WorkClass::CapabilityNative,
+            shard: SafetyScanShard::whole(),
+            after: None,
+            limit: 1,
+            slots: vec![ExpiredCapabilityRecoverySlot {
+                quota_entry_ids: vec![
+                    id(ResourceKind::QuotaLedgerEntry, 0x653),
+                    id(ResourceKind::QuotaLedgerEntry, 0x654),
+                ],
+                event_id: id(ResourceKind::Event, 0x655),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x656),
+                failure_mutations: failure_mutations(0x2600),
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.records.len(), 1);
+    let uncertain = recovered.records.into_iter().next().unwrap();
     assert_eq!(
         uncertain.invocation.state,
         insight_platform_contracts::InvocationState::ReconciliationRequired
@@ -1588,7 +1631,7 @@ async fn run_capability_phase3_fixture() {
     assert!(matches!(
         controlled.cancel_adapter_job(
             &cancel_worker_claim.claimed,
-            digest('6'),
+            native_worker_manifest_digest(),
             worker_audit(
                 &fixture.tenant_id,
                 &cancel_worker_claim.worker_id,
@@ -1607,7 +1650,7 @@ async fn run_capability_phase3_fixture() {
     let cancel_worker_command = controlled
         .cancel_adapter_job(
             &cancel_worker_claim.claimed,
-            digest('6'),
+            native_worker_manifest_digest(),
             worker_audit(
                 &fixture.tenant_id,
                 &cancel_worker_claim.worker_id,
@@ -1703,7 +1746,7 @@ async fn run_capability_phase3_fixture() {
             let cancel_worker_command = controlled
                 .cancel_adapter_job(
                     &cancel_claim.claimed,
-                    digest('6'),
+                    native_worker_manifest_digest(),
                     worker_audit(&fixture.tenant_id, &cancel_claim.worker_id, 0x780, '5', '6'),
                     vec![
                         id(ResourceKind::QuotaLedgerEntry, 0x783),
@@ -1756,7 +1799,254 @@ async fn run_capability_phase3_fixture() {
     // The deterministic cancellation path contributes one two-line reservation and one two-line
     // terminal settlement in addition to the original fixture's twenty-four ledger facts.
     assert_eq!(final_quota_totals, (2, 0, 28));
+    run_native_worker_process_recovery(&pool, &repository, &fixture).await;
     run_plan_capability_owner(&pool, &repository, &fixture).await;
+}
+
+async fn run_native_worker_process_recovery(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+) {
+    let Ok(binary) = std::env::var("PLATFORM_CAPABILITY_NATIVE_WORKER_BIN") else {
+        eprintln!(
+            "PLATFORM_CAPABILITY_NATIVE_WORKER_BIN is unset; process recovery fixture skipped"
+        );
+        return;
+    };
+    let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
+    let admitted = match execute_admit(
+        repository,
+        command_for_node(fixture, &fixture.process_recovery_node_id, 0x900),
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("process recovery admission replayed"),
+    };
+    let job_id = id(ResourceKind::Job, 0x910);
+    match execute_prepare(
+        repository,
+        PrepareCapabilityDispatch {
+            audit: audit(
+                &fixture.tenant_id,
+                &fixture.principal_id,
+                PrincipalKind::AgentRunner,
+                0x911,
+                '7',
+                '8',
+            ),
+            invocation_id: admitted.invocation_id.clone(),
+            expected_invocation_version: admitted.version,
+            job_id: job_id.clone(),
+            scheduled_at: Utc::now() - Duration::seconds(1),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(_) => {}
+        CommandOutcome::Replayed(_) => panic!("process recovery prepare replayed"),
+    }
+
+    let config = json!({
+        "schema_version": 1,
+        "worker_manifest": {
+            "manifest_version": WORKER_MANIFEST_VERSION,
+            "worker_role": "capability.native",
+            "work_class": "capability_native",
+            "adapter_runtime_digest": native_adapter_runtime_digest(),
+            "protocol_version": WORKER_PROTOCOL_VERSION,
+            "max_concurrency": 2,
+            "critical_control_reserved_slots": 1
+        },
+        "installed_adapters": [{
+            "adapter_id": "builtin.echo",
+            "adapter_version": "1.0.0",
+            "module_digest": builtin_echo_module_digest(),
+            "entrypoint_id": "echo.inline"
+        }],
+        "database": {
+            "business_max_connections": 2,
+            "critical_control_max_connections": 2,
+            "process_connection_budget": 4,
+            "acquire_timeout_milliseconds": 1000
+        },
+        "timing": {
+            "initial_scan_delay_milliseconds": 500,
+            "receipt_ttl_milliseconds": 60000,
+            "safety_scan_milliseconds": 20,
+            "claim_failure_backoff_milliseconds": 5,
+            "drain_grace_milliseconds": 1000
+        }
+    });
+    let config_digest = canonical_digest(&config).unwrap();
+    let config_path = PathBuf::from(format!(
+        "/tmp/platform-capability-native-worker-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let spawn_worker = || {
+        std::process::Command::new(&binary)
+            .env("PLATFORM_CAPABILITY_NATIVE_WORKER_CONFIG", &config_path)
+            .env(
+                "PLATFORM_CAPABILITY_NATIVE_WORKER_CONFIG_DIGEST",
+                &config_digest,
+            )
+            .env(
+                "PLATFORM_CAPABILITY_NATIVE_WORKER_DATABASE_URL",
+                &database_url,
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let mut first = spawn_worker();
+    let mut startup = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(first.stderr.take().unwrap()),
+        &mut startup,
+    )
+    .unwrap();
+    assert!(startup.contains("started generation="), "{startup}");
+    sqlx::query(
+        r#"
+        CREATE FUNCTION insight_platform.test_pause_native_capability_commit()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF OLD.state = 'running' AND NEW.state = 'succeeded'
+             AND NEW.work_class = 'capability_native' THEN
+            PERFORM pg_sleep(30);
+          END IF;
+          RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER test_pause_native_capability_commit
+        BEFORE UPDATE ON insight_platform.jobs
+        FOR EACH ROW EXECUTE FUNCTION insight_platform.test_pause_native_capability_commit()
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    wait_for_database_state(pool, &job_id, "running", StdDuration::from_secs(10)).await;
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let reservation_id: String = sqlx::query_scalar(
+        "SELECT quota_reservation_id FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("DROP TRIGGER test_pause_native_capability_commit ON insight_platform.jobs")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION insight_platform.test_pause_native_capability_commit()")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let mut second = spawn_worker();
+    wait_for_invocation_state(
+        pool,
+        &admitted.invocation_id,
+        "reconciliation_required",
+        StdDuration::from_secs(10),
+    )
+    .await;
+    second.kill().unwrap();
+    second.wait().unwrap();
+    let reservation_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.quota_ledger WHERE tenant_id = $1 AND correlation_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(reservation_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    // The process generates its reservation identity, so assert the current Job was fully
+    // released rather than coupling the fixture to an opaque process-generated ID.
+    let released: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT state, quota_reservation_id, lease_expires_at FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(released.0, "reconciliation_required");
+    assert!(released.1.is_none());
+    assert!(released.2.is_none());
+    assert_eq!(reservation_count, 4);
+    std::fs::remove_file(config_path).unwrap();
+}
+
+async fn wait_for_database_state(
+    pool: &PgPool,
+    job_id: &ResourceId,
+    expected: &str,
+    timeout: StdDuration,
+) {
+    let started = std::time::Instant::now();
+    loop {
+        let state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM insight_platform.jobs WHERE job_id = $1")
+                .bind(job_id.to_string())
+                .fetch_optional(pool)
+                .await
+                .unwrap();
+        if state.as_deref() == Some(expected) {
+            return;
+        }
+        assert!(started.elapsed() < timeout, "Job did not reach {expected}");
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+}
+
+async fn wait_for_invocation_state(
+    pool: &PgPool,
+    invocation_id: &ResourceId,
+    expected: &str,
+    timeout: StdDuration,
+) {
+    let started = std::time::Instant::now();
+    loop {
+        let state: Option<String> = sqlx::query_scalar(
+            "SELECT state FROM insight_platform.invocations WHERE invocation_id = $1",
+        )
+        .bind(invocation_id.to_string())
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        if state.as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "Invocation did not reach {expected}"
+        );
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
 }
 
 fn capability_defer_mutations(base: u16) -> DeferOrchestrationCapabilityMutationIds {
@@ -2628,10 +2918,10 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let implementation_exact =
         ExactVersionRef::new(implementation_revision.clone(), digest('4')).unwrap();
     let native_contract = CapabilityBackendContract::Native(NativeCapabilityContract {
-        adapter_id: "builtin.fixture".to_owned(),
+        adapter_id: "builtin.echo".to_owned(),
         adapter_version: "1.0.0".to_owned(),
-        module_digest: digest('7'),
-        entrypoint_id: "fixture.invoke".to_owned(),
+        module_digest: builtin_echo_module_digest(),
+        entrypoint_id: "echo.inline".to_owned(),
         worker_protocol_version: WORKER_PROTOCOL_VERSION,
     });
     let native_contract_digest = native_contract.canonical_digest().unwrap();
@@ -2683,8 +2973,8 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         implementation: implementation_exact,
         interface: interface_exact,
         backend: CapabilityBackendBinding::Native {
-            worker_manifest_digest: digest('6'),
-            adapter_module_digest: digest('7'),
+            worker_manifest_digest: native_worker_manifest_digest(),
+            adapter_module_digest: builtin_echo_module_digest(),
         },
         secret_bindings: vec![],
         policies: vec![policy_exact.clone()],
@@ -2804,6 +3094,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let uncertain_node_id = id(ResourceKind::NodeExecution, 0x3b);
     let cancel_node_id = id(ResourceKind::NodeExecution, 0x3c);
     let cancel_worker_node_id = id(ResourceKind::NodeExecution, 0x3d);
+    let process_recovery_node_id = id(ResourceKind::NodeExecution, 0x3f);
     let inline_value_id = id(ResourceKind::RunValue, 0x34);
     let artifact_value_id = id(ResourceKind::RunValue, 0x35);
     let artifact_id = id(ResourceKind::Artifact, 0x36);
@@ -2901,6 +3192,11 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             &approval_cancel_node_id,
             "capability-approval-cancel",
             7_i32,
+        ),
+        (
+            &process_recovery_node_id,
+            "capability-process-recovery",
+            8_i32,
         ),
     ] {
         sqlx::query(
@@ -3001,6 +3297,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         uncertain_node_id,
         cancel_node_id,
         cancel_worker_node_id,
+        process_recovery_node_id,
         inline_value_id,
         artifact_value_id,
         artifact_id,

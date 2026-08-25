@@ -10,10 +10,11 @@ use insight_platform_contracts::{
 };
 use insight_platform_jobs::{
     decide_claim, decide_claim_continuation, decide_cleanup_reconciliation,
-    decide_cleanup_terminal, decide_observation_update, decide_owner_cancelling,
-    decide_owner_reconciliation, decide_owner_terminal, decide_reconciliation, decide_resume,
-    decide_retry, decide_start, decide_terminal, decide_wait, decide_wake, JobFence, JobOwnerRef,
-    JobProjection, LeasePolicy, WakeContract, WakeKind, WakeSource,
+    decide_cleanup_terminal, decide_expired_lease, decide_observation_update,
+    decide_owner_cancelling, decide_owner_reconciliation, decide_owner_terminal,
+    decide_reconciliation, decide_resume, decide_retry, decide_start, decide_terminal, decide_wait,
+    decide_wake, JobFence, JobOwnerRef, JobProjection, LeasePolicy, WakeContract, WakeKind,
+    WakeSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1010,6 +1011,111 @@ pub struct StartedCapabilityDispatch {
     pub invocation: CapabilityInvocationRecord,
     pub job: JobProjection,
     pub job_payload: CapabilityJobPayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredCapabilityDispatch {
+    pub invocation: CapabilityInvocationRecord,
+    pub job: JobProjection,
+    pub job_payload: CapabilityJobPayload,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpiredCapabilityLeaseObservation {
+    pub observed_job_version: u64,
+    pub observed_lease_generation: u64,
+    pub retry_at: Option<DateTime<Utc>>,
+    pub observation_digest: Sha256Digest,
+}
+
+/// Applies the logical owner policy after a started Capability execution loses its lease.
+/// Safe/replayable work receives a new physical attempt; an expired deadline is terminal; and
+/// every outcome that might have produced an unproven write is fenced into reconciliation.
+pub fn decide_expired_dispatch(
+    current_invocation: &CapabilityInvocationRecord,
+    current_job: &JobProjection,
+    current_job_payload: &CapabilityJobPayload,
+    database_now: DateTime<Utc>,
+    observation: ExpiredCapabilityLeaseObservation,
+) -> Result<RecoveredCapabilityDispatch, InvocationError> {
+    current_invocation.validate()?;
+    current_job_payload.validate_for(current_invocation, current_job)?;
+    if current_invocation.state != InvocationState::InFlight
+        || current_job.state != JobState::Running
+        || current_invocation.payload.current_job_id.as_ref() != Some(&current_job.job_id)
+    {
+        return Err(InvocationError::FirstWinnerLost);
+    }
+    let mut invocation = current_invocation.clone();
+    let mut job_payload = current_job_payload.clone();
+    let replayable = current_invocation.payload.admission.effect.risk_rank()
+        < Effect::IdempotentWrite.risk_rank()
+        || current_invocation.payload.admission.idempotency
+            != insight_platform_contracts::CapabilityIdempotencyKind::None;
+    let job = if database_now >= current_job.deadline {
+        invocation.state = InvocationState::TimedOut;
+        invocation.terminal_at = Some(database_now);
+        decide_expired_lease(
+            current_job,
+            observation.observed_job_version,
+            observation.observed_lease_generation,
+            database_now,
+            JobState::TimedOut,
+            None,
+        )
+    } else if replayable
+        && current_job.attempt_count < current_job.attempt_limit
+        && observation.retry_at.is_some()
+    {
+        let retry_at = observation.retry_at.expect("retry presence checked");
+        invocation.state = InvocationState::RetryScheduled;
+        invocation.retry_at = Some(retry_at);
+        decide_expired_lease(
+            current_job,
+            observation.observed_job_version,
+            observation.observed_lease_generation,
+            database_now,
+            JobState::RetryScheduled,
+            Some(retry_at),
+        )
+    } else {
+        invocation.state = InvocationState::ReconciliationRequired;
+        invocation.payload.reconciliation = Some(super::CapabilityReconciliationSnapshot {
+            schema_version: 1,
+            effect: invocation.payload.admission.effect,
+            last_job_generation: current_job.lease_generation,
+            external_identity_digest: current_job_payload.external_identity_digest.clone(),
+            observation_digest: observation.observation_digest.clone(),
+            policy_path_digest: invocation
+                .payload
+                .admission
+                .policies
+                .canonical_digest
+                .clone(),
+            manual: true,
+        });
+        job_payload.physical_outcome = Some(CapabilityPhysicalOutcomeEvidence::Uncertain {
+            observation_digest: observation.observation_digest,
+        });
+        decide_expired_lease(
+            current_job,
+            observation.observed_job_version,
+            observation.observed_lease_generation,
+            database_now,
+            JobState::ReconciliationRequired,
+            None,
+        )
+    }
+    .map_err(|_| InvocationError::FirstWinnerLost)?;
+    invocation.version = increment(invocation.version)?;
+    invocation.updated_at = database_now;
+    invocation.validate()?;
+    job_payload.validate_for(&invocation, &job)?;
+    Ok(RecoveredCapabilityDispatch {
+        invocation,
+        job,
+        job_payload,
+    })
 }
 
 pub fn decide_start_dispatch(
@@ -3681,6 +3787,77 @@ mod tests {
             cleanup_deadline + Duration::milliseconds(1),
         )
         .is_err());
+    }
+
+    #[test]
+    fn expired_dispatch_retries_only_replayable_effects() {
+        let now = DateTime::parse_from_rfc3339("2026-08-10T04:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (invocation, job, payload, _) =
+            prepared_and_started(now, Effect::ReadOnly, CapabilityIdempotencyKind::Intrinsic);
+        let expired_at = job.lease.as_ref().unwrap().expires_at;
+        let retry_at = expired_at + Duration::milliseconds(100);
+        let recovered = decide_expired_dispatch(
+            &invocation,
+            &job,
+            &payload,
+            expired_at,
+            ExpiredCapabilityLeaseObservation {
+                observed_job_version: job.version,
+                observed_lease_generation: job.lease_generation,
+                retry_at: Some(retry_at),
+                observation_digest: hash('8'),
+            },
+        )
+        .unwrap();
+        assert_eq!(recovered.invocation.state, InvocationState::RetryScheduled);
+        assert_eq!(recovered.invocation.retry_at, Some(retry_at));
+        assert_eq!(recovered.job.state, JobState::RetryScheduled);
+        assert!(recovered.job.lease.is_none());
+
+        let (unsafe_invocation, unsafe_job, unsafe_payload, _) = prepared_and_started(
+            now,
+            Effect::NonIdempotentWrite,
+            CapabilityIdempotencyKind::None,
+        );
+        let unsafe_expired_at = unsafe_job.lease.as_ref().unwrap().expires_at;
+        let uncertain = decide_expired_dispatch(
+            &unsafe_invocation,
+            &unsafe_job,
+            &unsafe_payload,
+            unsafe_expired_at,
+            ExpiredCapabilityLeaseObservation {
+                observed_job_version: unsafe_job.version,
+                observed_lease_generation: unsafe_job.lease_generation,
+                retry_at: Some(unsafe_expired_at + Duration::milliseconds(100)),
+                observation_digest: hash('9'),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            uncertain.invocation.state,
+            InvocationState::ReconciliationRequired
+        );
+        assert_eq!(uncertain.job.state, JobState::ReconciliationRequired);
+        assert!(uncertain.job.lease.is_none());
+
+        let timed_out = decide_expired_dispatch(
+            &invocation,
+            &job,
+            &payload,
+            invocation.deadline,
+            ExpiredCapabilityLeaseObservation {
+                observed_job_version: job.version,
+                observed_lease_generation: job.lease_generation,
+                retry_at: None,
+                observation_digest: hash('a'),
+            },
+        )
+        .unwrap();
+        assert_eq!(timed_out.invocation.state, InvocationState::TimedOut);
+        assert_eq!(timed_out.job.state, JobState::TimedOut);
+        assert!(timed_out.job.lease.is_none());
     }
 
     #[test]

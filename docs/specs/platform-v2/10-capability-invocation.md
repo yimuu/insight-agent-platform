@@ -193,5 +193,6 @@ fault/isolated-capacity tests分层运行。一个低层fixture不同时声明�
 
 ## 14. 未决问题
 
-CR-181 cross-review已确认Plan v4 dispatch/result binding并恢复Accepted；实现与L2/L3 evidence仍待完成。
+CR-181 cross-review已确认Plan v4 dispatch/result binding并恢复Accepted。fresh PostgreSQL 16 r208已通过Native exact manifest双进程
+kill/expired-lease recovery、quota settlement与non-idempotent reconciliation L3；Remote protocol、Model/Context整链L3及L4～L6仍待完成。
 CR-188进一步确认remote installed codec与required Worker manifest是Invocation冻结闭包，不能由Worker运行时选择或caller覆盖。
