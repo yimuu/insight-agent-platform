@@ -78,7 +78,7 @@ use uuid::Uuid;
 
 const MCP_AUTHORIZATION_RESOURCE_KIND: &str = "mcp_authorization_binding";
 const MCP_DISCOVERY_RESOURCE_KIND: &str = "mcp_discovery_snapshot";
-const CONTEXT_SUBSCRIPTION_REFRESH_MAX_CLAIM_BATCH: usize = 64;
+pub const CONTEXT_SUBSCRIPTION_REFRESH_MAX_BATCH: u16 = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimableContextSubscriptionRefreshJob {
@@ -141,7 +141,7 @@ impl ClaimContextSubscriptionRefreshJobs {
     fn validate(&self) -> Result<(), RepositoryError> {
         if self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.slots.is_empty()
-            || self.slots.len() > CONTEXT_SUBSCRIPTION_REFRESH_MAX_CLAIM_BATCH
+            || self.slots.len() > usize::from(CONTEXT_SUBSCRIPTION_REFRESH_MAX_BATCH)
             || self.lease_policy.requested_milliseconds == 0
             || self.lease_policy.requested_milliseconds
                 > self.lease_policy.hard_maximum_milliseconds
@@ -206,7 +206,7 @@ impl DriveExpiredContextSubscriptionRefreshJobs {
             || self.shard_count > 256
             || self.shard_index >= self.shard_count
             || self.limit == 0
-            || usize::from(self.limit) > CONTEXT_SUBSCRIPTION_REFRESH_MAX_CLAIM_BATCH
+            || self.limit > CONTEXT_SUBSCRIPTION_REFRESH_MAX_BATCH
             || self.slots.len() != usize::from(self.limit)
             || self.retry_backoff_milliseconds == 0
             || self.retry_backoff_milliseconds > 3_600_000
@@ -2145,7 +2145,7 @@ impl PgRepository {
         worker_manifest_digest: &Sha256Digest,
         limit: u16,
     ) -> Result<Vec<ClaimableContextSubscriptionRefreshJob>, RepositoryError> {
-        if limit == 0 || usize::from(limit) > CONTEXT_SUBSCRIPTION_REFRESH_MAX_CLAIM_BATCH {
+        if limit == 0 || limit > CONTEXT_SUBSCRIPTION_REFRESH_MAX_BATCH {
             return Err(RepositoryError::InvalidInput(
                 "Context subscription refresh scan limit is invalid".to_owned(),
             ));

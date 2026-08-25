@@ -233,4 +233,9 @@ r277新增独立`platform-mcp-resource-host` production entrypoint，组合Postg
 Egress Broker production composition也安装同一Resource Refresh connector。独立subscription Context Worker entrypoint只以Context Worker audience
 调用该Host。all-target/既有process L3/strict Clippy通过；尚未render Helm和执行subscription kill-window，故L3仍未关闭。
 
+r279在fresh PostgreSQL 16上以production Resource Host和subscription Context Worker进程覆盖两个崩溃窗口：首次Egress dispatch后终止Host及
+Worker并以expired lease恢复；第二次response后暂停Job terminal commit并终止Worker；第三个Worker完成同一ReadOnly Job，三次远端尝试只产生
+一个completed Event。Egress Broker在该fixture中通过真实mTLS运行于测试进程内，尚不是独立OS进程，且未连接真实Streamable HTTP fake server；
+因此只关闭Host/Context process recovery切片，完整subscription protocol L3仍须补齐独立Egress、真实list/read wire及pre-dispatch零I/O矩阵。
+
 首版remote Streamable HTTP合同无未决设计问题。

@@ -28,6 +28,7 @@ use insight_platform_postgres::{
         ClaimContextSubscriptionRefreshJobs, ClaimedContextSubscriptionRefresh,
         CommitContextSubscriptionRefresh, ContextSubscriptionRefreshClaimSlot,
         ContextSubscriptionRefreshRecoverySlot, DriveExpiredContextSubscriptionRefreshJobs,
+        CONTEXT_SUBSCRIPTION_REFRESH_MAX_BATCH,
     },
     repository::{HeartbeatJob, JobFence as RepositoryJobFence, PgRepository, RepositoryError},
 };
@@ -655,7 +656,11 @@ impl SubscriptionContextWorkerDriver {
     }
 
     pub async fn recover_once(&self) -> Result<usize, ContextWorkerError> {
-        let slots = (0..self.config.recovery_size)
+        let recovery_size = self
+            .config
+            .recovery_size
+            .min(CONTEXT_SUBSCRIPTION_REFRESH_MAX_BATCH);
+        let slots = (0..recovery_size)
             .map(|_| {
                 Ok(ContextSubscriptionRefreshRecoverySlot {
                     quota_settlement_entry_id: new_id(ResourceKind::QuotaLedgerEntry)?,
@@ -669,7 +674,7 @@ impl SubscriptionContextWorkerDriver {
                 DriveExpiredContextSubscriptionRefreshJobs {
                     shard_index: 0,
                     shard_count: 1,
-                    limit: self.config.recovery_size,
+                    limit: recovery_size,
                     retry_backoff_milliseconds: u64::try_from(
                         self.config.timing.failure_backoff.as_millis(),
                     )

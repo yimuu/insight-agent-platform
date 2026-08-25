@@ -1,4 +1,10 @@
 use chrono::{DateTime, Duration, Utc};
+use async_trait::async_trait;
+use insight_platform_capability_adapters::{
+    CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
+    GrpcNetworkTransport, GrpcTransportRequest, GrpcTransportResponse, HttpNetworkTransport,
+    HttpTransportRequest, HttpTransportResponse,
+};
 use insight_platform_artifacts::ArtifactReferenceSnapshot;
 use insight_platform_context::{
     AdmitContextSubscriptionRefresh, ContextSubscriptionAdmissionAudit,
@@ -27,9 +33,14 @@ use insight_platform_contracts::{
     SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument, SandboxResourcePolicyDocument,
     SandboxRuntimeFamily, SandboxSecretDeliveryMode, SandboxSecretResolutionPolicyDocument,
     SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, WorkClass, MCP_PROTOCOL_BASELINE,
+    TenantPrincipalPayload, ValidationSummary, WorkClass, WorkerManifest, MCP_PROTOCOL_BASELINE,
+    WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_jobs::{JobFence as DomainJobFence, LeasePolicy};
+use insight_platform_egress_rpc::{
+    proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
+    EgressCallerWorkloadIdentity, EgressInternalRpcLimits, MCP_HOST_WORKLOAD_IDENTITY,
+};
 use insight_platform_mcp_host::{
     CompleteMcpSubscriptionReconcile, CompleteMcpSubscriptionRefresh,
     ContextSubscriptionRefreshResolver, CreateMcpDiscoveryOperation, CreateMcpResourceSubscription,
@@ -42,6 +53,17 @@ use insight_platform_mcp_host::{
     NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord,
     RecoverDueMcpSubscription, ReportMcpSubscriptionTransportTermination,
     SaveMcpSubscriptionSession, WakeMcpSubscriptionReconcile,
+    McpResourceRefreshConnector, McpResourceRefreshTransportEvidence,
+    McpResourceRefreshTransportRequest, McpTransportFailure,
+};
+use insight_platform_model_adapters::{
+    ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
+    ModelProviderWireConnector, ModelProviderWireProtocol, ModelProviderWireRequest,
+    ModelProviderWireStream,
+};
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose, SanType,
 };
 use insight_platform_postgres::{
     mcp_repository::{
@@ -58,7 +80,19 @@ use insight_platform_postgres::{
 };
 use insight_platform_sandbox::SandboxExecutionPolicyClosure;
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    process::{Child, Stdio},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration as StdDuration,
+};
+use tokio::sync::Notify;
+use tonic::transport::server::TcpIncoming;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     format!(
@@ -164,7 +198,10 @@ fn protocol_document() -> McpProtocolPolicyDocument {
             subscriptions: true,
         },
         experimental_features: vec![],
-        method_limits: BTreeMap::from([(PublishedMcpMethod::ResourcesRead, method_limits())]),
+        method_limits: BTreeMap::from([
+            (PublishedMcpMethod::ResourcesList, method_limits()),
+            (PublishedMcpMethod::ResourcesRead, method_limits()),
+        ]),
         metadata_policy: McpMetadataPolicy {
             maximum_server_name_bytes: 128,
             maximum_server_version_bytes: 64,
@@ -173,6 +210,180 @@ fn protocol_document() -> McpProtocolPolicyDocument {
             maximum_description_bytes: 8_192,
             maximum_icon_bytes: 1_048_576,
         },
+    }
+}
+
+fn context_worker_manifest() -> WorkerManifest {
+    WorkerManifest {
+        manifest_version: WORKER_MANIFEST_VERSION,
+        worker_role: "context-worker".to_owned(),
+        work_class: WorkClass::Context,
+        adapter_runtime_digest: named_digest("context-subscription-runtime"),
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        max_concurrency: 4,
+        critical_control_reserved_slots: 1,
+    }
+}
+
+fn context_worker_manifest_digest() -> Sha256Digest {
+    context_worker_manifest().canonical_digest().unwrap()
+}
+
+struct EmptyModel;
+
+#[async_trait]
+impl ModelProviderWireConnector for EmptyModel {
+    async fn open(
+        &self,
+        _request: ModelProviderWireRequest,
+    ) -> Result<ModelProviderWireStream, ModelAdapterFailure> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    async fn cancel(
+        &self,
+        _protocol: ModelProviderWireProtocol,
+        _request: ModelAdapterCancelRequest,
+    ) -> Result<ModelAdapterCancelOutcome, ModelAdapterFailure> {
+        Ok(ModelAdapterCancelOutcome::Unsupported)
+    }
+}
+
+struct EmptyHttp;
+
+#[async_trait]
+impl HttpNetworkTransport for EmptyHttp {
+    async fn round_trip(
+        &self,
+        _request: HttpTransportRequest,
+    ) -> Result<HttpTransportResponse, CapabilityAdapterFailure> {
+        unreachable!()
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Accepted)
+    }
+}
+
+struct EmptyGrpc;
+
+#[async_trait]
+impl GrpcNetworkTransport for EmptyGrpc {
+    async fn unary(
+        &self,
+        _request: GrpcTransportRequest,
+    ) -> Result<GrpcTransportResponse, CapabilityAdapterFailure> {
+        unreachable!()
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Accepted)
+    }
+}
+
+struct ProcessRefreshConnector {
+    calls: AtomicUsize,
+    first_started: Notify,
+    second_started: Notify,
+    second_release: Notify,
+}
+
+#[async_trait]
+impl McpResourceRefreshConnector for ProcessRefreshConnector {
+    async fn refresh_resources(
+        &self,
+        request: McpResourceRefreshTransportRequest,
+    ) -> Result<McpResourceRefreshTransportEvidence, McpTransportFailure> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            self.first_started.notify_one();
+            tokio::time::sleep(StdDuration::from_secs(30)).await;
+        } else if call == 1 {
+            self.second_started.notify_one();
+            self.second_release.notified().await;
+        }
+        Ok(McpResourceRefreshTransportEvidence {
+            schema_version: request.schema_version,
+            execution_identity_digest: request.execution_identity_digest,
+            request_digest: request.request_digest,
+            response_digest: named_digest(&format!("process-refresh-response-{call}")),
+            resource_set_digest: named_digest("process-refresh-resource-set"),
+            resource_count: 1,
+            item_count: 2,
+            byte_count: 512,
+            remote_revision: Some(format!("process-revision-{call}")),
+            cursor: None,
+            observed_at: Utc::now(),
+        })
+    }
+}
+
+struct ProcessTlsFixture {
+    ca: String,
+    egress_server_cert: String,
+    egress_server_key: String,
+    resource_host_server_cert: String,
+    resource_host_server_key: String,
+    resource_host_client_cert: String,
+    resource_host_client_key: String,
+    context_worker_client_cert: String,
+    context_worker_client_key: String,
+}
+
+fn process_tls_fixture() -> ProcessTlsFixture {
+    let mut params = CertificateParams::default();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let ca = CertifiedIssuer::self_signed(params, KeyPair::generate().unwrap()).unwrap();
+    let issue = |sans, usage| {
+        let mut params = CertificateParams::default();
+        params.subject_alt_names = sans;
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![usage];
+        let key = KeyPair::generate().unwrap();
+        let certificate = params.signed_by(&key, &ca).unwrap();
+        (certificate.pem(), key.serialize_pem())
+    };
+    let (egress_server_cert, egress_server_key) = issue(
+        vec![SanType::DnsName("egress.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let (resource_host_server_cert, resource_host_server_key) = issue(
+        vec![SanType::DnsName("resource-host.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let (resource_host_client_cert, resource_host_client_key) = issue(
+        vec![SanType::URI(MCP_HOST_WORKLOAD_IDENTITY.try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
+    let (context_worker_client_cert, context_worker_client_key) = issue(
+        vec![SanType::URI(
+            insight_platform_egress_rpc::CONTEXT_WORKER_WORKLOAD_IDENTITY
+                .try_into()
+                .unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
+    ProcessTlsFixture {
+        ca: ca.pem(),
+        egress_server_cert,
+        egress_server_key,
+        resource_host_server_cert,
+        resource_host_server_key,
+        resource_host_client_cert,
+        resource_host_client_key,
+        context_worker_client_cert,
+        context_worker_client_key,
     }
 }
 
@@ -1056,7 +1267,7 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
     let context_closure = ContextDeploymentClosure {
         implementation: implementation_revision,
         interface: interface_revision.clone(),
-        required_worker_manifest_digest: named_digest("context-worker-manifest"),
+        required_worker_manifest_digest: context_worker_manifest_digest(),
         backend: ContextBackendBinding::McpResources {
             mcp_deployment: mcp_deployment.clone(),
             discovery_snapshot_id: snapshot.snapshot_id.clone(),
@@ -1377,6 +1588,453 @@ fn context_reconcile_admission(
             correlation_digest: named_digest(&format!("context-reconcile-correlation-{base}")),
         },
     }
+}
+
+async fn monitor_process_stderr(
+    stderr: std::process::ChildStderr,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let (startup_tx, startup_rx) = tokio::sync::oneshot::channel();
+    let monitor = tokio::task::spawn_blocking(move || {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut reader, &mut line).unwrap();
+        startup_tx.send(line).unwrap();
+        loop {
+            let mut line = String::new();
+            if std::io::BufRead::read_line(&mut reader, &mut line).unwrap() == 0 {
+                break;
+            }
+            eprint!("{line}");
+        }
+    });
+    (startup_rx.await.unwrap(), monitor)
+}
+
+fn available_address() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    address
+}
+
+struct ProcessFixtureFiles {
+    prefix: String,
+    ca: PathBuf,
+    resource_host_server_cert: PathBuf,
+    resource_host_server_key: PathBuf,
+    resource_host_client_cert: PathBuf,
+    resource_host_client_key: PathBuf,
+    context_worker_client_cert: PathBuf,
+    context_worker_client_key: PathBuf,
+}
+
+impl ProcessFixtureFiles {
+    fn new(tls: &ProcessTlsFixture) -> Self {
+        let prefix = format!(
+            "/private/tmp/platform-subscription-process-l3-{}",
+            std::process::id()
+        );
+        let path = |suffix: &str| PathBuf::from(format!("{prefix}-{suffix}"));
+        let files = Self {
+            prefix: prefix.clone(),
+            ca: path("ca.pem"),
+            resource_host_server_cert: path("resource-host.pem"),
+            resource_host_server_key: path("resource-host-key.pem"),
+            resource_host_client_cert: path("resource-host-client.pem"),
+            resource_host_client_key: path("resource-host-client-key.pem"),
+            context_worker_client_cert: path("context-worker-client.pem"),
+            context_worker_client_key: path("context-worker-client-key.pem"),
+        };
+        for (path, contents) in [
+            (&files.ca, &tls.ca),
+            (&files.resource_host_server_cert, &tls.resource_host_server_cert),
+            (&files.resource_host_server_key, &tls.resource_host_server_key),
+            (&files.resource_host_client_cert, &tls.resource_host_client_cert),
+            (&files.resource_host_client_key, &tls.resource_host_client_key),
+            (&files.context_worker_client_cert, &tls.context_worker_client_cert),
+            (&files.context_worker_client_key, &tls.context_worker_client_key),
+        ] {
+            std::fs::write(path, contents).unwrap();
+        }
+        files
+    }
+
+    fn write_config(&self, name: &str, value: &serde_json::Value) -> (PathBuf, String) {
+        let path = PathBuf::from(format!("{}-{name}.json", self.prefix));
+        std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+        (path, canonical_digest(value).unwrap())
+    }
+}
+
+struct ResourceHostSpawn<'a> {
+    binary: &'a str,
+    database_url: &'a str,
+    files: &'a ProcessFixtureFiles,
+    config_path: &'a PathBuf,
+    config_digest: &'a str,
+}
+
+fn spawn_resource_host(input: ResourceHostSpawn<'_>) -> Child {
+    std::process::Command::new(input.binary)
+        .env("PLATFORM_MCP_RESOURCE_HOST_CONFIG", input.config_path)
+        .env(
+            "PLATFORM_MCP_RESOURCE_HOST_CONFIG_DIGEST",
+            input.config_digest,
+        )
+        .env("PLATFORM_MCP_RESOURCE_HOST_DATABASE_URL", input.database_url)
+        .env(
+            "PLATFORM_MCP_RESOURCE_HOST_SERVER_CLIENT_CA_PATH",
+            &input.files.ca,
+        )
+        .env(
+            "PLATFORM_MCP_RESOURCE_HOST_SERVER_CERT_PATH",
+            &input.files.resource_host_server_cert,
+        )
+        .env(
+            "PLATFORM_MCP_RESOURCE_HOST_SERVER_KEY_PATH",
+            &input.files.resource_host_server_key,
+        )
+        .env("PLATFORM_MCP_RESOURCE_HOST_EGRESS_CA_PATH", &input.files.ca)
+        .env(
+            "PLATFORM_MCP_RESOURCE_HOST_EGRESS_CERT_PATH",
+            &input.files.resource_host_client_cert,
+        )
+        .env(
+            "PLATFORM_MCP_RESOURCE_HOST_EGRESS_KEY_PATH",
+            &input.files.resource_host_client_key,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+struct ContextWorkerSpawn<'a> {
+    binary: &'a str,
+    database_url: &'a str,
+    files: &'a ProcessFixtureFiles,
+    config_path: &'a PathBuf,
+    config_digest: &'a str,
+}
+
+fn spawn_subscription_context_worker(input: ContextWorkerSpawn<'_>) -> Child {
+    std::process::Command::new(input.binary)
+        .env("PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_CONFIG", input.config_path)
+        .env(
+            "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_CONFIG_DIGEST",
+            input.config_digest,
+        )
+        .env(
+            "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_DATABASE_URL",
+            input.database_url,
+        )
+        .env(
+            "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_CA_PATH",
+            &input.files.ca,
+        )
+        .env(
+            "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_CERT_PATH",
+            &input.files.context_worker_client_cert,
+        )
+        .env(
+            "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_KEY_PATH",
+            &input.files.context_worker_client_key,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+async fn wait_for_context_job_state(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    job_id: &ResourceId,
+    expected: &str,
+    timeout: StdDuration,
+) {
+    let started = std::time::Instant::now();
+    loop {
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if state == expected {
+            return;
+        }
+        assert!(started.elapsed() < timeout, "Job did not reach {expected}; current={state}");
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+}
+
+async fn install_context_commit_pause(pool: &PgPool) {
+    sqlx::query(
+        r#"
+        CREATE FUNCTION insight_platform.test_pause_subscription_context_commit()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF OLD.state = 'running' AND NEW.state = 'succeeded'
+             AND NEW.work_class = 'context'
+             AND NEW.owner_kind = 'mcp_operation' THEN
+            PERFORM pg_sleep(30);
+          END IF;
+          RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_pause_subscription_context_commit BEFORE UPDATE ON insight_platform.jobs FOR EACH ROW EXECUTE FUNCTION insight_platform.test_pause_subscription_context_commit()",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn remove_context_commit_pause(pool: &PgPool) {
+    sqlx::query("DROP TRIGGER test_pause_subscription_context_commit ON insight_platform.jobs")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION insight_platform.test_pause_subscription_context_commit()")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn run_subscription_process_l3(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+    active_subscription: &McpSubscriptionRecord,
+    database_url: &str,
+    resource_host_binary: &str,
+    context_worker_binary: &str,
+) {
+    let admission = context_reconcile_admission(active_subscription, 0x360);
+    let accepted = repository
+        .admit_context_subscription_refresh(admission)
+        .await
+        .unwrap();
+    wait_for_context_job_state(
+        pool,
+        &fixture.tenant_id,
+        &accepted.job_id,
+        "ready",
+        StdDuration::from_secs(5),
+    )
+    .await;
+
+    let tls = process_tls_fixture();
+    let files = ProcessFixtureFiles::new(&tls);
+    let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let egress_address = incoming.local_addr().unwrap();
+    let connector = Arc::new(ProcessRefreshConnector {
+        calls: AtomicUsize::new(0),
+        first_started: Notify::new(),
+        second_started: Notify::new(),
+        second_release: Notify::new(),
+    });
+    let egress_limits = EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap();
+    let egress_service = EgressBrokerServiceServer::new(
+        EgressBrokerGrpcService::new(
+            Arc::new(EmptyModel),
+            Arc::new(EmptyHttp),
+            Arc::new(EmptyGrpc),
+            egress_limits,
+        )
+        .with_mcp_resource_refresh(connector.clone()),
+    );
+    let egress_service = tonic::service::interceptor::InterceptedService::new(
+        egress_service,
+        EgressCallerWorkloadIdentity,
+    );
+    let (egress_shutdown, egress_shutdown_rx) = tokio::sync::oneshot::channel();
+    let egress_server = tokio::spawn(
+        Server::builder()
+            .tls_config(
+                ServerTlsConfig::new()
+                    .identity(Identity::from_pem(
+                        &tls.egress_server_cert,
+                        &tls.egress_server_key,
+                    ))
+                    .client_ca_root(Certificate::from_pem(tls.ca.clone())),
+            )
+            .unwrap()
+            .add_service(egress_service)
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = egress_shutdown_rx.await;
+            }),
+    );
+
+    let resource_host_address = available_address();
+    let resource_host_observability = available_address();
+    let resource_host_config = serde_json::json!({
+        "schema_version": 1,
+        "listen_address": resource_host_address.to_string(),
+        "observability_listen_address": resource_host_observability.to_string(),
+        "maximum_rpc_message_bytes": 1048576,
+        "database_max_connections": 4,
+        "database_acquire_timeout_milliseconds": 5000,
+        "egress": {
+            "endpoint": format!("https://{egress_address}/"),
+            "tls_server_name": "egress.test",
+            "connect_timeout_milliseconds": 1000,
+            "request_timeout_milliseconds": 30000,
+            "maximum_rpc_metadata_bytes": 65536,
+            "maximum_rpc_payload_bytes": 1048576
+        },
+        "drain_grace_milliseconds": 1000
+    });
+    let (resource_host_config_path, resource_host_config_digest) =
+        files.write_config("resource-host", &resource_host_config);
+    let context_worker_config = serde_json::json!({
+        "schema_version": 1,
+        "observability_listen_address": available_address().to_string(),
+        "worker_manifest": context_worker_manifest(),
+        "database_max_connections": 4,
+        "database_acquire_timeout_milliseconds": 5000,
+        "receipt_ttl_seconds": 3600,
+        "scan_interval_milliseconds": 20,
+        "failure_backoff_milliseconds": 5,
+        "drain_grace_milliseconds": 1000,
+        "host": {
+            "endpoint": format!("https://{resource_host_address}/"),
+            "tls_server_name": "resource-host.test",
+            "connect_timeout_milliseconds": 1000,
+            "request_timeout_milliseconds": 30000,
+            "maximum_rpc_message_bytes": 1048576
+        }
+    });
+    let (context_worker_config_path, context_worker_config_digest) =
+        files.write_config("context-worker", &context_worker_config);
+
+    let spawn_host = || {
+        spawn_resource_host(ResourceHostSpawn {
+            binary: resource_host_binary,
+            database_url,
+            files: &files,
+            config_path: &resource_host_config_path,
+            config_digest: &resource_host_config_digest,
+        })
+    };
+    let spawn_worker = || {
+        spawn_subscription_context_worker(ContextWorkerSpawn {
+            binary: context_worker_binary,
+            database_url,
+            files: &files,
+            config_path: &context_worker_config_path,
+            config_digest: &context_worker_config_digest,
+        })
+    };
+
+    let mut host = spawn_host();
+    let (startup, first_host_stderr) = monitor_process_stderr(host.stderr.take().unwrap()).await;
+    assert!(startup.contains("platform-mcp-resource-host started"), "{startup}");
+    let mut first_worker = spawn_worker();
+    let (startup, first_worker_stderr) =
+        monitor_process_stderr(first_worker.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("platform-subscription-context-worker started"),
+        "{startup}"
+    );
+    tokio::time::timeout(StdDuration::from_secs(10), connector.first_started.notified())
+        .await
+        .unwrap();
+    host.kill().unwrap();
+    host.wait().unwrap();
+    first_host_stderr.await.unwrap();
+    first_worker.kill().unwrap();
+    first_worker.wait().unwrap();
+    first_worker_stderr.await.unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(accepted.job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let mut host = spawn_host();
+    let (startup, second_host_stderr) = monitor_process_stderr(host.stderr.take().unwrap()).await;
+    assert!(startup.contains("platform-mcp-resource-host started"), "{startup}");
+    let mut second_worker = spawn_worker();
+    let (startup, second_worker_stderr) =
+        monitor_process_stderr(second_worker.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("platform-subscription-context-worker started"),
+        "{startup}"
+    );
+    tokio::time::timeout(
+        StdDuration::from_secs(10),
+        connector.second_started.notified(),
+    )
+    .await
+    .unwrap();
+    install_context_commit_pause(pool).await;
+    connector.second_release.notify_one();
+    wait_for_context_job_state(
+        pool,
+        &fixture.tenant_id,
+        &accepted.job_id,
+        "running",
+        StdDuration::from_secs(10),
+    )
+    .await;
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    second_worker.kill().unwrap();
+    second_worker.wait().unwrap();
+    second_worker_stderr.await.unwrap();
+    remove_context_commit_pause(pool).await;
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(accepted.job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let mut third_worker = spawn_worker();
+    let (startup, third_worker_stderr) =
+        monitor_process_stderr(third_worker.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("platform-subscription-context-worker started"),
+        "{startup}"
+    );
+    wait_for_context_job_state(
+        pool,
+        &fixture.tenant_id,
+        &accepted.job_id,
+        "succeeded",
+        StdDuration::from_secs(15),
+    )
+    .await;
+    assert_eq!(connector.calls.load(Ordering::SeqCst), 3);
+    let completed_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND aggregate_id = $2 AND event_type = 'context.subscription_refresh.completed'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(accepted.job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(completed_events, 1);
+    third_worker.kill().unwrap();
+    third_worker.wait().unwrap();
+    third_worker_stderr.await.unwrap();
+    host.kill().unwrap();
+    host.wait().unwrap();
+    second_host_stderr.await.unwrap();
+    let _ = egress_shutdown.send(());
+    egress_server.await.unwrap().unwrap();
 }
 
 #[test]
@@ -1747,7 +2405,7 @@ async fn mcp_subscription_fixture() {
     ));
 
     let context_worker = id(ResourceKind::WorkerProcessGeneration, 0x279);
-    let context_worker_manifest = named_digest("context-worker-manifest");
+    let context_worker_manifest = context_worker_manifest_digest();
     let candidates = repository
         .scan_claimable_context_subscription_refresh_jobs(&context_worker_manifest, 8)
         .await
@@ -1968,7 +2626,7 @@ async fn mcp_subscription_fixture() {
         .is_empty());
     let reconcile_context_candidates = repository
         .scan_claimable_context_subscription_refresh_jobs(
-            &named_digest("context-worker-manifest"),
+            &context_worker_manifest_digest(),
             8,
         )
         .await
@@ -1982,7 +2640,7 @@ async fn mcp_subscription_fixture() {
     let first_reconcile_claim = repository
         .claim_context_subscription_refresh_jobs(ClaimContextSubscriptionRefreshJobs {
             worker_process_generation_id: recovery_worker,
-            worker_manifest_digest: named_digest("context-worker-manifest"),
+            worker_manifest_digest: context_worker_manifest_digest(),
             slots: vec![ContextSubscriptionRefreshClaimSlot {
                 tenant_id: fixture.tenant_id.clone(),
                 job_id: reconcile_acceptance.job_id.clone(),
@@ -2030,7 +2688,7 @@ async fn mcp_subscription_fixture() {
     let second_reconcile_claim = repository
         .claim_context_subscription_refresh_jobs(ClaimContextSubscriptionRefreshJobs {
             worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x2d3),
-            worker_manifest_digest: named_digest("context-worker-manifest"),
+            worker_manifest_digest: context_worker_manifest_digest(),
             slots: vec![ContextSubscriptionRefreshClaimSlot {
                 tenant_id: fixture.tenant_id.clone(),
                 job_id: reconcile_acceptance.job_id.clone(),
@@ -2071,7 +2729,7 @@ async fn mcp_subscription_fixture() {
     let terminal_reconcile_claim = repository
         .claim_context_subscription_refresh_jobs(ClaimContextSubscriptionRefreshJobs {
             worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x2db),
-            worker_manifest_digest: named_digest("context-worker-manifest"),
+            worker_manifest_digest: context_worker_manifest_digest(),
             slots: vec![ContextSubscriptionRefreshClaimSlot {
                 tenant_id: fixture.tenant_id.clone(),
                 job_id: reconcile_acceptance.job_id.clone(),
@@ -2149,6 +2807,25 @@ async fn mcp_subscription_fixture() {
         CommandOutcome::Applied(record) => record,
         CommandOutcome::Replayed(_) => panic!("periodic reconcile must apply"),
     };
+    if let (Ok(resource_host_binary), Ok(context_worker_binary)) = (
+        std::env::var("PLATFORM_MCP_RESOURCE_HOST_BIN"),
+        std::env::var("PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_BIN"),
+    ) {
+        run_subscription_process_l3(
+            &pool,
+            &repository,
+            &fixture,
+            &reconciled,
+            &database_url,
+            &resource_host_binary,
+            &context_worker_binary,
+        )
+        .await;
+    } else {
+        eprintln!(
+            "subscription process binaries are unset; Resource Refresh process L3 skipped"
+        );
+    }
     let reconcile_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND event_type IN ('mcp.subscription_reconcile_due', 'mcp.subscription_reconciled')",
     )

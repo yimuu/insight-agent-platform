@@ -324,6 +324,11 @@ ContextQuery/Job owner合同。fresh PostgreSQL 16 r240进一步通过错digest�
 物理attempt 2和唯一Observation，关闭NativeCatalog process L3。Model tool-result整链、Context remote backend及Sandbox-backed Capability仍缺完整production多进程L3，因此不能据此
 宣称Phase 2完成。
 
+截至2026-08-26，r279又以fresh PostgreSQL 16、production Resource Host与subscription Context Worker进程及真实mTLS测试Egress service
+覆盖subscription refresh的dispatch后Host/Worker强杀、response后/terminal commit前Worker强杀、expired-lease恢复和唯一completed Event。
+Egress尚运行在测试进程内且未接真实Streamable HTTP fake server，因此该证据只关闭Host/Context进程恢复切片，不改变完整subscription L3、
+隔舱容量与L4～L6仍未完成的边界。
+
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
 storage与audit closure全部由服务端拥有；upload target是唯一显式Secret-bearing响应例外。Public Gateway不取得storage authority，Artifact Gateway
 不信任自由principal header，两者以exact audience mTLS连接并由Artifact Gateway从PostgreSQL重绑定current principal。

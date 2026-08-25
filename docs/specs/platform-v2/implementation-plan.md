@@ -77,6 +77,14 @@
 > egress，只有Resource Host可接受Context subscription caller并访问PostgreSQL/Egress。Helm lint/render、两类deployment checker及全局
 > ComponentRole closure通过（15 roles、19 isolated pools；Context=3、MCP Host=2）。真实多进程kill-window仍待执行，L3未关闭。
 
+> 2026-08-26 implementation evidence：r279在fresh PostgreSQL 16上运行production `platform-mcp-resource-host`与
+> `platform-subscription-context-worker`进程，并通过真实mTLS连接测试进程内的Egress Broker service。fixture在第一次Egress dispatch后终止
+> Resource Host及首个Worker，过期其lease；第二个Worker取得response后由数据库trigger暂停terminal commit并被终止；第三个Worker恢复后成功。
+> 三次refresh调用最终只产生一个`context.subscription_refresh.completed` Event。该批同时修复全局recovery default大于subscription 64项仓储
+> 上限导致Worker启动即退出的问题，批次上限现在由单一共享常量约束。此证据关闭production Host/Context进程的dispatch/response-commit崩溃
+> 窗口，但Egress仍是测试进程内service，且尚未接真实Streamable HTTP fake server；独立Egress OS进程、真实list/read wire、pre-dispatch零I/O
+> 与pool saturation矩阵仍待完成，因此不把完整subscription L3标为关闭。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。
