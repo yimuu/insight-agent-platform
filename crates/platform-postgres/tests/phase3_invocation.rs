@@ -2,27 +2,35 @@ use chrono::{DateTime, Duration, Utc};
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityAdapterRequest, CapabilityAdapterResponse,
     CapabilityAdapterWorker, CapabilityDispatcher, CapabilityTransportCancelOutcome,
-    CapabilityTransportCancelRequest, InstalledNativeAdapter, InstalledNativeRegistry,
-    NativeCapabilityAdapter,
+    CapabilityTransportCancelRequest, GrpcNetworkTransport, GrpcTransportRequest,
+    GrpcTransportResponse, HttpNetworkTransport, HttpTransportRequest, HttpTransportResponse,
+    InstalledNativeAdapter, InstalledNativeRegistry, NativeCapabilityAdapter,
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, AdministrativeGate, AgentDeploymentClosure,
     AgentResourceSpec, ArtifactRef, AuthoringPackage, CandidateSelectionMode,
-    CandidateSelectionPolicyDocument, CapabilityArtifactContract, CapabilityArtifactDirection,
-    CapabilityArtifactPort, CapabilityBackendBinding, CapabilityBackendContract,
-    CapabilityBackendFeatures, CapabilityBackendKind, CapabilityBackendLimits,
-    CapabilityCancellationKind, CapabilityDataFlowPolicy, CapabilityDeploymentClosure,
-    CapabilityIdempotencyKind, CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
+    CandidateSelectionPolicyDocument, CanonicalHttpEndpoint, CapabilityArtifactContract,
+    CapabilityArtifactDirection, CapabilityArtifactPort, CapabilityBackendBinding,
+    CapabilityBackendContract, CapabilityBackendFeatures, CapabilityBackendKind,
+    CapabilityBackendLimits, CapabilityCancellationKind, CapabilityDataFlowPolicy,
+    CapabilityDeploymentClosure, CapabilityEndpointScheme, CapabilityIdempotencyKind,
+    CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
     CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
     CapabilityProgressMode, ClosedJsonSchema, CommandAudit, CommandOutcome, DataClassification,
     DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
     ExactVersionRef, ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds,
-    FrozenSlotBinding, FrozenSlotTarget, InteractionKind, NativeCapabilityContract, Permission,
+    FrozenSlotBinding, FrozenSlotTarget, HttpCapabilityContract, HttpCapabilityMethod,
+    InstalledCapabilityCodecRef, InteractionKind, NativeCapabilityContract, Permission,
     PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
     QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
     RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
-    ValueRef, WorkClass, WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
+    ValueRef, WorkClass, INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION, WORKER_MANIFEST_VERSION,
+    WORKER_PROTOCOL_VERSION,
+};
+use insight_platform_egress_rpc::{
+    proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
+    EgressCallerWorkloadIdentity, EgressInternalRpcLimits, CAPABILITY_WORKER_WORKLOAD_IDENTITY,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, BackendInputRequest, CapabilityApprovalDecision,
@@ -37,6 +45,11 @@ use insight_platform_invocations::{
     WakeCapabilityInvocation,
 };
 use insight_platform_jobs::{JobFence, WakeSource};
+use insight_platform_model_adapters::{
+    ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
+    ModelProviderWireConnector, ModelProviderWireProtocol, ModelProviderWireRequest,
+    ModelProviderWireStream,
+};
 use insight_platform_orchestrator::{
     derive_candidate_selection, DataPortKey, ExactDataPortRef, ExactRunValueRef,
     OrchestrationJobPayload, PlanLimits, PlanNodeKey, RunCurrentSnapshot, RuntimeDependencyKind,
@@ -59,16 +72,138 @@ use insight_platform_postgres::{
     },
     verify_schema,
 };
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose, SanType,
+};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicUsize, Ordering},
+    sync::Arc,
+};
 use std::{path::PathBuf, process::Stdio, time::Duration as StdDuration};
+use tonic::transport::server::TcpIncoming;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 #[derive(Clone)]
 struct CompletingNativeAdapter {
     descriptor: InstalledNativeAdapter,
     response: CapabilityAdapterResponse,
+}
+
+struct EmptyModelWire;
+
+#[async_trait::async_trait]
+impl ModelProviderWireConnector for EmptyModelWire {
+    async fn open(
+        &self,
+        _request: ModelProviderWireRequest,
+    ) -> Result<ModelProviderWireStream, ModelAdapterFailure> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    async fn cancel(
+        &self,
+        _protocol: ModelProviderWireProtocol,
+        _request: ModelAdapterCancelRequest,
+    ) -> Result<ModelAdapterCancelOutcome, ModelAdapterFailure> {
+        Ok(ModelAdapterCancelOutcome::Unsupported)
+    }
+}
+
+struct CountingHttpTransport {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl HttpNetworkTransport for CountingHttpTransport {
+    async fn round_trip(
+        &self,
+        request: HttpTransportRequest,
+    ) -> Result<HttpTransportResponse, CapabilityAdapterFailure> {
+        request.validate_at(Utc::now()).unwrap();
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(HttpTransportResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::to_vec(&json!({"accepted": true})).unwrap(),
+            transport_evidence_digest: digest('9'),
+        })
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Accepted)
+    }
+}
+
+struct UnusedGrpcTransport;
+
+#[async_trait::async_trait]
+impl GrpcNetworkTransport for UnusedGrpcTransport {
+    async fn unary(
+        &self,
+        _request: GrpcTransportRequest,
+    ) -> Result<GrpcTransportResponse, CapabilityAdapterFailure> {
+        unreachable!("Remote HTTP process fixture does not invoke gRPC")
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Accepted)
+    }
+}
+
+struct ProcessMtlsFixture {
+    ca_pem: String,
+    server_certificate_pem: String,
+    server_key_pem: String,
+    capability_certificate_pem: String,
+    capability_key_pem: String,
+}
+
+fn process_mtls_fixture() -> ProcessMtlsFixture {
+    let mut ca_parameters = CertificateParams::default();
+    ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_parameters.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let ca = CertifiedIssuer::self_signed(ca_parameters, KeyPair::generate().unwrap()).unwrap();
+    let issue = |subject_alt_names, extended_key_usage| {
+        let mut parameters = CertificateParams::default();
+        parameters.subject_alt_names = subject_alt_names;
+        parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        parameters.extended_key_usages = vec![extended_key_usage];
+        let key = KeyPair::generate().unwrap();
+        let certificate = parameters.signed_by(&key, &ca).unwrap();
+        (certificate.pem(), key.serialize_pem())
+    };
+    let (server_certificate_pem, server_key_pem) = issue(
+        vec![SanType::DnsName("egress.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let (capability_certificate_pem, capability_key_pem) = issue(
+        vec![SanType::URI(
+            CAPABILITY_WORKER_WORKLOAD_IDENTITY.try_into().unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
+    ProcessMtlsFixture {
+        ca_pem: ca.pem(),
+        server_certificate_pem,
+        server_key_pem,
+        capability_certificate_pem,
+        capability_key_pem,
+    }
 }
 
 #[async_trait::async_trait]
@@ -117,6 +252,58 @@ fn builtin_echo_module_digest() -> Sha256Digest {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("sha256:{encoded}").parse().unwrap()
+}
+
+fn builtin_json_digest(domain: &str) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"insight.platform/v1/capability-worker/builtin\0");
+    hasher.update(domain.as_bytes());
+    let encoded = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{encoded}").parse().unwrap()
+}
+
+fn builtin_json_module_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-codec-module")
+}
+
+fn builtin_json_http_protocol_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-http-protocol-contract")
+}
+
+fn builtin_json_http_request_mapping_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-http-request-mapping")
+}
+
+fn builtin_json_http_response_mapping_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-http-response-mapping")
+}
+
+fn builtin_json_http_error_mapping_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-http-error-mapping")
+}
+
+fn builtin_json_grpc_protocol_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-grpc-protobuf-contract")
+}
+
+fn builtin_json_grpc_request_mapping_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-grpc-request-mapping")
+}
+
+fn builtin_json_grpc_response_mapping_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-grpc-response-mapping")
+}
+
+fn builtin_json_grpc_error_mapping_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-grpc-error-mapping")
+}
+
+fn builtin_json_mcp_output_mapping_digest() -> Sha256Digest {
+    builtin_json_digest("builtin-json-mcp-output-mapping")
 }
 
 fn native_adapter_runtime_digest() -> Sha256Digest {
@@ -1801,6 +1988,7 @@ async fn run_capability_phase3_fixture() {
     assert_eq!(final_quota_totals, (2, 0, 28));
     run_native_worker_process_recovery(&pool, &repository, &fixture).await;
     run_plan_capability_owner(&pool, &repository, &fixture).await;
+    run_remote_http_worker_process_recovery(&pool, &repository, &fixture).await;
 }
 
 async fn run_native_worker_process_recovery(
@@ -1999,6 +2187,726 @@ async fn run_native_worker_process_recovery(
     assert!(released.2.is_none());
     assert_eq!(reservation_count, 4);
     std::fs::remove_file(config_path).unwrap();
+}
+
+struct RemoteHttpProcessFixture {
+    config: serde_json::Value,
+    manifest_digest: Sha256Digest,
+    node_id: ResourceId,
+}
+
+async fn prepare_remote_http_process_fixture(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+    egress_endpoint: &str,
+) -> RemoteHttpProcessFixture {
+    let package = AuthoringPackage {
+        artifact: ArtifactRef::new(
+            id(ResourceKind::Artifact, 0x20),
+            digest('0'),
+            2,
+            "application/json",
+            DataClassification::Internal,
+            Some("fixture.json".to_owned()),
+        )
+        .unwrap(),
+        manifest_digest: digest('1'),
+    };
+    let validation = ValidationSummary {
+        validator_digest: digest('2'),
+        validated_draft_digest: digest('3'),
+        dependency_closure_digest: digest('4'),
+        security_evidence_digest: digest('5'),
+        warnings: vec![],
+    };
+    let mut remote_policies = Vec::new();
+    for (offset, kind, semantic) in [
+        (0x922, PolicyKind::Network, '1'),
+        (0x924, PolicyKind::Tls, '2'),
+        (0x926, PolicyKind::Trust, '3'),
+    ] {
+        let resource_id = id(ResourceKind::Policy, offset);
+        let revision_id = id(ResourceKind::PolicyRevision, offset + 1);
+        insert_resource(
+            pool,
+            &fixture.tenant_id,
+            &resource_id,
+            RegistryResourceKind::Policy,
+            &fixture.principal_id,
+        )
+        .await;
+        let exact = ExactVersionRef::new(revision_id, digest(semantic)).unwrap();
+        insert_version(
+            pool,
+            &fixture.tenant_id,
+            &resource_id,
+            &exact,
+            1,
+            &fixture.principal_id,
+            PublishedVersionPayload {
+                document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
+                    authoring_package: package.clone(),
+                    contract_digest: digest('4'),
+                    dependency_versions: vec![],
+                    policy_versions: vec![],
+                    policy_kind: kind,
+                    rules_digest: digest('5'),
+                    selection: None,
+                    scheduling: None,
+                    retention: None,
+                    model_safety: None,
+                    model_budget: None,
+                    model_public_projection: None,
+                    mcp_protocol: None,
+                    mcp_auth: None,
+                    sandbox_isolation: None,
+                    sandbox_resource: None,
+                    sandbox_network: None,
+                    sandbox_artifact_io: None,
+                    sandbox_secret_resolution: None,
+                })),
+                validation: validation.clone(),
+            },
+        )
+        .await;
+        remote_policies.push(exact);
+    }
+
+    let http_contract = HttpCapabilityContract {
+        method: HttpCapabilityMethod::Post,
+        protocol_contract_digest: builtin_json_http_protocol_digest(),
+        request_mapping_digest: builtin_json_http_request_mapping_digest(),
+        response_mapping_digest: builtin_json_http_response_mapping_digest(),
+        error_mapping_digest: builtin_json_http_error_mapping_digest(),
+        idempotency_header: None,
+    };
+    let backend_contract = CapabilityBackendContract::Http(http_contract.clone());
+    let descriptor_digest = backend_contract.descriptor_digest().unwrap();
+    let installed_http = json!({
+        "codec_id": "platform.json",
+        "codec_version": "1.0.0",
+        "module_digest": builtin_json_module_digest(),
+        "worker_protocol_version": WORKER_PROTOCOL_VERSION,
+        "descriptor_digest": descriptor_digest,
+        "protocol_contract_digest": builtin_json_http_protocol_digest(),
+        "request_mapping_digest": builtin_json_http_request_mapping_digest(),
+        "response_mapping_digest": builtin_json_http_response_mapping_digest(),
+        "error_mapping_digest": builtin_json_http_error_mapping_digest()
+    });
+    let installed_grpc = json!({
+        "codec_id": "platform.json",
+        "codec_version": "1.0.0",
+        "module_digest": builtin_json_module_digest(),
+        "worker_protocol_version": WORKER_PROTOCOL_VERSION,
+        "descriptor_digest": digest('6'),
+        "protobuf_contract_digest": builtin_json_grpc_protocol_digest(),
+        "service_name": "insight.fixture.v1.Lookup",
+        "method_name": "Get",
+        "request_mapping_digest": builtin_json_grpc_request_mapping_digest(),
+        "response_mapping_digest": builtin_json_grpc_response_mapping_digest(),
+        "error_mapping_digest": builtin_json_grpc_error_mapping_digest()
+    });
+    let installed_mcp = json!({
+        "codec_id": "platform.json",
+        "codec_version": "1.0.0",
+        "module_digest": builtin_json_module_digest(),
+        "worker_protocol_version": WORKER_PROTOCOL_VERSION,
+        "descriptor_digest": digest('7'),
+        "remote_tool_name": "fixture_lookup",
+        "remote_input_schema_digest": fixture.input_schema_digest,
+        "output_mapping_digest": builtin_json_mcp_output_mapping_digest(),
+        "protocol_profile_id": fixture.policy.revision_id,
+        "protocol_profile_digest": fixture.policy.semantic_digest,
+        "discovery_semantic_evidence_digest": digest('8')
+    });
+    let installed_closure = json!({
+        "schema_version": 1,
+        "http": [installed_http.clone()],
+        "grpc": [installed_grpc.clone()],
+        "mcp": [installed_mcp.clone()]
+    });
+    let adapter_runtime_digest: Sha256Digest = canonical_digest(&installed_closure)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let worker_manifest = json!({
+        "manifest_version": WORKER_MANIFEST_VERSION,
+        "worker_role": "capability.remote",
+        "work_class": "capability_remote",
+        "adapter_runtime_digest": adapter_runtime_digest,
+        "protocol_version": WORKER_PROTOCOL_VERSION,
+        "max_concurrency": 2,
+        "critical_control_reserved_slots": 1
+    });
+    let manifest_digest: Sha256Digest =
+        canonical_digest(&worker_manifest).unwrap().parse().unwrap();
+    let codec = InstalledCapabilityCodecRef {
+        schema_version: INSTALLED_CAPABILITY_CODEC_MANIFEST_VERSION,
+        backend_kind: CapabilityBackendKind::Http,
+        codec_id: "platform.json".to_owned(),
+        codec_version: "1.0.0".to_owned(),
+        module_digest: builtin_json_module_digest(),
+        worker_protocol_version: WORKER_PROTOCOL_VERSION,
+        descriptor_digest,
+    };
+    let implementation_exact = ExactVersionRef::new(
+        id(ResourceKind::CapabilityImplementationRevision, 0x920),
+        digest('9'),
+    )
+    .unwrap();
+    insert_version(
+        pool,
+        &fixture.tenant_id,
+        &id(ResourceKind::CapabilityImplementation, 0x18),
+        &implementation_exact,
+        2,
+        &fixture.principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::CapabilityImplementation(
+                CapabilityImplementationResourceSpec {
+                    authoring_package: package.clone(),
+                    contract_digest: digest('a'),
+                    dependency_versions: vec![],
+                    policy_versions: remote_policies.clone(),
+                    interface_revision: ExactVersionRef::new(
+                        id(ResourceKind::CapabilityInterfaceRevision, 0x17),
+                        digest('e'),
+                    )
+                    .unwrap(),
+                    backend_kind: CapabilityBackendKind::Http,
+                    backend_contract: backend_contract.clone(),
+                    backend_contract_digest: backend_contract.canonical_digest().unwrap(),
+                    credential_requirements: vec![],
+                    backend_limits: CapabilityBackendLimits {
+                        maximum_request_bytes: 1_048_576,
+                        maximum_response_bytes: 1_048_576,
+                        maximum_diagnostic_bytes: 65_536,
+                        connect_timeout_milliseconds: 100,
+                        first_byte_timeout_milliseconds: 500,
+                        idle_timeout_milliseconds: 1_000,
+                        total_timeout_milliseconds: 5_000,
+                    },
+                    features: CapabilityBackendFeatures {
+                        deferred: false,
+                        input_required: false,
+                        callback: false,
+                        poll: false,
+                        progress: true,
+                        cancellation: true,
+                        max_remote_state_bytes: 0,
+                        max_poll_count: 0,
+                    },
+                },
+            ),
+            validation,
+        },
+    )
+    .await;
+    let endpoint = CanonicalHttpEndpoint {
+        scheme: CapabilityEndpointScheme::Https,
+        host: "fixture.remote.test".to_owned(),
+        port: 443,
+        base_path: "/v1/execute".to_owned(),
+    };
+    let capability_closure = CapabilityDeploymentClosure {
+        implementation: implementation_exact,
+        interface: ExactVersionRef::new(
+            id(ResourceKind::CapabilityInterfaceRevision, 0x17),
+            digest('e'),
+        )
+        .unwrap(),
+        backend: CapabilityBackendBinding::Http {
+            codec,
+            worker_manifest_digest: manifest_digest.clone(),
+            endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
+            endpoint,
+            network_policy: remote_policies[0].clone(),
+            tls_policy: remote_policies[1].clone(),
+            trust_policy: remote_policies[2].clone(),
+        },
+        secret_bindings: vec![],
+        policies: vec![fixture.policy.clone()],
+        conformance_evidence: package.artifact,
+    };
+    capability_closure.validate().unwrap();
+    let capability_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::CapabilityInterface(capability_closure),
+    )
+    .unwrap();
+    let deployment_id = id(ResourceKind::CapabilityDeployment, 0x921);
+    insert_deployment(
+        pool,
+        &fixture.tenant_id,
+        &deployment_id,
+        &id(ResourceKind::CapabilityInterface, 0x16),
+        &id(ResourceKind::CapabilityInterfaceRevision, 0x17),
+        &fixture.principal_id,
+        &capability_payload,
+    )
+    .await;
+    let remote_deployment =
+        ExactDeploymentRef::new(deployment_id, capability_payload.digest.parse().unwrap()).unwrap();
+
+    for (account_id, scope_kind, scope_id, metric) in [
+        (
+            id(ResourceKind::QuotaAccount, 0x930),
+            "tenant",
+            fixture.tenant_id.clone(),
+            QuotaDimension::WorkClassConcurrentOperations,
+        ),
+        (
+            id(ResourceKind::QuotaAccount, 0x931),
+            "capability_deployment",
+            remote_deployment.deployment_id.clone(),
+            QuotaDimension::CapabilityConcurrentInvocations,
+        ),
+    ] {
+        repository
+            .create_quota_account(NewQuotaAccount {
+                tenant_id: fixture.tenant_id.to_string(),
+                quota_account_id: account_id.to_string(),
+                scope_kind: scope_kind.to_owned(),
+                scope_id: scope_id.to_string(),
+                work_class: WorkClass::CapabilityRemote.as_str().to_owned(),
+                metric: metric.as_str().to_owned(),
+                limit_value: 8,
+                payload: TypedPayload::new(1, &json!({"fixture": "remote-capability"})).unwrap(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let agent_closure = AgentDeploymentClosure {
+        interface: ExactVersionRef::new(
+            id(ResourceKind::AgentInterfaceRevision, 0x13),
+            digest('9'),
+        )
+        .unwrap(),
+        plan: ExactVersionRef::new(id(ResourceKind::AgentPlanRevision, 0x14), digest('a')).unwrap(),
+        entry_node_id: "start".to_owned(),
+        entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
+        slots: vec![FrozenSlotBinding {
+            slot_id: "writer".to_owned(),
+            requirement_digest: digest('8'),
+            target: FrozenSlotTarget::Capability {
+                candidates: vec![remote_deployment],
+                selection_policy: fixture.selection_policy.clone(),
+                tool_alias: Some("write".to_owned()),
+            },
+            binding_digest: digest('9'),
+        }],
+        policies: vec![],
+        execution_profile: fixture.selection_policy.clone(),
+    };
+    let agent_payload =
+        TypedPayload::new(1, &DeploymentClosure::Agent(agent_closure.clone())).unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.deployments SET bindings_digest = $3, payload_schema_version = $4, bindings = $5 WHERE tenant_id = $1 AND deployment_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(id(ResourceKind::AgentDeployment, 0x15).to_string())
+    .bind(&agent_payload.digest)
+    .bind(agent_payload.schema_version)
+    .bind(&agent_payload.value)
+    .execute(pool)
+    .await
+    .unwrap();
+    let principal = PrincipalSnapshot::build(
+        fixture.tenant_id.clone(),
+        fixture.principal_id.clone(),
+        PrincipalKind::AgentRunner,
+        PermissionSet::new(vec![
+            Permission::ApprovalRespond,
+            Permission::CapabilityInvoke,
+            Permission::InteractionRespond,
+            Permission::RuntimeControl,
+        ])
+        .unwrap(),
+        1,
+        1,
+        1,
+    )
+    .unwrap();
+    let run_bindings = RunBindingsSnapshot::build(
+        ExactDeploymentRef::new(
+            id(ResourceKind::AgentDeployment, 0x15),
+            agent_payload.digest.parse().unwrap(),
+        )
+        .unwrap(),
+        principal,
+        &agent_closure,
+    )
+    .unwrap();
+    let bindings_payload = TypedPayload::from_versioned(1, &run_bindings, 1_048_576).unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.runs SET bindings_schema_version = $3, bindings = $4, bindings_digest = $5 WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .bind(bindings_payload.schema_version)
+    .bind(&bindings_payload.value)
+    .bind(run_bindings.canonical_digest.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let node_id = id(ResourceKind::NodeExecution, 0x932);
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let node_payload = TypedPayload::new(1, &json!({"fixture": "remote-capability"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, logical_key, node_kind, state,
+            generation, version, payload_schema_version, payload, payload_digest,
+            deadline, started_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, $4, 'node_execution', $4,
+            'capability-plan', 9, 'remote-capability-process-recovery', 'capability_call', 'running',
+            1, 1, $5, $6, $7, $8, $9, $9, $9
+        )
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(node_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .bind(id(ResourceKind::ScopeInstance, 0x31).to_string())
+    .bind(node_payload.schema_version)
+    .bind(&node_payload.value)
+    .bind(&node_payload.digest)
+    .bind(now + Duration::hours(1))
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    RemoteHttpProcessFixture {
+        config: json!({
+            "schema_version": 1,
+            "worker_manifest": worker_manifest,
+            "installed_http_codecs": [installed_http],
+            "installed_grpc_codecs": [installed_grpc],
+            "installed_mcp_codecs": [installed_mcp],
+            "database": {
+                "business_max_connections": 2,
+                "critical_control_max_connections": 2,
+                "process_connection_budget": 4,
+                "acquire_timeout_milliseconds": 1000
+            },
+            "egress": {
+                "endpoint": egress_endpoint,
+                "tls_server_name": "egress.test",
+                "connect_timeout_milliseconds": 1000,
+                "request_timeout_milliseconds": 30000,
+                "maximum_rpc_metadata_bytes": 65536,
+                "maximum_rpc_payload_bytes": 1048576
+            },
+            "mcp_host": {
+                "endpoint": "https://127.0.0.1:9/",
+                "tls_server_name": "mcp.test",
+                "connect_timeout_milliseconds": 1000,
+                "request_timeout_milliseconds": 30000,
+                "maximum_rpc_message_bytes": 1048576
+            },
+            "timing": {
+                "initial_scan_delay_milliseconds": 500,
+                "receipt_ttl_milliseconds": 60000,
+                "safety_scan_milliseconds": 20,
+                "claim_failure_backoff_milliseconds": 5,
+                "drain_grace_milliseconds": 1000
+            }
+        }),
+        manifest_digest,
+        node_id,
+    }
+}
+
+async fn run_remote_http_worker_process_recovery(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+) {
+    let Ok(binary) = std::env::var("PLATFORM_CAPABILITY_REMOTE_WORKER_BIN") else {
+        eprintln!(
+            "PLATFORM_CAPABILITY_REMOTE_WORKER_BIN is unset; remote process recovery fixture skipped"
+        );
+        return;
+    };
+    let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
+    let tls = process_mtls_fixture();
+    let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = incoming.local_addr().unwrap();
+    let http = Arc::new(CountingHttpTransport {
+        calls: AtomicUsize::new(0),
+    });
+    let limits = EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap();
+    let service = EgressBrokerServiceServer::new(EgressBrokerGrpcService::new(
+        Arc::new(EmptyModelWire),
+        Arc::clone(&http),
+        Arc::new(UnusedGrpcTransport),
+        limits,
+    ));
+    let service =
+        tonic::service::interceptor::InterceptedService::new(service, EgressCallerWorkloadIdentity);
+    let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(
+        Server::builder()
+            .tls_config(
+                ServerTlsConfig::new()
+                    .identity(Identity::from_pem(
+                        &tls.server_certificate_pem,
+                        &tls.server_key_pem,
+                    ))
+                    .client_ca_root(Certificate::from_pem(tls.ca_pem.clone())),
+            )
+            .unwrap()
+            .add_service(service)
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = shutdown_receiver.await;
+            }),
+    );
+    let remote = prepare_remote_http_process_fixture(
+        pool,
+        repository,
+        fixture,
+        &format!("https://{address}/"),
+    )
+    .await;
+    let run_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let mut admission = command_for_node(fixture, &remote.node_id, 0x940);
+    admission.expected_run_version = u64::try_from(run_version).unwrap();
+    let admitted = match execute_admit(repository, admission).await.unwrap() {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("remote process recovery admission replayed"),
+    };
+    let job_id = id(ResourceKind::Job, 0x950);
+    match execute_prepare(
+        repository,
+        PrepareCapabilityDispatch {
+            audit: audit(
+                &fixture.tenant_id,
+                &fixture.principal_id,
+                PrincipalKind::AgentRunner,
+                0x951,
+                '1',
+                '2',
+            ),
+            invocation_id: admitted.invocation_id.clone(),
+            expected_invocation_version: admitted.version,
+            job_id: job_id.clone(),
+            scheduled_at: Utc::now() - Duration::seconds(1),
+        },
+    )
+    .await
+    .unwrap()
+    {
+        CommandOutcome::Applied(_) => {}
+        CommandOutcome::Replayed(_) => panic!("remote process recovery prepare replayed"),
+    }
+
+    let temp_prefix = format!(
+        "/tmp/platform-capability-remote-worker-{}",
+        std::process::id()
+    );
+    let ca_path = PathBuf::from(format!("{temp_prefix}-ca.pem"));
+    let cert_path = PathBuf::from(format!("{temp_prefix}-client.pem"));
+    let key_path = PathBuf::from(format!("{temp_prefix}-client-key.pem"));
+    std::fs::write(&ca_path, &tls.ca_pem).unwrap();
+    std::fs::write(&cert_path, &tls.capability_certificate_pem).unwrap();
+    std::fs::write(&key_path, &tls.capability_key_pem).unwrap();
+
+    let write_config = |suffix: &str, config: &serde_json::Value| {
+        let path = PathBuf::from(format!("{temp_prefix}-{suffix}.json"));
+        std::fs::write(&path, serde_json::to_vec(config).unwrap()).unwrap();
+        let digest = canonical_digest(config).unwrap();
+        (path, digest)
+    };
+    let spawn_worker = |path: &PathBuf, config_digest: &str| {
+        std::process::Command::new(&binary)
+            .env("PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG", path)
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG_DIGEST",
+                config_digest,
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_DATABASE_URL",
+                &database_url,
+            )
+            .env("PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH", &ca_path)
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH",
+                &cert_path,
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH",
+                &key_path,
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH",
+                &ca_path,
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH",
+                &cert_path,
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH",
+                &key_path,
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+
+    let mut wrong_config = remote.config.clone();
+    wrong_config["installed_http_codecs"][0]["descriptor_digest"] =
+        serde_json::to_value(digest('f')).unwrap();
+    let wrong_runtime: Sha256Digest = canonical_digest(&json!({
+        "schema_version": 1,
+        "http": wrong_config["installed_http_codecs"].clone(),
+        "grpc": wrong_config["installed_grpc_codecs"].clone(),
+        "mcp": wrong_config["installed_mcp_codecs"].clone()
+    }))
+    .unwrap()
+    .parse()
+    .unwrap();
+    wrong_config["worker_manifest"]["adapter_runtime_digest"] =
+        serde_json::to_value(wrong_runtime).unwrap();
+    let (wrong_path, wrong_digest) = write_config("wrong", &wrong_config);
+    let mut wrong = spawn_worker(&wrong_path, &wrong_digest);
+    let wrong_startup = read_process_stderr_line(wrong.stderr.take().unwrap()).await;
+    assert!(
+        wrong_startup.contains("started generation="),
+        "{wrong_startup}"
+    );
+    tokio::time::sleep(StdDuration::from_millis(750)).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap(),
+        "ready"
+    );
+    assert_eq!(http.calls.load(Ordering::SeqCst), 0);
+    wrong.kill().unwrap();
+    wrong.wait().unwrap();
+
+    let (config_path, config_digest) = write_config("correct", &remote.config);
+    assert_eq!(
+        remote.manifest_digest,
+        canonical_digest(&remote.config["worker_manifest"])
+            .unwrap()
+            .parse()
+            .unwrap()
+    );
+    let mut first = spawn_worker(&config_path, &config_digest);
+    let startup = read_process_stderr_line(first.stderr.take().unwrap()).await;
+    assert!(startup.contains("started generation="), "{startup}");
+    sqlx::query(
+        r#"
+        CREATE FUNCTION insight_platform.test_pause_remote_capability_commit()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF OLD.state = 'running' AND NEW.state = 'succeeded'
+             AND NEW.work_class = 'capability_remote' THEN
+            PERFORM pg_sleep(30);
+          END IF;
+          RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER test_pause_remote_capability_commit
+        BEFORE UPDATE ON insight_platform.jobs
+        FOR EACH ROW EXECUTE FUNCTION insight_platform.test_pause_remote_capability_commit()
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    wait_for_atomic_count(&http.calls, 1, StdDuration::from_secs(10)).await;
+    wait_for_database_state(pool, &job_id, "running", StdDuration::from_secs(10)).await;
+    first.kill().unwrap();
+    first.wait().unwrap();
+    sqlx::query("DROP TRIGGER test_pause_remote_capability_commit ON insight_platform.jobs")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION insight_platform.test_pause_remote_capability_commit()")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let mut second = spawn_worker(&config_path, &config_digest);
+    wait_for_invocation_state(
+        pool,
+        &admitted.invocation_id,
+        "reconciliation_required",
+        StdDuration::from_secs(10),
+    )
+    .await;
+    assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+    second.kill().unwrap();
+    second.wait().unwrap();
+
+    let _ = shutdown_sender.send(());
+    server.await.unwrap().unwrap();
+    for path in [wrong_path, config_path, ca_path, cert_path, key_path] {
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+async fn wait_for_atomic_count(counter: &AtomicUsize, expected: usize, timeout: StdDuration) {
+    let started = std::time::Instant::now();
+    loop {
+        if counter.load(Ordering::SeqCst) == expected {
+            return;
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "counter did not reach {expected}"
+        );
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+}
+
+async fn read_process_stderr_line(stderr: std::process::ChildStderr) -> String {
+    tokio::task::spawn_blocking(move || {
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(stderr), &mut line).unwrap();
+        line
+    })
+    .await
+    .unwrap()
 }
 
 async fn wait_for_database_state(

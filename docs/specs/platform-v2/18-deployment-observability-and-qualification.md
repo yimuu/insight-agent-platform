@@ -225,7 +225,9 @@ CR-188 L1覆盖installed codec manifest closed schema、排序/数量、descript
 codec/module/descriptor/Worker manifest在Egress/MCP调用计数仍为零时fail closed；L4覆盖镜像rollout manifest drift使readiness/claim关闭。
 
 当前分层证据：fresh PostgreSQL 16 r208已通过Native exact startup registry/Worker manifest双进程强杀、expired-lease owner recovery、
-quota settlement与non-idempotent reconciliation，关闭Native部分L3；Remote HTTP/gRPC/MCP跨进程零外部调用负向矩阵和L4 rollout仍未通过。
+quota settlement与non-idempotent reconciliation，关闭Native部分L3；r216以真实Remote Worker+mTLS Egress RPC通过错manifest零claim/零
+外部调用、HTTP响应后commit-window强杀、第二进程expired-lease恢复及非幂等调用不重放，关闭Remote HTTP部分L3。gRPC/MCP跨进程矩阵和
+L4 rollout仍未通过。
 
 每个production release至少覆盖：
 

@@ -126,6 +126,13 @@ ALLOWED_INTERNAL = {
     "platform_worker": {"contracts"},
 }
 
+# Cross-plane real-process fixtures may compose typed RPC servers around an owner crate without
+# permitting that edge in the shipped dependency graph. Every resolved dep-kind must be `dev`;
+# adding the same crate as a normal or build dependency remains a boundary failure.
+ALLOWED_DEV_INTERNAL = {
+    "platform_postgres": {"egress_rpc"},
+}
+
 FORBIDDEN_DIRECT = {
     "engine": {
         "axum",
@@ -464,8 +471,17 @@ def check(metadata, baseline_path, workspace_root):
             dependency_id = dependency["pkg"]
             dependency_package = packages[dependency_id]
             dependency_role = role_by_id.get(dependency_id)
-            kinds = "/".join(dependency_kinds(dependency))
-            if dependency_role is not None and dependency_role not in ALLOWED_INTERNAL[role]:
+            dependency_kind_set = set(dependency_kinds(dependency))
+            kinds = "/".join(sorted(dependency_kind_set))
+            dev_only_allowed = (
+                dependency_role in ALLOWED_DEV_INTERNAL.get(role, set())
+                and dependency_kind_set == {"dev"}
+            )
+            if (
+                dependency_role is not None
+                and dependency_role not in ALLOWED_INTERNAL[role]
+                and not dev_only_allowed
+            ):
                 errors.append(
                     f"{role}: forbidden {kinds} internal edge to {dependency_role} "
                     f"({format_package(dependency_package)})"

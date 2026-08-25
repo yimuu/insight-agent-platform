@@ -80,8 +80,10 @@
 > domain-separated compiled digest；startup对任一任意或漂移mapping/protocol digest均fail closed，不能再让同一raw-JCS实现替任意
 > authoring contract背书。最终Inline实例仍由PostgreSQL owner transaction按冻结Interface schema与byte limit重验。
 > Helm以digest image/config、双副本/PDB/HPA、restricted pod和仅DNS/PostgreSQL/Egress Broker egress部署，正负静态fixture、worker/
-> adapter tests、strict Clippy与crate-boundary scan通过。该批关闭HTTP/gRPC production composition与静态部署边界；真实HTTP/gRPC
-> 多进程L3及Phase 2 exit gate仍待完成；独立MCP Host RPC由下一批接线。
+> adapter tests、strict Clippy与crate-boundary scan通过。后续fresh PostgreSQL 16 r216以真实mTLS Egress RPC、错Worker manifest进程、
+> 正确Remote Worker commit-window强杀和第二进程expired-lease恢复关闭HTTP非幂等路径L3：错manifest时Job保持ready且外部调用为零；
+> 已返回响应的进程被杀后Invocation只进入`reconciliation_required`且远端总调用仍为一次。gRPC与MCP真实多进程L3及Phase 2 exit gate
+> 仍待完成；独立MCP Host RPC由下一批接线。
 
 > 2026-08-25 implementation evidence：Remote MCP现有独立`platform-mcp-host` production进程及closed protobuf RPC。Capability
 > Worker只通过mTLS client调用Host，服务端在解码前要求唯一Capability Worker URI SAN；同一私有CA签发的Model Worker身份在真实

@@ -528,4 +528,6 @@ lease scanner、quota settlement与非幂等reconciliation。该证据关闭Nati
 
 Remote `platform.json@1.0.0`随后把实际raw-JCS protocol与HTTP/gRPC request/response/error及MCP output mapping逐项绑定到
 domain-separated compiled digest；binary startup和codec constructor对任一漂移声明均拒绝，避免把自由mapping digest误当成已安装
-可执行codec。PostgreSQL owner transaction继续对结果正文执行exact Interface schema与byte-limit复验。真实remote protocol L3仍待完成。
+可执行codec。PostgreSQL owner transaction继续对结果正文执行exact Interface schema与byte-limit复验。fresh PostgreSQL 16 r216进一步
+以真实Remote Worker、mTLS Egress RPC、错manifest零claim/零外部调用、响应后commit-window强杀与第二进程恢复关闭HTTP非幂等L3；
+恢复只进入人工reconciliation且远端调用保持一次。gRPC/MCP process L3与L4 rollout仍待完成。
