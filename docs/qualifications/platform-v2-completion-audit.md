@@ -34,7 +34,7 @@ Phase 3的MCP subscription真实HTTPS多进程L3已闭合，仍缺OAuth Callback
 | Typed Plan v4 wire | RuntimePlan保存closed dependency slots及全部external leaf payload，拒绝v1/v2/v3并验证slot kind、output producer、input reachability与bounded budget；fresh PG的phase2 Run kernel和真实coordinator既有路径通过 | L1/L2 wire与controller已闭合；Timer/Signal/HumanTask/ChildAgent、Model tool-result、Capability和Context的production component L3均有独立证据 |
 | Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；各owner按Run冻结exact Policy/Revision重算并拒绝伪造结果 | L1/L2 owner闭合，production Model/Capability/Context dispatch已在对应L3链路重验exact binding |
 | 已有部署 | 11个chart覆盖全部15个ComponentRole、17个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
-| HTTP observability | shared bounded-label owner；全部17个ComponentRole workload pool及Sandbox两种process attestor具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency | process wiring与静态部署闭合，不代表真实scrape或完整业务observability |
+| HTTP observability | shared bounded-label owner；全部17个ComponentRole workload pool、Sandbox两种process attestor及OAuth Cleanup Worker具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency | process wiring与静态部署闭合，不代表真实scrape或完整业务observability |
 | Dashboard/alerts | 独立chart提供role-filtered process/HTTP及Orchestration业务dashboard、9条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代完整业务SLI或真实alert delivery |
 | Worker/queue telemetry | Orchestration、Model、Capability Native/Remote、Context Native/Remote、Sandbox WASI/gVisor共8个pool从各自LocalWorkerPools导出business/critical-control available/used permit；Orchestration另有active jobs、claim/recovery outcome及PostgreSQL authority的due/expired-lease count、oldest lag与observation health | Orchestration durable backlog/recovery lag和8/17 pool permit L1 telemetry闭合；shared Outbox、其余role authority及saturation仍待接线 |
 | Telemetry redaction | production Rust source静态门禁拒绝identity、Secret、prompt/response、object key及URL进入structured tracing或插值日志；现有LLM/SSE/MCP OAuth/conversation/worker启动日志已清理 | source-level L1负向合同；不替代动态payload审计、trace propagation、RBAC/retention或production验证 |
@@ -158,6 +158,7 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 - 已存在role清单的ServiceAccount、NetworkPolicy、PDB/HPA、digest与security context静态检查；
 - shared低基数HTTP telemetry owner，以及Public Gateway、Callback API的request/outcome、latency histogram、ready指标和受NetworkPolicy约束的ServiceMonitor；
 - durable MCP OAuth PKCE cleanup worker已进入workspace/runtime image，并具备独立Deployment、PDB、default-deny与精确PostgreSQL/Egress网络边界；
+- OAuth Cleanup Worker在上述authority组合完成后才开放shared HTTP readiness/metrics，且具有独立ServiceMonitor与Prometheus-only ingress；
 - production QualificationProfile、Candidate/Capacity/Evidence validator、拓扑preflight和资格运行手册。
 
 ### 仓库内缺口

@@ -5,3 +5,5 @@
 {{- if or (empty .Values.config.existingConfigMap) (empty .Values.config.fileKey) }}{{- fail "Candidate config reference is required" }}{{- end }}
 {{- if or (empty .Values.database.existingSecret) (empty .Values.egressTls.existingSecret) }}{{- fail "database and Egress mTLS Secrets are required" }}{{- end }}
 {{- if empty .Values.networkPolicy.postgresCidrs }}{{- fail "networkPolicy.postgresCidrs is required" }}{{- end }}
+{{- if or (lt (int .Values.observability.port) 1) (gt (int .Values.observability.port) 65535) }}{{- fail "observability port must be in 1..65535" }}{{- end }}
+{{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) }}{{- fail "monitoring selectors are required" }}{{- end }}

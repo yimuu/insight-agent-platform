@@ -438,6 +438,12 @@
 > Clippy、11-panel dashboard、9条symptom-first alert及逐alert runbook门禁通过。该批关闭Orchestration durable backlog/recovery lag与其PostgreSQL
 > observation health的L1接线；shared Outbox、其余role backlog/dependency/saturation、真实Prometheus scrape及L4仍未闭合。
 
+> 2026-08-26 implementation evidence：r283为durable MCP OAuth PKCE Cleanup Worker增加独立shared HTTP observability listener；只有closed
+> config、PostgreSQL/schema、mTLS Egress client与cleanup owner组合成功后才Ready，listener提前退出使process fail closed。Helm将PID exec探针
+> 替换为HTTP live/ready，增加独立observability Service、ServiceMonitor及仅Prometheus可访问的NetworkPolicy ingress，不放宽PostgreSQL或Egress
+> 边界。binary tests、strict Clippy和chart正负门禁通过。该批关闭Cleanup Worker process observability/readiness接线，不替代OAuth真实endpoint
+> 多进程kill/restart、真实scrape或L4证据。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

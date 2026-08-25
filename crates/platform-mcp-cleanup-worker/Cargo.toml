@@ -11,14 +11,17 @@ name = "platform-mcp-cleanup-worker"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-egress-rpc.workspace = true
 insight-platform-mcp-host.workspace = true
+insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 url.workspace = true
 uuid.workspace = true

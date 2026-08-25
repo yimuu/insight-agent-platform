@@ -445,6 +445,11 @@ production sampler、fresh PostgreSQL 16、owner tests与strict Clippy通过；d
 PostgreSQL observation failure三条带runbook的symptom alert。该证据只关闭Orchestration durable backlog/recovery lag及对应dependency observation
 的L1接线；Outbox、其他role authority、真实Prometheus scrape和L4～L6仍待完成。
 
+r283为独立MCP OAuth PKCE Cleanup Worker接入shared process observability。readiness位于closed config、PostgreSQL/schema、mTLS Egress client
+和durable cleanup owner之后，HTTP listener提前退出会使process失败；Helm以HTTP probe、独立Service/ServiceMonitor及Prometheus-only ingress
+替换原PID探针，同时保持数据库与Egress的exact出口。binary tests、strict Clippy和chart静态正负门禁通过；该process surface不计作新的
+ComponentRole authority，也不替代真实OAuth endpoint、kill/restart、production scrape或L4。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

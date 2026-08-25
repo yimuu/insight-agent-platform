@@ -11,6 +11,9 @@ use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimit
 use insight_platform_mcp_host::{
     McpOAuthPkceCleanupConsumer, McpOAuthPkceCleanupWorker, McpOAuthPkceCleanupWorkerConfig,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -32,6 +35,7 @@ const MAX_TLS_FILE_BYTES: usize = 1_048_576;
 #[serde(deny_unknown_fields)]
 struct ProcessConfig {
     schema_version: u32,
+    observability_listen_address: String,
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
     egress_endpoint: String,
@@ -81,9 +85,14 @@ impl ProcessConfig {
     }
 
     fn validate(&self) -> Result<(), ProcessError> {
+        let observability: std::net::SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         let egress =
             Url::parse(&self.egress_endpoint).map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
+            || observability.port() == 0
             || !(2..=32).contains(&self.database_max_connections)
             || self.database_acquire_timeout_milliseconds == 0
             || self.database_acquire_timeout_milliseconds > 30_000
@@ -167,13 +176,43 @@ async fn run() -> Result<(), ProcessError> {
         McpOAuthPkceCleanupWorker::new(generation_id, repository, consumer, config.worker_config())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
 
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("mcp-cleanup-worker", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
+        .await
+        .map_err(|_| ProcessError::ObservabilityFailed)?;
+    let (http_shutdown, http_shutdown_receiver) = tokio::sync::oneshot::channel();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut http = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = http_shutdown_receiver.await;
+            })
+            .await
+    });
+    metrics.mark_ready();
+
     let mut interval =
         tokio::time::interval(Duration::from_millis(config.poll_interval_milliseconds));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut shutdown = Box::pin(shutdown_signal());
     loop {
         tokio::select! {
-            _ = &mut shutdown => break,
+            _ = &mut shutdown => {
+                let _ = http_shutdown.send(());
+                http.await
+                    .map_err(|_| ProcessError::ObservabilityFailed)?
+                    .map_err(|_| ProcessError::ObservabilityFailed)?;
+                return Ok(());
+            },
+            result = &mut http => {
+                result
+                    .map_err(|_| ProcessError::ObservabilityFailed)?
+                    .map_err(|_| ProcessError::ObservabilityFailed)?;
+                return Err(ProcessError::ObservabilityFailed);
+            },
             _ = interval.tick() => {
                 if worker.run_once().await.is_err() {
                     eprintln!("MCP OAuth cleanup delivery iteration was unavailable");
@@ -181,7 +220,6 @@ async fn run() -> Result<(), ProcessError> {
             }
         }
     }
-    Ok(())
 }
 
 async fn connect_egress(config: &ProcessConfig) -> Result<tonic::transport::Channel, ProcessError> {
@@ -295,6 +333,7 @@ enum ProcessError {
     DatabaseUnavailable,
     SchemaMismatch,
     EgressUnavailable,
+    ObservabilityFailed,
 }
 
 impl fmt::Display for ProcessError {
@@ -308,6 +347,7 @@ impl fmt::Display for ProcessError {
             Self::DatabaseUnavailable => formatter.write_str("database is unavailable"),
             Self::SchemaMismatch => formatter.write_str("database schema does not match candidate"),
             Self::EgressUnavailable => formatter.write_str("Egress Broker is unavailable"),
+            Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }
     }
 }
@@ -322,6 +362,7 @@ mod tests {
     fn process_config_rejects_unbounded_cleanup_and_non_https_egress() {
         let mut config = ProcessConfig {
             schema_version: 1,
+            observability_listen_address: "127.0.0.1:9090".to_owned(),
             database_max_connections: 8,
             database_acquire_timeout_milliseconds: 5_000,
             egress_endpoint: "https://egress.platform-egress.svc:8443/".to_owned(),

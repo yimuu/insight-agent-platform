@@ -6,6 +6,7 @@ imagePullSecrets: []
 
 namespace: platform-mcp-cleanup
 replicas: 2
+observability: {port: 9090}
 
 config:
   existingConfigMap: insight-platform-mcp-cleanup-worker-candidate
@@ -25,6 +26,8 @@ networkPolicy:
   egressPort: 8443
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
+  monitoringNamespaceSelector: {insight.platform/monitoring-namespace: "true"}
+  monitoringPodSelector: {app.kubernetes.io/name: prometheus}
   postgresCidrs: [10.10.0.0/24]
 
 resources:
@@ -32,3 +35,4 @@ resources:
   limits: {cpu: "1", memory: 512Mi}
 
 podDisruptionBudget: {enabled: true, minAvailable: 1}
+monitoring: {enabled: true, interval: 30s, scrapeTimeout: 5s}

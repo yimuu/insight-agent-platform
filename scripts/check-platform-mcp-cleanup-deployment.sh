@@ -13,7 +13,7 @@ egress_values = (root / "deploy/helm/insight-platform-security-egress/values.yam
 chart = root / "deploy/helm/insight-platform-mcp-cleanup-worker"
 failures = []
 
-for dependency in ("insight-platform-egress-rpc.workspace = true", "insight-platform-mcp-host.workspace = true", "insight-platform-postgres.workspace = true"):
+for dependency in ("insight-platform-egress-rpc.workspace = true", "insight-platform-mcp-host.workspace = true", "insight-platform-observability.workspace = true", "insight-platform-postgres.workspace = true"):
     if dependency not in manifest:
         failures.append(f"cleanup process is missing {dependency}")
 for forbidden in ("insight-platform-egress.workspace = true", "insight-platform-secret-broker.workspace = true"):
@@ -33,7 +33,7 @@ except (FileNotFoundError, subprocess.CalledProcessError) as error:
     failures.append(f"cleanup Helm contract did not render: {error}")
     rendered = ""
 
-for required in ("kind: Deployment", "kind: PodDisruptionBudget", "name: default-deny", "insight.platform/workload-role: mcp-cleanup-worker", "PLATFORM_MCP_CLEANUP_CONFIG_DIGEST", "PLATFORM_MCP_CLEANUP_DATABASE_URL", "PLATFORM_MCP_CLEANUP_EGRESS_CA_PATH", "app.kubernetes.io/component: egress-broker"):
+for required in ("kind: Deployment", "kind: PodDisruptionBudget", "kind: ServiceMonitor", "name: default-deny", "insight.platform/workload-role: mcp-cleanup-worker", "PLATFORM_MCP_CLEANUP_CONFIG_DIGEST", "PLATFORM_MCP_CLEANUP_DATABASE_URL", "PLATFORM_MCP_CLEANUP_EGRESS_CA_PATH", "app.kubernetes.io/component: egress-broker", "path: /readyz", "path: /metrics", "name: observability"):
     if required not in rendered:
         failures.append(f"cleanup render is missing {required}")
 for forbidden in ("AWS_ACCESS_KEY", "AWS_SECRET", "SECRET_MANAGER", "KMS_ENDPOINT"):
