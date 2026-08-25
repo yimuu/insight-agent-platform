@@ -148,6 +148,14 @@
 > 并完成00～18 cross-review；不新增表、aggregate、Job、WorkClass、route或role。后续remote Context实现必须消费该Accepted合同，禁止以
 > 进程本地自由URL、默认trust store或明文Secret绕过。
 
+> 2026-08-25 implementation evidence：RemoteSearch新增独立`platform-remote-context-worker`，与Native Worker共享Context/Job owner但
+> 只通过typed mTLS Egress RPC执行远端查询；进程启动、claim扫描和Egress端分别重验exact Worker manifest、canonical endpoint、protocol/
+> result mapping及Network/TLS/Trust closure。独立Helm role仅允许DNS/PostgreSQL/Egress Broker出站。fresh PostgreSQL 16 r241以真实
+> Remote Worker进程和mTLS Egress服务证明错manifest时Job保持ready、lease/quota不变且远端调用为零；正确进程在响应后的terminal commit
+> 窗口被强杀，第二进程expired-lease恢复后以attempt 2安全重放，远端调用恰为2且最终只有一个Observation和一个lease-recovered Event。
+> 该证据关闭Remote Worker→Egress RPC component L3；production HTTPS last-hop、完整Run→Context→resume→Return整链、隔舱容量与L4
+> rollout仍分别归后续门禁，不能由本fixture替代。
+
 > 2026-08-25 implementation evidence：runtime新增production orchestration composition，明确把business claim/heartbeat连接与
 > critical-control Plan/RunValue/Skill读取、owner commit及Safety scanner连接分开，并用同一mTLS Artifact Scheduler client组合exact
 > Plan materializer、Capability/Model admission、durable Plan driver、lease-fenced executor和coordinator。独立binary和Helm角色已在

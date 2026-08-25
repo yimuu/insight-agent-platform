@@ -244,7 +244,10 @@ fence/payload/reservation，原子结算旧quota与Event/Outbox并创建下一�
 adapter和独立Helm role；该role仅允许DNS/PostgreSQL出站，不含Egress、Secret、NATS或Sandbox凭据，并以claim前exact adapter digest
 扫描避免配置漂移产生lease/quota mutation。fresh PostgreSQL 16 r240又以真实双进程通过错digest零claim、terminal commit窗口强杀、
 第二进程expired-lease恢复、attempt 2及唯一Observation，关闭NativeCatalog process L3；remote Context backend protocol、隔舱容量和L4
-rollout仍待通过。
+rollout仍待通过。fresh PostgreSQL 16 r241进一步以独立Remote Context Worker、真实mTLS Egress RPC及Egress侧受控协议connector通过
+错Worker manifest零claim/零远端调用、响应后commit-window强杀、expired-lease恢复、attempt 2安全重放及唯一Observation；远端调用总数
+严格为2。该证据关闭Remote Worker→Egress RPC component L3，但不替代production HTTPS last-hop、完整Run→Context→resume→Return整链、
+隔舱容量或L4 rollout证据。
 
 每个production release至少覆盖：
 

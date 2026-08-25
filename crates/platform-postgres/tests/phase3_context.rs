@@ -1,39 +1,50 @@
 use chrono::{DateTime, Duration, Utc};
+use insight_platform_capability_adapters::{
+    CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
+    GrpcNetworkTransport, GrpcTransportRequest, GrpcTransportResponse, HttpNetworkTransport,
+    HttpTransportRequest, HttpTransportResponse,
+};
 use insight_platform_context::{
     CitationLocator, ClaimContextJobs, CommitContextDatasetBuild, CommitContextOutcome,
     ContextBackendOutcome, ContextCitation, ContextClaimSlot, ContextDatasetBuildJobPayload,
     ContextItem, ContextObservation, ContextObservationOutput, ContextQueryRequest,
     ContextQueryTransaction, ContextRetrievalEvidence, ContextSignalAudit, ContextWorkerAudit,
     CreateContextQuery, NormalizedContextScore, PrepareContextDispatch,
-    ReadOnlySqlExecutionBinding, ReadOnlySqlPlan, RequestContextDatasetBuild, SqlColumnRef,
-    SqlComparisonOperator, SqlObjectName, SqlPredicate, SqlProjection, SqlProjectionExpression,
-    SqlSource, WakeContextDispatch, READONLY_DATABASE_CAPABILITY, TEXT2SQL_PLAN_VALUE_KIND,
+    ReadOnlySqlExecutionBinding, ReadOnlySqlPlan, RemoteContextFailure, RemoteContextItem,
+    RemoteContextSearchConnector, RemoteContextSearchRequest, RemoteContextSearchResponse,
+    RequestContextDatasetBuild, SqlColumnRef, SqlComparisonOperator, SqlObjectName, SqlPredicate,
+    SqlProjection, SqlProjectionExpression, SqlSource, WakeContextDispatch,
+    READONLY_DATABASE_CAPABILITY, TEXT2SQL_PLAN_VALUE_KIND,
 };
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, AdministrativeGate, AgentDeploymentClosure,
-    AgentResourceSpec, ArtifactRef, AuthoringPackage, CapabilityArtifactContract,
-    CapabilityBackendBinding, CapabilityBackendContract, CapabilityBackendFeatures,
-    CapabilityBackendKind, CapabilityBackendLimits, CapabilityCancellationKind,
-    CapabilityDataFlowPolicy, CapabilityDeploymentClosure, CapabilityIdempotencyKind,
-    CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
-    CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
-    CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue, CommandAudit, CommandOutcome,
-    ContextBackendBinding, ContextBackendContract, ContextBackendKind, ContextBackendLimits,
-    ContextBindingSnapshot, ContextCitationContract, ContextCitationStrength,
-    ContextConsistencyMode, ContextConsistencyPolicy, ContextDataPolicyContract,
-    ContextDatasetGenerationSpec, ContextDeploymentClosure, ContextImplementationContract,
-    ContextImplementationResourceSpec, ContextInterfaceLimits, ContextInterfaceResourceSpec,
-    ContextLocatorKind, ContextPaginationContract, ContextQueryState, ContextRankingContract,
-    DataClassification, DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
-    ExactPolicyBinding, ExactVersionRef, ExternalLeafFailureMutationIds,
-    ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
-    FrozenSlotBinding, FrozenSlotTarget, JobState, NativeCapabilityContract, Permission,
-    PermissionSet, PlatformFailureCode, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
-    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, QuotaDimension,
-    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
-    RunBindingsSnapshot, SchedulerPriority, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef, WorkClass, WorkerManifest, WORKER_MANIFEST_VERSION,
-    WORKER_PROTOCOL_VERSION,
+    AgentResourceSpec, ArtifactRef, AuthoringPackage, CanonicalHttpEndpoint,
+    CapabilityArtifactContract, CapabilityBackendBinding, CapabilityBackendContract,
+    CapabilityBackendFeatures, CapabilityBackendKind, CapabilityBackendLimits,
+    CapabilityCancellationKind, CapabilityDataFlowPolicy, CapabilityDeploymentClosure,
+    CapabilityEndpointScheme, CapabilityIdempotencyKind, CapabilityImplementationResourceSpec,
+    CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
+    CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
+    CommandAudit, CommandOutcome, ContextBackendBinding, ContextBackendContract,
+    ContextBackendKind, ContextBackendLimits, ContextBindingSnapshot, ContextCitationContract,
+    ContextCitationStrength, ContextConsistencyMode, ContextConsistencyPolicy,
+    ContextDataPolicyContract, ContextDatasetGenerationSpec, ContextDeploymentClosure,
+    ContextImplementationContract, ContextImplementationResourceSpec, ContextInterfaceLimits,
+    ContextInterfaceResourceSpec, ContextLocatorKind, ContextPaginationContract, ContextQueryState,
+    ContextRankingContract, DataClassification, DataRegion, DeploymentClosure, Effect,
+    EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
+    ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds, Failure, FailureClass,
+    FailureCode, FailureSource, FrozenSlotBinding, FrozenSlotTarget, JobState,
+    NativeCapabilityContract, Permission, PermissionSet, PlatformFailureCode, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
+    ResourceKind, Retryability, RunBindingsSnapshot, SchedulerPriority, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
+    WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
+};
+use insight_platform_egress_rpc::{
+    proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
+    EgressCallerWorkloadIdentity, EgressInternalRpcLimits, CONTEXT_WORKER_WORKLOAD_IDENTITY,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, ExactInvocationValueRef, InvocationOrigin, InvocationPolicyDecision,
@@ -41,6 +52,11 @@ use insight_platform_invocations::{
     InvocationValueStorage,
 };
 use insight_platform_jobs::{JobFence, LeasePolicy, WakeContract, WakeKind, WakeSource};
+use insight_platform_model_adapters::{
+    ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
+    ModelProviderWireConnector, ModelProviderWireProtocol, ModelProviderWireRequest,
+    ModelProviderWireStream,
+};
 use insight_platform_orchestrator::{
     DataPortKey, ExactDataPortRef, ExactRunValueRef, OrchestrationJobPayload, PlanLimits,
     PlanNodeKey, RunCurrentSnapshot, RuntimeDependencyKind, RuntimeDependencySlot, RuntimeNode,
@@ -59,6 +75,10 @@ use insight_platform_postgres::{
     },
     verify_schema,
 };
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose, SanType,
+};
 use serde::Serialize;
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -67,8 +87,14 @@ use std::{
     io::BufRead as _,
     path::{Path, PathBuf},
     process::{Child, Stdio},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration as StdDuration,
 };
+use tonic::transport::server::TcpIncoming;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     format!(
@@ -652,13 +678,45 @@ async fn seed_policy_versions(
 }
 
 async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
-    seed_fixture_with_native_adapter(pool, repository, None).await
+    seed_fixture_with_backend(pool, repository, ContextFixtureBackend::SqlCatalog).await
 }
 
 async fn seed_fixture_with_native_adapter(
     pool: &PgPool,
     repository: &PgRepository,
     native_adapter: Option<(Sha256Digest, Sha256Digest)>,
+) -> Fixture {
+    let backend = native_adapter.map_or(
+        ContextFixtureBackend::SqlCatalog,
+        |(installed_adapter_digest, adapter_contract_digest)| {
+            ContextFixtureBackend::NativeCatalog {
+                installed_adapter_digest,
+                adapter_contract_digest,
+            }
+        },
+    );
+    seed_fixture_with_backend(pool, repository, backend).await
+}
+
+#[derive(Clone)]
+enum ContextFixtureBackend {
+    SqlCatalog,
+    NativeCatalog {
+        installed_adapter_digest: Sha256Digest,
+        adapter_contract_digest: Sha256Digest,
+    },
+    RemoteSearch {
+        endpoint: CanonicalHttpEndpoint,
+        protocol_contract_digest: Sha256Digest,
+        result_mapping_digest: Sha256Digest,
+        installed_adapter_digest: Sha256Digest,
+    },
+}
+
+async fn seed_fixture_with_backend(
+    pool: &PgPool,
+    repository: &PgRepository,
+    backend_fixture: ContextFixtureBackend,
 ) -> Fixture {
     let tenant_id = id(ResourceKind::Tenant, 1);
     let other_tenant_id = id(ResourceKind::Tenant, 2);
@@ -740,7 +798,10 @@ async fn seed_fixture_with_native_adapter(
     let execution_profile = version(ResourceKind::PolicyRevision, 0x26);
     let invocation_policy = version(ResourceKind::PolicyRevision, 0x27);
     let chunker_policy = version(ResourceKind::PolicyRevision, 0x28);
-    let policies = vec![
+    let network_policy = version(ResourceKind::PolicyRevision, 0x29);
+    let tls_policy = version(ResourceKind::PolicyRevision, 0x2a);
+    let trust_policy = version(ResourceKind::PolicyRevision, 0x2b);
+    let mut policies = vec![
         authorization_policy.clone(),
         ranking_policy.clone(),
         parser_policy.clone(),
@@ -751,6 +812,13 @@ async fn seed_fixture_with_native_adapter(
         invocation_policy.clone(),
         chunker_policy.clone(),
     ];
+    if matches!(&backend_fixture, ContextFixtureBackend::RemoteSearch { .. }) {
+        policies.extend([
+            network_policy.clone(),
+            tls_policy.clone(),
+            trust_policy.clone(),
+        ]);
+    }
     seed_policy_versions(pool, &tenant_id, &principal_id, &policy_resource, &policies).await;
     insert_ready_artifact(
         pool,
@@ -826,20 +894,31 @@ async fn seed_fixture_with_native_adapter(
 
     let catalog_projection_digest = named_digest("catalog-projection");
     let database_identity_digest = named_digest("database");
-    let backend_kind = if native_adapter.is_some() {
-        ContextBackendKind::NativeCatalog
-    } else {
-        ContextBackendKind::SqlCatalog
+    let backend_kind = match &backend_fixture {
+        ContextFixtureBackend::SqlCatalog => ContextBackendKind::SqlCatalog,
+        ContextFixtureBackend::NativeCatalog { .. } => ContextBackendKind::NativeCatalog,
+        ContextFixtureBackend::RemoteSearch { .. } => ContextBackendKind::RemoteSearch,
     };
-    let backend_contract = native_adapter.as_ref().map_or_else(
-        || ContextBackendContract::SqlCatalog {
+    let backend_contract = match &backend_fixture {
+        ContextFixtureBackend::SqlCatalog => ContextBackendContract::SqlCatalog {
             dialect: "postgres".to_owned(),
             catalog_projection_digest: catalog_projection_digest.clone(),
         },
-        |(_, adapter_contract_digest)| ContextBackendContract::NativeCatalog {
+        ContextFixtureBackend::NativeCatalog {
+            adapter_contract_digest,
+            ..
+        } => ContextBackendContract::NativeCatalog {
             adapter_contract_digest: adapter_contract_digest.clone(),
         },
-    );
+        ContextFixtureBackend::RemoteSearch {
+            protocol_contract_digest,
+            result_mapping_digest,
+            ..
+        } => ContextBackendContract::RemoteSearch {
+            protocol_contract_digest: protocol_contract_digest.clone(),
+            result_mapping_digest: result_mapping_digest.clone(),
+        },
+    };
     let implementation = ContextImplementationResourceSpec {
         authoring_package: authoring(0xa1),
         contract_digest: named_digest("implementation-contract"),
@@ -875,33 +954,49 @@ async fn seed_fixture_with_native_adapter(
     )
     .await;
 
-    let context_worker_manifest_digest = native_adapter
-        .as_ref()
-        .map(|(installed_adapter_digest, _)| {
-            native_context_worker_manifest(installed_adapter_digest.clone())
-                .canonical_digest()
-                .unwrap()
-        })
-        .unwrap_or_else(|| named_digest("context-worker-manifest"));
-    let backend_binding = native_adapter.map_or_else(
-        || ContextBackendBinding::SqlCatalog {
+    let context_worker_manifest_digest = match &backend_fixture {
+        ContextFixtureBackend::SqlCatalog => named_digest("context-worker-manifest"),
+        ContextFixtureBackend::NativeCatalog {
+            installed_adapter_digest,
+            ..
+        }
+        | ContextFixtureBackend::RemoteSearch {
+            installed_adapter_digest,
+            ..
+        } => native_context_worker_manifest(installed_adapter_digest.clone())
+            .canonical_digest()
+            .unwrap(),
+    };
+    let backend_binding = match backend_fixture {
+        ContextFixtureBackend::SqlCatalog => ContextBackendBinding::SqlCatalog {
             database_identity_digest: database_identity_digest.clone(),
             dialect: "postgres".to_owned(),
             catalog_scope_digest: named_digest("catalog-scope"),
         },
-        |(installed_adapter_digest, _)| ContextBackendBinding::NativeCatalog {
+        ContextFixtureBackend::NativeCatalog {
+            installed_adapter_digest,
+            ..
+        } => ContextBackendBinding::NativeCatalog {
             installed_adapter_digest,
         },
-    );
+        ContextFixtureBackend::RemoteSearch { endpoint, .. } => {
+            ContextBackendBinding::RemoteSearch {
+                endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
+                endpoint,
+                region: "cn-east-1".parse().unwrap(),
+            }
+        }
+    };
+    let remote_search = matches!(&backend_binding, ContextBackendBinding::RemoteSearch { .. });
     let context_closure = ContextDeploymentClosure {
         implementation: implementation_revision,
         interface: interface_revision.clone(),
         required_worker_manifest_digest: context_worker_manifest_digest.clone(),
         backend: backend_binding,
         secret_bindings: vec![],
-        network_policy: None,
-        tls_policy: None,
-        trust_policy: None,
+        network_policy: remote_search.then_some(network_policy),
+        tls_policy: remote_search.then_some(tls_policy),
+        trust_policy: remote_search.then_some(trust_policy),
         parser_policy: parser_policy.clone(),
         chunker_policy,
         embedding_model_deployment: None,
@@ -3172,6 +3267,143 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         .unwrap();
 }
 
+struct EmptyModelWire;
+
+#[async_trait::async_trait]
+impl ModelProviderWireConnector for EmptyModelWire {
+    async fn open(
+        &self,
+        _request: ModelProviderWireRequest,
+    ) -> Result<ModelProviderWireStream, ModelAdapterFailure> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    async fn cancel(
+        &self,
+        _protocol: ModelProviderWireProtocol,
+        _request: ModelAdapterCancelRequest,
+    ) -> Result<ModelAdapterCancelOutcome, ModelAdapterFailure> {
+        Ok(ModelAdapterCancelOutcome::Unsupported)
+    }
+}
+
+struct EmptyHttpTransport;
+
+#[async_trait::async_trait]
+impl HttpNetworkTransport for EmptyHttpTransport {
+    async fn round_trip(
+        &self,
+        _request: HttpTransportRequest,
+    ) -> Result<HttpTransportResponse, CapabilityAdapterFailure> {
+        unreachable!("Remote Context qualification must not use Capability HTTP")
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Unsupported)
+    }
+}
+
+struct EmptyGrpcTransport;
+
+#[async_trait::async_trait]
+impl GrpcNetworkTransport for EmptyGrpcTransport {
+    async fn unary(
+        &self,
+        _request: GrpcTransportRequest,
+    ) -> Result<GrpcTransportResponse, CapabilityAdapterFailure> {
+        unreachable!("Remote Context qualification must not use Capability gRPC")
+    }
+
+    async fn cancel(
+        &self,
+        _request: CapabilityTransportCancelRequest,
+    ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+        Ok(CapabilityTransportCancelOutcome::Unsupported)
+    }
+}
+
+struct CountingRemoteContext {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl RemoteContextSearchConnector for CountingRemoteContext {
+    async fn query(
+        &self,
+        request: RemoteContextSearchRequest,
+    ) -> Result<RemoteContextSearchResponse, RemoteContextFailure> {
+        request.validate_at(Utc::now()).unwrap();
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(RemoteContextSearchResponse {
+            schema_version: 1,
+            items: vec![RemoteContextItem {
+                source_item_identity_digest: named_digest("remote-source-item"),
+                content: json!({"item": "authorized remote search entry"}),
+                structured_fields: json!({}),
+                score_millionths: Some(850_000),
+                locator_digest: named_digest("remote-locator"),
+                authorization_evidence_digest: named_digest("remote-authorization"),
+                display_label: "authorized remote search entry".to_owned(),
+                classification: DataClassification::Internal,
+            }],
+            next_cursor_digest: None,
+            backend_request_digest: request.normalized_query_digest,
+            backend_response_digest: named_digest("remote-backend-response"),
+            ranking_evidence_digest: named_digest("remote-ranking"),
+            remote_revision_digest: Some(named_digest("remote-revision")),
+            observed_at: Utc::now(),
+        })
+    }
+}
+
+struct ContextProcessMtlsFixture {
+    ca_pem: String,
+    server_certificate_pem: String,
+    server_key_pem: String,
+    client_certificate_pem: String,
+    client_key_pem: String,
+}
+
+fn context_process_mtls_fixture() -> ContextProcessMtlsFixture {
+    let mut ca_parameters = CertificateParams::default();
+    ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_parameters.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let ca = CertifiedIssuer::self_signed(ca_parameters, KeyPair::generate().unwrap()).unwrap();
+    let issue = |subject_alt_names, extended_key_usage| {
+        let mut parameters = CertificateParams::default();
+        parameters.subject_alt_names = subject_alt_names;
+        parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        parameters.extended_key_usages = vec![extended_key_usage];
+        let key = KeyPair::generate().unwrap();
+        let certificate = parameters.signed_by(&key, &ca).unwrap();
+        (certificate.pem(), key.serialize_pem())
+    };
+    let (server_certificate_pem, server_key_pem) = issue(
+        vec![SanType::DnsName("egress.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let (client_certificate_pem, client_key_pem) = issue(
+        vec![SanType::URI(
+            CONTEXT_WORKER_WORKLOAD_IDENTITY.try_into().unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
+    ContextProcessMtlsFixture {
+        ca_pem: ca.pem(),
+        server_certificate_pem,
+        server_key_pem,
+        client_certificate_pem,
+        client_key_pem,
+    }
+}
+
 #[test]
 fn production_native_context_worker_recovers_commit_window_process_loss() {
     let (Ok(database_url), Ok(binary)) = (
@@ -3367,6 +3599,273 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
     });
 }
 
+#[test]
+fn production_remote_context_worker_recovers_mtls_response_commit_window() {
+    let (Ok(database_url), Ok(binary)) = (
+        std::env::var("PLATFORM_REMOTE_CONTEXT_WORKER_TEST_DATABASE_URL"),
+        std::env::var("PLATFORM_REMOTE_CONTEXT_WORKER_BIN"),
+    ) else {
+        eprintln!(
+            "Remote Context Worker binary or dedicated PostgreSQL fixture is unset; process recovery skipped"
+        );
+        return;
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async move {
+        let pool = PgPoolOptions::new()
+            .max_connections(16)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        verify_schema(&pool).await.unwrap();
+        let repository = PgRepository::new(pool.clone());
+        let tls = context_process_mtls_fixture();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = incoming.local_addr().unwrap();
+        let remote = Arc::new(CountingRemoteContext {
+            calls: AtomicUsize::new(0),
+        });
+        let service = EgressBrokerServiceServer::new(
+            EgressBrokerGrpcService::new(
+                Arc::new(EmptyModelWire),
+                Arc::new(EmptyHttpTransport),
+                Arc::new(EmptyGrpcTransport),
+                EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap(),
+            )
+            .with_remote_context(remote.clone()),
+        );
+        let service = tonic::service::interceptor::InterceptedService::new(
+            service,
+            EgressCallerWorkloadIdentity,
+        );
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(
+            Server::builder()
+                .tls_config(
+                    ServerTlsConfig::new()
+                        .identity(Identity::from_pem(
+                            &tls.server_certificate_pem,
+                            &tls.server_key_pem,
+                        ))
+                        .client_ca_root(Certificate::from_pem(tls.ca_pem.clone())),
+                )
+                .unwrap()
+                .add_service(service)
+                .serve_with_incoming_shutdown(incoming, async move {
+                    let _ = shutdown_receiver.await;
+                }),
+        );
+
+        let installed_adapter_digest = named_digest("production-remote-context-adapter");
+        let fixture = seed_fixture_with_backend(
+            &pool,
+            &repository,
+            ContextFixtureBackend::RemoteSearch {
+                endpoint: CanonicalHttpEndpoint {
+                    scheme: CapabilityEndpointScheme::Https,
+                    host: "search.example.test".to_owned(),
+                    port: 443,
+                    base_path: "/v1/query".to_owned(),
+                },
+                protocol_contract_digest: named_digest("remote-protocol-contract"),
+                result_mapping_digest: named_digest("remote-result-mapping"),
+                installed_adapter_digest: installed_adapter_digest.clone(),
+            },
+        )
+        .await;
+        let command = create_command(&fixture, 0x980);
+        let created = match execute_create(&repository, command).await.unwrap() {
+            CommandOutcome::Applied(record) => record,
+            CommandOutcome::Replayed(_) => panic!("fresh remote Context create replayed"),
+        };
+        let job_id = id(ResourceKind::Job, 0x990);
+        match execute_prepare(
+            &repository,
+            PrepareContextDispatch {
+                audit: audit(&fixture.tenant_id, &fixture.principal_id, 0x991, "remote-prepare"),
+                context_query_id: created.context_query_id.clone(),
+                expected_query_version: created.version,
+                job_id: job_id.clone(),
+                scheduled_at: Utc::now() + Duration::seconds(5),
+            },
+        )
+        .await
+        .unwrap()
+        {
+            CommandOutcome::Applied(_) => {}
+            CommandOutcome::Replayed(_) => panic!("fresh remote Context prepare replayed"),
+        }
+        park_direct_context_leaf(&pool, &fixture, &created.context_query_id, &job_id).await;
+
+        let prefix = PathBuf::from(format!(
+            "/tmp/platform-remote-context-worker-process-{}",
+            std::process::id()
+        ));
+        let ca_path = PathBuf::from(format!("{}-ca.pem", prefix.display()));
+        let cert_path = PathBuf::from(format!("{}-client.pem", prefix.display()));
+        let key_path = PathBuf::from(format!("{}-client-key.pem", prefix.display()));
+        std::fs::write(&ca_path, &tls.ca_pem).unwrap();
+        std::fs::write(&cert_path, &tls.client_certificate_pem).unwrap();
+        std::fs::write(&key_path, &tls.client_key_pem).unwrap();
+        let config = remote_context_process_config(
+            installed_adapter_digest.clone(),
+            format!("https://{address}/"),
+        );
+        let (config_path, config_digest) =
+            write_context_process_config(&prefix, "remote-correct", &config);
+        let mut wrong_config = config.clone();
+        let wrong_adapter_digest = named_digest("wrong-production-remote-context-adapter");
+        wrong_config["installed_adapter_digest"] =
+            serde_json::to_value(wrong_adapter_digest.clone()).unwrap();
+        wrong_config["worker_manifest"]["adapter_runtime_digest"] =
+            serde_json::to_value(wrong_adapter_digest).unwrap();
+        let (wrong_path, wrong_digest) =
+            write_context_process_config(&prefix, "remote-wrong", &wrong_config);
+
+        let mut wrong = spawn_remote_context_worker(
+            &binary,
+            &wrong_path,
+            &wrong_digest,
+            &database_url,
+            &ca_path,
+            &cert_path,
+            &key_path,
+        );
+        let wrong_log = observe_context_worker_start(&mut wrong);
+        tokio::time::sleep(StdDuration::from_millis(300)).await;
+        let unclaimed: (String, i32, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT state, attempt_no, worker_id IS NULL, quota_reservation_id IS NULL
+            FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unclaimed, ("ready".to_owned(), 0, true, true));
+        assert_eq!(remote.calls.load(Ordering::SeqCst), 0);
+        wrong.kill().unwrap();
+        wrong.wait().unwrap();
+        wrong_log.join().unwrap();
+
+        let mut first = spawn_remote_context_worker(
+            &binary,
+            &config_path,
+            &config_digest,
+            &database_url,
+            &ca_path,
+            &cert_path,
+            &key_path,
+        );
+        let first_log = observe_context_worker_start(&mut first);
+        sqlx::query(
+            r#"
+            CREATE FUNCTION insight_platform.test_pause_remote_context_commit()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+              IF OLD.state = 'running' AND NEW.state = 'succeeded' AND NEW.work_class = 'context' THEN
+                PERFORM pg_sleep(30);
+              END IF;
+              RETURN NEW;
+            END
+            $$
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER test_pause_remote_context_commit BEFORE UPDATE ON insight_platform.jobs FOR EACH ROW EXECUTE FUNCTION insight_platform.test_pause_remote_context_commit()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE insight_platform.jobs SET scheduled_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'ready'")
+            .bind(fixture.tenant_id.to_string())
+            .bind(job_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        wait_remote_context_calls(&remote.calls, 1).await;
+        wait_context_job_state(&pool, &job_id, "running").await;
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        first.kill().unwrap();
+        first.wait().unwrap();
+        first_log.join().unwrap();
+        sqlx::query("DROP TRIGGER test_pause_remote_context_commit ON insight_platform.jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP FUNCTION insight_platform.test_pause_remote_context_commit()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'")
+            .bind(fixture.tenant_id.to_string())
+            .bind(job_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut second = spawn_remote_context_worker(
+            &binary,
+            &config_path,
+            &config_digest,
+            &database_url,
+            &ca_path,
+            &cert_path,
+            &key_path,
+        );
+        let second_log = observe_context_worker_start(&mut second);
+        wait_context_query_state(&pool, &created.context_query_id, "succeeded").await;
+        wait_remote_context_calls(&remote.calls, 2).await;
+        let evidence: (i64, i32, bool, i64) = sqlx::query_as(
+            r#"
+            SELECT
+              (SELECT count(*) FROM insight_platform.events
+                 WHERE tenant_id = $1 AND aggregate_id = $2
+                   AND event_type = 'context.lease_recovered'),
+              job.attempt_no,
+              job.worker_id IS NULL AND job.lease_token_digest IS NULL
+                AND job.quota_reservation_id IS NULL,
+              (SELECT count(*) FROM insight_platform.run_values
+                 WHERE tenant_id = $1 AND run_id = $3
+                   AND value_kind = 'context_observation')
+            FROM insight_platform.jobs AS job
+            WHERE job.tenant_id = $1 AND job.job_id = $4
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(created.context_query_id.to_string())
+        .bind(fixture.run_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence, (1, 2, true, 1));
+        assert_eq!(remote.calls.load(Ordering::SeqCst), 2);
+        second.kill().unwrap();
+        second.wait().unwrap();
+        second_log.join().unwrap();
+        let _ = shutdown_sender.send(());
+        server.await.unwrap().unwrap();
+        for path in [
+            wrong_path,
+            config_path,
+            ca_path,
+            cert_path,
+            key_path,
+        ] {
+            std::fs::remove_file(path).unwrap();
+        }
+    });
+}
+
 fn native_context_process_config(
     installed_adapter_digest: Sha256Digest,
     adapter_contract_digest: Sha256Digest,
@@ -3389,6 +3888,30 @@ fn native_context_process_config(
             "display_label": "authorized native catalog entry",
             "classification": "internal"
         },
+        "database_max_connections": 4,
+        "database_acquire_timeout_milliseconds": 1000,
+        "receipt_ttl_seconds": 60,
+        "scan_interval_milliseconds": 20,
+        "failure_backoff_milliseconds": 5,
+        "drain_grace_milliseconds": 1000
+    })
+}
+
+fn remote_context_process_config(
+    installed_adapter_digest: Sha256Digest,
+    egress_endpoint: String,
+) -> serde_json::Value {
+    let manifest = native_context_worker_manifest(installed_adapter_digest.clone());
+    json!({
+        "schema_version": 1,
+        "worker_manifest": manifest,
+        "installed_adapter_digest": installed_adapter_digest,
+        "egress_endpoint": egress_endpoint,
+        "egress_tls_server_name": "egress.test",
+        "maximum_rpc_metadata_bytes": 65536,
+        "maximum_rpc_payload_bytes": 1048576,
+        "connect_timeout_milliseconds": 1000,
+        "request_timeout_milliseconds": 30000,
         "database_max_connections": 4,
         "database_acquire_timeout_milliseconds": 1000,
         "receipt_ttl_seconds": 60,
@@ -3436,6 +3959,31 @@ fn spawn_context_worker(
         .unwrap()
 }
 
+fn spawn_remote_context_worker(
+    binary: &str,
+    config_path: &Path,
+    config_digest: &str,
+    database_url: &str,
+    ca_path: &Path,
+    cert_path: &Path,
+    key_path: &Path,
+) -> Child {
+    std::process::Command::new(binary)
+        .env("PLATFORM_REMOTE_CONTEXT_WORKER_CONFIG", config_path)
+        .env(
+            "PLATFORM_REMOTE_CONTEXT_WORKER_CONFIG_DIGEST",
+            config_digest,
+        )
+        .env("PLATFORM_REMOTE_CONTEXT_WORKER_DATABASE_URL", database_url)
+        .env("PLATFORM_REMOTE_CONTEXT_WORKER_EGRESS_CA_PATH", ca_path)
+        .env("PLATFORM_REMOTE_CONTEXT_WORKER_EGRESS_CERT_PATH", cert_path)
+        .env("PLATFORM_REMOTE_CONTEXT_WORKER_EGRESS_KEY_PATH", key_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
 fn observe_context_worker_start(child: &mut Child) -> std::thread::JoinHandle<()> {
     let stderr = child.stderr.take().unwrap();
     let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
@@ -3453,6 +4001,19 @@ fn observe_context_worker_start(child: &mut Child) -> std::thread::JoinHandle<()
         .expect("Context Worker did not report startup");
     assert!(first.contains("started generation="), "{first}");
     logger
+}
+
+async fn wait_remote_context_calls(calls: &AtomicUsize, expected: usize) {
+    for _ in 0..400 {
+        if calls.load(Ordering::SeqCst) >= expected {
+            return;
+        }
+        tokio::time::sleep(StdDuration::from_millis(25)).await;
+    }
+    panic!(
+        "Remote Context call count did not reach {expected}; observed {}",
+        calls.load(Ordering::SeqCst)
+    );
 }
 
 async fn context_job_state(pool: &PgPool, job_id: &ResourceId) -> String {
