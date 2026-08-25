@@ -19,6 +19,8 @@ spec:
         app.kubernetes.io/name: {{ .Chart.Name }}
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: executor-wasi
+        insight.platform/workload-role: sandbox-wasi-executor
+        insight.platform/component-role: sandbox_wasi_executor
       annotations:
         checksum/config: {{ $config | sha256sum }}
     spec:
@@ -72,3 +74,16 @@ spec:
         - {name: nats-tls, secret: {secretName: {{ .Values.natsTls.existingSecret }}, defaultMode: 0440}}
         - {name: socket, hostPath: {path: {{ .Values.attestor.hostPaths.socketDirectory }}, type: Directory}}
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "insight-platform-sandbox.executorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: executor-wasi

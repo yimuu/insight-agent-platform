@@ -18,8 +18,8 @@ roles:
     serviceAccount:
       annotations: {eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-gateway}
     resources:
-      requests: {cpu: 200m, memory: 256Mi}
-      limits: {cpu: "2", memory: 1Gi}
+      requests: {cpu: 200m, memory: 256Mi, ephemeral-storage: 64Mi}
+      limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 1Gi}
   data-worker:
     command: /usr/local/bin/platform-artifact-data-worker
     replicas: 2
@@ -35,8 +35,8 @@ roles:
       existingSecret: insight-platform-artifact-data-worker-server-tls
       keys: {clientCa: client-ca.pem, serverCertificate: server.pem, serverPrivateKey: server-key.pem}
     resources:
-      requests: {cpu: 500m, memory: 512Mi}
-      limits: {cpu: "4", memory: 2Gi}
+      requests: {cpu: 500m, memory: 512Mi, ephemeral-storage: 128Mi}
+      limits: {cpu: "4", memory: 2Gi, ephemeral-storage: 2Gi}
   maintenance:
     command: /usr/local/bin/platform-artifact-maintenance
     replicas: 2
@@ -46,8 +46,8 @@ roles:
     serviceAccount:
       annotations: {eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/insight-platform-artifact-maintenance}
     resources:
-      requests: {cpu: 200m, memory: 256Mi}
-      limits: {cpu: "2", memory: 1Gi}
+      requests: {cpu: 200m, memory: 256Mi, ephemeral-storage: 128Mi}
+      limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 2Gi}
 
 podDisruptionBudget: {enabled: true, minAvailable: 1}
 autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 32, targetCPUUtilizationPercentage: 70}

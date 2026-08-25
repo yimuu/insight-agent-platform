@@ -10,6 +10,7 @@ namespaces:
 
 egress:
   replicas: 2
+  autoscaling: {minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
   port: 8443
   config:
     existingConfigMap: insight-platform-egress-candidate
@@ -31,11 +32,12 @@ egress:
       authorityClientCertificate: authority-client.pem
       authorityClientPrivateKey: authority-client-key.pem
   resources:
-    requests: {cpu: 200m, memory: 256Mi}
-    limits: {cpu: "2", memory: 1Gi}
+    requests: {cpu: 200m, memory: 256Mi, ephemeral-storage: 64Mi}
+    limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 1Gi}
 
 securityAuthority:
   replicas: 2
+  autoscaling: {minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
   port: 9443
   config:
     existingConfigMap: insight-platform-security-authority-candidate
@@ -51,8 +53,8 @@ securityAuthority:
       serverCertificate: server.pem
       serverPrivateKey: server-key.pem
   resources:
-    requests: {cpu: 100m, memory: 128Mi}
-    limits: {cpu: "1", memory: 512Mi}
+    requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
+    limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}
 
 networkPolicy:
   enabled: true

@@ -34,6 +34,7 @@ spec:
       labels:
         {{- include "insight-platform-mcp-host.labels" . | nindent 8 }}
         insight.platform/workload-role: mcp-host
+        insight.platform/component-role: mcp_host
     spec:
       serviceAccountName: {{ include "insight-platform-mcp-host.name" . }}
       automountServiceAccountToken: false

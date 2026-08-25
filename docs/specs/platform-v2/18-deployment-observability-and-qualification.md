@@ -279,6 +279,11 @@ RuntimeClass topology fixture全部通过。该本地证据没有运行productio
 r247修正一个role只允许一个workload的过度实现约束，增加同role多隔离pool的聚合副本/HPA闭包和独立ServiceAccount检查；新增双Context
 pool正向fixture后workload矩阵为6项。该修正不降低closed 15-role、exact image或任一安全/rollout负向门禁。
 
+r248完成checked-in Helm的15个ComponentRole/17个隔离pool静态闭包：Context与Egress role各有两个独立pool，其余各一个；全部主workload
+使用exact role label、digest image、独立ServiceAccount/PDB，Deployment有HPA，container闭合CPU/memory/ephemeral-storage request/limit，
+每个namespace保持exact default-deny。跨11个chart的全局render检查和各受影响role原有静态检查通过。该证据只证明待部署manifest闭包，
+live rollout、identity、mTLS/RBAC/NetworkPolicy enforcement仍须r245 preflight在production-equivalent cluster实际通过。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

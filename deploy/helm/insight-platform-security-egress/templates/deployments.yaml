@@ -23,6 +23,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: egress-broker
         insight.platform/workload-role: egress-broker
+        insight.platform/component-role: egress_secret_broker
     spec:
       serviceAccountName: {{ include "insight-platform-security-egress.egressName" . }}
       automountServiceAccountToken: false
@@ -122,6 +123,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: security-authority
         insight.platform/workload-role: security-authority
+        insight.platform/component-role: egress_secret_broker
     spec:
       serviceAccountName: {{ include "insight-platform-security-egress.authorityName" . }}
       automountServiceAccountToken: false

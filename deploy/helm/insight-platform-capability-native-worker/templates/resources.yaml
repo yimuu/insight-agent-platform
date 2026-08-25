@@ -28,6 +28,7 @@ spec:
       labels:
         {{- include "insight-platform-capability-native-worker.labels" . | nindent 8 }}
         insight.platform/workload-role: capability-native-worker
+        insight.platform/component-role: capability_native_worker
     spec:
       serviceAccountName: {{ include "insight-platform-capability-native-worker.name" . }}
       automountServiceAccountToken: false

@@ -26,6 +26,7 @@ spec:
       labels:
         {{- include "insight-platform-capability-remote-worker.labels" . | nindent 8 }}
         insight.platform/workload-role: capability-remote-worker
+        insight.platform/component-role: capability_remote_worker
     spec:
       serviceAccountName: {{ include "insight-platform-capability-remote-worker.name" . }}
       automountServiceAccountToken: false

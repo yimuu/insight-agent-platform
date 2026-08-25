@@ -26,8 +26,8 @@ networkPolicy:
   egressPodSelector: {insight.platform/workload-role: egress-broker}
   egressPort: 8443
 resources:
-  requests: {cpu: 100m, memory: 128Mi}
-  limits: {cpu: "1", memory: 512Mi}
+  requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
+  limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}
 podDisruptionBudget: {enabled: true, minAvailable: 1}
 autoscaling:
   enabled: true

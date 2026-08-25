@@ -22,8 +22,8 @@ networkPolicy:
   postgresCidrs: [10.10.0.0/24]
 
 resources:
-  requests: {cpu: 100m, memory: 128Mi}
-  limits: {cpu: "1", memory: 512Mi}
+  requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
+  limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}
 
 podDisruptionBudget:
   enabled: true

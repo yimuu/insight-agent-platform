@@ -1,0 +1,16 @@
+{{ range $role := list "egress" "securityAuthority" }}
+{{- $component := index $.Values $role }}
+{{- $name := ternary (include "insight-platform-security-egress.egressName" $) (include "insight-platform-security-egress.authorityName" $) (eq $role "egress") }}
+{{- $namespace := ternary $.Values.namespaces.egress $.Values.namespaces.securityAuthority (eq $role "egress") }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: {{ $name }}, namespace: {{ $namespace }}}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ $name }}}
+  minReplicas: {{ int $component.autoscaling.minReplicas }}
+  maxReplicas: {{ int $component.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: {{ int $component.autoscaling.targetCPUUtilizationPercentage }}}}
+---
+{{ end }}

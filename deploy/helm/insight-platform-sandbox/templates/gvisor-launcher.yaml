@@ -21,6 +21,8 @@ spec:
         app.kubernetes.io/name: {{ .Chart.Name }}
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: executor-gvisor
+        insight.platform/workload-role: sandbox-gvisor-executor
+        insight.platform/component-role: sandbox_gvisor_executor
       annotations:
         checksum/executor-config: {{ $executorConfig | sha256sum }}
         checksum/attestor-config: {{ $attestorConfig | sha256sum }}
@@ -109,3 +111,29 @@ spec:
               - serviceAccountToken: {path: token, audience: "https://kubernetes.default.svc", expirationSeconds: 600}
               - configMap: {name: kube-root-ca.crt, items: [{key: ca.crt, path: ca.crt}]}
               - downwardAPI: {items: [{path: namespace, fieldRef: {apiVersion: v1, fieldPath: metadata.namespace}}]}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "insight-platform-sandbox.gvisorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: executor-gvisor
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "insight-platform-sandbox.gvisorName" . }}
+  namespace: {{ .Values.namespaces.executor }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "insight-platform-sandbox.gvisorName" . }}}
+  minReplicas: {{ int .Values.gvisor.autoscaling.minReplicas }}
+  maxReplicas: {{ int .Values.gvisor.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: {{ int .Values.gvisor.autoscaling.targetCPUUtilizationPercentage }}}}

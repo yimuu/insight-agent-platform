@@ -34,6 +34,7 @@ spec:
       labels:
         {{- include "insight-platform-model-worker.labels" . | nindent 8 }}
         insight.platform/workload-role: model-worker
+        insight.platform/component-role: model_worker
     spec:
       serviceAccountName: {{ include "insight-platform-model-worker.name" . }}
       automountServiceAccountToken: false

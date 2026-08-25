@@ -17,6 +17,7 @@ admission:
 
 controller:
   replicas: 2
+  autoscaling: {minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
   port: 7443
   database:
     existingSecret: insight-platform-sandbox-database
@@ -38,8 +39,8 @@ controller:
   requestTimeoutMilliseconds: 30000
   shutdownGraceMilliseconds: 30000
   resources:
-    requests: {cpu: 100m, memory: 128Mi}
-    limits: {cpu: "1", memory: 512Mi}
+    requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
+    limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}
 
 executor:
   serviceAccount:
@@ -68,11 +69,12 @@ executor:
   connectTimeoutMilliseconds: 5000
   requestTimeoutMilliseconds: 30000
   resources:
-    requests: {cpu: "1", memory: 512Mi}
-    limits: {cpu: "4", memory: 2Gi}
+    requests: {cpu: "1", memory: 512Mi, ephemeral-storage: 128Mi}
+    limits: {cpu: "4", memory: 2Gi, ephemeral-storage: 2Gi}
 
 gvisor:
   replicas: 2
+  autoscaling: {minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
   serviceAccount:
     annotations: {}
   guestServiceAccount: sandbox-guest
@@ -107,16 +109,16 @@ gvisor:
   connectTimeoutMilliseconds: 5000
   requestTimeoutMilliseconds: 30000
   resources:
-    requests: {cpu: 100m, memory: 128Mi}
-    limits: {cpu: "1", memory: 512Mi}
+    requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 128Mi}
+    limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 1Gi}
   attestor:
     maximumRegistrations: 10000
     absentRetentionSeconds: 3900
     tlsHandshakeTimeoutMilliseconds: 5000
     shutdownGraceMilliseconds: 30000
     resources:
-      requests: {cpu: 25m, memory: 32Mi}
-      limits: {cpu: 200m, memory: 128Mi}
+      requests: {cpu: 25m, memory: 32Mi, ephemeral-storage: 32Mi}
+      limits: {cpu: 200m, memory: 128Mi, ephemeral-storage: 256Mi}
 
 attestor:
   nodeSelector:
@@ -135,8 +137,8 @@ attestor:
     registryDirectory: /var/lib/insight-sandbox-attestor
     socketDirectory: /var/run/insight-sandbox-attestor
   resources:
-    requests: {cpu: 50m, memory: 64Mi}
-    limits: {cpu: 250m, memory: 256Mi}
+    requests: {cpu: 50m, memory: 64Mi, ephemeral-storage: 32Mi}
+    limits: {cpu: 250m, memory: 256Mi, ephemeral-storage: 256Mi}
 
 tls:
   controllerSecret: insight-platform-sandbox-controller-tls

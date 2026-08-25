@@ -7,6 +7,12 @@
 {{- if lt (int .Values.securityAuthority.replicas) 2 }}
 {{- fail "securityAuthority.replicas must be at least 2" }}
 {{- end }}
+{{- range $role := list "egress" "securityAuthority" }}
+{{- $component := index $.Values $role }}
+{{- if or (lt (int $component.autoscaling.minReplicas) 2) (lt (int $component.autoscaling.maxReplicas) (int $component.autoscaling.minReplicas)) }}
+{{- fail (printf "%s autoscaling bounds are invalid" $role) }}
+{{- end }}
+{{- end }}
 {{- if not .Values.networkPolicy.enabled }}
 {{- fail "networkPolicy.enabled must remain true" }}
 {{- end }}
