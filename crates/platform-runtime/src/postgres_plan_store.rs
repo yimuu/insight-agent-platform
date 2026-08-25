@@ -408,23 +408,11 @@ fn assemble_default_model_continuation(
                 trusted_instruction: false,
             },
         });
-    canonical.classification = classification;
-    let added_tokens = u64::try_from(encoded_results.len())
-        .ok()
-        .and_then(|bytes| bytes.checked_add(3))
-        .map(|bytes| bytes / 4)
-        .ok_or(DurablePlanDriverError::InvariantViolation)?;
-    canonical.input_token_estimate = canonical
-        .input_token_estimate
-        .checked_add(added_tokens.max(1))
-        .ok_or(DurablePlanDriverError::InvariantViolation)?;
-    canonical.source_map_digest = canonical_digest(&json!({
-        "previous_source_map_digest": canonical.source_map_digest,
-        "tool_result_source_digest": source_digest,
-    }))
-    .map_err(|_| DurablePlanDriverError::InvariantViolation)?
-    .parse()
-    .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+    let source_map = insight_platform_models::derive_prompt_source_map(&canonical.messages)
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+    canonical.classification = source_map.classification;
+    canonical.input_token_estimate = source_map.total_estimated_tokens;
+    canonical.source_map_digest = source_map.canonical_digest;
     let value =
         serde_json::to_value(&canonical).map_err(|_| DurablePlanDriverError::InvariantViolation)?;
     let content_digest: Sha256Digest = canonical_digest(&value)

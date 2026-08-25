@@ -46,6 +46,15 @@ pub struct AssembledPrompt {
     pub total_estimated_tokens: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedPromptSourceMap {
+    pub entries: Vec<PromptSourceMapEntry>,
+    pub canonical_digest: Sha256Digest,
+    pub total_bytes: u32,
+    pub total_estimated_tokens: u64,
+    pub classification: DataClassification,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptAssemblyError {
     Empty,
@@ -188,6 +197,99 @@ pub fn assemble_prompt_messages(
     })
 }
 
+pub fn derive_prompt_source_map(
+    messages: &[CanonicalMessage],
+) -> Result<DerivedPromptSourceMap, PromptAssemblyError> {
+    if messages.is_empty() {
+        return Err(PromptAssemblyError::Empty);
+    }
+    let mut entries = Vec::with_capacity(messages.len());
+    let mut positions = BTreeSet::new();
+    let mut previous = None;
+    let mut total_bytes = 0_u32;
+    let mut total_estimated_tokens = 0_u64;
+    let mut classification = DataClassification::Public;
+    for message in messages {
+        let position = (
+            message.source.assembly_phase,
+            message.source.ordinal,
+            message.source.source_id.as_str(),
+        );
+        if previous.is_some_and(|previous| previous > position)
+            || !positions.insert((message.source.assembly_phase, message.source.ordinal))
+        {
+            return Err(PromptAssemblyError::NonCanonicalOrdinal);
+        }
+        previous = Some(position);
+        let encoded = match message.parts.as_slice() {
+            [CanonicalMessagePart::Text(text)] => text.as_bytes().to_vec(),
+            parts
+                if parts
+                    .iter()
+                    .all(|part| matches!(part, CanonicalMessagePart::ToolResult(_))) =>
+            {
+                let results = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        CanonicalMessagePart::ToolResult(result) => Some(result),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::to_vec(&results).map_err(|_| PromptAssemblyError::Canonicalization)?
+            }
+            _ => return Err(PromptAssemblyError::InvalidSource),
+        };
+        let included_bytes =
+            u32::try_from(encoded.len()).map_err(|_| PromptAssemblyError::BlockBudgetExceeded)?;
+        let estimated_tokens = included_bytes
+            .checked_add(3)
+            .ok_or(PromptAssemblyError::BlockBudgetExceeded)?
+            / 4;
+        let estimated_tokens = estimated_tokens.max(1);
+        if included_bytes > message.source.byte_budget
+            || estimated_tokens > message.source.token_budget
+            || digest_bytes(&encoded)? != message.source.content_digest
+        {
+            return Err(PromptAssemblyError::BlockBudgetExceeded);
+        }
+        total_bytes = total_bytes
+            .checked_add(included_bytes)
+            .ok_or(PromptAssemblyError::TotalBudgetExceeded)?;
+        total_estimated_tokens = total_estimated_tokens
+            .checked_add(u64::from(estimated_tokens))
+            .ok_or(PromptAssemblyError::TotalBudgetExceeded)?;
+        if message.classification.rank() > classification.rank() {
+            classification = message.classification;
+        }
+        entries.push(PromptSourceMapEntry {
+            phase: message.source.assembly_phase,
+            ordinal: message.source.ordinal,
+            source_kind: message.source.source_kind.clone(),
+            source_id: message.source.source_id.clone(),
+            source_digest: message.source.source_digest.clone(),
+            content_digest: message.source.content_digest.clone(),
+            classification: message.classification,
+            byte_budget: message.source.byte_budget,
+            token_budget: message.source.token_budget,
+            included_bytes,
+            estimated_tokens,
+        });
+    }
+    let canonical_digest: Sha256Digest = canonical_digest(
+        &serde_json::to_value(&entries).map_err(|_| PromptAssemblyError::Canonicalization)?,
+    )
+    .map_err(|_| PromptAssemblyError::Canonicalization)?
+    .parse()
+    .map_err(|_| PromptAssemblyError::Canonicalization)?;
+    Ok(DerivedPromptSourceMap {
+        entries,
+        canonical_digest,
+        total_bytes,
+        total_estimated_tokens,
+        classification,
+    })
+}
+
 fn digest_bytes(bytes: &[u8]) -> Result<Sha256Digest, PromptAssemblyError> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -257,6 +359,11 @@ mod tests {
         reversed.reverse();
         let second = assemble_prompt_messages(reversed, 8_192, 2_048).unwrap();
         assert_eq!(first, second);
+        let derived = derive_prompt_source_map(&first.messages).unwrap();
+        assert_eq!(derived.entries, first.source_map);
+        assert_eq!(derived.canonical_digest, first.source_map_digest);
+        assert_eq!(derived.total_bytes, first.total_bytes);
+        assert_eq!(derived.total_estimated_tokens, first.total_estimated_tokens);
         assert_eq!(first.messages[0].role, CanonicalMessageRole::Platform);
         assert_eq!(first.messages[3].role, CanonicalMessageRole::User);
         assert!(!first.messages[3].source.trusted_instruction);
