@@ -5,7 +5,9 @@ use super::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use insight_platform_contracts::{CommandOutcome, ResourceId, ResourceKind};
+use insight_platform_contracts::{
+    CommandOutcome, ExternalLeafResumeMutationIds, ResourceId, ResourceKind,
+};
 use insight_platform_invocations::{
     CapabilityWorkerAudit, CommitCapabilityCancellationOutcome, CommitCapabilityOutcome,
     DispatchOutcome, CAPABILITY_QUOTA_LINES,
@@ -28,6 +30,7 @@ pub struct ExecuteCapabilityAdapterJob {
     /// Retry time already intersected with the frozen policy and remaining Run/Invocation budget.
     /// It is consumed only when the adapter returns a safely retryable failure.
     pub retry_at: Option<DateTime<Utc>>,
+    pub resume_mutations: Option<ExternalLeafResumeMutationIds>,
 }
 
 impl ExecuteCapabilityAdapterJob {
@@ -198,6 +201,7 @@ where
                 fence: command.fence,
                 quota_entry_ids: command.quota_entry_ids,
                 outcome,
+                resume_mutations: command.resume_mutations,
             })
             .await
             .map_err(CapabilityAdapterWorkerError::Authority)
@@ -505,6 +509,7 @@ mod tests {
                 id(ResourceKind::QuotaLedgerEntry, 24),
             ],
             retry_at: Some(Utc::now() + Duration::seconds(1)),
+            resume_mutations: None,
             execution,
         }
     }
@@ -567,6 +572,7 @@ mod tests {
                         manual: true,
                     },
                 ),
+                resume_mutations: None,
             }))
         }
     }

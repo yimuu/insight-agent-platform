@@ -1,9 +1,10 @@
 //! PostgreSQL-backed durable Plan-generation store.
 
 use crate::{
-    allocate_child_run_mutations, allocate_context_query_mutations,
-    allocate_controller_step_mutations, allocate_human_task_mutations,
-    allocate_orchestration_terminal_mutations, CoordinatorIdentityFactory, DerivedControllerCommit,
+    allocate_capability_invocation_mutations, allocate_child_run_mutations,
+    allocate_context_query_mutations, allocate_controller_step_mutations,
+    allocate_human_task_mutations, allocate_orchestration_terminal_mutations,
+    CoordinatorIdentityFactory, DerivedControllerCommit, DurableCapabilityDispatchFacts,
     DurableChildAgentDispatchFacts, DurableContextDispatchFacts, DurableControllerFacts,
     DurableControllerPhase, DurablePlanDriverError, DurablePlanGenerationStore,
     GenerationHandoffReason, StartedOrchestrationJob,
@@ -24,11 +25,11 @@ use insight_platform_orchestrator::{
 };
 use insight_platform_postgres::repository::{
     ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep, CommitPlanTerminal,
-    ControllerFacts, DeferOrchestrationToChildRun, DeferOrchestrationToContextQuery,
-    DeferOrchestrationToTask, DerivedExpressionFailureEvidence, FailOrchestrationJob, JobFence,
-    MaterializedTerminalValue, OrchestrationFailureCause, OrchestrationYield,
-    OrchestrationYieldMutationIds, PgRepository, RepositoryError, ResolvedExpressionInput,
-    YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+    ControllerFacts, DeferOrchestrationToCapabilityInvocation, DeferOrchestrationToChildRun,
+    DeferOrchestrationToContextQuery, DeferOrchestrationToTask, DerivedExpressionFailureEvidence,
+    FailOrchestrationJob, JobFence, MaterializedTerminalValue, OrchestrationFailureCause,
+    OrchestrationYield, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
+    ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use insight_platform_tasks::TaskDefinition;
 use serde_json::json;
@@ -263,7 +264,34 @@ pub struct PostgresDurablePlanGenerationStore<M, I> {
     repository: PgRepository,
     materializer: Arc<M>,
     identities: Arc<I>,
+    capability_admission: Arc<dyn ControllerCapabilityAdmissionProvider>,
     handoff_retry_delay: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct ControllerCapabilityAdmissionRequest {
+    pub tenant_id: ResourceId,
+    pub run_id: ResourceId,
+    pub node_execution_id: ResourceId,
+    pub slot_id: String,
+    pub selected_deployment: insight_platform_contracts::ExactDeploymentRef,
+    pub input_value_id: ResourceId,
+    pub input_content_digest: Sha256Digest,
+    pub selection_evidence_digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone)]
+pub struct ControllerCapabilityAdmissionDecision {
+    pub policies: insight_platform_invocations::InvocationPolicyDecisionBundle,
+    pub mcp_runtime: Option<insight_platform_invocations::McpCapabilityRuntimeRequest>,
+}
+
+#[async_trait]
+pub trait ControllerCapabilityAdmissionProvider: Send + Sync + 'static {
+    async fn decide(
+        &self,
+        request: ControllerCapabilityAdmissionRequest,
+    ) -> Result<ControllerCapabilityAdmissionDecision, DurablePlanDriverError>;
 }
 
 impl<M, I> PostgresDurablePlanGenerationStore<M, I>
@@ -275,6 +303,7 @@ where
         repository: PgRepository,
         materializer: Arc<M>,
         identities: Arc<I>,
+        capability_admission: Arc<dyn ControllerCapabilityAdmissionProvider>,
         handoff_retry_delay: Duration,
     ) -> Result<Self, DurablePlanDriverError> {
         if handoff_retry_delay.is_zero() || i64::try_from(handoff_retry_delay.as_millis()).is_err()
@@ -285,6 +314,7 @@ where
             repository,
             materializer,
             identities,
+            capability_admission,
             handoff_retry_delay,
         })
     }
@@ -296,6 +326,137 @@ where
         self.identities
             .new_resource_id(kind)
             .map_err(|_| DurablePlanDriverError::InvariantViolation)
+    }
+
+    async fn commit_capability_dispatch(
+        &self,
+        job: &StartedOrchestrationJob,
+        command: DerivedControllerCommit,
+    ) -> Result<(), DurablePlanDriverError> {
+        let DurableControllerPhase::CapabilityDispatch(facts) = command.facts.phase else {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        };
+        let DurableCapabilityDispatchFacts {
+            input,
+            route,
+            selection_policy,
+            selection_document,
+            candidates,
+        } = *facts;
+        let capability_slot_id = match command
+            .materialized
+            .plan
+            .node(&command.facts.plan_node_key)
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        {
+            RuntimeNode::CapabilityCall {
+                capability_slot_id, ..
+            } => capability_slot_id.clone(),
+            _ => return Err(DurablePlanDriverError::InvariantViolation),
+        };
+        let route_reference = route.as_ref().map(|(resolved, _)| ExactRunValueRef {
+            value_id: resolved.run_value_id.clone(),
+            schema_digest: resolved.schema_digest.clone(),
+            content_digest: resolved.content_digest.clone(),
+        });
+        let selection_evidence = derive_candidate_selection(
+            &capability_slot_id,
+            &selection_policy,
+            &selection_document,
+            &candidates,
+            route_reference
+                .as_ref()
+                .zip(route.as_ref().map(|(_, value)| value)),
+        )
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let tenant_id: ResourceId = job
+            .started()
+            .tenant_id
+            .parse()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let run_id: ResourceId = job
+            .started()
+            .run_id
+            .as_deref()
+            .ok_or(DurablePlanDriverError::InvariantViolation)?
+            .parse()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let admission = self
+            .capability_admission
+            .decide(ControllerCapabilityAdmissionRequest {
+                tenant_id,
+                run_id,
+                node_execution_id: command.facts.node_execution_id.clone(),
+                slot_id: capability_slot_id,
+                selected_deployment: selection_evidence.selected_deployment.clone(),
+                input_value_id: input.run_value_id.clone(),
+                input_content_digest: input.content_digest.clone(),
+                selection_evidence_digest: selection_evidence.canonical_digest.clone(),
+            })
+            .await?;
+        let invocation_id = self.new_id(ResourceKind::CapabilityInvocation)?;
+        let capability_job_id = self.new_id(ResourceKind::Job)?;
+        let request_digest: Sha256Digest = canonical_digest(&json!({
+            "input_content_digest": input.content_digest,
+            "invocation_id": invocation_id,
+            "job_id": command.fence.job_id,
+            "lease_generation": command.fence.lease_epoch,
+            "operation": "orchestration.capability.defer",
+            "plan_digest": command.materialized.request.artifact.content_digest(),
+            "selection_evidence_digest": selection_evidence.canonical_digest,
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let capability = DeferOrchestrationToCapabilityInvocation {
+            fence: command.fence,
+            plan: command.materialized.plan,
+            invocation_id,
+            capability_job_id,
+            input_artifact_link_id: matches!(input.value, ValueRef::Artifact { .. })
+                .then(|| self.new_id(ResourceKind::ArtifactLink))
+                .transpose()?,
+            input,
+            route,
+            selection_evidence,
+            approval_task_id: admission
+                .policies
+                .approval
+                .as_ref()
+                .map(|_| self.new_id(ResourceKind::ApprovalTask))
+                .transpose()?,
+            policy_decisions: admission.policies,
+            mcp_runtime: admission.mcp_runtime,
+            idempotency_key_digest: self
+                .identities
+                .new_lease_token_digest()
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            request_digest,
+            receipt_expires_at: job.started().deadline,
+            mutations: allocate_capability_invocation_mutations(self.identities.as_ref())
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+        };
+        let mut transaction = self
+            .repository
+            .begin_scheduler_transaction()
+            .await
+            .map_err(classify_repository_failure)?;
+        match transaction
+            .defer_orchestration_to_capability_invocation(capability)
+            .await
+        {
+            Ok(_) => transaction
+                .commit()
+                .await
+                .map_err(classify_repository_failure),
+            Err(failure) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(classify_repository_failure)?;
+                Err(classify_repository_failure(failure))
+            }
+        }
     }
 
     async fn commit_context_dispatch(
@@ -791,6 +952,32 @@ where
                     )),
                 })
             }
+            ControllerFacts::CapabilityDispatch(facts) => {
+                let route = if let Some(route) = facts.route {
+                    let value = self
+                        .materializer
+                        .materialize(&context, &route)
+                        .await
+                        .map_err(map_materialization_failure)?;
+                    Some((route, value))
+                } else {
+                    None
+                };
+                Ok(DurableControllerFacts {
+                    node_execution_id: facts.identity.node_execution_id,
+                    node_execution_version: facts.identity.node_execution_version,
+                    plan_node_key: facts.identity.plan_node_key,
+                    phase: DurableControllerPhase::CapabilityDispatch(Box::new(
+                        DurableCapabilityDispatchFacts {
+                            input: facts.input,
+                            route,
+                            selection_policy: facts.selection_policy,
+                            selection_document: facts.selection_document,
+                            candidates: facts.candidates,
+                        },
+                    )),
+                })
+            }
             ControllerFacts::ContextDispatch(facts) => {
                 let value = self
                     .materializer
@@ -823,6 +1010,7 @@ where
             }
             (DurableControllerPhase::CommittedFacts { .. }, None) => None,
             (DurableControllerPhase::ChildAgentDispatch(_), None) => None,
+            (DurableControllerPhase::CapabilityDispatch(_), None) => None,
             (DurableControllerPhase::ContextDispatch(_), None) => None,
             _ => return Err(DurablePlanDriverError::InvariantViolation),
         };
@@ -831,6 +1019,15 @@ where
             insight_platform_orchestrator::ControllerDecision::CreateChildRun { .. }
         ) {
             return self.commit_child_agent_dispatch(job, command).await;
+        }
+        if matches!(
+            command.decision,
+            insight_platform_orchestrator::ControllerDecision::DispatchLeaf {
+                kind: insight_platform_orchestrator::LeafKind::Capability,
+                ..
+            }
+        ) {
+            return self.commit_capability_dispatch(job, command).await;
         }
         if matches!(
             command.decision,

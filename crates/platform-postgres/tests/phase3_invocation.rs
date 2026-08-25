@@ -6,8 +6,9 @@ use insight_platform_capability_adapters::{
     NativeCapabilityAdapter,
 };
 use insight_platform_contracts::{
-    canonical_digest, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
-    AuthoringPackage, CapabilityArtifactContract, CapabilityArtifactDirection,
+    canonical_digest, checked_in_hard_limit_profile, AdministrativeGate, AgentDeploymentClosure,
+    AgentResourceSpec, ArtifactRef, AuthoringPackage, CandidateSelectionMode,
+    CandidateSelectionPolicyDocument, CapabilityArtifactContract, CapabilityArtifactDirection,
     CapabilityArtifactPort, CapabilityBackendBinding, CapabilityBackendContract,
     CapabilityBackendFeatures, CapabilityBackendKind, CapabilityBackendLimits,
     CapabilityCancellationKind, CapabilityDataFlowPolicy, CapabilityDeploymentClosure,
@@ -15,19 +16,19 @@ use insight_platform_contracts::{
     CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
     CapabilityProgressMode, ClosedJsonSchema, CommandAudit, CommandOutcome, DataClassification,
     DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
-    ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, InteractionKind,
-    NativeCapabilityContract, Permission, PermissionSet, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
-    RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary,
-    ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    ExactVersionRef, ExternalLeafResumeMutationIds, FrozenSlotBinding, FrozenSlotTarget,
+    InteractionKind, NativeCapabilityContract, Permission, PermissionSet, PolicyDeploymentClosure,
+    PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
+    ResourceKind, RunBindingsSnapshot, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     AdmitCapabilityInvocation, BackendInputRequest, CapabilityApprovalDecision,
-    CapabilityClaimSlot, CapabilityControlKind, CapabilityInputResponse,
-    CapabilityInvocationRecord, CapabilityOutputValue, CapabilityProgress, CapabilitySignalAudit,
-    CapabilityUncertainty, CapabilityWorkerAudit, ClaimCapabilityJobs, CommitCapabilityOutcome,
-    ControlCapabilityInvocation, DispatchOutcome, EncryptedRemoteState,
+    CapabilityApprovalDispatchMutationIds, CapabilityClaimSlot, CapabilityControlKind,
+    CapabilityInputResponse, CapabilityInvocationRecord, CapabilityOutputValue, CapabilityProgress,
+    CapabilitySignalAudit, CapabilityUncertainty, CapabilityWorkerAudit, ClaimCapabilityJobs,
+    CommitCapabilityOutcome, ControlCapabilityInvocation, DispatchOutcome, EncryptedRemoteState,
     InvocationApprovalRequirement, InvocationOrigin, InvocationPolicyDecision,
     InvocationPolicyDecisionBundle, InvocationPolicyDisposition, InvocationTransaction,
     PrepareCapabilityDispatch, ReconciliationResolution, RecordCapabilityProgress, RemoteWait,
@@ -35,7 +36,12 @@ use insight_platform_invocations::{
     WakeCapabilityInvocation,
 };
 use insight_platform_jobs::{JobFence, WakeSource};
-use insight_platform_orchestrator::RunCurrentSnapshot;
+use insight_platform_orchestrator::{
+    derive_candidate_selection, DataPortKey, ExactDataPortRef, ExactRunValueRef,
+    OrchestrationJobPayload, PlanLimits, PlanNodeKey, RunCurrentSnapshot, RuntimeDependencyKind,
+    RuntimeDependencySlot, RuntimeNode, RuntimePlan, ScopeDataEnvironmentSnapshot,
+    ScopeEnvironmentLimits,
+};
 use insight_platform_postgres::{
     capability_execution_repository::{
         ClaimedCapabilityExecution, ControlledCapabilityExecution, PreparedCapabilityExecution,
@@ -44,14 +50,16 @@ use insight_platform_postgres::{
 };
 use insight_platform_postgres::{
     repository::{
-        NewPrincipal, NewQuotaAccount, NewTenant, NewTenantPrincipal, PgRepository,
-        RepositoryError, TypedPayload,
+        DeferOrchestrationCapabilityMutationIds, DeferOrchestrationToCapabilityInvocation,
+        JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewTenant,
+        NewTenantPrincipal, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
+        ResolvedExpressionInput, TypedPayload, MAX_ORCHESTRATION_QUOTA_LINES,
     },
     verify_schema,
 };
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone)]
 struct CompletingNativeAdapter {
@@ -93,6 +101,21 @@ fn digest(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
         .unwrap()
+}
+
+fn resume_mutations(base: u16) -> ExternalLeafResumeMutationIds {
+    ExternalLeafResumeMutationIds {
+        continuation_node_execution_id: id(ResourceKind::NodeExecution, base),
+        continuation_job_id: id(ResourceKind::Job, base + 1),
+        run_event_id: id(ResourceKind::Event, base + 2),
+        run_outbox_id: id(ResourceKind::OutboxEvent, base + 3),
+        leaf_node_event_id: id(ResourceKind::Event, base + 4),
+        leaf_node_outbox_id: id(ResourceKind::OutboxEvent, base + 5),
+        continuation_node_event_id: id(ResourceKind::Event, base + 6),
+        continuation_node_outbox_id: id(ResourceKind::OutboxEvent, base + 7),
+        continuation_job_event_id: id(ResourceKind::Event, base + 8),
+        continuation_job_outbox_id: id(ResourceKind::OutboxEvent, base + 9),
+    }
 }
 
 fn capability_input_schema() -> ClosedJsonSchema {
@@ -162,17 +185,6 @@ fn capability_error_schema() -> ClosedJsonSchema {
             }
         },
         "required": ["error"],
-        "additionalProperties": false
-    }))
-    .unwrap()
-}
-
-fn agent_schema() -> ClosedJsonSchema {
-    ClosedJsonSchema::build(json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {},
-        "required": [],
         "additionalProperties": false
     }))
     .unwrap()
@@ -524,6 +536,7 @@ async fn claim_one(repository: &PgRepository, tenant_id: &ResourceId, base: u16)
                 ],
                 event_id: id(ResourceKind::Event, base + 4),
                 outbox_id: id(ResourceKind::OutboxEvent, base + 5),
+                resume_mutations: resume_mutations(base + 0x1000),
             }],
         })
         .await
@@ -606,6 +619,9 @@ struct Fixture {
     capability_deployment: ExactDeploymentRef,
     output_schema_digest: Sha256Digest,
     policy: ExactVersionRef,
+    plan: RuntimePlan,
+    selection_policy: ExactPolicyBinding,
+    input_schema_digest: Sha256Digest,
 }
 
 #[test]
@@ -779,6 +795,7 @@ async fn run_capability_phase3_fixture() {
         ],
         event_id: id(ResourceKind::Event, 0x308),
         outbox_id: id(ResourceKind::OutboxEvent, 0x309),
+        resume_mutations: resume_mutations(0x1300),
     };
     let mut claims = repository
         .claim_capability_jobs(ClaimCapabilityJobs {
@@ -868,6 +885,7 @@ async fn run_capability_phase3_fixture() {
         fence: worker_command.fence.clone(),
         quota_entry_ids: worker_command.quota_entry_ids.clone(),
         outcome: response.outcome,
+        resume_mutations: None,
     };
     let completed = match worker.execute(worker_command).await.unwrap() {
         CommandOutcome::Applied(record) => record,
@@ -1125,6 +1143,7 @@ async fn run_capability_phase3_fixture() {
                 next_poll_at: Some(next_poll_at),
                 callback_binding_digest: Some(callback_binding_digest.clone()),
             }),
+            resume_mutations: None,
         },
     )
     .await
@@ -1298,6 +1317,7 @@ async fn run_capability_phase3_fixture() {
                 external_identity_digest: digest('a'),
                 deadline: Utc::now() + Duration::minutes(10),
             }),
+            resume_mutations: None,
         },
     )
     .await
@@ -1419,6 +1439,7 @@ async fn run_capability_phase3_fixture() {
                 artifact_link_id: None,
                 validation_evidence_digest: digest('7'),
             }),
+            resume_mutations: None,
         },
     )
     .await
@@ -1461,6 +1482,7 @@ async fn run_capability_phase3_fixture() {
                 external_identity_digest: digest('c'),
                 manual: true,
             }),
+            resume_mutations: None,
         },
     )
     .await
@@ -1631,6 +1653,7 @@ async fn run_capability_phase3_fixture() {
             artifact_link_id: None,
             validation_evidence_digest: digest('4'),
         }),
+        resume_mutations: None,
     };
     let (cancel_result, complete_result) = tokio::join!(
         execute_control(&repository, cancel_command),
@@ -1698,6 +1721,405 @@ async fn run_capability_phase3_fixture() {
     // The deterministic cancellation path contributes one two-line reservation and one two-line
     // terminal settlement in addition to the original fixture's twenty-four ledger facts.
     assert_eq!(final_quota_totals, (2, 0, 28));
+    run_plan_capability_owner(&pool, &repository, &fixture).await;
+}
+
+fn capability_defer_mutations(base: u16) -> DeferOrchestrationCapabilityMutationIds {
+    DeferOrchestrationCapabilityMutationIds {
+        source: OrchestrationYieldMutationIds {
+            receipt_id: id(ResourceKind::Receipt, base),
+            quota_entry_ids: (0..MAX_ORCHESTRATION_QUOTA_LINES)
+                .map(|offset| id(ResourceKind::QuotaLedgerEntry, base + 1 + offset as u16))
+                .collect(),
+            run_event_id: id(ResourceKind::Event, base + 5),
+            run_outbox_id: id(ResourceKind::OutboxEvent, base + 6),
+            node_event_id: id(ResourceKind::Event, base + 7),
+            node_outbox_id: id(ResourceKind::OutboxEvent, base + 8),
+            job_event_id: id(ResourceKind::Event, base + 9),
+            job_outbox_id: id(ResourceKind::OutboxEvent, base + 10),
+        },
+        invocation_admit_receipt_id: id(ResourceKind::Receipt, base + 11),
+        invocation_admit_event_id: id(ResourceKind::Event, base + 12),
+        invocation_admit_outbox_id: id(ResourceKind::OutboxEvent, base + 13),
+        invocation_prepare_receipt_id: id(ResourceKind::Receipt, base + 14),
+        invocation_prepare_event_id: id(ResourceKind::Event, base + 15),
+        invocation_prepare_outbox_id: id(ResourceKind::OutboxEvent, base + 16),
+    }
+}
+
+async fn run_plan_capability_owner(pool: &PgPool, repository: &PgRepository, fixture: &Fixture) {
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.runs SET state = 'running', active_work_count = 1 WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let node_id = id(ResourceKind::NodeExecution, 0x8000);
+    let node_payload = TypedPayload::new(1, &json!({"fixture": "capability-plan-owner"})).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, logical_key, node_kind, state,
+            generation, version, payload_schema_version, payload, payload_digest,
+            deadline, started_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, $4, 'node_execution', $4,
+            'capability-plan', 20, 'capability-plan-owner', 'capability_call', 'running',
+            1, 1, $5, $6, $7, $8, $9, $9, $9
+        )
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(node_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .bind(id(ResourceKind::ScopeInstance, 0x31).to_string())
+    .bind(node_payload.schema_version)
+    .bind(&node_payload.value)
+    .bind(&node_payload.digest)
+    .bind(now + Duration::minutes(30))
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let quota_account_id = id(ResourceKind::QuotaAccount, 0x8010);
+    repository
+        .create_quota_account(NewQuotaAccount {
+            tenant_id: fixture.tenant_id.to_string(),
+            quota_account_id: quota_account_id.to_string(),
+            scope_kind: "tenant".to_owned(),
+            scope_id: fixture.tenant_id.to_string(),
+            work_class: WorkClass::Orchestration.as_str().to_owned(),
+            metric: "concurrent_jobs".to_owned(),
+            limit_value: 4,
+            payload: TypedPayload::new(1, &json!({"fixture": "capability-plan-owner"})).unwrap(),
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.quota_accounts SET reserved_value = 1 WHERE tenant_id = $1 AND quota_account_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(quota_account_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let reservation_id = id(ResourceKind::UsageReservation, 0x8011);
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.quota_ledger (
+            tenant_id, quota_entry_id, quota_account_id, correlation_id, entry_kind,
+            reserved_amount, used_amount, account_version, request_digest
+        ) VALUES ($1, $2, $3, $4, 'reserve', 1, 0, 1, $5)
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(id(ResourceKind::QuotaLedgerEntry, 0x8012).to_string())
+    .bind(quota_account_id.to_string())
+    .bind(reservation_id.to_string())
+    .bind(digest('1').to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let source_job_id = id(ResourceKind::Job, 0x8020);
+    let worker_id = id(ResourceKind::WorkerProcessGeneration, 0x8021);
+    let lease_token = digest('2');
+    let bindings_digest: Sha256Digest = sqlx::query_scalar::<_, String>(
+        "SELECT bindings_digest FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+    .parse()
+    .unwrap();
+    let source_payload = TypedPayload::new(
+        1,
+        &OrchestrationJobPayload {
+            bindings_digest,
+            node_execution_id: node_id.clone(),
+            root_scope_id: id(ResourceKind::ScopeInstance, 0x31),
+            retry_backoff_milliseconds: 100,
+            wake_contract: None,
+        },
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            state, version, attempt_no, attempt_limit, lease_epoch, worker_id,
+            lease_token_digest, lease_expires_at, heartbeat_at, scheduled_at, deadline,
+            request_digest, quota_reservation_id, payload_schema_version, payload,
+            payload_digest, started_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            'running', 2, 1, 3, 1, $5, $6, $7, $8, $8, $9,
+            $10, $11, $12, $13, $14, $8, $8, $8
+        )
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(source_job_id.to_string())
+    .bind(node_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .bind(worker_id.to_string())
+    .bind(lease_token.to_string())
+    .bind(now + Duration::minutes(10))
+    .bind(now)
+    .bind(now + Duration::minutes(30))
+    .bind(digest('3').to_string())
+    .bind(reservation_id.to_string())
+    .bind(source_payload.schema_version)
+    .bind(&source_payload.value)
+    .bind(&source_payload.digest)
+    .execute(pool)
+    .await
+    .unwrap();
+    let fence = RepositoryJobFence {
+        tenant_id: fixture.tenant_id.to_string(),
+        job_id: source_job_id.to_string(),
+        worker_id,
+        lease_epoch: 1,
+        expected_job_version: 2,
+        lease_token_digest: lease_token,
+    };
+    let input_json = json!({"amount": 7});
+    let input_digest: Sha256Digest = canonical_digest(&input_json).unwrap().parse().unwrap();
+    let input = ResolvedExpressionInput {
+        run_value_id: fixture.inline_value_id.clone(),
+        producing_node_id: None,
+        value_kind: "capability_input".to_owned(),
+        port: ExactDataPortRef::RunInput {
+            schema_digest: fixture.input_schema_digest.clone(),
+        },
+        classification: DataClassification::Internal,
+        schema_digest: fixture.input_schema_digest.clone(),
+        content_digest: input_digest,
+        value: ValueRef::Inline { value: input_json },
+    };
+    let selection_document = CandidateSelectionPolicyDocument {
+        schema_version: 1,
+        mode: CandidateSelectionMode::OnlyCandidate,
+        route_schema_digest: None,
+    };
+    let selection_evidence = derive_candidate_selection(
+        "writer",
+        &fixture.selection_policy,
+        &selection_document,
+        std::slice::from_ref(&fixture.capability_deployment),
+        None,
+    )
+    .unwrap();
+    let invocation_id = id(ResourceKind::CapabilityInvocation, 0x8030);
+    let capability_job_id = id(ResourceKind::Job, 0x8031);
+    let command = DeferOrchestrationToCapabilityInvocation {
+        fence: fence.clone(),
+        plan: fixture.plan.clone(),
+        invocation_id: invocation_id.clone(),
+        capability_job_id: capability_job_id.clone(),
+        input,
+        route: None,
+        selection_evidence,
+        policy_decisions: approval_policy(&fixture.policy),
+        approval_task_id: Some(id(ResourceKind::ApprovalTask, 0x8032)),
+        input_artifact_link_id: None,
+        mcp_runtime: None,
+        idempotency_key_digest: digest('4'),
+        request_digest: digest('5'),
+        receipt_expires_at: now + Duration::minutes(30),
+        mutations: capability_defer_mutations(0x8100),
+    };
+    let mut forged = command.clone();
+    forged.selection_evidence.canonical_digest = digest('f');
+    let mut transaction = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        transaction
+            .defer_orchestration_to_capability_invocation(forged)
+            .await,
+        Err(RepositoryError::Conflict(
+            "exact Capability candidate selection"
+        ))
+    ));
+    transaction.rollback().await.unwrap();
+    let leaked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.invocations WHERE tenant_id = $1 AND invocation_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(invocation_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(leaked, 0);
+
+    let mut transaction = repository.begin_scheduler_transaction().await.unwrap();
+    let deferred = match transaction
+        .defer_orchestration_to_capability_invocation(command.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(deferred) => deferred,
+        CommandOutcome::Replayed(_) => panic!("fresh Plan Capability dispatch replayed"),
+    };
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        deferred.invocation.state,
+        insight_platform_contracts::InvocationState::AwaitingApproval
+    );
+    assert!(deferred.capability_job.is_none());
+    assert_eq!(deferred.run.state, "waiting");
+    let mut transaction = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        transaction
+            .defer_orchestration_to_capability_invocation(command)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(_)
+    ));
+    transaction.commit().await.unwrap();
+
+    let approval_command = ResolveCapabilityApproval {
+        audit: audit(
+            &fixture.tenant_id,
+            &fixture.principal_id,
+            PrincipalKind::AgentRunner,
+            0x8210,
+            '6',
+            '7',
+        ),
+        invocation_id: invocation_id.clone(),
+        approval_task_id: id(ResourceKind::ApprovalTask, 0x8032),
+        expected_invocation_version: 1,
+        expected_task_generation: 1,
+        expected_task_version: 1,
+        eligible_principal_rule_digest: digest('a'),
+        decision: CapabilityApprovalDecision::Approve,
+        dispatch_mutations: Some(CapabilityApprovalDispatchMutationIds {
+            receipt_id: id(ResourceKind::Receipt, 0x8220),
+            event_id: id(ResourceKind::Event, 0x8221),
+            outbox_id: id(ResourceKind::OutboxEvent, 0x8222),
+        }),
+    };
+    let approved = match execute_approval(repository, approval_command.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(approved) => approved,
+        CommandOutcome::Replayed(_) => panic!("fresh Plan Capability approval replayed"),
+    };
+    assert_eq!(
+        approved.payload.current_job_id,
+        Some(capability_job_id.clone())
+    );
+    let prepared_state: String = sqlx::query_scalar(
+        "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(capability_job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(prepared_state, "ready");
+    assert!(matches!(
+        execute_approval(repository, approval_command).await.unwrap(),
+        CommandOutcome::Replayed(record) if record == approved
+    ));
+
+    let claim = claim_one(repository, &fixture.tenant_id, 0x9000).await;
+    assert_eq!(claim.claimed.job.job_id, capability_job_id.to_string());
+    let continuation_mutations = claim.claimed.resume_mutations.clone().unwrap();
+    let output_json = json!({"result": "plan-owner"});
+    let output_digest: Sha256Digest = canonical_digest(&output_json).unwrap().parse().unwrap();
+    let completion_command = CommitCapabilityOutcome {
+        audit: worker_audit(&fixture.tenant_id, &claim.worker_id, 0x9100, '6', '7'),
+        invocation_id: invocation_id.clone(),
+        job_id: capability_job_id.clone(),
+        expected_invocation_version: claim.claimed.invocation.version,
+        fence: claim.fence(),
+        quota_entry_ids: vec![
+            id(ResourceKind::QuotaLedgerEntry, 0x9103),
+            id(ResourceKind::QuotaLedgerEntry, 0x9104),
+        ],
+        outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+            value_id: id(ResourceKind::RunValue, 0x9105),
+            classification: DataClassification::Internal,
+            schema_digest: fixture.output_schema_digest.clone(),
+            content_digest: output_digest,
+            value: ValueRef::Inline { value: output_json },
+            artifact_link_id: None,
+            validation_evidence_digest: digest('8'),
+        }),
+        resume_mutations: Some(continuation_mutations.clone()),
+    };
+    let completed = match execute_outcome(repository, completion_command.clone())
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(completed) => completed,
+        CommandOutcome::Replayed(_) => panic!("fresh Plan Capability outcome replayed"),
+    };
+    assert_eq!(
+        completed.invocation.state,
+        insight_platform_contracts::InvocationState::Succeeded
+    );
+    assert!(matches!(
+        execute_outcome(repository, completion_command).await.unwrap(),
+        CommandOutcome::Replayed(record) if record == completed
+    ));
+    let owner_state: String = sqlx::query_scalar(
+        "SELECT state FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(node_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(owner_state, "succeeded");
+    let continuation: (String, String, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT node.state, job.state,
+               (SELECT count(*) FROM insight_platform.run_nodes
+                WHERE tenant_id = $1 AND node_id = $2),
+               (SELECT count(*) FROM insight_platform.run_values
+                WHERE tenant_id = $1 AND value_id = $4
+                  AND node_id = $5 AND schema_digest = $6)
+        FROM insight_platform.run_nodes AS node
+        JOIN insight_platform.jobs AS job
+          ON job.tenant_id = node.tenant_id AND job.node_id = node.node_id
+        WHERE node.tenant_id = $1 AND node.node_id = $2 AND job.job_id = $3
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(
+        continuation_mutations
+            .continuation_node_execution_id
+            .to_string(),
+    )
+    .bind(continuation_mutations.continuation_job_id.to_string())
+    .bind(id(ResourceKind::RunValue, 0x9105).to_string())
+    .bind(node_id.to_string())
+    .bind(fixture.output_schema_digest.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(continuation, ("ready".to_owned(), "ready".to_owned(), 1, 1));
+    let run_state: (String, i32) = sqlx::query_as(
+        "SELECT state, active_work_count FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(run_state, ("running".to_owned(), 0));
 }
 
 fn command_for_inline(fixture: &Fixture, base: u16) -> AdmitCapabilityInvocation {
@@ -1801,6 +2223,7 @@ fn approval_resolution(
         } else {
             CapabilityApprovalDecision::Reject
         },
+        dispatch_mutations: None,
     }
 }
 
@@ -1882,6 +2305,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
 
     let policy_resource = id(ResourceKind::Policy, 0x10);
     let policy_revision = id(ResourceKind::PolicyRevision, 0x11);
+    let selection_policy_resource = id(ResourceKind::Policy, 0x72);
+    let selection_policy_revision = id(ResourceKind::PolicyRevision, 0x73);
+    let selection_policy_deployment = id(ResourceKind::PolicyDeployment, 0x71);
     let agent_resource = id(ResourceKind::Agent, 0x12);
     let agent_interface = id(ResourceKind::AgentInterfaceRevision, 0x13);
     let agent_plan = id(ResourceKind::AgentPlanRevision, 0x14);
@@ -1893,6 +2319,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let capability_deployment_id = id(ResourceKind::CapabilityDeployment, 0x1a);
     for (resource_id, kind) in [
         (&policy_resource, RegistryResourceKind::Policy),
+        (&selection_policy_resource, RegistryResourceKind::Policy),
         (&agent_resource, RegistryResourceKind::Agent),
         (
             &capability_resource,
@@ -1967,18 +2394,131 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         now,
     )
     .await;
+    let selection_document = CandidateSelectionPolicyDocument {
+        schema_version: 1,
+        mode: CandidateSelectionMode::OnlyCandidate,
+        route_schema_digest: None,
+    };
+    let selection_exact =
+        ExactVersionRef::new(selection_policy_revision.clone(), digest('f')).unwrap();
+    insert_version(
+        pool,
+        &tenant_id,
+        &selection_policy_resource,
+        &selection_exact,
+        1,
+        &principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::Policy(PolicyResourceSpec {
+                authoring_package: package.clone(),
+                contract_digest: digest('e'),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                policy_kind: PolicyKind::Selection,
+                rules_digest: selection_document.canonical_digest().unwrap(),
+                selection: Some(selection_document),
+                scheduling: None,
+                retention: None,
+                mcp_protocol: None,
+                mcp_auth: None,
+                sandbox_isolation: None,
+                sandbox_resource: None,
+                sandbox_network: None,
+                sandbox_artifact_io: None,
+                sandbox_secret_resolution: None,
+            }),
+            validation: validation.clone(),
+        },
+    )
+    .await;
+    let selection_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: selection_exact.clone(),
+            applicability_digest: digest('d'),
+            qualification_evidence: package.artifact.clone(),
+        }),
+    )
+    .unwrap();
+    insert_deployment(
+        pool,
+        &tenant_id,
+        &selection_policy_deployment,
+        &selection_policy_resource,
+        &selection_policy_revision,
+        &principal_id,
+        &selection_payload,
+    )
+    .await;
+    let selection_policy = ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(
+            selection_policy_deployment,
+            selection_payload.digest.parse().unwrap(),
+        )
+        .unwrap(),
+        revision: selection_exact,
+    };
+
     let agent_interface_exact = ExactVersionRef::new(agent_interface.clone(), digest('9')).unwrap();
     let agent_plan_exact = ExactVersionRef::new(agent_plan.clone(), digest('a')).unwrap();
+    let plan_node_key = PlanNodeKey::new("capability-plan".to_owned()).unwrap();
+    let finish_node_key = PlanNodeKey::new("finish".to_owned()).unwrap();
+    let input_schema = capability_input_schema();
+    let output_schema = capability_output_schema();
+    let error_schema = capability_error_schema();
+    let output_port = ExactDataPortRef::NodeOutput {
+        producer_node_id: plan_node_key.clone(),
+        port_id: DataPortKey::new("result".to_owned()).unwrap(),
+        schema_digest: output_schema.canonical_digest.clone(),
+    };
+    let plan = RuntimePlan {
+        plan_version: 4,
+        interface_revision_id: agent_interface.clone(),
+        entry_node_id: PlanNodeKey::new("start".to_owned()).unwrap(),
+        dependency_slots: BTreeMap::from([(
+            "writer".to_owned(),
+            RuntimeDependencySlot {
+                kind: RuntimeDependencyKind::Capability,
+                requirement_digest: digest('8'),
+            },
+        )]),
+        nodes: BTreeMap::from([
+            (
+                PlanNodeKey::new("start".to_owned()).unwrap(),
+                RuntimeNode::Start {
+                    next: plan_node_key.clone(),
+                },
+            ),
+            (
+                plan_node_key.clone(),
+                RuntimeNode::CapabilityCall {
+                    capability_slot_id: "writer".to_owned(),
+                    input: ExactDataPortRef::RunInput {
+                        schema_digest: input_schema.canonical_digest.clone(),
+                    },
+                    candidate_route: None,
+                    output: output_port.clone(),
+                    attempt_limit: 3,
+                    retry_backoff_milliseconds: 100,
+                    resume: finish_node_key.clone(),
+                },
+            ),
+            (finish_node_key, RuntimeNode::Return { value: output_port }),
+        ]),
+    };
+    let plan_limits = PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+    plan.validate(plan_limits).unwrap();
+    let plan_digest = plan.canonical_digest(plan_limits).unwrap();
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_package: package.clone(),
         contract_digest: digest('b'),
         dependency_versions: vec![],
         policy_versions: vec![policy_exact.clone()],
-        input_schema: agent_schema(),
-        output_schema: agent_schema(),
-        error_schema: agent_schema(),
+        input_schema: input_schema.clone(),
+        output_schema: output_schema.clone(),
+        error_schema,
         typed_plan_artifact_id: package.artifact.artifact_id().clone(),
-        typed_plan_digest: digest('d'),
+        typed_plan_digest: plan_digest,
     });
     for (exact, revision) in [(&agent_interface_exact, 1), (&agent_plan_exact, 2)] {
         insert_version(
@@ -1996,9 +2536,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         .await;
     }
     let interface_exact = ExactVersionRef::new(capability_interface.clone(), digest('e')).unwrap();
-    let input_schema = capability_input_schema();
     let input_schema_digest = input_schema.canonical_digest.clone();
-    let output_schema = capability_output_schema();
     let output_schema_digest = output_schema.canonical_digest.clone();
     insert_version(
         pool,
@@ -2154,11 +2692,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             .await
             .unwrap();
     }
-    let policy_binding = ExactPolicyBinding {
-        deployment: ExactDeploymentRef::new(id(ResourceKind::PolicyDeployment, 0x71), digest('7'))
-            .unwrap(),
-        revision: policy_exact.clone(),
-    };
+    let policy_binding = selection_policy.clone();
     let agent_closure = AgentDeploymentClosure {
         interface: agent_interface_exact,
         plan: agent_plan_exact,
@@ -2174,7 +2708,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             },
             binding_digest: digest('9'),
         }],
-        policies: vec![policy_binding.clone()],
+        policies: vec![],
         execution_profile: policy_binding,
     };
     let agent_payload =
@@ -2262,6 +2796,30 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     .execute(pool)
     .await
     .unwrap();
+    let inline_value = json!({"amount": 7});
+    let inline_digest: Sha256Digest = canonical_digest(&inline_value).unwrap().parse().unwrap();
+    let root_environment = ScopeDataEnvironmentSnapshot::build(
+        BTreeMap::from([(
+            ExactDataPortRef::RunInput {
+                schema_digest: input_schema_digest.clone(),
+            },
+            ExactRunValueRef {
+                value_id: inline_value_id.clone(),
+                schema_digest: input_schema_digest.clone(),
+                content_digest: inline_digest.clone(),
+            },
+        )]),
+        ScopeEnvironmentLimits::from_profile(&checked_in_hard_limit_profile()).unwrap(),
+    )
+    .unwrap();
+    let root_payload = TypedPayload::new(
+        1,
+        &json!({
+            "root_run_id": run_id,
+            "environment": root_environment,
+        }),
+    )
+    .unwrap();
     let node_payload = TypedPayload::new(1, &json!({"fixture": "capability"})).unwrap();
     sqlx::query(
         r#"
@@ -2278,9 +2836,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     .bind(tenant_id.to_string())
     .bind(scope_id.to_string())
     .bind(run_id.to_string())
-    .bind(node_payload.schema_version)
-    .bind(&node_payload.value)
-    .bind(&node_payload.digest)
+    .bind(root_payload.schema_version)
+    .bind(&root_payload.value)
+    .bind(&root_payload.digest)
     .bind(now + Duration::hours(1))
     .bind(now)
     .execute(pool)
@@ -2328,8 +2886,6 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         .await
         .unwrap();
     }
-    let inline_value = json!({"amount": 7});
-    let inline_digest: Sha256Digest = canonical_digest(&inline_value).unwrap().parse().unwrap();
     sqlx::query(
         r#"
         INSERT INTO insight_platform.run_values (
@@ -2405,6 +2961,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         capability_deployment,
         output_schema_digest,
         policy: policy_exact,
+        plan,
+        selection_policy,
+        input_schema_digest,
     }
 }
 

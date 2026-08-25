@@ -1362,6 +1362,28 @@ pub enum CapabilityApprovalDecision {
 }
 
 #[derive(Debug, Clone)]
+pub struct CapabilityApprovalDispatchMutationIds {
+    pub receipt_id: ResourceId,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+}
+
+impl CapabilityApprovalDispatchMutationIds {
+    pub fn validate(&self) -> Result<(), InvocationError> {
+        if self.receipt_id.kind() != ResourceKind::Receipt
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.receipt_id.to_string() == self.event_id.to_string()
+            || self.receipt_id.to_string() == self.outbox_id.to_string()
+            || self.event_id.to_string() == self.outbox_id.to_string()
+        {
+            return Err(InvocationError::InvalidIdentity);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolveCapabilityApproval {
     pub audit: CommandAudit,
     pub invocation_id: ResourceId,
@@ -1371,6 +1393,7 @@ pub struct ResolveCapabilityApproval {
     pub expected_task_version: u64,
     pub eligible_principal_rule_digest: Sha256Digest,
     pub decision: CapabilityApprovalDecision,
+    pub dispatch_mutations: Option<CapabilityApprovalDispatchMutationIds>,
 }
 
 impl ResolveCapabilityApproval {
@@ -1383,6 +1406,12 @@ impl ResolveCapabilityApproval {
             || self.expected_invocation_version == 0
             || self.expected_task_generation == 0
             || self.expected_task_version == 0
+            || self
+                .dispatch_mutations
+                .as_ref()
+                .is_some_and(|mutations| mutations.validate().is_err())
+            || (self.decision != CapabilityApprovalDecision::Approve
+                && self.dispatch_mutations.is_some())
         {
             return Err(InvocationError::InvalidCommand);
         }
@@ -1893,6 +1922,7 @@ mod tests {
             expected_task_version: 1,
             eligible_principal_rule_digest: digest_value('c'),
             decision: CapabilityApprovalDecision::Approve,
+            dispatch_mutations: None,
         };
         let mut cancel_command = command.clone();
         cancel_command.decision = CapabilityApprovalDecision::Cancel;

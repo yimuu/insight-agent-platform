@@ -65,6 +65,7 @@ pub struct ClaimedCapabilityExecution {
     /// Ledger identities consumed by the claim transaction to record the quota reservation.
     /// Terminal settlement must use a distinct caller-generated pair.
     pub quota_reservation_entry_ids: Vec<ResourceId>,
+    pub resume_mutations: Option<insight_platform_contracts::ExternalLeafResumeMutationIds>,
 }
 
 impl ClaimedCapabilityExecution {
@@ -175,6 +176,7 @@ impl ClaimedCapabilityExecution {
             fence: self.fence.clone(),
             quota_entry_ids: quota_settlement_entry_ids,
             retry_at,
+            resume_mutations: self.resume_mutations.clone(),
         };
         command
             .validate_at(Utc::now())
@@ -486,6 +488,118 @@ async fn load_capability_owner_job(
     Ok((job, kind))
 }
 
+pub(crate) async fn prepare_capability_dispatch_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: PrepareCapabilityDispatch,
+    database_now: DateTime<Utc>,
+) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+    if claim_command_receipt(
+        transaction,
+        &command.audit,
+        "capability_invocation",
+        &command.invocation_id.to_string(),
+        "capability.dispatch.prepare",
+    )
+    .await?
+    {
+        let invocation = load_capability_invocation(
+            transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            false,
+        )
+        .await?;
+        load_capability_execution_contract(
+            transaction,
+            &command.audit.tenant_id,
+            &invocation.payload.admission,
+        )
+        .await?;
+        let job_id = invocation
+            .payload
+            .current_job_id
+            .as_ref()
+            .ok_or(RepositoryError::Conflict("Capability dispatch replay"))?;
+        if job_id != &command.job_id {
+            return Err(RepositoryError::Conflict("Capability dispatch replay"));
+        }
+        let job = load_capability_job(transaction, &command.audit.tenant_id, job_id, false).await?;
+        return Ok(CommandOutcome::Replayed(PreparedCapabilityExecution {
+            invocation,
+            job,
+        }));
+    }
+    let current = load_capability_invocation(
+        transaction,
+        &command.audit.tenant_id,
+        &command.invocation_id,
+        true,
+    )
+    .await?;
+    let principal =
+        require_tenant_permission(transaction, &command.audit, Permission::CapabilityInvoke)
+            .await?;
+    if principal != current.payload.admission.principal {
+        return Err(RepositoryError::Conflict(
+            "Capability dispatch principal snapshot",
+        ));
+    }
+    // Re-resolve the exact immutable execution closure before creating a Capability-owned
+    // Job. Managed stdio MCP is rejected by this route check and must instead be admitted by
+    // SandboxGatewayAuthority as the sole physical Sandbox Job.
+    load_capability_execution_contract(
+        transaction,
+        &command.audit.tenant_id,
+        &current.payload.admission,
+    )
+    .await?;
+    let prepared = decide_prepare_dispatch(&current, &command, database_now)?;
+    insert_capability_job(transaction, &prepared).await?;
+    update_capability_invocation(transaction, &current, &prepared.invocation).await?;
+    append_command_event(
+        transaction,
+        &command.audit,
+        "capability_invocation",
+        &command.invocation_id.to_string(),
+        as_i64(prepared.invocation.version, "Invocation version")?,
+        "capability.dispatch_prepared",
+        &TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "admission_digest": prepared.invocation.payload.admission.canonical_digest,
+                "job_id": prepared.job.job_id,
+                "work_class": prepared.job.work_class,
+            }),
+        )?,
+    )
+    .await?;
+    terminalize_command_receipt(
+        transaction,
+        &command.audit,
+        &command.invocation_id.to_string(),
+        "prepared",
+    )
+    .await?;
+    let invocation = load_capability_invocation(
+        transaction,
+        &command.audit.tenant_id,
+        &command.invocation_id,
+        false,
+    )
+    .await?;
+    let job = load_capability_job(
+        transaction,
+        &command.audit.tenant_id,
+        &command.job_id,
+        false,
+    )
+    .await?;
+    Ok(CommandOutcome::Applied(PreparedCapabilityExecution {
+        invocation,
+        job,
+    }))
+}
+
 impl PgInvocationTransaction {
     pub async fn prepare_capability_dispatch(
         &mut self,
@@ -495,118 +609,11 @@ impl PgInvocationTransaction {
         let mut transaction = self.transaction.begin().await?;
         let database_now = database_now(&mut transaction).await?;
         command.validate_at(database_now)?;
-        if claim_command_receipt(
-            &mut transaction,
-            &command.audit,
-            "capability_invocation",
-            &command.invocation_id.to_string(),
-            "capability.dispatch.prepare",
-        )
-        .await?
-        {
-            let invocation = load_capability_invocation(
-                &mut transaction,
-                &command.audit.tenant_id,
-                &command.invocation_id,
-                false,
-            )
-            .await?;
-            load_capability_execution_contract(
-                &mut transaction,
-                &command.audit.tenant_id,
-                &invocation.payload.admission,
-            )
-            .await?;
-            let job_id = invocation
-                .payload
-                .current_job_id
-                .as_ref()
-                .ok_or(RepositoryError::Conflict("Capability dispatch replay"))?;
-            if job_id != &command.job_id {
-                return Err(RepositoryError::Conflict("Capability dispatch replay"));
-            }
-            let job =
-                load_capability_job(&mut transaction, &command.audit.tenant_id, job_id, false)
-                    .await?;
-            transaction.commit().await?;
-            return Ok(CommandOutcome::Replayed(PreparedCapabilityExecution {
-                invocation,
-                job,
-            }));
-        }
-        let current = load_capability_invocation(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &command.invocation_id,
-            true,
-        )
-        .await?;
-        let principal = require_tenant_permission(
-            &mut transaction,
-            &command.audit,
-            Permission::CapabilityInvoke,
-        )
-        .await?;
-        if principal != current.payload.admission.principal {
-            return Err(RepositoryError::Conflict(
-                "Capability dispatch principal snapshot",
-            ));
-        }
-        // Re-resolve the exact immutable execution closure before creating a Capability-owned
-        // Job. Managed stdio MCP is rejected by this route check and must instead be admitted by
-        // SandboxGatewayAuthority as the sole physical Sandbox Job.
-        load_capability_execution_contract(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &current.payload.admission,
-        )
-        .await?;
-        let prepared = decide_prepare_dispatch(&current, &command, database_now)?;
-        insert_capability_job(&mut transaction, &prepared).await?;
-        update_capability_invocation(&mut transaction, &current, &prepared.invocation).await?;
-        append_command_event(
-            &mut transaction,
-            &command.audit,
-            "capability_invocation",
-            &command.invocation_id.to_string(),
-            as_i64(prepared.invocation.version, "Invocation version")?,
-            "capability.dispatch_prepared",
-            &TypedPayload::new(
-                1,
-                &serde_json::json!({
-                    "admission_digest": prepared.invocation.payload.admission.canonical_digest,
-                    "job_id": prepared.job.job_id,
-                    "work_class": prepared.job.work_class,
-                }),
-            )?,
-        )
-        .await?;
-        terminalize_command_receipt(
-            &mut transaction,
-            &command.audit,
-            &command.invocation_id.to_string(),
-            "prepared",
-        )
-        .await?;
-        let invocation = load_capability_invocation(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &command.invocation_id,
-            false,
-        )
-        .await?;
-        let job = load_capability_job(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &command.job_id,
-            false,
-        )
-        .await?;
+        let outcome =
+            prepare_capability_dispatch_in_transaction(&mut transaction, command, database_now)
+                .await?;
         transaction.commit().await?;
-        Ok(CommandOutcome::Applied(PreparedCapabilityExecution {
-            invocation,
-            job,
-        }))
+        Ok(outcome)
     }
 
     pub async fn commit_capability_outcome(
@@ -787,6 +794,64 @@ impl PgInvocationTransaction {
         .await?;
         update_capability_invocation(&mut transaction, &current_invocation, &decision.invocation)
             .await?;
+
+        let plan_leaf_waiting: bool = sqlx::query_scalar(
+            r#"
+            SELECT state = 'waiting'
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution'
+            "#,
+        )
+        .bind(current_invocation.tenant_id.to_string())
+        .bind(current_invocation.node_execution_id.to_string())
+        .bind(current_invocation.run_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if plan_leaf_waiting {
+            if matches!(trusted_outcome, DispatchOutcome::Completed(_)) {
+                let mutations =
+                    command
+                        .resume_mutations
+                        .as_ref()
+                        .ok_or(RepositoryError::InvalidInput(
+                            "Capability Plan leaf completion has no continuation identities"
+                                .to_owned(),
+                        ))?;
+                let exact_output =
+                    decision.invocation.payload.result.as_ref().ok_or_else(|| {
+                        RepositoryError::CorruptRow(
+                            "Capability success has no exact output".to_owned(),
+                        )
+                    })?;
+                crate::repository::settle_capability_leaf_success_in_transaction(
+                    &mut transaction,
+                    &decision.invocation,
+                    &command.job_id,
+                    &exact_output.output,
+                    mutations,
+                    self.scope_environment_limits,
+                    database_now,
+                )
+                .await?;
+            } else {
+                if command.resume_mutations.is_some() {
+                    return Err(RepositoryError::InvalidInput(
+                        "non-success Capability outcome has continuation identities".to_owned(),
+                    ));
+                }
+                release_capability_plan_leaf_permit(
+                    &mut transaction,
+                    &decision.invocation,
+                    database_now,
+                )
+                .await?;
+            }
+        } else if command.resume_mutations.is_some() {
+            return Err(RepositoryError::InvalidInput(
+                "non-Plan Capability outcome has continuation identities".to_owned(),
+            ));
+        }
 
         let (event_type, disposition) = match &trusted_outcome {
             DispatchOutcome::Completed(_) => ("capability.completed", "completed"),
@@ -2104,6 +2169,8 @@ impl PgRepository {
                     "Capability Job parent binding does not match its Invocation".to_owned(),
                 ));
             }
+            let plan_leaf_waiting =
+                node.state == insight_platform_contracts::NodeExecutionState::Waiting;
             require_claim_parents(
                 &mut transaction,
                 &current_invocation,
@@ -2218,6 +2285,7 @@ impl PgRepository {
                 load_capability_invocation(&mut transaction, &tenant_id, &invocation_id, false)
                     .await?;
             claimed.push(ClaimedCapabilityExecution {
+                resume_mutations: plan_leaf_waiting.then(|| slot.resume_mutations.clone()),
                 invocation,
                 job,
                 execution_contract,
@@ -2565,6 +2633,53 @@ async fn settle_capability_quota(
     Ok(())
 }
 
+async fn release_capability_plan_leaf_permit(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let run = load_run_for_update(transaction, &invocation.tenant_id, &invocation.run_id).await?;
+    if run.active_work_count < 1 || run.terminal_at.is_some() {
+        return Err(RepositoryError::Conflict(
+            "Capability Plan leaf active permit",
+        ));
+    }
+    let mut current = run.current.clone();
+    if run.active_work_count == 1 {
+        current.waiting_reason = Some("capability_invocation".to_owned());
+    }
+    current
+        .validate(&invocation.run_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN active_work_count = 1 THEN 'waiting' ELSE state END,
+            version = version + 1, active_work_count = active_work_count - 1,
+            current_schema_version = $4, current_payload = $5,
+            current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state = 'running' AND active_work_count > 0 AND terminal_at IS NULL
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(&run.run_id)
+    .bind(run.version)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(RepositoryError::Conflict(
+            "Capability Plan leaf permit release",
+        ));
+    }
+    Ok(())
+}
+
 async fn require_claim_parents(
     transaction: &mut Transaction<'_, Postgres>,
     invocation: &insight_platform_invocations::CapabilityInvocationRecord,
@@ -2583,12 +2698,25 @@ async fn require_claim_parents(
         .parse::<ResourceId>()
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     let resource = load_resource(transaction, &invocation.tenant_id, &resource_id).await?;
+    let plan_leaf = matches!(
+        invocation.payload.admission.origin_key,
+        insight_platform_invocations::InvocationOrigin::PlanNode { .. }
+    ) && node.state == insight_platform_contracts::NodeExecutionState::Waiting;
+    let run_state = run.state.parse::<RunState>().ok();
     if invocation.run_id.to_string() != run.run_id
-        || run.state.parse::<RunState>().ok() != Some(RunState::Running)
+        || if plan_leaf {
+            !matches!(run_state, Some(RunState::Running | RunState::Waiting))
+        } else {
+            run_state != Some(RunState::Running)
+        }
         || run.current.control.pause_requested
         || run.current.control.cancel_requested_at.is_some()
         || run.current.control.timeout_requested_at.is_some()
-        || node.state != insight_platform_contracts::NodeExecutionState::Running
+        || if plan_leaf {
+            node.state != insight_platform_contracts::NodeExecutionState::Waiting
+        } else {
+            node.state != insight_platform_contracts::NodeExecutionState::Running
+        }
         || node.run_id != run.run_id
         || database_now >= run.deadline
         || database_now >= node.deadline
@@ -2603,6 +2731,41 @@ async fn require_claim_parents(
         || resource.gate_state != "enabled"
     {
         return Err(RepositoryError::Conflict("Capability dispatch parent"));
+    }
+    if plan_leaf {
+        let mut current = run.current.clone();
+        if run_state == Some(RunState::Waiting) {
+            current.waiting_reason = None;
+        }
+        current
+            .validate(&invocation.run_id)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE insight_platform.runs
+            SET state = 'running', version = version + 1,
+                active_work_count = active_work_count + 1,
+                current_schema_version = $4, current_payload = $5,
+                current_payload_digest = $6, updated_at = $7
+            WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+              AND state IN ('running', 'waiting') AND terminal_at IS NULL
+            "#,
+        )
+        .bind(&run.tenant_id)
+        .bind(&run.run_id)
+        .bind(run.version)
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .bind(database_now)
+        .execute(&mut **transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(RepositoryError::Conflict(
+                "Capability Plan leaf claim permit",
+            ));
+        }
     }
     Ok(())
 }

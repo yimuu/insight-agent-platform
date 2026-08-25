@@ -15,6 +15,7 @@ use insight_platform_contracts::{
     SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
     ValidationSummary, ValueRef, WorkClass, WorkerManifest,
 };
+use insight_platform_invocations::InvocationPolicyDecisionBundle;
 use insight_platform_orchestrator::{
     AdmitRun, ExactDataPortRef, ExpressionLimits, PlanLimits, PlanNodeKey, RunInputValue,
     RuntimeNode, RuntimePlan,
@@ -31,13 +32,15 @@ use insight_platform_runtime::postgres::{
     PostgresConnectionBulkheadConfig, PostgresConnectionBulkheads,
 };
 use insight_platform_runtime::{
-    ActiveOrchestrationJob, CoordinatorIdentityFactory, CoordinatorTiming,
-    ExactPlanGenerationDriver, ExecutionDisposition, GenerationHandlerDisposition,
-    GenerationHandlerError, GenerationHandoffReason, LeaseFencedOrchestrationExecutor,
-    MaterializingOrchestrationJobHandler, OrchestrationCoordinatorConfig,
-    OrchestrationExecutorConfig, OrchestrationExecutorTiming, OrchestrationJobExecutor,
-    OrchestrationSafetyConfig, OrchestrationSafetyDriver, PostgresDurablePlanGenerationStore,
-    SafetyDriverTiming, SchedulerControllerRunValueMaterializer, SchedulerPlanMaterializer,
+    ActiveOrchestrationJob, ControllerCapabilityAdmissionDecision,
+    ControllerCapabilityAdmissionProvider, ControllerCapabilityAdmissionRequest,
+    CoordinatorIdentityFactory, CoordinatorTiming, ExactPlanGenerationDriver, ExecutionDisposition,
+    GenerationHandlerDisposition, GenerationHandlerError, GenerationHandoffReason,
+    LeaseFencedOrchestrationExecutor, MaterializingOrchestrationJobHandler,
+    OrchestrationCoordinatorConfig, OrchestrationExecutorConfig, OrchestrationExecutorTiming,
+    OrchestrationJobExecutor, OrchestrationSafetyConfig, OrchestrationSafetyDriver,
+    PostgresDurablePlanGenerationStore, SafetyDriverTiming,
+    SchedulerControllerRunValueMaterializer, SchedulerPlanMaterializer,
     SchedulerPlanMaterializerConfig, StartedOrchestrationJob, StartedOrchestrationJobHandler,
     UuidCoordinatorIdentityFactory, WorkCoordinator,
 };
@@ -73,6 +76,24 @@ const JOB_ID: &str = "job_0198f1c5-0787-75e1-a9e8-d95ca0f3600e";
 const VALUE_ID: &str = "val_0198f1c5-0787-75e1-a9e8-d95ca0f3600f";
 const TYPED_PLAN_ARTIFACT_ID: &str = "art_0198f1c5-0787-75e1-a9e8-d95ca0f36012";
 const INPUT_ARTIFACT_ID: &str = "art_0198f1c5-0787-75e1-a9e8-d95ca0f36013";
+
+struct EmptyCapabilityAdmissionProvider;
+
+#[async_trait]
+impl ControllerCapabilityAdmissionProvider for EmptyCapabilityAdmissionProvider {
+    async fn decide(
+        &self,
+        _request: ControllerCapabilityAdmissionRequest,
+    ) -> Result<
+        ControllerCapabilityAdmissionDecision,
+        insight_platform_runtime::DurablePlanDriverError,
+    > {
+        Ok(ControllerCapabilityAdmissionDecision {
+            policies: InvocationPolicyDecisionBundle::build(Vec::new(), None).unwrap(),
+            mcp_runtime: None,
+        })
+    }
+}
 
 fn id(value: &str) -> ResourceId {
     value.parse().unwrap()
@@ -709,6 +730,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                 )
                 .unwrap()),
                 Arc::new(UuidCoordinatorIdentityFactory),
+                Arc::new(EmptyCapabilityAdmissionProvider),
                 Duration::from_millis(50),
             )
             .unwrap(),

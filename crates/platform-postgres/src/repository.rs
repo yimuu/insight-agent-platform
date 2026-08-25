@@ -12,17 +12,19 @@ use insight_platform_contracts::{
     CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle,
     ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure,
     FailureClass, FailureCode, FailureSource, FrozenSlotTarget, HardLimitProfile,
-    InstallationPrincipalBinding, JobState, JsonLimits, NodeExecutionState, Permission,
-    PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind, PrincipalBindingState,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
-    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
-    ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState, SchedulerPriority,
-    ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
+    InstallationPrincipalBinding, InvocationState, JobState, JsonLimits, NodeExecutionState,
+    Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
+    PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublicRunEventType, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
+    ResourceDraftPayload, ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState,
+    SchedulerPriority, ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
     TenantPrincipalPayload, ValueRef, WorkClass, MAX_RESOURCE_DEPENDENCIES,
 };
 use insight_platform_invocations::{
-    CapabilityJobPayload, ExactInvocationValueRef, InvocationCommandLimits,
-    InvocationError as DomainInvocationError, InvocationValueStorage,
+    AdmitCapabilityInvocation, CapabilityInvocationRecord, CapabilityJobPayload,
+    ExactInvocationValueRef, InvocationCommandLimits, InvocationError as DomainInvocationError,
+    InvocationOrigin, InvocationPolicyDecisionBundle, InvocationValueStorage,
+    McpCapabilityRuntimeRequest, PrepareCapabilityDispatch,
 };
 use insight_platform_jobs::{
     decide_claim as decide_job_claim, decide_expired_lease as decide_expired_job_lease,
@@ -1622,6 +1624,87 @@ impl PgRepository {
                 },
             )));
         }
+        if let insight_platform_orchestrator::RuntimeNode::CapabilityCall {
+            capability_slot_id,
+            input,
+            candidate_route,
+            ..
+        } = runtime_node
+        {
+            let plan_slot = plan
+                .dependency_slots
+                .get(capability_slot_id)
+                .ok_or(RepositoryError::Conflict("Capability Plan dependency slot"))?;
+            let frozen_slot = run
+                .bindings
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == *capability_slot_id)
+                .ok_or(RepositoryError::NotFound("frozen Capability slot"))?;
+            if plan_slot.requirement_digest != frozen_slot.requirement_digest {
+                return Err(RepositoryError::Conflict(
+                    "Capability Plan frozen requirement",
+                ));
+            }
+            let FrozenSlotTarget::Capability {
+                candidates,
+                selection_policy,
+                ..
+            } = &frozen_slot.target
+            else {
+                return Err(RepositoryError::Conflict("frozen Capability slot kind"));
+            };
+            let selection_document =
+                load_exact_frozen_selection_policy(&mut transaction, &run, selection_policy, false)
+                    .await?;
+            let scope_id: ResourceId = row.try_get::<String, _>("scope_id")?.parse().map_err(
+                |failure: insight_platform_contracts::ResourceIdError| {
+                    RepositoryError::CorruptRow(failure.to_string())
+                },
+            )?;
+            let environments = load_scope_environment_chain(
+                &mut transaction,
+                &tenant_id,
+                &run_id,
+                &scope_id,
+                self.scope_environment_limits,
+            )
+            .await?;
+            let ports = std::iter::once(input.clone())
+                .chain(candidate_route.iter().cloned())
+                .collect::<Vec<_>>();
+            let references = insight_platform_orchestrator::resolve_scope_inputs(
+                &ports,
+                &environments,
+                self.scope_environment_limits,
+            )?;
+            let mut values = load_resolved_expression_values(
+                &mut transaction,
+                &tenant_id,
+                &run_id,
+                ports,
+                references,
+            )
+            .await?;
+            if values.is_empty() || values.len() > 2 {
+                return Err(RepositoryError::CorruptRow(
+                    "Capability dispatch input arity".to_owned(),
+                ));
+            }
+            let input = values.remove(0);
+            let route = values.pop();
+            transaction.commit().await?;
+            return Ok(ControllerFacts::CapabilityDispatch(Box::new(
+                CapabilityDispatchFacts {
+                    identity,
+                    input,
+                    route,
+                    selection_policy: selection_policy.clone(),
+                    selection_document,
+                    candidates: candidates.clone(),
+                },
+            )));
+        }
         if let insight_platform_orchestrator::RuntimeNode::ContextQuery {
             context_slot_id,
             request,
@@ -2424,6 +2507,7 @@ impl PgRepository {
         Ok(PgSchedulerTransaction {
             transaction,
             limits: self.scheduler_limits,
+            invocation_limits: self.invocation_limits,
             context_query_limits: self.context_query_limits,
             plan_limits: self.plan_limits,
             scope_environment_limits: self.scope_environment_limits,
@@ -5099,6 +5183,7 @@ fn map_prepared_secret_binding_registration_error(
 pub struct PgSchedulerTransaction {
     transaction: Transaction<'static, Postgres>,
     limits: SchedulerHardLimits,
+    invocation_limits: InvocationCommandLimits,
     context_query_limits: ContextQueryLimits,
     plan_limits: PlanLimits,
     scope_environment_limits: ScopeEnvironmentLimits,
@@ -6408,6 +6493,293 @@ impl PgSchedulerTransaction {
             &command.mutations.receipt_id,
             &command.request_digest,
             "task_pending",
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(deferred))
+    }
+
+    pub async fn defer_orchestration_to_capability_invocation(
+        &mut self,
+        command: DeferOrchestrationToCapabilityInvocation,
+    ) -> Result<CommandOutcome<DeferredOrchestrationCapabilityInvocation>, RepositoryError> {
+        command.validate(self.expression_inline_limits)?;
+        let plan_digest = command.plan.canonical_digest(self.plan_limits)?;
+        let mut transaction = self.transaction.begin().await?;
+        let receipt_payload = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "capability_job_id": command.capability_job_id,
+                "input_value_id": command.input.run_value_id,
+                "invocation_id": command.invocation_id,
+                "selection_evidence_digest": command.selection_evidence.canonical_digest,
+            }),
+            65_536,
+        )?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.source.receipt_id,
+            "orchestration.capability.defer",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            let deferred = load_deferred_orchestration_capability_invocation(
+                &mut transaction,
+                &command.fence,
+                &command.invocation_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(deferred));
+        }
+
+        let observed = load_job_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        require_orchestration_job(&observed)?;
+        let quota_accounts = lock_job_quota_bundle(
+            &mut transaction,
+            &observed,
+            &command.mutations.source.quota_entry_ids,
+        )
+        .await?;
+        let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
+        require_exact_runtime_plan(&mut transaction, &parents.run, &command.plan, &plan_digest)
+            .await?;
+        let source_node =
+            load_controller_source_node(&mut transaction, &observed, &parents, &command.plan)
+                .await?;
+        let RuntimeNode::CapabilityCall {
+            capability_slot_id,
+            output,
+            attempt_limit,
+            retry_backoff_milliseconds,
+            resume,
+            ..
+        } = command.plan.node(&source_node.plan_node_key)?
+        else {
+            return Err(RepositoryError::Conflict(
+                "orchestration Capability exact Plan node",
+            ));
+        };
+        let selected_ordinal = require_exact_capability_candidate_selection(
+            &mut transaction,
+            &parents,
+            command.plan.node(&source_node.plan_node_key)?,
+            &command,
+            self.scope_environment_limits,
+        )
+        .await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let tenant_id: ResourceId = parents.run.tenant_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let run_id: ResourceId = parents.run.run_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let node_id: ResourceId = parents.node_id.parse().map_err(
+            |failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            },
+        )?;
+        let principal = parents.run.bindings.principal.clone();
+        let admit_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "input_content_digest": command.input.content_digest,
+            "invocation_id": command.invocation_id,
+            "operation": "capability.admit",
+            "plan_digest": plan_digest,
+            "selection_evidence_digest": command.selection_evidence.canonical_digest,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|_| RepositoryError::InvalidInput("Capability admission digest".to_owned()))?;
+        let admitted =
+            match crate::invocation_repository::admit_capability_invocation_in_transaction(
+                &mut transaction,
+                AdmitCapabilityInvocation {
+                    audit: CommandAudit {
+                        tenant_id: tenant_id.clone(),
+                        principal_id: principal.principal_id.clone(),
+                        principal_kind: principal.principal_kind,
+                        receipt_id: command.mutations.invocation_admit_receipt_id.clone(),
+                        event_id: command.mutations.invocation_admit_event_id.clone(),
+                        outbox_id: command.mutations.invocation_admit_outbox_id.clone(),
+                        idempotency_key_digest: command.idempotency_key_digest.clone(),
+                        request_digest: admit_digest,
+                        receipt_expires_at: command.receipt_expires_at,
+                    },
+                    invocation_id: command.invocation_id.clone(),
+                    run_id: run_id.clone(),
+                    node_execution_id: node_id.clone(),
+                    expected_run_version: u64::try_from(parents.run.version).map_err(|_| {
+                        RepositoryError::CorruptRow("Run version is negative".to_owned())
+                    })?,
+                    expected_node_version: u64::try_from(parents.node_version).map_err(|_| {
+                        RepositoryError::CorruptRow("Node version is negative".to_owned())
+                    })?,
+                    slot_id: capability_slot_id.clone(),
+                    input_value_id: command.input.run_value_id.clone(),
+                    input_artifact_link_id: command.input_artifact_link_id.clone(),
+                    origin: InvocationOrigin::PlanNode {
+                        node_execution_id: node_id,
+                    },
+                    selected_candidate_ordinal: selected_ordinal,
+                    selector_input_digest: command.selection_evidence.canonical_digest.clone(),
+                    policy_decisions: command.policy_decisions.clone(),
+                    approval_task_id: command.approval_task_id.clone(),
+                    requested_attempt_limit: u32::from(*attempt_limit),
+                    requested_retry_backoff_milliseconds: *retry_backoff_milliseconds,
+                    mcp_runtime: command.mcp_runtime.clone(),
+                },
+                self.invocation_limits,
+                self.context_query_limits,
+                database_now,
+            )
+            .await?
+            {
+                CommandOutcome::Applied(invocation) | CommandOutcome::Replayed(invocation) => {
+                    invocation
+                }
+            };
+        let (invocation, capability_job) = if admitted.state == InvocationState::Ready {
+            let prepare_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+                "capability_job_id": command.capability_job_id,
+                "expected_invocation_version": admitted.version,
+                "invocation_id": command.invocation_id,
+                "operation": "capability.dispatch.prepare",
+            }))
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+            .parse()
+            .map_err(|_| RepositoryError::InvalidInput("Capability prepare digest".to_owned()))?;
+            let prepared = match crate::capability_execution_repository::prepare_capability_dispatch_in_transaction(
+                &mut transaction,
+                PrepareCapabilityDispatch {
+                    audit: CommandAudit {
+                        tenant_id: tenant_id.clone(),
+                        principal_id: principal.principal_id.clone(),
+                        principal_kind: principal.principal_kind,
+                        receipt_id: command.mutations.invocation_prepare_receipt_id.clone(),
+                        event_id: command.mutations.invocation_prepare_event_id.clone(),
+                        outbox_id: command.mutations.invocation_prepare_outbox_id.clone(),
+                        idempotency_key_digest: command.idempotency_key_digest.clone(),
+                        request_digest: prepare_digest,
+                        receipt_expires_at: command.receipt_expires_at,
+                    },
+                    invocation_id: command.invocation_id.clone(),
+                    expected_invocation_version: admitted.version,
+                    job_id: command.capability_job_id.clone(),
+                    scheduled_at: database_now,
+                },
+                database_now,
+            )
+            .await?
+            {
+                CommandOutcome::Applied(prepared) | CommandOutcome::Replayed(prepared) => prepared,
+            };
+            (prepared.invocation, Some(prepared.job))
+        } else if admitted.state == InvocationState::AwaitingApproval {
+            (admitted, None)
+        } else {
+            return Err(RepositoryError::Conflict(
+                "Capability admission owner state",
+            ));
+        };
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.version != observed.version
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+        {
+            return Err(RepositoryError::Conflict("Capability source Job"));
+        }
+        let next_job = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            JobState::Succeeded,
+        )?;
+        settle_locked_job_quota_bundle(
+            &mut transaction,
+            &current,
+            &quota_accounts,
+            &command.mutations.source.quota_entry_ids,
+            &command.request_digest,
+        )
+        .await?;
+        let orchestration_payload: OrchestrationJobPayload =
+            decode_typed_payload(&current.payload, "orchestration Job")?;
+        let wait_payload = TypedPayload::with_limit(
+            1,
+            &StoredCapabilityInvocationWaitPayload {
+                plan_node_key: source_node.plan_node_key,
+                plan_digest,
+                source_orchestration_job_id: command.fence.job_id.parse().map_err(
+                    |failure: insight_platform_contracts::ResourceIdError| {
+                        RepositoryError::CorruptRow(failure.to_string())
+                    },
+                )?,
+                invocation_id: command.invocation_id.clone(),
+                capability_job_id: Some(command.capability_job_id.clone()),
+                output_port: output.clone(),
+                resume_plan_node_key: resume.clone(),
+                resume_node_kind: command.plan.node(resume)?.kind(),
+                root_scope_id: orchestration_payload.root_scope_id,
+                continuation_attempt_limit: current.attempt_limit,
+                retry_backoff_milliseconds: orchestration_payload.retry_backoff_milliseconds,
+                priority: current.priority,
+                deadline: current.deadline.min(parents.run.deadline),
+            },
+            262_144,
+        )?;
+        let mut deferred = mutate_deferred_orchestration_capability_invocation(
+            &mut transaction,
+            &current,
+            &next_job,
+            &parents,
+            &invocation,
+            capability_job.as_ref(),
+            &wait_payload,
+            database_now,
+        )
+        .await?;
+        deferred.settled_quota_account_ids = quota_accounts
+            .iter()
+            .map(|account| account.quota_account_id.clone())
+            .collect();
+        append_deferred_orchestration_capability_events(
+            &mut transaction,
+            &deferred,
+            &command.mutations.source,
+        )
+        .await?;
+        terminalize_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.mutations.source.receipt_id,
+            &command.request_digest,
+            if capability_job.is_some() {
+                "capability_ready"
+            } else {
+                "capability_approval_pending"
+            },
         )
         .await?;
         transaction.commit().await?;
@@ -10942,6 +11314,394 @@ pub(crate) async fn settle_context_leaf_success_in_transaction(
         &mutations.leaf_node_outbox_id,
         "node_execution",
         &query.node_execution_id.to_string(),
+        leaf_version,
+        Some(&run.run_id),
+        "node.external_leaf_succeeded",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.continuation_node_event_id,
+        &mutations.continuation_node_outbox_id,
+        "node_execution",
+        &mutations.continuation_node_execution_id.to_string(),
+        1,
+        Some(&run.run_id),
+        "node.ready",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.continuation_job_event_id,
+        &mutations.continuation_job_outbox_id,
+        "job",
+        &continuation_job.job_id,
+        continuation_job.version,
+        Some(&run.run_id),
+        "job.ready",
+        &common,
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn settle_capability_leaf_success_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &CapabilityInvocationRecord,
+    capability_job_id: &ResourceId,
+    output: &ExactInvocationValueRef,
+    mutations: &insight_platform_contracts::ExternalLeafResumeMutationIds,
+    scope_limits: ScopeEnvironmentLimits,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    mutations
+        .validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let run = load_run_for_update(transaction, &invocation.tenant_id, &invocation.run_id).await?;
+    let node_row = sqlx::query(
+        r#"
+        SELECT scope_id, state, version, payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'node_execution'
+        FOR UPDATE
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(invocation.node_execution_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Capability leaf Node"))?;
+    if node_row.try_get::<String, _>("state")? != NodeExecutionState::Waiting.as_str() {
+        return Err(RepositoryError::Conflict("Capability leaf terminal state"));
+    }
+    let wait_payload = payload_from_row(
+        &node_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let wait: StoredCapabilityInvocationWaitPayload =
+        decode_typed_payload(&wait_payload, "Capability leaf wait")?;
+    if wait.invocation_id != invocation.invocation_id
+        || wait.capability_job_id.as_ref() != Some(capability_job_id)
+        || wait.source_orchestration_job_id.kind() != ResourceKind::Job
+        || wait.output_port.schema_digest() != &output.schema_digest
+        || output.run_id != invocation.run_id
+        || output.producing_node_id.as_ref() != Some(&invocation.node_execution_id)
+        || invocation
+            .payload
+            .result
+            .as_ref()
+            .map(|result| &result.output.value_id)
+            != Some(&output.value_id)
+    {
+        return Err(RepositoryError::Conflict(
+            "Capability leaf terminal contract",
+        ));
+    }
+    let plan_row = sqlx::query(
+        r#"
+        SELECT payload_schema_version, payload, payload_digest
+        FROM insight_platform.resource_versions
+        WHERE tenant_id = $1 AND resource_version_id = $2
+          AND resource_version_kind = 'agent_plan_revision' AND content_digest = $3
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(run.bindings.plan.revision_id.to_string())
+    .bind(run.bindings.plan.semantic_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("exact Agent Plan revision"))?;
+    let plan_payload = payload_from_row(
+        &plan_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let published = decode_published_version_payload(&plan_payload)?;
+    let ResourceDocument::Agent(agent) = published.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Agent Plan revision contains a non-Agent document".to_owned(),
+        ));
+    };
+    if agent.typed_plan_digest != wait.plan_digest {
+        return Err(RepositoryError::Conflict("Capability leaf exact Plan"));
+    }
+    let source_job = load_job_by_text(
+        transaction,
+        &run.tenant_id,
+        &wait.source_orchestration_job_id.to_string(),
+    )
+    .await?;
+    require_orchestration_job(&source_job)?;
+    let source_payload: OrchestrationJobPayload =
+        decode_typed_payload(&source_job.payload, "Capability source orchestration Job")?;
+    if source_job.state != JobState::Succeeded.as_str()
+        || source_job.terminal_at.is_none()
+        || source_job.owner_id != invocation.node_execution_id.to_string()
+        || source_job.run_id.as_deref() != Some(run.run_id.as_str())
+        || source_job.attempt_limit != wait.continuation_attempt_limit
+        || source_job.priority != wait.priority
+        || source_job.deadline.min(run.deadline) != wait.deadline
+        || source_payload.root_scope_id != wait.root_scope_id
+        || source_payload.retry_backoff_milliseconds != wait.retry_backoff_milliseconds
+        || source_payload.bindings_digest != run.bindings.canonical_digest
+    {
+        return Err(RepositoryError::Conflict(
+            "Capability source orchestration Job contract",
+        ));
+    }
+
+    let scope_id: ResourceId = node_row.try_get::<String, _>("scope_id")?.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let scope_row = sqlx::query(
+        r#"
+        SELECT node_kind, state, version, parent_node_id,
+               payload_schema_version, payload, payload_digest
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+          AND record_kind = 'scope_instance'
+        FOR UPDATE
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Capability leaf Scope"))?;
+    if scope_row.try_get::<String, _>("state")? != ScopeState::Open.as_str() {
+        return Err(RepositoryError::Conflict("Capability leaf open Scope"));
+    }
+    let scope_payload = payload_from_row(
+        &scope_row,
+        "payload_schema_version",
+        "payload",
+        "payload_digest",
+    )?;
+    let binding = ExactRunValueRef {
+        value_id: output.value_id.clone(),
+        schema_digest: output.schema_digest.clone(),
+        content_digest: output.content_digest.clone(),
+    };
+    let next_scope_payload = match scope_row.try_get::<String, _>("node_kind")?.as_str() {
+        "root" => {
+            let mut root: StoredRootScopePayload =
+                decode_typed_payload(&scope_payload, "root Scope")?;
+            root.environment
+                .bind_new(wait.output_port.clone(), binding, scope_limits)?;
+            TypedPayload::with_limit(1, &root, 262_144)?
+        }
+        "parallel_leg" | "loop_iteration" | "map_item" => {
+            let mut nested: StoredControllerScopePayload =
+                decode_typed_payload(&scope_payload, "controller Scope")?;
+            nested
+                .environment
+                .bind_new(wait.output_port.clone(), binding, scope_limits)?;
+            TypedPayload::with_limit(1, &nested, 262_144)?
+        }
+        _ => return Err(RepositoryError::Conflict("Capability leaf Scope kind")),
+    };
+    let scope_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET version = version + 1, payload_schema_version = $4,
+            payload = $5, payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'scope_instance' AND state = 'open'
+        RETURNING version
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(scope_row.try_get::<i64, _>("version")?)
+    .bind(next_scope_payload.schema_version)
+    .bind(&next_scope_payload.value)
+    .bind(&next_scope_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Capability leaf Scope binding"))?;
+    let leaf_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'succeeded', version = version + 1,
+            terminal_at = $4, updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'waiting'
+        RETURNING version
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(invocation.node_execution_id.to_string())
+    .bind(node_row.try_get::<i64, _>("version")?)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Capability leaf Node terminal"))?;
+    let activation_ordinal: i32 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(max(activation_ordinal), 0) + 1
+        FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND run_id = $2
+          AND record_kind = 'node_execution' AND plan_node_key = $3
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .bind(wait.resume_plan_node_key.as_str())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let continuation_payload = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "plan_node_key": wait.resume_plan_node_key,
+            "plan_source_digest": wait.plan_digest,
+            "required_control_tokens": [{
+                "source_node_execution_id": invocation.node_execution_id,
+                "source_port": "success",
+            }],
+        }),
+        262_144,
+    )?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_nodes (
+            tenant_id, node_id, run_id, parent_node_id, record_kind, scope_id,
+            plan_node_key, activation_ordinal, logical_key, node_kind, state,
+            enqueue_round, payload_schema_version, payload, payload_digest, deadline
+        ) VALUES (
+            $1, $2, $3, $4, 'node_execution', $5,
+            $6, $7, $8, $9, 'ready', 0, $10, $11, $12, $13
+        )
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(mutations.continuation_node_execution_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .bind(invocation.node_execution_id.to_string())
+    .bind(scope_id.to_string())
+    .bind(wait.resume_plan_node_key.as_str())
+    .bind(activation_ordinal)
+    .bind(format!(
+        "external_leaf:{}:{}",
+        invocation.node_execution_id,
+        wait.resume_plan_node_key.as_str()
+    ))
+    .bind(wait.resume_node_kind.as_str())
+    .bind(continuation_payload.schema_version)
+    .bind(&continuation_payload.value)
+    .bind(&continuation_payload.digest)
+    .bind(wait.deadline)
+    .execute(&mut **transaction)
+    .await?;
+    let job_payload = OrchestrationJobPayload {
+        bindings_digest: run.bindings.canonical_digest.clone(),
+        node_execution_id: mutations.continuation_node_execution_id.clone(),
+        root_scope_id: wait.root_scope_id,
+        retry_backoff_milliseconds: wait.retry_backoff_milliseconds,
+        wake_contract: None,
+    };
+    let job_payload = TypedPayload::with_limit(1, &job_payload, 262_144)?;
+    let continuation_job = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+            payload_schema_version, payload, payload_digest
+        ) VALUES (
+            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            'ready', $5, $6, $7, $8, $9, $10, $11, $12
+        ) RETURNING *
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(mutations.continuation_job_id.to_string())
+    .bind(mutations.continuation_node_execution_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .bind(wait.continuation_attempt_limit)
+    .bind(database_now)
+    .bind(wait.deadline)
+    .bind(scheduler_priority_to_database(wait.priority))
+    .bind(&job_payload.digest)
+    .bind(job_payload.schema_version)
+    .bind(&job_payload.value)
+    .bind(&job_payload.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let continuation_job = job_from_row(continuation_job)?;
+    let mut current = run.current.clone();
+    if run.state == RunState::Waiting.as_str() {
+        current.waiting_reason = None;
+    }
+    current.validate(&invocation.run_id)?;
+    let current_payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+    let run_row = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN state = 'waiting' THEN 'running' ELSE state END,
+            version = version + 1, active_work_count = active_work_count - 1,
+            current_schema_version = $4,
+            current_payload = $5, current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state IN ('running', 'waiting') AND active_work_count > 0
+          AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(&run.run_id)
+    .bind(run.version)
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Capability leaf Run resume"))?;
+    let resumed_run = run_from_row(run_row)?;
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "capability_job_id": capability_job_id,
+            "invocation_id": invocation.invocation_id,
+            "continuation_job_id": continuation_job.job_id,
+            "continuation_node_execution_id": mutations.continuation_node_execution_id,
+            "output_value_id": output.value_id,
+            "scope_version": scope_version,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        &run.run_id,
+        resumed_run.version,
+        Some(&run.run_id),
+        "run.external_leaf_resumed",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &run.tenant_id,
+        &mutations.leaf_node_event_id,
+        &mutations.leaf_node_outbox_id,
+        "node_execution",
+        &invocation.node_execution_id.to_string(),
         leaf_version,
         Some(&run.run_id),
         "node.external_leaf_succeeded",
@@ -16062,6 +16822,270 @@ async fn mutate_deferred_orchestration_context_query(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn mutate_deferred_orchestration_capability_invocation(
+    transaction: &mut Transaction<'_, Postgres>,
+    current_job: &JobRecord,
+    next_job: &JobProjection,
+    parents: &LockedOrchestrationJobParents,
+    invocation: &CapabilityInvocationRecord,
+    capability_job: Option<&JobRecord>,
+    node_payload: &TypedPayload,
+    database_now: DateTime<Utc>,
+) -> Result<DeferredOrchestrationCapabilityInvocation, RepositoryError> {
+    if !NodeExecutionState::Running.can_transition_to(NodeExecutionState::Waiting) {
+        return Err(RepositoryError::Conflict(
+            "orchestration Capability wait transition",
+        ));
+    }
+    let source_job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'succeeded', version = $4, result_digest = $5,
+            worker_id = NULL, lease_token_digest = NULL,
+            lease_expires_at = NULL, heartbeat_at = NULL,
+            terminal_at = $6, updated_at = $6
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
+        RETURNING *
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&current_job.job_id)
+    .bind(current_job.version)
+    .bind(
+        i64::try_from(next_job.version)
+            .map_err(|_| RepositoryError::InvalidInput("Job version exceeds bigint".to_owned()))?,
+    )
+    .bind(&node_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Capability deferral Job",
+    ))?;
+    let source_job = job_from_row(source_job)?;
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'waiting', version = version + 1,
+            payload_schema_version = $5, payload = $6, payload_digest = $7,
+            updated_at = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $3
+          AND record_kind = 'node_execution' AND state = 'running'
+          AND terminal_at IS NULL
+        RETURNING version
+        "#,
+    )
+    .bind(&current_job.tenant_id)
+    .bind(&parents.node_id)
+    .bind(parents.node_version)
+    .bind(database_now)
+    .bind(node_payload.schema_version)
+    .bind(&node_payload.value)
+    .bind(&node_payload.digest)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Capability deferral Node",
+    ))?;
+    let mut current_snapshot = parents.run.current.clone();
+    if parents.run.active_work_count == 1 {
+        current_snapshot.waiting_reason = Some("capability_invocation".to_owned());
+    }
+    let run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    current_snapshot
+        .validate(&run_id)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let current_payload = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN active_work_count = 1 THEN 'waiting' ELSE state END,
+            version = version + 1, active_work_count = active_work_count - 1,
+            current_schema_version = $4, current_payload = $5,
+            current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state = 'running' AND active_work_count > 0 AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Capability deferral Run",
+    ))?;
+    Ok(DeferredOrchestrationCapabilityInvocation {
+        run: run_from_row(run)?,
+        node_id: parents.node_id.clone(),
+        node_version,
+        source_job,
+        invocation: invocation.clone(),
+        capability_job: capability_job.cloned(),
+        settled_quota_account_ids: Vec::new(),
+    })
+}
+
+async fn require_exact_capability_candidate_selection(
+    transaction: &mut Transaction<'_, Postgres>,
+    parents: &LockedOrchestrationJobParents,
+    runtime_node: &insight_platform_orchestrator::RuntimeNode,
+    command: &DeferOrchestrationToCapabilityInvocation,
+    scope_limits: ScopeEnvironmentLimits,
+) -> Result<u16, RepositoryError> {
+    let insight_platform_orchestrator::RuntimeNode::CapabilityCall {
+        capability_slot_id,
+        input,
+        candidate_route,
+        ..
+    } = runtime_node
+    else {
+        return Err(RepositoryError::Conflict(
+            "orchestration Capability exact Plan node",
+        ));
+    };
+    let slot = parents
+        .run
+        .bindings
+        .slots
+        .iter()
+        .find(|slot| slot.slot_id == *capability_slot_id)
+        .ok_or(RepositoryError::NotFound("frozen Capability slot"))?;
+    if command
+        .plan
+        .dependency_slots
+        .get(capability_slot_id)
+        .is_none_or(|plan_slot| plan_slot.requirement_digest != slot.requirement_digest)
+    {
+        return Err(RepositoryError::Conflict(
+            "Capability Plan frozen requirement",
+        ));
+    }
+    let FrozenSlotTarget::Capability {
+        candidates,
+        selection_policy,
+        ..
+    } = &slot.target
+    else {
+        return Err(RepositoryError::InvalidInput(
+            "selected slot is not a Capability slot".to_owned(),
+        ));
+    };
+    let policy =
+        load_exact_frozen_selection_policy(transaction, &parents.run, selection_policy, true)
+            .await?;
+    let tenant_id: ResourceId = parents.run.tenant_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let scope_id: ResourceId = parents.scope_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let environments =
+        load_scope_environment_chain(transaction, &tenant_id, &run_id, &scope_id, scope_limits)
+            .await?;
+    let references = insight_platform_orchestrator::resolve_scope_inputs(
+        std::slice::from_ref(input),
+        &environments,
+        scope_limits,
+    )?;
+    let mut resolved = load_resolved_expression_values(
+        transaction,
+        &tenant_id,
+        &run_id,
+        vec![input.clone()],
+        references,
+    )
+    .await?;
+    let exact_input = resolved.pop().ok_or_else(|| {
+        RepositoryError::CorruptRow("Capability input RunValue missing".to_owned())
+    })?;
+    if exact_input != command.input {
+        return Err(RepositoryError::Conflict(
+            "Capability input RunValue evidence",
+        ));
+    }
+    let route = match (candidate_route, command.route.as_ref()) {
+        (None, None) => None,
+        (Some(port), Some((provided, materialized))) => {
+            let references = insight_platform_orchestrator::resolve_scope_inputs(
+                std::slice::from_ref(port),
+                &environments,
+                scope_limits,
+            )?;
+            let mut resolved = load_resolved_expression_values(
+                transaction,
+                &tenant_id,
+                &run_id,
+                vec![port.clone()],
+                references,
+            )
+            .await?;
+            let exact_route = resolved.pop().ok_or_else(|| {
+                RepositoryError::CorruptRow("Capability route RunValue missing".to_owned())
+            })?;
+            let reference = ExactRunValueRef {
+                value_id: exact_route.run_value_id.clone(),
+                schema_digest: exact_route.schema_digest.clone(),
+                content_digest: exact_route.content_digest.clone(),
+            };
+            if &exact_route != provided
+                || materialized.schema_digest != exact_route.schema_digest
+                || materialized.canonical_digest != exact_route.content_digest
+                || matches!(&exact_route.value, ValueRef::Inline { value } if value != &materialized.value)
+            {
+                return Err(RepositoryError::Conflict(
+                    "Capability route RunValue evidence",
+                ));
+            }
+            Some((reference, materialized))
+        }
+        _ => {
+            return Err(RepositoryError::Conflict(
+                "Capability route exact Plan contract",
+            ))
+        }
+    };
+    let route = route.as_ref().map(|(reference, value)| (reference, *value));
+    let exact = derive_candidate_selection(
+        capability_slot_id,
+        selection_policy,
+        &policy,
+        candidates,
+        route,
+    )?;
+    if exact != command.selection_evidence {
+        return Err(RepositoryError::Conflict(
+            "exact Capability candidate selection",
+        ));
+    }
+    candidates
+        .iter()
+        .position(|candidate| candidate == &exact.selected_deployment)
+        .and_then(|ordinal| u16::try_from(ordinal).ok())
+        .ok_or(RepositoryError::Conflict(
+            "Capability selected candidate ordinal",
+        ))
+}
+
 async fn require_exact_child_candidate_selection(
     transaction: &mut Transaction<'_, Postgres>,
     parents: &LockedOrchestrationJobParents,
@@ -18590,6 +19614,64 @@ async fn append_deferred_orchestration_context_events(
     Ok(())
 }
 
+async fn append_deferred_orchestration_capability_events(
+    transaction: &mut Transaction<'_, Postgres>,
+    deferred: &DeferredOrchestrationCapabilityInvocation,
+    mutations: &OrchestrationYieldMutationIds,
+) -> Result<(), RepositoryError> {
+    let run_id = deferred.run.run_id.as_str();
+    let common = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "capability_job_id": deferred.capability_job.as_ref().map(|job| &job.job_id),
+            "invocation_id": deferred.invocation.invocation_id,
+            "source_job_id": deferred.source_job.job_id,
+            "settled_quota_account_ids": deferred.settled_quota_account_ids,
+        }),
+        65_536,
+    )?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        run_id,
+        deferred.run.version,
+        Some(run_id),
+        "run.capability_waiting",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.node_event_id,
+        &mutations.node_outbox_id,
+        "node_execution",
+        &deferred.node_id,
+        deferred.node_version,
+        Some(run_id),
+        "node.capability_waiting",
+        &common,
+    )
+    .await?;
+    append_scheduler_event(
+        transaction,
+        &deferred.run.tenant_id,
+        &mutations.job_event_id,
+        &mutations.job_outbox_id,
+        "job",
+        &deferred.source_job.job_id,
+        deferred.source_job.version,
+        Some(run_id),
+        "job.capability_deferred",
+        &common,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn append_deferred_orchestration_child_events(
     transaction: &mut Transaction<'_, Postgres>,
     deferred: &DeferredOrchestrationChildRun,
@@ -20618,6 +21700,91 @@ async fn load_deferred_orchestration_task(
         node_version,
         job,
         task,
+        settled_quota_account_ids,
+    })
+}
+
+async fn load_deferred_orchestration_capability_invocation(
+    transaction: &mut Transaction<'_, Postgres>,
+    fence: &JobFence,
+    invocation_id: &ResourceId,
+) -> Result<DeferredOrchestrationCapabilityInvocation, RepositoryError> {
+    let source_job = load_job_by_text(transaction, &fence.tenant_id, &fence.job_id).await?;
+    require_orchestration_job(&source_job)?;
+    if source_job.state != JobState::Succeeded.as_str() || source_job.terminal_at.is_none() {
+        return Err(RepositoryError::Conflict(
+            "orchestration Capability deferral replay",
+        ));
+    }
+    let tenant_id: ResourceId = fence.tenant_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    let invocation = crate::invocation_repository::load_capability_invocation(
+        transaction,
+        &tenant_id,
+        invocation_id,
+        false,
+    )
+    .await?;
+    if invocation.node_execution_id.to_string() != source_job.owner_id
+        || invocation.run_id.to_string() != source_job.run_id.as_deref().unwrap_or_default()
+    {
+        return Err(RepositoryError::Conflict(
+            "orchestration Capability deferral replay",
+        ));
+    }
+    let capability_job = if let Some(job_id) = invocation.payload.current_job_id.as_ref() {
+        Some(
+            crate::capability_execution_repository::load_capability_job(
+                transaction,
+                &tenant_id,
+                job_id,
+                false,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let run = load_run(transaction, &tenant_id, &invocation.run_id).await?;
+    let node_id = invocation.node_execution_id.to_string();
+    let node_version: i64 = sqlx::query_scalar(
+        r#"
+        SELECT version FROM insight_platform.run_nodes
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'waiting'
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(&node_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "orchestration Capability deferral replay",
+    ))?;
+    let reservation_id = source_job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("deferred orchestration Job lost quota evidence".to_owned())
+    })?;
+    let settled_quota_account_ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT quota_account_id FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        ORDER BY quota_account_id
+        "#,
+    )
+    .bind(&fence.tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(DeferredOrchestrationCapabilityInvocation {
+        run,
+        node_id,
+        node_version,
+        source_job,
+        invocation,
+        capability_job,
         settled_quota_account_ids,
     })
 }
@@ -23920,6 +25087,16 @@ pub struct ChildAgentDispatchFacts {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CapabilityDispatchFacts {
+    pub identity: ControllerFactIdentity,
+    pub input: ResolvedExpressionInput,
+    pub route: Option<ResolvedExpressionInput>,
+    pub selection_policy: insight_platform_contracts::ExactPolicyBinding,
+    pub selection_document: CandidateSelectionPolicyDocument,
+    pub candidates: Vec<ExactDeploymentRef>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ContextDispatchFacts {
     pub identity: ControllerFactIdentity,
     pub input: ResolvedExpressionInput,
@@ -23929,6 +25106,7 @@ pub struct ContextDispatchFacts {
 pub enum ControllerFacts {
     Expression(ExpressionControllerFacts),
     ChildAgentDispatch(Box<ChildAgentDispatchFacts>),
+    CapabilityDispatch(Box<CapabilityDispatchFacts>),
     ContextDispatch(Box<ContextDispatchFacts>),
     Committed {
         identity: ControllerFactIdentity,
@@ -24080,6 +25258,24 @@ struct StoredContextQueryWaitPayload {
     deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredCapabilityInvocationWaitPayload {
+    pub(crate) plan_node_key: PlanNodeKey,
+    pub(crate) plan_digest: Sha256Digest,
+    pub(crate) source_orchestration_job_id: ResourceId,
+    pub(crate) invocation_id: ResourceId,
+    pub(crate) capability_job_id: Option<ResourceId>,
+    pub(crate) output_port: ExactDataPortRef,
+    pub(crate) resume_plan_node_key: PlanNodeKey,
+    pub(crate) resume_node_kind: PlanNodeKind,
+    pub(crate) root_scope_id: ResourceId,
+    pub(crate) continuation_attempt_limit: i32,
+    pub(crate) retry_backoff_milliseconds: u64,
+    pub(crate) priority: SchedulerPriority,
+    pub(crate) deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StoredControllerPort {
@@ -24191,6 +25387,133 @@ pub struct DeferOrchestrationContextMutationIds {
     pub context_prepare_receipt_id: ResourceId,
     pub context_prepare_event_id: ResourceId,
     pub context_prepare_outbox_id: ResourceId,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferOrchestrationCapabilityMutationIds {
+    pub source: OrchestrationYieldMutationIds,
+    pub invocation_admit_receipt_id: ResourceId,
+    pub invocation_admit_event_id: ResourceId,
+    pub invocation_admit_outbox_id: ResourceId,
+    pub invocation_prepare_receipt_id: ResourceId,
+    pub invocation_prepare_event_id: ResourceId,
+    pub invocation_prepare_outbox_id: ResourceId,
+}
+
+impl DeferOrchestrationCapabilityMutationIds {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.source.validate()?;
+        let expected = [
+            (&self.invocation_admit_receipt_id, ResourceKind::Receipt),
+            (&self.invocation_admit_event_id, ResourceKind::Event),
+            (&self.invocation_admit_outbox_id, ResourceKind::OutboxEvent),
+            (&self.invocation_prepare_receipt_id, ResourceKind::Receipt),
+            (&self.invocation_prepare_event_id, ResourceKind::Event),
+            (
+                &self.invocation_prepare_outbox_id,
+                ResourceKind::OutboxEvent,
+            ),
+        ];
+        if expected.iter().any(|(id, kind)| id.kind() != *kind) {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration Capability mutation identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for id in self.source.quota_entry_ids.iter().chain([
+            &self.source.receipt_id,
+            &self.source.run_event_id,
+            &self.source.run_outbox_id,
+            &self.source.node_event_id,
+            &self.source.node_outbox_id,
+            &self.source.job_event_id,
+            &self.source.job_outbox_id,
+            &self.invocation_admit_receipt_id,
+            &self.invocation_admit_event_id,
+            &self.invocation_admit_outbox_id,
+            &self.invocation_prepare_receipt_id,
+            &self.invocation_prepare_event_id,
+            &self.invocation_prepare_outbox_id,
+        ]) {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "orchestration Capability mutation identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeferOrchestrationToCapabilityInvocation {
+    pub fence: JobFence,
+    pub plan: RuntimePlan,
+    pub invocation_id: ResourceId,
+    pub capability_job_id: ResourceId,
+    pub input: ResolvedExpressionInput,
+    pub route: Option<(ResolvedExpressionInput, ClosedJsonValue)>,
+    pub selection_evidence: CandidateSelectionEvidence,
+    pub policy_decisions: InvocationPolicyDecisionBundle,
+    pub approval_task_id: Option<ResourceId>,
+    pub input_artifact_link_id: Option<ResourceId>,
+    pub mcp_runtime: Option<McpCapabilityRuntimeRequest>,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+    pub mutations: DeferOrchestrationCapabilityMutationIds,
+}
+
+impl DeferOrchestrationToCapabilityInvocation {
+    fn validate(&self, inline_limits: JsonLimits) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        self.mutations.validate()?;
+        self.input
+            .value
+            .validate(inline_limits)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        if let Some((resolved, value)) = &self.route {
+            resolved
+                .value
+                .validate(inline_limits)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+            value
+                .validate()
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        }
+        if self.invocation_id.kind() != ResourceKind::CapabilityInvocation
+            || self.capability_job_id.kind() != ResourceKind::Job
+            || self.input.run_value_id.kind() != ResourceKind::RunValue
+            || self.approval_task_id.is_some() != self.policy_decisions.approval.is_some()
+            || self
+                .approval_task_id
+                .as_ref()
+                .is_some_and(|id| id.kind() != ResourceKind::ApprovalTask)
+            || self
+                .input_artifact_link_id
+                .as_ref()
+                .is_some_and(|id| id.kind() != ResourceKind::ArtifactLink)
+            || self.input_artifact_link_id.is_some()
+                != matches!(self.input.value, ValueRef::Artifact { .. })
+            || self.receipt_expires_at <= Utc::now()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "orchestration Capability deferral is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeferredOrchestrationCapabilityInvocation {
+    pub run: RunRecord,
+    pub node_id: String,
+    pub node_version: i64,
+    pub source_job: JobRecord,
+    pub invocation: CapabilityInvocationRecord,
+    pub capability_job: Option<JobRecord>,
+    pub settled_quota_account_ids: Vec<String>,
 }
 
 impl DeferOrchestrationContextMutationIds {

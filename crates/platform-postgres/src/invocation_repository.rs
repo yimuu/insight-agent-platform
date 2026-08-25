@@ -26,8 +26,9 @@ use insight_platform_invocations::{
     CapabilityImplementationContract, CapabilityInterfaceContract, CapabilityInvocationPayload,
     CapabilityInvocationRecord, ExactInvocationValueRef, InvocationCommandLimits, InvocationStore,
     InvocationTransaction, InvocationValueStorage, McpCapabilityRuntimeBinding,
-    ResolveCapabilityApproval,
+    PrepareCapabilityDispatch, ResolveCapabilityApproval,
 };
+use insight_platform_orchestrator::ScopeEnvironmentLimits;
 use insight_platform_sandbox::SandboxCommandLimits;
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
@@ -41,6 +42,7 @@ pub struct PgInvocationTransaction {
     pub(crate) limits: InvocationCommandLimits,
     pub(crate) sandbox_limits: SandboxCommandLimits,
     context_limits: ContextQueryLimits,
+    pub(crate) scope_environment_limits: ScopeEnvironmentLimits,
 }
 
 impl PgRepository {
@@ -52,6 +54,7 @@ impl PgRepository {
             limits: self.invocation_limits(),
             sandbox_limits: self.sandbox_limits(),
             context_limits: self.context_query_limits(),
+            scope_environment_limits: self.scope_environment_limits(),
         })
     }
 }
@@ -66,6 +69,255 @@ impl InvocationStore for PgRepository {
     async fn begin(&self) -> Result<Self::Transaction<'_>, Self::Error> {
         self.begin_invocation_transaction().await
     }
+}
+
+pub(crate) async fn admit_capability_invocation_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: AdmitCapabilityInvocation,
+    limits: InvocationCommandLimits,
+    context_limits: ContextQueryLimits,
+    database_now: DateTime<Utc>,
+) -> Result<CommandOutcome<CapabilityInvocationRecord>, RepositoryError> {
+    if claim_command_receipt(
+        transaction,
+        &command.audit,
+        "capability_invocation",
+        &command.invocation_id.to_string(),
+        "capability.admit",
+    )
+    .await?
+    {
+        let record = load_capability_invocation(
+            transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            false,
+        )
+        .await?;
+        require_admission_replay(&record, &command)?;
+        return Ok(CommandOutcome::Replayed(record));
+    }
+
+    let run = load_run_for_update(transaction, &command.audit.tenant_id, &command.run_id).await?;
+    let principal =
+        require_tenant_permission(transaction, &command.audit, Permission::CapabilityInvoke)
+            .await?;
+    let node = load_capability_node_for_update(
+        transaction,
+        &command.audit.tenant_id,
+        &command.node_execution_id,
+    )
+    .await?;
+    if node.run_id != run.run_id {
+        return Err(RepositoryError::InvalidInput(
+            "CapabilityInvocation Node does not belong to its Run".to_owned(),
+        ));
+    }
+
+    let selected = selected_capability_deployment(&run.bindings, &command)?;
+    let deployment = load_deployment(
+        transaction,
+        &command.audit.tenant_id,
+        &selected.deployment_id,
+    )
+    .await?;
+    if deployment.bindings.digest != selected.deployment_digest.to_string() {
+        return Err(RepositoryError::Conflict(
+            "exact Capability Deployment binding",
+        ));
+    }
+    let deployment_resource_id = parse_id(&deployment.resource_id, "Capability resource")?;
+    let deployment_resource = load_resource(
+        transaction,
+        &command.audit.tenant_id,
+        &deployment_resource_id,
+    )
+    .await?;
+    if deployment_resource.resource_kind != RegistryResourceKind::CapabilityInterface.as_str()
+        || deployment_resource.lifecycle_state != EntityLifecycle::Active.as_str()
+        || deployment_resource.gate_state != "enabled"
+    {
+        return Err(RepositoryError::Conflict("Capability Deployment gate"));
+    }
+    let closure = match decode_deployment_closure(&deployment.bindings)? {
+        DeploymentClosure::CapabilityInterface(closure) => closure,
+        _ => {
+            return Err(RepositoryError::CorruptRow(
+                "Capability Deployment has a non-Capability closure".to_owned(),
+            ));
+        }
+    };
+    if deployment.resource_version_id != closure.interface.revision_id.to_string() {
+        return Err(RepositoryError::CorruptRow(
+            "Capability Deployment root revision differs from its Interface closure".to_owned(),
+        ));
+    }
+    let interface_payload = load_enabled_exact_published_version(
+        transaction,
+        &command.audit.tenant_id,
+        &closure.interface,
+        RegistryResourceKind::CapabilityInterface,
+    )
+    .await?;
+    let implementation_payload = load_enabled_exact_published_version(
+        transaction,
+        &command.audit.tenant_id,
+        &closure.implementation,
+        RegistryResourceKind::CapabilityImplementation,
+    )
+    .await?;
+    let ResourceDocument::CapabilityInterface(interface_spec) = interface_payload.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Capability Interface revision contains the wrong document".to_owned(),
+        ));
+    };
+    let ResourceDocument::CapabilityImplementation(implementation_spec) =
+        implementation_payload.document
+    else {
+        return Err(RepositoryError::CorruptRow(
+            "Capability Implementation revision contains the wrong document".to_owned(),
+        ));
+    };
+    let interface = CapabilityInterfaceContract {
+        revision: closure.interface.clone(),
+        qualified_name: interface_spec.qualified_name,
+        input_schema_digest: interface_spec.input_schema.canonical_digest.clone(),
+        output_schema_digest: interface_spec.output_schema.canonical_digest.clone(),
+        error_schema_digest: interface_spec.error_schema.canonical_digest.clone(),
+        artifacts: interface_spec.artifacts,
+        data_policy: interface_spec.data_policy,
+        execution_limits: interface_spec.execution_limits,
+        effect: interface_spec.effect,
+        idempotency: interface_spec.idempotency,
+        cancellation: interface_spec.cancellation,
+        progress: interface_spec.progress,
+    };
+    let implementation = CapabilityImplementationContract {
+        revision: closure.implementation.clone(),
+        interface_revision: implementation_spec.interface_revision,
+        backend_kind: implementation_spec.backend_kind,
+        backend_contract: implementation_spec.backend_contract,
+        backend_contract_digest: implementation_spec.backend_contract_digest,
+        credential_requirements: implementation_spec.credential_requirements,
+        backend_limits: implementation_spec.backend_limits,
+        features: implementation_spec.features,
+    };
+    require_capability_backend_closure(&closure, &implementation)?;
+    validate_deployment_closure_exists(
+        transaction,
+        &command.audit.tenant_id,
+        &DeploymentClosure::CapabilityInterface(closure.clone()),
+    )
+    .await?;
+    validate_policy_revisions(
+        transaction,
+        &command.audit.tenant_id,
+        &command.policy_decisions,
+    )
+    .await?;
+    let mcp_runtime =
+        resolve_mcp_capability_runtime(transaction, &command, &closure, &principal, database_now)
+            .await?;
+    let input = load_exact_input_for_update(
+        transaction,
+        &command.audit.tenant_id,
+        &command.input_value_id,
+    )
+    .await?;
+    if matches!(input.storage, InvocationValueStorage::Inline) {
+        let row = sqlx::query(
+            "SELECT inline_value FROM insight_platform.run_values \
+                     WHERE tenant_id = $1 AND value_id = $2 FOR SHARE",
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.input_value_id.to_string())
+        .fetch_one(&mut **transaction)
+        .await?;
+        let input_value = insight_platform_contracts::ValueRef::Inline {
+            value: row.try_get::<serde_json::Value, _>("inline_value")?,
+        };
+        validate_capability_value_against_schema(
+            &interface_spec.input_schema,
+            &input_value,
+            interface_spec.execution_limits.maximum_input_bytes,
+        )?;
+    }
+    validate_text_to_sql_input_if_present(
+        transaction,
+        &command.audit.tenant_id,
+        &selected,
+        &interface,
+        &input,
+        context_limits,
+    )
+    .await?;
+    let run_state = RunState::from_str(&run.state)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let record = decide_capability_admission(
+        &command,
+        CapabilityAdmissionFacts {
+            run_state,
+            run_version: parse_u64(run.version, "Run version")?,
+            run_pause_requested: run.current.control.pause_requested,
+            run_cancel_requested: run.current.control.cancel_requested_at.is_some(),
+            run_timeout_requested: run.current.control.timeout_requested_at.is_some(),
+            run_deadline: run.deadline,
+            run_bindings: run.bindings,
+            node_state: node.state,
+            node_version: node.version,
+            node_kind: node.node_kind,
+            node_deadline: node.deadline,
+            deployment: selected,
+            deployment_closure: closure,
+            interface,
+            implementation,
+            input,
+            principal,
+            mcp_runtime,
+            database_now,
+        },
+        limits,
+    )?;
+    insert_capability_invocation(transaction, &record).await?;
+    if let Some(link_id) = &command.input_artifact_link_id {
+        insert_input_artifact_reference(transaction, &record, link_id).await?;
+    }
+    if let Some(task_id) = &record.payload.approval_task_id {
+        insert_approval_task(transaction, &record, task_id).await?;
+    }
+    append_command_event(
+        transaction,
+        &command.audit,
+        "capability_invocation",
+        &record.invocation_id.to_string(),
+        1,
+        "capability.admitted",
+        &TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "admission_digest": record.payload.admission.canonical_digest,
+                "approval_task_id": record.payload.approval_task_id,
+                "deployment_id": record.deployment_id,
+                "state": record.state.as_str(),
+            }),
+        )?,
+    )
+    .await?;
+    terminalize_command_receipt(
+        transaction,
+        &command.audit,
+        &record.invocation_id.to_string(),
+        "admitted",
+    )
+    .await?;
+    let persisted = load_capability_invocation(
+        transaction,
+        &command.audit.tenant_id,
+        &command.invocation_id,
+        false,
+    )
+    .await?;
+    Ok(CommandOutcome::Applied(persisted))
 }
 
 impl InvocationTransaction for PgInvocationTransaction {
@@ -84,259 +336,16 @@ impl InvocationTransaction for PgInvocationTransaction {
             .fetch_one(&mut *transaction)
             .await?;
         command.validate_at(database_now, self.limits)?;
-
-        if claim_command_receipt(
+        let outcome = admit_capability_invocation_in_transaction(
             &mut transaction,
-            &command.audit,
-            "capability_invocation",
-            &command.invocation_id.to_string(),
-            "capability.admit",
-        )
-        .await?
-        {
-            let record = load_capability_invocation(
-                &mut transaction,
-                &command.audit.tenant_id,
-                &command.invocation_id,
-                false,
-            )
-            .await?;
-            require_admission_replay(&record, &command)?;
-            transaction.commit().await?;
-            return Ok(CommandOutcome::Replayed(record));
-        }
-
-        let run = load_run_for_update(&mut transaction, &command.audit.tenant_id, &command.run_id)
-            .await?;
-        let principal = require_tenant_permission(
-            &mut transaction,
-            &command.audit,
-            Permission::CapabilityInvoke,
-        )
-        .await?;
-        let node = load_capability_node_for_update(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &command.node_execution_id,
-        )
-        .await?;
-        if node.run_id != run.run_id {
-            return Err(RepositoryError::InvalidInput(
-                "CapabilityInvocation Node does not belong to its Run".to_owned(),
-            ));
-        }
-
-        let selected = selected_capability_deployment(&run.bindings, &command)?;
-        let deployment = load_deployment(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &selected.deployment_id,
-        )
-        .await?;
-        if deployment.bindings.digest != selected.deployment_digest.to_string() {
-            return Err(RepositoryError::Conflict(
-                "exact Capability Deployment binding",
-            ));
-        }
-        let deployment_resource_id = parse_id(&deployment.resource_id, "Capability resource")?;
-        let deployment_resource = load_resource(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &deployment_resource_id,
-        )
-        .await?;
-        if deployment_resource.resource_kind != RegistryResourceKind::CapabilityInterface.as_str()
-            || deployment_resource.lifecycle_state != EntityLifecycle::Active.as_str()
-            || deployment_resource.gate_state != "enabled"
-        {
-            return Err(RepositoryError::Conflict("Capability Deployment gate"));
-        }
-        let closure = match decode_deployment_closure(&deployment.bindings)? {
-            DeploymentClosure::CapabilityInterface(closure) => closure,
-            _ => {
-                return Err(RepositoryError::CorruptRow(
-                    "Capability Deployment has a non-Capability closure".to_owned(),
-                ));
-            }
-        };
-        if deployment.resource_version_id != closure.interface.revision_id.to_string() {
-            return Err(RepositoryError::CorruptRow(
-                "Capability Deployment root revision differs from its Interface closure".to_owned(),
-            ));
-        }
-        let interface_payload = load_enabled_exact_published_version(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &closure.interface,
-            RegistryResourceKind::CapabilityInterface,
-        )
-        .await?;
-        let implementation_payload = load_enabled_exact_published_version(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &closure.implementation,
-            RegistryResourceKind::CapabilityImplementation,
-        )
-        .await?;
-        let ResourceDocument::CapabilityInterface(interface_spec) = interface_payload.document
-        else {
-            return Err(RepositoryError::CorruptRow(
-                "Capability Interface revision contains the wrong document".to_owned(),
-            ));
-        };
-        let ResourceDocument::CapabilityImplementation(implementation_spec) =
-            implementation_payload.document
-        else {
-            return Err(RepositoryError::CorruptRow(
-                "Capability Implementation revision contains the wrong document".to_owned(),
-            ));
-        };
-        let interface = CapabilityInterfaceContract {
-            revision: closure.interface.clone(),
-            qualified_name: interface_spec.qualified_name,
-            input_schema_digest: interface_spec.input_schema.canonical_digest.clone(),
-            output_schema_digest: interface_spec.output_schema.canonical_digest.clone(),
-            error_schema_digest: interface_spec.error_schema.canonical_digest.clone(),
-            artifacts: interface_spec.artifacts,
-            data_policy: interface_spec.data_policy,
-            execution_limits: interface_spec.execution_limits,
-            effect: interface_spec.effect,
-            idempotency: interface_spec.idempotency,
-            cancellation: interface_spec.cancellation,
-            progress: interface_spec.progress,
-        };
-        let implementation = CapabilityImplementationContract {
-            revision: closure.implementation.clone(),
-            interface_revision: implementation_spec.interface_revision,
-            backend_kind: implementation_spec.backend_kind,
-            backend_contract: implementation_spec.backend_contract,
-            backend_contract_digest: implementation_spec.backend_contract_digest,
-            credential_requirements: implementation_spec.credential_requirements,
-            backend_limits: implementation_spec.backend_limits,
-            features: implementation_spec.features,
-        };
-        require_capability_backend_closure(&closure, &implementation)?;
-        validate_deployment_closure_exists(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &DeploymentClosure::CapabilityInterface(closure.clone()),
-        )
-        .await?;
-        validate_policy_revisions(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &command.policy_decisions,
-        )
-        .await?;
-        let mcp_runtime = resolve_mcp_capability_runtime(
-            &mut transaction,
-            &command,
-            &closure,
-            &principal,
+            command,
+            self.limits,
+            self.context_limits,
             database_now,
         )
         .await?;
-        let input = load_exact_input_for_update(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &command.input_value_id,
-        )
-        .await?;
-        if matches!(input.storage, InvocationValueStorage::Inline) {
-            let row = sqlx::query(
-                "SELECT inline_value FROM insight_platform.run_values \
-                     WHERE tenant_id = $1 AND value_id = $2 FOR SHARE",
-            )
-            .bind(command.audit.tenant_id.to_string())
-            .bind(command.input_value_id.to_string())
-            .fetch_one(&mut *transaction)
-            .await?;
-            let input_value = insight_platform_contracts::ValueRef::Inline {
-                value: row.try_get::<serde_json::Value, _>("inline_value")?,
-            };
-            validate_capability_value_against_schema(
-                &interface_spec.input_schema,
-                &input_value,
-                interface_spec.execution_limits.maximum_input_bytes,
-            )?;
-        }
-        validate_text_to_sql_input_if_present(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &selected,
-            &interface,
-            &input,
-            self.context_limits,
-        )
-        .await?;
-        let run_state = RunState::from_str(&run.state)
-            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-        let record = decide_capability_admission(
-            &command,
-            CapabilityAdmissionFacts {
-                run_state,
-                run_version: parse_u64(run.version, "Run version")?,
-                run_pause_requested: run.current.control.pause_requested,
-                run_cancel_requested: run.current.control.cancel_requested_at.is_some(),
-                run_timeout_requested: run.current.control.timeout_requested_at.is_some(),
-                run_deadline: run.deadline,
-                run_bindings: run.bindings,
-                node_state: node.state,
-                node_version: node.version,
-                node_kind: node.node_kind,
-                node_deadline: node.deadline,
-                deployment: selected,
-                deployment_closure: closure,
-                interface,
-                implementation,
-                input,
-                principal,
-                mcp_runtime,
-                database_now,
-            },
-            self.limits,
-        )?;
-        insert_capability_invocation(&mut transaction, &record).await?;
-        if let Some(link_id) = &command.input_artifact_link_id {
-            insert_input_artifact_reference(&mut transaction, &record, link_id).await?;
-        }
-        if let Some(task_id) = &record.payload.approval_task_id {
-            insert_approval_task(&mut transaction, &record, task_id).await?;
-        }
-        append_command_event(
-            &mut transaction,
-            &command.audit,
-            "capability_invocation",
-            &record.invocation_id.to_string(),
-            1,
-            "capability.admitted",
-            &TypedPayload::new(
-                1,
-                &serde_json::json!({
-                    "admission_digest": record.payload.admission.canonical_digest,
-                    "approval_task_id": record.payload.approval_task_id,
-                    "deployment_id": record.deployment_id,
-                    "state": record.state.as_str(),
-                }),
-            )?,
-        )
-        .await?;
-        terminalize_command_receipt(
-            &mut transaction,
-            &command.audit,
-            &record.invocation_id.to_string(),
-            "admitted",
-        )
-        .await?;
-        let persisted = load_capability_invocation(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &command.invocation_id,
-            false,
-        )
-        .await?;
         transaction.commit().await?;
-        Ok(CommandOutcome::Applied(persisted))
+        Ok(outcome)
     }
 
     async fn resolve_capability_approval(
@@ -476,6 +485,95 @@ impl InvocationTransaction for PgInvocationTransaction {
         if updated_invocation.is_none() {
             return Err(RepositoryError::Conflict("CapabilityInvocation approval"));
         }
+        let node_row = sqlx::query(
+            r#"
+            SELECT state, payload_schema_version, payload, payload_digest
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution'
+            FOR UPDATE
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(current.node_execution_id.to_string())
+        .bind(current.run_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("Capability approval owner Node"))?;
+        let plan_leaf_waiting =
+            node_row.try_get::<String, _>("state")? == NodeExecutionState::Waiting.as_str();
+        let prepared = if command.decision == CapabilityApprovalDecision::Approve
+            && plan_leaf_waiting
+        {
+            let mutations = command.dispatch_mutations.as_ref().ok_or_else(|| {
+                RepositoryError::InvalidInput(
+                    "Capability Plan approval has no dispatch identities".to_owned(),
+                )
+            })?;
+            let wait_payload = payload_from_row(
+                &node_row,
+                "payload_schema_version",
+                "payload",
+                "payload_digest",
+            )?;
+            let wait: crate::repository::StoredCapabilityInvocationWaitPayload =
+                crate::repository::decode_typed_payload(
+                    &wait_payload,
+                    "Capability approval leaf wait",
+                )?;
+            if wait.invocation_id != current.invocation_id {
+                return Err(RepositoryError::Conflict(
+                    "Capability approval leaf binding",
+                ));
+            }
+            let job_id = wait.capability_job_id.ok_or_else(|| {
+                RepositoryError::CorruptRow(
+                    "Capability approval leaf has no planned Job".to_owned(),
+                )
+            })?;
+            let request_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+                "approval_task_id": command.approval_task_id,
+                "invocation_id": command.invocation_id,
+                "job_id": job_id,
+                "operation": "capability.dispatch.prepare",
+            }))
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+            .parse()
+            .map_err(|_| RepositoryError::InvalidInput("Capability prepare digest".to_owned()))?;
+            let prepared =
+                crate::capability_execution_repository::prepare_capability_dispatch_in_transaction(
+                    &mut transaction,
+                    PrepareCapabilityDispatch {
+                        audit: insight_platform_contracts::CommandAudit {
+                            tenant_id: current.tenant_id.clone(),
+                            principal_id: current.payload.admission.principal.principal_id.clone(),
+                            principal_kind: current.payload.admission.principal.principal_kind,
+                            receipt_id: mutations.receipt_id.clone(),
+                            event_id: mutations.event_id.clone(),
+                            outbox_id: mutations.outbox_id.clone(),
+                            idempotency_key_digest: command.audit.idempotency_key_digest.clone(),
+                            request_digest,
+                            receipt_expires_at: command.audit.receipt_expires_at,
+                        },
+                        invocation_id: current.invocation_id.clone(),
+                        expected_invocation_version: next.version,
+                        job_id,
+                        scheduled_at: database_now,
+                    },
+                    database_now,
+                )
+                .await?;
+            Some(match prepared {
+                CommandOutcome::Applied(prepared) | CommandOutcome::Replayed(prepared) => prepared,
+            })
+        } else {
+            if command.dispatch_mutations.is_some() {
+                return Err(RepositoryError::InvalidInput(
+                    "Capability approval dispatch identities are not applicable".to_owned(),
+                ));
+            }
+            None
+        };
         append_command_event(
             &mut transaction,
             &command.audit,
@@ -502,13 +600,17 @@ impl InvocationTransaction for PgInvocationTransaction {
             task_state.as_str(),
         )
         .await?;
-        let persisted = load_capability_invocation(
-            &mut transaction,
-            &command.audit.tenant_id,
-            &command.invocation_id,
-            false,
-        )
-        .await?;
+        let persisted = if let Some(prepared) = prepared {
+            prepared.invocation
+        } else {
+            load_capability_invocation(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.invocation_id,
+                false,
+            )
+            .await?
+        };
         transaction.commit().await?;
         Ok(CommandOutcome::Applied(persisted))
     }

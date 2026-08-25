@@ -27,6 +27,7 @@ pub enum DurableControllerPhase {
         observation: ControllerObservation,
     },
     ChildAgentDispatch(Box<DurableChildAgentDispatchFacts>),
+    CapabilityDispatch(Box<DurableCapabilityDispatchFacts>),
     ContextDispatch(Box<DurableContextDispatchFacts>),
 }
 
@@ -43,6 +44,15 @@ pub struct DurableChildAgentDispatchFacts {
 pub struct DurableContextDispatchFacts {
     pub input: ResolvedExpressionInput,
     pub value: ClosedJsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DurableCapabilityDispatchFacts {
+    pub input: ResolvedExpressionInput,
+    pub route: Option<(ResolvedExpressionInput, ClosedJsonValue)>,
+    pub selection_policy: ExactPolicyBinding,
+    pub selection_document: CandidateSelectionPolicyDocument,
+    pub candidates: Vec<ExactDeploymentRef>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -172,6 +182,14 @@ where
                 (ControllerObservation::None, None)
             }
             DurableControllerPhase::ChildAgentDispatch(_) => {
+                return Err(DurablePlanDriverError::InvariantViolation)
+            }
+            DurableControllerPhase::CapabilityDispatch(_)
+                if matches!(node, RuntimeNode::CapabilityCall { .. }) =>
+            {
+                (ControllerObservation::None, None)
+            }
+            DurableControllerPhase::CapabilityDispatch(_) => {
                 return Err(DurablePlanDriverError::InvariantViolation)
             }
             DurableControllerPhase::ContextDispatch(_)

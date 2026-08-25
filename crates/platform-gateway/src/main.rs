@@ -55,7 +55,8 @@ use insight_platform_contracts::{
     Sha256Digest, ValueRef, MAX_ARTIFACT_BYTES,
 };
 use insight_platform_invocations::{
-    CapabilityApprovalDecision, InvocationTransaction, ResolveCapabilityApproval,
+    CapabilityApprovalDecision, CapabilityApprovalDispatchMutationIds, InvocationTransaction,
+    ResolveCapabilityApproval,
 };
 use insight_platform_mcp_host::CreateMcpDiscoveryOperation;
 use insight_platform_observability::ProcessHttpMetrics;
@@ -805,6 +806,15 @@ impl TaskApplication for PgTasks {
                 expected_task_version: intent.expected_task_version,
                 eligible_principal_rule_digest,
                 decision,
+                dispatch_mutations: (decision == CapabilityApprovalDecision::Approve)
+                    .then(|| {
+                        Ok(CapabilityApprovalDispatchMutationIds {
+                            receipt_id: new_task_id(ResourceKind::Receipt)?,
+                            event_id: new_task_id(ResourceKind::Event)?,
+                            outbox_id: new_task_id(ResourceKind::OutboxEvent)?,
+                        })
+                    })
+                    .transpose()?,
             };
             let mut transaction = self
                 .0
