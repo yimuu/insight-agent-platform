@@ -332,6 +332,10 @@ procfs/node identity observer、UDS+mTLS registration、Controller mTLS proof se
 bounded drain其余server。node DaemonSet与Pod-local sidecar使用不同metrics端口和精确Prometheus ingress，不增加host或Controller authority。
 该证据不替代真实runsc、node-loss、production scrape或L4 enforcement。
 
+r260为Artifact Gateway接入shared process observability。readiness位于restricted PostgreSQL/schema、AWS provider catalog、bounded broker、
+exact Public Gateway mTLS listener与独立HTTP listener组合之后；任一server提前退出使进程fail closed。业务与metrics端口使用不同
+NetworkPolicy source，未增加Data Worker或Maintenance authority。该证据不包含真实S3/KMS、production scrape或L4 enforcement。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

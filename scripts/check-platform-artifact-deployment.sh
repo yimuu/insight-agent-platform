@@ -57,6 +57,7 @@ for boundary in (
     "PUBLIC_GATEWAY_WORKLOAD_IDENTITY",
     "x-insight-verified-principal-id",
     "x-insight-idempotency-key-digest",
+    "process_observability_router",
 ):
     if boundary not in gateway:
         failures.append(f"missing authenticated public Artifact hop boundary {boundary}")
@@ -69,6 +70,8 @@ helm template platform "$chart" --include-crds >"$rendered"
 
 negative_values=(
   "--set|roles.gateway.replicas=1"
+  "--set|roles.gateway.observabilityPort=8080"
+  "--set-json|networkPolicy.monitoringPodSelector=null"
   "--set|image.digest=latest"
   "--set|roles.extra.replicas=2"
   "--set-json|roles.maintenance=null"
@@ -96,12 +99,14 @@ accounts = docs.select { |doc| doc["kind"] == "ServiceAccount" }
 policies = docs.select { |doc| doc["kind"] == "NetworkPolicy" }
 pdbs = docs.select { |doc| doc["kind"] == "PodDisruptionBudget" }
 hpas = docs.select { |doc| doc["kind"] == "HorizontalPodAutoscaler" }
+service_monitors = docs.select { |doc| doc["kind"] == "ServiceMonitor" }
 
 failures << "must render exactly three Artifact Deployments" unless deployments.length == 3
 failures << "must render exactly three Artifact Services" unless services.length == 3
 failures << "must render exactly three Artifact ServiceAccounts" unless accounts.length == 3
 failures << "must render one PDB per role" unless pdbs.length == 3
 failures << "must render one HPA per role" unless hpas.length == 3
+failures << "must render the Artifact Gateway ServiceMonitor" unless service_monitors.length == 1
 failures << "must render default deny and one policy per role" unless policies.length == 4
 
 expected = {
@@ -139,6 +144,7 @@ expected.each do |role, (command, database_env)|
     failures << "Artifact Gateway lost mTLS client CA" unless env.key?("PLATFORM_ARTIFACT_GATEWAY_CLIENT_CA_PATH")
     tls_mount = container.fetch("volumeMounts", []).find { |mount| mount["name"] == "tls" }
     failures << "Artifact Gateway lost read-only TLS mount" unless tls_mount && tls_mount["readOnly"] == true
+    failures << "Artifact Gateway lost HTTP readiness" unless container.dig("readinessProbe", "httpGet", "path") == "/readyz"
   end
 end
 failures << "Artifact roles share a database Secret" unless identities.flat_map(&:first).uniq.length == 4

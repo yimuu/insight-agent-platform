@@ -23,12 +23,16 @@ kind: Service
 metadata:
   name: {{ include "insight-platform-artifact.name" $context }}
   namespace: {{ $root.Values.namespace }}
+  labels: {{ include "insight-platform-artifact.labels" $context | nindent 4 }}
 spec:
   type: ClusterIP
   selector: {{ include "insight-platform-artifact.labels" $context | nindent 4 }}
   ports:
     {{- range $port := $component.ports }}
     - {name: {{ $port.name }}, protocol: TCP, port: {{ int $port.port }}, targetPort: {{ $port.name }}}
+    {{- end }}
+    {{- if hasKey $component "observabilityPort" }}
+    - {name: observability, protocol: TCP, port: {{ int $component.observabilityPort }}, targetPort: observability}
     {{- end }}
 ---
 apiVersion: apps/v1
@@ -75,6 +79,9 @@ spec:
             {{- range $port := $component.ports }}
             - {name: {{ $port.name }}, containerPort: {{ int $port.port }}, protocol: TCP}
             {{- end }}
+            {{- if hasKey $component "observabilityPort" }}
+            - {name: observability, containerPort: {{ int $component.observabilityPort }}, protocol: TCP}
+            {{- end }}
           env:
             {{- if eq $role "gateway" }}
             - {name: PLATFORM_ARTIFACT_GATEWAY_CONFIG, value: /etc/insight/config/config.json}
@@ -101,9 +108,15 @@ spec:
             - name: PLATFORM_ARTIFACT_MAINTENANCE_DATABASE_URL
               valueFrom: {secretKeyRef: {name: {{ $component.database.existingSecret }}, key: {{ $component.database.urlKey }}}}
             {{- end }}
+          {{- if hasKey $component "observabilityPort" }}
+          startupProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          {{- else }}
           startupProbe: {tcpSocket: {port: {{ (index $component.ports 0).name }}}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
           readinessProbe: {tcpSocket: {port: {{ (index $component.ports 0).name }}}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
           livenessProbe: {tcpSocket: {port: {{ (index $component.ports 0).name }}}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          {{- end }}
           resources: {{ toYaml $component.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false

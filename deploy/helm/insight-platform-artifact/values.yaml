@@ -12,6 +12,7 @@ roles:
     command: /usr/local/bin/platform-artifact-gateway
     replicas: 2
     ports: [{name: http, port: 8080}]
+    observabilityPort: 9090
     config: {existingConfigMap: insight-platform-artifact-gateway-config, fileKey: artifact-gateway.json, digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
     database: {existingSecret: insight-platform-artifact-gateway-database, urlKey: database-url}
     tls:
@@ -56,6 +57,8 @@ autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 32, targetCPUUtilizati
 
 networkPolicy:
   enabled: true
+  monitoringNamespaceSelector: {insight.platform/monitoring-namespace: "true"}
+  monitoringPodSelector: {app.kubernetes.io/name: prometheus}
   publicGatewayNamespaceSelector: {insight.platform/public-gateway-namespace: "true"}
   publicGatewayPodSelector: {insight.platform/workload-role: public-gateway}
   sandboxControllerNamespaceSelector: {insight.platform/sandbox-controller-namespace: "true"}
@@ -70,3 +73,5 @@ networkPolicy:
   storageProviderCidrs: [10.50.0.0/24]
   kmsProviderCidrs: [10.60.0.0/24]
   workloadIdentityCidrs: [10.40.0.0/24]
+
+monitoring: {enabled: true, interval: 30s, scrapeTimeout: 5s}

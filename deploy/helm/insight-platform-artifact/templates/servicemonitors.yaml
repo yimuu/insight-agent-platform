@@ -1,0 +1,19 @@
+{{- if .Values.monitoring.enabled }}
+{{- $root := . }}
+{{- range $role, $component := .Values.roles }}
+{{- if hasKey $component "observabilityPort" }}
+{{- $context := dict "role" $role }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "insight-platform-artifact.name" $context }}
+  namespace: {{ $root.Values.namespace }}
+spec:
+  namespaceSelector: {matchNames: [{{ $root.Values.namespace }}]}
+  selector:
+    matchLabels: {{ include "insight-platform-artifact.labels" $context | nindent 6 }}
+  endpoints: [{port: observability, path: /metrics, interval: {{ $root.Values.monitoring.interval }}, scrapeTimeout: {{ $root.Values.monitoring.scrapeTimeout }}, scheme: http}]
+---
+{{- end }}
+{{- end }}
+{{- end }}

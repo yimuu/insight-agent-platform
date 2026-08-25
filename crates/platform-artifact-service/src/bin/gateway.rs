@@ -29,6 +29,9 @@ use insight_platform_contracts::{
     canonical_digest, parse_strict_json, CommandAudit, CommandOutcome, JsonLimits, PrincipalKind,
     ResourceId, ResourceKind, Sha256Digest, UtcTimestamp,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
@@ -52,6 +55,7 @@ use std::{
     time::Duration,
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio_util::sync::CancellationToken;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CONFIG";
@@ -115,6 +119,7 @@ impl axum::serve::Listener for ExactMtlsListener {
 struct GatewayConfig {
     schema_version: u32,
     listen_address: String,
+    observability_listen_address: String,
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
     artifact_provider_catalog: AwsArtifactProviderCatalogConfig,
@@ -156,14 +161,21 @@ impl GatewayConfig {
     }
 
     fn validate(&self) -> Result<(), GatewayError> {
-        let _: SocketAddr = self
+        let listen: SocketAddr = self
             .listen_address
+            .parse()
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+        let observability: SocketAddr = self
+            .observability_listen_address
             .parse()
             .map_err(|_| GatewayError::InvalidConfiguration)?;
         self.artifact_provider_catalog
             .validate()
             .map_err(|_| GatewayError::InvalidConfiguration)?;
         if self.schema_version != 1
+            || listen.port() == 0
+            || observability.port() == 0
+            || observability == listen
             || !(2..=64).contains(&self.database_max_connections)
             || !(1..=30_000).contains(&self.database_acquire_timeout_milliseconds)
             || !(60..=3_600).contains(&self.maximum_upload_target_seconds)
@@ -273,7 +285,6 @@ async fn run() -> Result<(), GatewayError> {
         download_timeout_milliseconds: config.download_timeout_milliseconds,
     };
     let app = Router::new()
-        .route("/readyz", get(ready))
         .route("/v1/artifacts:prepare-upload", post(prepare_upload))
         .route(
             "/v1/artifacts/{artifact_action}",
@@ -290,10 +301,62 @@ async fn run() -> Result<(), GatewayError> {
         .parse()
         .map_err(|_| GatewayError::InvalidConfiguration)?;
     let listener = install_mtls_listener(address).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|_| GatewayError::HttpUnavailable)
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("artifact-gateway", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| GatewayError::InvalidConfiguration)?,
+    );
+    let observability_listener =
+        tokio::net::TcpListener::bind(&config.observability_listen_address)
+            .await
+            .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+    let cancellation = CancellationToken::new();
+    let http_cancellation = cancellation.child_token();
+    let mut http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(http_cancellation.cancelled_owned())
+            .await
+    });
+    let observability_cancellation = cancellation.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut observability = tokio::spawn(async move {
+        axum::serve(observability_listener, router)
+            .with_graceful_shutdown(observability_cancellation.cancelled_owned())
+            .await
+    });
+    metrics.mark_ready();
+    tokio::select! {
+        _ = shutdown_signal() => cancellation.cancel(),
+        result = &mut http => {
+            cancellation.cancel();
+            result.map_err(|_| GatewayError::HttpUnavailable)?
+                .map_err(|_| GatewayError::HttpUnavailable)?;
+            observability.await.map_err(|_| GatewayError::ObservabilityUnavailable)?
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+            return Err(GatewayError::HttpUnavailable);
+        }
+        result = &mut observability => {
+            cancellation.cancel();
+            result.map_err(|_| GatewayError::ObservabilityUnavailable)?
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+            http.await.map_err(|_| GatewayError::HttpUnavailable)?
+                .map_err(|_| GatewayError::HttpUnavailable)?;
+            return Err(GatewayError::ObservabilityUnavailable);
+        }
+    }
+    tokio::time::timeout(
+        Duration::from_millis(config.shutdown_grace_milliseconds),
+        async {
+            http.await
+                .map_err(|_| GatewayError::HttpUnavailable)?
+                .map_err(|_| GatewayError::HttpUnavailable)?;
+            observability
+                .await
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?
+                .map_err(|_| GatewayError::ObservabilityUnavailable)
+        },
+    )
+    .await
+    .map_err(|_| GatewayError::ShutdownDeadlineExceeded)?
 }
 
 async fn install_mtls_listener(address: SocketAddr) -> Result<ExactMtlsListener, GatewayError> {
@@ -355,10 +418,6 @@ fn has_exact_workload_identity(certificate: &[u8], expected: &str) -> bool {
             _ => None,
         });
     uris.next() == Some(expected) && uris.next().is_none()
-}
-
-async fn ready() -> Response {
-    no_store((StatusCode::OK, "ready").into_response())
 }
 
 async fn prepare_upload(
@@ -1105,6 +1164,8 @@ enum GatewayError {
     SchemaMismatch,
     ProviderUnavailable,
     HttpUnavailable,
+    ObservabilityUnavailable,
+    ShutdownDeadlineExceeded,
 }
 
 impl fmt::Display for GatewayError {
@@ -1117,6 +1178,12 @@ impl fmt::Display for GatewayError {
             Self::SchemaMismatch => formatter.write_str("database schema mismatch"),
             Self::ProviderUnavailable => formatter.write_str("Artifact provider unavailable"),
             Self::HttpUnavailable => formatter.write_str("Artifact Gateway HTTP unavailable"),
+            Self::ObservabilityUnavailable => {
+                formatter.write_str("Artifact Gateway observability unavailable")
+            }
+            Self::ShutdownDeadlineExceeded => {
+                formatter.write_str("Artifact Gateway shutdown deadline exceeded")
+            }
         }
     }
 }

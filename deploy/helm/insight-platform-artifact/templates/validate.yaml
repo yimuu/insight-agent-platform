@@ -4,6 +4,9 @@
 {{- if not .Values.networkPolicy.enabled }}
 {{- fail "Artifact NetworkPolicy must remain enabled" }}
 {{- end }}
+{{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) }}
+{{- fail "monitoring requires exact namespace and Pod selectors" }}
+{{- end }}
 {{- if ne (join "," (keys .Values.roles | sortAlpha)) "data-worker,gateway,maintenance" }}
 {{- fail "roles must contain exactly gateway, data-worker, and maintenance" }}
 {{- end }}
@@ -17,6 +20,10 @@
 {{- if or (empty $component.database.readExistingSecret) (empty $component.database.workExistingSecret) (eq $component.database.readExistingSecret $component.database.workExistingSecret) }}{{ fail "Data Worker requires distinct read and mutation database Secrets" }}{{- end }}
 {{- else if empty $component.database.existingSecret }}{{ fail (printf "%s independent database credential is required" $role) }}{{- end }}
 {{- if empty $component.serviceAccount.annotations }}{{ fail (printf "%s workload identity is required" $role) }}{{- end }}
+{{- if hasKey $component "observabilityPort" }}
+{{- if or (lt (int $component.observabilityPort) 1) (gt (int $component.observabilityPort) 65535) }}{{ fail (printf "%s observability port must be in 1..65535" $role) }}{{- end }}
+{{- range $port := $component.ports }}{{- if eq (int $component.observabilityPort) (int $port.port) }}{{ fail (printf "%s observability port must be distinct" $role) }}{{- end }}{{- end }}
+{{- end }}
 {{- $sa := toJson $component.serviceAccount.annotations -}}
 {{- if hasKey $identities $sa }}{{ fail "Artifact roles cannot share a storage workload identity" }}{{- end }}
 {{- $_ := set $identities $sa true -}}
