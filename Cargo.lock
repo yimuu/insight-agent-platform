@@ -2574,6 +2574,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-capability-worker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "insight-platform-capability-adapters",
+ "insight-platform-contracts",
+ "insight-platform-invocations",
+ "insight-platform-jobs",
+ "insight-platform-postgres",
+ "insight-platform-worker",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "insight-platform-context"
 version = "0.1.0"
 dependencies = [

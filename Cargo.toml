@@ -15,6 +15,7 @@ members = [
     "crates/platform-artifacts",
     "crates/platform-api",
     "crates/platform-capability-adapters",
+    "crates/platform-capability-worker",
     "crates/platform-callback-api",
     "crates/platform-contracts",
     "crates/platform-context",
@@ -134,6 +135,7 @@ insight-platform-artifact-service = { path = "crates/platform-artifact-service" 
 insight-platform-artifacts = { path = "crates/platform-artifacts" }
 insight-platform-api = { path = "crates/platform-api" }
 insight-platform-capability-adapters = { path = "crates/platform-capability-adapters" }
+insight-platform-capability-worker = { path = "crates/platform-capability-worker" }
 insight-platform-callback-api = { path = "crates/platform-callback-api" }
 insight-platform-contracts = { path = "crates/platform-contracts" }
 insight-platform-context = { path = "crates/platform-context" }
