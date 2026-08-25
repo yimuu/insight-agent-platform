@@ -250,7 +250,10 @@ rollout仍待通过。fresh PostgreSQL 16 r241进一步以独立Remote Context W
 该证据关闭Remote Worker→Egress RPC和Context external-leaf terminal/resume component L3，但不替代production HTTPS last-hop、resume后
 Return的进程执行、隔舱容量或L4 rollout证据。随后r242以production RemoteSearch connector、真实TLS socket、独立CA/SAN、固定DNS pin、显式PEM trust及
 真实HTTP bytes关闭HTTPS wire/protocol L3；test-only loopback许可不进入production build，生产SSRF public-destination guard保持不变。
-完整Run整链、隔舱容量与L4 rollout仍需独立证据。
+fresh PostgreSQL 16 r243随后以真实`platform-orchestration-worker`和mTLS Artifact Scheduler RPC读取exact typed Plan，把恢复后的唯一Return
+Node/Job执行到Run终态；同一fixture重验错manifest零claim、commit-window kill、attempt 2、严格两次远端调用、唯一Observation/Event、
+Artifact读取及最终Run output。恢复事务和terminal owner事务分别释放旧/current active-work permit，避免重试泄漏阻止terminal closure。
+至此Run→Remote Context→resume→Return component L3关闭；Model tool-result整链、隔舱容量与L4 rollout仍需独立证据。
 
 每个production release至少覆盖：
 

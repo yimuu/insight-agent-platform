@@ -2961,6 +2961,7 @@ dependencies = [
  "chrono",
  "futures",
  "insight-platform-artifact-broker",
+ "insight-platform-artifact-rpc",
  "insight-platform-artifacts",
  "insight-platform-capability-adapters",
  "insight-platform-context",

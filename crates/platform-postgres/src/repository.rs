@@ -13784,14 +13784,20 @@ async fn settle_external_leaf_success_in_transaction(
     }
     current.validate(owner.run_id)?;
     let current_payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+    let release_active_permit = matches!(
+        owner.kind,
+        ExternalLeafSuccessKind::Context | ExternalLeafSuccessKind::Model
+    );
     let run_row = sqlx::query(
         r#"
         UPDATE insight_platform.runs
         SET state = CASE WHEN state = 'waiting' THEN 'running' ELSE state END,
-            version = version + 1, current_schema_version = $4,
+            version = version + 1, active_work_count = active_work_count - $8,
+            current_schema_version = $4,
             current_payload = $5, current_payload_digest = $6, updated_at = $7
         WHERE tenant_id = $1 AND run_id = $2 AND version = $3
-          AND state IN ('running', 'waiting') AND terminal_at IS NULL
+          AND state IN ('running', 'waiting') AND active_work_count >= $8
+          AND terminal_at IS NULL
         RETURNING *
         "#,
     )
@@ -13802,6 +13808,7 @@ async fn settle_external_leaf_success_in_transaction(
     .bind(&current_payload.value)
     .bind(&current_payload.digest)
     .bind(database_now)
+    .bind(i32::from(release_active_permit))
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::Conflict("Context leaf Run resume"))?;

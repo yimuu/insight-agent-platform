@@ -1647,6 +1647,13 @@ impl PgRepository {
             self.context_query_limits(),
         )
         .await?;
+        release_context_plan_leaf_permit(
+            &mut transaction,
+            &current_job,
+            &current_query,
+            database_now,
+        )
+        .await?;
         append_scheduler_event(
             &mut transaction,
             &current_job.tenant_id,
@@ -1828,6 +1835,52 @@ impl PgRepository {
         transaction.commit().await?;
         Ok(claimed)
     }
+}
+
+async fn release_context_plan_leaf_permit(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+    query: &ContextQueryRecord,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let plan_leaf_waiting: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution' AND node_kind = 'context_query'
+              AND state = 'waiting' AND terminal_at IS NULL
+        )
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(query.node_execution_id.to_string())
+    .bind(query.run_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !plan_leaf_waiting {
+        return Ok(());
+    }
+    let updated = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET version = version + 1, active_work_count = active_work_count - 1,
+            updated_at = $3
+        WHERE tenant_id = $1 AND run_id = $2 AND terminal_at IS NULL
+          AND state = 'running' AND active_work_count > 0
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(query.run_id.to_string())
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(RepositoryError::Conflict(
+            "expired Context Plan leaf permit",
+        ));
+    }
+    Ok(())
 }
 
 async fn lock_context_quota_accounts(

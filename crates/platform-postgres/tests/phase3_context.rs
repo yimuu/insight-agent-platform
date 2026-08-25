@@ -1,4 +1,15 @@
 use chrono::{DateTime, Duration, Utc};
+use insight_platform_artifact_rpc::{
+    proto::artifact_scheduler_service_server::ArtifactSchedulerServiceServer,
+    ArtifactInternalRpcLimits, ArtifactSchedulerGrpcService, LeasedArtifactBytes,
+    SchedulerRunValueResponseBroker, SchedulerSkillPackageResponseBroker,
+    SchedulerTypedPlanResponseBroker, SchedulerWorkloadIdentity, SCHEDULER_WORKLOAD_IDENTITY,
+};
+use insight_platform_artifacts::{
+    SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerSkillPackageReadError,
+    SchedulerSkillPackageReadRequest, SchedulerTypedPlanLease, SchedulerTypedPlanReadError,
+    SchedulerTypedPlanReadRequest, SchedulerTypedPlanRequestResolver,
+};
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
     GrpcNetworkTransport, GrpcTransportRequest, GrpcTransportResponse, HttpNetworkTransport,
@@ -17,28 +28,29 @@ use insight_platform_context::{
     READONLY_DATABASE_CAPABILITY, TEXT2SQL_PLAN_VALUE_KIND,
 };
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, AdministrativeGate, AgentDeploymentClosure,
-    AgentResourceSpec, ArtifactRef, AuthoringPackage, CanonicalHttpEndpoint,
-    CapabilityArtifactContract, CapabilityBackendBinding, CapabilityBackendContract,
-    CapabilityBackendFeatures, CapabilityBackendKind, CapabilityBackendLimits,
-    CapabilityCancellationKind, CapabilityDataFlowPolicy, CapabilityDeploymentClosure,
-    CapabilityEndpointScheme, CapabilityIdempotencyKind, CapabilityImplementationResourceSpec,
-    CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
-    CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
-    CommandAudit, CommandOutcome, ContextBackendBinding, ContextBackendContract,
-    ContextBackendKind, ContextBackendLimits, ContextBindingSnapshot, ContextCitationContract,
-    ContextCitationStrength, ContextConsistencyMode, ContextConsistencyPolicy,
-    ContextDataPolicyContract, ContextDatasetGenerationSpec, ContextDeploymentClosure,
-    ContextImplementationContract, ContextImplementationResourceSpec, ContextInterfaceLimits,
-    ContextInterfaceResourceSpec, ContextLocatorKind, ContextPaginationContract, ContextQueryState,
-    ContextRankingContract, DataClassification, DataRegion, DeploymentClosure, Effect,
-    EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
-    ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds, Failure, FailureClass,
-    FailureCode, FailureSource, FrozenSlotBinding, FrozenSlotTarget, JobState,
-    NativeCapabilityContract, Permission, PermissionSet, PlatformFailureCode, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
-    ResourceKind, Retryability, RunBindingsSnapshot, SchedulerPriority, Sha256Digest, TenantConfig,
+    canonical_digest, canonical_json, checked_in_hard_limit_profile, AdministrativeGate,
+    AgentDeploymentClosure, AgentResourceSpec, ArtifactRef, AuthoringPackage,
+    CanonicalHttpEndpoint, CapabilityArtifactContract, CapabilityBackendBinding,
+    CapabilityBackendContract, CapabilityBackendFeatures, CapabilityBackendKind,
+    CapabilityBackendLimits, CapabilityCancellationKind, CapabilityDataFlowPolicy,
+    CapabilityDeploymentClosure, CapabilityEndpointScheme, CapabilityIdempotencyKind,
+    CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
+    CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
+    CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue, CommandAudit, CommandOutcome,
+    ContextBackendBinding, ContextBackendContract, ContextBackendKind, ContextBackendLimits,
+    ContextBindingSnapshot, ContextCitationContract, ContextCitationStrength,
+    ContextConsistencyMode, ContextConsistencyPolicy, ContextDataPolicyContract,
+    ContextDatasetGenerationSpec, ContextDeploymentClosure, ContextImplementationContract,
+    ContextImplementationResourceSpec, ContextInterfaceLimits, ContextInterfaceResourceSpec,
+    ContextLocatorKind, ContextPaginationContract, ContextQueryState, ContextRankingContract,
+    DataClassification, DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
+    ExactPolicyBinding, ExactVersionRef, ExternalLeafFailureMutationIds,
+    ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
+    FrozenSlotBinding, FrozenSlotTarget, JobState, NativeCapabilityContract, Permission,
+    PermissionSet, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
+    RunBindingsSnapshot, SchedulerPriority, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
     TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
     WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
@@ -133,14 +145,11 @@ fn closed_object_schema(property: &str) -> ClosedJsonSchema {
 }
 
 fn agent_schema() -> ClosedJsonSchema {
-    ClosedJsonSchema::build(json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {},
-        "required": [],
-        "additionalProperties": false
-    }))
-    .unwrap()
+    closed_object_schema("question")
+}
+
+fn query_schema_digest() -> Sha256Digest {
+    agent_schema().canonical_digest
 }
 
 fn readonly_sql_plan_schema() -> ClosedJsonSchema {
@@ -582,7 +591,7 @@ fn context_runtime_plan(interface_revision_id: ResourceId) -> RuntimePlan {
     let catalog = PlanNodeKey::new("catalog".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     let request = ExactDataPortRef::RunInput {
-        schema_digest: named_digest("query-schema"),
+        schema_digest: query_schema_digest(),
     };
     let result = ExactDataPortRef::NodeOutput {
         producer_node_id: catalog.clone(),
@@ -801,6 +810,7 @@ async fn seed_fixture_with_backend(
     let network_policy = version(ResourceKind::PolicyRevision, 0x29);
     let tls_policy = version(ResourceKind::PolicyRevision, 0x2a);
     let trust_policy = version(ResourceKind::PolicyRevision, 0x2b);
+    let scheduling_policy = version(ResourceKind::PolicyRevision, 0x2c);
     let mut policies = vec![
         authorization_policy.clone(),
         ranking_policy.clone(),
@@ -829,10 +839,99 @@ async fn seed_fixture_with_backend(
         0xb0,
     )
     .await;
+    let scheduling = SchedulingPolicyDocument {
+        version: 1,
+        weight: 1,
+        burst: 4,
+        aging_rounds: 2,
+    };
+    insert_version(
+        pool,
+        &tenant_id,
+        &policy_resource,
+        RegistryResourceKind::Policy,
+        &scheduling_policy,
+        20,
+        &principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
+                authoring_package: authoring(0xaf),
+                contract_digest: named_digest("scheduling-policy-contract"),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                policy_kind: PolicyKind::Scheduling,
+                rules_digest: scheduling.canonical_digest().unwrap(),
+                selection: None,
+                scheduling: Some(scheduling),
+                retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
+                mcp_protocol: None,
+                mcp_auth: None,
+                sandbox_isolation: None,
+                sandbox_resource: None,
+                sandbox_network: None,
+                sandbox_artifact_io: None,
+                sandbox_secret_resolution: None,
+            })),
+            validation: validation(),
+        },
+    )
+    .await;
+    let scheduling_deployment_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: scheduling_policy.clone(),
+            applicability_digest: named_digest("scheduling-applicability"),
+            qualification_evidence: artifact(0xa2),
+        }),
+    )
+    .unwrap();
+    let scheduling_deployment_id = id(ResourceKind::PolicyDeployment, 0x79);
+    insert_deployment(
+        pool,
+        &tenant_id,
+        &scheduling_deployment_id,
+        &policy_resource,
+        &scheduling_policy.revision_id,
+        &principal_id,
+        &scheduling_deployment_payload,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE insight_platform.resources SET active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(policy_resource.to_string())
+    .bind(scheduling_deployment_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let scheduling_deployment = ExactDeploymentRef::new(
+        scheduling_deployment_id,
+        scheduling_deployment_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
+    let tenant_config = TenantConfig {
+        scheduling_policy: Some(scheduling_deployment),
+        ..TenantConfig::default()
+    };
+    let tenant_config_payload = TypedPayload::new(1, &tenant_config).unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.tenants SET version = version + 1, config_schema_version = $2, config = $3, config_digest = $4, updated_at = clock_timestamp() WHERE tenant_id = $1",
+    )
+    .bind(tenant_id.to_string())
+    .bind(tenant_config_payload.schema_version)
+    .bind(&tenant_config_payload.value)
+    .bind(&tenant_config_payload.digest)
+    .execute(pool)
+    .await
+    .unwrap();
 
     let interface_revision = version(ResourceKind::ContextSourceInterfaceRevision, 0x30);
     let implementation_revision = version(ResourceKind::ContextSourceImplementationRevision, 0x31);
-    let query_schema_digest = named_digest("query-schema");
+    let query_schema_digest = query_schema_digest();
     let item_schema_digest = named_digest("item-schema");
     let score_domain_digest = named_digest("score-domain");
     let interface = ContextInterfaceResourceSpec {
@@ -1162,11 +1261,16 @@ async fn seed_fixture_with_backend(
     .unwrap();
 
     let agent_interface = version(ResourceKind::AgentInterfaceRevision, 0x40);
-    let agent_plan = version(ResourceKind::AgentPlanRevision, 0x41);
     let runtime_plan = context_runtime_plan(agent_interface.revision_id.clone());
     let runtime_plan_digest = runtime_plan
         .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
         .unwrap();
+    let agent_plan = ExactVersionRef::new(
+        id(ResourceKind::AgentPlanRevision, 0x41),
+        runtime_plan_digest.clone(),
+    )
+    .unwrap();
+    let runtime_plan_bytes = canonical_json(&serde_json::to_value(&runtime_plan).unwrap()).unwrap();
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_package: authoring(0xa5),
         contract_digest: named_digest("agent-contract"),
@@ -1176,7 +1280,7 @@ async fn seed_fixture_with_backend(
         output_schema: agent_schema(),
         error_schema: agent_schema(),
         typed_plan_artifact_id: id(ResourceKind::Artifact, 0xa5),
-        typed_plan_digest: runtime_plan_digest,
+        typed_plan_digest: runtime_plan_digest.clone(),
     });
     for (exact, revision_no) in [(&agent_interface, 1), (&agent_plan, 2)] {
         insert_version(
@@ -1194,6 +1298,41 @@ async fn seed_fixture_with_backend(
         )
         .await;
     }
+    let typed_plan_artifact = ArtifactRef::new(
+        id(ResourceKind::Artifact, 0xa5),
+        runtime_plan_digest,
+        u64::try_from(runtime_plan_bytes.len()).unwrap(),
+        "application/json",
+        DataClassification::Internal,
+        Some("context-runtime-plan.json".to_owned()),
+    )
+    .unwrap();
+    insert_ready_artifact(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &authorization_policy.revision_id,
+        &typed_plan_artifact,
+        0xb5,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE insight_platform.artifacts SET purpose = 'typed_plan' WHERE tenant_id = $1 AND artifact_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(typed_plan_artifact.artifact_id().to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resource_versions SET artifact_id = $3 WHERE tenant_id = $1 AND resource_version_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(agent_plan.revision_id.to_string())
+    .bind(typed_plan_artifact.artifact_id().to_string())
+    .execute(pool)
+    .await
+    .unwrap();
     let agent_deployment_id = id(ResourceKind::AgentDeployment, 0x42);
     let binding = ContextBindingSnapshot::build(
         id(ResourceKind::ContextBinding, 0x43),
@@ -1289,6 +1428,19 @@ async fn seed_fixture_with_backend(
             .await
             .unwrap();
     }
+    repository
+        .create_quota_account(NewQuotaAccount {
+            tenant_id: tenant_id.to_string(),
+            quota_account_id: id(ResourceKind::QuotaAccount, 0x53).to_string(),
+            scope_kind: "tenant".to_owned(),
+            scope_id: tenant_id.to_string(),
+            work_class: WorkClass::Orchestration.as_str().to_owned(),
+            metric: "concurrent_jobs".to_owned(),
+            limit_value: 8,
+            payload: TypedPayload::new(1, &json!({"fixture": "context-orchestration"})).unwrap(),
+        })
+        .await
+        .unwrap();
 
     let run_id = id(ResourceKind::Run, 0x60);
     let scope_id = id(ResourceKind::ScopeInstance, 0x61);
@@ -1494,7 +1646,7 @@ fn create_command(fixture: &Fixture, base: u16) -> CreateContextQuery {
                 producing_node_id: Some(fixture.node_id.clone()),
                 value_kind: "context_query".to_owned(),
                 classification: DataClassification::Internal,
-                schema_digest: named_digest("query-schema"),
+                schema_digest: query_schema_digest(),
                 content_digest: input_digest,
                 storage: InvocationValueStorage::Inline,
             },
@@ -1544,14 +1696,14 @@ async fn seed_running_context_orchestration(
     let input_value = json!({"question": "top customers"});
     let input_digest: Sha256Digest = canonical_digest(&input_value).unwrap().parse().unwrap();
     let input_port = ExactDataPortRef::RunInput {
-        schema_digest: named_digest("query-schema"),
+        schema_digest: query_schema_digest(),
     };
     let environment = ScopeDataEnvironmentSnapshot::build(
         BTreeMap::from([(
             input_port.clone(),
             ExactRunValueRef {
                 value_id: id(ResourceKind::RunValue, 0x63),
-                schema_digest: named_digest("query-schema"),
+                schema_digest: query_schema_digest(),
                 content_digest: input_digest.clone(),
             },
         )]),
@@ -1763,14 +1915,13 @@ async fn seed_running_context_orchestration(
             value_kind: "context_query".to_owned(),
             port: input_port,
             classification: DataClassification::Internal,
-            schema_digest: named_digest("query-schema"),
+            schema_digest: query_schema_digest(),
             content_digest: input_digest.clone(),
             value: ValueRef::Inline {
                 value: input_value.clone(),
             },
         },
-        materialized_input: ClosedJsonValue::build(named_digest("query-schema"), input_value)
-            .unwrap(),
+        materialized_input: ClosedJsonValue::build(query_schema_digest(), input_value).unwrap(),
         input_artifact_link_id: None,
         idempotency_key_digest: named_digest("context-owner-idempotency"),
         request_digest: named_digest("context-owner-request"),
@@ -1789,14 +1940,14 @@ async fn park_direct_context_leaf(
     let input_value = json!({"question": "top customers"});
     let input_digest: Sha256Digest = canonical_digest(&input_value).unwrap().parse().unwrap();
     let request_port = ExactDataPortRef::RunInput {
-        schema_digest: named_digest("query-schema"),
+        schema_digest: query_schema_digest(),
     };
     let environment = ScopeDataEnvironmentSnapshot::build(
         BTreeMap::from([(
             request_port,
             ExactRunValueRef {
                 value_id: id(ResourceKind::RunValue, 0x63),
-                schema_digest: named_digest("query-schema"),
+                schema_digest: query_schema_digest(),
                 content_digest: input_digest,
             },
         )]),
@@ -3269,6 +3420,56 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
 
 struct EmptyModelWire;
 
+struct TypedPlanArtifactBroker {
+    bytes: Vec<u8>,
+    reads: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl SchedulerTypedPlanResponseBroker for TypedPlanArtifactBroker {
+    async fn read_typed_plan_for_response(
+        &self,
+        request: SchedulerTypedPlanReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerTypedPlanReadError> {
+        request
+            .validate_at(Utc::now())
+            .map_err(|_| SchedulerTypedPlanReadError::Denied)?;
+        let value: serde_json::Value = serde_json::from_slice(&self.bytes)
+            .map_err(|_| SchedulerTypedPlanReadError::Integrity)?;
+        let digest: Sha256Digest = canonical_digest(&value)
+            .map_err(|_| SchedulerTypedPlanReadError::Integrity)?
+            .parse()
+            .map_err(|_| SchedulerTypedPlanReadError::Integrity)?;
+        if digest != *request.artifact.content_digest()
+            || u64::try_from(self.bytes.len()).ok() != Some(request.artifact.byte_length())
+        {
+            return Err(SchedulerTypedPlanReadError::Integrity);
+        }
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
+    }
+}
+
+#[async_trait::async_trait]
+impl SchedulerRunValueResponseBroker for TypedPlanArtifactBroker {
+    async fn read_run_value_for_response(
+        &self,
+        _request: SchedulerRunValueReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerRunValueReadError> {
+        Err(SchedulerRunValueReadError::Denied)
+    }
+}
+
+#[async_trait::async_trait]
+impl SchedulerSkillPackageResponseBroker for TypedPlanArtifactBroker {
+    async fn read_skill_package_for_response(
+        &self,
+        _request: SchedulerSkillPackageReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerSkillPackageReadError> {
+        Err(SchedulerSkillPackageReadError::Denied)
+    }
+}
+
 #[async_trait::async_trait]
 impl ModelProviderWireConnector for EmptyModelWire {
     async fn open(
@@ -3365,6 +3566,10 @@ struct ContextProcessMtlsFixture {
     server_key_pem: String,
     client_certificate_pem: String,
     client_key_pem: String,
+    artifact_server_certificate_pem: String,
+    artifact_server_key_pem: String,
+    scheduler_certificate_pem: String,
+    scheduler_key_pem: String,
 }
 
 fn context_process_mtls_fixture() -> ContextProcessMtlsFixture {
@@ -3395,12 +3600,26 @@ fn context_process_mtls_fixture() -> ContextProcessMtlsFixture {
         )],
         ExtendedKeyUsagePurpose::ClientAuth,
     );
+    let (artifact_server_certificate_pem, artifact_server_key_pem) = issue(
+        vec![SanType::DnsName("artifact.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let (scheduler_certificate_pem, scheduler_key_pem) = issue(
+        vec![SanType::URI(
+            SCHEDULER_WORKLOAD_IDENTITY.try_into().unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
     ContextProcessMtlsFixture {
         ca_pem: ca.pem(),
         server_certificate_pem,
         server_key_pem,
         client_certificate_pem,
         client_key_pem,
+        artifact_server_certificate_pem,
+        artifact_server_key_pem,
+        scheduler_certificate_pem,
+        scheduler_key_pem,
     }
 }
 
@@ -3566,7 +3785,7 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
         let second_log = observe_context_worker_start(&mut second);
         assert!(second.try_wait().unwrap().is_none());
         wait_context_query_state(&pool, &created.context_query_id, "succeeded").await;
-        let evidence: (i64, i32, bool, i64, String, String, i64) = sqlx::query_as(
+        let evidence: (i64, i32, bool, i64, String, i32, String, i64) = sqlx::query_as(
             r#"
             SELECT
               (SELECT count(*) FROM insight_platform.events
@@ -3579,6 +3798,8 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
                  WHERE tenant_id = $1 AND run_id = $3
                    AND value_kind = 'context_observation'),
               (SELECT state FROM insight_platform.runs
+                 WHERE tenant_id = $1 AND run_id = $3),
+              (SELECT active_work_count FROM insight_platform.runs
                  WHERE tenant_id = $1 AND run_id = $3),
               (SELECT state FROM insight_platform.run_nodes
                  WHERE tenant_id = $1 AND node_id = $5),
@@ -3611,6 +3832,7 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
                 true,
                 1,
                 "running".to_owned(),
+                0,
                 "succeeded".to_owned(),
                 1,
             )
@@ -3626,12 +3848,13 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
 
 #[test]
 fn production_remote_context_worker_recovers_mtls_response_commit_window() {
-    let (Ok(database_url), Ok(binary)) = (
+    let (Ok(database_url), Ok(binary), Ok(orchestration_binary)) = (
         std::env::var("PLATFORM_REMOTE_CONTEXT_WORKER_TEST_DATABASE_URL"),
         std::env::var("PLATFORM_REMOTE_CONTEXT_WORKER_BIN"),
+        std::env::var("PLATFORM_ORCHESTRATION_WORKER_BIN"),
     ) else {
         eprintln!(
-            "Remote Context Worker binary or dedicated PostgreSQL fixture is unset; process recovery skipped"
+            "Remote Context/Orchestration Worker binary or dedicated PostgreSQL fixture is unset; process recovery skipped"
         );
         return;
     };
@@ -3849,7 +4072,7 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
         let second_log = observe_context_worker_start(&mut second);
         wait_context_query_state(&pool, &created.context_query_id, "succeeded").await;
         wait_remote_context_calls(&remote.calls, 2).await;
-        let evidence: (i64, i32, bool, i64, String, String, i64) = sqlx::query_as(
+        let evidence: (i64, i32, bool, i64, String, i32, String, i64) = sqlx::query_as(
             r#"
             SELECT
               (SELECT count(*) FROM insight_platform.events
@@ -3862,6 +4085,8 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
                  WHERE tenant_id = $1 AND run_id = $3
                    AND value_kind = 'context_observation'),
               (SELECT state FROM insight_platform.runs
+                 WHERE tenant_id = $1 AND run_id = $3),
+              (SELECT active_work_count FROM insight_platform.runs
                  WHERE tenant_id = $1 AND run_id = $3),
               (SELECT state FROM insight_platform.run_nodes
                  WHERE tenant_id = $1 AND node_id = $5),
@@ -3894,6 +4119,7 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
                 true,
                 1,
                 "running".to_owned(),
+                0,
                 "succeeded".to_owned(),
                 1,
             )
@@ -3902,6 +4128,163 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
         second.kill().unwrap();
         second.wait().unwrap();
         second_log.join().unwrap();
+
+        sqlx::query(
+            r#"
+            UPDATE insight_platform.run_nodes
+            SET state = 'cancelled', version = version + 1,
+                terminal_at = clock_timestamp(), updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND node_id = $2 AND state = 'running'
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(fixture.text2sql_node_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let plan_bytes = canonical_json(&serde_json::to_value(&fixture.runtime_plan).unwrap())
+            .unwrap();
+        let plan_broker = Arc::new(TypedPlanArtifactBroker {
+            bytes: plan_bytes,
+            reads: AtomicUsize::new(0),
+        });
+        let artifact_incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let artifact_address = artifact_incoming.local_addr().unwrap();
+        let artifact_service = ArtifactSchedulerServiceServer::new(
+            ArtifactSchedulerGrpcService::new(
+                plan_broker.clone(),
+                ArtifactInternalRpcLimits::new(262_144, 262_144).unwrap(),
+            ),
+        );
+        let artifact_service = tonic::service::interceptor::InterceptedService::new(
+            artifact_service,
+            SchedulerWorkloadIdentity,
+        );
+        let (artifact_shutdown_sender, artifact_shutdown_receiver) = tokio::sync::oneshot::channel();
+        let artifact_server = tokio::spawn(
+            Server::builder()
+                .tls_config(
+                    ServerTlsConfig::new()
+                        .identity(Identity::from_pem(
+                            &tls.artifact_server_certificate_pem,
+                            &tls.artifact_server_key_pem,
+                        ))
+                        .client_ca_root(Certificate::from_pem(tls.ca_pem.clone())),
+                )
+                .unwrap()
+                .add_service(artifact_service)
+                .serve_with_incoming_shutdown(artifact_incoming, async move {
+                    let _ = artifact_shutdown_receiver.await;
+                }),
+        );
+        let scheduler_cert_path =
+            PathBuf::from(format!("{}-scheduler-client.pem", prefix.display()));
+        let scheduler_key_path =
+            PathBuf::from(format!("{}-scheduler-client-key.pem", prefix.display()));
+        std::fs::write(&scheduler_cert_path, &tls.scheduler_certificate_pem).unwrap();
+        std::fs::write(&scheduler_key_path, &tls.scheduler_key_pem).unwrap();
+        let orchestration_config = orchestration_process_config(format!(
+            "https://{artifact_address}/"
+        ));
+        let (orchestration_config_path, orchestration_config_digest) =
+            write_context_process_config(&prefix, "orchestration", &orchestration_config);
+        let mut orchestration = spawn_orchestration_worker(
+            &orchestration_binary,
+            &orchestration_config_path,
+            &orchestration_config_digest,
+            &database_url,
+            &ca_path,
+            &scheduler_cert_path,
+            &scheduler_key_path,
+        );
+        let orchestration_log = observe_context_worker_start(&mut orchestration);
+        let running_resume = loop {
+            let row = sqlx::query_as::<_, (String, String, i64, String)>(
+                r#"
+                SELECT resume_job.job_id, resume_job.worker_id,
+                       resume_job.lease_epoch, resume_job.lease_token_digest
+                FROM insight_platform.run_nodes AS resume
+                JOIN insight_platform.jobs AS resume_job
+                  ON resume_job.tenant_id = resume.tenant_id
+                 AND resume_job.node_id = resume.node_id
+                WHERE resume.tenant_id = $1 AND resume.run_id = $2
+                  AND resume.plan_node_key = 'finish'
+                  AND resume_job.state = 'running'
+                "#,
+            )
+            .bind(fixture.tenant_id.to_string())
+            .bind(fixture.run_id.to_string())
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            if let Some(row) = row {
+                break row;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        };
+        let exact_plan_read = repository
+            .resolve_typed_plan_read(SchedulerTypedPlanLease {
+                tenant_id: fixture.tenant_id.clone(),
+                run_id: fixture.run_id.clone(),
+                orchestration_job_id: running_resume.0.parse().unwrap(),
+                worker_process_generation_id: running_resume.1.parse().unwrap(),
+                lease_generation: u64::try_from(running_resume.2).unwrap(),
+                lease_token_digest: running_resume.3.parse().unwrap(),
+                request_digest: named_digest("orchestration-plan-read-diagnostic"),
+                maximum_bytes: 1_048_576,
+                deadline: Utc::now() + Duration::seconds(1),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            exact_plan_read.artifact.content_digest(),
+            &fixture
+                .runtime_plan
+                .canonical_digest(
+                    PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap(),
+                )
+                .unwrap()
+        );
+        wait_remote_context_calls(&plan_broker.reads, 1).await;
+        wait_run_state(&pool, &fixture.run_id, "succeeded").await;
+        let terminal: (String, String, String, bool, i64) = sqlx::query_as(
+            r#"
+            SELECT run.state, resume.state, resume_job.state,
+                   run.output_value_id IS NOT NULL,
+                   (SELECT count(*) FROM insight_platform.run_nodes
+                      WHERE tenant_id = run.tenant_id AND run_id = run.run_id
+                        AND plan_node_key = 'finish' AND node_kind = 'return')
+            FROM insight_platform.runs AS run
+            JOIN insight_platform.run_nodes AS resume
+              ON resume.tenant_id = run.tenant_id AND resume.run_id = run.run_id
+             AND resume.plan_node_key = 'finish' AND resume.node_kind = 'return'
+            JOIN insight_platform.jobs AS resume_job
+              ON resume_job.tenant_id = resume.tenant_id AND resume_job.node_id = resume.node_id
+            WHERE run.tenant_id = $1 AND run.run_id = $2
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(fixture.run_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            terminal,
+            (
+                "succeeded".to_owned(),
+                "succeeded".to_owned(),
+                "succeeded".to_owned(),
+                true,
+                1,
+            )
+        );
+        assert!(plan_broker.reads.load(Ordering::SeqCst) >= 1);
+        orchestration.kill().unwrap();
+        orchestration.wait().unwrap();
+        orchestration_log.join().unwrap();
+        let _ = artifact_shutdown_sender.send(());
+        artifact_server.await.unwrap().unwrap();
         let _ = shutdown_sender.send(());
         server.await.unwrap().unwrap();
         for path in [
@@ -3910,6 +4293,9 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
             ca_path,
             cert_path,
             key_path,
+            scheduler_cert_path,
+            scheduler_key_path,
+            orchestration_config_path,
         ] {
             std::fs::remove_file(path).unwrap();
         }
@@ -3968,6 +4354,53 @@ fn remote_context_process_config(
         "scan_interval_milliseconds": 20,
         "failure_backoff_milliseconds": 5,
         "drain_grace_milliseconds": 1000
+    })
+}
+
+fn orchestration_process_config(artifact_endpoint: String) -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "worker_manifest": WorkerManifest {
+            manifest_version: WORKER_MANIFEST_VERSION,
+            worker_role: "orchestration-worker".to_owned(),
+            work_class: WorkClass::Orchestration,
+            adapter_runtime_digest: named_digest("production-orchestration-runtime"),
+            protocol_version: WORKER_PROTOCOL_VERSION,
+            max_concurrency: 4,
+            critical_control_reserved_slots: 1,
+        },
+        "database": {
+            "business_max_connections": 4,
+            "critical_control_reserved_connections": 2,
+            "process_connection_budget": 6,
+            "acquire_timeout_milliseconds": 1000,
+            "statement_timeout_milliseconds": 30000,
+            "idle_timeout_milliseconds": 60000,
+            "max_lifetime_milliseconds": 600000
+        },
+        "artifact": {
+            "endpoint": artifact_endpoint,
+            "tls_server_name": "artifact.test",
+            "connect_timeout_milliseconds": 1000,
+            "request_timeout_milliseconds": 5000,
+            "maximum_request_bytes": 262144,
+            "maximum_chunk_bytes": 262144
+        },
+        "timing": {
+            "coordinator_coalesce_milliseconds": 5,
+            "coordinator_scan_milliseconds": 20,
+            "coordinator_scan_jitter_milliseconds": 1,
+            "claim_failure_backoff_milliseconds": 5,
+            "drain_grace_milliseconds": 1000,
+            "heartbeat_jitter_milliseconds": 1,
+            "store_retry_backoff_milliseconds": 5,
+            "safety_scan_milliseconds": 20,
+            "safety_scan_jitter_milliseconds": 1,
+            "safety_failure_backoff_milliseconds": 5,
+            "handoff_retry_milliseconds": 5
+        },
+        "plan_maximum_bytes": 1048576,
+        "safety_shard": SafetyScanShard::whole()
     })
 }
 
@@ -4034,6 +4467,31 @@ fn spawn_remote_context_worker(
         .unwrap()
 }
 
+fn spawn_orchestration_worker(
+    binary: &str,
+    config_path: &Path,
+    config_digest: &str,
+    database_url: &str,
+    ca_path: &Path,
+    cert_path: &Path,
+    key_path: &Path,
+) -> Child {
+    std::process::Command::new(binary)
+        .env("PLATFORM_ORCHESTRATION_WORKER_CONFIG", config_path)
+        .env("PLATFORM_ORCHESTRATION_WORKER_CONFIG_DIGEST", config_digest)
+        .env("PLATFORM_ORCHESTRATION_WORKER_DATABASE_URL", database_url)
+        .env("PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CA_PATH", ca_path)
+        .env(
+            "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CERT_PATH",
+            cert_path,
+        )
+        .env("PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_KEY_PATH", key_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
 fn observe_context_worker_start(child: &mut Child) -> std::thread::JoinHandle<()> {
     let stderr = child.stderr.take().unwrap();
     let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
@@ -4064,6 +4522,22 @@ async fn wait_remote_context_calls(calls: &AtomicUsize, expected: usize) {
         "Remote Context call count did not reach {expected}; observed {}",
         calls.load(Ordering::SeqCst)
     );
+}
+
+async fn wait_run_state(pool: &PgPool, run_id: &ResourceId, expected: &str) {
+    for _ in 0..400 {
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM insight_platform.runs WHERE run_id = $1")
+                .bind(run_id.to_string())
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        if state == expected {
+            return;
+        }
+        tokio::time::sleep(StdDuration::from_millis(25)).await;
+    }
+    panic!("Run {run_id} did not reach {expected}");
 }
 
 async fn context_job_state(pool: &PgPool, job_id: &ResourceId) -> String {

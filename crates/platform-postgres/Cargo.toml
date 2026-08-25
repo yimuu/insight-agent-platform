@@ -51,6 +51,7 @@ uuid.workspace = true
 [dev-dependencies]
 futures.workspace = true
 insight-platform-artifact-broker.workspace = true
+insight-platform-artifact-rpc.workspace = true
 insight-platform-egress-rpc.workspace = true
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }
 tokio-stream.workspace = true
