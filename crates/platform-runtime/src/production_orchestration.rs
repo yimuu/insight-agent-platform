@@ -1,0 +1,145 @@
+//! Production composition for the durable orchestration and critical-control drivers.
+
+use crate::{
+    ExactPlanGenerationDriver, LeaseFencedOrchestrationExecutor,
+    MaterializingOrchestrationJobHandler, OrchestrationCoordinatorConfig,
+    OrchestrationExecutorConfig, OrchestrationSafetyConfig, OrchestrationSafetyDriver,
+    PostgresControllerCapabilityAdmissionProvider, PostgresControllerModelAdmissionProvider,
+    PostgresDurablePlanGenerationStore, RunningOrchestrationSafetyDriver, RunningWorkCoordinator,
+    SchedulerControllerRunValueMaterializer, SchedulerPlanMaterializer,
+    SchedulerPlanMaterializerConfig, UuidCoordinatorIdentityFactory, WorkCoordinator,
+};
+use insight_platform_artifact_rpc::ArtifactSchedulerGrpcClient;
+use insight_platform_orchestrator::ExpressionLimits;
+use insight_platform_postgres::repository::PgRepository;
+use insight_platform_worker::LocalWorkerPools;
+use std::{error::Error, fmt, sync::Arc, time::Duration};
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProductionOrchestrationConfig {
+    pub plan_materializer: SchedulerPlanMaterializerConfig,
+    pub run_value_read_timeout: Duration,
+    pub handoff_retry_delay: Duration,
+    pub expression_limits: ExpressionLimits,
+    pub executor: OrchestrationExecutorConfig,
+    pub coordinator: OrchestrationCoordinatorConfig,
+    pub safety: OrchestrationSafetyConfig,
+}
+
+impl ProductionOrchestrationConfig {
+    pub fn validate(self) -> Result<(), ProductionOrchestrationError> {
+        self.plan_materializer
+            .validate()
+            .map_err(|_| ProductionOrchestrationError::InvalidConfiguration)?;
+        if self.run_value_read_timeout.is_zero()
+            || self.handoff_retry_delay.is_zero()
+            || !self.expression_limits.bounded_by_absolute()
+        {
+            return Err(ProductionOrchestrationError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+pub struct RunningProductionOrchestration {
+    pub coordinator: RunningWorkCoordinator,
+    pub safety: RunningOrchestrationSafetyDriver,
+}
+
+pub fn start_production_orchestration(
+    business_repository: PgRepository,
+    critical_control_repository: PgRepository,
+    artifact_client: Arc<ArtifactSchedulerGrpcClient>,
+    pools: LocalWorkerPools,
+    config: ProductionOrchestrationConfig,
+) -> Result<RunningProductionOrchestration, ProductionOrchestrationError> {
+    config.validate()?;
+    let identities = Arc::new(UuidCoordinatorIdentityFactory);
+    let critical_authority = Arc::new(critical_control_repository.clone());
+    let run_value_materializer = Arc::new(
+        SchedulerControllerRunValueMaterializer::new(
+            Arc::clone(&critical_authority),
+            Arc::clone(&artifact_client),
+            config.run_value_read_timeout,
+        )
+        .map_err(|_| ProductionOrchestrationError::InvalidConfiguration)?,
+    );
+    let capability_admission = Arc::new(PostgresControllerCapabilityAdmissionProvider::new(
+        critical_control_repository.clone(),
+    ));
+    let model_admission = Arc::new(PostgresControllerModelAdmissionProvider::new(
+        critical_control_repository.clone(),
+        critical_authority.clone(),
+        artifact_client.clone(),
+    ));
+    let durable_store = Arc::new(
+        PostgresDurablePlanGenerationStore::new(
+            critical_control_repository.clone(),
+            run_value_materializer,
+            Arc::clone(&identities),
+            capability_admission,
+            model_admission,
+            config.handoff_retry_delay,
+        )
+        .map_err(|_| ProductionOrchestrationError::InvalidConfiguration)?,
+    );
+    let plan_driver = Arc::new(
+        ExactPlanGenerationDriver::new(durable_store, config.expression_limits)
+            .map_err(|_| ProductionOrchestrationError::InvalidConfiguration)?,
+    );
+    let plan_materializer = Arc::new(
+        SchedulerPlanMaterializer::new(
+            critical_authority,
+            artifact_client,
+            config.plan_materializer,
+        )
+        .map_err(|_| ProductionOrchestrationError::InvalidConfiguration)?,
+    );
+    let handler = Arc::new(MaterializingOrchestrationJobHandler::new(
+        plan_materializer,
+        plan_driver,
+    ));
+    let executor = Arc::new(
+        LeaseFencedOrchestrationExecutor::new(
+            Arc::new(business_repository.clone()),
+            handler,
+            Arc::clone(&identities),
+            config.executor,
+        )
+        .map_err(|_| ProductionOrchestrationError::InvalidConfiguration)?,
+    );
+    let coordinator = WorkCoordinator::new(
+        Arc::new(business_repository),
+        executor,
+        Arc::clone(&identities),
+        pools.clone(),
+        config.coordinator,
+    )
+    .map_err(|_| ProductionOrchestrationError::InvalidConfiguration)?
+    .spawn();
+    let safety = OrchestrationSafetyDriver::new(
+        Arc::new(critical_control_repository),
+        identities,
+        pools,
+        config.safety,
+    )
+    .map_err(|_| ProductionOrchestrationError::InvalidConfiguration)?
+    .spawn();
+    Ok(RunningProductionOrchestration {
+        coordinator,
+        safety,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionOrchestrationError {
+    InvalidConfiguration,
+}
+
+impl fmt::Display for ProductionOrchestrationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("production orchestration composition is invalid")
+    }
+}
+
+impl Error for ProductionOrchestrationError {}

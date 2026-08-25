@@ -2881,6 +2881,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "insight-platform-artifact-rpc",
  "insight-platform-artifacts",
  "insight-platform-contracts",
  "insight-platform-invocations",
