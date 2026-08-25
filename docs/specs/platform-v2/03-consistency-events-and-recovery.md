@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-192 |
+| 状态 | Accepted / CR-193 |
 | 日期 | 2026-08-26 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
@@ -173,6 +173,11 @@ Secret写入Job/Event/Receipt，也不声称创建Context Observation、dataset 
 Job terminal、quota settlement、Event和Outbox；stale fence或字段漂移零写入。dispatch前validation/authorization失败为terminal failure，
 可恢复dependency/capacity失败进入bounded retry；响应是否到达不改变ReadOnly属性，post-dispatch uncertain可作为新attempt安全重读并保留
 attempt evidence。deadline/cancel/lease recovery继续使用同一Job generation/fence规则。
+
+subscription refresh的remote evidence绑定不可变`execution_identity_digest`：tenant/subscription/Job、worker process generation、
+lease generation/token、physical attempt与exact request closure。它明确排除heartbeat推进的Job `expected_version`、lease expiry和时间戳。
+Host在dispatch前用收到的完整fence重验current running Job；Context Worker每次成功heartbeat后更新本地owner commit fence，但不改变已派发的
+execution identity。最终JobCommit Receipt摘要最新commit attempt与response，response evidence仍验证同一不可变物理attempt。
 
 reconciliation冻结exact owner/Job generation、backend idempotency/correlation identity、known evidence、deadline/budget和closed decision policy。
 只能返回`ConfirmedSucceeded | ConfirmedFailed | StillUnknown | RetryableProbeFailure`。不确定保持Unknown/Reconciling并交由人/运维

@@ -1,10 +1,30 @@
-# Platform v2 00～18 Cross-review（CR-192）
+# Platform v2 00～18 Cross-review（CR-193）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-192 Accepted |
+| 状态 | Closed / CR-193 Accepted |
 | 日期 | 2026-08-26 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-192 subscription Context Job execution/outcome feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-193 subscription heartbeat/evidence identity feedback |
+
+### CR-193 subscription heartbeat/evidence identity impact review
+
+CR-192把Host evidence绑定到整个`ContextSubscriptionRefreshAttempt`，而其中Job fence的`expected_version`会被每次合法heartbeat推进。
+长调用若不heartbeat会失去lease；若heartbeat，Host按dispatch attempt生成的evidence又无法用latest fence提交，形成P1不可实现合同。CR-193将
+remote evidence改为绑定不可变execution identity，owner terminal Receipt仍绑定包含latest fence的完整commit attempt。
+
+| Spec | CR-193结论 |
+|---|---|
+| 00～02、04～06、08～11、14～16 | clean `/v1`、plane/resource/policy/Run/Capability/Sandbox/Artifact/Model authority与schema不变 |
+| 03 | execution identity冻结tenant/subscription/Job、worker generation、lease generation/token、attempt number与exact request；排除version/expiry |
+| 07 | heartbeat只推进owner terminal fence；不创建新physical attempt，不改变execution identity |
+| 12 | Context Worker保存dispatch identity并以latest fence提交；新lease/attempt必须生成不同identity |
+| 13 | Host以dispatch fence做I/O前重验，response只绑定immutable identity/request，不能延长或改写lease |
+| 17 | internal RPC携带完整dispatch fence与immutable identity；无public schema/route变化 |
+| 18 | 增加跨至少一次heartbeat成功提交、旧version零写入与新attempt evidence不可复用fixture |
+
+00～18已再次按state ownership、IDs/schema、errors、transactions、events、permissions、capacity、failure recovery与fixtures全量复核。
+CR-193不新增table、aggregate、route、role、WorkClass、Secret路径或第二current-state authority；`expected_version`仍是PostgreSQL CAS fence，
+只是明确不属于remote业务evidence identity。受影响00、03、07、12、13、17、18恢复Accepted / CR-193；Acceptance 35增加heartbeat窗口。
 
 ### CR-192 MCP subscription refresh execution/outcome impact review
 
@@ -323,11 +343,12 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00、01、03～04、07、12～13、17～18 | Accepted / CR-192 | subscription refresh execution/outcome、typed internal RPC、fenced recovery与pool隔离闭合 |
-| 02 | Accepted / CR-189（CR-192影响复核） | exact Resource lifecycle与Deployment authority不变 |
+| 00、03、07、12～13、17～18 | Accepted / CR-193 | subscription immutable execution identity与heartbeat后的latest terminal fence闭合 |
+| 01、04 | Accepted / CR-192（CR-193影响复核） | plane、Secret、quota与pool隔离不变 |
+| 02 | Accepted / CR-189（CR-193影响复核） | exact Resource lifecycle与Deployment authority不变 |
 | 05～06 | Accepted / CR-184（CR-189影响复核） | Plan v4 external leaf与Run snapshot只复制补全后的exact closure |
 | 08、14 | Accepted / CR-182/181（CR-189影响复核） | Subagent与Sandbox execution plane不变 |
-| 09～10 | Accepted / CR-188（CR-192影响复核） | Capability owner不被Context/MCP transport替代 |
+| 09～10 | Accepted / CR-188（CR-193影响复核） | Capability owner不被Context/MCP transport替代 |
 | 11、15 | Accepted / CR-185（CR-189影响复核） | Skill/Artifact authority不变 |
 | 16 | Accepted / CR-187（CR-189影响复核） | Model provider/Inline authority不变 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
@@ -706,7 +727,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-192合同范围没有未关闭P0/P1。Acceptance 35与既有13～34形成单一闭包，00～18状态为Accepted。
+CR-193合同范围没有未关闭P0/P1。Acceptance 35与既有13～34形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

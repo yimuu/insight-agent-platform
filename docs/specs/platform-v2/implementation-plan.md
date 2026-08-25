@@ -1,10 +1,10 @@
-# Platform v2 四阶段实现计划（CR-192）
+# Platform v2 四阶段实现计划（CR-193）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-192 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-193 contracts accepted; L3～L6 pending |
 | 日期 | 2026-08-26 |
-| 合同输入 | 00～18、cross-review CR-192、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-193、ADR-0001、ADR-0002、AGENTS.md |
 
 > 2026-08-26 contract feedback：CR-190 L2接线发现closed owner registry没有subscription refresh Context Job的合法pair。CR-191在03增加
 > 唯一`Context -> McpOperation` pair，并在07/12/13/18冻结source row/payload/WorkClass claim约束；不新增WorkClass、aggregate、table或route。
@@ -35,6 +35,10 @@
 > successful admission Receipt/current session/auth/closure重验、Context concurrent quota、fenced attempt、JobCommit success/retry、expired running
 > lease recovery及Event/Outbox均已接线。fresh PostgreSQL 16 fixture按MCP先清pending、Context后claim的真实时序覆盖wrong manifest零claim、
 > replay、attempt 2/3与零Context Observation。Context Worker production handler、Host Resource RPC和三进程L3仍待实现。
+
+> 2026-08-26 implementation feedback：handler接线发现CR-192的whole-attempt evidence digest包含heartbeat可变Job version，长调用续租后会
+> 系统性拒绝合法结果。CR-193按03→07→12→13→17→18修复：Host evidence绑定排除version/expiry的immutable execution identity，Host仍以
+> dispatch fence fail closed，Context Worker最终以heartbeat后的latest fence提交。00～18 cross-review已关闭；实现需增加跨heartbeat正向fixture。
 
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，

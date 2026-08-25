@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-192 |
+| 状态 | Accepted / CR-193 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
@@ -324,6 +324,9 @@ internal service只有跨物理信任边界时才存在，不为每个domain tra
 | ArtifactDataWorker | internal stage/read/verify/derive | exact workload capability + owner/Job fence |
 | ArtifactMaintenance | delete/GC/quarantine/reconcile | closed maintenance transition |
 | McpResourceRefresh | Context Worker提交fenced subscription refresh/reconcile | Host重载Job/subscription/closure；credential-free、ReadOnly、bounded evidence |
+
+`McpResourceRefresh` request携带dispatch时完整fence与不可变execution identity；heartbeat后的version不要求重发RPC，也不进入Host response
+identity。调用方最终提交必须使用最新owner fence，server response只绑定原始execution identity与exact request digest。
 
 没有Model Artifact Producer、Model/Sandbox专用Artifact Broker、microVM RPC、Managed stdio runner或Installation release service。
 Artifact public hop保持同一个OpenAPI HTTP请求/响应语义，不生成一份字段对等protobuf；其余internal RPC使用protobuf。所有跨进程调用使用

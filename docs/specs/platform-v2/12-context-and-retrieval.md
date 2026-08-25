@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-192 |
+| 状态 | Accepted / CR-193 |
 | 日期 | 2026-08-26 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
@@ -660,6 +660,10 @@ session/auth/Deployment/root及成功admission Receipt，预留独立Context con
 bounded success/retry evidence、quota settlement、Job/Event/Outbox。fresh PostgreSQL 16 fixture覆盖MCP先清除pending marker后Context claim、
 wrong manifest零claim、success replay、retryable outcome、expired running lease恢复到attempt 2、attempt 3唯一成功及零Context
 Invocation/Observation。该L2尚不包含真实MCP Resource RPC或独立Context/MCP/Egress进程L3。
+
+CR-193修正成功evidence绑定：`execution_identity_digest`由tenant/subscription/Job、worker generation、lease generation/token、physical
+attempt与exact request计算，排除heartbeat可变的Job `expected_version`/lease expiry。Context Worker把dispatch时的identity交给Host，续租只推进
+最终owner commit fence；因此一次或多次heartbeat不会使合法Host evidence失效。新lease或新physical attempt必须产生不同identity。
 
 ## 24. 明确推迟的工作
 

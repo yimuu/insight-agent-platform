@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-192 |
+| 状态 | Accepted / CR-193 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
@@ -229,3 +229,6 @@ tenant无法生成critical-control work。
 ## 13. 未决问题
 
 基础调度合同无未决设计问题。具体容量数值只由18已资格的CapacityProfile拥有。
+
+CR-193确认长调用heartbeat推进Job version只更新owner terminal fence，不创建新physical attempt，也不改变subscription refresh的
+`execution_identity_digest`；只有lease generation/token或attempt number变化才产生新identity。测试必须覆盖至少一次heartbeat后的成功提交。

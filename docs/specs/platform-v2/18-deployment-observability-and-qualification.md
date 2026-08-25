@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-192 |
+| 状态 | Accepted / CR-193 |
 | 日期 | 2026-08-26 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -391,6 +391,9 @@ r272在fresh PostgreSQL 16闭合subscription Context Job的exact manifest scan�
 concurrent quota、fenced claim、JobCommit success/retry、expired running lease recovery、唯一terminal Event/Outbox与零Context Observation L2。
 fixture按真实顺序先由MCP Worker清除pending marker，再由Context Worker claim，证明pending history不是第二执行权威。独立Context Worker→
 MCP Host→Egress RPC、真实Streamable HTTP与kill-window仍属于未完成L3。
+
+CR-193增加L1/L2必测项：Host调用跨越至少一次Job heartbeat后，返回的immutable execution identity仍验证成功，Context owner用最新version
+terminal commit；旧version commit零写入。新lease generation/token或新physical attempt不得重用前一identity/evidence。
 
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role

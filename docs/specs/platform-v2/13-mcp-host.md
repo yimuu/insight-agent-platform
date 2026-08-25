@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-192 |
+| 状态 | Accepted / CR-193 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
@@ -206,5 +206,9 @@ Host/Context独立进程L3仍待完成。
 r272关闭refresh Job的PostgreSQL claim/terminal/retry/recovery L2，并验证MCP Worker先以durable acceptance结算自身Job、清除pending marker后，
 Context Worker仍只凭exact admission Receipt与当前session/auth/closure安全claim；旧pending字段不再成为第二执行权威。MCP Host
 `RefreshResources` RPC、真实Streamable HTTP read/list及三进程kill-window仍待实现。
+
+CR-193明确Host evidence不得摘要包含可变`expected_version`的整个attempt。Host在I/O前仍重验收到的完整Job fence，但返回的
+`execution_identity_digest`只绑定不可变物理attempt closure；Context Worker heartbeat后的最新version仅用于PostgreSQL terminal commit。
+Host不能据此缓存、延长或改写Job lease。
 
 首版remote Streamable HTTP合同无未决设计问题。
