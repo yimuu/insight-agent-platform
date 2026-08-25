@@ -316,10 +316,13 @@ pub fn decide_context_query_admission(
         facts.binding.authorization_policy.clone(),
         facts.binding.ranking_policy.clone(),
         facts.context_closure.parser_policy.clone(),
+        facts.context_closure.chunker_policy.clone(),
         facts.context_closure.ranking_policy.clone(),
         facts.context_closure.data_policy.clone(),
     ]);
     policies.extend(facts.context_closure.network_policy.iter().cloned());
+    policies.extend(facts.context_closure.tls_policy.iter().cloned());
+    policies.extend(facts.context_closure.trust_policy.iter().cloned());
     policies.sort_by(|left, right| left.revision_id.cmp(&right.revision_id));
     policies.dedup_by(|left, right| left.revision_id == right.revision_id);
     let quota_ceiling = ContextQuotaCeiling {
@@ -654,6 +657,7 @@ impl ContextClaimSlot {
 #[derive(Debug, Clone)]
 pub struct ClaimContextJobs {
     pub worker_process_generation_id: ResourceId,
+    pub worker_manifest_digest: Sha256Digest,
     pub slots: Vec<ContextClaimSlot>,
     pub lease_policy: LeasePolicy,
 }
@@ -1456,6 +1460,7 @@ mod tests {
         let context_closure = ContextDeploymentClosure {
             implementation: implementation_revision.clone(),
             interface: interface_revision.clone(),
+            required_worker_manifest_digest: named_digest("context-worker-manifest"),
             backend: ContextBackendBinding::SqlCatalog {
                 database_identity_digest: named_digest("database"),
                 dialect: "postgres".to_owned(),
@@ -1463,6 +1468,8 @@ mod tests {
             },
             secret_bindings: vec![],
             network_policy: None,
+            tls_policy: None,
+            trust_policy: None,
             parser_policy: parser_policy.clone(),
             chunker_policy,
             embedding_model_deployment: None,

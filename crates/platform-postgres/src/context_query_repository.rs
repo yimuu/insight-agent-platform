@@ -189,6 +189,7 @@ impl PgRepository {
     /// loss without creating a second scheduler authority.
     pub async fn scan_claimable_native_context_jobs(
         &self,
+        worker_manifest_digest: &Sha256Digest,
         installed_adapter_digest: &Sha256Digest,
         adapter_contract_digest: &Sha256Digest,
         limit: u16,
@@ -213,15 +214,17 @@ impl PgRepository {
               AND COALESCE(job.retry_at, job.scheduled_at) <= clock_timestamp()
               AND job.deadline > clock_timestamp()
               AND job.attempt_no < job.attempt_limit
+              AND query.payload #>> '{admission,context_closure,required_worker_manifest_digest}' = $2
               AND query.payload #>> '{admission,implementation,contract,backend,kind}' = 'native_catalog'
-              AND query.payload #>> '{admission,implementation,contract,backend,adapter_contract_digest}' = $2
+              AND query.payload #>> '{admission,implementation,contract,backend,adapter_contract_digest}' = $3
               AND query.payload #>> '{admission,context_closure,backend,kind}' = 'native_catalog'
-              AND query.payload #>> '{admission,context_closure,backend,installed_adapter_digest}' = $3
+              AND query.payload #>> '{admission,context_closure,backend,installed_adapter_digest}' = $4
             ORDER BY job.priority DESC, COALESCE(job.retry_at, job.scheduled_at), job.job_id
             LIMIT $1
             "#,
         )
         .bind(i64::from(limit))
+        .bind(worker_manifest_digest.to_string())
         .bind(adapter_contract_digest.to_string())
         .bind(installed_adapter_digest.to_string())
         .fetch_all(self.pool())
@@ -1646,6 +1649,15 @@ impl PgRepository {
                 self.context_query_limits(),
             )
             .await?;
+            if query
+                .payload
+                .admission
+                .context_closure
+                .required_worker_manifest_digest
+                != command.worker_manifest_digest
+            {
+                return Err(RepositoryError::Conflict("Context Worker manifest"));
+            }
             let current_job =
                 load_context_job(&mut transaction, &tenant_id, &slot.job_id, true).await?;
             require_same_context_job(&observed_job, &current_job)?;

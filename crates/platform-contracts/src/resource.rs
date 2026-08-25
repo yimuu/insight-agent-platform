@@ -2158,6 +2158,8 @@ impl DeploymentClosure {
                     &closure.data_policy,
                 ]);
                 refs.extend(closure.network_policy.iter());
+                refs.extend(closure.tls_policy.iter());
+                refs.extend(closure.trust_policy.iter());
             }
             Self::McpServer(closure) => {
                 refs.push(&closure.server_revision);
@@ -2466,9 +2468,12 @@ impl CapabilityDeploymentClosure {
 pub struct ContextDeploymentClosure {
     pub implementation: ExactVersionRef,
     pub interface: ExactVersionRef,
+    pub required_worker_manifest_digest: Sha256Digest,
     pub backend: ContextBackendBinding,
     pub secret_bindings: Vec<crate::ExactSecretBindingRef>,
     pub network_policy: Option<ExactVersionRef>,
+    pub tls_policy: Option<ExactVersionRef>,
+    pub trust_policy: Option<ExactVersionRef>,
     pub parser_policy: ExactVersionRef,
     pub chunker_policy: ExactVersionRef,
     pub embedding_model_deployment: Option<ExactDeploymentRef>,
@@ -2491,6 +2496,15 @@ impl ContextDeploymentClosure {
             .validate()
             .map_err(|_| ResourceContractError::InvalidContextContract)?;
         validate_secret_bindings(&self.secret_bindings)?;
+        let remote_search = matches!(&self.backend, ContextBackendBinding::RemoteSearch { .. });
+        if remote_search
+            != (self.network_policy.is_some()
+                && self.tls_policy.is_some()
+                && self.trust_policy.is_some())
+            || (!remote_search && (self.tls_policy.is_some() || self.trust_policy.is_some()))
+        {
+            return Err(ResourceContractError::InvalidContextContract);
+        }
         if self
             .embedding_model_deployment
             .as_ref()
@@ -2508,6 +2522,8 @@ impl ContextDeploymentClosure {
             &self.data_policy,
         ];
         policies.extend(self.network_policy.iter());
+        policies.extend(self.tls_policy.iter());
+        policies.extend(self.trust_policy.iter());
         validate_distinct_policy_roles(&policies)?;
         self.conformance_evidence
             .validate()
@@ -3394,6 +3410,95 @@ mod tests {
             )
             .unwrap(),
         }
+    }
+
+    fn exact_revision(kind: ResourceKind, suffix: &str, marker: char) -> ExactVersionRef {
+        let prefix = match kind {
+            ResourceKind::ContextSourceImplementationRevision => "ximp",
+            ResourceKind::ContextSourceInterfaceRevision => "xirev",
+            ResourceKind::PolicyRevision => "prev",
+            _ => unreachable!(),
+        };
+        ExactVersionRef::new(
+            id(&format!(
+                "{prefix}_0198f1c3-8f49-7c3e-b1f3-773c2836{suffix}"
+            )),
+            digest(marker),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn remote_context_closure_requires_exact_endpoint_and_transport_policies() {
+        let endpoint = crate::CanonicalHttpEndpoint {
+            scheme: crate::CapabilityEndpointScheme::Https,
+            host: "search.example.test".to_owned(),
+            port: 443,
+            base_path: "/v1/query".to_owned(),
+        };
+        let mut closure = ContextDeploymentClosure {
+            implementation: exact_revision(
+                ResourceKind::ContextSourceImplementationRevision,
+                "7d01",
+                '1',
+            ),
+            interface: exact_revision(ResourceKind::ContextSourceInterfaceRevision, "7d02", '2'),
+            required_worker_manifest_digest: digest('3'),
+            backend: ContextBackendBinding::RemoteSearch {
+                endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
+                endpoint,
+                region: "cn-east-1".parse().unwrap(),
+            },
+            secret_bindings: vec![],
+            network_policy: Some(exact_revision(ResourceKind::PolicyRevision, "7d03", '4')),
+            tls_policy: Some(exact_revision(ResourceKind::PolicyRevision, "7d04", '5')),
+            trust_policy: Some(exact_revision(ResourceKind::PolicyRevision, "7d05", '6')),
+            parser_policy: exact_revision(ResourceKind::PolicyRevision, "7d06", '7'),
+            chunker_policy: exact_revision(ResourceKind::PolicyRevision, "7d07", '8'),
+            embedding_model_deployment: None,
+            ranking_policy: exact_revision(ResourceKind::PolicyRevision, "7d08", '9'),
+            data_policy: exact_revision(ResourceKind::PolicyRevision, "7d09", 'a'),
+            conformance_evidence: qualification_artifact(),
+        };
+        closure.validate().unwrap();
+        let exact_refs = DeploymentClosure::ContextSourceInterface(closure.clone())
+            .exact_version_refs()
+            .into_iter()
+            .map(|exact| exact.revision_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(exact_refs.contains(
+            &closure
+                .tls_policy
+                .as_ref()
+                .expect("remote TLS policy")
+                .revision_id
+        ));
+        assert!(exact_refs.contains(
+            &closure
+                .trust_policy
+                .as_ref()
+                .expect("remote trust policy")
+                .revision_id
+        ));
+
+        closure.tls_policy = None;
+        assert_eq!(
+            closure.validate(),
+            Err(ResourceContractError::InvalidContextContract)
+        );
+        closure.tls_policy = Some(exact_revision(ResourceKind::PolicyRevision, "7d04", '5'));
+        let ContextBackendBinding::RemoteSearch {
+            endpoint_identity_digest,
+            ..
+        } = &mut closure.backend
+        else {
+            unreachable!()
+        };
+        *endpoint_identity_digest = digest('0');
+        assert_eq!(
+            closure.validate(),
+            Err(ResourceContractError::InvalidContextContract)
+        );
     }
 
     #[test]

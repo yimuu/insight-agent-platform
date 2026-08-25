@@ -172,6 +172,7 @@ impl ContextWorkerDriver {
         let candidates = self
             .repository
             .scan_claimable_native_context_jobs(
+                &self.pools.snapshot().worker_manifest_digest,
                 &self.adapter.installed_adapter_digest,
                 &self.adapter.adapter_contract_digest,
                 u16::try_from(reservation.claim_limit())
@@ -194,6 +195,7 @@ impl ContextWorkerDriver {
             .repository
             .claim_context_jobs(ClaimContextJobs {
                 worker_process_generation_id: process.worker_process_generation_id.clone(),
+                worker_manifest_digest: process.worker_manifest_digest.clone(),
                 slots,
                 lease_policy: LeasePolicy {
                     requested_milliseconds: self.config.lease_milliseconds,

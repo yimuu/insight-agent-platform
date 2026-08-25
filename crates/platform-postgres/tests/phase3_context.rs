@@ -538,6 +538,7 @@ struct Fixture {
     node_id: ResourceId,
     text2sql_node_id: ResourceId,
     context_deployment: ExactDeploymentRef,
+    context_worker_manifest_digest: Sha256Digest,
     interface_revision: ExactVersionRef,
     readonly_capability_deployment: ExactDeploymentRef,
     readonly_capability_interface: ExactVersionRef,
@@ -874,6 +875,14 @@ async fn seed_fixture_with_native_adapter(
     )
     .await;
 
+    let context_worker_manifest_digest = native_adapter
+        .as_ref()
+        .map(|(installed_adapter_digest, _)| {
+            native_context_worker_manifest(installed_adapter_digest.clone())
+                .canonical_digest()
+                .unwrap()
+        })
+        .unwrap_or_else(|| named_digest("context-worker-manifest"));
     let backend_binding = native_adapter.map_or_else(
         || ContextBackendBinding::SqlCatalog {
             database_identity_digest: database_identity_digest.clone(),
@@ -887,9 +896,12 @@ async fn seed_fixture_with_native_adapter(
     let context_closure = ContextDeploymentClosure {
         implementation: implementation_revision,
         interface: interface_revision.clone(),
+        required_worker_manifest_digest: context_worker_manifest_digest.clone(),
         backend: backend_binding,
         secret_bindings: vec![],
         network_policy: None,
+        tls_policy: None,
+        trust_policy: None,
         parser_policy: parser_policy.clone(),
         chunker_policy,
         embedding_model_deployment: None,
@@ -1349,6 +1361,7 @@ async fn seed_fixture_with_native_adapter(
         node_id,
         text2sql_node_id,
         context_deployment,
+        context_worker_manifest_digest,
         interface_revision,
         readonly_capability_deployment,
         readonly_capability_interface,
@@ -1850,11 +1863,30 @@ async fn claim(
     job_id: ResourceId,
     base: u16,
 ) -> ClaimEvidence {
+    claim_with_manifest(
+        repository,
+        fixture,
+        job_id,
+        base,
+        fixture.context_worker_manifest_digest.clone(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn claim_with_manifest(
+    repository: &PgRepository,
+    fixture: &Fixture,
+    job_id: ResourceId,
+    base: u16,
+    worker_manifest_digest: Sha256Digest,
+) -> Result<ClaimEvidence, RepositoryError> {
     let worker_id = id(ResourceKind::WorkerProcessGeneration, base);
     let lease_token = named_digest(&format!("lease-{base}"));
     let mut claimed = repository
         .claim_context_jobs(ClaimContextJobs {
             worker_process_generation_id: worker_id.clone(),
+            worker_manifest_digest,
             slots: vec![ContextClaimSlot {
                 tenant_id: fixture.tenant_id.clone(),
                 job_id,
@@ -1875,14 +1907,13 @@ async fn claim(
                 hard_maximum_milliseconds: 60_000,
             },
         })
-        .await
-        .unwrap();
+        .await?;
     assert_eq!(claimed.len(), 1);
-    ClaimEvidence {
+    Ok(ClaimEvidence {
         claimed: claimed.pop().unwrap(),
         worker_id,
         lease_token,
-    }
+    })
 }
 
 fn output(
@@ -2435,6 +2466,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     assert_eq!(prepared.job.state, JobState::Ready.as_str());
     assert!(repository
         .scan_claimable_native_context_jobs(
+            &fixture.context_worker_manifest_digest,
             &named_digest("uninstalled-native-adapter"),
             &named_digest("wrong-backend-contract"),
             1,
@@ -2442,6 +2474,26 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         .await
         .unwrap()
         .is_empty());
+    assert!(matches!(
+        claim_with_manifest(
+            &repository,
+            &fixture,
+            job_id.clone(),
+            0x130,
+            named_digest("wrong-context-worker-manifest"),
+        )
+        .await,
+        Err(RepositoryError::Conflict("Context Worker manifest"))
+    ));
+    let untouched: (String, i32, bool, bool) = sqlx::query_as(
+        "SELECT state, attempt_no, worker_id IS NULL, quota_reservation_id IS NULL FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(untouched, ("ready".to_owned(), 0, true, true));
     let first_claim = claim(&repository, &fixture, job_id.clone(), 0x130).await;
     assert_eq!(first_claim.claimed.query.state, ContextQueryState::InFlight);
     assert_eq!(first_claim.claimed.job.attempt_no, 1);
@@ -3313,15 +3365,7 @@ fn native_context_process_config(
     installed_adapter_digest: Sha256Digest,
     adapter_contract_digest: Sha256Digest,
 ) -> serde_json::Value {
-    let manifest = WorkerManifest {
-        manifest_version: WORKER_MANIFEST_VERSION,
-        worker_role: "context-worker".to_owned(),
-        work_class: WorkClass::Context,
-        adapter_runtime_digest: installed_adapter_digest.clone(),
-        protocol_version: WORKER_PROTOCOL_VERSION,
-        max_concurrency: 4,
-        critical_control_reserved_slots: 1,
-    };
+    let manifest = native_context_worker_manifest(installed_adapter_digest.clone());
     json!({
         "schema_version": 1,
         "worker_manifest": manifest,
@@ -3346,6 +3390,18 @@ fn native_context_process_config(
         "failure_backoff_milliseconds": 5,
         "drain_grace_milliseconds": 1000
     })
+}
+
+fn native_context_worker_manifest(installed_adapter_digest: Sha256Digest) -> WorkerManifest {
+    WorkerManifest {
+        manifest_version: WORKER_MANIFEST_VERSION,
+        worker_role: "context-worker".to_owned(),
+        work_class: WorkClass::Context,
+        adapter_runtime_digest: installed_adapter_digest,
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        max_concurrency: 4,
+        critical_control_reserved_slots: 1,
+    }
 }
 
 fn write_context_process_config(

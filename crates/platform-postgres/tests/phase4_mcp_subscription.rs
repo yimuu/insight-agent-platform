@@ -1043,6 +1043,7 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
     let context_closure = ContextDeploymentClosure {
         implementation: implementation_revision,
         interface: interface_revision.clone(),
+        required_worker_manifest_digest: named_digest("context-worker-manifest"),
         backend: ContextBackendBinding::McpResources {
             mcp_deployment: mcp_deployment.clone(),
             discovery_snapshot_id: snapshot.snapshot_id.clone(),
@@ -1050,6 +1051,8 @@ async fn seed(pool: &PgPool, repository: &PgRepository, now: DateTime<Utc>) -> F
         },
         secret_bindings: vec![],
         network_policy: None,
+        tls_policy: None,
+        trust_policy: None,
         parser_policy,
         chunker_policy,
         embedding_model_deployment: None,

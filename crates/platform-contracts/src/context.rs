@@ -1,7 +1,7 @@
 use crate::{
-    canonical_digest, ArtifactRef, ContextBackendKind, ContextCitationStrength,
-    ContextConsistencyMode, DataClassification, DataRegion, ExactDeploymentRef, ExactVersionRef,
-    ResourceId, ResourceKind, SecretPurpose, Sha256Digest,
+    canonical_digest, ArtifactRef, CanonicalHttpEndpoint, ContextBackendKind,
+    ContextCitationStrength, ContextConsistencyMode, DataClassification, DataRegion,
+    ExactDeploymentRef, ExactVersionRef, ResourceId, ResourceKind, SecretPurpose, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, error::Error, fmt};
@@ -249,6 +249,7 @@ pub enum ContextBackendBinding {
         region: DataRegion,
     },
     RemoteSearch {
+        endpoint: CanonicalHttpEndpoint,
         endpoint_identity_digest: Sha256Digest,
         region: DataRegion,
     },
@@ -289,6 +290,15 @@ impl ContextBackendBinding {
                 .map_err(|_| ContextContractError::InvalidBackend)?;
         }
         match self {
+            Self::RemoteSearch {
+                endpoint,
+                endpoint_identity_digest,
+                ..
+            } if endpoint.validate().is_err()
+                || endpoint.canonical_digest().as_ref() != Ok(endpoint_identity_digest) =>
+            {
+                Err(ContextContractError::InvalidBackend)
+            }
             Self::McpResources {
                 mcp_deployment,
                 discovery_snapshot_id,
