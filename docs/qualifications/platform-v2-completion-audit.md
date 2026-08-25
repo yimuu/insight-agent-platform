@@ -36,6 +36,7 @@ Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact
 | 已有部署 | 11个chart覆盖全部15个ComponentRole、17个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
 | HTTP observability | shared bounded-label owner；全部17个ComponentRole workload pool及Sandbox两种process attestor具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency | process wiring与静态部署闭合，不代表真实scrape或完整业务observability |
 | Dashboard/alerts | 独立chart提供role-filtered process/HTTP dashboard、4条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代业务SLI或真实alert delivery |
+| Telemetry redaction | production Rust source静态门禁拒绝identity、Secret、prompt/response、object key及URL进入structured tracing或插值日志；现有LLM/SSE/MCP OAuth/conversation/worker启动日志已清理 | source-level L1负向合同；不替代动态payload审计、trace propagation、RBAC/retention或production验证 |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator；live topology/workload preflight对照Candidate/Capacity并拒绝rollout、image、config、identity、安全和容量漂移 | 可验证证据形状与preflight行为，不证明任一外部门禁通过 |
 | Runbooks | production dependency recovery与GitOps clean-cut手册已提交 | 操作准备完成，execution evidence pending |
@@ -161,8 +162,8 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 1. 15个ComponentRole已由17个独立workload pool闭合；Candidate image与`deployment_config_digest`已进入全局render/live preflight门禁，
    但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
-2. 全部17个ComponentRole workload pool及Sandbox process attestor已有shared process metrics；仍缺低基数queue/dependency/recovery业务指标、
-   完整trace propagation/redaction门禁和production scrape证据。
+2. 全部17个ComponentRole workload pool及Sandbox process attestor已有shared process metrics，production tracing/log字段已有静态脱敏门禁；仍缺
+   低基数queue/dependency/recovery业务指标、跨进程trace propagation、动态payload采集审计和production scrape证据。
 3. 全部17个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP dashboard、四条symptom-first PrometheusRule及逐alert runbook已闭合，
    但queue/dependency/recovery/permit业务series对应的panel/alert仍待指标owner接线后补齐。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
@@ -181,9 +182,9 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 按上游到下游执行，且每批通过后提交：
 
-1. MCP OAuth Callback/Cleanup/Egress与subscription真实endpoint的多进程L3 kill/restart；
-2. 将已闭合的shared low-cardinality HTTP observability boundary逐role接入，并补queue/dependency metrics、trace/redaction；
-3. ServiceMonitor/dashboard、symptom-first alerts及逐alert runbook；
+1. 补queue/dependency/recovery/permit业务指标、跨进程trace propagation和动态payload采集审计；
+2. MCP OAuth Callback/Cleanup/Egress与subscription真实endpoint的多进程L3 kill/restart；
+3. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
 4. reproducible signed candidate pipeline；
 5. 外部L4～L6、GitOps clean cut、current文档与规范归档。
 

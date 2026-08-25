@@ -6198,7 +6198,7 @@ impl RunService {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&conversation_id);
-                tracing::warn!(conversation_id, "full Conversation summary worker panicked");
+                tracing::warn!("full Conversation summary worker panicked");
             }
         });
     }
@@ -6245,11 +6245,7 @@ impl RunService {
                         .metrics
                         .full_conversation_summary_failed
                         .fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(
-                        conversation_id = conversation.conversation_id.as_str(),
-                        code = error.code(),
-                        "full Conversation summary job failed"
-                    );
+                    tracing::warn!(code = error.code(), "full Conversation summary job failed");
                 }
             }
             if !self.finish_full_conversation_summary_pass(&conversation.conversation_id, true) {

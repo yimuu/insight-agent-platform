@@ -279,10 +279,6 @@ async fn run() -> Result<(), ProcessError> {
     )
     .parse()
     .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let manifest_digest = config
-        .worker_manifest
-        .canonical_digest()
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
     let pools = LocalWorkerPools::new(
         config.worker_manifest.clone(),
         process_generation_id.clone(),
@@ -313,10 +309,7 @@ async fn run() -> Result<(), ProcessError> {
             .await
     });
     metrics.mark_ready();
-    eprintln!(
-        "platform-orchestration-worker started generation={} manifest={}",
-        process_generation_id, manifest_digest
-    );
+    eprintln!("platform-orchestration-worker started");
     let mut health = tokio::time::interval(Duration::from_secs(1));
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let shutdown = shutdown_signal();

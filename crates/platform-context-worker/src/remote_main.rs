@@ -178,7 +178,7 @@ async fn run() -> Result<(), ProcessError> {
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityFailed)?;
-    eprintln!("platform-remote-context-worker started generation={process_generation_id}");
+    eprintln!("platform-remote-context-worker started");
     let cancellation = CancellationToken::new();
     let worker_cancellation = cancellation.child_token();
     let mut worker = tokio::spawn(async move { driver.run(worker_cancellation).await });

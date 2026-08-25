@@ -202,10 +202,6 @@ async fn run() -> Result<(), ProcessError> {
         process_generation_id.clone(),
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let manifest_digest = config
-        .worker_manifest
-        .canonical_digest()
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
     let claim_repository = Arc::new(PgRepository::new(business_pool.clone()));
     let commit_repository = PgRepository::new(business_pool.clone());
     let heartbeat_repository = Arc::new(PgRepository::new(critical_control_pool.clone()));
@@ -234,10 +230,7 @@ async fn run() -> Result<(), ProcessError> {
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityFailed)?;
-    eprintln!(
-        "platform-capability-native-worker started generation={} manifest={}",
-        process_generation_id, manifest_digest
-    );
+    eprintln!("platform-capability-native-worker started");
 
     let cancellation = CancellationToken::new();
     let worker_cancellation = cancellation.child_token();

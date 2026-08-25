@@ -70,6 +70,8 @@ jobs:
         run: bash scripts/check-platform-artifact-deployment.sh
       - name: Check observability dashboards and alerts
         run: bash scripts/check-platform-observability-deployment.sh
+      - name: Check production telemetry redaction
+        run: python3 scripts/check-platform-observability-redaction.py
       - name: Check callback API deployment boundary
         run: bash scripts/check-platform-callback-deployment.sh
       - name: Check MCP cleanup worker deployment boundary

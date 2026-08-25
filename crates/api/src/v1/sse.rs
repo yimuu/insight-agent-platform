@@ -385,7 +385,6 @@ fn run_stream_from_attached(
             let public_event = tokio::select! {
                 _ = sender.closed() => {
                     tracing::debug!(
-                        run_id = dispatcher.run_id(),
                         code = "SSE_OUTBOUND_CLOSED",
                         "run-stream client closed the bounded output"
                     );
@@ -393,7 +392,6 @@ fn run_stream_from_attached(
                 }
                 _ = conversation_privacy_cancelled(dispatcher.conversation_privacy()) => {
                     tracing::debug!(
-                        run_id = dispatcher.run_id(),
                         code = "SSE_CONVERSATION_PRIVACY_DELETED",
                         "Run stream stopped before publishing more Conversation content"
                     );
@@ -424,11 +422,9 @@ fn run_stream_from_attached(
             let ends_stream = public_event.ends_stream();
             let encoded = match encode_event(&public_event) {
                 Ok(encoded) => encoded,
-                Err(error) => {
+                Err(_) => {
                     tracing::error!(
-                        run_id = dispatcher.run_id(),
                         code = "SSE_ENCODE_FAILED",
-                        error = %error,
                         "run-stream event encoding failed"
                     );
                     break;
@@ -448,7 +444,6 @@ fn run_stream_from_attached(
                 Ok(Ok(())) => {}
                 Ok(Err(_)) | Err(_) => {
                     tracing::debug!(
-                        run_id = dispatcher.run_id(),
                         code = "SSE_OUTBOUND_UNWRITABLE",
                         "run-stream client stopped accepting bounded output"
                     );

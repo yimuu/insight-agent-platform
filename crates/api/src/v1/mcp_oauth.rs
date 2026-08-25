@@ -681,16 +681,12 @@ async fn delete_connection(
                 .await
                 .is_err();
             if revoke_failed {
-                tracing::warn!(
-                    server_id = %server_id,
-                    "MCP OAuth remote revocation failed before local privacy deletion"
-                );
+                tracing::warn!("MCP OAuth remote revocation failed before local privacy deletion");
             }
         }
         (Some(_), Ok(_)) => {}
         _ => {
             tracing::warn!(
-                server_id = %server_id,
                 "MCP OAuth token or metadata was unavailable before local privacy deletion"
             );
         }

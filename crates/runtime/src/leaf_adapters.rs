@@ -731,12 +731,7 @@ impl LeafTaskExecutor for LlmTaskExecutor {
         };
         tracing::info!(
             event_name = "llm.request_prepared",
-            run_id = request.run_id().as_str(),
-            task_id = request.task_id().as_str(),
-            provider_route = model_selector.provider(),
-            model_id = model_selector.id(),
             adapter = "core.llm",
-            worker_version = request.worker_version().as_str(),
             request_mode = match request_mode {
                 ChatRequestMode::Complete => "complete",
                 ChatRequestMode::Streaming => "streaming",

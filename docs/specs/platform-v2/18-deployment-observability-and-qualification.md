@@ -350,6 +350,10 @@ failure ratio/p95 latency四条symptom-first alert。全部alert有stable owner/
 高基数/Secret label、非法threshold、非HTTPS runbook及缺失discovery label。该证据不发明尚不存在的queue/dependency/recovery/permit series，
 也不替代Prometheus production scrape、alert delivery或L4演练。
 
+r264移除LLM、SSE、MCP OAuth、conversation及worker startup production telemetry中的高基数资源/进程标识、manifest digest和原始编码错误，
+并新增source-level CI门禁，拒绝规范列出的identity、Secret、prompt/response、object key及URL字段进入structured tracing或插值日志。
+相关crate tests与strict Clippy通过。该负向静态证据不替代跨进程trace propagation、动态payload采集审计、RBAC/retention或production验证。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

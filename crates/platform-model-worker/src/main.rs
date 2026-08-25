@@ -302,10 +302,6 @@ async fn run() -> Result<(), ProcessError> {
         process_generation_id.clone(),
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let manifest_digest = config
-        .worker_manifest
-        .canonical_digest()
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
     let egress = Arc::new(EgressBrokerGrpcClient::new(
         connect_egress(&config).await?,
         config.rpc_limits()?,
@@ -382,10 +378,7 @@ async fn run() -> Result<(), ProcessError> {
         .await
         .map_err(|_| ProcessError::ObservabilityFailed)?;
 
-    eprintln!(
-        "platform-model-worker started generation={} manifest={}",
-        process_generation_id, manifest_digest
-    );
+    eprintln!("platform-model-worker started");
     let cancellation = CancellationToken::new();
     let mut components = JoinSet::new();
     let driver_cancellation = cancellation.child_token();

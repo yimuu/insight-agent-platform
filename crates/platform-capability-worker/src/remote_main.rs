@@ -475,10 +475,6 @@ async fn run() -> Result<(), ProcessError> {
         process_generation_id.clone(),
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let manifest_digest = config
-        .worker_manifest
-        .canonical_digest()
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
     let egress = Arc::new(EgressBrokerGrpcClient::new(
         connect_egress(&config).await?,
         config.rpc_limits()?,
@@ -563,10 +559,7 @@ async fn run() -> Result<(), ProcessError> {
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityFailed)?;
-    eprintln!(
-        "platform-capability-remote-worker started generation={} manifest={}",
-        process_generation_id, manifest_digest
-    );
+    eprintln!("platform-capability-remote-worker started");
 
     let cancellation = CancellationToken::new();
     let worker_cancellation = cancellation.child_token();

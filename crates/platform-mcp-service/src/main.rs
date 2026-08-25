@@ -213,10 +213,7 @@ async fn run() -> Result<(), ProcessError> {
             .await
     });
     metrics.mark_ready();
-    eprintln!(
-        "platform-mcp-host started address={} server_name={}",
-        address, config.tls_server_name
-    );
+    eprintln!("platform-mcp-host started");
     tokio::select! {
         signal = shutdown_signal() => {
             signal?;
