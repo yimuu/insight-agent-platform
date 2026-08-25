@@ -410,7 +410,7 @@ impl CapabilityBackendPort for McpCapabilityAdapter {
             .host
             .execute(&prepared.host_contract, &prepared.operation)
             .await
-            .map_err(|_| contract_failure(CapabilityDispatchError::MalformedAdapterResponse))?;
+            .map_err(|failure| mcp_host_failure(request, failure))?;
         if matches!(outcome, McpOperationOutcome::RemoteTask { .. })
             && !prepared.tool_contract.supports_task
         {
@@ -650,5 +650,40 @@ fn resolution_failure(failure: McpExecutionContractResolutionError) -> Capabilit
         | McpExecutionContractResolutionError::NotFoundOrChanged => {
             contract_failure(CapabilityDispatchError::BackendContractMismatch)
         }
+    }
+}
+
+fn mcp_host_failure(
+    request: &CapabilityAdapterRequest,
+    failure: insight_platform_mcp_host::McpHostError,
+) -> CapabilityAdapterFailure {
+    match failure {
+        insight_platform_mcp_host::McpHostError::AuthorityUnavailable => CapabilityAdapterFailure {
+            class: super::CapabilityAdapterFailureClass::RetryableBeforeDispatch,
+            safe_code: "mcp_host_unavailable".to_owned(),
+            safe_message: "MCP Host is temporarily unavailable".to_owned(),
+            evidence_digest: insight_platform_contracts::canonical_digest(&serde_json::json!({
+                "domain": "mcp_host_unavailable",
+                "schema_version": 1,
+            }))
+            .expect("static MCP adapter evidence is canonical")
+            .parse()
+            .expect("canonical digest is SHA-256"),
+            external_identity_digest: None,
+        },
+        insight_platform_mcp_host::McpHostError::CompletionUnknown => CapabilityAdapterFailure {
+            class: super::CapabilityAdapterFailureClass::RetryableAfterDispatch,
+            safe_code: "mcp_host_completion_unknown".to_owned(),
+            safe_message: "MCP Host completion could not be observed".to_owned(),
+            evidence_digest: insight_platform_contracts::canonical_digest(&serde_json::json!({
+                "domain": "mcp_host_completion_unknown",
+                "schema_version": 1,
+            }))
+            .expect("static MCP adapter evidence is canonical")
+            .parse()
+            .expect("canonical digest is SHA-256"),
+            external_identity_digest: Some(request.idempotency_key_digest.clone()),
+        },
+        _ => contract_failure(CapabilityDispatchError::MalformedAdapterResponse),
     }
 }

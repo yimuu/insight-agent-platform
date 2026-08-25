@@ -1242,6 +1242,8 @@ fn static_digest(domain: &str) -> Sha256Digest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpHostError {
+    AuthorityUnavailable,
+    CompletionUnknown,
     InvalidAuthorization,
     InvalidDiscovery,
     InvalidExecutionContract,
@@ -1256,6 +1258,8 @@ pub enum McpHostError {
 impl fmt::Display for McpHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::AuthorityUnavailable => "MCP Host authority is unavailable",
+            Self::CompletionUnknown => "MCP Host completion could not be observed",
             Self::InvalidAuthorization => "MCP authorization context is invalid",
             Self::InvalidDiscovery => "MCP Discovery Snapshot authority is invalid",
             Self::InvalidExecutionContract => "MCP execution contract is invalid",

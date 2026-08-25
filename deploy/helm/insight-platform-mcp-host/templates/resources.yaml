@@ -1,0 +1,127 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    insight.platform/workload-namespace: mcp-host
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "insight-platform-mcp-host.name" . }}, namespace: {{ .Values.namespace }}}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata: {name: {{ include "insight-platform-mcp-host.name" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  selector:
+    {{- include "insight-platform-mcp-host.labels" . | nindent 4 }}
+  ports: [{name: grpc-mtls, protocol: TCP, port: {{ int .Values.service.port }}, targetPort: grpc-mtls}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: {{ include "insight-platform-mcp-host.name" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  replicas: {{ int .Values.replicas }}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-mcp-host.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "insight-platform-mcp-host.labels" . | nindent 8 }}
+        insight.platform/workload-role: mcp-host
+    spec:
+      serviceAccountName: {{ include "insight-platform-mcp-host.name" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "insight-platform-mcp-host.labels" . | nindent 14 }}
+      containers:
+        - name: mcp-host
+          image: {{ include "insight-platform-mcp-host.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-mcp-host"]
+          ports: [{name: grpc-mtls, containerPort: {{ int .Values.service.port }}, protocol: TCP}]
+          env:
+            - {name: PLATFORM_MCP_HOST_CONFIG, value: /etc/insight/config/mcp-host.json}
+            - {name: PLATFORM_MCP_HOST_CONFIG_DIGEST, value: {{ .Values.config.digest | quote }}}
+            - {name: PLATFORM_MCP_HOST_SERVER_CLIENT_CA_PATH, value: /etc/insight/server-tls/client-ca.pem}
+            - {name: PLATFORM_MCP_HOST_SERVER_CERT_PATH, value: /etc/insight/server-tls/server.pem}
+            - {name: PLATFORM_MCP_HOST_SERVER_KEY_PATH, value: /etc/insight/server-tls/server-key.pem}
+            - {name: PLATFORM_MCP_HOST_EGRESS_CA_PATH, value: /etc/insight/egress-tls/ca.pem}
+            - {name: PLATFORM_MCP_HOST_EGRESS_CERT_PATH, value: /etc/insight/egress-tls/client.pem}
+            - {name: PLATFORM_MCP_HOST_EGRESS_KEY_PATH, value: /etc/insight/egress-tls/client-key.pem}
+          startupProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: server-tls, mountPath: /etc/insight/server-tls, readOnly: true}
+            - {name: egress-tls, mountPath: /etc/insight/egress-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.config.existingConfigMap }}
+            items: [{key: {{ .Values.config.fileKey }}, path: mcp-host.json}]
+        - name: server-tls
+          secret:
+            secretName: {{ .Values.serverTls.existingSecret }}
+            items:
+              - {key: {{ .Values.serverTls.keys.clientCa }}, path: client-ca.pem}
+              - {key: {{ .Values.serverTls.keys.certificate }}, path: server.pem}
+              - {key: {{ .Values.serverTls.keys.privateKey }}, path: server-key.pem}
+        - name: egress-tls
+          secret:
+            secretName: {{ .Values.egressTls.existingSecret }}
+            items:
+              - {key: {{ .Values.egressTls.keys.ca }}, path: ca.pem}
+              - {key: {{ .Values.egressTls.keys.certificate }}, path: client.pem}
+              - {key: {{ .Values.egressTls.keys.privateKey }}, path: client-key.pem}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+{{- if .Values.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ include "insight-platform-mcp-host.name" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  minAvailable: {{ int .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-mcp-host.labels" . | nindent 6 }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: {{ include "insight-platform-mcp-host.name" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "insight-platform-mcp-host.name" . }}}
+  minReplicas: {{ int .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ int .Values.autoscaling.maxReplicas }}
+  behavior: {scaleDown: {stabilizationWindowSeconds: 300}, scaleUp: {stabilizationWindowSeconds: 30}}
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: {{ int .Values.autoscaling.targetCPUUtilizationPercentage }}}}
+{{- end }}

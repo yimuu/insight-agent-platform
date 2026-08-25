@@ -57,6 +57,9 @@ spec:
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH, value: /etc/insight/egress-tls/ca.pem}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH, value: /etc/insight/egress-tls/client.pem}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH, value: /etc/insight/egress-tls/client-key.pem}
+            - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH, value: /etc/insight/mcp-host-tls/ca.pem}
+            - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH, value: /etc/insight/mcp-host-tls/client.pem}
+            - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH, value: /etc/insight/mcp-host-tls/client-key.pem}
           startupProbe: {exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
           readinessProbe: {exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
           livenessProbe: {exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
@@ -68,6 +71,7 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
             - {name: egress-tls, mountPath: /etc/insight/egress-tls, readOnly: true}
+            - {name: mcp-host-tls, mountPath: /etc/insight/mcp-host-tls, readOnly: true}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - name: config
@@ -81,6 +85,13 @@ spec:
               - {key: {{ .Values.egressTls.keys.ca }}, path: ca.pem}
               - {key: {{ .Values.egressTls.keys.certificate }}, path: client.pem}
               - {key: {{ .Values.egressTls.keys.privateKey }}, path: client-key.pem}
+        - name: mcp-host-tls
+          secret:
+            secretName: {{ .Values.mcpHostTls.existingSecret }}
+            items:
+              - {key: {{ .Values.mcpHostTls.keys.ca }}, path: ca.pem}
+              - {key: {{ .Values.mcpHostTls.keys.certificate }}, path: client.pem}
+              - {key: {{ .Values.mcpHostTls.keys.privateKey }}, path: client-key.pem}
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
 {{- if .Values.podDisruptionBudget.enabled }}
 ---

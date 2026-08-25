@@ -9,20 +9,24 @@ use insight_platform_capability_adapters::{
     CapabilityAdapterWorker, CapabilityDispatcher, GrpcCapabilityAdapter, GrpcNetworkTransport,
     HttpCapabilityAdapter, HttpNetworkTransport, InstalledGrpcCodecDescriptor,
     InstalledGrpcCodecRegistry, InstalledHttpCodecDescriptor, InstalledHttpCodecRegistry,
-    InstalledNativeRegistry,
+    InstalledMcpToolCodecDescriptor, InstalledMcpToolCodecRegistry, InstalledNativeRegistry,
+    McpCapabilityAdapter,
 };
 use insight_platform_capability_worker::{
     builtin_json_codec_module_digest, install_builtin_grpc_json_codecs,
-    install_builtin_http_json_codecs, CapabilityWorkerDriver, CapabilityWorkerDriverConfig,
-    CapabilityWorkerDriverTiming, RegisteredCapabilityJobExecutor,
+    install_builtin_http_json_codecs, install_builtin_mcp_json_codecs, CapabilityWorkerDriver,
+    CapabilityWorkerDriverConfig, CapabilityWorkerDriverTiming, RegisteredCapabilityJobExecutor,
     UuidCapabilityWorkerIdentityFactory, BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
     CAPABILITY_REMOTE_WORKER_ROLE,
 };
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
-    ResourceKind, Sha256Digest, WorkClass, WorkerManifest, WORKER_PROTOCOL_VERSION,
+    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits,
+    McpTransportKind, ResourceId, ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
+    WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
+use insight_platform_mcp_host::{McpExecutionContractResolver, McpHostClient};
+use insight_platform_mcp_rpc::{McpHostGrpcClient, McpHostInternalRpcLimits};
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_worker::LocalWorkerPools;
 use serde::{Deserialize, Serialize};
@@ -42,6 +46,9 @@ const DATABASE_URL_ENV: &str = "PLATFORM_CAPABILITY_REMOTE_WORKER_DATABASE_URL";
 const EGRESS_CA_PATH_ENV: &str = "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH";
 const EGRESS_CERT_PATH_ENV: &str = "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH";
 const EGRESS_KEY_PATH_ENV: &str = "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH";
+const MCP_HOST_CA_PATH_ENV: &str = "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH";
+const MCP_HOST_CERT_PATH_ENV: &str = "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH";
+const MCP_HOST_KEY_PATH_ENV: &str = "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
 const MAX_INSTALLED_CODECS: usize = 64;
@@ -53,8 +60,10 @@ struct ProcessConfig {
     worker_manifest: WorkerManifest,
     installed_http_codecs: Vec<InstalledHttpCodecConfig>,
     installed_grpc_codecs: Vec<InstalledGrpcCodecConfig>,
+    installed_mcp_codecs: Vec<InstalledMcpCodecConfig>,
     database: DatabaseConfig,
     egress: EgressConfig,
+    mcp_host: McpHostConfig,
     timing: TimingConfig,
 }
 
@@ -122,6 +131,40 @@ impl From<&InstalledGrpcCodecConfig> for InstalledGrpcCodecDescriptor {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstalledMcpCodecConfig {
+    codec_id: String,
+    codec_version: String,
+    module_digest: Sha256Digest,
+    worker_protocol_version: u32,
+    descriptor_digest: Sha256Digest,
+    remote_tool_name: String,
+    remote_input_schema_digest: Sha256Digest,
+    output_mapping_digest: Sha256Digest,
+    protocol_profile_id: ResourceId,
+    protocol_profile_digest: Sha256Digest,
+    discovery_semantic_evidence_digest: Sha256Digest,
+}
+
+impl From<&InstalledMcpCodecConfig> for InstalledMcpToolCodecDescriptor {
+    fn from(value: &InstalledMcpCodecConfig) -> Self {
+        Self {
+            codec_id: value.codec_id.clone(),
+            codec_version: value.codec_version.clone(),
+            module_digest: value.module_digest.clone(),
+            worker_protocol_version: value.worker_protocol_version,
+            descriptor_digest: value.descriptor_digest.clone(),
+            remote_tool_name: value.remote_tool_name.clone(),
+            remote_input_schema_digest: value.remote_input_schema_digest.clone(),
+            output_mapping_digest: value.output_mapping_digest.clone(),
+            protocol_profile_id: value.protocol_profile_id.clone(),
+            protocol_profile_digest: value.protocol_profile_digest.clone(),
+            discovery_semantic_evidence_digest: value.discovery_semantic_evidence_digest.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DatabaseConfig {
@@ -144,6 +187,16 @@ struct EgressConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct McpHostConfig {
+    endpoint: String,
+    tls_server_name: String,
+    connect_timeout_milliseconds: u64,
+    request_timeout_milliseconds: u64,
+    maximum_rpc_message_bytes: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TimingConfig {
     initial_scan_delay_milliseconds: u64,
     receipt_ttl_milliseconds: u64,
@@ -158,6 +211,7 @@ struct InstalledCodecClosure<'a> {
     schema_version: u32,
     http: &'a [InstalledHttpCodecConfig],
     grpc: &'a [InstalledGrpcCodecConfig],
+    mcp: &'a [InstalledMcpCodecConfig],
 }
 
 impl ProcessConfig {
@@ -198,11 +252,13 @@ impl ProcessConfig {
             .installed_http_codecs
             .len()
             .checked_add(self.installed_grpc_codecs.len())
+            .and_then(|count| count.checked_add(self.installed_mcp_codecs.len()))
             .ok_or(ProcessError::InvalidConfiguration)?;
         let installed_value = serde_json::to_value(InstalledCodecClosure {
             schema_version: 1,
             http: &self.installed_http_codecs,
             grpc: &self.installed_grpc_codecs,
+            mcp: &self.installed_mcp_codecs,
         })
         .map_err(|_| ProcessError::InvalidConfiguration)?;
         let installed_digest: Sha256Digest = canonical_digest(&installed_value)
@@ -216,6 +272,7 @@ impl ProcessConfig {
             || self.worker_manifest.adapter_runtime_digest != installed_digest
             || self.installed_http_codecs.is_empty()
             || self.installed_grpc_codecs.is_empty()
+            || self.installed_mcp_codecs.is_empty()
             || codec_count > MAX_INSTALLED_CODECS
             || self.database.business_max_connections == 0
             || self.database.critical_control_max_connections == 0
@@ -232,6 +289,7 @@ impl ProcessConfig {
         }
         self.validate_codecs()?;
         self.validate_egress()?;
+        self.validate_mcp_host()?;
         self.driver_config()?;
         Ok(())
     }
@@ -259,6 +317,19 @@ impl ProcessConfig {
                 || !valid_grpc_name(&configured.service_name)
                 || !valid_grpc_name(&configured.method_name)
                 || !grpc.insert(descriptor)
+            {
+                return Err(ProcessError::InvalidConfiguration);
+            }
+        }
+        let mut mcp = BTreeSet::new();
+        for configured in &self.installed_mcp_codecs {
+            let descriptor = InstalledMcpToolCodecDescriptor::from(configured);
+            if configured.codec_id != BUILTIN_JSON_CODEC_ID
+                || configured.codec_version != BUILTIN_JSON_CODEC_VERSION
+                || configured.module_digest != builtin_json_codec_module_digest()
+                || configured.worker_protocol_version != WORKER_PROTOCOL_VERSION
+                || configured.protocol_profile_id.kind() != ResourceKind::PolicyRevision
+                || !mcp.insert(descriptor)
             {
                 return Err(ProcessError::InvalidConfiguration);
             }
@@ -294,6 +365,33 @@ impl ProcessConfig {
             self.egress.maximum_rpc_payload_bytes,
         )
         .map_err(|_| ProcessError::InvalidConfiguration)
+    }
+
+    fn validate_mcp_host(&self) -> Result<(), ProcessError> {
+        let endpoint =
+            Url::parse(&self.mcp_host.endpoint).map_err(|_| ProcessError::InvalidConfiguration)?;
+        if endpoint.scheme() != "https"
+            || endpoint.host_str().is_none()
+            || endpoint.port().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.path() != "/"
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || !valid_tls_server_name(&self.mcp_host.tls_server_name)
+            || self.mcp_host.connect_timeout_milliseconds == 0
+            || self.mcp_host.connect_timeout_milliseconds > 30_000
+            || self.mcp_host.request_timeout_milliseconds == 0
+            || self.mcp_host.request_timeout_milliseconds > 120_000
+        {
+            return Err(ProcessError::InvalidConfiguration);
+        }
+        self.mcp_host_rpc_limits().map(|_| ())
+    }
+
+    fn mcp_host_rpc_limits(&self) -> Result<McpHostInternalRpcLimits, ProcessError> {
+        McpHostInternalRpcLimits::new(self.mcp_host.maximum_rpc_message_bytes)
+            .map_err(|_| ProcessError::InvalidConfiguration)
     }
 
     fn driver_config(&self) -> Result<CapabilityWorkerDriverConfig, ProcessError> {
@@ -379,6 +477,25 @@ async fn run() -> Result<(), ProcessError> {
             .map(InstalledGrpcCodecDescriptor::from),
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let mut mcp_codecs = InstalledMcpToolCodecRegistry::default();
+    install_builtin_mcp_json_codecs(
+        &mut mcp_codecs,
+        config
+            .installed_mcp_codecs
+            .iter()
+            .map(InstalledMcpToolCodecDescriptor::from),
+    )
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let mcp_host: Arc<dyn McpHostClient> = Arc::new(McpHostGrpcClient::new(
+        connect_mcp_host(&config)?,
+        config.mcp_host_rpc_limits()?,
+    ));
+    let mcp_resolver: Arc<dyn McpExecutionContractResolver> =
+        Arc::new(PgRepository::new(business_pool.clone()));
+    let mut mcp_adapter = McpCapabilityAdapter::new(mcp_codecs, mcp_resolver);
+    mcp_adapter
+        .install_host(McpTransportKind::StreamableHttp, mcp_host)
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
     let mut dispatcher = CapabilityDispatcher::new(InstalledNativeRegistry::default());
     dispatcher
         .install_port(Arc::new(HttpCapabilityAdapter::new(
@@ -391,6 +508,9 @@ async fn run() -> Result<(), ProcessError> {
             grpc_codecs,
             grpc_transport,
         )))
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    dispatcher
+        .install_port(Arc::new(mcp_adapter))
         .map_err(|_| ProcessError::InvalidConfiguration)?;
 
     let claim_repository = Arc::new(PgRepository::new(business_pool.clone()));
@@ -468,6 +588,36 @@ async fn connect_egress(config: &ProcessConfig) -> Result<tonic::transport::Chan
         .connect()
         .await
         .map_err(|_| ProcessError::EgressUnavailable)
+}
+
+fn connect_mcp_host(config: &ProcessConfig) -> Result<tonic::transport::Channel, ProcessError> {
+    let tls = ClientTlsConfig::new()
+        .domain_name(config.mcp_host.tls_server_name.clone())
+        .ca_certificate(Certificate::from_pem(read_bounded_file(
+            &required_absolute_path(MCP_HOST_CA_PATH_ENV)?,
+            MAX_TLS_FILE_BYTES,
+        )?))
+        .identity(Identity::from_pem(
+            read_bounded_file(
+                &required_absolute_path(MCP_HOST_CERT_PATH_ENV)?,
+                MAX_TLS_FILE_BYTES,
+            )?,
+            read_bounded_file(
+                &required_absolute_path(MCP_HOST_KEY_PATH_ENV)?,
+                MAX_TLS_FILE_BYTES,
+            )?,
+        ));
+    Ok(Endpoint::from_shared(config.mcp_host.endpoint.clone())
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .connect_timeout(Duration::from_millis(
+            config.mcp_host.connect_timeout_milliseconds,
+        ))
+        .timeout(Duration::from_millis(
+            config.mcp_host.request_timeout_milliseconds,
+        ))
+        .tls_config(tls)
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .connect_lazy())
 }
 
 async fn shutdown_signal() -> Result<(), ProcessError> {
@@ -596,6 +746,10 @@ mod tests {
             .unwrap()
     }
 
+    fn id(kind: ResourceKind) -> ResourceId {
+        ResourceId::from_uuid_v7(kind, Uuid::now_v7()).unwrap()
+    }
+
     fn http_codec() -> InstalledHttpCodecConfig {
         InstalledHttpCodecConfig {
             codec_id: BUILTIN_JSON_CODEC_ID.to_owned(),
@@ -626,13 +780,31 @@ mod tests {
         }
     }
 
+    fn mcp_codec() -> InstalledMcpCodecConfig {
+        InstalledMcpCodecConfig {
+            codec_id: BUILTIN_JSON_CODEC_ID.to_owned(),
+            codec_version: BUILTIN_JSON_CODEC_VERSION.to_owned(),
+            module_digest: builtin_json_codec_module_digest(),
+            worker_protocol_version: WORKER_PROTOCOL_VERSION,
+            descriptor_digest: digest('b'),
+            remote_tool_name: "fixture_lookup".to_owned(),
+            remote_input_schema_digest: digest('c'),
+            output_mapping_digest: digest('d'),
+            protocol_profile_id: id(ResourceKind::PolicyRevision),
+            protocol_profile_digest: digest('e'),
+            discovery_semantic_evidence_digest: digest('f'),
+        }
+    }
+
     fn config() -> ProcessConfig {
         let installed_http_codecs = vec![http_codec()];
         let installed_grpc_codecs = vec![grpc_codec()];
+        let installed_mcp_codecs = vec![mcp_codec()];
         let installed_value = serde_json::to_value(InstalledCodecClosure {
             schema_version: 1,
             http: &installed_http_codecs,
             grpc: &installed_grpc_codecs,
+            mcp: &installed_mcp_codecs,
         })
         .unwrap();
         let adapter_runtime_digest = canonical_digest(&installed_value).unwrap().parse().unwrap();
@@ -649,6 +821,7 @@ mod tests {
             },
             installed_http_codecs,
             installed_grpc_codecs,
+            installed_mcp_codecs,
             database: DatabaseConfig {
                 business_max_connections: 4,
                 critical_control_max_connections: 2,
@@ -662,6 +835,13 @@ mod tests {
                 request_timeout_milliseconds: 30_000,
                 maximum_rpc_metadata_bytes: 65_536,
                 maximum_rpc_payload_bytes: 1_048_576,
+            },
+            mcp_host: McpHostConfig {
+                endpoint: "https://platform-mcp-host.platform-mcp-host.svc:9443/".to_owned(),
+                tls_server_name: "platform-mcp-host.platform-mcp-host.svc".to_owned(),
+                connect_timeout_milliseconds: 1_000,
+                request_timeout_milliseconds: 30_000,
+                maximum_rpc_message_bytes: 1_048_576,
             },
             timing: TimingConfig {
                 initial_scan_delay_milliseconds: 0,
@@ -688,6 +868,10 @@ mod tests {
         let mut wrong_egress = config();
         wrong_egress.egress.endpoint = "http://platform-egress-broker:7443/".to_owned();
         assert!(wrong_egress.validate().is_err());
+
+        let mut wrong_mcp_host = config();
+        wrong_mcp_host.mcp_host.endpoint = "http://platform-mcp-host:9443/".to_owned();
+        assert!(wrong_mcp_host.validate().is_err());
 
         let mut wrong_budget = config();
         wrong_budget.database.process_connection_budget += 1;

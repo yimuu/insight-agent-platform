@@ -33,6 +33,8 @@ INTERNAL_ROLES = {
     "insight-platform-invocations": "invocations_domain",
     "insight-platform-jobs": "jobs_domain",
     "insight-platform-mcp-host": "mcp_host",
+    "insight-platform-mcp-rpc": "mcp_rpc",
+    "insight-platform-mcp-service": "mcp_service",
     "insight-platform-mcp-cleanup-worker": "mcp_cleanup_worker",
     "insight-platform-observability": "observability",
     "insight-platform-model-adapters": "model_adapters",
@@ -82,7 +84,7 @@ ALLOWED_INTERNAL = {
     "capability_adapters": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
     # The remote Capability binary uses only the typed mTLS Egress RPC client; the native binary
     # remains network-client free and is checked independently by its deployment boundary test.
-    "capability_worker": {"capability_adapters", "contracts", "egress_rpc", "invocations_domain", "jobs_domain", "platform_postgres", "platform_worker"},
+    "capability_worker": {"capability_adapters", "contracts", "egress_rpc", "invocations_domain", "jobs_domain", "mcp_host", "mcp_rpc", "platform_postgres", "platform_worker"},
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "observability", "platform_postgres"},
     "contracts": set(),
     "context_domain": {"contracts", "invocations_domain", "jobs_domain"},
@@ -95,6 +97,8 @@ ALLOWED_INTERNAL = {
     "invocations_domain": {"contracts", "jobs_domain"},
     "jobs_domain": {"contracts"},
     "mcp_host": {"contracts", "jobs_domain"},
+    "mcp_rpc": {"contracts", "mcp_host"},
+    "mcp_service": {"contracts", "egress_rpc", "mcp_host", "mcp_rpc"},
     "mcp_cleanup_worker": {"contracts", "egress_rpc", "mcp_host", "platform_postgres"},
     "model_adapters": {"contracts", "jobs_domain", "models_domain"},
     "model_worker": {"artifact_rpc", "contracts", "egress_rpc", "jobs_domain", "model_adapters", "models_domain", "platform_postgres", "platform_worker"},

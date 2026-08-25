@@ -29,6 +29,8 @@ members = [
     "crates/platform-model-worker",
     "crates/platform-models",
     "crates/platform-mcp-host",
+    "crates/platform-mcp-rpc",
+    "crates/platform-mcp-service",
     "crates/platform-mcp-cleanup-worker",
     "crates/platform-observability",
     "crates/platform-orchestration-worker",
@@ -149,6 +151,8 @@ insight-platform-model-adapters = { path = "crates/platform-model-adapters" }
 insight-platform-model-worker = { path = "crates/platform-model-worker" }
 insight-platform-models = { path = "crates/platform-models" }
 insight-platform-mcp-host = { path = "crates/platform-mcp-host" }
+insight-platform-mcp-rpc = { path = "crates/platform-mcp-rpc" }
+insight-platform-mcp-service = { path = "crates/platform-mcp-service" }
 insight-platform-mcp-cleanup-worker = { path = "crates/platform-mcp-cleanup-worker" }
 insight-platform-observability = { path = "crates/platform-observability" }
 insight-platform-orchestration-worker = { path = "crates/platform-orchestration-worker" }

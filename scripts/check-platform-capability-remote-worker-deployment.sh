@@ -16,6 +16,8 @@ failures = []
 for dependency in (
     "insight-platform-capability-adapters.workspace = true",
     "insight-platform-egress-rpc.workspace = true",
+    "insight-platform-mcp-host.workspace = true",
+    "insight-platform-mcp-rpc.workspace = true",
     "insight-platform-postgres.workspace = true",
     "insight-platform-worker.workspace = true",
 ):
@@ -39,6 +41,9 @@ for required in (
     "ClientTlsConfig",
     "HttpCapabilityAdapter",
     "GrpcCapabilityAdapter",
+    "McpCapabilityAdapter",
+    "McpHostGrpcClient",
+    "connect_lazy",
     "business_max_connections",
     "critical_control_max_connections",
     "verify_schema",
@@ -95,7 +100,11 @@ for needle in (
     "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH",
     "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH",
     "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH",
+    "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH",
+    "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH",
+    "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH",
     "app.kubernetes.io/component: egress-broker",
+    "app.kubernetes.io/component: mcp-host",
 ):
     if needle not in rendered:
         failures.append(f"rendered Remote Capability Worker contract is missing {needle}")
@@ -106,7 +115,6 @@ for forbidden in (
     "hostPID: true",
     "privileged: true",
     "automountServiceAccountToken: true",
-    "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_",
     "PLATFORM_CAPABILITY_REMOTE_WORKER_SANDBOX_",
     "PLATFORM_CAPABILITY_REMOTE_WORKER_ARTIFACT_",
     "port: 4222",
@@ -115,7 +123,7 @@ for forbidden in (
         failures.append(f"rendered Remote Capability Worker has forbidden capability {forbidden}")
 if rendered.count("\nkind: Deployment\n") != 1 or rendered.count("\nkind: NetworkPolicy\n") != 2:
     failures.append("Remote Capability Worker must render one workload and two NetworkPolicies")
-for port in ("port: 53", "port: 5432", "port: 8443"):
+for port in ("port: 53", "port: 5432", "port: 8443", "port: 9443"):
     if port not in rendered:
         failures.append(f"Remote Capability Worker egress is missing {port}")
 
@@ -124,7 +132,8 @@ negative_values = (
     ("--set", "image.digest=latest", "exact sha256"),
     ("--set", "config.digest=latest", "exact sha256"),
     ("--set-json", "networkPolicy.postgresCidrs=[]", "PostgreSQL CIDRs"),
-    ("--set", "networkPolicy.egressNamespace=", "Egress Broker selector"),
+    ("--set", "networkPolicy.egressNamespace=", "exact Egress Broker"),
+    ("--set", "networkPolicy.mcpHostNamespace=", "MCP Host selectors"),
     ("--set", "autoscaling.minReplicas=1", "at least two replicas"),
     ("--set", "autoscaling.maxReplicas=1", "maximum must be at least"),
 )

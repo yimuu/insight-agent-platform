@@ -12,19 +12,21 @@ use insight_platform_capability_adapters::{
     EncodedHttpCapabilityRequest, ExecuteCapabilityAdapterJob, GrpcCapabilityCodec,
     GrpcTransportResponse, HttpCapabilityCodec, HttpTransportResponse,
     InstalledGrpcCodecDescriptor, InstalledGrpcCodecRegistry, InstalledHttpCodecDescriptor,
-    InstalledHttpCodecRegistry, InstalledNativeAdapter, InstalledNativeRegistry,
+    InstalledHttpCodecRegistry, InstalledMcpToolCodecDescriptor, InstalledMcpToolCodecRegistry,
+    InstalledNativeAdapter, InstalledNativeRegistry, McpToolCapabilityCodec,
     NativeCapabilityAdapter, SafeHttpHeader,
 };
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, HardLimitProfile,
-    JsonLimits, ResourceId, ResourceIdError, ResourceKind, Sha256Digest, ValueRef, WorkClass,
-    WORKER_PROTOCOL_VERSION,
+    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, ClosedJsonValue,
+    HardLimitProfile, JsonLimits, ResourceId, ResourceIdError, ResourceKind, Sha256Digest,
+    ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     CapabilityClaimSlot, CapabilityExecutionInputMaterial, CapabilityOutputValue,
     CapabilityWorkerAudit, ClaimCapabilityJobs, DispatchOutcome, CAPABILITY_QUOTA_LINES,
 };
 use insight_platform_jobs::JobFence;
+use insight_platform_mcp_host::McpOperationOutcome;
 use insight_platform_postgres::{
     capability_execution_repository::{
         ClaimedCapabilityExecution, DriveExpiredCapabilityJobs, ExpiredCapabilityRecoverySlot,
@@ -130,6 +132,168 @@ pub struct BuiltinJsonGrpcCapabilityCodec {
     descriptor: InstalledGrpcCodecDescriptor,
 }
 
+#[derive(Debug, Clone)]
+pub struct BuiltinJsonMcpToolCapabilityCodec {
+    descriptor: InstalledMcpToolCodecDescriptor,
+}
+
+impl BuiltinJsonMcpToolCapabilityCodec {
+    pub fn new(
+        descriptor: InstalledMcpToolCodecDescriptor,
+    ) -> Result<Self, CapabilityAdapterFailure> {
+        validate_json_codec_identity(
+            &descriptor.codec_id,
+            &descriptor.codec_version,
+            &descriptor.module_digest,
+            descriptor.worker_protocol_version,
+        )?;
+        Ok(Self { descriptor })
+    }
+}
+
+impl McpToolCapabilityCodec for BuiltinJsonMcpToolCapabilityCodec {
+    fn descriptor(&self) -> InstalledMcpToolCodecDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn encode(
+        &self,
+        request: &insight_platform_capability_adapters::CapabilityAdapterRequest,
+    ) -> Result<ClosedJsonValue, CapabilityAdapterFailure> {
+        let CapabilityExecutionInputMaterial::Inline { value } = &request.input.material else {
+            return Err(permanent_adapter_failure(
+                "builtin_json_inline_only",
+                "Built-in JSON codec accepts Inline input only",
+            ));
+        };
+        ClosedJsonValue::build(
+            self.descriptor.remote_input_schema_digest.clone(),
+            serde_json::json!({
+                "arguments": value,
+                "name": self.descriptor.remote_tool_name,
+            }),
+        )
+        .map_err(|_| {
+            permanent_adapter_failure(
+                "builtin_json_encode",
+                "Built-in MCP JSON request encoding failed",
+            )
+        })
+    }
+
+    fn decode(
+        &self,
+        request: &insight_platform_capability_adapters::CapabilityAdapterRequest,
+        outcome: McpOperationOutcome,
+    ) -> Result<CapabilityAdapterResponse, CapabilityAdapterFailure> {
+        match outcome {
+            McpOperationOutcome::Completed {
+                result,
+                evidence_digest,
+            } => {
+                if result.schema_digest != request.output_schema_digest {
+                    return Err(permanent_adapter_failure(
+                        "builtin_json_output_schema",
+                        "MCP output schema does not match the admitted Capability interface",
+                    ));
+                }
+                let content_digest: Sha256Digest = canonical_digest(&result.value)
+                    .map_err(|_| {
+                        permanent_adapter_failure("builtin_json_digest", "MCP output digest failed")
+                    })?
+                    .parse()
+                    .map_err(|_| {
+                        permanent_adapter_failure("builtin_json_digest", "MCP output digest failed")
+                    })?;
+                let value_id = ResourceId::from_uuid_v7(ResourceKind::RunValue, Uuid::now_v7())
+                    .map_err(|_| {
+                        permanent_adapter_failure(
+                            "builtin_json_identity",
+                            "Output identity generation failed",
+                        )
+                    })?;
+                let validation_evidence_digest: Sha256Digest =
+                    canonical_digest(&serde_json::json!({
+                        "content_digest": content_digest,
+                        "host_evidence_digest": evidence_digest,
+                        "output_mapping_digest": self.descriptor.output_mapping_digest,
+                        "output_schema_digest": request.output_schema_digest,
+                        "schema_version": 1,
+                        "transport": "mcp",
+                    }))
+                    .map_err(|_| {
+                        permanent_adapter_failure(
+                            "builtin_json_evidence",
+                            "MCP output evidence failed",
+                        )
+                    })?
+                    .parse()
+                    .map_err(|_| {
+                        permanent_adapter_failure(
+                            "builtin_json_evidence",
+                            "MCP output evidence failed",
+                        )
+                    })?;
+                Ok(CapabilityAdapterResponse {
+                    outcome: DispatchOutcome::Completed(CapabilityOutputValue {
+                        value_id,
+                        classification: request.input.exact.classification,
+                        schema_digest: request.output_schema_digest.clone(),
+                        content_digest,
+                        value: ValueRef::Inline {
+                            value: result.value,
+                        },
+                        artifact_link_id: None,
+                        validation_evidence_digest,
+                    }),
+                })
+            }
+            McpOperationOutcome::RetryableFailure(failure) => Err(CapabilityAdapterFailure {
+                class: CapabilityAdapterFailureClass::RetryableAfterDispatch,
+                safe_code: failure.safe_code,
+                safe_message: failure.safe_message,
+                evidence_digest: failure.evidence_digest,
+                external_identity_digest: Some(request.idempotency_key_digest.clone()),
+            }),
+            McpOperationOutcome::PermanentFailure(failure) => Err(CapabilityAdapterFailure {
+                class: CapabilityAdapterFailureClass::Permanent,
+                safe_code: failure.safe_code,
+                safe_message: failure.safe_message,
+                evidence_digest: failure.evidence_digest,
+                external_identity_digest: None,
+            }),
+            McpOperationOutcome::Uncertain {
+                observation_digest,
+                external_identity_digest,
+            } => Ok(CapabilityAdapterResponse {
+                outcome: DispatchOutcome::Uncertain(
+                    insight_platform_invocations::CapabilityUncertainty {
+                        observation_digest,
+                        policy_path_digest: domain_digest("builtin-json-mcp-uncertain"),
+                        external_identity_digest,
+                        manual: true,
+                    },
+                ),
+            }),
+            McpOperationOutcome::ReauthorizationRequired { challenge_digest } => {
+                Err(CapabilityAdapterFailure {
+                    class: CapabilityAdapterFailureClass::Permanent,
+                    safe_code: "mcp_reauthorization_required".to_owned(),
+                    safe_message: "MCP authorization must be renewed".to_owned(),
+                    evidence_digest: challenge_digest,
+                    external_identity_digest: None,
+                })
+            }
+            McpOperationOutcome::RemoteTask { .. } | McpOperationOutcome::InputRequired { .. } => {
+                Err(permanent_adapter_failure(
+                    "builtin_json_mcp_unexpected_outcome",
+                    "MCP continuation outcome reached the terminal codec unexpectedly",
+                ))
+            }
+        }
+    }
+}
+
 impl BuiltinJsonGrpcCapabilityCodec {
     pub fn new(descriptor: InstalledGrpcCodecDescriptor) -> Result<Self, CapabilityAdapterFailure> {
         validate_json_codec_identity(
@@ -230,6 +394,19 @@ pub fn install_builtin_grpc_json_codecs(
 ) -> Result<(), insight_platform_capability_adapters::CapabilityDispatchError> {
     for descriptor in descriptors {
         let codec = BuiltinJsonGrpcCapabilityCodec::new(descriptor).map_err(|_| {
+            insight_platform_capability_adapters::CapabilityDispatchError::InvalidInstalledAdapter
+        })?;
+        registry.install(Arc::new(codec))?;
+    }
+    Ok(())
+}
+
+pub fn install_builtin_mcp_json_codecs(
+    registry: &mut InstalledMcpToolCodecRegistry,
+    descriptors: impl IntoIterator<Item = InstalledMcpToolCodecDescriptor>,
+) -> Result<(), insight_platform_capability_adapters::CapabilityDispatchError> {
+    for descriptor in descriptors {
+        let codec = BuiltinJsonMcpToolCapabilityCodec::new(descriptor).map_err(|_| {
             insight_platform_capability_adapters::CapabilityDispatchError::InvalidInstalledAdapter
         })?;
         registry.install(Arc::new(codec))?;
@@ -1560,6 +1737,22 @@ mod tests {
         }
     }
 
+    fn mcp_json_descriptor() -> InstalledMcpToolCodecDescriptor {
+        InstalledMcpToolCodecDescriptor {
+            codec_id: BUILTIN_JSON_CODEC_ID.to_owned(),
+            codec_version: BUILTIN_JSON_CODEC_VERSION.to_owned(),
+            module_digest: builtin_json_codec_module_digest(),
+            worker_protocol_version: WORKER_PROTOCOL_VERSION,
+            descriptor_digest: digest('b'),
+            remote_tool_name: "fixture_lookup".to_owned(),
+            remote_input_schema_digest: digest('c'),
+            output_mapping_digest: digest('d'),
+            protocol_profile_id: id(ResourceKind::PolicyRevision),
+            protocol_profile_digest: digest('e'),
+            discovery_semantic_evidence_digest: digest('f'),
+        }
+    }
+
     #[test]
     fn builtin_json_codecs_require_exact_installed_identity_and_reject_duplicates() {
         let mut wrong = http_json_descriptor();
@@ -1573,6 +1766,11 @@ mod tests {
         let mut grpc = InstalledGrpcCodecRegistry::default();
         install_builtin_grpc_json_codecs(&mut grpc, [grpc_json_descriptor()]).unwrap();
         assert!(install_builtin_grpc_json_codecs(&mut grpc, [grpc_json_descriptor()]).is_err());
+
+        let mut mcp = InstalledMcpToolCodecRegistry::default();
+        let descriptor = mcp_json_descriptor();
+        install_builtin_mcp_json_codecs(&mut mcp, [descriptor.clone()]).unwrap();
+        assert!(install_builtin_mcp_json_codecs(&mut mcp, [descriptor]).is_err());
     }
 
     #[test]

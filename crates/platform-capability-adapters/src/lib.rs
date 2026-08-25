@@ -1593,6 +1593,7 @@ mod tests {
         observed: Mutex<Option<McpOperationRequest>>,
         cancelled: Mutex<Option<(McpOperationRequest, DateTime<Utc>)>>,
         outcome: Mutex<Option<McpOperationOutcome>>,
+        failure: Mutex<Option<McpHostError>>,
     }
 
     #[async_trait]
@@ -1603,6 +1604,9 @@ mod tests {
             request: &McpOperationRequest,
         ) -> Result<McpOperationOutcome, McpHostError> {
             *self.observed.lock().unwrap() = Some(request.clone());
+            if let Some(failure) = self.failure.lock().unwrap().take() {
+                return Err(failure);
+            }
             if let Some(outcome) = self.outcome.lock().unwrap().take() {
                 return Ok(outcome);
             }
@@ -2043,6 +2047,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_host_response_loss_preserves_non_idempotent_write_uncertainty() {
+        let fixture = mcp_fixture(false);
+        let mut codecs = InstalledMcpToolCodecRegistry::default();
+        codecs
+            .install(Arc::new(FixtureMcpCodec {
+                descriptor: fixture.descriptor,
+            }))
+            .unwrap();
+        let host = Arc::new(FixtureMcpHost {
+            observed: Mutex::new(None),
+            cancelled: Mutex::new(None),
+            outcome: Mutex::new(None),
+            failure: Mutex::new(Some(McpHostError::CompletionUnknown)),
+        });
+        let mut adapter = McpCapabilityAdapter::new(
+            codecs,
+            Arc::new(FixtureMcpResolver {
+                contract: fixture.host,
+            }),
+        );
+        adapter
+            .install_host(McpTransportKind::StreamableHttp, host)
+            .unwrap();
+        let mut request = request(fixture.execution, digest('0'));
+        request.mcp_runtime = Some(fixture.runtime);
+        request.effect = Effect::NonIdempotentWrite;
+        request.idempotency = insight_platform_contracts::CapabilityIdempotencyKind::None;
+
+        let failure = adapter.invoke(&request).await.unwrap_err();
+        assert_eq!(
+            failure.class,
+            CapabilityAdapterFailureClass::RetryableAfterDispatch
+        );
+        assert!(matches!(
+            adapter_failure_outcome(
+                &request,
+                failure,
+                Some(Utc::now() + ChronoDuration::seconds(1))
+            )
+            .unwrap(),
+            DispatchOutcome::Uncertain(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn mcp_remote_task_round_trips_opaque_continuation_and_enforces_poll_limit() {
         let fixture = mcp_fixture(true);
         let mut codecs = InstalledMcpToolCodecRegistry::default();
@@ -2067,6 +2116,7 @@ mod tests {
                 external_identity_digest: external_identity.clone(),
                 next_poll_at: Utc::now() + ChronoDuration::milliseconds(100),
             })),
+            failure: Mutex::new(None),
         });
         let mut adapter = McpCapabilityAdapter::new(
             codecs,
@@ -2193,6 +2243,7 @@ mod tests {
                 response_schema_digest: response_schema.canonical_digest.clone(),
                 deadline: Utc::now() + ChronoDuration::seconds(10),
             })),
+            failure: Mutex::new(None),
         });
         let mut adapter = McpCapabilityAdapter::new(
             codecs,

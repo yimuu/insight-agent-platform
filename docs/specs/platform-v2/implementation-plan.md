@@ -78,7 +78,16 @@
 > mTLS Egress Broker RPC，进程持有分离的business/critical-control PostgreSQL pool，不持有Secret、Sandbox或MCP transport client。
 > Helm以digest image/config、双副本/PDB/HPA、restricted pod和仅DNS/PostgreSQL/Egress Broker egress部署，正负静态fixture、worker/
 > adapter tests、strict Clippy与crate-boundary scan通过。该批关闭HTTP/gRPC production composition与静态部署边界；真实HTTP/gRPC
-> 多进程L3、独立MCP Host RPC及Phase 2 exit gate仍待完成。
+> 多进程L3及Phase 2 exit gate仍待完成；独立MCP Host RPC由下一批接线。
+
+> 2026-08-25 implementation evidence：Remote MCP现有独立`platform-mcp-host` production进程及closed protobuf RPC。Capability
+> Worker只通过mTLS client调用Host，服务端在解码前要求唯一Capability Worker URI SAN；同一私有CA签发的Model Worker身份在真实
+> loopback mTLS fixture中被拒绝。RPC envelope只接受bounded canonical JCS nominal contract/outcome并绑定operation+digest；Host进程组合
+> `McpHostService`与Remote Streamable HTTP transport，所有网络/Secret最后一跳仍只经mTLS Egress Broker。Capability Worker已安装独立
+> MCP port、从PostgreSQL解析exact execution contract，并把Host响应丢失按post-dispatch unknown交由共享Effect/idempotency policy，避免
+> 非幂等写被误判为安全失败。Host Helm为双副本/PDB/HPA/restricted pod，仅允许Remote Worker入站及DNS/Egress Broker出站，无DB、
+> stdio、Sandbox或host process权限；正负静态部署fixture、RPC/Host/adapter/worker tests与strict Clippy通过。真实MCP远端协议、Host/
+> Worker kill-recovery跨进程L3及Phase 3 exit gate仍待完成。
 
 > 2026-08-25 implementation evidence：ModelTurn admission现已把Plan列出的Skill/Capability slots逐项冻结进snapshot与Receipt replay，
 > 并在owner transaction用各slot的exact Selection Policy重新执行共享selector；请求投影即使引用候选集合内的合法但未选中

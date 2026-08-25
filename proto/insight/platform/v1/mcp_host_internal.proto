@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package insight.platform.v1;
+
+// Closed, digest-bound envelope. Metadata is strict JCS JSON owned by the Rust nominal types;
+// arbitrary headers, URLs, credentials and untyped extension maps are not admitted here.
+message ClosedMcpHostEnvelope {
+  uint32 schema_version = 1;
+  string operation = 2;
+  bytes metadata_jcs = 3;
+  string metadata_digest = 4;
+}
+
+service McpHostExecutionService {
+  rpc Execute(ClosedMcpHostEnvelope) returns (ClosedMcpHostEnvelope);
+  rpc CancelRemoteTask(ClosedMcpHostEnvelope) returns (ClosedMcpHostEnvelope);
+}

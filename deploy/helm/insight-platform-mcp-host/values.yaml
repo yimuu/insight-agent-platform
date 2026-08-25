@@ -3,32 +3,28 @@ image:
   digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
   pullPolicy: IfNotPresent
 imagePullSecrets: []
-namespace: platform-capability-remote
+namespace: platform-mcp-host
 replicas: 2
+service: {port: 9443}
 config:
-  existingConfigMap: insight-platform-capability-remote-worker-candidate
-  fileKey: capability-remote-worker.json
+  existingConfigMap: insight-platform-mcp-host-candidate
+  fileKey: mcp-host.json
   digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-database:
-  existingSecret: insight-platform-capability-remote-worker-database
-  urlKey: database-url
+serverTls:
+  existingSecret: insight-platform-mcp-host-server-tls
+  keys: {clientCa: client-ca.pem, certificate: server.pem, privateKey: server-key.pem}
 egressTls:
-  existingSecret: insight-platform-capability-remote-worker-egress-client-tls
-  keys: {ca: ca.pem, certificate: client.pem, privateKey: client-key.pem}
-mcpHostTls:
-  existingSecret: insight-platform-capability-remote-worker-mcp-host-client-tls
+  existingSecret: insight-platform-mcp-host-egress-client-tls
   keys: {ca: ca.pem, certificate: client.pem, privateKey: client-key.pem}
 networkPolicy:
   enabled: true
+  callerNamespace: platform-capability-remote
+  callerPodSelector: {app.kubernetes.io/component: capability-remote-worker}
   egressNamespace: platform-egress
   egressPodSelector: {app.kubernetes.io/component: egress-broker}
   egressPort: 8443
-  mcpHostNamespace: platform-mcp-host
-  mcpHostPodSelector: {app.kubernetes.io/component: mcp-host}
-  mcpHostPort: 9443
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
-  postgresCidrs: [10.10.0.0/24]
 resources:
   requests: {cpu: 250m, memory: 256Mi}
   limits: {cpu: "2", memory: 1Gi}

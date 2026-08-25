@@ -1,8 +1,8 @@
 {{- if lt (int .Values.replicas) 2 -}}{{- fail "Remote Capability Worker requires at least two replicas" -}}{{- end -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) -}}{{- fail "image.digest must be exact sha256" -}}{{- end -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) -}}{{- fail "config.digest must be exact sha256" -}}{{- end -}}
-{{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.egressTls.existingSecret) (empty .Values.networkPolicy.postgresCidrs) -}}{{- fail "config, database, Egress TLS and PostgreSQL CIDRs are required" -}}{{- end -}}
-{{- if or (empty .Values.networkPolicy.egressNamespace) (empty .Values.networkPolicy.egressPodSelector) -}}{{- fail "exact Egress Broker selector is required" -}}{{- end -}}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.egressTls.existingSecret) (empty .Values.mcpHostTls.existingSecret) (empty .Values.networkPolicy.postgresCidrs) -}}{{- fail "config, database, Egress/MCP Host TLS and PostgreSQL CIDRs are required" -}}{{- end -}}
+{{- if or (empty .Values.networkPolicy.egressNamespace) (empty .Values.networkPolicy.egressPodSelector) (empty .Values.networkPolicy.mcpHostNamespace) (empty .Values.networkPolicy.mcpHostPodSelector) -}}{{- fail "exact Egress Broker and MCP Host selectors are required" -}}{{- end -}}
 {{- if .Values.autoscaling.enabled -}}
 {{- if lt (int .Values.autoscaling.minReplicas) 2 -}}{{- fail "HPA requires at least two replicas" -}}{{- end -}}
 {{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) -}}{{- fail "HPA maximum must be at least minimum" -}}{{- end -}}
