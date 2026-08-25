@@ -36,6 +36,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- dict
   "schema_version" 1
   "listen_address" (printf "0.0.0.0:%d" (int .Values.controller.port))
+  "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.controller.observabilityPort))
   "database_max_connections" (int .Values.controller.database.maxConnections)
   "artifact_broker" (dict
     "endpoint" .Values.controller.artifactBroker.endpoint

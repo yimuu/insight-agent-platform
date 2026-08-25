@@ -1,0 +1,15 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "insight-platform-sandbox.controllerName" . }}
+  namespace: {{ .Values.namespaces.controller }}
+spec:
+  namespaceSelector: {matchNames: [{{ .Values.namespaces.controller }}]}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller
+  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
+{{- end }}

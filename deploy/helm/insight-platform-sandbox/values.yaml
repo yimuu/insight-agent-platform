@@ -21,6 +21,7 @@ controller:
   replicas: 2
   autoscaling: {minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
   port: 7443
+  observabilityPort: 9090
   database:
     existingSecret: insight-platform-sandbox-database
     urlKey: database-url
@@ -173,6 +174,10 @@ natsTls:
 
 networkPolicy:
   enabled: true
+  monitoringNamespaceSelector:
+    insight.platform/monitoring-namespace: "true"
+  monitoringPodSelector:
+    app.kubernetes.io/name: prometheus
   dnsNamespaceSelector:
     kubernetes.io/metadata.name: kube-system
   dnsPodSelector:
@@ -190,3 +195,8 @@ networkPolicy:
   artifactDataWorkerNamespaceSelector: {insight.platform/artifact-namespace: "true"}
   artifactDataWorkerPodSelector: {insight.platform/workload-role: artifact-data-worker}
   artifactDataWorkerPort: 9444
+
+monitoring:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 5s

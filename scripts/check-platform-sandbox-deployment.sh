@@ -26,6 +26,11 @@ if ! rg -q '^    "crates/platform-sandbox-microvm",$' "$root/Cargo.toml"; then
   echo "sandbox deployment: deferred backend is not explicitly outside the release workspace" >&2
   exit 1
 fi
+if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-controller/Cargo.toml" ||
+   ! rg -q 'process_observability_router' "$root/crates/platform-sandbox-controller/src/main.rs"; then
+  echo "sandbox deployment: Controller shared observability composition is missing" >&2
+  exit 1
+fi
 
 helm lint "$chart" >/dev/null
 helm template sandbox "$chart" >"$rendered"
@@ -33,6 +38,8 @@ helm template sandbox "$chart" >"$rendered"
 for mutation in \
   '--set image.digest=latest' \
   '--set controller.replicas=1' \
+  '--set controller.observabilityPort=7443' \
+  '--set-json networkPolicy.monitoringPodSelector=null' \
   '--set networkPolicy.enabled=false' \
   '--set-string executor.nodeSelector.kubernetes\.io/os=windows' \
   '--set-string executor.nodeSelector.insight\.platform\.node-restriction\.kubernetes\.io/sandbox-wasi=' \
@@ -56,6 +63,12 @@ docs = File.read(ARGV.fetch(0)).split(/^---\s*$/).map do |source|
   YAML.safe_load(source, permitted_classes: [], aliases: true) unless source.strip.empty?
 end.compact
 failures = []
+
+service_monitors = docs.select { |doc| doc["kind"] == "ServiceMonitor" }
+failures << "Sandbox Controller ServiceMonitor is missing" unless service_monitors.length == 1
+unless File.read(ARGV.fetch(0)).include?("path: /readyz") && File.read(ARGV.fetch(0)).include?("path: /metrics")
+  failures << "Sandbox Controller HTTP readiness/metrics contract is missing"
+end
 
 workloads = docs.select { |doc| %w[Deployment DaemonSet].include?(doc["kind"]) }
 components = workloads.map { |doc| doc.dig("spec", "template", "metadata", "labels", "app.kubernetes.io/component") }.compact.sort

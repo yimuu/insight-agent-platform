@@ -9,6 +9,9 @@ use insight_platform_artifact_rpc::{ArtifactInternalRpcLimits, ArtifactSandboxBr
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_sandbox::{
     NodeAttestorRoute, ProveSandboxProcessGenerationAbsent,
@@ -34,6 +37,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity, Server, ServerTlsConfig};
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_SANDBOX_CONTROLLER_CONFIG";
@@ -57,6 +61,7 @@ const MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD: usize = 4;
 struct ControllerProcessConfig {
     schema_version: u32,
     listen_address: String,
+    observability_listen_address: String,
     database_max_connections: u32,
     artifact_broker: ArtifactBrokerProcessConfig,
     process_isolation_attestor: AttestorProcessConfig,
@@ -117,11 +122,18 @@ impl ControllerProcessConfig {
     }
 
     fn validate(&self) -> Result<(), ProcessError> {
-        let _listen: SocketAddr = self
+        let listen: SocketAddr = self
             .listen_address
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let observability: SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
+            || listen.port() == 0
+            || observability.port() == 0
+            || observability == listen
             || !(2..=64).contains(&self.database_max_connections)
             || !closed_https_endpoint(
                 &self.artifact_broker.endpoint,
@@ -243,30 +255,67 @@ async fn run() -> Result<(), ProcessError> {
         .listen_address
         .parse()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+    let cancellation = CancellationToken::new();
+    let rpc_cancellation = cancellation.child_token();
     let server = Server::builder()
         .tls_config(tls)
         .map_err(|_| ProcessError::InvalidTls)?
         .add_service(authority_service)
         .add_service(broker_service)
-        .serve_with_shutdown(address, async {
-            let _ = shutdown_receiver.await;
-        });
-    tokio::pin!(server);
+        .serve_with_shutdown(address, rpc_cancellation.cancelled_owned());
+    let mut server = tokio::spawn(server);
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("sandbox-controller", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
+        .await
+        .map_err(|_| ProcessError::ObservabilityUnavailable)?;
+    let observability_cancellation = cancellation.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut observability = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(observability_cancellation.cancelled_owned())
+            .await
+    });
+    metrics.mark_ready();
     tokio::select! {
-        result = &mut server => result.map_err(|_| ProcessError::RpcUnavailable),
         signal = tokio::signal::ctrl_c() => {
             signal.map_err(|_| ProcessError::RpcUnavailable)?;
-            let _ = shutdown_sender.send(());
-            tokio::time::timeout(
-                Duration::from_millis(config.shutdown_grace_milliseconds),
-                &mut server,
-            )
-            .await
-            .map_err(|_| ProcessError::ShutdownDeadlineExceeded)?
-            .map_err(|_| ProcessError::RpcUnavailable)
+            cancellation.cancel();
+        }
+        result = &mut server => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::RpcUnavailable)?
+                .map_err(|_| ProcessError::RpcUnavailable)?;
+            observability.await.map_err(|_| ProcessError::ObservabilityUnavailable)?
+                .map_err(|_| ProcessError::ObservabilityUnavailable)?;
+            return Err(ProcessError::RpcUnavailable);
+        }
+        result = &mut observability => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::ObservabilityUnavailable)?
+                .map_err(|_| ProcessError::ObservabilityUnavailable)?;
+            server.await.map_err(|_| ProcessError::RpcUnavailable)?
+                .map_err(|_| ProcessError::RpcUnavailable)?;
+            return Err(ProcessError::ObservabilityUnavailable);
         }
     }
+    tokio::time::timeout(
+        Duration::from_millis(config.shutdown_grace_milliseconds),
+        async {
+            server
+                .await
+                .map_err(|_| ProcessError::RpcUnavailable)?
+                .map_err(|_| ProcessError::RpcUnavailable)?;
+            observability
+                .await
+                .map_err(|_| ProcessError::ObservabilityUnavailable)?
+                .map_err(|_| ProcessError::ObservabilityUnavailable)
+        },
+    )
+    .await
+    .map_err(|_| ProcessError::ShutdownDeadlineExceeded)?
 }
 
 async fn connect_artifact_broker(
@@ -518,6 +567,7 @@ enum ProcessError {
     ArtifactBrokerUnavailable,
     InvalidTls,
     RpcUnavailable,
+    ObservabilityUnavailable,
     ShutdownDeadlineExceeded,
 }
 
@@ -530,6 +580,7 @@ impl fmt::Display for ProcessError {
             Self::ArtifactBrokerUnavailable => "Artifact Broker is unavailable",
             Self::InvalidTls => "Controller TLS configuration is invalid",
             Self::RpcUnavailable => "Controller RPC server failed",
+            Self::ObservabilityUnavailable => "Controller observability server failed",
             Self::ShutdownDeadlineExceeded => "Controller graceful shutdown deadline exceeded",
         })
     }
@@ -545,6 +596,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "listen_address": "0.0.0.0:7443",
+            "observability_listen_address": "0.0.0.0:9090",
             "database_max_connections": 8,
             "artifact_broker": {
                 "endpoint": "https://artifact-broker.platform-artifacts.svc:9443",

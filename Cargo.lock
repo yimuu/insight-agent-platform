@@ -3091,8 +3091,10 @@ dependencies = [
 name = "insight-platform-sandbox-controller"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "insight-platform-artifact-rpc",
  "insight-platform-contracts",
+ "insight-platform-observability",
  "insight-platform-postgres",
  "insight-platform-sandbox",
  "insight-platform-sandbox-rpc",
@@ -3101,6 +3103,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-util",
  "tonic",
  "url",
 ]

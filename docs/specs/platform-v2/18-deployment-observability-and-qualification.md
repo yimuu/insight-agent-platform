@@ -317,6 +317,11 @@ authority及TLS RPC组合之后；Egress的readiness还要求Authority mTLS、se
 两个namespace分别提供与业务gRPC不同的metrics端口、HTTP probes、ServiceMonitor和Prometheus-only ingress，且不扩大Egress caller或Authority
 PostgreSQL权限。任一server提前退出都会使所属进程fail closed；该证据不包含真实provider调用、Prometheus scrape或production L4 enforcement。
 
+r257为Sandbox Controller接入shared process observability。readiness位于restricted PostgreSQL/schema、Artifact Broker mTLS、routed
+process-attestor authority、executor identity interceptor及TLS RPC service组合之后；RPC与独立HTTP listener共同fail closed。Controller
+Service/NetworkPolicy只向精确Prometheus identity开放metrics端口。该证据不包含WASI/gVisor Executor或attestor接线，也不替代真实runsc、
+production scrape和L4 enforcement。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

@@ -4,6 +4,9 @@ kind: Deployment
 metadata:
   name: {{ include "insight-platform-sandbox.controllerName" . }}
   namespace: {{ .Values.namespaces.controller }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
 spec:
   replicas: {{ int .Values.controller.replicas }}
   strategy:
@@ -62,10 +65,12 @@ spec:
             - {name: PLATFORM_SANDBOX_ARTIFACT_CA_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.artifactBrokerServerCa }}}
             - {name: PLATFORM_SANDBOX_ARTIFACT_CERT_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.artifactBrokerClientCertificate }}}
             - {name: PLATFORM_SANDBOX_ARTIFACT_KEY_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.artifactBrokerClientPrivateKey }}}
-          ports: [{name: grpc, containerPort: {{ int .Values.controller.port }}}]
-          startupProbe: {tcpSocket: {port: grpc}, failureThreshold: 30, periodSeconds: 2}
-          readinessProbe: {tcpSocket: {port: grpc}, periodSeconds: 5, timeoutSeconds: 2}
-          livenessProbe: {tcpSocket: {port: grpc}, periodSeconds: 10, timeoutSeconds: 2}
+          ports:
+            - {name: grpc, containerPort: {{ int .Values.controller.port }}}
+            - {name: observability, containerPort: {{ int .Values.controller.observabilityPort }}}
+          startupProbe: {httpGet: {path: /livez, port: observability}, failureThreshold: 30, periodSeconds: 2}
+          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2}
+          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2}
           resources: {{ toYaml .Values.controller.resources | nindent 12 }}
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
@@ -79,12 +84,17 @@ kind: Service
 metadata:
   name: {{ include "insight-platform-sandbox.controllerName" . }}
   namespace: {{ .Values.namespaces.controller }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
 spec:
   selector:
     app.kubernetes.io/name: {{ .Chart.Name }}
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: controller
-  ports: [{name: grpc, port: {{ int .Values.controller.port }}, targetPort: grpc}]
+  ports:
+    - {name: grpc, port: {{ int .Values.controller.port }}, targetPort: grpc}
+    - {name: observability, port: {{ int .Values.controller.observabilityPort }}, targetPort: observability}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
