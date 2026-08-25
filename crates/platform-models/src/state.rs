@@ -8,7 +8,7 @@ use insight_platform_contracts::{
     CommandAudit, CommandOutcome, DecimalMoney, DeploymentClosure, ExactDeploymentRef,
     ExactPolicyBinding, ExactVersionRef, ExternalLeafFailureMutationIds,
     ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
-    FrozenSlotTarget, ModelDeploymentClosure, ModelProfileResourceSpec,
+    FrozenSlotBinding, FrozenSlotTarget, ModelDeploymentClosure, ModelProfileResourceSpec,
     ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelTurnState, NodeExecutionState,
     Permission, PlanNodeKind, PlatformFailureCode, PrincipalSnapshot, ResourceDocument, ResourceId,
     ResourceKind, Retryability, RunBindingsSnapshot, RunState, Sha256Digest, WorkClass,
@@ -68,6 +68,7 @@ pub struct ModelTurnAdmissionSnapshot {
     pub provider: ModelProviderResourceSpec,
     pub request: ExactInvocationValueRef,
     pub request_digest: Sha256Digest,
+    pub tool_slots: Vec<FrozenSlotBinding>,
     pub policies: Vec<ExactVersionRef>,
     pub principal: PrincipalSnapshot,
     pub quota_ceiling: ModelQuotaCeiling,
@@ -110,6 +111,7 @@ impl ModelTurnAdmissionSnapshot {
             .map_err(|_| ModelTurnError::InvalidPrincipal)?;
         self.quota_ceiling.validate(limits)?;
         validate_model_policies(&self.policies)?;
+        validate_model_tool_slots(&self.tool_slots, None)?;
         if self.schema_version != 1
             || self.scope_instance_id.kind() != ResourceKind::ScopeInstance
             || self.round_ordinal == 0
@@ -138,6 +140,37 @@ impl ModelTurnAdmissionSnapshot {
         }
         Ok(())
     }
+}
+
+fn validate_model_tool_slots(
+    slots: &[FrozenSlotBinding],
+    request: Option<&CanonicalModelRequest>,
+) -> Result<(), ModelTurnError> {
+    let mut identities = BTreeSet::new();
+    let mut projected_names = BTreeSet::new();
+    let mut capability_count = 0usize;
+    for slot in slots {
+        slot.validate()
+            .map_err(|_| ModelTurnError::InvalidDeployment)?;
+        if !identities.insert(slot.slot_id.as_str()) {
+            return Err(ModelTurnError::InvalidDeployment);
+        }
+        match &slot.target {
+            FrozenSlotTarget::Capability { tool_alias, .. } => {
+                capability_count += 1;
+                let projected_name = tool_alias.as_deref().unwrap_or(slot.slot_id.as_str());
+                if !projected_names.insert(projected_name) {
+                    return Err(ModelTurnError::InvalidToolProjection);
+                }
+            }
+            FrozenSlotTarget::Skill { .. } => {}
+            _ => return Err(ModelTurnError::InvalidDeployment),
+        }
+    }
+    if request.is_some_and(|request| request.tools.len() != capability_count) {
+        return Err(ModelTurnError::InvalidToolProjection);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +378,7 @@ pub struct CreateModelTurn {
     pub selected_candidate_ordinal: u16,
     pub selector_input_digest: Sha256Digest,
     pub request: ModelRequestValue,
+    pub tool_slots: Vec<FrozenSlotBinding>,
     pub requested_attempt_limit: u32,
     pub cost_ceiling_microunits: u64,
 }
@@ -372,6 +406,7 @@ impl CreateModelTurn {
         {
             return Err(ModelTurnError::InvalidCommand);
         }
+        validate_model_tool_slots(&self.tool_slots, Some(&self.request.request))?;
         Ok(())
     }
 }
@@ -454,6 +489,17 @@ pub fn decide_model_turn_admission(
         .iter()
         .find(|slot| slot.slot_id == command.slot_id)
         .ok_or(ModelTurnError::InvalidSelection)?;
+    for tool_slot in &command.tool_slots {
+        if facts
+            .run_bindings
+            .slots
+            .iter()
+            .find(|frozen| frozen.slot_id == tool_slot.slot_id)
+            != Some(tool_slot)
+        {
+            return Err(ModelTurnError::InvalidDeployment);
+        }
+    }
     let FrozenSlotTarget::Model {
         candidates,
         selection_policy,
@@ -541,6 +587,7 @@ pub fn decide_model_turn_admission(
         provider: facts.provider,
         request,
         request_digest,
+        tool_slots: command.tool_slots.clone(),
         policies,
         principal: facts.principal,
         quota_ceiling,

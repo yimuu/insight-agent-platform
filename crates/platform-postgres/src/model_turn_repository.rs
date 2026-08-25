@@ -3,9 +3,9 @@ use crate::{
     repository::{
         append_command_event, append_scheduler_event, claim_command_receipt,
         decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
-        load_deployment, load_job_for_update_by_text, load_resource, load_run_for_update,
-        require_tenant_permission, terminalize_command_receipt, JobRecord, PgRepository,
-        RepositoryError, RunRecord, TypedPayload,
+        load_deployment, load_exact_frozen_selection_policy, load_job_for_update_by_text,
+        load_resource, load_run_for_update, require_tenant_permission, terminalize_command_receipt,
+        JobRecord, PgRepository, RepositoryError, RunRecord, TypedPayload,
     },
 };
 use chrono::{DateTime, Utc};
@@ -30,6 +30,7 @@ use insight_platform_models::{
     ModelTurnRecord, ModelTurnStore, ModelTurnTransaction, ModelWorkerAudit, PrepareModelDispatch,
     PreparedModelDispatch, MODEL_QUOTA_LINES,
 };
+use insight_platform_orchestrator::derive_candidate_selection;
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -541,6 +542,7 @@ impl<'a> ModelTurnTransaction for PgModelTurnTransaction<'a> {
             &command.audit.tenant_id,
             &run,
             &command.request,
+            &command.tool_slots,
         )
         .await?;
         require_committed_tool_results(
@@ -846,28 +848,36 @@ async fn validate_model_tool_projections(
     tenant_id: &ResourceId,
     run: &RunRecord,
     request: &ModelRequestValue,
+    tool_slots: &[insight_platform_contracts::FrozenSlotBinding],
 ) -> Result<(), RepositoryError> {
-    for tool in &request.request.tools {
-        let mut matches = 0usize;
-        for slot in &run.bindings.slots {
-            if let FrozenSlotTarget::Capability {
-                candidates,
-                tool_alias,
-                ..
-            } = &slot.target
-            {
-                let alias_matches = match tool_alias {
-                    Some(alias) => alias == &tool.projected_name,
-                    None => true,
-                };
-                if candidates.contains(&tool.capability_deployment) && alias_matches {
-                    matches += 1;
-                }
-            }
-        }
-        if matches != 1 {
-            return Err(RepositoryError::InvalidInput(
-                "Model tool projection is not an unambiguous frozen Capability binding".to_owned(),
+    for slot in tool_slots {
+        let FrozenSlotTarget::Capability {
+            candidates,
+            selection_policy,
+            tool_alias,
+        } = &slot.target
+        else {
+            continue;
+        };
+        let policy =
+            load_exact_frozen_selection_policy(transaction, run, selection_policy, false).await?;
+        let selected =
+            derive_candidate_selection(&slot.slot_id, selection_policy, &policy, candidates, None)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let projected_name = tool_alias.as_deref().unwrap_or(slot.slot_id.as_str());
+        let tool = request
+            .request
+            .tools
+            .iter()
+            .find(|tool| tool.projected_name == projected_name)
+            .ok_or_else(|| {
+                RepositoryError::InvalidInput(
+                    "Model tool projection is missing its frozen Capability slot".to_owned(),
+                )
+            })?;
+        if tool.capability_deployment != selected.selected_deployment {
+            return Err(RepositoryError::Conflict(
+                "exact Model tool candidate selection",
             ));
         }
         let deployment = load_deployment(
@@ -1130,6 +1140,7 @@ fn require_model_create_replay(
             != command.selector_input_digest
         || record.request_value_id != command.request.value_id
         || record.payload.admission.request_digest != command.request.content_digest
+        || record.payload.admission.tool_slots != command.tool_slots
         || record.payload.admission.attempt_limit != command.requested_attempt_limit
         || record.payload.admission.quota_ceiling.cost_microunits != command.cost_ceiling_microunits
     {

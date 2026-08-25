@@ -8673,6 +8673,7 @@ impl PgSchedulerTransaction {
                 selected_candidate_ordinal: selected_ordinal,
                 selector_input_digest: command.selection_evidence.canonical_digest.clone(),
                 request: command.request.clone(),
+                tool_slots: command.tool_slots.clone(),
                 requested_attempt_limit: command.requested_attempt_limit,
                 cost_ceiling_microunits: command.cost_ceiling_microunits,
             })
@@ -9086,6 +9087,7 @@ impl PgSchedulerTransaction {
                     .selector_input_digest
                     .clone(),
                 request: command.request.clone(),
+                tool_slots: previous_turn.payload.admission.tool_slots.clone(),
                 requested_attempt_limit: command.requested_attempt_limit,
                 cost_ceiling_microunits: command.cost_ceiling_microunits,
             })
@@ -20799,7 +20801,7 @@ async fn require_exact_child_candidate_selection(
     Ok(())
 }
 
-async fn load_exact_frozen_selection_policy(
+pub(crate) async fn load_exact_frozen_selection_policy(
     transaction: &mut Transaction<'_, Postgres>,
     run: &RunRecord,
     binding: &insight_platform_contracts::ExactPolicyBinding,

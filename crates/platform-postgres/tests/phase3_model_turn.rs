@@ -365,8 +365,10 @@ struct Fixture {
     primary_node_id: ResourceId,
     cancel_node_id: ResourceId,
     capability_deployment: ExactDeploymentRef,
+    alternate_capability_deployment: ExactDeploymentRef,
     model_deployment: ExactDeploymentRef,
     selection_policy_binding: ExactPolicyBinding,
+    invocation_policy: ExactVersionRef,
     tool_slot_binding: FrozenSlotBinding,
     capability_interface_revision: ExactVersionRef,
     argument_schema: insight_platform_models::ClosedSchemaDocument,
@@ -620,7 +622,7 @@ async fn seed_policy_versions(
     for (index, exact) in policies.iter().enumerate() {
         let selection = (index == 8).then_some(CandidateSelectionPolicyDocument {
             schema_version: 1,
-            mode: CandidateSelectionMode::OnlyCandidate,
+            mode: CandidateSelectionMode::OrderedFirst,
             route_schema_digest: None,
         });
         let scheduling = (index == 12).then_some(SchedulingPolicyDocument {
@@ -1173,7 +1175,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     };
     let capability_payload = TypedPayload::new(
         1,
-        &DeploymentClosure::CapabilityInterface(capability_closure),
+        &DeploymentClosure::CapabilityInterface(capability_closure.clone()),
     )
     .unwrap();
     let capability_deployment_id = id(ResourceKind::CapabilityDeployment, 0x37);
@@ -1190,6 +1192,31 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let capability_deployment = ExactDeploymentRef::new(
         capability_deployment_id,
         capability_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
+    let alternate_capability_deployment_id = id(ResourceKind::CapabilityDeployment, 0x38);
+    let mut alternate_capability_closure = capability_closure;
+    alternate_capability_closure
+        .policies
+        .push(selection_policy.clone());
+    let alternate_capability_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::CapabilityInterface(alternate_capability_closure),
+    )
+    .unwrap();
+    insert_deployment(
+        pool,
+        &tenant_id,
+        &alternate_capability_deployment_id,
+        &capability_interface_resource,
+        &interface_revision.revision_id,
+        &principal_id,
+        &alternate_capability_payload,
+    )
+    .await;
+    let alternate_capability_deployment = ExactDeploymentRef::new(
+        alternate_capability_deployment_id,
+        alternate_capability_payload.digest.parse().unwrap(),
     )
     .unwrap();
     for (account_id, scope_kind, scope_id, metric) in [
@@ -1332,7 +1359,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let agent_policy_binding = ExactPolicyBinding {
         deployment: ExactDeploymentRef::new(id(ResourceKind::PolicyDeployment, 0x3c), digest('d'))
             .unwrap(),
-        revision: agent_policy,
+        revision: agent_policy.clone(),
     };
     let execution_profile_binding = ExactPolicyBinding {
         deployment: ExactDeploymentRef::new(id(ResourceKind::PolicyDeployment, 0x3d), digest('e'))
@@ -1352,8 +1379,11 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         slot_id: "search".to_owned(),
         requirement_digest: digest('1'),
         target: FrozenSlotTarget::Capability {
-            candidates: vec![capability_deployment.clone()],
-            selection_policy: agent_policy_binding.clone(),
+            candidates: vec![
+                capability_deployment.clone(),
+                alternate_capability_deployment.clone(),
+            ],
+            selection_policy: selection_policy_binding.clone(),
             tool_alias: Some("search".to_owned()),
         },
         binding_digest: digest('2'),
@@ -1597,8 +1627,10 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         primary_node_id,
         cancel_node_id,
         capability_deployment,
+        alternate_capability_deployment,
         model_deployment,
         selection_policy_binding,
+        invocation_policy: agent_policy,
         tool_slot_binding,
         capability_interface_revision: interface_revision,
         argument_schema,
@@ -1692,6 +1724,7 @@ fn command_for_node(fixture: &Fixture, node_id: &ResourceId, base: u16) -> Creat
             },
             request,
         },
+        tool_slots: vec![fixture.tool_slot_binding.clone()],
         requested_attempt_limit: 3,
         cost_ceiling_microunits: 10_000,
     }
@@ -1887,7 +1920,7 @@ async fn seed_running_model_orchestration(
     let create = command_for_node(fixture, &node_id, base + 0x30);
     let selection_document = CandidateSelectionPolicyDocument {
         schema_version: 1,
-        mode: CandidateSelectionMode::OnlyCandidate,
+        mode: CandidateSelectionMode::OrderedFirst,
         route_schema_digest: None,
     };
     let selection_evidence = derive_candidate_selection(
@@ -2075,15 +2108,9 @@ fn failure_mutations(base: u16) -> insight_platform_contracts::ExternalLeafFailu
 }
 
 fn allowed_tool_policy(fixture: &Fixture) -> InvocationPolicyDecisionBundle {
-    let FrozenSlotTarget::Capability {
-        selection_policy, ..
-    } = &fixture.tool_slot_binding.target
-    else {
-        unreachable!()
-    };
     InvocationPolicyDecisionBundle::build(
         vec![InvocationPolicyDecision {
-            policy: selection_policy.revision.clone(),
+            policy: fixture.invocation_policy.clone(),
             disposition: InvocationPolicyDisposition::Allowed,
             evidence_digest: named_digest("model-tool-policy-allowed"),
         }],
@@ -2255,6 +2282,24 @@ async fn model_turn_fixture() {
         Err(RepositoryError::Conflict("exact Model Deployment"))
     ));
     assert_model_deployment_closures_fail_closed(&repository, &fixture).await;
+
+    let mut nonselected_tool = command_for_node(&fixture, &fixture.primary_node_id, 0x0d0);
+    nonselected_tool.request.request.tools[0].capability_deployment =
+        fixture.alternate_capability_deployment.clone();
+    let nonselected_request = serde_json::to_value(&nonselected_tool.request.request).unwrap();
+    nonselected_tool.request.content_digest = canonical_digest(&nonselected_request)
+        .unwrap()
+        .parse()
+        .unwrap();
+    nonselected_tool.request.value = ValueRef::Inline {
+        value: nonselected_request,
+    };
+    assert!(matches!(
+        execute_create(&repository, nonselected_tool).await,
+        Err(RepositoryError::Conflict(
+            "exact Model tool candidate selection"
+        ))
+    ));
 
     let primary = command_for_node(&fixture, &fixture.primary_node_id, 0x100);
     let first_claim = admit_prepare_and_claim(&repository, &primary, 0x120).await;

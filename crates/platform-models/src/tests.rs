@@ -275,20 +275,34 @@ fn fixture() -> Fixture {
     )
     .unwrap();
     let selection_policy = policy_binding(39, 'd');
+    let capability_deployment = deployment(ResourceKind::CapabilityDeployment, 55, '7');
+    let capability_binding = FrozenSlotBinding {
+        slot_id: "search".to_owned(),
+        requirement_digest: sha('6'),
+        target: FrozenSlotTarget::Capability {
+            candidates: vec![capability_deployment.clone()],
+            selection_policy: policy_binding(40, 'e'),
+            tool_alias: Some("search".to_owned()),
+        },
+        binding_digest: sha('7'),
+    };
     let agent_closure = AgentDeploymentClosure {
         interface: version(ResourceKind::AgentInterfaceRevision, 50, 'e'),
         plan: version(ResourceKind::AgentPlanRevision, 51, 'f'),
         entry_node_id: "start".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::Start,
-        slots: vec![FrozenSlotBinding {
-            slot_id: "primary_model".to_owned(),
-            requirement_digest: sha('1'),
-            target: FrozenSlotTarget::Model {
-                candidates: vec![model_deployment.clone()],
-                selection_policy,
+        slots: vec![
+            FrozenSlotBinding {
+                slot_id: "primary_model".to_owned(),
+                requirement_digest: sha('1'),
+                target: FrozenSlotTarget::Model {
+                    candidates: vec![model_deployment.clone()],
+                    selection_policy,
+                },
+                binding_digest: sha('2'),
             },
-            binding_digest: sha('2'),
-        }],
+            capability_binding.clone(),
+        ],
         policies: vec![policy_binding(52, '3')],
         execution_profile: policy_binding(53, '4'),
     };
@@ -321,7 +335,7 @@ fn fixture() -> Fixture {
         }],
         tools: vec![ModelToolProjection {
             projected_name: "search".to_owned(),
-            capability_deployment: deployment(ResourceKind::CapabilityDeployment, 55, '7'),
+            capability_deployment,
             interface_revision: version(ResourceKind::CapabilityInterfaceRevision, 56, '8'),
             input_schema: argument_schema.clone(),
             output_schema_digest: sha('9'),
@@ -374,6 +388,7 @@ fn fixture() -> Fixture {
             },
             request: request.clone(),
         },
+        tool_slots: vec![capability_binding],
         requested_attempt_limit: 3,
         cost_ceiling_microunits: 10_000,
     };
@@ -636,6 +651,29 @@ fn invalid_tool_arguments_and_usage_ceiling_fail_closed() {
     )
     .unwrap_err();
     assert_eq!(failure, ModelTurnError::UsageCeilingExceeded);
+}
+
+#[test]
+fn model_admission_rejects_ambiguous_projected_tool_names() {
+    let fixture = fixture();
+    let mut command = fixture.command;
+    let mut second_tool = command.request.request.tools[0].clone();
+    second_tool.projected_name = "other-search".to_owned();
+    command.request.request.tools.push(second_tool);
+    let mut second_slot = command.tool_slots[0].clone();
+    second_slot.slot_id = "other_search".to_owned();
+    second_slot.binding_digest = sha('0');
+    command.tool_slots.push(second_slot);
+    let request_json = serde_json::to_value(&command.request.request).unwrap();
+    command.request.content_digest = crate::types::digest(&command.request.request).unwrap();
+    command.request.value = ValueRef::Inline {
+        value: request_json,
+    };
+
+    assert_eq!(
+        command.validate_at(fixture.now, fixture.limits),
+        Err(ModelTurnError::InvalidToolProjection)
+    );
 }
 
 #[test]
