@@ -1,4 +1,15 @@
 use chrono::{DateTime, Duration, Utc};
+use insight_platform_artifact_rpc::{
+    proto::artifact_scheduler_service_server::ArtifactSchedulerServiceServer,
+    ArtifactInternalRpcLimits, ArtifactSchedulerGrpcService, LeasedArtifactBytes,
+    SchedulerRunValueResponseBroker, SchedulerSkillPackageResponseBroker,
+    SchedulerTypedPlanResponseBroker, SchedulerWorkloadIdentity, SCHEDULER_WORKLOAD_IDENTITY,
+};
+use insight_platform_artifacts::{
+    SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerSkillPackageReadError,
+    SchedulerSkillPackageReadRequest, SchedulerTypedPlanLease, SchedulerTypedPlanReadError,
+    SchedulerTypedPlanReadRequest, SchedulerTypedPlanRequestResolver,
+};
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
     GrpcNetworkTransport, GrpcTransportRequest, GrpcTransportResponse, HttpNetworkTransport,
@@ -74,7 +85,7 @@ use insight_platform_postgres::{
         ModelToolCapabilityAdmission, ModelToolCapabilityMutationIds, NewPrincipal,
         NewQuotaAccount, NewSecretBinding, NewTenant, NewTenantPrincipal, OrchestrationClaimSlot,
         OrchestrationYieldMutationIds, PgRepository, RepositoryError, ResolvedExpressionInput,
-        StartOrchestrationJob, TypedPayload,
+        SafetyScanShard, StartOrchestrationJob, TypedPayload,
     },
     verify_schema,
 };
@@ -89,8 +100,9 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
-    process::Stdio,
+    io::BufRead as _,
+    path::{Path, PathBuf},
+    process::{Child, Stdio},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -270,6 +282,10 @@ struct ModelProcessTls {
     server_key: String,
     client_cert: String,
     client_key: String,
+    artifact_server_cert: String,
+    artifact_server_key: String,
+    scheduler_cert: String,
+    scheduler_key: String,
 }
 
 fn model_process_tls() -> ModelProcessTls {
@@ -300,14 +316,181 @@ fn model_process_tls() -> ModelProcessTls {
         )],
         ExtendedKeyUsagePurpose::ClientAuth,
     );
+    let (artifact_server_cert, artifact_server_key) = issue(
+        vec![SanType::DnsName("artifact.test".try_into().unwrap())],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let (scheduler_cert, scheduler_key) = issue(
+        vec![SanType::URI(
+            SCHEDULER_WORKLOAD_IDENTITY.try_into().unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
     ModelProcessTls {
         ca: ca.pem(),
         server_cert,
         server_key,
         client_cert,
         client_key,
+        artifact_server_cert,
+        artifact_server_key,
+        scheduler_cert,
+        scheduler_key,
     }
 }
+
+struct ModelTypedPlanBroker {
+    bytes: Vec<u8>,
+    reads: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl SchedulerTypedPlanResponseBroker for ModelTypedPlanBroker {
+    async fn read_typed_plan_for_response(
+        &self,
+        request: SchedulerTypedPlanReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerTypedPlanReadError> {
+        request
+            .validate_at(Utc::now())
+            .map_err(|_| SchedulerTypedPlanReadError::Denied)?;
+        let value: serde_json::Value = serde_json::from_slice(&self.bytes)
+            .map_err(|_| SchedulerTypedPlanReadError::Integrity)?;
+        let digest: Sha256Digest = canonical_digest(&value)
+            .map_err(|_| SchedulerTypedPlanReadError::Integrity)?
+            .parse()
+            .map_err(|_| SchedulerTypedPlanReadError::Integrity)?;
+        if digest != *request.artifact.content_digest()
+            || u64::try_from(self.bytes.len()).ok() != Some(request.artifact.byte_length())
+        {
+            return Err(SchedulerTypedPlanReadError::Integrity);
+        }
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
+    }
+}
+
+#[async_trait::async_trait]
+impl SchedulerRunValueResponseBroker for ModelTypedPlanBroker {
+    async fn read_run_value_for_response(
+        &self,
+        _request: SchedulerRunValueReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerRunValueReadError> {
+        Err(SchedulerRunValueReadError::Denied)
+    }
+}
+
+#[async_trait::async_trait]
+impl SchedulerSkillPackageResponseBroker for ModelTypedPlanBroker {
+    async fn read_skill_package_for_response(
+        &self,
+        _request: SchedulerSkillPackageReadRequest,
+    ) -> Result<LeasedArtifactBytes, SchedulerSkillPackageReadError> {
+        Err(SchedulerSkillPackageReadError::Denied)
+    }
+}
+
+fn model_orchestration_process_config(artifact_endpoint: String) -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "worker_manifest": WorkerManifest {
+            manifest_version: WORKER_MANIFEST_VERSION,
+            worker_role: "orchestration-worker".to_owned(),
+            work_class: WorkClass::Orchestration,
+            adapter_runtime_digest: named_digest("production-orchestration-runtime"),
+            protocol_version: WORKER_PROTOCOL_VERSION,
+            max_concurrency: 4,
+            critical_control_reserved_slots: 1,
+        },
+        "database": {
+            "business_max_connections": 4,
+            "critical_control_reserved_connections": 2,
+            "process_connection_budget": 6,
+            "acquire_timeout_milliseconds": 1000,
+            "statement_timeout_milliseconds": 30000,
+            "idle_timeout_milliseconds": 60000,
+            "max_lifetime_milliseconds": 600000
+        },
+        "artifact": {
+            "endpoint": artifact_endpoint,
+            "tls_server_name": "artifact.test",
+            "connect_timeout_milliseconds": 1000,
+            "request_timeout_milliseconds": 5000,
+            "maximum_request_bytes": 262144,
+            "maximum_chunk_bytes": 262144
+        },
+        "timing": {
+            "coordinator_coalesce_milliseconds": 5,
+            "coordinator_scan_milliseconds": 20,
+            "coordinator_scan_jitter_milliseconds": 1,
+            "claim_failure_backoff_milliseconds": 5,
+            "drain_grace_milliseconds": 1000,
+            "heartbeat_jitter_milliseconds": 1,
+            "store_retry_backoff_milliseconds": 5,
+            "safety_scan_milliseconds": 20,
+            "safety_scan_jitter_milliseconds": 1,
+            "safety_failure_backoff_milliseconds": 5,
+            "handoff_retry_milliseconds": 5
+        },
+        "plan_maximum_bytes": 1048576,
+        "safety_shard": SafetyScanShard::whole()
+    })
+}
+
+fn write_model_process_config(
+    prefix: &Path,
+    suffix: &str,
+    value: &serde_json::Value,
+) -> (PathBuf, String) {
+    let path = PathBuf::from(format!("{}-{suffix}.json", prefix.display()));
+    std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+    (path, canonical_digest(value).unwrap())
+}
+
+fn spawn_model_orchestration_worker(
+    binary: &str,
+    config_path: &Path,
+    config_digest: &str,
+    database_url: &str,
+    ca_path: &Path,
+    cert_path: &Path,
+    key_path: &Path,
+) -> Child {
+    std::process::Command::new(binary)
+        .env("PLATFORM_ORCHESTRATION_WORKER_CONFIG", config_path)
+        .env("PLATFORM_ORCHESTRATION_WORKER_CONFIG_DIGEST", config_digest)
+        .env("PLATFORM_ORCHESTRATION_WORKER_DATABASE_URL", database_url)
+        .env("PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CA_PATH", ca_path)
+        .env(
+            "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CERT_PATH",
+            cert_path,
+        )
+        .env("PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_KEY_PATH", key_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn observe_process_start(child: &mut Child) -> std::thread::JoinHandle<()> {
+    let stderr = child.stderr.take().unwrap();
+    let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
+    let logger = std::thread::spawn(move || {
+        for (ordinal, line) in std::io::BufReader::new(stderr).lines().enumerate() {
+            let line = line.unwrap();
+            eprintln!("{line}");
+            if ordinal == 0 {
+                let _ = started_sender.send(line);
+            }
+        }
+    });
+    let first = started_receiver
+        .recv_timeout(StdDuration::from_secs(10))
+        .expect("Worker did not report startup");
+    assert!(first.contains("started generation="), "{first}");
+    logger
+}
+
+type RunningOrchestrationEvidence = (String, i64, i64, Option<String>, Option<String>);
 
 fn version(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef {
     ExactVersionRef::new(id(kind, suffix), digest(character)).unwrap()
@@ -418,6 +601,25 @@ fn agent_schema() -> ClosedJsonSchema {
         "type": "object",
         "properties": {},
         "required": [],
+        "additionalProperties": false
+    }))
+    .unwrap()
+}
+
+fn run_input_schema() -> ClosedJsonSchema {
+    ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "x-platform-max-bytes": 1024,
+                "x-platform-classification": "internal"
+            }
+        },
+        "required": ["prompt"],
         "additionalProperties": false
     }))
     .unwrap()
@@ -635,7 +837,7 @@ fn model_runtime_plan(
                     skill_slot_ids: vec![],
                     capability_slot_ids: vec!["search".to_owned()],
                     input: ExactDataPortRef::RunInput {
-                        schema_digest: digest('e'),
+                        schema_digest: run_input_schema().canonical_digest,
                     },
                     model_route: None,
                     output: output.clone(),
@@ -784,6 +986,7 @@ async fn insert_ready_artifact(
     .execute(pool)
     .await
     .unwrap();
+    let metadata = TypedPayload::new(1, &json!({"fixture": "model-conformance"})).unwrap();
     sqlx::query(
         r#"
         INSERT INTO insight_platform.artifacts (
@@ -792,7 +995,7 @@ async fn insert_ready_artifact(
             metadata_schema_version, metadata, metadata_digest, retention_policy_revision_id,
             retain_until, created_by, created_at, updated_at
         ) VALUES ($1, $2, $3, 'conformance', $4, $5, $6, $7, $7, 'ready', 1,
-                  1, '{}'::jsonb, $8, $9, $10, $11, $12, $12)
+                  $8, $9, $10, $11, $12, $13, $14, $14)
         "#,
     )
     .bind(tenant_id.to_string())
@@ -802,7 +1005,9 @@ async fn insert_ready_artifact(
     .bind(i64::try_from(artifact.byte_length()).unwrap())
     .bind(artifact.content_digest().to_string())
     .bind(artifact.media_type())
-    .bind(digest('3').to_string())
+    .bind(metadata.schema_version)
+    .bind(&metadata.value)
+    .bind(&metadata.digest)
     .bind(retention_policy_revision_id.to_string())
     .bind(database_now + Duration::days(1))
     .bind(principal_id.to_string())
@@ -1477,7 +1682,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         contract_digest: digest('b'),
         dependency_versions: vec![],
         policy_versions: vec![agent_policy.clone()],
-        input_schema: agent_schema(),
+        input_schema: run_input_schema(),
         output_schema: output_schema.clone(),
         error_schema: agent_schema(),
         typed_plan_artifact_id: id(ResourceKind::Artifact, 0xa6),
@@ -1792,7 +1997,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     .bind(tenant_id.to_string())
     .bind(id(ResourceKind::RunValue, 0x54).to_string())
     .bind(run_id.to_string())
-    .bind(digest('e').to_string())
+    .bind(run_input_schema().canonical_digest.to_string())
     .bind(seed_input_digest.to_string())
     .bind(seed_input)
     .execute(pool)
@@ -1992,14 +2197,14 @@ async fn seed_running_model_orchestration(
     let input_value = json!({"prompt": "fixture"});
     let input_digest: Sha256Digest = canonical_digest(&input_value).unwrap().parse().unwrap();
     let input_port = ExactDataPortRef::RunInput {
-        schema_digest: digest('e'),
+        schema_digest: run_input_schema().canonical_digest,
     };
     let environment = ScopeDataEnvironmentSnapshot::build(
         BTreeMap::from([(
             input_port.clone(),
             ExactRunValueRef {
                 value_id: id(ResourceKind::RunValue, 0x54),
-                schema_digest: digest('e'),
+                schema_digest: run_input_schema().canonical_digest,
                 content_digest: input_digest.clone(),
             },
         )]),
@@ -2215,7 +2420,7 @@ async fn seed_running_model_orchestration(
             value_kind: "run_input".to_owned(),
             port: input_port,
             classification: DataClassification::Internal,
-            schema_digest: digest('e'),
+            schema_digest: run_input_schema().canonical_digest,
             content_digest: input_digest,
             value: ValueRef::Inline { value: input_value },
         },
@@ -2231,6 +2436,80 @@ async fn seed_running_model_orchestration(
         mutations,
     };
     (fence, command)
+}
+
+async fn seed_ready_model_orchestration(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+) -> (ResourceId, ResourceId) {
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET state = 'cancelled', version = version + 1,
+            terminal_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND run_id = $2 AND record_kind = 'node_execution'
+          AND terminal_at IS NULL
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let base = 0x800;
+    let _ = seed_running_model_orchestration(pool, repository, fixture, base).await;
+    let node_id = id(ResourceKind::NodeExecution, base);
+    let job_id = id(ResourceKind::Job, base + 4);
+    let reservation_id = id(ResourceKind::UsageReservation, base + 2);
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'ready', version = 1, attempt_no = 0, lease_epoch = 0,
+            worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
+            heartbeat_at = NULL, quota_reservation_id = NULL, started_at = NULL,
+            scheduled_at = clock_timestamp() - interval '1 second', updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND job_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.run_nodes SET state = 'ready', enqueue_round = 0, started_at = NULL, updated_at = clock_timestamp() WHERE tenant_id = $1 AND node_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(node_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.runs SET state = 'running', active_work_count = 0, updated_at = clock_timestamp() WHERE tenant_id = $1 AND run_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.run_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "DELETE FROM insight_platform.quota_ledger WHERE tenant_id = $1 AND correlation_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(reservation_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.quota_accounts SET reserved_value = 0 WHERE tenant_id = $1 AND quota_account_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(id(ResourceKind::QuotaAccount, 0x801).to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    (node_id, job_id)
 }
 
 async fn admit_prepare_and_claim(
@@ -2785,6 +3064,194 @@ async fn model_job_state(pool: &PgPool, job_id: &ResourceId) -> String {
         .fetch_one(pool)
         .await
         .unwrap()
+}
+
+#[test]
+fn production_orchestration_dispatches_exact_model_leaf() {
+    let (Ok(database_url), Ok(orchestration_binary)) = (
+        std::env::var("PLATFORM_MODEL_TOOL_CHAIN_TEST_DATABASE_URL"),
+        std::env::var("PLATFORM_ORCHESTRATION_WORKER_BIN"),
+    ) else {
+        eprintln!("Model tool-chain database or Orchestration Worker binary is unset; process dispatch skipped");
+        return;
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(32 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async move {
+        let pool = PgPoolOptions::new()
+            .max_connections(16)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        verify_schema(&pool).await.unwrap();
+        let repository = PgRepository::new(pool.clone());
+        let fixture = seed_fixture(&pool, &repository).await;
+        let (node_id, source_job_id) =
+            seed_ready_model_orchestration(&pool, &repository, &fixture).await;
+
+        let tls = model_process_tls();
+        let broker = Arc::new(ModelTypedPlanBroker {
+            bytes: canonical_json(&serde_json::to_value(&fixture.runtime_plan).unwrap()).unwrap(),
+            reads: AtomicUsize::new(0),
+        });
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = incoming.local_addr().unwrap();
+        let service = ArtifactSchedulerServiceServer::new(ArtifactSchedulerGrpcService::new(
+            broker.clone(),
+            ArtifactInternalRpcLimits::new(262_144, 262_144).unwrap(),
+        ));
+        let service = tonic::service::interceptor::InterceptedService::new(
+            service,
+            SchedulerWorkloadIdentity,
+        );
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(
+            Server::builder()
+                .tls_config(
+                    ServerTlsConfig::new()
+                        .identity(Identity::from_pem(
+                            &tls.artifact_server_cert,
+                            &tls.artifact_server_key,
+                        ))
+                        .client_ca_root(Certificate::from_pem(tls.ca.clone())),
+                )
+                .unwrap()
+                .add_service(service)
+                .serve_with_incoming_shutdown(incoming, async move {
+                    let _ = shutdown_receiver.await;
+                }),
+        );
+        let prefix = PathBuf::from(format!(
+            "/tmp/platform-model-tool-orchestration-{}",
+            std::process::id()
+        ));
+        let ca_path = PathBuf::from(format!("{}-ca.pem", prefix.display()));
+        let cert_path = PathBuf::from(format!("{}-scheduler.pem", prefix.display()));
+        let key_path = PathBuf::from(format!("{}-scheduler-key.pem", prefix.display()));
+        std::fs::write(&ca_path, &tls.ca).unwrap();
+        std::fs::write(&cert_path, &tls.scheduler_cert).unwrap();
+        std::fs::write(&key_path, &tls.scheduler_key).unwrap();
+        let config = model_orchestration_process_config(format!("https://{address}/"));
+        let (config_path, config_digest) =
+            write_model_process_config(&prefix, "orchestration", &config);
+        let mut worker = spawn_model_orchestration_worker(
+            &orchestration_binary,
+            &config_path,
+            &config_digest,
+            &database_url,
+            &ca_path,
+            &cert_path,
+            &key_path,
+        );
+        let worker_log = observe_process_start(&mut worker);
+        let started = std::time::Instant::now();
+        let mut diagnosed_running_job = false;
+        loop {
+            let state: Option<(String, String, String, i32, i64)> = sqlx::query_as(
+                r#"
+                SELECT source.state, node.state, run.state, run.active_work_count,
+                       (SELECT count(*) FROM insight_platform.jobs
+                        WHERE tenant_id = $1 AND run_id = $2
+                          AND work_class = 'model' AND state = 'ready')
+                FROM insight_platform.jobs AS source
+                JOIN insight_platform.run_nodes AS node
+                  ON node.tenant_id = source.tenant_id AND node.node_id = source.node_id
+                JOIN insight_platform.runs AS run
+                  ON run.tenant_id = source.tenant_id AND run.run_id = source.run_id
+                WHERE source.tenant_id = $1 AND source.job_id = $3
+                "#,
+            )
+            .bind(fixture.tenant_id.to_string())
+            .bind(fixture.run_id.to_string())
+            .bind(source_job_id.to_string())
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            if state
+                == Some((
+                    "succeeded".to_owned(),
+                    "waiting".to_owned(),
+                    "waiting".to_owned(),
+                    0,
+                    1,
+                ))
+            {
+                break;
+            }
+            if !diagnosed_running_job && started.elapsed() >= StdDuration::from_millis(500) {
+                let running: Option<RunningOrchestrationEvidence> = sqlx::query_as(
+                        "SELECT state, version, lease_epoch, worker_id, lease_token_digest FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+                    )
+                    .bind(fixture.tenant_id.to_string())
+                    .bind(source_job_id.to_string())
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+                if let Some((state, version, lease_epoch, Some(worker_id), Some(token))) = running {
+                    if state == "running" {
+                        diagnosed_running_job = true;
+                        repository
+                            .load_controller_facts(
+                                &RepositoryJobFence {
+                                    tenant_id: fixture.tenant_id.to_string(),
+                                    job_id: source_job_id.to_string(),
+                                    worker_id: worker_id.parse().unwrap(),
+                                    lease_epoch,
+                                    expected_job_version: version,
+                                    lease_token_digest: token.parse().unwrap(),
+                                },
+                                &fixture.runtime_plan,
+                            )
+                            .await
+                            .unwrap();
+                        repository
+                            .resolve_typed_plan_read(SchedulerTypedPlanLease {
+                                tenant_id: fixture.tenant_id.clone(),
+                                run_id: fixture.run_id.clone(),
+                                orchestration_job_id: source_job_id.clone(),
+                                worker_process_generation_id: worker_id.parse().unwrap(),
+                                lease_generation: u64::try_from(lease_epoch).unwrap(),
+                                lease_token_digest: token.parse().unwrap(),
+                                request_digest: named_digest("model-plan-read-diagnostic"),
+                                maximum_bytes: 1_048_576,
+                                deadline: Utc::now() + Duration::seconds(1),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            assert!(
+                started.elapsed() < StdDuration::from_secs(10),
+                "orchestration dispatch stalled with state={state:?}, artifact_reads={}",
+                broker.reads.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        assert!(broker.reads.load(Ordering::SeqCst) >= 1);
+        let model_owner: String = sqlx::query_scalar(
+            "SELECT node_id FROM insight_platform.jobs WHERE tenant_id = $1 AND run_id = $2 AND work_class = 'model'",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(fixture.run_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(model_owner, node_id.to_string());
+
+        worker.kill().unwrap();
+        worker.wait().unwrap();
+        worker_log.join().unwrap();
+        let _ = shutdown_sender.send(());
+        server.await.unwrap().unwrap();
+        for path in [config_path, ca_path, cert_path, key_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+    });
 }
 
 async fn wait_model_job_state(pool: &PgPool, job_id: &ResourceId, expected: &str) {
