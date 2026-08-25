@@ -276,6 +276,23 @@ impl ContextSubscriptionRefreshAttempt {
     pub fn canonical_digest(&self) -> Result<Sha256Digest, ContextSubscriptionExecutionError> {
         crate::digest(self).map_err(|_| ContextSubscriptionExecutionError::Canonicalization)
     }
+
+    /// Identifies one immutable physical execution while excluding the Job version advanced by
+    /// heartbeats. The complete attempt digest remains the owner commit/Receipt identity.
+    pub fn execution_identity_digest(
+        &self,
+    ) -> Result<Sha256Digest, ContextSubscriptionExecutionError> {
+        crate::digest(&serde_json::json!({
+            "schema_version": self.schema_version,
+            "job_id": self.job_id,
+            "worker_process_generation_id": self.worker_process_generation_id,
+            "lease_generation": self.job_fence.lease_generation,
+            "lease_token_digest": self.job_fence.token_digest,
+            "attempt_number": self.attempt_number,
+            "request": self.request,
+        }))
+        .map_err(|_| ContextSubscriptionExecutionError::Canonicalization)
+    }
 }
 
 /// Bounded proof of a successful read-only resource refresh. Remote content and locators are
@@ -284,7 +301,7 @@ impl ContextSubscriptionRefreshAttempt {
 #[serde(deny_unknown_fields)]
 pub struct ContextSubscriptionRefreshEvidence {
     pub schema_version: u32,
-    pub attempt_digest: Sha256Digest,
+    pub execution_identity_digest: Sha256Digest,
     pub request_digest: Sha256Digest,
     pub response_digest: Sha256Digest,
     pub resource_set_digest: Sha256Digest,
@@ -302,9 +319,9 @@ impl ContextSubscriptionRefreshEvidence {
         attempt: &ContextSubscriptionRefreshAttempt,
         now: DateTime<Utc>,
     ) -> Result<(), ContextSubscriptionExecutionError> {
-        let attempt_digest = attempt.canonical_digest()?;
+        let execution_identity_digest = attempt.execution_identity_digest()?;
         if self.schema_version != CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION
-            || self.attempt_digest != attempt_digest
+            || self.execution_identity_digest != execution_identity_digest
             || self.request_digest != attempt.request.request_digest
             || self.resource_count > MAX_CONTEXT_SUBSCRIPTION_REFRESH_RESOURCES
             || self.item_count > MAX_CONTEXT_SUBSCRIPTION_REFRESH_ITEMS
@@ -514,7 +531,7 @@ mod tests {
     ) -> ContextSubscriptionRefreshEvidence {
         ContextSubscriptionRefreshEvidence {
             schema_version: CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
-            attempt_digest: attempt.canonical_digest().unwrap(),
+            execution_identity_digest: attempt.execution_identity_digest().unwrap(),
             request_digest: attempt.request.request_digest.clone(),
             response_digest: digest("response"),
             resource_set_digest: digest("resource-set"),
@@ -577,6 +594,24 @@ mod tests {
             evidence: evidence(&attempt, now),
         };
         response.validate_for(&attempt, now).unwrap();
+    }
+
+    #[test]
+    fn heartbeat_version_changes_commit_digest_but_not_execution_identity() {
+        let now = Utc::now();
+        let before = attempt(now);
+        let mut after = before.clone();
+        after.job_fence.expected_version += 1;
+
+        assert_ne!(
+            before.canonical_digest().unwrap(),
+            after.canonical_digest().unwrap()
+        );
+        assert_eq!(
+            before.execution_identity_digest().unwrap(),
+            after.execution_identity_digest().unwrap()
+        );
+        evidence(&before, now).validate_for(&after, now).unwrap();
     }
 
     #[test]

@@ -395,6 +395,10 @@ MCP Host→Egress RPC、真实Streamable HTTP与kill-window仍属于未完成L3�
 CR-193增加L1/L2必测项：Host调用跨越至少一次Job heartbeat后，返回的immutable execution identity仍验证成功，Context owner用最新version
 terminal commit；旧version commit零写入。新lease generation/token或新physical attempt不得重用前一identity/evidence。
 
+r273接入subscription Context Worker driver，domain/unit evidence覆盖immutable execution identity及backend error到durable retry/terminal分类；
+fresh PostgreSQL 16证明调用跨heartbeat后旧version commit零写入、原Host evidence仍由latest fence成功提交。由于尚无Host Resource RPC、
+production process composition与kill/restart fixture，该证据只关闭handler与CR-193 L1/L2门禁，不推进L3/L4资格状态。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

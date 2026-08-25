@@ -40,6 +40,12 @@
 > 系统性拒绝合法结果。CR-193按03→07→12→13→17→18修复：Host evidence绑定排除version/expiry的immutable execution identity，Host仍以
 > dispatch fence fail closed，Context Worker最终以heartbeat后的latest fence提交。00～18 cross-review已关闭；实现需增加跨heartbeat正向fixture。
 
+> 2026-08-26 implementation evidence：r273把CR-193 execution port接入`platform-context-worker` durable driver。driver从exact manifest
+> scan认领`Context -> McpOperation` Job，先绑定本地Context permit，再以同一lease identity heartbeat；Host backend返回后由Context owner以
+> latest fence提交success/retry/permanent outcome及quota/Event/Outbox，expired lease由独立bounded recovery scan处理。Unavailable与
+> completion-uncertain固定映射为ReadOnly dependency retry，Host拒绝或非法响应固定映射为terminal rejection。domain fixture证明heartbeat前后
+> execution identity稳定而commit digest改变；fresh PostgreSQL 16 fixture证明旧version零写入且latest fence成功。Host Resource RPC与三进程L3仍待实现。
+
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
 > 不得恢复Plan v3或caller-supplied completion。已通过的CR-180 terminal authority实现和证据保留，不回退。

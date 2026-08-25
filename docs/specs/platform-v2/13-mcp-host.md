@@ -211,4 +211,8 @@ CR-193明确Host evidence不得摘要包含可变`expected_version`的整个atte
 `execution_identity_digest`只绑定不可变物理attempt closure；Context Worker heartbeat后的最新version仅用于PostgreSQL terminal commit。
 Host不能据此缓存、延长或改写Job lease。
 
+r273已在Context侧组合durable driver与typed `ContextSubscriptionRefreshBackend` port，包括独立permit、heartbeat/latest fence commit、
+ReadOnly retry分类和expired-lease recovery；CR-193 identity与fresh PostgreSQL heartbeat fixture通过。Host侧仍未提供该port的RPC server/
+Streamable HTTP adapter，故Context Worker→Host→Egress三进程L3保持未完成。
+
 首版remote Streamable HTTP合同无未决设计问题。

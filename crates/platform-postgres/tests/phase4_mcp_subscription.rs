@@ -50,8 +50,9 @@ use insight_platform_postgres::{
         DriveExpiredContextSubscriptionRefreshJobs,
     },
     repository::{
-        ClaimJobs, JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewSecretBinding,
-        NewTenant, NewTenantPrincipal, PgRepository, RepositoryError, TypedPayload,
+        ClaimJobs, HeartbeatJob, JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount,
+        NewSecretBinding, NewTenant, NewTenantPrincipal, PgRepository, RepositoryError,
+        TypedPayload,
     },
     verify_schema,
 };
@@ -1755,7 +1756,7 @@ async fn mcp_subscription_fixture() {
     assert_eq!(candidates[0].job_id, accepted.job_id);
     let claims = repository
         .claim_context_subscription_refresh_jobs(ClaimContextSubscriptionRefreshJobs {
-            worker_process_generation_id: context_worker,
+            worker_process_generation_id: context_worker.clone(),
             worker_manifest_digest: context_worker_manifest,
             slots: vec![ContextSubscriptionRefreshClaimSlot {
                 tenant_id: fixture.tenant_id.clone(),
@@ -1775,11 +1776,11 @@ async fn mcp_subscription_fixture() {
         .unwrap();
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].quota_account_id, context_quota_account_id);
-    let attempt = claims[0].attempt.clone();
+    let dispatch_attempt = claims[0].attempt.clone();
     let evidence = ContextSubscriptionRefreshEvidence {
         schema_version: CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
-        attempt_digest: attempt.canonical_digest().unwrap(),
-        request_digest: attempt.request.request_digest.clone(),
+        execution_identity_digest: dispatch_attempt.execution_identity_digest().unwrap(),
+        request_digest: dispatch_attempt.request.request_digest.clone(),
         response_digest: named_digest("context-refresh-response"),
         resource_set_digest: named_digest("context-refresh-resource-set"),
         resource_count: 1,
@@ -1789,8 +1790,39 @@ async fn mcp_subscription_fixture() {
         cursor: None,
         observed_at: now,
     };
+    let heartbeat = repository
+        .heartbeat_job(HeartbeatJob {
+            fence: RepositoryJobFence {
+                tenant_id: fixture.tenant_id.to_string(),
+                job_id: accepted.job_id.to_string(),
+                worker_id: context_worker,
+                lease_epoch: claims[0].job.lease_epoch,
+                expected_job_version: claims[0].job.version,
+                lease_token_digest: named_digest("context-refresh-lease"),
+            },
+            lease_milliseconds: 30_000,
+        })
+        .await
+        .unwrap();
+    let stale_commit = CommitContextSubscriptionRefresh {
+        attempt: dispatch_attempt.clone(),
+        response: ContextSubscriptionRefreshResponse::Completed {
+            evidence: evidence.clone(),
+        },
+        quota_settlement_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x27e),
+        event_id: id(ResourceKind::Event, 0x27f),
+        outbox_id: id(ResourceKind::OutboxEvent, 0x281),
+    };
+    assert!(matches!(
+        repository
+            .commit_context_subscription_refresh(stale_commit)
+            .await,
+        Err(RepositoryError::StaleFence)
+    ));
+    let mut terminal_attempt = dispatch_attempt;
+    terminal_attempt.job_fence.expected_version = u64::try_from(heartbeat.version).unwrap();
     let commit = CommitContextSubscriptionRefresh {
-        attempt,
+        attempt: terminal_attempt,
         response: ContextSubscriptionRefreshResponse::Completed { evidence },
         quota_settlement_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x27e),
         event_id: id(ResourceKind::Event, 0x27f),
@@ -2048,7 +2080,7 @@ async fn mcp_subscription_fixture() {
     let terminal_attempt = terminal_reconcile_claim[0].attempt.clone();
     let terminal_evidence = ContextSubscriptionRefreshEvidence {
         schema_version: CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
-        attempt_digest: terminal_attempt.canonical_digest().unwrap(),
+        execution_identity_digest: terminal_attempt.execution_identity_digest().unwrap(),
         request_digest: terminal_attempt.request.request_digest.clone(),
         response_digest: named_digest("reconcile-context-response"),
         resource_set_digest: named_digest("reconcile-context-resource-set"),

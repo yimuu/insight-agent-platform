@@ -665,6 +665,11 @@ CR-193修正成功evidence绑定：`execution_identity_digest`由tenant/subscrip
 attempt与exact request计算，排除heartbeat可变的Job `expected_version`/lease expiry。Context Worker把dispatch时的identity交给Host，续租只推进
 最终owner commit fence；因此一次或多次heartbeat不会使合法Host evidence失效。新lease或新physical attempt必须产生不同identity。
 
+r273新增subscription专用Context Worker durable driver：exact manifest scan后绑定`WorkClass::Context` permit，再claim、heartbeat并把
+credential-free attempt交给typed Host backend；返回后只通过PostgreSQL Context owner提交outcome，另执行bounded expired-lease recovery。
+domain/unit fixture覆盖CR-193 identity与closed failure mapping；fresh PostgreSQL 16覆盖heartbeat后的stale fence零写入和latest fence成功。
+Host RPC composition和真实进程kill-window仍未完成。
+
 ## 24. 明确推迟的工作
 
 - 跨地域 index replication 与主动容灾；

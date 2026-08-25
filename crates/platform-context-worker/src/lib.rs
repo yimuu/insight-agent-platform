@@ -8,7 +8,9 @@ use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_context::{
     CitationLocator, ClaimContextJobs, CommitContextOutcome, ContextBackendOutcome,
     ContextCitation, ContextClaimSlot, ContextItem, ContextObservation, ContextObservationOutput,
-    ContextQueryLimits, ContextRetrievalEvidence, ContextWorkerAudit, NormalizedContextScore,
+    ContextQueryLimits, ContextRetrievalEvidence, ContextSubscriptionExecutionError,
+    ContextSubscriptionRefreshBackend, ContextSubscriptionRefreshFailureClass,
+    ContextSubscriptionRefreshResponse, ContextWorkerAudit, NormalizedContextScore,
     RemoteContextFailureClass, RemoteContextSearchConnector, RemoteContextSearchRequest,
     RemoteContextSearchResponse, CONTEXT_QUOTA_LINES, REMOTE_CONTEXT_PROTOCOL_VERSION,
 };
@@ -22,6 +24,11 @@ use insight_platform_contracts::{
 use insight_platform_jobs::{JobFence, LeasePolicy};
 use insight_platform_postgres::{
     context_query_repository::{ClaimableNativeContextJob, ClaimedContextExecution},
+    mcp_repository::{
+        ClaimContextSubscriptionRefreshJobs, ClaimedContextSubscriptionRefresh,
+        CommitContextSubscriptionRefresh, ContextSubscriptionRefreshClaimSlot,
+        ContextSubscriptionRefreshRecoverySlot, DriveExpiredContextSubscriptionRefreshJobs,
+    },
     repository::{HeartbeatJob, JobFence as RepositoryJobFence, PgRepository, RepositoryError},
 };
 use insight_platform_worker::{ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPools};
@@ -523,6 +530,210 @@ impl RemoteContextWorkerDriver {
     }
 }
 
+/// Drives durable MCP resource-subscription refresh Jobs from the Context Worker while keeping
+/// protocol I/O behind the credential-free MCP Host backend contract.
+pub struct SubscriptionContextWorkerDriver {
+    repository: Arc<PgRepository>,
+    pools: LocalWorkerPools,
+    backend: Arc<dyn ContextSubscriptionRefreshBackend>,
+    config: ContextWorkerConfig,
+}
+
+impl SubscriptionContextWorkerDriver {
+    pub fn new(
+        repository: Arc<PgRepository>,
+        pools: LocalWorkerPools,
+        backend: Arc<dyn ContextSubscriptionRefreshBackend>,
+        config: ContextWorkerConfig,
+    ) -> Result<Self, ContextWorkerError> {
+        let snapshot = pools.snapshot();
+        if snapshot.worker_role != CONTEXT_WORKER_ROLE || snapshot.work_class != WorkClass::Context
+        {
+            return Err(ContextWorkerError::WrongWorkerManifest);
+        }
+        Ok(Self {
+            repository,
+            pools,
+            backend,
+            config,
+        })
+    }
+
+    pub async fn drive_once(
+        &self,
+        active: &mut JoinSet<bool>,
+    ) -> Result<usize, ContextWorkerError> {
+        let Some(reservation) = self
+            .pools
+            .reserve_claim_capacity(
+                WorkClass::Context,
+                self.config.claim_size,
+                self.config.claim_limit,
+            )
+            .map_err(|_| ContextWorkerError::LocalCapacity)?
+        else {
+            return Ok(0);
+        };
+        let process = self.pools.snapshot();
+        let candidates = self
+            .repository
+            .scan_claimable_context_subscription_refresh_jobs(
+                &process.worker_manifest_digest,
+                u16::try_from(reservation.claim_limit())
+                    .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+            )
+            .await?;
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let slots = candidates
+            .iter()
+            .map(|candidate| {
+                Ok(ContextSubscriptionRefreshClaimSlot {
+                    tenant_id: candidate.tenant_id.clone(),
+                    job_id: candidate.job_id.clone(),
+                    lease_token_digest: new_digest()?,
+                    quota_reservation_id: new_id(ResourceKind::UsageReservation)?,
+                    quota_reserve_entry_id: new_id(ResourceKind::QuotaLedgerEntry)?,
+                    event_id: new_id(ResourceKind::Event)?,
+                    outbox_id: new_id(ResourceKind::OutboxEvent)?,
+                })
+            })
+            .collect::<Result<Vec<_>, ContextWorkerError>>()?;
+        let expected_tokens = slots
+            .iter()
+            .map(|slot| slot.lease_token_digest.clone())
+            .collect::<BTreeSet<_>>();
+        let claims = self
+            .repository
+            .claim_context_subscription_refresh_jobs(ClaimContextSubscriptionRefreshJobs {
+                worker_process_generation_id: process.worker_process_generation_id.clone(),
+                worker_manifest_digest: process.worker_manifest_digest.clone(),
+                slots,
+                lease_policy: LeasePolicy {
+                    requested_milliseconds: self.config.lease_milliseconds,
+                    hard_maximum_milliseconds: self.config.lease_milliseconds,
+                },
+            })
+            .await?;
+        let permits = reservation
+            .bind_claimed_jobs(
+                claims
+                    .iter()
+                    .map(|claim| {
+                        claimed_subscription_identity(
+                            claim,
+                            &process.worker_process_generation_id,
+                            &expected_tokens,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .map_err(|_| ContextWorkerError::CorruptClaim)?;
+        if permits.len() != claims.len() {
+            return Err(ContextWorkerError::CorruptClaim);
+        }
+        let count = claims.len();
+        for (claim, permit) in claims.into_iter().zip(permits) {
+            let repository = Arc::clone(&self.repository);
+            let backend = Arc::clone(&self.backend);
+            let config = self.config;
+            active.spawn(async move {
+                let _permit = permit;
+                match execute_subscription_claim(repository, backend, config, claim).await {
+                    Ok(()) => true,
+                    Err(failure) => {
+                        eprintln!(
+                            "platform-context-worker abandoned subscription refresh: {failure}"
+                        );
+                        false
+                    }
+                }
+            });
+        }
+        Ok(count)
+    }
+
+    pub async fn recover_once(&self) -> Result<usize, ContextWorkerError> {
+        let slots = (0..self.config.recovery_size)
+            .map(|_| {
+                Ok(ContextSubscriptionRefreshRecoverySlot {
+                    quota_settlement_entry_id: new_id(ResourceKind::QuotaLedgerEntry)?,
+                    event_id: new_id(ResourceKind::Event)?,
+                    outbox_id: new_id(ResourceKind::OutboxEvent)?,
+                })
+            })
+            .collect::<Result<Vec<_>, ContextWorkerError>>()?;
+        self.repository
+            .drive_expired_context_subscription_refresh_jobs(
+                DriveExpiredContextSubscriptionRefreshJobs {
+                    shard_index: 0,
+                    shard_count: 1,
+                    limit: self.config.recovery_size,
+                    retry_backoff_milliseconds: u64::try_from(
+                        self.config.timing.failure_backoff.as_millis(),
+                    )
+                    .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+                    slots,
+                },
+            )
+            .await
+            .map(|jobs| jobs.len())
+            .map_err(ContextWorkerError::Repository)
+    }
+
+    pub async fn run(
+        self,
+        cancellation: CancellationToken,
+    ) -> Result<ContextWorkerReport, ContextWorkerError> {
+        let mut report = ContextWorkerReport::default();
+        let mut active = JoinSet::new();
+        let mut scan = tokio::time::interval(self.config.timing.scan_interval);
+        scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => break,
+                joined = active.join_next(), if !active.is_empty() => match joined {
+                    Some(Ok(true)) => report.settled += 1,
+                    Some(_) => report.abandoned += 1,
+                    None => {}
+                },
+                _ = scan.tick() => {
+                    if let Err(failure) = self.recover_once().await {
+                        if !failure.is_transient_repository_race() {
+                            return Err(failure);
+                        }
+                    }
+                    match self.drive_once(&mut active).await {
+                        Ok(claimed) => report.claimed += u64::try_from(claimed)
+                            .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+                        Err(failure) if failure.is_transient_repository_race() => {
+                            tokio::select! {
+                                _ = cancellation.cancelled() => break,
+                                _ = tokio::time::sleep(self.config.timing.failure_backoff) => {}
+                            }
+                        }
+                        Err(failure) => return Err(failure),
+                    }
+                }
+            }
+        }
+        let drain = async {
+            while let Some(joined) = active.join_next().await {
+                match joined {
+                    Ok(true) => report.settled += 1,
+                    _ => report.abandoned += 1,
+                }
+            }
+        };
+        tokio::time::timeout(self.config.timing.drain_grace, drain)
+            .await
+            .map_err(|_| ContextWorkerError::DrainRequiresTermination)?;
+        Ok(report)
+    }
+}
+
 async fn recover_expired(
     repository: &PgRepository,
     config: ContextWorkerConfig,
@@ -827,6 +1038,141 @@ async fn execute_remote_claim(
         config,
     )
     .await
+}
+
+async fn execute_subscription_claim(
+    repository: Arc<PgRepository>,
+    backend: Arc<dyn ContextSubscriptionRefreshBackend>,
+    config: ContextWorkerConfig,
+    mut claim: ClaimedContextSubscriptionRefresh,
+) -> Result<(), ContextWorkerError> {
+    let process_id = parse_id(&claim.job.worker_id, ResourceKind::WorkerProcessGeneration)?;
+    let token: Sha256Digest = claim
+        .job
+        .lease_token_digest
+        .as_deref()
+        .ok_or(ContextWorkerError::CorruptClaim)?
+        .parse()
+        .map_err(|_| ContextWorkerError::CorruptClaim)?;
+    let heartbeat = repository
+        .heartbeat_job(HeartbeatJob {
+            fence: RepositoryJobFence {
+                tenant_id: claim.job.tenant_id.clone(),
+                job_id: claim.job.job_id.clone(),
+                worker_id: process_id.clone(),
+                lease_epoch: claim.job.lease_epoch,
+                expected_job_version: claim.job.version,
+                lease_token_digest: token.clone(),
+            },
+            lease_milliseconds: i64::try_from(config.lease_milliseconds)
+                .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+        })
+        .await?;
+    claim.attempt.job_fence.expected_version =
+        u64::try_from(heartbeat.version).map_err(|_| ContextWorkerError::CorruptClaim)?;
+    let refresh = backend.refresh_subscription_resources(claim.attempt.clone());
+    tokio::pin!(refresh);
+    let mut interval = tokio::time::interval(config.heartbeat_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    let backend_result = loop {
+        tokio::select! {
+            result = &mut refresh => break result,
+            _ = interval.tick() => {
+                match repository.heartbeat_job(HeartbeatJob {
+                    fence: RepositoryJobFence {
+                        tenant_id: claim.job.tenant_id.clone(),
+                        job_id: claim.job.job_id.clone(),
+                        worker_id: process_id.clone(),
+                        lease_epoch: i64::try_from(claim.attempt.job_fence.lease_generation)
+                            .map_err(|_| ContextWorkerError::CorruptClaim)?,
+                        expected_job_version: i64::try_from(claim.attempt.job_fence.expected_version)
+                            .map_err(|_| ContextWorkerError::CorruptClaim)?,
+                        lease_token_digest: token.clone(),
+                    },
+                    lease_milliseconds: i64::try_from(config.lease_milliseconds)
+                        .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+                }).await {
+                    Ok(next) => claim.attempt.job_fence.expected_version = u64::try_from(next.version)
+                        .map_err(|_| ContextWorkerError::CorruptClaim)?,
+                    Err(RepositoryError::Database(_)) => {}
+                    Err(failure) => return Err(ContextWorkerError::Repository(failure)),
+                }
+            }
+        }
+    };
+    let response = normalize_subscription_response(
+        &claim.attempt,
+        backend_result,
+        config.timing.failure_backoff,
+    )?;
+    repository
+        .commit_context_subscription_refresh(CommitContextSubscriptionRefresh {
+            attempt: claim.attempt,
+            response,
+            quota_settlement_entry_id: new_id(ResourceKind::QuotaLedgerEntry)?,
+            event_id: new_id(ResourceKind::Event)?,
+            outbox_id: new_id(ResourceKind::OutboxEvent)?,
+        })
+        .await?;
+    Ok(())
+}
+
+fn normalize_subscription_response(
+    attempt: &insight_platform_context::ContextSubscriptionRefreshAttempt,
+    result: Result<ContextSubscriptionRefreshResponse, ContextSubscriptionExecutionError>,
+    failure_backoff: Duration,
+) -> Result<ContextSubscriptionRefreshResponse, ContextWorkerError> {
+    let response = match result {
+        Ok(response) if response.validate_for(attempt, Utc::now()).is_ok() => response,
+        Ok(_) => {
+            subscription_permanent_failure(ContextSubscriptionExecutionError::InvalidResponse)?
+        }
+        Err(
+            failure @ (ContextSubscriptionExecutionError::Unavailable
+            | ContextSubscriptionExecutionError::CompletionUncertain),
+        ) => ContextSubscriptionRefreshResponse::RetryableFailure {
+            class: ContextSubscriptionRefreshFailureClass::Dependency,
+            evidence_digest: subscription_failure_digest(failure)?,
+            retry_after_milliseconds: u64::try_from(failure_backoff.as_millis())
+                .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+        },
+        Err(failure) => subscription_permanent_failure(failure)?,
+    };
+    response
+        .validate_for(attempt, Utc::now())
+        .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?;
+    Ok(response)
+}
+
+fn subscription_permanent_failure(
+    failure: ContextSubscriptionExecutionError,
+) -> Result<ContextSubscriptionRefreshResponse, ContextWorkerError> {
+    Ok(ContextSubscriptionRefreshResponse::PermanentFailure {
+        class: ContextSubscriptionRefreshFailureClass::Rejected,
+        evidence_digest: subscription_failure_digest(failure)?,
+    })
+}
+
+fn subscription_failure_digest(
+    failure: ContextSubscriptionExecutionError,
+) -> Result<Sha256Digest, ContextWorkerError> {
+    let code = match failure {
+        ContextSubscriptionExecutionError::InvalidAttempt => "invalid_attempt",
+        ContextSubscriptionExecutionError::InvalidEvidence => "invalid_evidence",
+        ContextSubscriptionExecutionError::InvalidResponse => "invalid_response",
+        ContextSubscriptionExecutionError::Rejected => "rejected",
+        ContextSubscriptionExecutionError::Unavailable => "unavailable",
+        ContextSubscriptionExecutionError::CompletionUncertain => "completion_uncertain",
+        ContextSubscriptionExecutionError::Canonicalization => "canonicalization",
+    };
+    canonical_digest(&serde_json::json!({
+        "schema_version": 1,
+        "context_subscription_refresh_failure": code,
+    }))
+    .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?
+    .parse()
+    .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)
 }
 
 fn remote_request(
@@ -1158,6 +1504,34 @@ fn claimed_identity(
     })
 }
 
+fn claimed_subscription_identity(
+    claim: &ClaimedContextSubscriptionRefresh,
+    process_id: &ResourceId,
+    tokens: &BTreeSet<Sha256Digest>,
+) -> Result<ClaimedJobIdentity, ContextWorkerError> {
+    let worker = parse_id(&claim.job.worker_id, ResourceKind::WorkerProcessGeneration)?;
+    let token: Sha256Digest = claim
+        .job
+        .lease_token_digest
+        .as_deref()
+        .ok_or(ContextWorkerError::CorruptClaim)?
+        .parse()
+        .map_err(|_| ContextWorkerError::CorruptClaim)?;
+    if &worker != process_id
+        || claim.attempt.worker_process_generation_id != *process_id
+        || claim.attempt.job_fence.token_digest != token
+        || !tokens.contains(&token)
+        || claim.job.lease_epoch <= 0
+    {
+        return Err(ContextWorkerError::CorruptClaim);
+    }
+    Ok(ClaimedJobIdentity {
+        job_id: parse_required_id(&claim.job.job_id, ResourceKind::Job)?,
+        lease_generation: u64::try_from(claim.job.lease_epoch)
+            .map_err(|_| ContextWorkerError::CorruptClaim)?,
+    })
+}
+
 fn resume_mutations() -> Result<ExternalLeafResumeMutationIds, ContextWorkerError> {
     Ok(ExternalLeafResumeMutationIds {
         continuation_node_execution_id: new_id(ResourceKind::NodeExecution)?,
@@ -1291,3 +1665,130 @@ impl fmt::Display for ContextWorkerError {
 }
 
 impl Error for ContextWorkerError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration as ChronoDuration;
+    use insight_platform_context::{
+        ContextSubscriptionRefreshAttempt, ContextSubscriptionRefreshCause,
+        ContextSubscriptionRefreshRequest, CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+        CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
+    };
+    use insight_platform_contracts::ExactDeploymentRef;
+
+    fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
+        format!(
+            "{}_0198f1c9-32e4-75e1-a9e8-d95ca0f5{suffix:04x}",
+            kind.descriptor().prefix
+        )
+        .parse()
+        .unwrap()
+    }
+
+    fn digest(label: &str) -> Sha256Digest {
+        canonical_digest(&serde_json::json!({"worker_test": label}))
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    fn subscription_attempt(now: chrono::DateTime<Utc>) -> ContextSubscriptionRefreshAttempt {
+        let worker = id(ResourceKind::WorkerProcessGeneration, 1);
+        let mut request = ContextSubscriptionRefreshRequest {
+            schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
+            tenant_id: id(ResourceKind::Tenant, 2),
+            subscription_id: id(ResourceKind::McpOperation, 3),
+            context_deployment: ExactDeploymentRef::new(
+                id(ResourceKind::ContextDeployment, 4),
+                digest("context-deployment"),
+            )
+            .unwrap(),
+            mcp_deployment: ExactDeploymentRef::new(
+                id(ResourceKind::McpDeployment, 5),
+                digest("mcp-deployment"),
+            )
+            .unwrap(),
+            discovery_snapshot_id: id(ResourceKind::McpDiscoverySnapshot, 6),
+            discovery_snapshot_digest: digest("discovery"),
+            resource_uri: "mcp://knowledge/root".to_owned(),
+            resource_uri_digest: digest("resource-uri"),
+            authorization_generation: 1,
+            session_generation: 2,
+            event_generation: 3,
+            event_key_digest: digest("event-key"),
+            body_digest: digest("body"),
+            cause: ContextSubscriptionRefreshCause::ResourceUpdated,
+            deadline: now + ChronoDuration::minutes(5),
+            request_digest: digest("placeholder"),
+        };
+        request.request_digest = request.canonical_request_digest().unwrap();
+        ContextSubscriptionRefreshAttempt {
+            schema_version: CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
+            job_id: id(ResourceKind::Job, 7),
+            worker_process_generation_id: worker.clone(),
+            job_fence: JobFence {
+                expected_version: 4,
+                worker_process_generation_id: worker,
+                lease_generation: 2,
+                token_digest: digest("lease"),
+            },
+            attempt_number: 1,
+            request,
+        }
+    }
+
+    #[test]
+    fn unavailable_subscription_backend_is_retryable_dependency_failure() {
+        let attempt = subscription_attempt(Utc::now());
+        let response = normalize_subscription_response(
+            &attempt,
+            Err(ContextSubscriptionExecutionError::Unavailable),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(matches!(
+            response,
+            ContextSubscriptionRefreshResponse::RetryableFailure {
+                class: ContextSubscriptionRefreshFailureClass::Dependency,
+                retry_after_milliseconds: 2_000,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn invalid_backend_response_is_terminal_rejection() {
+        let attempt = subscription_attempt(Utc::now());
+        let response = normalize_subscription_response(
+            &attempt,
+            Ok(ContextSubscriptionRefreshResponse::RetryableFailure {
+                class: ContextSubscriptionRefreshFailureClass::Rejected,
+                evidence_digest: digest("bad-response"),
+                retry_after_milliseconds: 1,
+            }),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(matches!(
+            response,
+            ContextSubscriptionRefreshResponse::PermanentFailure {
+                class: ContextSubscriptionRefreshFailureClass::Rejected,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn failure_evidence_is_stable_and_class_specific() {
+        assert_eq!(
+            subscription_failure_digest(ContextSubscriptionExecutionError::Unavailable).unwrap(),
+            subscription_failure_digest(ContextSubscriptionExecutionError::Unavailable).unwrap()
+        );
+        assert_ne!(
+            subscription_failure_digest(ContextSubscriptionExecutionError::Unavailable).unwrap(),
+            subscription_failure_digest(ContextSubscriptionExecutionError::CompletionUncertain)
+                .unwrap()
+        );
+    }
+}
