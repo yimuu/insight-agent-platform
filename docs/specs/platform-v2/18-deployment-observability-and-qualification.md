@@ -364,6 +364,10 @@ r266新增shared worker-permit sampler并接入Model、Capability Native/Remote�
 tenant identity，shutdown token终止sampler。连同Orchestration已有接线，6个pool具备动态permit saturation series；其余11个pool及durable
 backlog/dependency health仍待对应owner接线。
 
+r267把shared permit sampler接入同一Sandbox Executor binary的WASI和gVisor两个隔离pool，均从exact `LocalWorkerPools`导出fixed lane
+available/used并随process cancellation退出。相关executor/owner tests和strict Clippy通过，动态permit coverage达到8/17 pool；Sandbox Controller、
+Artifact、Security/Egress等不同容量authority不能用该series代替，仍待各自owner指标。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

@@ -4,7 +4,8 @@ use insight_platform_contracts::{
     ResourceKind, SandboxIsolationClass, Sha256Digest, WorkClass, WorkerManifest,
 };
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, run_worker_permit_sampler, update_worker_permits,
+    ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_sandbox::{
     InstalledSandboxBackendDescriptor, InstalledSandboxBackendRegistry,
@@ -359,10 +360,13 @@ async fn run() -> Result<(), ProcessError> {
     .await
     .map_err(|_| ProcessError::NatsUnavailable)?;
 
+    let permit_metrics = Arc::new(WorkerPermitMetrics::default());
+    update_worker_permits(&permit_metrics, &pools);
     let metrics = Arc::new(
-        ProcessHttpMetrics::install(
+        ProcessHttpMetrics::install_with_worker_permits(
             config.backend.observability_component(),
             PROCESS_OBSERVABILITY_OPERATIONS,
+            Arc::clone(&permit_metrics),
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
@@ -372,6 +376,11 @@ async fn run() -> Result<(), ProcessError> {
             .map_err(|_| ProcessError::ObservabilityUnavailable)?;
 
     let shutdown = CancellationToken::new();
+    let _permit_sampler = tokio::spawn(run_worker_permit_sampler(
+        permit_metrics,
+        pools,
+        shutdown.child_token(),
+    ));
     let mut driver_task = tokio::spawn(driver.run(shutdown.child_token()));
     let mut control_task = tokio::spawn(listener.run(shutdown.child_token()));
     let observability_shutdown = shutdown.child_token();
