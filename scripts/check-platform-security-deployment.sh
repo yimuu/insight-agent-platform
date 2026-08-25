@@ -9,8 +9,10 @@ import subprocess
 root = pathlib.Path.cwd()
 grants = (root / "crates/platform-postgres/security-authority-grants.sql").read_text(encoding="utf-8")
 authority = (root / "crates/platform-security-authority/Cargo.toml").read_text(encoding="utf-8")
+authority_source = (root / "crates/platform-security-authority/src/main.rs").read_text(encoding="utf-8")
 egress_core = (root / "crates/platform-egress/Cargo.toml").read_text(encoding="utf-8")
 egress = (root / "crates/platform-egress-broker/Cargo.toml").read_text(encoding="utf-8")
+egress_source = (root / "crates/platform-egress-broker/src/main.rs").read_text(encoding="utf-8")
 egress_rpc = (root / "crates/platform-egress-rpc/Cargo.toml").read_text(encoding="utf-8")
 broker = (root / "crates/platform-secret-broker/Cargo.toml").read_text(encoding="utf-8")
 proto = (root / "proto/insight/platform/v1/security_internal.proto").read_text(encoding="utf-8")
@@ -21,6 +23,20 @@ chart = root / "deploy/helm/insight-platform-security-egress"
 failures = []
 if "sqlx.workspace = true" not in authority:
     failures.append("Security Authority must own the restricted PostgreSQL adapter")
+for name, manifest, source in (
+    ("Security Authority", authority, authority_source),
+    ("Egress Broker", egress, egress_source),
+):
+    if "insight-platform-observability.workspace = true" not in manifest:
+        failures.append(f"{name} must depend on shared process observability")
+    for required in (
+        "observability_listen_address",
+        "process_observability_router",
+        "ProcessHttpMetrics",
+        "mark_ready",
+    ):
+        if required not in source:
+            failures.append(f"{name} production composition is missing {required}")
 for name, manifest in (
     ("Egress core", egress_core),
     ("Egress Broker", egress),
@@ -107,6 +123,32 @@ if rendered.count("kind: Namespace") != 2:
     failures.append("Helm must render two isolated namespaces")
 if rendered.count("name: default-deny") != 2:
     failures.append("both Security and Egress namespaces require default-deny NetworkPolicy")
+for needle in (
+    "kind: ServiceMonitor",
+    "name: observability",
+    "path: /livez",
+    "path: /readyz",
+    "path: /metrics",
+):
+    if needle not in rendered:
+        failures.append(f"rendered Security/Egress observability contract is missing {needle}")
+if rendered.count("kind: ServiceMonitor") != 2:
+    failures.append("Security/Egress chart must render one ServiceMonitor per isolated workload pool")
+
+negative_values = (
+    ("--set", "egress.observabilityPort=8443", "egress.observabilityPort must be distinct"),
+    ("--set", "securityAuthority.observabilityPort=0", "securityAuthority.observabilityPort must be distinct"),
+    ("--set-json", "networkPolicy.monitoringPodSelector=null", "monitoring requires exact"),
+)
+for flag, assignment, expected in negative_values:
+    result = subprocess.run(
+        ["helm", "template", "platform", str(chart), flag, assignment],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode == 0 or expected not in result.stderr:
+        failures.append(f"Security/Egress chart accepted invalid override {assignment}")
 
 required_select = {
     "schema_migrations",

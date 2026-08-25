@@ -3,6 +3,9 @@ kind: Service
 metadata:
   name: {{ include "insight-platform-security-egress.egressName" . }}
   namespace: {{ .Values.namespaces.egress }}
+  labels:
+    {{- include "insight-platform-security-egress.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress-broker
 spec:
   type: ClusterIP
   selector:
@@ -14,12 +17,19 @@ spec:
       protocol: TCP
       port: {{ int .Values.egress.port }}
       targetPort: grpc-mtls
+    - name: observability
+      protocol: TCP
+      port: {{ int .Values.egress.observabilityPort }}
+      targetPort: observability
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "insight-platform-security-egress.authorityName" . }}
   namespace: {{ .Values.namespaces.securityAuthority }}
+  labels:
+    {{- include "insight-platform-security-egress.labels" . | nindent 4 }}
+    app.kubernetes.io/component: security-authority
 spec:
   type: ClusterIP
   selector:
@@ -31,3 +41,7 @@ spec:
       protocol: TCP
       port: {{ int .Values.securityAuthority.port }}
       targetPort: grpc-mtls
+    - name: observability
+      protocol: TCP
+      port: {{ int .Values.securityAuthority.observabilityPort }}
+      targetPort: observability

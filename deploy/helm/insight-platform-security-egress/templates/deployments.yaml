@@ -51,7 +51,9 @@ spec:
           image: {{ include "insight-platform-security-egress.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/platform-egress-broker"]
-          ports: [{name: grpc-mtls, containerPort: {{ int .Values.egress.port }}, protocol: TCP}]
+          ports:
+            - {name: grpc-mtls, containerPort: {{ int .Values.egress.port }}, protocol: TCP}
+            - {name: observability, containerPort: {{ int .Values.egress.observabilityPort }}, protocol: TCP}
           env:
             - {name: PLATFORM_EGRESS_BROKER_CONFIG, value: /etc/insight/config/egress.json}
             - {name: PLATFORM_EGRESS_BROKER_CONFIG_DIGEST, value: {{ .Values.egress.config.digest | quote }}}
@@ -61,9 +63,9 @@ spec:
             - {name: PLATFORM_EGRESS_BROKER_AUTHORITY_CA_PATH, value: /etc/insight/authority-tls/authority-ca.pem}
             - {name: PLATFORM_EGRESS_BROKER_AUTHORITY_CERT_PATH, value: /etc/insight/authority-tls/authority-client.pem}
             - {name: PLATFORM_EGRESS_BROKER_AUTHORITY_KEY_PATH, value: /etc/insight/authority-tls/authority-client-key.pem}
-          readinessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
-          livenessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
-          startupProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          startupProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
           resources: {{ toYaml .Values.egress.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -153,7 +155,9 @@ spec:
           image: {{ include "insight-platform-security-egress.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/platform-security-authority"]
-          ports: [{name: grpc-mtls, containerPort: {{ int .Values.securityAuthority.port }}, protocol: TCP}]
+          ports:
+            - {name: grpc-mtls, containerPort: {{ int .Values.securityAuthority.port }}, protocol: TCP}
+            - {name: observability, containerPort: {{ int .Values.securityAuthority.observabilityPort }}, protocol: TCP}
           env:
             - {name: PLATFORM_SECURITY_AUTHORITY_CONFIG, value: /etc/insight/config/authority.json}
             - {name: PLATFORM_SECURITY_AUTHORITY_CONFIG_DIGEST, value: {{ .Values.securityAuthority.config.digest | quote }}}
@@ -162,9 +166,9 @@ spec:
             - {name: PLATFORM_SECURITY_AUTHORITY_CLIENT_CA_PATH, value: /etc/insight/tls/client-ca.pem}
             - {name: PLATFORM_SECURITY_AUTHORITY_CERT_PATH, value: /etc/insight/tls/server.pem}
             - {name: PLATFORM_SECURITY_AUTHORITY_KEY_PATH, value: /etc/insight/tls/server-key.pem}
-          readinessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
-          livenessProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
-          startupProbe: {tcpSocket: {port: grpc-mtls}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          startupProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
           resources: {{ toYaml .Values.securityAuthority.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false

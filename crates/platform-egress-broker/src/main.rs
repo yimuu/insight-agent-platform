@@ -32,6 +32,9 @@ use insight_platform_egress_rpc::{
 use insight_platform_model_adapters::{
     BrokeredModelProviderWireConnector, ModelProviderEgressBroker,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_secret_broker::{
     AwsSecretProviderCatalog, AwsSecretProviderCatalogConfig, BrokeredMcpOAuthSecretStore,
     BrokeredSecretMaterialResolver, SecretBrokerLimits,
@@ -47,7 +50,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity, Server, ServerTlsConfig};
 use url::Url;
 
@@ -69,6 +72,7 @@ const MCP_STATE_KEY_DIRECTORY: &str = "/etc/insight/mcp-state-keys";
 struct ProcessConfig {
     schema_version: u32,
     listen_address: String,
+    observability_listen_address: String,
     security_authority_endpoint: String,
     security_authority_tls_server_name: String,
     maximum_rpc_metadata_bytes: usize,
@@ -216,10 +220,16 @@ impl ProcessConfig {
             .listen_address
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let observability: SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         let authority = Url::parse(&self.security_authority_endpoint)
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
             || listen.port() == 0
+            || observability.port() == 0
+            || observability == listen
             || authority.scheme() != "https"
             || authority.host_str().is_none()
             || authority.port().is_none()
@@ -480,32 +490,63 @@ async fn run() -> Result<(), ProcessError> {
         .listen_address
         .parse()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+    let cancellation = CancellationToken::new();
+    let server_cancellation = cancellation.child_token();
     let server = Server::builder()
         .tls_config(tls)
         .map_err(|_| ProcessError::InvalidConfiguration)?
         .add_service(service)
-        .serve_with_shutdown(listen, async move {
-            let _ = shutdown_receiver.await;
-        });
+        .serve_with_shutdown(listen, server_cancellation.cancelled_owned());
     let mut server = tokio::spawn(server);
-    shutdown_signal().await;
-    let _ = shutdown_sender.send(());
-    match tokio::time::timeout(
-        Duration::from_millis(config.shutdown_grace_milliseconds),
-        &mut server,
-    )
-    .await
-    {
-        Ok(joined) => joined
-            .map_err(|_| ProcessError::ServerFailure)?
-            .map_err(|_| ProcessError::ServerFailure),
-        Err(_) => {
-            server.abort();
-            let _ = server.await;
-            Err(ProcessError::ShutdownTimeout)
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("egress-secret-broker", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
+        .await
+        .map_err(|_| ProcessError::ObservabilityFailure)?;
+    let observability_cancellation = cancellation.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut observability = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(observability_cancellation.cancelled_owned())
+            .await
+    });
+    metrics.mark_ready();
+    tokio::select! {
+        _ = shutdown_signal() => cancellation.cancel(),
+        result = &mut server => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::ServerFailure)?
+                .map_err(|_| ProcessError::ServerFailure)?;
+            observability.await.map_err(|_| ProcessError::ObservabilityFailure)?
+                .map_err(|_| ProcessError::ObservabilityFailure)?;
+            return Err(ProcessError::ServerFailure);
+        }
+        result = &mut observability => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::ObservabilityFailure)?
+                .map_err(|_| ProcessError::ObservabilityFailure)?;
+            server.await.map_err(|_| ProcessError::ServerFailure)?
+                .map_err(|_| ProcessError::ServerFailure)?;
+            return Err(ProcessError::ObservabilityFailure);
         }
     }
+    tokio::time::timeout(
+        Duration::from_millis(config.shutdown_grace_milliseconds),
+        async {
+            server
+                .await
+                .map_err(|_| ProcessError::ServerFailure)?
+                .map_err(|_| ProcessError::ServerFailure)?;
+            observability
+                .await
+                .map_err(|_| ProcessError::ObservabilityFailure)?
+                .map_err(|_| ProcessError::ObservabilityFailure)
+        },
+    )
+    .await
+    .map_err(|_| ProcessError::ShutdownTimeout)?
 }
 
 async fn connect_security_authority(
@@ -644,6 +685,7 @@ enum ProcessError {
     SecretProviderUnavailable,
     ServerFailure,
     ShutdownTimeout,
+    ObservabilityFailure,
 }
 
 impl fmt::Display for ProcessError {
@@ -662,6 +704,7 @@ impl fmt::Display for ProcessError {
             }
             Self::ServerFailure => formatter.write_str("internal gRPC server failed"),
             Self::ShutdownTimeout => formatter.write_str("graceful shutdown timed out"),
+            Self::ObservabilityFailure => formatter.write_str("observability server failed"),
         }
     }
 }

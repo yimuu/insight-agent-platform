@@ -312,6 +312,11 @@ r255为MCP Host增加独立observability listener，readiness位于Egress mTLS�
 组合之后。业务gRPC与metrics使用不同端口及不同NetworkPolicy source，任一server提前退出使进程失败。该证据不等于OAuth/subscription
 production L3，也不包含真实Prometheus scrape。
 
+r256为Security Authority与Egress Broker接入shared process observability。Authority的readiness位于restricted PostgreSQL/schema、exact
+authority及TLS RPC组合之后；Egress的readiness还要求Authority mTLS、secret-provider catalog、MCP state/codecs与全部closed connector完成组合。
+两个namespace分别提供与业务gRPC不同的metrics端口、HTTP probes、ServiceMonitor和Prometheus-only ingress，且不扩大Egress caller或Authority
+PostgreSQL权限。任一server提前退出都会使所属进程fail closed；该证据不包含真实provider调用、Prometheus scrape或production L4 enforcement。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

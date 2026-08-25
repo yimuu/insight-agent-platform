@@ -11,8 +11,10 @@ name = "platform-security-authority"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
 async-trait.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-security.workspace = true
 insight-platform-security-rpc.workspace = true
@@ -20,4 +22,5 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true

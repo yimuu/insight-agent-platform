@@ -8,6 +8,9 @@ use async_trait::async_trait;
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, JsonLimits, ResourceId, Sha256Digest,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_security::{
     PreparedSecretBindingAuthority, PreparedSecretBindingRegistrationError,
@@ -24,7 +27,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::{
     error::Error, fmt, io::Read as _, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration,
 };
-use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_SECURITY_AUTHORITY_CONFIG";
@@ -41,6 +44,7 @@ const MAX_TLS_FILE_BYTES: usize = 1024 * 1024;
 struct ProcessConfig {
     schema_version: u32,
     listen_address: String,
+    observability_listen_address: String,
     service_principal_id: ResourceId,
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
@@ -85,8 +89,14 @@ impl ProcessConfig {
             .listen_address
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let observability: SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
             || listen.port() == 0
+            || observability.port() == 0
+            || observability == listen
             || self.service_principal_id.kind()
                 != insight_platform_contracts::ResourceKind::Principal
             || !(2..=32).contains(&self.database_max_connections)
@@ -203,32 +213,63 @@ async fn run() -> Result<(), ProcessError> {
         .listen_address
         .parse()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+    let cancellation = CancellationToken::new();
+    let server_cancellation = cancellation.child_token();
     let server = Server::builder()
         .tls_config(tls)
         .map_err(|_| ProcessError::InvalidConfiguration)?
         .add_service(service)
-        .serve_with_shutdown(listen, async move {
-            let _ = shutdown_receiver.await;
-        });
+        .serve_with_shutdown(listen, server_cancellation.cancelled_owned());
     let mut server = tokio::spawn(server);
-    shutdown_signal().await;
-    let _ = shutdown_sender.send(());
-    match tokio::time::timeout(
-        Duration::from_millis(config.shutdown_grace_milliseconds),
-        &mut server,
-    )
-    .await
-    {
-        Ok(joined) => joined
-            .map_err(|_| ProcessError::ServerFailure)?
-            .map_err(|_| ProcessError::ServerFailure),
-        Err(_) => {
-            server.abort();
-            let _ = server.await;
-            Err(ProcessError::ShutdownTimeout)
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("security-authority", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
+        .await
+        .map_err(|_| ProcessError::ObservabilityFailure)?;
+    let observability_cancellation = cancellation.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut observability = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(observability_cancellation.cancelled_owned())
+            .await
+    });
+    metrics.mark_ready();
+    tokio::select! {
+        _ = shutdown_signal() => cancellation.cancel(),
+        result = &mut server => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::ServerFailure)?
+                .map_err(|_| ProcessError::ServerFailure)?;
+            observability.await.map_err(|_| ProcessError::ObservabilityFailure)?
+                .map_err(|_| ProcessError::ObservabilityFailure)?;
+            return Err(ProcessError::ServerFailure);
+        }
+        result = &mut observability => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::ObservabilityFailure)?
+                .map_err(|_| ProcessError::ObservabilityFailure)?;
+            server.await.map_err(|_| ProcessError::ServerFailure)?
+                .map_err(|_| ProcessError::ServerFailure)?;
+            return Err(ProcessError::ObservabilityFailure);
         }
     }
+    tokio::time::timeout(
+        Duration::from_millis(config.shutdown_grace_milliseconds),
+        async {
+            server
+                .await
+                .map_err(|_| ProcessError::ServerFailure)?
+                .map_err(|_| ProcessError::ServerFailure)?;
+            observability
+                .await
+                .map_err(|_| ProcessError::ObservabilityFailure)?
+                .map_err(|_| ProcessError::ObservabilityFailure)
+        },
+    )
+    .await
+    .map_err(|_| ProcessError::ShutdownTimeout)?
 }
 
 async fn shutdown_signal() {
@@ -297,6 +338,7 @@ enum ProcessError {
     SchemaMismatch,
     ServerFailure,
     ShutdownTimeout,
+    ObservabilityFailure,
 }
 
 impl fmt::Display for ProcessError {
@@ -313,6 +355,7 @@ impl fmt::Display for ProcessError {
             }
             Self::ServerFailure => formatter.write_str("internal gRPC server failed"),
             Self::ShutdownTimeout => formatter.write_str("graceful shutdown timed out"),
+            Self::ObservabilityFailure => formatter.write_str("observability server failed"),
         }
     }
 }
@@ -328,6 +371,7 @@ mod tests {
         let config: ProcessConfig = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "listen_address": "0.0.0.0:9443",
+            "observability_listen_address": "0.0.0.0:9090",
             "service_principal_id": "prn_0198f1c3-8f49-7c3e-b1f3-773c28367b90",
             "database_max_connections": 8,
             "database_acquire_timeout_milliseconds": 5000,
@@ -341,6 +385,7 @@ mod tests {
         assert!(serde_json::from_value::<ProcessConfig>(serde_json::json!({
             "schema_version": 1,
             "listen_address": "0.0.0.0:9443",
+            "observability_listen_address": "0.0.0.0:9090",
             "service_principal_id": "prn_0198f1c3-8f49-7c3e-b1f3-773c28367b90",
             "database_max_connections": 8,
             "database_acquire_timeout_milliseconds": 5000,

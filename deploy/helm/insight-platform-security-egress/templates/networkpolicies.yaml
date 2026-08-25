@@ -30,6 +30,14 @@ spec:
             matchLabels: {{ toYaml .podSelector | nindent 16 }}
       ports: [{protocol: TCP, port: {{ int $.Values.egress.port }}}]
     {{- end }}
+    {{- if .Values.monitoring.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.egress.observabilityPort }}}]
+    {{- end }}
   egress:
     - to:
         - namespaceSelector:
@@ -84,6 +92,14 @@ spec:
               app.kubernetes.io/instance: {{ .Release.Name }}
               app.kubernetes.io/component: egress-broker
       ports: [{protocol: TCP, port: {{ int .Values.securityAuthority.port }}}]
+    {{- if .Values.monitoring.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.monitoringPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.securityAuthority.observabilityPort }}}]
+    {{- end }}
   egress:
     - to:
         {{- range .Values.networkPolicy.postgresCidrs }}
