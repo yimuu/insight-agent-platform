@@ -300,6 +300,10 @@ r252将worker health router提升为shared observability owner并接入Model Wor
 Prometheus content type由共享测试覆盖。Model的startup authority、Egress/NATS与全部driver组合成功后才Ready，任一组件提前退出会使进程
 整体失败；对应ServiceMonitor和Prometheus-only ingress已进入Helm。该证据不把单个外部Provider健康纳入全进程readiness，也不替代L4。
 
+r253把shared process observability接入Capability Native/Remote；readiness分别位于exact native registry或remote codec/Egress/MCP Host
+startup closure之后，worker与HTTP listener共同fail closed。两个隔离chart均增加内部Service、HTTP probes、ServiceMonitor和精确
+Prometheus ingress，同时保留各自原有出站权限。该证据不包含真实scrape、业务queue/permit指标或production topology enforcement。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

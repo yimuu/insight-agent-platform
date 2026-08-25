@@ -15,6 +15,7 @@ name = "platform-capability-remote-worker"
 path = "src/remote_main.rs"
 
 [dependencies]
+axum.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 insight-platform-capability-adapters.workspace = true
@@ -24,6 +25,7 @@ insight-platform-invocations.workspace = true
 insight-platform-jobs.workspace = true
 insight-platform-mcp-host.workspace = true
 insight-platform-mcp-rpc.workspace = true
+insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-worker.workspace = true
 sha2.workspace = true

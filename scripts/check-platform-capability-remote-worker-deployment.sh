@@ -20,6 +20,7 @@ for dependency in (
     "insight-platform-mcp-rpc.workspace = true",
     "insight-platform-postgres.workspace = true",
     "insight-platform-worker.workspace = true",
+    "insight-platform-observability.workspace = true",
 ):
     if dependency not in manifest:
         failures.append(f"Remote Capability Worker process is missing {dependency}")
@@ -49,6 +50,7 @@ for required in (
     "verify_schema",
     "CancellationToken",
     "driver.run",
+    "process_observability_router",
 ):
     if required not in source:
         failures.append(f"Remote Capability Worker production composition is missing {required}")
@@ -88,6 +90,10 @@ for needle in (
     "kind: Deployment",
     "kind: HorizontalPodAutoscaler",
     "kind: PodDisruptionBudget",
+    "kind: ServiceMonitor",
+    "name: observability",
+    "path: /readyz",
+    "path: /metrics",
     'command: ["/usr/local/bin/platform-capability-remote-worker"]',
     "insight.platform/workload-role: capability-remote-worker",
     "insight.platform/workload-namespace: capability-remote-worker",
@@ -110,7 +116,6 @@ for needle in (
         failures.append(f"rendered Remote Capability Worker contract is missing {needle}")
 for forbidden in (
     "kind: Ingress",
-    "kind: Service\n",
     "hostNetwork: true",
     "hostPID: true",
     "privileged: true",
@@ -136,6 +141,8 @@ negative_values = (
     ("--set", "networkPolicy.mcpHostNamespace=", "MCP Host selectors"),
     ("--set", "autoscaling.minReplicas=1", "at least two replicas"),
     ("--set", "autoscaling.maxReplicas=1", "maximum must be at least"),
+    ("--set", "observability.port=0", "observability port"),
+    ("--set-json", "networkPolicy.monitoringPodSelector=null", "monitoring requires exact"),
 )
 for flag, assignment, expected in negative_values:
     result = subprocess.run(

@@ -2,6 +2,8 @@
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) -}}{{- fail "image.digest must be exact sha256" -}}{{- end -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) -}}{{- fail "config.digest must be exact sha256" -}}{{- end -}}
 {{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.networkPolicy.postgresCidrs) -}}{{- fail "config, database and PostgreSQL CIDRs are required" -}}{{- end -}}
+{{- if or (lt (int .Values.observability.port) 1) (gt (int .Values.observability.port) 65535) -}}{{- fail "observability port must be in 1..65535" -}}{{- end -}}
+{{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) -}}{{- fail "monitoring requires exact namespace and Pod selectors" -}}{{- end -}}
 {{- if .Values.autoscaling.enabled -}}
 {{- if lt (int .Values.autoscaling.minReplicas) 2 -}}{{- fail "HPA requires at least two replicas" -}}{{- end -}}
 {{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) -}}{{- fail "HPA maximum must be at least minimum" -}}{{- end -}}

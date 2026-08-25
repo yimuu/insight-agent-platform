@@ -12,6 +12,9 @@ use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
     ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
+use insight_platform_observability::{
+    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+};
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_worker::LocalWorkerPools;
 use serde::{Deserialize, Serialize};
@@ -29,6 +32,7 @@ const MAX_CONFIG_BYTES: usize = 1_048_576;
 #[serde(deny_unknown_fields)]
 struct ProcessConfig {
     schema_version: u32,
+    observability_listen_address: String,
     worker_manifest: WorkerManifest,
     installed_adapters: Vec<InstalledNativeAdapterConfig>,
     database: DatabaseConfig,
@@ -105,6 +109,10 @@ impl ProcessConfig {
     }
 
     fn validate(&self) -> Result<(), ProcessError> {
+        let observability: std::net::SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
         self.worker_manifest
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -118,6 +126,7 @@ impl ProcessConfig {
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
+            || observability.port() == 0
             || self.worker_manifest.worker_role != CAPABILITY_NATIVE_WORKER_ROLE
             || self.worker_manifest.work_class != WorkClass::CapabilityNative
             || self.worker_manifest.adapter_runtime_digest != installed_digest
@@ -218,6 +227,13 @@ async fn run() -> Result<(), ProcessError> {
         config.driver_config()?,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install("capability-native-worker", PROCESS_OBSERVABILITY_OPERATIONS)
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
+        .await
+        .map_err(|_| ProcessError::ObservabilityFailed)?;
     eprintln!(
         "platform-capability-native-worker started generation={} manifest={}",
         process_generation_id, manifest_digest
@@ -226,6 +242,14 @@ async fn run() -> Result<(), ProcessError> {
     let cancellation = CancellationToken::new();
     let worker_cancellation = cancellation.child_token();
     let mut worker_task = tokio::spawn(async move { driver.run(worker_cancellation).await });
+    let http_cancellation = cancellation.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut http_task = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(http_cancellation.cancelled_owned())
+            .await
+    });
+    metrics.mark_ready();
     tokio::select! {
         signal = shutdown_signal() => {
             signal?;
@@ -233,12 +257,27 @@ async fn run() -> Result<(), ProcessError> {
             worker_task.await
                 .map_err(|_| ProcessError::WorkerFailed)?
                 .map_err(|_| ProcessError::WorkerFailed)?;
+            http_task.await
+                .map_err(|_| ProcessError::ObservabilityFailed)?
+                .map_err(|_| ProcessError::ObservabilityFailed)?;
         }
         result = &mut worker_task => {
             cancellation.cancel();
             result.map_err(|_| ProcessError::WorkerFailed)?
                 .map_err(|_| ProcessError::WorkerFailed)?;
+            http_task.await
+                .map_err(|_| ProcessError::ObservabilityFailed)?
+                .map_err(|_| ProcessError::ObservabilityFailed)?;
             return Err(ProcessError::WorkerExitedUnexpectedly);
+        }
+        result = &mut http_task => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::ObservabilityFailed)?
+                .map_err(|_| ProcessError::ObservabilityFailed)?;
+            worker_task.await
+                .map_err(|_| ProcessError::WorkerFailed)?
+                .map_err(|_| ProcessError::WorkerFailed)?;
+            return Err(ProcessError::ObservabilityFailed);
         }
     }
     business_pool.close().await;
@@ -301,6 +340,7 @@ enum ProcessError {
     SignalUnavailable,
     WorkerFailed,
     WorkerExitedUnexpectedly,
+    ObservabilityFailed,
 }
 
 impl fmt::Display for ProcessError {
@@ -321,6 +361,7 @@ impl fmt::Display for ProcessError {
             Self::WorkerExitedUnexpectedly => {
                 formatter.write_str("Capability Worker exited unexpectedly")
             }
+            Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }
     }
 }
@@ -343,6 +384,7 @@ mod tests {
                 .unwrap();
         ProcessConfig {
             schema_version: 1,
+            observability_listen_address: "127.0.0.1:9090".to_owned(),
             worker_manifest: WorkerManifest {
                 manifest_version: WORKER_MANIFEST_VERSION,
                 worker_role: CAPABILITY_NATIVE_WORKER_ROLE.to_owned(),

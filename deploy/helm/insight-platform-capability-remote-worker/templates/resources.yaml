@@ -12,6 +12,16 @@ kind: ServiceAccount
 metadata: {name: {{ include "insight-platform-capability-remote-worker.name" . }}, namespace: {{ .Values.namespace }}}
 automountServiceAccountToken: false
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-capability-remote-worker.name" . }}
+  namespace: {{ .Values.namespace }}
+  labels: {{ include "insight-platform-capability-remote-worker.labels" . | nindent 4 }}
+spec:
+  selector: {{ include "insight-platform-capability-remote-worker.labels" . | nindent 4 }}
+  ports: [{name: observability, port: {{ int .Values.observability.port }}, targetPort: observability, protocol: TCP}]
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: {{ include "insight-platform-capability-remote-worker.name" . }}, namespace: {{ .Values.namespace }}}
@@ -52,6 +62,7 @@ spec:
           image: {{ include "insight-platform-capability-remote-worker.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/platform-capability-remote-worker"]
+          ports: [{name: observability, containerPort: {{ int .Values.observability.port }}, protocol: TCP}]
           env:
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG, value: /etc/insight/config/capability-remote-worker.json}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG_DIGEST, value: {{ .Values.config.digest | quote }}}
@@ -63,9 +74,9 @@ spec:
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH, value: /etc/insight/mcp-host-tls/ca.pem}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH, value: /etc/insight/mcp-host-tls/client.pem}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH, value: /etc/insight/mcp-host-tls/client-key.pem}
-          startupProbe: {exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
-          readinessProbe: {exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
-          livenessProbe: {exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          startupProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
           resources: {{ toYaml .Values.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
