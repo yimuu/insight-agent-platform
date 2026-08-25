@@ -439,6 +439,12 @@ TLS fake MCP server关闭subscription protocol/crash component L3。第一次ini
 commit窗口强杀Worker，第三次expired-lease恢复；方法计数3次initialize、2次initialized/list/read，唯一completed Event。显式测试feature只允许
 loopback协议fixture且production build默认关闭。Context/MCP/Egress各lane saturation、真实scrape与L4 bundle/config rollout drift仍未由此关闭。
 
+r282为`scheduler-recovery`接入PostgreSQL authority的bounded只读Job observation：数据库时间计算`due`与`expired_lease`的count/oldest lag，
+且不读取Job payload或导出tenant、Job、Worker、URL、Secret、错误文本。失败保留上一份有效gauge并累加fixed PostgreSQL observation outcome。
+production sampler、fresh PostgreSQL 16、owner tests与strict Clippy通过；dashboard扩展为11个panel，并新增due lag、expired-lease recovery lag和
+PostgreSQL observation failure三条带runbook的symptom alert。该证据只关闭Orchestration durable backlog/recovery lag及对应dependency observation
+的L1接线；Outbox、其他role authority、真实Prometheus scrape和L4～L6仍待完成。
+
 r246将Management与Runtime API拆为两个startup role及独立Kubernetes identity/DB/NetworkPolicy/PDB/HPA；closed path guard在认证和repository
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。

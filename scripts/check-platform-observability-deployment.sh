@@ -15,6 +15,8 @@ for mutation in \
   '--set alerts.maximumFailureRatio=1' \
   '--set alerts.maximumRecoveryFailureRatio=1' \
   '--set alerts.minimumRecoveryRate=0' \
+  '--set alerts.maximumDueJobLagSeconds=0' \
+  '--set alerts.maximumExpiredLeaseLagSeconds=0' \
   '--set-json dashboard.labels=null'; do
   # shellcheck disable=SC2086
   if helm template platform "$chart" $mutation >/dev/null 2>&1; then
@@ -34,8 +36,11 @@ failures << "must render one PrometheusRule and one dashboard" unless rules.leng
 alerts = rules.flat_map { |document| document.dig("spec", "groups").to_a.flat_map { |group| group["rules"].to_a } }
 expected = %w[
   InsightPlatformCriticalControlPermitsExhausted
+  InsightPlatformDurableJobLagHigh
+  InsightPlatformExpiredLeaseRecoveryLagHigh
   InsightPlatformHttpFailureRatioHigh
   InsightPlatformHttpLatencyHigh
+  InsightPlatformPostgresObservationFailing
   InsightPlatformRecoveryFailureRatioHigh
   InsightPlatformTelemetryMissing
   InsightPlatformWorkloadNotReady

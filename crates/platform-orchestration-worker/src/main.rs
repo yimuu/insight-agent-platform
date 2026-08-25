@@ -7,11 +7,13 @@ use insight_platform_contracts::{
     ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
 use insight_platform_observability::{
-    process_observability_router, OrchestrationOperationalMetrics,
+    process_observability_router, DurableJobQueueSnapshot, OrchestrationOperationalMetrics,
     OrchestrationOperationalSnapshot, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_orchestrator::{ExpressionLimits, PlanLimits};
-use insight_platform_postgres::{repository::SafetyScanShard, verify_schema};
+use insight_platform_postgres::{
+    operational_metrics::observe_durable_job_queue, repository::SafetyScanShard, verify_schema,
+};
 use insight_platform_runtime::postgres::{
     PostgresConnectionBulkheadConfig, PostgresConnectionBulkheads,
 };
@@ -343,6 +345,15 @@ async fn run() -> Result<(), ProcessError> {
             }
             _ = health.tick() => {
                 update_operational_metrics(&operational_metrics, &observability_pools, &runtime);
+                match observe_durable_job_queue(bulkheads.critical_control_pool(), "orchestration").await {
+                    Ok(snapshot) => operational_metrics.observe_durable_job_queue(DurableJobQueueSnapshot {
+                        due_jobs: snapshot.due_jobs,
+                        due_oldest_age_seconds: snapshot.due_oldest_age_seconds,
+                        expired_leases: snapshot.expired_leases,
+                        expired_oldest_lag_seconds: snapshot.expired_oldest_lag_seconds,
+                    }),
+                    Err(_) => operational_metrics.observe_database_failure(),
+                }
                 if runtime.is_finished() {
                     runtime.shutdown().await.map_err(|_| ProcessError::RuntimeFailed)?;
                     bulkheads.close().await;

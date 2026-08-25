@@ -13,6 +13,7 @@ mod mcp_oauth_cleanup_outbox;
 pub mod mcp_repository;
 pub mod model_turn_repository;
 pub mod operation_repository;
+pub mod operational_metrics;
 pub mod principal_authentication;
 pub mod repository;
 pub mod sandbox_repository;

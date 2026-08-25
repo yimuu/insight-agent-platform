@@ -43,3 +43,24 @@ Compare attempted and failed recovery scans with PostgreSQL availability, lease 
 recent rollout events. Determine whether every recovery family is failing or one bounded scan is
 affected before changing replicas. Preserve fencing and owner transactions; never repair recovery
 state with direct row edits.
+
+## InsightPlatformDurableJobLagHigh
+
+Compare the `due` backlog and oldest lag with business permits, claim outcomes, PostgreSQL latency,
+and recent rollout events. A growing count indicates admission exceeds qualified capacity; a flat
+small count with growing lag indicates stalled claims. Do not delete or reprioritize Job rows. Use
+the qualified GitOps scaling path or repair the blocked dependency while preserving fairness.
+
+## InsightPlatformExpiredLeaseRecoveryLagHigh
+
+Compare expired-lease count and lag with critical-control permits and recovery scan outcomes. Check
+Worker loss, database time, and fencing errors before changing recovery cadence. Never clear lease
+columns directly or lend business capacity to recovery; owner recovery transactions must settle the
+expired lease.
+
+## InsightPlatformPostgresObservationFailing
+
+Confirm the scheduler critical-control PostgreSQL pool can acquire a connection and execute bounded
+read-only queries. Correlate failures with readiness and recovery scan failures. The exporter keeps
+the last valid gauge snapshot, so do not interpret an unchanged backlog as healthy while this alert
+is active. Follow the dependency recovery runbook and retain the reserved connection boundary.

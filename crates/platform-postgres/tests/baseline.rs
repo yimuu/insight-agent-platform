@@ -1,6 +1,7 @@
 use chrono::{Duration, Utc};
 use insight_platform_contracts::{SchedulerPriority, TenantConfig};
 use insight_platform_postgres::{
+    operational_metrics::observe_durable_job_queue,
     repository::{
         ClaimJobs, CommitJob, HeartbeatJob, JobCommitOutcome, JobFence, JobTerminalState, NewJob,
         NewQuotaAccount, NewTenant, PgRepository, QuotaMutationOutcome, RepositoryError,
@@ -108,6 +109,20 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
         })
         .await
         .unwrap();
+
+    let queue = observe_durable_job_queue(&pool, "interaction")
+        .await
+        .unwrap();
+    assert_eq!(queue.due_jobs, 1);
+    assert!(queue.due_oldest_age_seconds >= 0.0);
+    assert_eq!(queue.expired_leases, 0);
+    assert_eq!(queue.expired_oldest_lag_seconds, 0.0);
+    assert_eq!(
+        observe_durable_job_queue(&pool, "orchestration")
+            .await
+            .unwrap(),
+        Default::default()
+    );
 
     let claimed = repository
         .claim_jobs(ClaimJobs {

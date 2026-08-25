@@ -22,7 +22,10 @@ data:
         {"id": 5, "type": "timeseries", "title": "Worker permits available", "targets": [{"expr": "min by (component_role, lane) (insight_platform_worker_permits{component_role=~\"$component_role\",state=\"available\"})"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}},
         {"id": 6, "type": "timeseries", "title": "Orchestration active jobs", "targets": [{"expr": "max by (component_role) (insight_platform_orchestration_active_jobs{component_role=~\"$component_role\"})"}], "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16}},
         {"id": 7, "type": "timeseries", "title": "Orchestration claim outcomes", "targets": [{"expr": "sum by (component_role, outcome) (rate(insight_platform_orchestration_claims_total{component_role=~\"$component_role\"}[5m]))"}], "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16}},
-        {"id": 8, "type": "timeseries", "title": "Recovery operation outcomes", "targets": [{"expr": "sum by (component_role, outcome) (rate(insight_platform_recovery_operations_total{component_role=~\"$component_role\"}[5m]))"}], "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16}}
+        {"id": 8, "type": "timeseries", "title": "Recovery operation outcomes", "targets": [{"expr": "sum by (component_role, outcome) (rate(insight_platform_recovery_operations_total{component_role=~\"$component_role\"}[5m]))"}], "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16}},
+        {"id": 9, "type": "timeseries", "title": "Durable Job backlog", "targets": [{"expr": "max by (component_role, queue) (insight_platform_durable_jobs{component_role=~\"$component_role\"})"}], "gridPos": {"h": 8, "w": 8, "x": 0, "y": 24}},
+        {"id": 10, "type": "timeseries", "title": "Durable Job lag seconds", "targets": [{"expr": "max by (component_role, queue) (insight_platform_durable_job_lag_seconds{component_role=~\"$component_role\"})"}], "gridPos": {"h": 8, "w": 8, "x": 8, "y": 24}},
+        {"id": 11, "type": "timeseries", "title": "PostgreSQL observation outcomes", "targets": [{"expr": "sum by (component_role, outcome) (rate(insight_platform_dependency_observations_total{component_role=~\"$component_role\",dependency=\"postgresql\"}[5m]))"}], "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24}}
       ]
     }
 {{- end }}

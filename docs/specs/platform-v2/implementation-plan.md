@@ -432,6 +432,12 @@
 > tests与strict Clippy通过；动态permit coverage现为8/17 pool。Controller admission、Artifact lane、Security/Egress等非LocalWorkerPools容量模型
 > 仍必须从各自authority接线，不能由该series推断。
 
+> 2026-08-26 implementation evidence：r282从PostgreSQL Job authority为Orchestration接入read-only durable queue observation，使用数据库时间
+> 导出fixed `due`/`expired_lease` count与oldest lag；不读取payload且不暴露tenant、Job、Worker或错误文本。采样失败保留上一有效gauge并只累加
+> fixed PostgreSQL success/failure counter。fresh PostgreSQL 16验证真实ready Job读取；observability owner、production Scheduler sampler、strict
+> Clippy、11-panel dashboard、9条symptom-first alert及逐alert runbook门禁通过。该批关闭Orchestration durable backlog/recovery lag与其PostgreSQL
+> observation health的L1接线；shared Outbox、其余role backlog/dependency/saturation、真实Prometheus scrape及L4仍未闭合。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

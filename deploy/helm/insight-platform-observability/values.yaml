@@ -14,9 +14,13 @@ alerts:
   latencyFor: 15m
   permitExhaustedFor: 10m
   recoveryFailureFor: 10m
+  durableLagFor: 10m
+  dependencyFailureFor: 5m
   minimumRequestRate: 0.1
   minimumRecoveryRate: 0.01
   maximumFailureRatio: 0.05
   maximumRecoveryFailureRatio: 0.1
   maximumP95Seconds: 2
+  maximumDueJobLagSeconds: 30
+  maximumExpiredLeaseLagSeconds: 60
   runbookBaseUrl: https://runbooks.insight.platform/platform-v2-observability

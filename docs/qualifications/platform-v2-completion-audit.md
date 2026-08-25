@@ -11,7 +11,7 @@
 
 00～18均已完成CR-192 cross-review（历史CR-173～191结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
 实现与真实PostgreSQL门禁已闭合；Phase 2的production Orchestration、Model、Capability、Context与wait/Subagent主要L3链路已经闭合；
-Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact资格。Phase 4 public API和15-role/17-pool静态部署闭包已完成，
+Phase 3的MCP subscription真实HTTPS多进程L3已闭合，仍缺OAuth Callback/Cleanup/Egress的真实多进程L3及外部Sandbox/Artifact资格。Phase 4 public API和15-role/17-pool静态部署闭包已完成，
 完整observability及production-equivalent L4～L6仍未交付。
 
 因此：
@@ -35,8 +35,8 @@ Phase 3仍缺MCP OAuth/subscription的真实多进程L3及外部Sandbox/Artifact
 | Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；各owner按Run冻结exact Policy/Revision重算并拒绝伪造结果 | L1/L2 owner闭合，production Model/Capability/Context dispatch已在对应L3链路重验exact binding |
 | 已有部署 | 11个chart覆盖全部15个ComponentRole、17个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote、MCP Host、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
 | HTTP observability | shared bounded-label owner；全部17个ComponentRole workload pool及Sandbox两种process attestor具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency | process wiring与静态部署闭合，不代表真实scrape或完整业务observability |
-| Dashboard/alerts | 独立chart提供role-filtered process/HTTP及Orchestration业务dashboard、6条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代完整业务SLI或真实alert delivery |
-| Worker saturation | Orchestration、Model、Capability Native/Remote、Context Native/Remote、Sandbox WASI/gVisor共8个pool从各自LocalWorkerPools导出business/critical-control available/used permit；Orchestration另有active jobs及claim/recovery outcome | 8/17 pool的process-local L1 telemetry闭合；durable queue/outbox/recovery lag和其余role saturation仍待接线 |
+| Dashboard/alerts | 独立chart提供role-filtered process/HTTP及Orchestration业务dashboard、9条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代完整业务SLI或真实alert delivery |
+| Worker/queue telemetry | Orchestration、Model、Capability Native/Remote、Context Native/Remote、Sandbox WASI/gVisor共8个pool从各自LocalWorkerPools导出business/critical-control available/used permit；Orchestration另有active jobs、claim/recovery outcome及PostgreSQL authority的due/expired-lease count、oldest lag与observation health | Orchestration durable backlog/recovery lag和8/17 pool permit L1 telemetry闭合；shared Outbox、其余role authority及saturation仍待接线 |
 | Telemetry redaction | production Rust source静态门禁拒绝identity、Secret、prompt/response、object key及URL进入structured tracing或插值日志；现有LLM/SSE/MCP OAuth/conversation/worker启动日志已清理 | source-level L1负向合同；不替代动态payload审计、trace propagation、RBAC/retention或production验证 |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator；live topology/workload preflight对照Candidate/Capacity并拒绝rollout、image、config、identity、安全和容量漂移 | 可验证证据形状与preflight行为，不证明任一外部门禁通过 |
@@ -140,11 +140,9 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 ### 仓库内或外部缺口
 
-1. MCP Host production binary/Helm与ToolsCall process L3已闭合；OAuth Callback/Cleanup/Egress和subscription的真实endpoint多进程
-   kill/restart L3仍缺，fresh PostgreSQL r249只证明既有durable owner层；r268已实现CR-190 subscription→Context closed request、bounded Job
-   payload与exact acceptance的L1 nominal contract，r269已闭合`Context -> McpOperation` machine owner pair；r270完成notification的PostgreSQL
-   owner transaction、Receipt replay与唯一Job L2；r271补齐typed production target及full reconcile acceptance L2；r272补齐exact claim、
-   JobCommit success/retry、quota与expired-lease recovery L2。该target尚未组合进binary，Context Worker→MCP Host Resource RPC及对应L3尚未实现。
+1. MCP Host production binary/Helm与ToolsCall process L3已闭合；subscription的production Resource Host/Context Worker/独立Egress进程、真实TLS
+   initialize/list/read与三轮kill/recovery已由r281闭合component L3。OAuth Callback/Cleanup/Egress的真实endpoint多进程kill/restart L3仍缺；
+   Context/MCP/Egress lane saturation、bundle/config rollout和live cluster identity仍归L4～L5。
 2. Context Native/Remote和Capability Native/Remote production composition已闭合；Dataset build/Text2SQL、Artifact和各外部依赖仍须按
    production qualification matrix取得适用的真实协议、故障与隔舱证据。
 3. S3/KMS/Secret Manager只有adapter/fixture和deployment contract，没有production-equivalent fault/rotation/restore证据。
@@ -168,10 +166,12 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
    但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
 2. 全部17个ComponentRole workload pool及Sandbox process attestor已有shared process metrics；Orchestration、Model、Capability Native/Remote、
    Context Native/Remote、Sandbox WASI/gVisor共8个pool已有动态permit指标，Orchestration另有claim/recovery指标，production tracing/log字段已有
-   静态脱敏门禁；仍缺durable queue/outbox/recovery lag、dependency health、其余9个pool的role saturation、跨进程trace
+   静态脱敏门禁；Orchestration现另有PostgreSQL authority的due/expired-lease backlog/lag与observation health；仍缺shared Outbox、其余role
+   backlog/dependency health、其余9个pool的role saturation、跨进程trace
    propagation、动态payload采集审计和production scrape证据。
 3. 全部17个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP/Orchestration dashboard、六条symptom-first PrometheusRule及逐alert
-   runbook已闭合，但durable queue/outbox/recovery lag、dependency与其他role saturation对应的panel/alert仍待指标owner接线后补齐。
+   runbook已扩展到11个panel和9条alert，包含Orchestration due/expired-lease lag及PostgreSQL observation failure；shared Outbox、其他role backlog/
+   dependency与saturation对应的panel/alert仍待指标owner接线后补齐。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
    mTLS与live identity enforcement仍须production-equivalent L4验证。
 5. 没有可重现的signed image/SBOM/provenance build pipeline与GitOps environment repository输入。
@@ -188,8 +188,8 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 按上游到下游执行，且每批通过后提交：
 
-1. 补queue/dependency/recovery/permit业务指标、跨进程trace propagation和动态payload采集审计；
-2. MCP OAuth Callback/Cleanup/Egress与subscription真实endpoint的多进程L3 kill/restart；
+1. 补shared Outbox、其他role dependency/recovery/permit业务指标、跨进程trace propagation和动态payload采集审计；
+2. MCP OAuth Callback/Cleanup/Egress真实endpoint的多进程L3 kill/restart；
 3. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
 4. reproducible signed candidate pipeline；
 5. 外部L4～L6、GitOps clean cut、current文档与规范归档。
