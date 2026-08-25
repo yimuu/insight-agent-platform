@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-190 |
+| 状态 | Accepted / CR-191 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
@@ -113,6 +113,8 @@ notification commit后，MCP subscription Worker从exact pending invalidation构
 application port。只有owner transaction已提交shared Context Job + Receipt/Event/Outbox且返回的request digest精确匹配时，Worker才可提交
 `complete_subscription_refresh/reconcile`并park自身MCP Job；它不生成durable work digest、不直接创建Context结果，也不以内存future等待Context
 完成。commit-window不确定必须按同一Receipt key查询/replay，Host restart从PostgreSQL subscription/Job恢复；旧session/worker fence不得再次接线。
+Context owner创建的物理刷新Job以closed `Context -> McpOperation` pair绑定当前subscription identity；Host自有connection/recovery Job仍为
+`Mcp -> McpOperation`。owner pair相同不代表WorkClass或claim authority相同，任一worker扫描错class/payload必须零claim。
 
 ## 9. OAuth 与authorization
 

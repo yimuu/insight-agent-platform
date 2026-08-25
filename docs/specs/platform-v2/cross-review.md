@@ -1,10 +1,34 @@
-# Platform v2 00～18 Cross-review（CR-190）
+# Platform v2 00～18 Cross-review（CR-191）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-190 Accepted |
+| 状态 | Closed / CR-191 Accepted |
 | 日期 | 2026-08-26 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-190 MCP subscription implementation feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-191 Context Job owner-pair implementation feedback |
+
+### CR-191 MCP subscription refresh Context Job owner-pair impact review
+
+CR-190要求Context owner为subscription refresh/reconcile创建shared `Context` Job且不新增aggregate；实现接线发现03/machine closed registry仅允许
+`Context -> ContextQuery/ContextDataset`，而该工作不是Run leaf、没有Dataset identity。以自由owner string插入会绕过typed registry，虚构
+ContextQuery/Dataset又会制造第二current-state authority。CR-191增加`Context -> McpOperation`这一pair，并将使用范围限定为Context owner从
+同tenant `mcp_subscription` source row与exact CR-190 request创建的refresh/reconcile Job。
+
+| Spec | CR-191结论 |
+|---|---|
+| 00～02 | 登记feedback；plane、resource lifecycle、clean `/v1`不变 |
+| 03 | closed owner registry增加`Context -> McpOperation`；source row kind/state与typed payload仍须事务内验证 |
+| 04～06 | tenant/permission、Plan/Run/Node authority不变；refresh仍不是Run leaf |
+| 07 | MCP/Context各自WorkClass、scanner与permit；wrong class/kind/payload零claim |
+| 08～11 | Subagent、Capability、Skill合同不变 |
+| 12 | Context owner transaction锁定subscription identity并创建该pair的Job，不新建Context aggregate |
+| 13 | Host自有Job仍为`Mcp -> McpOperation`，不得创建/claim Context Job |
+| 14～17 | Sandbox/Artifact/Model/API无新route、owner或projection |
+| 18 | L2/L3增加同owner跨WorkClass claim负向矩阵 |
+
+00～18已按state ownership、IDs、JSON schemas、errors、transactions、events、permissions、capacity、recovery与fixtures全量复核。该变更不新增
+WorkClass、aggregate、table、role或public API；`McpOperation`继续是subscription current-state authority，Context Job只拥有物理work state。
+Acceptance 34：Context owner只可从exact active subscription创建至多一个typed refresh/reconcile Job；MCP与Context worker即使看到同一owner ID也
+只能claim自身WorkClass与payload。00、03、07、12、13、18恢复Accepted / CR-191。
 
 ### CR-190 MCP subscription→Context durable admission impact review
 

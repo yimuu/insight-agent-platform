@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-176 |
+| 状态 | Accepted / CR-191 |
 | 日期 | 2026-08-20 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
@@ -60,6 +60,11 @@ enum TypedOwnerRef {
 JobKind、ReceiptKind、EventKind、ArtifactRelation与owner-kind pair来自一个closed machine registry。每次创建/解析必须验证
 nominal ID prefix、tenant、source row kind/state和合法pair。不使用generic `(owner_type: String, owner_id: UUID)`作为信任边界。
 Job可作为Artifact/Receipt等关联的typed owner，但首版Job kind-owner registry不允许Job拥有child Job。
+
+`WorkClass::Context`的合法owner为`ContextQuery`、`ContextDataset`，以及仅用于MCP Resource subscription refresh/reconcile的
+`McpOperation`。最后一种pair必须由Context application owner transaction重载同tenant `invocation_kind=mcp_subscription` row、exact
+Deployment/Discovery/authorization/session/event evidence后创建；MCP Host不能凭该pair直接创建Job或执行Context backend。它复用已有
+subscription aggregate identity，不产生新的Context current-state aggregate。
 
 Sandbox execution只有shared Job owner/fence，无SandboxJob ID/aggregate。MCP首版无stdio session child。Operation无owner variant；
 它直接投影Job的typed owner。

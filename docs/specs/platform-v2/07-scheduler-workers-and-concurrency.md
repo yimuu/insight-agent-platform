@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-190 |
+| 状态 | Accepted / CR-191 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
@@ -64,6 +64,8 @@ WorkClass是closed machine registry，由03拥有。backend映射固定如下：
 - MCP discovery、remote subscription等Host自有工作 → `Mcp`；
 - MCP notification触发的Context refresh/reconcile admission只在Context owner事务创建`Context` Job；MCP Job只等待durable acceptance，
   不执行Context backend，也不占Context permit；
+- 上述Job使用closed `Context -> McpOperation` owner pair；claim必须同时要求source row为同tenant `mcp_subscription`且payload是12定义的
+  subscription refresh类型，普通MCP Job仍使用`Mcp -> McpOperation`，两者不得互相claim；
 - WASI或gVisor代码 → `Sandbox`；
 - Artifact stage/read/verify/maintenance → `Artifact`。
 

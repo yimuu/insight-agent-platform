@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-190 |
+| 状态 | Accepted / CR-191 |
 | 日期 | 2026-08-26 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -384,6 +384,7 @@ r246将Management与Runtime API拆为两个startup role及独立Kubernetes ident
 - MCP remote Streamable HTTP、OAuth、discovery、Task和subscription的真实协议fixture；
 - MCP subscription notification→Context admission以真实PostgreSQL和独立Host/Context进程覆盖accept commit前后kill、Receipt replay、唯一
   Context Job、stale session/fence零Job以及MCP/Context pool互不占用；
+- 同一`McpOperation` owner下`Mcp`与`Context`两种Job的claim负向矩阵必须证明wrong WorkClass、wrong invocation kind或wrong typed payload零claim；
 - real WASI与真实`runsc` RuntimeClass gVisor的ABI/limit/escape/cleanup/process-kill/watch-restart/node-loss测试；
 - gVisor Launcher RBAC逐verb/resource/subresource负向矩阵，以及绕过runtimeClass/image/resource/volume/network/fence字段的
   admission负向矩阵；

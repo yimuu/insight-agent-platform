@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-190 |
+| 状态 | Accepted / CR-191 |
 | 日期 | 2026-08-26 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
@@ -521,6 +521,8 @@ MCP Resource subscription的notification refresh与full reconcile由Context appl
 identity/digest、reason与canonical request digest。owner transaction必须重载published Context/MCP closure和当前subscription evidence，按
 `(tenant, subscription, session generation, event generation, request digest)` claim `Command` Receipt，并以shared `Context` Job承载刷新工作；
 同一事务写Job、Receipt、Event和Outbox后返回`request_digest + durable_work_digest + accepted_at`。
+该Job使用03 closed `Context -> McpOperation` pair，`owner_id`是已锁定的同tenant `mcp_subscription` identity；这只是Job的typed business owner，
+不把Context执行权交给MCP Host，也不新建ContextQuery/ContextDataset或第二份subscription current state。
 
 replay返回第一次接受的相同Job/evidence；字段漂移、stale generation、撤权、wrong Deployment/Discovery、Receipt key复用不同digest均fail closed且
 不创建Job。MCP Host只能在验证acceptance绑定exact request后结算自身MCP subscription Job；RPC可传输命令但不能替代owner transaction，

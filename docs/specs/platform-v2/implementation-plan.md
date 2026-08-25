@@ -1,10 +1,14 @@
-# Platform v2 四阶段实现计划（CR-190）
+# Platform v2 四阶段实现计划（CR-191）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-190 contracts accepted; L3～L6 pending |
+| 状态 | In Progress / CR-191 contracts accepted; L3～L6 pending |
 | 日期 | 2026-08-26 |
-| 合同输入 | 00～18、cross-review CR-190、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-191、ADR-0001、ADR-0002、AGENTS.md |
+
+> 2026-08-26 contract feedback：CR-190 L2接线发现closed owner registry没有subscription refresh Context Job的合法pair。CR-191在03增加
+> 唯一`Context -> McpOperation` pair，并在07/12/13/18冻结source row/payload/WorkClass claim约束；不新增WorkClass、aggregate、table或route。
+> PostgreSQL实现必须先锁定同tenant `mcp_subscription` row，再创建该Context Job，MCP Host仍不得直接创建或claim它。
 
 > 2026-08-24：production external leaf接线发现Plan v3缺少可执行payload及candidate selection evidence，CR-181已重新打开04～18与cross-review。
 > CR-181 cross-review已经关闭并恢复实现授权；Leaf/Task/Subagent dispatch必须直接实现Plan v4与exact selection/owner transaction，
