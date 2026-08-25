@@ -2,6 +2,7 @@ use crate::digest_without_field;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{ExactDeploymentRef, ResourceId, ResourceKind, Sha256Digest};
+use insight_platform_jobs::JobFence;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
 
@@ -9,6 +10,11 @@ pub const CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION: u32 = 1;
 pub const MAX_CONTEXT_SUBSCRIPTION_RESOURCE_URI_BYTES: usize = 8_192;
 pub const MAX_CONTEXT_SUBSCRIPTION_ADMISSION_BYTES: usize = 64 * 1_024;
 pub const MAX_CONTEXT_SUBSCRIPTION_ADMISSION_CLOCK_SKEW_SECONDS: i64 = 60;
+pub const CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION: u32 = 1;
+pub const MAX_CONTEXT_SUBSCRIPTION_REFRESH_RESOURCES: u32 = 4_096;
+pub const MAX_CONTEXT_SUBSCRIPTION_REFRESH_ITEMS: u32 = 65_536;
+pub const MAX_CONTEXT_SUBSCRIPTION_REFRESH_BYTES: u64 = 64 * 1_024 * 1_024;
+pub const MAX_CONTEXT_SUBSCRIPTION_REFRESH_CURSOR_BYTES: usize = 2_048;
 
 /// Why a durable subscription refresh is required. The resource identity is
 /// frozen to the published subscription root, never copied from an untrusted
@@ -236,6 +242,206 @@ pub trait ContextSubscriptionAdmissionAuthority: Send + Sync {
     ) -> Result<AcceptedContextSubscriptionRefresh, ContextSubscriptionAdmissionError>;
 }
 
+/// Credential-free request sent by a fenced Context Worker attempt to the MCP Host.
+/// The Host reloads the current subscription and execution closure before I/O.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSubscriptionRefreshAttempt {
+    pub schema_version: u32,
+    pub job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub job_fence: JobFence,
+    pub attempt_number: u32,
+    pub request: ContextSubscriptionRefreshRequest,
+}
+
+impl ContextSubscriptionRefreshAttempt {
+    pub fn validate_at(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<(), ContextSubscriptionExecutionError> {
+        self.request
+            .validate_at(now)
+            .map_err(|_| ContextSubscriptionExecutionError::InvalidAttempt)?;
+        if self.schema_version != CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION
+            || self.job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind()
+                != ResourceKind::WorkerProcessGeneration
+            || self.job_fence.expected_version == 0
+            || self.job_fence.lease_generation == 0
+            || self.job_fence.worker_process_generation_id
+                != self.worker_process_generation_id
+            || self.attempt_number == 0
+        {
+            return Err(ContextSubscriptionExecutionError::InvalidAttempt);
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(
+        &self,
+    ) -> Result<Sha256Digest, ContextSubscriptionExecutionError> {
+        crate::digest(self).map_err(|_| ContextSubscriptionExecutionError::Canonicalization)
+    }
+}
+
+/// Bounded proof of a successful read-only resource refresh. Remote content and locators are
+/// intentionally absent; a successful refresh does not create a Context Observation or cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSubscriptionRefreshEvidence {
+    pub schema_version: u32,
+    pub attempt_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub response_digest: Sha256Digest,
+    pub resource_set_digest: Sha256Digest,
+    pub resource_count: u32,
+    pub item_count: u32,
+    pub byte_count: u64,
+    pub remote_revision: Option<String>,
+    pub cursor: Option<String>,
+    pub observed_at: DateTime<Utc>,
+}
+
+impl ContextSubscriptionRefreshEvidence {
+    pub fn validate_for(
+        &self,
+        attempt: &ContextSubscriptionRefreshAttempt,
+        now: DateTime<Utc>,
+    ) -> Result<(), ContextSubscriptionExecutionError> {
+        let attempt_digest = attempt.canonical_digest()?;
+        if self.schema_version != CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION
+            || self.attempt_digest != attempt_digest
+            || self.request_digest != attempt.request.request_digest
+            || self.resource_count > MAX_CONTEXT_SUBSCRIPTION_REFRESH_RESOURCES
+            || self.item_count > MAX_CONTEXT_SUBSCRIPTION_REFRESH_ITEMS
+            || self.byte_count > MAX_CONTEXT_SUBSCRIPTION_REFRESH_BYTES
+            || !valid_optional_evidence(&self.remote_revision)
+            || !valid_optional_evidence(&self.cursor)
+            || self.observed_at > attempt.request.deadline
+            || self.observed_at
+                > now + Duration::seconds(MAX_CONTEXT_SUBSCRIPTION_ADMISSION_CLOCK_SKEW_SECONDS)
+        {
+            return Err(ContextSubscriptionExecutionError::InvalidEvidence);
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(
+        &self,
+    ) -> Result<Sha256Digest, ContextSubscriptionExecutionError> {
+        crate::digest(self).map_err(|_| ContextSubscriptionExecutionError::Canonicalization)
+    }
+}
+
+fn valid_optional_evidence(value: &Option<String>) -> bool {
+    value.as_ref().is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= MAX_CONTEXT_SUBSCRIPTION_REFRESH_CURSOR_BYTES
+            && !value.chars().any(char::is_control)
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSubscriptionRefreshFailureClass {
+    Rejected,
+    Dependency,
+    Capacity,
+    Deadline,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContextSubscriptionRefreshResponse {
+    Completed {
+        evidence: ContextSubscriptionRefreshEvidence,
+    },
+    RetryableFailure {
+        class: ContextSubscriptionRefreshFailureClass,
+        evidence_digest: Sha256Digest,
+        retry_after_milliseconds: u64,
+    },
+    PermanentFailure {
+        class: ContextSubscriptionRefreshFailureClass,
+        evidence_digest: Sha256Digest,
+    },
+}
+
+impl ContextSubscriptionRefreshResponse {
+    pub fn validate_for(
+        &self,
+        attempt: &ContextSubscriptionRefreshAttempt,
+        now: DateTime<Utc>,
+    ) -> Result<(), ContextSubscriptionExecutionError> {
+        match self {
+            Self::Completed { evidence } => evidence.validate_for(attempt, now),
+            Self::RetryableFailure {
+                class,
+                retry_after_milliseconds,
+                ..
+            } => {
+                if matches!(
+                    class,
+                    ContextSubscriptionRefreshFailureClass::Rejected
+                        | ContextSubscriptionRefreshFailureClass::Cancelled
+                ) || *retry_after_milliseconds == 0
+                    || *retry_after_milliseconds > 3_600_000
+                {
+                    return Err(ContextSubscriptionExecutionError::InvalidResponse);
+                }
+                Ok(())
+            }
+            Self::PermanentFailure { class, .. } => {
+                if matches!(
+                    class,
+                    ContextSubscriptionRefreshFailureClass::Dependency
+                        | ContextSubscriptionRefreshFailureClass::Capacity
+                ) {
+                    return Err(ContextSubscriptionExecutionError::InvalidResponse);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextSubscriptionExecutionError {
+    InvalidAttempt,
+    InvalidEvidence,
+    InvalidResponse,
+    Rejected,
+    Unavailable,
+    CompletionUncertain,
+    Canonicalization,
+}
+
+impl fmt::Display for ContextSubscriptionExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidAttempt => "Context subscription refresh attempt is invalid",
+            Self::InvalidEvidence => "Context subscription refresh evidence is invalid",
+            Self::InvalidResponse => "Context subscription refresh response is invalid",
+            Self::Rejected => "Context subscription refresh was rejected before dispatch",
+            Self::Unavailable => "Context subscription refresh backend is unavailable",
+            Self::CompletionUncertain => "Context subscription refresh completion is uncertain",
+            Self::Canonicalization => "Context subscription refresh canonicalization failed",
+        })
+    }
+}
+
+impl Error for ContextSubscriptionExecutionError {}
+
+#[async_trait]
+pub trait ContextSubscriptionRefreshBackend: Send + Sync {
+    async fn refresh_subscription_resources(
+        &self,
+        attempt: ContextSubscriptionRefreshAttempt,
+    ) -> Result<ContextSubscriptionRefreshResponse, ContextSubscriptionExecutionError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +496,42 @@ mod tests {
         request
     }
 
+    fn attempt(now: DateTime<Utc>) -> ContextSubscriptionRefreshAttempt {
+        let worker_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 7);
+        ContextSubscriptionRefreshAttempt {
+            schema_version: CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
+            job_id: id(ResourceKind::Job, 6),
+            worker_process_generation_id: worker_process_generation_id.clone(),
+            job_fence: JobFence {
+                expected_version: 3,
+                worker_process_generation_id,
+                lease_generation: 2,
+                token_digest: digest("lease-token"),
+            },
+            attempt_number: 1,
+            request: request(now),
+        }
+    }
+
+    fn evidence(
+        attempt: &ContextSubscriptionRefreshAttempt,
+        now: DateTime<Utc>,
+    ) -> ContextSubscriptionRefreshEvidence {
+        ContextSubscriptionRefreshEvidence {
+            schema_version: CONTEXT_SUBSCRIPTION_REFRESH_EXECUTION_SCHEMA_VERSION,
+            attempt_digest: attempt.canonical_digest().unwrap(),
+            request_digest: attempt.request.request_digest.clone(),
+            response_digest: digest("response"),
+            resource_set_digest: digest("resource-set"),
+            resource_count: 2,
+            item_count: 3,
+            byte_count: 4_096,
+            remote_revision: Some("revision-7".to_owned()),
+            cursor: Some("cursor-8".to_owned()),
+            observed_at: now,
+        }
+    }
+
     #[test]
     fn validates_closed_refresh_and_stable_job_payload() {
         let now = Utc::now();
@@ -328,6 +570,47 @@ mod tests {
         assert_eq!(
             oversized.validate_at(now),
             Err(ContextSubscriptionAdmissionError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn validates_fenced_refresh_attempt_and_bounded_evidence() {
+        let now = Utc::now();
+        let attempt = attempt(now);
+        attempt.validate_at(now).unwrap();
+        let response = ContextSubscriptionRefreshResponse::Completed {
+            evidence: evidence(&attempt, now),
+        };
+        response.validate_for(&attempt, now).unwrap();
+    }
+
+    #[test]
+    fn rejects_attempt_drift_unbounded_evidence_and_invalid_failure_mapping() {
+        let now = Utc::now();
+        let attempt = attempt(now);
+
+        let mut wrong_worker = attempt.clone();
+        wrong_worker.worker_process_generation_id = id(ResourceKind::WorkerProcessGeneration, 8);
+        assert_eq!(
+            wrong_worker.validate_at(now),
+            Err(ContextSubscriptionExecutionError::InvalidAttempt)
+        );
+
+        let mut oversized = evidence(&attempt, now);
+        oversized.byte_count = MAX_CONTEXT_SUBSCRIPTION_REFRESH_BYTES + 1;
+        assert_eq!(
+            oversized.validate_for(&attempt, now),
+            Err(ContextSubscriptionExecutionError::InvalidEvidence)
+        );
+
+        let invalid_retry = ContextSubscriptionRefreshResponse::RetryableFailure {
+            class: ContextSubscriptionRefreshFailureClass::Rejected,
+            evidence_digest: digest("rejected"),
+            retry_after_milliseconds: 1,
+        };
+        assert_eq!(
+            invalid_retry.validate_for(&attempt, now),
+            Err(ContextSubscriptionExecutionError::InvalidResponse)
         );
     }
 }
