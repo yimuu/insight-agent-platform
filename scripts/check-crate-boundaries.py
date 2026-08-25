@@ -80,7 +80,9 @@ ALLOWED_INTERNAL = {
     # persistence and state transitions remain behind application ports.
     "platform_api": {"artifacts_domain", "contracts", "mcp_host", "tasks_domain"},
     "capability_adapters": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
-    "capability_worker": {"capability_adapters", "contracts", "invocations_domain", "jobs_domain", "platform_postgres", "platform_worker"},
+    # The remote Capability binary uses only the typed mTLS Egress RPC client; the native binary
+    # remains network-client free and is checked independently by its deployment boundary test.
+    "capability_worker": {"capability_adapters", "contracts", "egress_rpc", "invocations_domain", "jobs_domain", "platform_postgres", "platform_worker"},
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "observability", "platform_postgres"},
     "contracts": set(),
     "context_domain": {"contracts", "invocations_domain", "jobs_domain"},

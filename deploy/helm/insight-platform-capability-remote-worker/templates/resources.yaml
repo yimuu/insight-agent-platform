@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    insight.platform/workload-namespace: capability-remote-worker
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "insight-platform-capability-remote-worker.name" . }}, namespace: {{ .Values.namespace }}}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: {{ include "insight-platform-capability-remote-worker.name" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  replicas: {{ int .Values.replicas }}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-capability-remote-worker.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "insight-platform-capability-remote-worker.labels" . | nindent 8 }}
+        insight.platform/workload-role: capability-remote-worker
+    spec:
+      serviceAccountName: {{ include "insight-platform-capability-remote-worker.name" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "insight-platform-capability-remote-worker.labels" . | nindent 14 }}
+      containers:
+        - name: capability-remote-worker
+          image: {{ include "insight-platform-capability-remote-worker.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-capability-remote-worker"]
+          env:
+            - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG, value: /etc/insight/config/capability-remote-worker.json}
+            - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG_DIGEST, value: {{ .Values.config.digest | quote }}}
+            - name: PLATFORM_CAPABILITY_REMOTE_WORKER_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.database.existingSecret }}, key: {{ .Values.database.urlKey }}}}
+            - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH, value: /etc/insight/egress-tls/ca.pem}
+            - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH, value: /etc/insight/egress-tls/client.pem}
+            - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH, value: /etc/insight/egress-tls/client-key.pem}
+          startupProbe: {exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {exec: {command: ["/bin/sh", "-ec", "kill -0 1"]}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: egress-tls, mountPath: /etc/insight/egress-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.config.existingConfigMap }}
+            items: [{key: {{ .Values.config.fileKey }}, path: capability-remote-worker.json}]
+        - name: egress-tls
+          secret:
+            secretName: {{ .Values.egressTls.existingSecret }}
+            items:
+              - {key: {{ .Values.egressTls.keys.ca }}, path: ca.pem}
+              - {key: {{ .Values.egressTls.keys.certificate }}, path: client.pem}
+              - {key: {{ .Values.egressTls.keys.privateKey }}, path: client-key.pem}
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+{{- if .Values.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ include "insight-platform-capability-remote-worker.name" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  minAvailable: {{ int .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-capability-remote-worker.labels" . | nindent 6 }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: {{ include "insight-platform-capability-remote-worker.name" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "insight-platform-capability-remote-worker.name" . }}}
+  minReplicas: {{ int .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ int .Values.autoscaling.maxReplicas }}
+  behavior: {scaleDown: {stabilizationWindowSeconds: 300}, scaleUp: {stabilizationWindowSeconds: 30}}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ int .Values.autoscaling.targetCPUUtilizationPercentage }}}
+{{- end }}

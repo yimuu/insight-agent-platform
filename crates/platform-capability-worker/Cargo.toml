@@ -10,11 +10,16 @@ publish = false
 name = "platform-capability-native-worker"
 path = "src/main.rs"
 
+[[bin]]
+name = "platform-capability-remote-worker"
+path = "src/remote_main.rs"
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
 insight-platform-capability-adapters.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-egress-rpc.workspace = true
 insight-platform-invocations.workspace = true
 insight-platform-jobs.workspace = true
 insight-platform-postgres.workspace = true
@@ -26,4 +31,6 @@ serde.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tonic.workspace = true
+url.workspace = true
 uuid.workspace = true

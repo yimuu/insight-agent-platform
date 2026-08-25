@@ -22,7 +22,6 @@ for dependency in (
         failures.append(f"Native Capability Worker process is missing {dependency}")
 for forbidden in (
     "insight-platform-egress.workspace = true",
-    "insight-platform-egress-rpc.workspace = true",
     "insight-platform-mcp-host.workspace = true",
     "insight-platform-secret-broker.workspace = true",
     "insight-platform-sandbox.workspace = true",
@@ -45,7 +44,7 @@ for required in (
 ):
     if required not in source:
         failures.append(f"Native Capability Worker production composition is missing {required}")
-for forbidden in ("reqwest", "async_nats", "aws_sdk", "SecretManager", "KmsClient"):
+for forbidden in ("EgressBrokerGrpcClient", "reqwest", "async_nats", "aws_sdk", "SecretManager", "KmsClient"):
     if forbidden in source:
         failures.append(f"Native Capability Worker owns a forbidden external client: {forbidden}")
 for required in (

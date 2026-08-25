@@ -1,0 +1,34 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: {{ .Values.namespace }}}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "insight-platform-capability-remote-worker.name" . }}, namespace: {{ .Values.namespace }} }
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "insight-platform-capability-remote-worker.labels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.egressNamespace }} }
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.egressPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.egressPort }}}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        {{- range .Values.networkPolicy.postgresCidrs }}
+        - ipBlock: {cidr: {{ . }} }
+        {{- end }}
+      ports: [{protocol: TCP, port: 5432}]
+{{- end }}

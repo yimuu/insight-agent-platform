@@ -72,6 +72,14 @@
 > Native Capability process kill/recovery L3至此闭合；Remote HTTP/gRPC/MCP真实协议、错codec外部调用零计数的跨进程L3仍待完成，Phase 2
 > Model/Context及整链exit gate仍未关闭。
 
+> 2026-08-25 implementation evidence：Remote Capability已有独立HTTP/gRPC production binary与Helm role。进程只安装配置枚举且
+> image内存在的`platform.json@1.0.0`静态codec，清单摘要绑定exact Worker manifest；请求使用JCS，响应经backend byte limit与全局
+> JSON depth/property/item hard limit共同约束，错误状态保留给共享Effect/idempotency policy判定retry或uncertain。所有远程网络调用只经
+> mTLS Egress Broker RPC，进程持有分离的business/critical-control PostgreSQL pool，不持有Secret、Sandbox或MCP transport client。
+> Helm以digest image/config、双副本/PDB/HPA、restricted pod和仅DNS/PostgreSQL/Egress Broker egress部署，正负静态fixture、worker/
+> adapter tests、strict Clippy与crate-boundary scan通过。该批关闭HTTP/gRPC production composition与静态部署边界；真实HTTP/gRPC
+> 多进程L3、独立MCP Host RPC及Phase 2 exit gate仍待完成。
+
 > 2026-08-25 implementation evidence：ModelTurn admission现已把Plan列出的Skill/Capability slots逐项冻结进snapshot与Receipt replay，
 > 并在owner transaction用各slot的exact Selection Policy重新执行共享selector；请求投影即使引用候选集合内的合法但未选中
 > Capability Deployment也会整批回滚。fresh PostgreSQL 16 r178已覆盖两候选`ordered_first`正/负路径及既有tool continuation、quota和

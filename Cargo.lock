@@ -2581,6 +2581,7 @@ dependencies = [
  "chrono",
  "insight-platform-capability-adapters",
  "insight-platform-contracts",
+ "insight-platform-egress-rpc",
  "insight-platform-invocations",
  "insight-platform-jobs",
  "insight-platform-postgres",
@@ -2592,6 +2593,8 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-util",
+ "tonic",
+ "url",
  "uuid",
 ]
 
