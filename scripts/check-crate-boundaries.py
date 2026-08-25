@@ -89,15 +89,15 @@ ALLOWED_INTERNAL = {
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "observability", "platform_postgres"},
     "contracts": set(),
     "context_domain": {"contracts", "invocations_domain", "jobs_domain"},
-    # The first Context Worker backend is an installed NativeCatalog adapter. It owns only local
-    # Context capacity and durable PostgreSQL composition; it has no Egress or Secret client.
-    "context_worker": {"context_domain", "contracts", "jobs_domain", "platform_postgres", "platform_worker"},
+    # Native and Remote Context binaries share durable composition; only the Remote binary imports
+    # the typed Egress RPC client, while the Native binary remains separately deployment-checked.
+    "context_worker": {"context_domain", "contracts", "egress_rpc", "jobs_domain", "platform_postgres", "platform_worker"},
     # The public Gateway is the control-plane composition root. It binds HTTP application ports
     # to owner adapters but does not execute user code or become durable state authority.
     "public_gateway": {"context_domain", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "observability", "orchestrator_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain"},
-    "egress_core": {"capability_adapters", "contracts", "jobs_domain", "mcp_host", "model_adapters", "sandbox_domain"},
+    "egress_core": {"capability_adapters", "context_domain", "contracts", "jobs_domain", "mcp_host", "model_adapters", "sandbox_domain"},
     "egress_broker": {"contracts", "egress_core", "egress_rpc", "model_adapters", "secret_broker", "security_rpc"},
-    "egress_rpc": {"capability_adapters", "contracts", "egress_core", "mcp_host", "model_adapters", "sandbox_domain"},
+    "egress_rpc": {"capability_adapters", "context_domain", "contracts", "egress_core", "mcp_host", "model_adapters", "sandbox_domain"},
     "invocations_domain": {"contracts", "jobs_domain"},
     "jobs_domain": {"contracts"},
     "mcp_host": {"contracts", "jobs_domain"},

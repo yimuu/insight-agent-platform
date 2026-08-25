@@ -1,0 +1,6 @@
+apiVersion: v2
+name: insight-platform-remote-context-worker
+description: RemoteSearch Context Worker with typed mTLS Egress RPC only
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

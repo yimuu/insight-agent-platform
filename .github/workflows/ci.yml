@@ -62,6 +62,8 @@ jobs:
         run: bash scripts/check-platform-model-worker-deployment.sh
       - name: Check Context Worker deployment boundary
         run: bash scripts/check-platform-context-worker-deployment.sh
+      - name: Check Remote Context Worker deployment boundary
+        run: bash scripts/check-platform-remote-context-worker-deployment.sh
       - name: Check Orchestration Worker deployment boundary
         run: bash scripts/check-platform-orchestration-worker-deployment.sh
       - name: Check Artifact Broker deployment boundary

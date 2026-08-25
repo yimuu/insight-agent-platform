@@ -13,10 +13,15 @@ path = "src/lib.rs"
 name = "platform-context-worker"
 path = "src/main.rs"
 
+[[bin]]
+name = "platform-remote-context-worker"
+path = "src/remote_main.rs"
+
 [dependencies]
 chrono.workspace = true
 insight-platform-context.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-egress-rpc.workspace = true
 insight-platform-jobs.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-worker.workspace = true
@@ -25,4 +30,5 @@ serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tonic.workspace = true
 uuid.workspace = true

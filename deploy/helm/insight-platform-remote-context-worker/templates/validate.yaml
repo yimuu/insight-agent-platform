@@ -1,0 +1,9 @@
+{{- if lt (int .Values.replicas) 2 -}}{{- fail "Remote Context Worker requires at least two replicas" -}}{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) -}}{{- fail "image.digest must be exact" -}}{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) -}}{{- fail "config.digest must be exact" -}}{{- end -}}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.database.existingSecret) (empty .Values.egressTls.existingSecret) -}}
+{{- fail "config, database and Egress TLS inputs must be projected" -}}{{- end -}}
+{{- if or (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.egressNamespaceSelector) (empty .Values.networkPolicy.egressPodSelector) -}}
+{{- fail "PostgreSQL and Egress NetworkPolicy targets are required" -}}{{- end -}}
+{{- if or (lt (int .Values.networkPolicy.egressPort) 1) (gt (int .Values.networkPolicy.egressPort) 65535) -}}{{- fail "Egress port is invalid" -}}{{- end -}}
+{{- if and .Values.autoscaling.enabled (lt (int .Values.autoscaling.minReplicas) 2) -}}{{- fail "HPA requires two replicas" -}}{{- end -}}

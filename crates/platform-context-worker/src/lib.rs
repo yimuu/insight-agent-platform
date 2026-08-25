@@ -9,13 +9,15 @@ use insight_platform_context::{
     CitationLocator, ClaimContextJobs, CommitContextOutcome, ContextBackendOutcome,
     ContextCitation, ContextClaimSlot, ContextItem, ContextObservation, ContextObservationOutput,
     ContextQueryLimits, ContextRetrievalEvidence, ContextWorkerAudit, NormalizedContextScore,
-    CONTEXT_QUOTA_LINES,
+    RemoteContextFailureClass, RemoteContextSearchConnector, RemoteContextSearchRequest,
+    RemoteContextSearchResponse, CONTEXT_QUOTA_LINES, REMOTE_CONTEXT_PROTOCOL_VERSION,
 };
 use insight_platform_contracts::{
-    canonical_digest, ClosedJsonValue, ContextCitationStrength, DataClassification,
-    ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds, Failure, FailureClass,
-    FailureCode, FailureSource, HardLimitProfile, PlatformFailureCode, ResourceId, ResourceIdError,
-    ResourceKind, Retryability, Sha256Digest, ValueRef, WorkClass,
+    canonical_digest, ClosedJsonValue, ContextBackendBinding, ContextBackendContract,
+    ContextCitationStrength, DataClassification, ExternalLeafFailureMutationIds,
+    ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
+    HardLimitProfile, PlatformFailureCode, ResourceId, ResourceIdError, ResourceKind, Retryability,
+    Sha256Digest, ValueRef, WorkClass,
 };
 use insight_platform_jobs::{JobFence, LeasePolicy};
 use insight_platform_postgres::{
@@ -80,6 +82,7 @@ pub struct ContextWorkerConfig {
     recovery_size: u16,
     claim_limit: ClaimBatchHardLimit,
     lease_milliseconds: u64,
+    heartbeat_interval: Duration,
     timing: ContextWorkerTiming,
     limits: ContextQueryLimits,
 }
@@ -100,6 +103,9 @@ impl ContextWorkerConfig {
             claim_limit: ClaimBatchHardLimit::from_profile(profile)
                 .map_err(|_| ContextWorkerError::InvalidConfiguration)?,
             lease_milliseconds: profile.run_scheduler.lease_milliseconds.q1_default,
+            heartbeat_interval: Duration::from_millis(
+                profile.run_scheduler.heartbeat_milliseconds.q1_default,
+            ),
             timing,
             limits: ContextQueryLimits::from_profile(profile)
                 .map_err(|_| ContextWorkerError::InvalidConfiguration)?,
@@ -107,6 +113,8 @@ impl ContextWorkerConfig {
         if config.claim_size == 0
             || config.recovery_size == 0
             || config.lease_milliseconds == 0
+            || config.heartbeat_interval.is_zero()
+            || config.heartbeat_interval >= Duration::from_millis(config.lease_milliseconds / 3)
             || timing.scan_interval.is_zero()
             || timing.failure_backoff.is_zero()
             || timing.failure_backoff > timing.scan_interval
@@ -337,6 +345,214 @@ impl ContextWorkerDriver {
     }
 }
 
+pub struct RemoteContextWorkerDriver {
+    repository: Arc<PgRepository>,
+    pools: LocalWorkerPools,
+    connector: Arc<dyn RemoteContextSearchConnector>,
+    config: ContextWorkerConfig,
+}
+
+impl RemoteContextWorkerDriver {
+    pub fn new(
+        repository: Arc<PgRepository>,
+        pools: LocalWorkerPools,
+        connector: Arc<dyn RemoteContextSearchConnector>,
+        config: ContextWorkerConfig,
+    ) -> Result<Self, ContextWorkerError> {
+        let snapshot = pools.snapshot();
+        if snapshot.worker_role != CONTEXT_WORKER_ROLE || snapshot.work_class != WorkClass::Context
+        {
+            return Err(ContextWorkerError::WrongWorkerManifest);
+        }
+        Ok(Self {
+            repository,
+            pools,
+            connector,
+            config,
+        })
+    }
+
+    pub async fn drive_once(
+        &self,
+        active: &mut JoinSet<bool>,
+    ) -> Result<usize, ContextWorkerError> {
+        let Some(reservation) = self
+            .pools
+            .reserve_claim_capacity(
+                WorkClass::Context,
+                self.config.claim_size,
+                self.config.claim_limit,
+            )
+            .map_err(|_| ContextWorkerError::LocalCapacity)?
+        else {
+            return Ok(0);
+        };
+        let process = self.pools.snapshot();
+        let candidates = self
+            .repository
+            .scan_claimable_remote_context_jobs(
+                &process.worker_manifest_digest,
+                u16::try_from(reservation.claim_limit())
+                    .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+            )
+            .await?;
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let slots = candidates
+            .iter()
+            .map(|candidate| {
+                Ok(ContextClaimSlot {
+                    tenant_id: candidate.tenant_id.clone(),
+                    job_id: candidate.job_id.clone(),
+                    lease_token_digest: new_digest()?,
+                    quota_reservation_id: new_id(ResourceKind::UsageReservation)?,
+                    quota_entry_ids: ids_array(ResourceKind::QuotaLedgerEntry)?,
+                    event_id: new_id(ResourceKind::Event)?,
+                    outbox_id: new_id(ResourceKind::OutboxEvent)?,
+                    resume_mutations: resume_mutations()?,
+                    failure_mutations: failure_mutations()?,
+                })
+            })
+            .collect::<Result<Vec<_>, ContextWorkerError>>()?;
+        let expected_tokens = slots
+            .iter()
+            .map(|slot| slot.lease_token_digest.clone())
+            .collect::<BTreeSet<_>>();
+        let claims = self
+            .repository
+            .claim_context_jobs(ClaimContextJobs {
+                worker_process_generation_id: process.worker_process_generation_id.clone(),
+                worker_manifest_digest: process.worker_manifest_digest.clone(),
+                slots,
+                lease_policy: LeasePolicy {
+                    requested_milliseconds: self.config.lease_milliseconds,
+                    hard_maximum_milliseconds: self.config.lease_milliseconds,
+                },
+            })
+            .await?;
+        let permits = reservation
+            .bind_claimed_jobs(
+                claims
+                    .iter()
+                    .map(|claim| {
+                        claimed_identity(
+                            claim,
+                            &process.worker_process_generation_id,
+                            &expected_tokens,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .map_err(|_| ContextWorkerError::CorruptClaim)?;
+        if permits.len() != claims.len() {
+            return Err(ContextWorkerError::CorruptClaim);
+        }
+        let count = claims.len();
+        for (claim, permit) in claims.into_iter().zip(permits) {
+            let repository = Arc::clone(&self.repository);
+            let connector = Arc::clone(&self.connector);
+            let config = self.config;
+            active.spawn(async move {
+                let _permit = permit;
+                match execute_remote_claim(repository, connector, config, claim).await {
+                    Ok(()) => true,
+                    Err(failure) => {
+                        eprintln!("platform-context-worker abandoned remote execution: {failure}");
+                        false
+                    }
+                }
+            });
+        }
+        Ok(count)
+    }
+
+    pub async fn recover_once(&self) -> Result<usize, ContextWorkerError> {
+        recover_expired(&self.repository, self.config).await
+    }
+
+    pub async fn run(
+        self,
+        cancellation: CancellationToken,
+    ) -> Result<ContextWorkerReport, ContextWorkerError> {
+        let mut report = ContextWorkerReport::default();
+        let mut active = JoinSet::new();
+        let mut scan = tokio::time::interval(self.config.timing.scan_interval);
+        scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => break,
+                joined = active.join_next(), if !active.is_empty() => match joined {
+                    Some(Ok(true)) => report.settled += 1,
+                    Some(_) => report.abandoned += 1,
+                    None => {}
+                },
+                _ = scan.tick() => {
+                    if let Err(failure) = self.recover_once().await {
+                        if !failure.is_transient_repository_race() {
+                            return Err(failure);
+                        }
+                    }
+                    match self.drive_once(&mut active).await {
+                        Ok(claimed) => report.claimed += u64::try_from(claimed)
+                            .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+                        Err(failure) if failure.is_transient_repository_race() => {
+                            tokio::select! {
+                                _ = cancellation.cancelled() => break,
+                                _ = tokio::time::sleep(self.config.timing.failure_backoff) => {}
+                            }
+                        }
+                        Err(failure) => return Err(failure),
+                    }
+                }
+            }
+        }
+        let drain = async {
+            while let Some(joined) = active.join_next().await {
+                match joined {
+                    Ok(true) => report.settled += 1,
+                    _ => report.abandoned += 1,
+                }
+            }
+        };
+        tokio::time::timeout(self.config.timing.drain_grace, drain)
+            .await
+            .map_err(|_| ContextWorkerError::DrainRequiresTermination)?;
+        Ok(report)
+    }
+}
+
+async fn recover_expired(
+    repository: &PgRepository,
+    config: ContextWorkerConfig,
+) -> Result<usize, ContextWorkerError> {
+    use insight_platform_postgres::context_query_repository::{
+        DriveExpiredContextJobs, ExpiredContextRecoverySlot,
+    };
+    let slots = (0..config.recovery_size)
+        .map(|_| {
+            Ok(ExpiredContextRecoverySlot {
+                quota_entry_ids: ids_array(ResourceKind::QuotaLedgerEntry)?,
+                event_id: new_id(ResourceKind::Event)?,
+                outbox_id: new_id(ResourceKind::OutboxEvent)?,
+            })
+        })
+        .collect::<Result<Vec<_>, ContextWorkerError>>()?;
+    repository
+        .drive_expired_context_jobs(DriveExpiredContextJobs {
+            shard: insight_platform_postgres::repository::SafetyScanShard::whole(),
+            after: None,
+            limit: config.recovery_size,
+            slots,
+            retry_backoff_milliseconds: u64::try_from(config.timing.failure_backoff.as_millis())
+                .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+        })
+        .await
+        .map(|page| page.records.len())
+        .map_err(ContextWorkerError::from)
+}
+
 async fn execute_claim(
     repository: Arc<PgRepository>,
     adapter: NativeCatalogAdapter,
@@ -377,7 +593,7 @@ async fn execute_claim(
         match build_output(&adapter, &claim, config.limits) {
             Ok(output) => (
                 ContextBackendOutcome::Completed(Box::new(output)),
-                Some(claim.resume_mutations),
+                Some(claim.resume_mutations.clone()),
                 None,
             ),
             Err(ContextWorkerError::AdapterOutputRejected) => (
@@ -397,10 +613,39 @@ async fn execute_claim(
                     },
                 },
                 None,
-                Some(claim.failure_mutations),
+                Some(claim.failure_mutations.clone()),
             ),
             Err(failure) => return Err(failure),
         };
+    commit_worker_outcome(
+        &repository,
+        &claim,
+        process_id,
+        fence,
+        PreparedWorkerOutcome {
+            outcome,
+            resume_mutations,
+            failure_mutations,
+        },
+        config,
+    )
+    .await
+}
+
+struct PreparedWorkerOutcome {
+    outcome: ContextBackendOutcome,
+    resume_mutations: Option<ExternalLeafResumeMutationIds>,
+    failure_mutations: Option<ExternalLeafFailureMutationIds>,
+}
+
+async fn commit_worker_outcome(
+    repository: &PgRepository,
+    claim: &ClaimedContextExecution,
+    process_id: ResourceId,
+    fence: JobFence,
+    prepared: PreparedWorkerOutcome,
+    config: ContextWorkerConfig,
+) -> Result<(), ContextWorkerError> {
     let audit = ContextWorkerAudit {
         tenant_id: claim.query.tenant_id.clone(),
         worker_process_generation_id: process_id,
@@ -431,14 +676,228 @@ async fn execute_claim(
             expected_query_version: claim.query.version,
             job_id: parse_required_id(&claim.job.job_id, ResourceKind::Job)?,
             fence,
-            outcome,
+            outcome: prepared.outcome,
             quota_entry_ids: ids_array(ResourceKind::QuotaLedgerEntry)?,
-            resume_mutations,
-            failure_mutations,
+            resume_mutations: prepared.resume_mutations,
+            failure_mutations: prepared.failure_mutations,
         })
         .await?;
     transaction.commit().await?;
     Ok(())
+}
+
+async fn execute_remote_claim(
+    repository: Arc<PgRepository>,
+    connector: Arc<dyn RemoteContextSearchConnector>,
+    config: ContextWorkerConfig,
+    claim: ClaimedContextExecution,
+) -> Result<(), ContextWorkerError> {
+    let process_id = parse_id(&claim.job.worker_id, ResourceKind::WorkerProcessGeneration)?;
+    let token: Sha256Digest = claim
+        .job
+        .lease_token_digest
+        .as_deref()
+        .ok_or(ContextWorkerError::CorruptClaim)?
+        .parse()
+        .map_err(|_| ContextWorkerError::CorruptClaim)?;
+    let heartbeat = repository
+        .heartbeat_job(HeartbeatJob {
+            fence: RepositoryJobFence {
+                tenant_id: claim.job.tenant_id.clone(),
+                job_id: claim.job.job_id.clone(),
+                worker_id: process_id.clone(),
+                lease_epoch: claim.job.lease_epoch,
+                expected_job_version: claim.job.version,
+                lease_token_digest: token.clone(),
+            },
+            lease_milliseconds: i64::try_from(config.lease_milliseconds)
+                .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+        })
+        .await?;
+    let mut fence = JobFence {
+        expected_version: u64::try_from(heartbeat.version)
+            .map_err(|_| ContextWorkerError::CorruptClaim)?,
+        worker_process_generation_id: process_id.clone(),
+        lease_generation: u64::try_from(heartbeat.lease_epoch)
+            .map_err(|_| ContextWorkerError::CorruptClaim)?,
+        token_digest: token.clone(),
+    };
+    let request = remote_request(&claim, &fence)?;
+    let query = connector.query(request);
+    tokio::pin!(query);
+    let mut interval = tokio::time::interval(config.heartbeat_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    let remote = loop {
+        tokio::select! {
+            result = &mut query => break result,
+            _ = interval.tick() => {
+                match repository.heartbeat_job(HeartbeatJob {
+                    fence: RepositoryJobFence {
+                        tenant_id: claim.job.tenant_id.clone(),
+                        job_id: claim.job.job_id.clone(),
+                        worker_id: process_id.clone(),
+                        lease_epoch: i64::try_from(fence.lease_generation)
+                            .map_err(|_| ContextWorkerError::CorruptClaim)?,
+                        expected_job_version: i64::try_from(fence.expected_version)
+                            .map_err(|_| ContextWorkerError::CorruptClaim)?,
+                        lease_token_digest: token.clone(),
+                    },
+                    lease_milliseconds: i64::try_from(config.lease_milliseconds)
+                        .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+                }).await {
+                    Ok(next) => fence.expected_version = u64::try_from(next.version)
+                        .map_err(|_| ContextWorkerError::CorruptClaim)?,
+                    Err(RepositoryError::Database(_)) => {}
+                    Err(failure) => return Err(ContextWorkerError::Repository(failure)),
+                }
+            }
+        }
+    };
+    let (outcome, resume_mutations, failure_mutations) = match remote {
+        Ok(response) => (
+            ContextBackendOutcome::Completed(Box::new(build_remote_output(
+                response,
+                &claim,
+                config.limits,
+            )?)),
+            Some(claim.resume_mutations.clone()),
+            None,
+        ),
+        Err(failure) => {
+            failure
+                .validate()
+                .map_err(|_| ContextWorkerError::AdapterOutputRejected)?;
+            let retryable = matches!(
+                failure.class,
+                RemoteContextFailureClass::RetryableBeforeDispatch
+                    | RemoteContextFailureClass::RetryableAfterDispatch
+            );
+            let retry_at = Utc::now().checked_add_signed(
+                ChronoDuration::from_std(config.timing.failure_backoff)
+                    .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+            );
+            let may_retry = retryable
+                && claim.job.attempt_no < claim.job.attempt_limit
+                && retry_at.is_some_and(|retry_at| retry_at < claim.query.deadline);
+            let domain_failure = Failure {
+                code: FailureCode::Platform {
+                    code: PlatformFailureCode::ContextQueryFailed,
+                },
+                class: FailureClass::External,
+                retryability: if may_retry {
+                    Retryability::SafeWithinPolicy
+                } else {
+                    Retryability::Never
+                },
+                safe_message: Some(failure.safe_message),
+                details_ref: None,
+                source: FailureSource::Context,
+            };
+            if may_retry {
+                (
+                    ContextBackendOutcome::RetryableFailure {
+                        failure: domain_failure,
+                        retry_at: retry_at.expect("checked retry time"),
+                    },
+                    None,
+                    None,
+                )
+            } else {
+                (
+                    ContextBackendOutcome::PermanentFailure {
+                        failure: domain_failure,
+                    },
+                    None,
+                    Some(claim.failure_mutations.clone()),
+                )
+            }
+        }
+    };
+    commit_worker_outcome(
+        &repository,
+        &claim,
+        process_id,
+        fence,
+        PreparedWorkerOutcome {
+            outcome,
+            resume_mutations,
+            failure_mutations,
+        },
+        config,
+    )
+    .await
+}
+
+fn remote_request(
+    claim: &ClaimedContextExecution,
+    fence: &JobFence,
+) -> Result<RemoteContextSearchRequest, ContextWorkerError> {
+    let admission = &claim.query.payload.admission;
+    let ContextBackendContract::RemoteSearch {
+        protocol_contract_digest,
+        result_mapping_digest,
+    } = &admission.implementation.contract.backend
+    else {
+        return Err(ContextWorkerError::CorruptClaim);
+    };
+    let ContextBackendBinding::RemoteSearch {
+        endpoint,
+        endpoint_identity_digest,
+        region,
+    } = &admission.context_closure.backend
+    else {
+        return Err(ContextWorkerError::CorruptClaim);
+    };
+    let request = RemoteContextSearchRequest {
+        schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
+        tenant_id: claim.query.tenant_id.clone(),
+        context_query_id: claim.query.context_query_id.clone(),
+        job_id: parse_required_id(&claim.job.job_id, ResourceKind::Job)?,
+        physical_attempt: u32::try_from(claim.job.attempt_no)
+            .map_err(|_| ContextWorkerError::CorruptClaim)?,
+        lease_generation: fence.lease_generation,
+        context_deployment: admission.binding.context_deployment.clone(),
+        implementation_revision: admission.implementation_revision.clone(),
+        protocol_contract_digest: protocol_contract_digest.clone(),
+        result_mapping_digest: result_mapping_digest.clone(),
+        endpoint: endpoint.clone(),
+        endpoint_identity_digest: endpoint_identity_digest.clone(),
+        region: region.clone(),
+        secret_bindings: admission.context_closure.secret_bindings.clone(),
+        network_policy: admission
+            .context_closure
+            .network_policy
+            .clone()
+            .ok_or(ContextWorkerError::CorruptClaim)?,
+        tls_policy: admission
+            .context_closure
+            .tls_policy
+            .clone()
+            .ok_or(ContextWorkerError::CorruptClaim)?,
+        trust_policy: admission
+            .context_closure
+            .trust_policy
+            .clone()
+            .ok_or(ContextWorkerError::CorruptClaim)?,
+        query_input: claim.query_input.clone(),
+        normalized_query_digest: admission.request.normalized_query_digest.clone(),
+        normalized_filter_digest: admission.request.normalized_filter_digest.clone(),
+        requested_projection: admission.request.requested_projection.clone(),
+        maximum_classification: admission.grant.maximum_classification,
+        page_size: admission.request.page_size,
+        cursor_digest: admission.request.cursor_digest.clone(),
+        maximum_response_bytes: admission
+            .implementation
+            .contract
+            .limits
+            .maximum_response_bytes,
+        deadline: claim.query.deadline,
+    };
+    request
+        .validate_at(Utc::now())
+        .map_err(|_| ContextWorkerError::CorruptClaim)?;
+    Ok(request)
 }
 
 fn build_output(
@@ -535,6 +994,145 @@ fn build_output(
         observation,
         validation_evidence_digest: new_digest()?,
     })
+}
+
+fn build_remote_output(
+    response: RemoteContextSearchResponse,
+    claim: &ClaimedContextExecution,
+    limits: ContextQueryLimits,
+) -> Result<ContextObservationOutput, ContextWorkerError> {
+    let admission = &claim.query.payload.admission;
+    let now = Utc::now();
+    let request = remote_request(
+        claim,
+        &JobFence {
+            expected_version: u64::try_from(claim.job.version)
+                .map_err(|_| ContextWorkerError::CorruptClaim)?,
+            worker_process_generation_id: parse_id(
+                &claim.job.worker_id,
+                ResourceKind::WorkerProcessGeneration,
+            )?,
+            lease_generation: u64::try_from(claim.job.lease_epoch)
+                .map_err(|_| ContextWorkerError::CorruptClaim)?,
+            token_digest: claim
+                .job
+                .lease_token_digest
+                .as_deref()
+                .ok_or(ContextWorkerError::CorruptClaim)?
+                .parse()
+                .map_err(|_| ContextWorkerError::CorruptClaim)?,
+        },
+    )?;
+    response
+        .validate_for(&request, now)
+        .map_err(|_| ContextWorkerError::AdapterOutputRejected)?;
+    let authorization_evidence_digest = digest_value(&serde_json::json!({
+        "items": response
+            .items
+            .iter()
+            .map(|item| item.authorization_evidence_digest.clone())
+            .collect::<Vec<_>>(),
+        "response": response.backend_response_digest,
+    }))?;
+    let mut total_bytes = 0_u64;
+    let mut classification = DataClassification::Public;
+    let mut items = Vec::with_capacity(response.items.len());
+    for remote in response.items {
+        let bytes = serde_json::to_vec(&remote.content)
+            .map_err(|_| ContextWorkerError::AdapterOutputRejected)?;
+        total_bytes = total_bytes
+            .checked_add(
+                u64::try_from(bytes.len())
+                    .map_err(|_| ContextWorkerError::AdapterOutputRejected)?,
+            )
+            .ok_or(ContextWorkerError::AdapterOutputRejected)?;
+        classification = classification.join(remote.classification);
+        let content_digest = digest_value(&remote.content)?;
+        items.push(ContextItem {
+            item_id: new_id(ResourceKind::ContextItem)?,
+            source_item_identity_digest: remote.source_item_identity_digest,
+            content: ValueRef::Inline {
+                value: remote.content,
+            },
+            structured_fields: ClosedJsonValue::build(
+                admission.interface.item_schema_digest.clone(),
+                remote.structured_fields,
+            )
+            .map_err(|_| ContextWorkerError::AdapterOutputRejected)?,
+            score: remote
+                .score_millionths
+                .map(|millionths| NormalizedContextScore {
+                    millionths,
+                    score_domain_digest: admission.interface.ranking.score_domain_digest.clone(),
+                }),
+            classification: remote.classification,
+            citation: ContextCitation {
+                context_deployment: admission.binding.context_deployment.clone(),
+                interface_revision: admission.interface_revision.clone(),
+                dataset_view: admission.dataset_view.clone(),
+                locator: CitationLocator::RemoteOpaque {
+                    locator_digest: remote.locator_digest,
+                },
+                strength: ContextCitationStrength::ObservationOnly,
+                content_digest,
+                observed_at: response.observed_at,
+                display_label: remote.display_label,
+            },
+            authorization_evidence_digest: remote.authorization_evidence_digest,
+        });
+    }
+    let candidate_count =
+        u32::try_from(items.len()).map_err(|_| ContextWorkerError::AdapterOutputRejected)?;
+    let mut observation = ContextObservation {
+        schema_version: 1,
+        observation_id: new_id(ResourceKind::ContextObservation)?,
+        context_query_id: claim.query.context_query_id.clone(),
+        dataset_view: admission.dataset_view.clone(),
+        normalized_query_digest: admission.request.normalized_query_digest.clone(),
+        items,
+        next_cursor_digest: response.next_cursor_digest,
+        evidence: ContextRetrievalEvidence {
+            backend_request_digest: response.backend_request_digest,
+            backend_response_digest: response.backend_response_digest.clone(),
+            authorization_evidence_digest,
+            ranking_evidence_digest: response.ranking_evidence_digest,
+            candidate_count,
+            rejected_count: 0,
+            truncated: false,
+        },
+        observed_at: response.observed_at,
+        total_bytes,
+        canonical_digest: new_digest()?,
+    };
+    observation.canonical_digest = digest_without_field(&observation, "canonical_digest")?;
+    observation
+        .validate_for(&claim.query.context_query_id, admission, limits)
+        .map_err(|_| ContextWorkerError::AdapterOutputRejected)?;
+    let mut unsigned = serde_json::to_value(&observation)
+        .map_err(|_| ContextWorkerError::AdapterOutputRejected)?;
+    unsigned
+        .as_object_mut()
+        .ok_or(ContextWorkerError::AdapterOutputRejected)?
+        .remove("canonical_digest");
+    Ok(ContextObservationOutput {
+        value_id: new_id(ResourceKind::RunValue)?,
+        value_kind: "context_observation".to_owned(),
+        classification,
+        value: ValueRef::Inline { value: unsigned },
+        artifact_link_id: None,
+        observation,
+        validation_evidence_digest: digest_value(&serde_json::json!({
+            "backend_response_digest": response.backend_response_digest,
+            "remote_revision_digest": response.remote_revision_digest,
+        }))?,
+    })
+}
+
+fn digest_value(value: &Value) -> Result<Sha256Digest, ContextWorkerError> {
+    canonical_digest(value)
+        .map_err(|_| ContextWorkerError::AdapterOutputRejected)?
+        .parse()
+        .map_err(|_| ContextWorkerError::AdapterOutputRejected)
 }
 
 fn claimed_identity(

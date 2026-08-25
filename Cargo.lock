@@ -2620,6 +2620,7 @@ dependencies = [
  "chrono",
  "insight-platform-context",
  "insight-platform-contracts",
+ "insight-platform-egress-rpc",
  "insight-platform-jobs",
  "insight-platform-postgres",
  "insight-platform-worker",
@@ -2628,6 +2629,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-util",
+ "tonic",
  "uuid",
 ]
 

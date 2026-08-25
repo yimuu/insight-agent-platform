@@ -14,6 +14,7 @@ RUN cargo build --locked --release --bin insight-agent-platform \
     && cargo build --locked --release -p insight-platform-gateway --bin platform-gateway \
     && cargo build --locked --release -p insight-platform-model-worker --bin platform-model-worker \
     && cargo build --locked --release -p insight-platform-context-worker --bin platform-context-worker \
+    && cargo build --locked --release -p insight-platform-context-worker --bin platform-remote-context-worker \
     && cargo build --locked --release -p insight-platform-orchestration-worker --bin platform-orchestration-worker \
     && cargo build --locked --release -p insight-platform-capability-worker --bin platform-capability-native-worker \
     && cargo build --locked --release -p insight-platform-capability-worker --bin platform-capability-remote-worker \
@@ -46,6 +47,7 @@ COPY --from=builder /workspace/target/release/platform-callback-api /usr/local/b
 COPY --from=builder /workspace/target/release/platform-gateway /usr/local/bin/platform-gateway
 COPY --from=builder /workspace/target/release/platform-model-worker /usr/local/bin/platform-model-worker
 COPY --from=builder /workspace/target/release/platform-context-worker /usr/local/bin/platform-context-worker
+COPY --from=builder /workspace/target/release/platform-remote-context-worker /usr/local/bin/platform-remote-context-worker
 COPY --from=builder /workspace/target/release/platform-orchestration-worker /usr/local/bin/platform-orchestration-worker
 COPY --from=builder /workspace/target/release/platform-capability-native-worker /usr/local/bin/platform-capability-native-worker
 COPY --from=builder /workspace/target/release/platform-capability-remote-worker /usr/local/bin/platform-capability-remote-worker

@@ -1,0 +1,36 @@
+image:
+  repository: insight-agent-platform
+  digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+namespace: platform-remote-context-worker
+replicas: 2
+config:
+  existingConfigMap: insight-platform-remote-context-worker-candidate
+  fileKey: remote-context-worker.json
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+database:
+  existingSecret: insight-platform-remote-context-worker-database
+  urlKey: database-url
+egressTls:
+  existingSecret: insight-platform-remote-context-worker-egress-tls
+  caKey: ca.crt
+  certKey: tls.crt
+  privateKeyKey: tls.key
+networkPolicy:
+  enabled: true
+  dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
+  dnsPodSelector: {k8s-app: kube-dns}
+  postgresCidrs: [10.10.0.0/24]
+  egressNamespaceSelector: {kubernetes.io/metadata.name: platform-egress}
+  egressPodSelector: {insight.platform/workload-role: egress-broker}
+  egressPort: 8443
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {cpu: "1", memory: 512Mi}
+podDisruptionBudget: {enabled: true, minAvailable: 1}
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 16
+  targetCPUUtilizationPercentage: 70
