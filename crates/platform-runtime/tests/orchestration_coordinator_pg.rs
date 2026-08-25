@@ -7,19 +7,22 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, AgentDeploymentClosure,
-    AgentResourceSpec, ArtifactRef, AuthoringPackage, ClosedJsonSchema, CommandAudit,
-    CommandOutcome, DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding,
-    ExactVersionRef, InteractionKind, JsonLimits, Permission, PermissionSet, PlanNodeKind,
-    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
-    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, ResourceDocument, ResourceId,
-    ResourceKind, RunBindingsSnapshot, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
+    AgentResourceSpec, ArtifactRef, AuthoringPackage, CandidateSelectionMode,
+    CandidateSelectionPolicyDocument, ClosedJsonSchema, CommandAudit, CommandOutcome,
+    DataClassification, DeploymentClosure, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
+    FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission, PermissionSet,
+    PlanNodeKind, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, SchedulingPolicyDocument,
+    Sha256Digest, TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass,
+    WorkerManifest,
 };
 use insight_platform_invocations::InvocationPolicyDecisionBundle;
 use insight_platform_jobs::WakeSource;
 use insight_platform_orchestrator::{
-    AdmitRun, DataPortKey, ExactDataPortRef, ExpressionLimits, HumanTaskDefinition, PlanLimits,
-    PlanNodeKey, RunInputValue, RuntimeNode, RuntimePlan,
+    AdmitRun, ChildBudgetLimit, ChildCancellationPolicy, DataPortKey, ExactDataPortRef,
+    ExpressionLimits, HumanTaskDefinition, PlanLimits, PlanNodeKey, RunInputValue,
+    RuntimeDependencyKind, RuntimeDependencySlot, RuntimeNode, RuntimePlan,
 };
 use insight_platform_postgres::{
     repository::{
@@ -82,6 +85,14 @@ const JOB_ID: &str = "job_0198f1c5-0787-75e1-a9e8-d95ca0f3600e";
 const VALUE_ID: &str = "val_0198f1c5-0787-75e1-a9e8-d95ca0f3600f";
 const TYPED_PLAN_ARTIFACT_ID: &str = "art_0198f1c5-0787-75e1-a9e8-d95ca0f36012";
 const INPUT_ARTIFACT_ID: &str = "art_0198f1c5-0787-75e1-a9e8-d95ca0f36013";
+const CHILD_AGENT_ID: &str = "agt_0198f1c5-0787-75e1-a9e8-d95ca0f36014";
+const CHILD_INTERFACE_ID: &str = "aif_0198f1c5-0787-75e1-a9e8-d95ca0f36015";
+const CHILD_PLAN_ID: &str = "arev_0198f1c5-0787-75e1-a9e8-d95ca0f36016";
+const CHILD_DEPLOYMENT_ID: &str = "adep_0198f1c5-0787-75e1-a9e8-d95ca0f36017";
+const CHILD_PLAN_ARTIFACT_ID: &str = "art_0198f1c5-0787-75e1-a9e8-d95ca0f36018";
+const SELECTION_POLICY_ID: &str = "pol_0198f1c5-0787-75e1-a9e8-d95ca0f36019";
+const SELECTION_POLICY_REVISION_ID: &str = "prev_0198f1c5-0787-75e1-a9e8-d95ca0f3601a";
+const SELECTION_POLICY_DEPLOYMENT_ID: &str = "pdep_0198f1c5-0787-75e1-a9e8-d95ca0f3601b";
 
 struct EmptyCapabilityAdmissionProvider;
 
@@ -145,12 +156,19 @@ fn fixture_plan() -> RuntimePlan {
     let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
     let signal = PlanNodeKey::new("signal".to_owned()).unwrap();
     let task = PlanNodeKey::new("task".to_owned()).unwrap();
+    let child = PlanNodeKey::new("child".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     RuntimePlan {
         plan_version: 4,
         interface_revision_id: id(INTERFACE_ID),
         entry_node_id: entry.clone(),
-        dependency_slots: BTreeMap::new(),
+        dependency_slots: BTreeMap::from([(
+            "child_worker".to_owned(),
+            RuntimeDependencySlot {
+                kind: RuntimeDependencyKind::ChildAgent,
+                requirement_digest: digest('c'),
+            },
+        )]),
         nodes: BTreeMap::from([
             (
                 entry,
@@ -182,6 +200,60 @@ fn fixture_plan() -> RuntimePlan {
                         schema_digest: agent_schema().canonical_digest,
                     },
                     timeout_milliseconds: 60_000,
+                    resume: child.clone(),
+                },
+            ),
+            (
+                child.clone(),
+                RuntimeNode::ChildAgentCall {
+                    child_agent_slot_id: "child_worker".to_owned(),
+                    input: ExactDataPortRef::RunInput {
+                        schema_digest: agent_schema().canonical_digest,
+                    },
+                    candidate_route: None,
+                    output: ExactDataPortRef::NodeOutput {
+                        producer_node_id: child,
+                        port_id: DataPortKey::new("response".to_owned()).unwrap(),
+                        schema_digest: agent_schema().canonical_digest,
+                    },
+                    budget: ChildBudgetLimit {
+                        maximum_duration_milliseconds: 60_000,
+                        maximum_model_tokens: 1_000,
+                        maximum_capability_calls: 10,
+                        maximum_artifact_bytes: 1_048_576,
+                        maximum_descendant_runs: 2,
+                    },
+                    cancellation_policy: ChildCancellationPolicy::CascadeAndWait,
+                    attempt_limit: 3,
+                    retry_backoff_milliseconds: 100,
+                    resume: finish.clone(),
+                },
+            ),
+            (
+                finish,
+                RuntimeNode::Return {
+                    value: ExactDataPortRef::RunInput {
+                        schema_digest: agent_schema().canonical_digest,
+                    },
+                },
+            ),
+        ]),
+    }
+}
+
+fn child_fixture_plan() -> RuntimePlan {
+    let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
+    let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
+    RuntimePlan {
+        plan_version: 4,
+        interface_revision_id: id(CHILD_INTERFACE_ID),
+        entry_node_id: entry.clone(),
+        dependency_slots: BTreeMap::new(),
+        nodes: BTreeMap::from([
+            (
+                entry,
+                RuntimeNode::TimerWait {
+                    delay_milliseconds: 1_000,
                     resume: finish.clone(),
                 },
             ),
@@ -198,7 +270,7 @@ fn fixture_plan() -> RuntimePlan {
 }
 
 struct StaticTypedPlanReader {
-    bytes: Vec<u8>,
+    plans: BTreeMap<ResourceId, Vec<u8>>,
 }
 
 #[async_trait]
@@ -207,18 +279,20 @@ impl SchedulerTypedPlanReader for StaticTypedPlanReader {
         &self,
         request: SchedulerTypedPlanReadRequest,
     ) -> Result<Vec<u8>, SchedulerTypedPlanReadError> {
-        if request.artifact.byte_length() != u64::try_from(self.bytes.len()).unwrap()
+        let bytes = self
+            .plans
+            .get(request.artifact.artifact_id())
+            .ok_or(SchedulerTypedPlanReadError::Denied)?;
+        if request.artifact.byte_length() != u64::try_from(bytes.len()).unwrap()
             || request.artifact.content_digest()
-                != &canonical_digest(
-                    &serde_json::from_slice::<serde_json::Value>(&self.bytes).unwrap(),
-                )
-                .unwrap()
-                .parse()
-                .unwrap()
+                != &canonical_digest(&serde_json::from_slice::<serde_json::Value>(bytes).unwrap())
+                    .unwrap()
+                    .parse()
+                    .unwrap()
         {
             return Err(SchedulerTypedPlanReadError::Integrity);
         }
-        Ok(self.bytes.clone())
+        Ok(bytes.clone())
     }
 }
 
@@ -234,7 +308,7 @@ impl SchedulerRunValueReader for StaticRunValueReader {
         request: SchedulerRunValueReadRequest,
     ) -> Result<Vec<u8>, SchedulerRunValueReadError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        if request.run_value_id != id(VALUE_ID)
+        if request.run_value_id.kind() != ResourceKind::RunValue
             || request.schema_digest != agent_schema().canonical_digest
             || request.artifact.artifact_id() != &id(INPUT_ARTIFACT_ID)
             || request.artifact.byte_length() != u64::try_from(self.bytes.len()).unwrap()
@@ -516,7 +590,9 @@ fn wait_recovery_worker_process_entry() {
         .unwrap();
     runtime.block_on(async {
         let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
-        let profile = checked_in_hard_limit_profile();
+        let mut profile = checked_in_hard_limit_profile();
+        profile.control_data.recovery_batch.q1_default = 1;
+        profile.validate().unwrap();
         let process_generation_id = fresh_id(ResourceKind::WorkerProcessGeneration);
         let bulkheads = PostgresConnectionBulkheads::connect(
             &database_url,
@@ -550,10 +626,17 @@ fn wait_recovery_worker_process_entry() {
         .unwrap();
         let plan = fixture_plan();
         let plan_bytes = canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
+        let child_plan_bytes =
+            canonical_json(&serde_json::to_value(child_fixture_plan()).unwrap()).unwrap();
         let plan_materializer = Arc::new(
             SchedulerPlanMaterializer::new(
                 Arc::new(bulkheads.critical_control_repository()),
-                Arc::new(StaticTypedPlanReader { bytes: plan_bytes }),
+                Arc::new(StaticTypedPlanReader {
+                    plans: BTreeMap::from([
+                        (id(TYPED_PLAN_ARTIFACT_ID), plan_bytes),
+                        (id(CHILD_PLAN_ARTIFACT_ID), child_plan_bytes),
+                    ]),
+                }),
                 SchedulerPlanMaterializerConfig {
                     request_timeout: Duration::from_secs(1),
                     maximum_bytes: 64 * 1024,
@@ -648,7 +731,7 @@ fn wait_recovery_worker_process_entry() {
         .unwrap()
         .spawn();
 
-        tokio::time::timeout(Duration::from_secs(20), async {
+        let terminal = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let states = sqlx::query_as::<_, (String, String)>(
                     r#"
@@ -670,8 +753,13 @@ fn wait_recovery_worker_process_entry() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
-        .await
-        .expect("timer recovery process did not reach the durable terminal state");
+        .await;
+        if terminal.is_err() {
+            panic!(
+                "wait recovery process did not reach the durable terminal state: safety={:?}",
+                safety.snapshot()
+            );
+        }
         coordinator.shutdown().await.unwrap();
         safety.shutdown().await.unwrap();
         bulkheads.close().await;
@@ -1171,9 +1259,60 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
             .unwrap();
         task_transaction.commit().await.unwrap();
 
+        let mut child_run_worker = spawn_wait_worker();
+        let child_park_deadline = Instant::now() + Duration::from_secs(10);
+        let (child_run_id, child_due_at) = loop {
+            if child_run_worker.try_wait().unwrap().is_some() {
+                let failed = child_run_worker.wait_with_output().unwrap();
+                panic!(
+                    "HumanTask recovery worker exited before durable child Timer park: stdout={} stderr={}",
+                    String::from_utf8_lossy(&failed.stdout),
+                    String::from_utf8_lossy(&failed.stderr),
+                );
+            }
+            let child: Option<(String, chrono::DateTime<Utc>)> = sqlx::query_as(
+                r#"
+                SELECT child.run_id, job.scheduled_at
+                FROM insight_platform.run_nodes AS link
+                JOIN insight_platform.runs AS child
+                  ON child.tenant_id = link.tenant_id AND child.run_id = link.related_run_id
+                JOIN insight_platform.jobs AS job
+                  ON job.tenant_id = child.tenant_id AND job.run_id = child.run_id
+                WHERE link.tenant_id = $1 AND link.run_id = $2
+                  AND link.record_kind = 'child_run_link'
+                  AND job.wake_kind = 'timer' AND job.state = 'waiting'
+                "#,
+            )
+            .bind(TENANT_ID)
+            .bind(RUN_ID)
+            .fetch_optional(bulkheads.critical_control_pool())
+            .await
+            .unwrap();
+            if let Some(child) = child {
+                break child;
+            }
+            if Instant::now() >= child_park_deadline {
+                child_run_worker.kill().unwrap();
+                let failed = child_run_worker.wait_with_output().unwrap();
+                panic!(
+                    "HumanTask recovery worker did not durably park the child Run: stdout={} stderr={}",
+                    String::from_utf8_lossy(&failed.stdout),
+                    String::from_utf8_lossy(&failed.stderr),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        child_run_worker.kill().unwrap();
+        let child_worker_crashed = child_run_worker.wait_with_output().unwrap();
+        assert!(!child_worker_crashed.status.success());
+        let child_until_due = child_due_at.signed_duration_since(Utc::now());
+        if let Ok(child_until_due) = child_until_due.to_std() {
+            tokio::time::sleep(child_until_due + Duration::from_millis(100)).await;
+        }
+
         let final_child = spawn_wait_worker();
         let recovered = tokio::time::timeout(
-            Duration::from_secs(20),
+            Duration::from_secs(25),
             tokio::task::spawn_blocking(move || final_child.wait_with_output()),
         )
         .await
@@ -1241,6 +1380,23 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         .unwrap();
         assert_eq!(task_terminal.0, "responded");
         assert!(task_terminal.1.is_some());
+        let child_terminal: (String, String) = sqlx::query_as(
+            r#"
+            SELECT child.state, link.state
+            FROM insight_platform.run_nodes AS link
+            JOIN insight_platform.runs AS child
+              ON child.tenant_id = link.tenant_id AND child.run_id = link.related_run_id
+            WHERE link.tenant_id = $1 AND link.run_id = $2
+              AND link.record_kind = 'child_run_link' AND child.run_id = $3
+            "#,
+        )
+        .bind(TENANT_ID)
+        .bind(RUN_ID)
+        .bind(&child_run_id)
+        .fetch_one(bulkheads.critical_control_pool())
+        .await
+        .unwrap();
+        assert_eq!(child_terminal, ("succeeded".to_owned(), "succeeded".to_owned()));
         bulkheads.close().await;
     });
 }
@@ -1285,7 +1441,12 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
 
     let pool = repository.pool();
     let empty = TypedPayload::empty(1).unwrap();
-    for (resource_id, resource_kind) in [(POLICY_ID, "policy"), (AGENT_ID, "agent")] {
+    for (resource_id, resource_kind) in [
+        (POLICY_ID, "policy"),
+        (SELECTION_POLICY_ID, "policy"),
+        (AGENT_ID, "agent"),
+        (CHILD_AGENT_ID, "agent"),
+    ] {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.resources (
@@ -1356,6 +1517,56 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         },
     )
     .unwrap();
+    let selection = CandidateSelectionPolicyDocument {
+        schema_version: 1,
+        mode: CandidateSelectionMode::OnlyCandidate,
+        route_schema_digest: None,
+    };
+    let selection_policy_payload = TypedPayload::new(
+        1,
+        &PublishedVersionPayload {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
+                authoring_package: AuthoringPackage {
+                    artifact: ArtifactRef::new(
+                        id("art_0198f1c5-0787-75e1-a9e8-d95ca0f36010"),
+                        digest('3'),
+                        1,
+                        "application/json",
+                        DataClassification::Internal,
+                        Some("selection-policy.json".to_owned()),
+                    )
+                    .unwrap(),
+                    manifest_digest: digest('4'),
+                },
+                contract_digest: digest('5'),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                policy_kind: PolicyKind::Selection,
+                rules_digest: selection.canonical_digest().unwrap(),
+                selection: Some(selection),
+                scheduling: None,
+                retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
+                mcp_protocol: None,
+                mcp_auth: None,
+                sandbox_isolation: None,
+                sandbox_resource: None,
+                sandbox_network: None,
+                sandbox_artifact_io: None,
+                sandbox_secret_resolution: None,
+            })),
+            validation: ValidationSummary {
+                validator_digest: digest('6'),
+                validated_draft_digest: digest('7'),
+                dependency_closure_digest: digest('8'),
+                security_evidence_digest: digest('9'),
+                warnings: vec![],
+            },
+        },
+    )
+    .unwrap();
     let plan = fixture_plan();
     let plan_limits = PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
     let typed_plan_bytes = canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
@@ -1396,31 +1607,89 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         },
     )
     .unwrap();
-    for (version_id, kind, content_digest, payload) in [
+    let child_plan = child_fixture_plan();
+    let child_plan_bytes = canonical_json(&serde_json::to_value(&child_plan).unwrap()).unwrap();
+    let child_plan_digest = child_plan.canonical_digest(plan_limits).unwrap();
+    let child_plan_artifact = ArtifactRef::new(
+        id(CHILD_PLAN_ARTIFACT_ID),
+        child_plan_digest.clone(),
+        u64::try_from(child_plan_bytes.len()).unwrap(),
+        "application/json",
+        DataClassification::Internal,
+        Some("child-typed-plan.json".to_owned()),
+    )
+    .unwrap();
+    let child_plan_payload = TypedPayload::new(
+        1,
+        &PublishedVersionPayload {
+            document: ResourceDocument::Agent(AgentResourceSpec {
+                authoring_package: AuthoringPackage {
+                    artifact: child_plan_artifact.clone(),
+                    manifest_digest: digest('4'),
+                },
+                contract_digest: digest('5'),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                input_schema: agent_schema(),
+                output_schema: agent_schema(),
+                error_schema: agent_schema(),
+                typed_plan_artifact_id: id(CHILD_PLAN_ARTIFACT_ID),
+                typed_plan_digest: child_plan_digest.clone(),
+            }),
+            validation: ValidationSummary {
+                validator_digest: digest('6'),
+                validated_draft_digest: digest('7'),
+                dependency_closure_digest: digest('8'),
+                security_evidence_digest: digest('9'),
+                warnings: vec![],
+            },
+        },
+    )
+    .unwrap();
+    for (version_id, resource_id, kind, content_digest, payload) in [
         (
             POLICY_REVISION_ID,
+            POLICY_ID,
             "policy_revision",
             digest('a'),
             &policy_payload,
         ),
         (
+            SELECTION_POLICY_REVISION_ID,
+            SELECTION_POLICY_ID,
+            "policy_revision",
+            digest('d'),
+            &selection_policy_payload,
+        ),
+        (
             INTERFACE_ID,
+            AGENT_ID,
             "agent_interface_revision",
             digest('b'),
             &agent_plan_payload,
         ),
         (
             PLAN_ID,
+            AGENT_ID,
             "agent_plan_revision",
             typed_plan_digest.clone(),
             &agent_plan_payload,
         ),
+        (
+            CHILD_INTERFACE_ID,
+            CHILD_AGENT_ID,
+            "agent_interface_revision",
+            digest('e'),
+            &child_plan_payload,
+        ),
+        (
+            CHILD_PLAN_ID,
+            CHILD_AGENT_ID,
+            "agent_plan_revision",
+            child_plan_digest.clone(),
+            &child_plan_payload,
+        ),
     ] {
-        let resource_id = if version_id == POLICY_REVISION_ID {
-            POLICY_ID
-        } else {
-            AGENT_ID
-        };
         sqlx::query(
             r#"
             INSERT INTO insight_platform.resource_versions (
@@ -1479,12 +1748,30 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         "typed_plan",
     )
     .await;
+    insert_ready_artifact(
+        pool,
+        &id(TENANT_ID),
+        &id(PRINCIPAL_ID),
+        &id(POLICY_REVISION_ID),
+        &child_plan_artifact,
+        "typed_plan",
+    )
+    .await;
     sqlx::query(
         "UPDATE insight_platform.resource_versions SET artifact_id = $3 WHERE tenant_id = $1 AND resource_version_id = $2",
     )
     .bind(TENANT_ID)
     .bind(PLAN_ID)
     .bind(TYPED_PLAN_ARTIFACT_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resource_versions SET artifact_id = $3 WHERE tenant_id = $1 AND resource_version_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(CHILD_PLAN_ID)
+    .bind(CHILD_PLAN_ARTIFACT_ID)
     .execute(pool)
     .await
     .unwrap();
@@ -1496,19 +1783,100 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         &id(POLICY_ID),
         id(POLICY_DEPLOYMENT_ID),
         policy.clone(),
-        qualification_evidence,
+        qualification_evidence.clone(),
     )
     .await;
     let policy_binding = ExactPolicyBinding {
         deployment: policy_deployment.clone(),
         revision: policy.clone(),
     };
+    let selection_revision =
+        ExactVersionRef::new(id(SELECTION_POLICY_REVISION_ID), digest('d')).unwrap();
+    let selection_deployment_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: selection_revision.clone(),
+            applicability_digest: digest('f'),
+            qualification_evidence: qualification_evidence.clone(),
+        }),
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.deployments (
+            tenant_id, deployment_id, resource_id, resource_version_id, environment,
+            bindings_digest, payload_schema_version, bindings, created_by
+        ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(SELECTION_POLICY_DEPLOYMENT_ID)
+    .bind(SELECTION_POLICY_ID)
+    .bind(SELECTION_POLICY_REVISION_ID)
+    .bind(&selection_deployment_payload.digest)
+    .bind(selection_deployment_payload.schema_version)
+    .bind(&selection_deployment_payload.value)
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    let selection_binding = ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(
+            id(SELECTION_POLICY_DEPLOYMENT_ID),
+            selection_deployment_payload.digest.parse().unwrap(),
+        )
+        .unwrap(),
+        revision: selection_revision,
+    };
+    let child_closure = AgentDeploymentClosure {
+        interface: ExactVersionRef::new(id(CHILD_INTERFACE_ID), digest('e')).unwrap(),
+        plan: ExactVersionRef::new(id(CHILD_PLAN_ID), child_plan_digest).unwrap(),
+        entry_node_id: "entry".to_owned(),
+        entry_node_kind: PlanNodeKind::TimerWait,
+        slots: vec![],
+        policies: vec![policy_binding.clone()],
+        execution_profile: policy_binding.clone(),
+    };
+    let child_deployment_payload =
+        TypedPayload::new(1, &DeploymentClosure::Agent(child_closure)).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.deployments (
+            tenant_id, deployment_id, resource_id, resource_version_id, environment,
+            bindings_digest, payload_schema_version, bindings, created_by
+        ) VALUES ($1, $2, $3, $4, 'test', $5, $6, $7, $8)
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(CHILD_DEPLOYMENT_ID)
+    .bind(CHILD_AGENT_ID)
+    .bind(CHILD_PLAN_ID)
+    .bind(&child_deployment_payload.digest)
+    .bind(child_deployment_payload.schema_version)
+    .bind(&child_deployment_payload.value)
+    .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    let child_deployment = ExactDeploymentRef::new(
+        id(CHILD_DEPLOYMENT_ID),
+        child_deployment_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
     let closure = AgentDeploymentClosure {
         interface: ExactVersionRef::new(id(INTERFACE_ID), digest('b')).unwrap(),
         plan: ExactVersionRef::new(id(PLAN_ID), typed_plan_digest).unwrap(),
         entry_node_id: "entry".to_owned(),
         entry_node_kind: insight_platform_contracts::PlanNodeKind::TimerWait,
-        slots: vec![],
+        slots: vec![FrozenSlotBinding {
+            slot_id: "child_worker".to_owned(),
+            requirement_digest: digest('c'),
+            target: FrozenSlotTarget::ChildAgent {
+                candidates: vec![child_deployment],
+                selection_policy: selection_binding,
+            },
+            binding_digest: digest('2'),
+        }],
         policies: vec![policy_binding.clone()],
         execution_profile: policy_binding,
     };
@@ -1530,6 +1898,15 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
     .bind(deployment_payload.schema_version)
     .bind(&deployment_payload.value)
     .bind(PRINCIPAL_ID)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resources SET active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(CHILD_AGENT_ID)
+    .bind(CHILD_DEPLOYMENT_ID)
     .execute(pool)
     .await
     .unwrap();

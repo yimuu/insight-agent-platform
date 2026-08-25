@@ -279,9 +279,10 @@ timeout的typed Job scheduling与critical-control bounded scan已通过fresh Pos
 r113完成claim、durable park、独立safety到期唤醒、continuation claim、Return物化与Run终态的真实协调器L3链路；r181进一步完成
 durable park后强制终止首个Worker、由替代Worker及独立safety scanner恢复且finish Node唯一的Timer多进程kill-window。独立认证Signal
 ingress已接入generated OpenAPI、Gateway和同事务Principal/Signal owner重验，并在fresh PostgreSQL 16 r187通过权限、owner与Receipt replay门禁。
-fresh PostgreSQL 16 r192又完成Timer到期恢复后进入SignalWait、强制终止第二个Worker、认证Signal owner事务唤醒，再进入HumanTask并强制终止
-第三个Worker、由Task owner事务提交typed response，第四个Worker仅凭durable state完成Return且finish Node唯一的多进程链路。Child的多进程
-kill/recovery仍未完成，ModelLoop、CapabilityCall和ContextQuery仍缺完整production多进程L3，因此不能据此宣称
+fresh PostgreSQL 16 r199又完成Timer到期恢复后进入SignalWait、强制终止第二个Worker、认证Signal owner事务唤醒，再进入HumanTask并强制终止
+第三个Worker、由Task owner事务提交typed response，随后创建exact-binding durable child Run并在child Timer停车后强制终止第四个Worker；第五个Worker
+恢复child、由critical-control scanner结算terminal child link与typed output、恢复parent并完成Return，parent finish Node唯一。Timer/Signal/Task/Child的
+多进程kill/recovery至此闭合，ModelLoop、CapabilityCall和ContextQuery仍缺完整production多进程L3，因此不能据此宣称
 Phase 2完成。
 
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、

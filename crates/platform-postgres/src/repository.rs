@@ -9690,7 +9690,7 @@ impl PgSchedulerTransaction {
         &mut self,
         command: DriveTerminalChildRuns,
     ) -> Result<Vec<ResolvedOrchestrationChildRun>, RepositoryError> {
-        command.validate(self.limits)?;
+        command.validate(self.recovery_batch_limit)?;
         let mut transaction = self.transaction.begin().await?;
         let rows = sqlx::query(
             r#"
@@ -30398,9 +30398,9 @@ pub struct DriveTerminalChildRuns {
 }
 
 impl DriveTerminalChildRuns {
-    fn validate(&self, limits: SchedulerHardLimits) -> Result<(), RepositoryError> {
+    fn validate(&self, maximum_batch: u16) -> Result<(), RepositoryError> {
         if self.limit == 0
-            || self.limit > limits.maximum_batch
+            || self.limit > maximum_batch
             || self.slots.len() != usize::from(self.limit)
         {
             return Err(RepositoryError::InvalidInput(
@@ -35680,6 +35680,35 @@ mod tests {
             MapFailurePolicy::BoundedErrorCount {
                 maximum_failures: 1,
             }
+        ));
+    }
+
+    #[test]
+    fn terminal_child_scan_uses_the_recovery_batch_limit() {
+        let new_id = |kind| ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7()).unwrap();
+        let slots = (0..65)
+            .map(|_| TerminalChildRunSlot {
+                parent_output_value_id: new_id(ResourceKind::RunValue),
+                continuation_node_execution_id: new_id(ResourceKind::NodeExecution),
+                resume_job_id: new_id(ResourceKind::Job),
+                resume_request_digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
+                child_link_event_id: new_id(ResourceKind::Event),
+                child_link_outbox_id: new_id(ResourceKind::OutboxEvent),
+                parent_run_event_id: new_id(ResourceKind::Event),
+                parent_run_outbox_id: new_id(ResourceKind::OutboxEvent),
+                parent_node_event_id: new_id(ResourceKind::Event),
+                parent_node_outbox_id: new_id(ResourceKind::OutboxEvent),
+                continuation_node_event_id: new_id(ResourceKind::Event),
+                continuation_node_outbox_id: new_id(ResourceKind::OutboxEvent),
+                resume_job_event_id: new_id(ResourceKind::Event),
+                resume_job_outbox_id: new_id(ResourceKind::OutboxEvent),
+            })
+            .collect();
+        let command = DriveTerminalChildRuns { limit: 65, slots };
+        assert!(command.validate(1_000).is_ok());
+        assert!(matches!(
+            command.validate(64),
+            Err(RepositoryError::InvalidInput(_))
         ));
     }
 }

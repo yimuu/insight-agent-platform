@@ -9,11 +9,12 @@ use insight_platform_postgres::artifact_repository::{
 use insight_platform_postgres::repository::{
     ConvergedOrchestrationRun, DriveDueOrchestrationRetries, DriveDueOrchestrationWaits,
     DriveExpiredOrchestrationJobs, DriveExpiredOrchestrationTasks, DriveOrchestrationConvergence,
-    DueOrchestrationRetrySlot, DueOrchestrationWaitSlot, ExpiredOrchestrationRecoverySlot,
-    ExpiredOrchestrationTaskSlot, OrchestrationConvergenceSlot, OrchestrationWakeMutationIds,
-    PgRepository, PromotedOrchestrationRetry, RecoveredOrchestrationJob, RepositoryError,
+    DriveTerminalChildRuns, DueOrchestrationRetrySlot, DueOrchestrationWaitSlot,
+    ExpiredOrchestrationRecoverySlot, ExpiredOrchestrationTaskSlot, OrchestrationConvergenceSlot,
+    OrchestrationWakeMutationIds, PgRepository, PromotedOrchestrationRetry,
+    RecoveredOrchestrationJob, RepositoryError, ResolvedOrchestrationChildRun,
     ResolvedOrchestrationTask, SafetyScanCursor, SafetyScanPage, SafetyScanShard,
-    WokenOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+    TerminalChildRunSlot, WokenOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use insight_platform_worker::{LocalWorkerPoolError, LocalWorkerPools};
 use std::{
@@ -59,6 +60,11 @@ pub trait OrchestrationSafetyStore: Send + Sync + 'static {
         &self,
         command: DriveExpiredOrchestrationTasks,
     ) -> Result<SafetyScanPage<ResolvedOrchestrationTask>, Self::Error>;
+
+    async fn drive_terminal_children(
+        &self,
+        command: DriveTerminalChildRuns,
+    ) -> Result<Vec<ResolvedOrchestrationChildRun>, Self::Error>;
 }
 
 #[async_trait]
@@ -117,6 +123,16 @@ impl OrchestrationSafetyStore for PgRepository {
             .await?;
         transaction.commit().await?;
         Ok(page)
+    }
+
+    async fn drive_terminal_children(
+        &self,
+        command: DriveTerminalChildRuns,
+    ) -> Result<Vec<ResolvedOrchestrationChildRun>, Self::Error> {
+        let mut transaction = self.begin_scheduler_transaction().await?;
+        let resolved = transaction.drive_terminal_child_runs(command).await?;
+        transaction.commit().await?;
+        Ok(resolved)
     }
 }
 
@@ -438,12 +454,29 @@ where
         cursors: &mut SafetyCursors,
         metrics: &SafetyMetrics,
     ) -> Result<(), SafetyDriveFailure> {
-        self.drive_expired_jobs(cursors, metrics).await?;
-        self.drive_due_retries(cursors, metrics).await?;
-        self.drive_due_waits(cursors, metrics).await?;
-        self.drive_convergence(cursors, metrics).await?;
-        self.drive_expired_tasks(cursors, metrics).await?;
-        Ok(())
+        let results = [
+            self.drive_terminal_children(metrics).await,
+            self.drive_expired_jobs(cursors, metrics).await,
+            self.drive_due_retries(cursors, metrics).await,
+            self.drive_due_waits(cursors, metrics).await,
+            self.drive_convergence(cursors, metrics).await,
+            self.drive_expired_tasks(cursors, metrics).await,
+        ];
+        let mut unavailable = false;
+        for result in results {
+            match result {
+                Ok(()) => {}
+                Err(SafetyDriveFailure::StoreUnavailable) => unavailable = true,
+                Err(SafetyDriveFailure::Fatal(failure)) => {
+                    return Err(SafetyDriveFailure::Fatal(failure));
+                }
+            }
+        }
+        if unavailable {
+            Err(SafetyDriveFailure::StoreUnavailable)
+        } else {
+            Ok(())
+        }
     }
 
     fn try_control_permit(
@@ -593,6 +626,35 @@ where
             .await
             .map_err(|_| SafetyDriveFailure::StoreUnavailable)?;
         observe_page(&page, &mut cursors.expired_tasks, metrics);
+        Ok(())
+    }
+
+    async fn drive_terminal_children(
+        &self,
+        metrics: &SafetyMetrics,
+    ) -> Result<(), SafetyDriveFailure> {
+        let Some(_permit) = self.try_control_permit(metrics)? else {
+            return Ok(());
+        };
+        let command = DriveTerminalChildRuns {
+            limit: self.config.batch_size,
+            slots: (0..self.config.batch_size)
+                .map(|_| terminal_child_slot(self.identities.as_ref()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(identity_failure)?,
+        };
+        metrics.scan_attempts.fetch_add(1, Ordering::Relaxed);
+        let resolved = self
+            .store
+            .drive_terminal_children(command)
+            .await
+            .map_err(|_| SafetyDriveFailure::StoreUnavailable)?;
+        metrics
+            .mutations
+            .fetch_add(resolved.len() as u64, Ordering::Relaxed);
+        if resolved.len() == usize::from(self.config.batch_size) {
+            metrics.full_pages.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 }
@@ -835,6 +897,27 @@ fn expired_task_slot(
     })
 }
 
+fn terminal_child_slot(
+    identities: &impl CoordinatorIdentityFactory,
+) -> Result<TerminalChildRunSlot, IdentityFactoryError> {
+    Ok(TerminalChildRunSlot {
+        parent_output_value_id: new_id(identities, ResourceKind::RunValue)?,
+        continuation_node_execution_id: new_id(identities, ResourceKind::NodeExecution)?,
+        resume_job_id: new_id(identities, ResourceKind::Job)?,
+        resume_request_digest: identities.new_lease_token_digest()?,
+        child_link_event_id: new_id(identities, ResourceKind::Event)?,
+        child_link_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        parent_run_event_id: new_id(identities, ResourceKind::Event)?,
+        parent_run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        parent_node_event_id: new_id(identities, ResourceKind::Event)?,
+        parent_node_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        continuation_node_event_id: new_id(identities, ResourceKind::Event)?,
+        continuation_node_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        resume_job_event_id: new_id(identities, ResourceKind::Event)?,
+        resume_job_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+    })
+}
+
 fn artifact_recovery_slot(
     identities: &impl CoordinatorIdentityFactory,
 ) -> Result<ArtifactRecoverySlot, IdentityFactoryError> {
@@ -1041,6 +1124,13 @@ mod tests {
             _command: DriveExpiredOrchestrationTasks,
         ) -> Result<SafetyScanPage<ResolvedOrchestrationTask>, Self::Error> {
             Ok(empty_page())
+        }
+
+        async fn drive_terminal_children(
+            &self,
+            _command: DriveTerminalChildRuns,
+        ) -> Result<Vec<ResolvedOrchestrationChildRun>, Self::Error> {
+            Ok(Vec::new())
         }
     }
 
