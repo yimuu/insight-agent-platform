@@ -12,13 +12,18 @@ use dependency_observer::install_postgres_dependency_metrics;
 use insight_platform_artifact_rpc::{ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcClient};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
+    WorkClass,
 };
 use insight_platform_observability::{
-    process_observability_router, OperationalCapacityMetric, OperationalCapacitySnapshot,
-    OperationalCapacitySource, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, DurableJobQueueMetrics, DurableJobQueueSnapshot,
+    OperationalCapacityMetric, OperationalCapacitySnapshot, OperationalCapacitySource,
+    ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{
-    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+    dependency_health::run_postgres_health_sampler,
+    operational_metrics::{observe_durable_job_queue_for_owner, DurableJobOwnerKind},
+    repository::PgRepository,
+    verify_schema,
 };
 use insight_platform_sandbox::{
     NodeAttestorRoute, ProveSandboxProcessGenerationAbsent,
@@ -38,7 +43,7 @@ use insight_platform_sandbox_rpc::{
 };
 use ipnet::IpNet;
 use serde::Deserialize;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
     collections::BTreeMap, error::Error, fmt, net::SocketAddr, path::PathBuf, sync::Arc,
     time::Duration,
@@ -223,6 +228,7 @@ async fn run() -> Result<(), ProcessError> {
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
     let database_health_pool = pool.clone();
+    let durable_queue_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
     let (dependency_metrics, postgres_observer) =
         install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -280,11 +286,6 @@ async fn run() -> Result<(), ProcessError> {
         .parse()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
     let cancellation = CancellationToken::new();
-    let mut postgres_health = tokio::spawn(run_postgres_health_sampler(
-        database_health_pool,
-        postgres_observer,
-        cancellation.child_token(),
-    ));
     let rpc_cancellation = cancellation.child_token();
     let server = Server::builder()
         .tls_config(tls)
@@ -296,6 +297,7 @@ async fn run() -> Result<(), ProcessError> {
     let capacity_observation: Arc<dyn OperationalCapacitySource> = Arc::new(
         ArtifactResponseCapacityObservation(artifact_response_capacity),
     );
+    let durable_queue_metrics = Arc::new(DurableJobQueueMetrics::default());
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_capacities(
             "sandbox-controller",
@@ -306,8 +308,24 @@ async fn run() -> Result<(), ProcessError> {
             )],
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_durable_job_queue(Arc::clone(&durable_queue_metrics))
         .with_dependency_observations(dependency_metrics),
     );
+    let health_cancellation = cancellation.child_token();
+    let mut postgres_health = tokio::spawn(async move {
+        tokio::join!(
+            run_postgres_health_sampler(
+                database_health_pool,
+                postgres_observer,
+                health_cancellation.child_token(),
+            ),
+            run_sandbox_queue_sampler(
+                durable_queue_pool,
+                durable_queue_metrics,
+                health_cancellation,
+            ),
+        );
+    });
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityUnavailable)?;
@@ -384,6 +402,35 @@ async fn run() -> Result<(), ProcessError> {
     )
     .await
     .map_err(|_| ProcessError::ShutdownDeadlineExceeded)?
+}
+
+async fn run_sandbox_queue_sampler(
+    pool: PgPool,
+    metrics: Arc<DurableJobQueueMetrics>,
+    cancellation: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return,
+            _ = interval.tick() => {
+                match observe_durable_job_queue_for_owner(
+                    &pool,
+                    WorkClass::Sandbox,
+                    DurableJobOwnerKind::SandboxExecution,
+                ).await {
+                    Ok(snapshot) => metrics.observe(DurableJobQueueSnapshot {
+                        due_jobs: snapshot.due_jobs,
+                        due_oldest_age_seconds: snapshot.due_oldest_age_seconds,
+                        expired_leases: snapshot.expired_leases,
+                        expired_oldest_lag_seconds: snapshot.expired_oldest_lag_seconds,
+                    }),
+                    Err(_) => metrics.observe_query_failure(),
+                }
+            }
+        }
+    }
 }
 
 async fn connect_artifact_broker(

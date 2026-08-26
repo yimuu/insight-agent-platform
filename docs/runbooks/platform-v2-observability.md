@@ -94,6 +94,20 @@ PostgreSQL time, fence failures and the applicable external dependency. Preserve
 and Job fencing. Never clear leases or replay non-idempotent Remote effects by hand; let the owning
 Capability recovery transaction choose the safe terminal or retry path.
 
+## InsightPlatformSandboxDurableJobLagHigh
+
+Compare the Sandbox execution due count and age with Controller readiness, executor admission,
+Artifact response capacity and PostgreSQL health. This series intentionally excludes MCP-owned
+`sandbox_job` work. Do not bypass admission, move work between owners or execute code in the
+Controller; restore the blocked executor/Artifact path or use the qualified GitOps scaling path.
+
+## InsightPlatformSandboxExpiredLeaseRecoveryLagHigh
+
+Check executor loss, process-generation attestation, database time, Controller fencing and
+critical-control recovery. Preserve the shared Job and physical execution fence; never clear lease
+or attestation fields directly and never fall back to host execution. Recovery must prove the old
+process generation absent before the Controller permits a new physical attempt.
+
 ## InsightPlatformDurableObservationFailureRatioHigh
 
 Confirm the affected fixed `component_role`, then correlate PostgreSQL transport health and pool

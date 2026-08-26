@@ -460,6 +460,10 @@ r326为Capability Native/Remote两个production binary复用crate内共享sample
 `WorkClass::CapabilityRemote`导出durable backlog/recovery lag；双角色共享固定告警但保留`component_role`隔离。目标13/13、strict Clippy、双部署、
 observability/redaction/format/diff门禁通过；本轮无fresh PostgreSQL或production scrape，只关闭两条Capability queue的仓库内L1接线。
 
+r327新增closed `DurableJobOwnerKind` selector，并让Sandbox Controller只观察`WorkClass::Sandbox + owner_kind=job`的execution queue，明确排除同
+WorkClass下MCP-owned `sandbox_job`。固定due/expired alert与runbook接线；lib tests 14/14、strict Clippy、Sandbox部署、observability/redaction门禁通过。
+本轮无fresh PostgreSQL、production scrape或runsc证据，只关闭Sandbox execution backlog/recovery的仓库内L1接线。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

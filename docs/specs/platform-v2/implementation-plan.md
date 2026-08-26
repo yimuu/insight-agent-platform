@@ -688,6 +688,11 @@
 > role-set alert按`component_role`区分Native/Remote，runbook与静态inventory同步。目标13/13、strict Clippy、双部署、observability/redaction/
 > format/diff门禁通过；无fresh PostgreSQL或production scrape，只关闭两个Capability WorkClass的仓库内L1 backlog/recovery接线。
 
+> 2026-08-27 implementation evidence：r327为共享WorkClass引入closed owner selector，并只把`Sandbox + owner_kind=job` execution queue接到
+> Sandbox Controller；MCP-owned `sandbox_job`显式排除。sampler与PostgreSQL health同受process监督，固定due/expired alert、runbook及静态inventory
+> 同步。lib tests 14/14、strict Clippy、Sandbox deployment、observability/redaction/format/diff门禁通过；无fresh PostgreSQL、production scrape或
+> runsc，只关闭Sandbox execution backlog/recovery仓库内L1。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

@@ -60,6 +60,8 @@ expected = %w[
   InsightPlatformOperationalCapacityExhausted
   InsightPlatformOutboxDeadEventsPresent
   InsightPlatformRecoveryFailureRatioHigh
+  InsightPlatformSandboxDurableJobLagHigh
+  InsightPlatformSandboxExpiredLeaseRecoveryLagHigh
   InsightPlatformTelemetryMissing
   InsightPlatformWorkloadNotReady
 ]
@@ -132,7 +134,7 @@ dependency_owner_contracts = {
   "crates/platform-mcp-service/src/main.rs" => ["install_mcp_dependency_metrics(false)", "new_with_observer", "with_dependency_observations"],
   "crates/platform-mcp-service/src/resource_main.rs" => ["install_mcp_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler"],
   "crates/platform-mcp-cleanup-worker/src/main.rs" => %w[install_cleanup_dependency_metrics new_with_observer run_postgres_health_sampler],
-  "crates/platform-sandbox-controller/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler],
+  "crates/platform-sandbox-controller/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler with_durable_job_queue WorkClass::Sandbox DurableJobOwnerKind::SandboxExecution],
   "crates/platform-sandbox-executor/src/main.rs" => %w[install_sandbox_executor_dependency_metrics bind_with_observer with_dependency_observations],
   "crates/platform-callback-api/src/main.rs" => %w[install_callback_dependency_metrics new_with_observer run_postgres_health_sampler],
   "crates/platform-gateway/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler],

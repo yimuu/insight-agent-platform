@@ -658,6 +658,12 @@ health sampler同受取消和异常退出监督。指标仅含固定role与`due|
 集合覆盖Native/Remote并按role分组，runbook明确Remote外部effect不得手工重放。目标13/13、strict Clippy、双部署、observability/redaction及format/diff
 门禁通过；无fresh PostgreSQL或production scrape，故只关闭这两个WorkClass的L1 backlog/recovery wiring，不推进L2或L4～L5。
 
+r327处理共享WorkClass的owner歧义：PostgreSQL operational query新增closed `DurableJobOwnerKind`，首个variant把Sandbox execution固定为
+`WorkClass::Sandbox + owner_kind=job`。Sandbox Controller的同一受监督health task每秒采样该selector并接入既有capacity/dependency process surface；
+`owner_kind=sandbox_job`的MCP路径不会被计入Controller role。两条固定role due/expired symptom alert及runbook强调process-generation absence proof与禁止
+host fallback。lib tests 14/14、strict Clippy、Sandbox全拓扑部署、observability/redaction及format/diff门禁通过；无fresh PostgreSQL、production
+Prometheus或runsc，故只关闭Sandbox execution queue的L1 backlog/recovery wiring，不推进L2/L4～L5。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

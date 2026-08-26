@@ -20,9 +20,38 @@ pub struct DurableOutboxSnapshot {
     pub dead_events: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableJobOwnerKind {
+    SandboxExecution,
+}
+
+impl DurableJobOwnerKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::SandboxExecution => "job",
+        }
+    }
+}
+
 pub async fn observe_durable_job_queue(
     pool: &PgPool,
     work_class: WorkClass,
+) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
+    observe_durable_job_queue_inner(pool, work_class, None).await
+}
+
+pub async fn observe_durable_job_queue_for_owner(
+    pool: &PgPool,
+    work_class: WorkClass,
+    owner_kind: DurableJobOwnerKind,
+) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
+    observe_durable_job_queue_inner(pool, work_class, Some(owner_kind.as_str())).await
+}
+
+async fn observe_durable_job_queue_inner(
+    pool: &PgPool,
+    work_class: WorkClass,
+    owner_kind: Option<&str>,
 ) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
     let row = sqlx::query(
         r#"
@@ -39,6 +68,7 @@ pub async fn observe_durable_job_queue(
             FROM insight_platform.jobs AS job
             CROSS JOIN authority_now
             WHERE job.work_class = $1
+              AND ($2::text IS NULL OR job.owner_kind = $2)
               AND job.terminal_at IS NULL
               AND job.worker_id IS NULL
               AND job.state IN ('ready', 'retry_scheduled')
@@ -55,6 +85,7 @@ pub async fn observe_durable_job_queue(
             FROM insight_platform.jobs AS job
             CROSS JOIN authority_now
             WHERE job.work_class = $1
+              AND ($2::text IS NULL OR job.owner_kind = $2)
               AND job.terminal_at IS NULL
               AND job.worker_id IS NOT NULL
               AND job.lease_expires_at <= authority_now.observed_at
@@ -67,6 +98,7 @@ pub async fn observe_durable_job_queue(
         "#,
     )
     .bind(work_class.as_str())
+    .bind(owner_kind)
     .fetch_one(pool)
     .await?;
 

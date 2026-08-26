@@ -181,6 +181,10 @@ r326为Capability Native/Remote production binary接入crate内共享typed sampl
 backlog/recovery alert按固定`component_role`隔离并配套runbook。目标13/13、strict Clippy、双部署、observability/redaction/format/diff门禁通过；
 未运行fresh PostgreSQL或production scrape，故仅关闭两条Capability queue的L1接线。
 
+r327新增closed durable Job owner selector，并让Sandbox Controller只观察`Sandbox/job` execution queue，排除同WorkClass的MCP `sandbox_job`；固定
+due/expired alert、runbook和inventory同步。lib tests 14/14、strict Clippy、Sandbox部署、observability/redaction门禁通过；未运行fresh PostgreSQL、
+production scrape或runsc，故仅关闭Sandbox execution queue的L1接线。
+
 ## 3. Phase 1 审计
 
 ### 已满足
