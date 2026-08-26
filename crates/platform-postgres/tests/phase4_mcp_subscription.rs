@@ -151,6 +151,8 @@ fn discovery_artifact_policy(
             ruleset_digest: named_digest("artifact-rules"),
             evidence_ttl_milliseconds: 60_000,
             retry_backoff_milliseconds: 1_000,
+            write_storage_binding_digest: named_digest("artifact-write-storage-binding"),
+            encryption_domain_id: id(ResourceKind::EncryptionDomain, suffix + 3),
             retain_until: now + Duration::hours(3),
         },
     )
@@ -765,7 +767,7 @@ fn sandbox_policy_closure(token_purpose: SecretPurpose) -> SandboxExecutionPolic
             deny_host_devices: true,
         },
         resource: SandboxResourcePolicyDocument {
-            schema_version: 1,
+            schema_version: 3,
             maximum_cpu_millicores: 1_000,
             maximum_memory_mebibytes: 1_024,
             maximum_pids: 64,
@@ -811,6 +813,8 @@ fn sandbox_policy_closure(token_purpose: SecretPurpose) -> SandboxExecutionPolic
             scanner_contract_digest: named_digest("artifact-scanner-contract"),
             verification_evidence_ttl_milliseconds: 60_000,
             verification_retry_backoff_milliseconds: 1_000,
+            write_storage_binding_digest: named_digest("artifact-write-storage-binding"),
+            encryption_domain_id: id(ResourceKind::EncryptionDomain, 0x0f05),
             deny_symlink: true,
             deny_hardlink: true,
             deny_device: true,

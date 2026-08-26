@@ -1044,7 +1044,7 @@ async fn seed_artifact_io_policy(
     )
     .unwrap();
     let artifact_io = SandboxArtifactIoPolicyDocument {
-        schema_version: 1,
+        schema_version: 3,
         allowed_input_media_types: vec!["application/json".to_owned()],
         allowed_output_media_types: vec![],
         maximum_input_artifacts: 1,
@@ -1052,6 +1052,8 @@ async fn seed_artifact_io_policy(
         scanner_contract_digest: digest('8'),
         verification_evidence_ttl_milliseconds: 60_000,
         verification_retry_backoff_milliseconds: 1_000,
+        write_storage_binding_digest: digest('9'),
+        encryption_domain_id: id(ResourceKind::EncryptionDomain, 0x0f02),
         deny_symlink: true,
         deny_hardlink: true,
         deny_device: true,

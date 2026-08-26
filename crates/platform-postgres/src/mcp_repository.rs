@@ -1208,6 +1208,10 @@ impl PgRepository {
                 retry_backoff_milliseconds: artifact_authority
                     .artifact_io_policy
                     .verification_retry_backoff_milliseconds,
+                write_storage_binding_digest: artifact_authority
+                    .artifact_io_policy
+                    .write_storage_binding_digest,
+                encryption_domain_id: artifact_authority.artifact_io_policy.encryption_domain_id,
                 retain_until: command.deadline.max(minimum_retain_until),
             },
         )
@@ -1270,6 +1274,11 @@ impl PgRepository {
                 ruleset_digest: admission.artifact_policy.ruleset_digest.clone(),
                 evidence_ttl_milliseconds: admission.artifact_policy.evidence_ttl_milliseconds,
                 retry_backoff_milliseconds: admission.artifact_policy.retry_backoff_milliseconds,
+                write_storage_binding_digest: admission
+                    .artifact_policy
+                    .write_storage_binding_digest
+                    .clone(),
+                encryption_domain_id: admission.artifact_policy.encryption_domain_id.clone(),
                 retain_until: admission.artifact_policy.retain_until,
                 deadline: command.deadline,
             },

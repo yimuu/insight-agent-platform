@@ -1,6 +1,6 @@
 use crate::{
-    canonical_digest, CodeTrustClass, ResourceContractError, SandboxIsolationClass,
-    SandboxRuntimeFamily, SecretPurpose, Sha256Digest,
+    canonical_digest, CodeTrustClass, ResourceContractError, ResourceId, ResourceKind,
+    SandboxIsolationClass, SandboxRuntimeFamily, SecretPurpose, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -216,6 +216,8 @@ pub struct SandboxArtifactIoPolicyDocument {
     pub scanner_contract_digest: Sha256Digest,
     pub verification_evidence_ttl_milliseconds: u64,
     pub verification_retry_backoff_milliseconds: u64,
+    pub write_storage_binding_digest: Sha256Digest,
+    pub encryption_domain_id: ResourceId,
     pub deny_symlink: bool,
     pub deny_hardlink: bool,
     pub deny_device: bool,
@@ -227,7 +229,7 @@ pub struct SandboxArtifactIoPolicyDocument {
 
 impl SandboxArtifactIoPolicyDocument {
     pub fn validate(&self) -> Result<(), ResourceContractError> {
-        if self.schema_version != 2
+        if self.schema_version != 3
             || self.allowed_input_media_types.len() > MAX_SANDBOX_POLICY_SET_ITEMS
             || self.allowed_output_media_types.len() > MAX_SANDBOX_POLICY_SET_ITEMS
             || !strictly_sorted_unique(&self.allowed_input_media_types)
@@ -247,6 +249,7 @@ impl SandboxArtifactIoPolicyDocument {
                 > MAX_ARTIFACT_VERIFICATION_RETRY_BACKOFF_MILLISECONDS
             || self.verification_retry_backoff_milliseconds
                 >= self.verification_evidence_ttl_milliseconds
+            || self.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
             || !self.deny_symlink
             || !self.deny_hardlink
             || !self.deny_device
@@ -355,7 +358,7 @@ mod tests {
 
     fn artifact_io_policy() -> SandboxArtifactIoPolicyDocument {
         SandboxArtifactIoPolicyDocument {
-            schema_version: 2,
+            schema_version: 3,
             allowed_input_media_types: vec!["application/octet-stream".to_owned()],
             allowed_output_media_types: vec![],
             maximum_input_artifacts: 8,
@@ -363,6 +366,12 @@ mod tests {
             scanner_contract_digest: digest('8'),
             verification_evidence_ttl_milliseconds: 60_000,
             verification_retry_backoff_milliseconds: 1_000,
+            write_storage_binding_digest: digest('9'),
+            encryption_domain_id: ResourceId::from_uuid_v7(
+                ResourceKind::EncryptionDomain,
+                uuid::Uuid::now_v7(),
+            )
+            .unwrap(),
             deny_symlink: true,
             deny_hardlink: true,
             deny_device: true,
@@ -374,14 +383,14 @@ mod tests {
     }
 
     #[test]
-    fn artifact_io_v2_freezes_verification_policy() {
+    fn artifact_io_v3_freezes_verification_and_storage_policy() {
         let policy = artifact_io_policy();
         assert!(policy.validate().is_ok());
         assert_eq!(policy.canonical_digest(), policy.canonical_digest());
     }
 
     #[test]
-    fn artifact_io_v1_and_unbounded_verification_are_rejected() {
+    fn artifact_io_legacy_and_unbounded_verification_are_rejected() {
         let mut legacy = artifact_io_policy();
         legacy.schema_version = 1;
         assert_eq!(

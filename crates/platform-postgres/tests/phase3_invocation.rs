@@ -2706,6 +2706,8 @@ async fn seed_remote_mcp_facts(
                 ruleset_digest: digest('a'),
                 evidence_ttl_milliseconds: 60_000,
                 retry_backoff_milliseconds: 1_000,
+                write_storage_binding_digest: digest('b'),
+                encryption_domain_id: id(ResourceKind::EncryptionDomain, 0x999),
                 retain_until: now + Duration::hours(3),
             },
         )

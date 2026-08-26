@@ -73,6 +73,8 @@ fn discovery_artifact_policy(suffix: u16, now: DateTime<Utc>) -> McpDiscoveryArt
         ruleset_digest: sha('a'),
         evidence_ttl_milliseconds: 60_000,
         retry_backoff_milliseconds: 1_000,
+        write_storage_binding_digest: sha('b'),
+        encryption_domain_id: id(ResourceKind::EncryptionDomain, suffix + 3),
         retain_until: now + ChronoDuration::hours(1),
     })
     .unwrap()

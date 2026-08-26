@@ -505,6 +505,9 @@ async fn prepare_upload_inner(
         return Err(HttpError::Forbidden);
     }
     if authority.artifact_io_policy.scanner_contract_digest != state.scanner_contract_digest
+        || authority.artifact_io_policy.write_storage_binding_digest
+            != *state.uploads.storage_binding_digest()
+        || authority.artifact_io_policy.encryption_domain_id != state.write_encryption_domain_id
         || authority
             .artifact_io_policy
             .verification_evidence_ttl_milliseconds
@@ -540,7 +543,7 @@ async fn prepare_upload_inner(
             tenant_id: &principal.tenant_id,
             artifact_id: &artifact_id,
             blob_id: &blob_id,
-            encryption_domain_id: &state.write_encryption_domain_id,
+            encryption_domain_id: &authority.artifact_io_policy.encryption_domain_id,
             expected_size_bytes: request.expected_size_bytes,
             declared_media_type: request.declared_media_type.as_deref(),
             expires_in: Duration::from_secs(target_seconds),
@@ -586,7 +589,7 @@ async fn prepare_upload_inner(
         storage_binding_digest: upload.storage_binding_digest.clone(),
         object_reference_ciphertext: upload.object_reference_ciphertext.clone(),
         key_id: upload.key_id.clone(),
-        encryption_domain_id: state.write_encryption_domain_id.clone(),
+        encryption_domain_id: authority.artifact_io_policy.encryption_domain_id,
         display_name: request.display_name,
     };
     let mut transaction = state

@@ -336,6 +336,8 @@ pub struct ArtifactAwaitingStageSnapshot {
     pub ruleset_digest: Sha256Digest,
     pub evidence_ttl_milliseconds: u64,
     pub retry_backoff_milliseconds: u64,
+    pub write_storage_binding_digest: Sha256Digest,
+    pub encryption_domain_id: ResourceId,
     pub retain_until: DateTime<Utc>,
     pub deadline: DateTime<Utc>,
 }
@@ -465,6 +467,7 @@ impl StageWorkloadArtifact {
             || self.size_bytes == 0
             || self.size_bytes > awaiting.maximum_bytes
             || self.media_type != awaiting.declared_media_type
+            || self.storage_binding_digest != awaiting.write_storage_binding_digest
             || !valid_code(&self.storage_backend, MAX_BACKEND_BYTES)
             || self.object_reference_ciphertext.is_empty()
             || self.object_reference_ciphertext.len() > MAX_OBJECT_REFERENCE_BYTES
@@ -472,7 +475,7 @@ impl StageWorkloadArtifact {
             || self.key_id.is_empty()
             || self.key_id.len() > MAX_KEY_ID_BYTES
             || self.key_id.chars().any(char::is_control)
-            || self.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || self.encryption_domain_id != awaiting.encryption_domain_id
             || self.staged_at > now
             || self.staged_at > awaiting.deadline
             || now > awaiting.deadline
@@ -551,6 +554,7 @@ impl ArtifactAwaitingStageSnapshot {
             || self.retry_backoff_milliseconds == 0
             || self.retry_backoff_milliseconds > MAX_ARTIFACT_RETRY_BACKOFF_MILLISECONDS
             || self.retry_backoff_milliseconds >= self.evidence_ttl_milliseconds
+            || self.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
             || self.deadline > self.retain_until
         {
             return Err(ArtifactWorkError::InvalidJobPayload);
@@ -2143,6 +2147,8 @@ mod tests {
                 ruleset_digest: digest("rules"),
                 evidence_ttl_milliseconds: 60_000,
                 retry_backoff_milliseconds: 1_000,
+                write_storage_binding_digest: digest("storage-binding"),
+                encryption_domain_id: id(ResourceKind::EncryptionDomain, 0x821),
                 retain_until: now + Duration::hours(2),
                 deadline: now + Duration::hours(1),
             },
@@ -2188,6 +2194,18 @@ mod tests {
             staged_at: now,
         };
         assert!(command.validate_for(&stage, now).is_ok());
+        let mut wrong_binding = command.clone();
+        wrong_binding.storage_binding_digest = digest("other-storage-binding");
+        assert_eq!(
+            wrong_binding.validate_for(&stage, now),
+            Err(ArtifactWorkError::InvalidCommand)
+        );
+        let mut wrong_encryption_domain = command.clone();
+        wrong_encryption_domain.encryption_domain_id = id(ResourceKind::EncryptionDomain, 0x824);
+        assert_eq!(
+            wrong_encryption_domain.validate_for(&stage, now),
+            Err(ArtifactWorkError::InvalidCommand)
+        );
         let scan = command.scan_payload(&stage, 2, 1, 2).unwrap();
         assert!(scan.validate_for_owner(&artifact_id).is_ok());
         let ArtifactJobPayload::Scan { scan } = scan else {

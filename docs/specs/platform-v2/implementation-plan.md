@@ -10,6 +10,12 @@
 > 冻结进public/internal Artifact admission和waiting stage payload；随后让Data Worker按digest选择installed provider、写object并生成内部storage
 > evidence。producer-facing DTO继续禁止locator/bucket/key/binding/encryption authority；unsupported binding必须在object I/O前fail closed。
 
+> 2026-08-27 implementation evidence：r343将`SandboxArtifactIoPolicyDocument` clean-cut升级为schema v3，新增exact
+> `write_storage_binding_digest`与`encryption_domain_id`并迁移全部Rust fixtures。MCP discovery policy closure、admission digest与
+> `ArtifactAwaitingStageSnapshot`逐字段冻结两者；post-write stage command必须精确匹配。public Artifact Gateway把原process write binding/encryption
+> 降级为installed support校验，只有与tenant exact policy一致才生成upload target。Contracts 100/100、MCP Host 59/59、Artifact 31/31、workspace
+> all-target与相关strict Clippy通过；本轮无fresh PostgreSQL，Data Worker direct object write adapter与L2 zero-I/O/transaction证据仍Pending。
+
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。
 > 删除Artifact Gateway对这三项业务默认的所有权；部署配置只保留supported scanner集合与不可放大的hard limits。

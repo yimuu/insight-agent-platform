@@ -409,6 +409,10 @@ impl fmt::Debug for AwsArtifactUploadProvider {
 }
 
 impl AwsArtifactUploadProvider {
+    pub fn storage_binding_digest(&self) -> &Sha256Digest {
+        &self.storage_binding_digest
+    }
+
     pub async fn prepare_upload(
         &self,
         request: AwsArtifactUploadRequest<'_>,

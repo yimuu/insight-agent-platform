@@ -80,7 +80,7 @@ fn policy_closure() -> SandboxExecutionPolicyClosure {
             deny_host_devices: true,
         },
         resource: SandboxResourcePolicyDocument {
-            schema_version: 1,
+            schema_version: 3,
             maximum_cpu_millicores: 1_000,
             maximum_memory_mebibytes: 1_024,
             maximum_pids: 64,
@@ -129,6 +129,8 @@ fn policy_closure() -> SandboxExecutionPolicyClosure {
             scanner_contract_digest: sha('8'),
             verification_evidence_ttl_milliseconds: 60_000,
             verification_retry_backoff_milliseconds: 1_000,
+            write_storage_binding_digest: sha('9'),
+            encryption_domain_id: id(ResourceKind::EncryptionDomain, 0x0f06),
             deny_symlink: true,
             deny_hardlink: true,
             deny_device: true,

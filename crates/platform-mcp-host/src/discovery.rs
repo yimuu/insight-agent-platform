@@ -1088,6 +1088,8 @@ pub struct NewMcpDiscoveryArtifactPolicyClosure {
     pub ruleset_digest: Sha256Digest,
     pub evidence_ttl_milliseconds: u64,
     pub retry_backoff_milliseconds: u64,
+    pub write_storage_binding_digest: Sha256Digest,
+    pub encryption_domain_id: ResourceId,
     pub retain_until: DateTime<Utc>,
 }
 
@@ -1105,6 +1107,8 @@ pub struct McpDiscoveryArtifactPolicyClosure {
     pub ruleset_digest: Sha256Digest,
     pub evidence_ttl_milliseconds: u64,
     pub retry_backoff_milliseconds: u64,
+    pub write_storage_binding_digest: Sha256Digest,
+    pub encryption_domain_id: ResourceId,
     pub retain_until: DateTime<Utc>,
     pub canonical_digest: Sha256Digest,
 }
@@ -1123,6 +1127,8 @@ impl McpDiscoveryArtifactPolicyClosure {
             ruleset_digest: input.ruleset_digest,
             evidence_ttl_milliseconds: input.evidence_ttl_milliseconds,
             retry_backoff_milliseconds: input.retry_backoff_milliseconds,
+            write_storage_binding_digest: input.write_storage_binding_digest,
+            encryption_domain_id: input.encryption_domain_id,
             retain_until: input.retain_until,
             canonical_digest: placeholder_digest()?,
         };
@@ -1156,6 +1162,7 @@ impl McpDiscoveryArtifactPolicyClosure {
             || self.retry_backoff_milliseconds == 0
             || self.retry_backoff_milliseconds > 60_000
             || self.retry_backoff_milliseconds >= self.evidence_ttl_milliseconds
+            || self.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
         {
             return Err(McpHostError::InvalidDiscovery);
         }
