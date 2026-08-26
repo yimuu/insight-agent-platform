@@ -1902,7 +1902,8 @@ impl PgRepository {
             JOIN insight_platform.invocations AS operation
               ON operation.tenant_id = job.tenant_id
              AND operation.invocation_id = job.invocation_id
-            WHERE job.work_class = 'mcp' AND job.owner_kind = 'mcp_operation'
+            WHERE job.work_class = 'mcp' AND job.job_kind = 'mcp_discovery'
+              AND job.owner_kind = 'mcp_operation'
               AND job.owner_id = operation.invocation_id
               AND operation.invocation_kind = 'mcp_discovery'
               AND operation.state IN ('pending', 'running')
@@ -2163,7 +2164,9 @@ impl PgRepository {
             JOIN insight_platform.deployments AS deployment
               ON deployment.tenant_id = job.tenant_id
              AND deployment.deployment_id = job.payload #>> '{request,context_deployment,deployment_id}'
-            WHERE job.work_class = 'context' AND job.owner_kind = 'mcp_operation'
+            WHERE job.work_class = 'context'
+              AND job.job_kind = 'context_subscription_refresh'
+              AND job.owner_kind = 'mcp_operation'
               AND job.state IN ('ready', 'retry_scheduled')
               AND job.scheduled_at <= clock_timestamp()
               AND COALESCE(job.retry_at, job.scheduled_at) <= clock_timestamp()
@@ -2482,7 +2485,9 @@ impl PgRepository {
             r#"
             SELECT job.*
             FROM insight_platform.jobs AS job
-            WHERE job.work_class = 'context' AND job.owner_kind = 'mcp_operation'
+            WHERE job.work_class = 'context'
+              AND job.job_kind = 'context_subscription_refresh'
+              AND job.owner_kind = 'mcp_operation'
               AND job.state IN ('leased', 'running')
               AND job.lease_expires_at <= $1 AND job.terminal_at IS NULL
               AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
@@ -2944,7 +2949,9 @@ async fn load_context_subscription_refresh_job(
             r#"
             SELECT * FROM insight_platform.jobs
             WHERE tenant_id = $1 AND job_id = $2
-              AND work_class = 'context' AND owner_kind = 'mcp_operation'
+              AND work_class = 'context'
+              AND job_kind = 'context_subscription_refresh'
+              AND owner_kind = 'mcp_operation'
             FOR UPDATE
             "#,
         )
@@ -2957,7 +2964,9 @@ async fn load_context_subscription_refresh_job(
             r#"
             SELECT * FROM insight_platform.jobs
             WHERE tenant_id = $1 AND job_id = $2
-              AND work_class = 'context' AND owner_kind = 'mcp_operation'
+              AND work_class = 'context'
+              AND job_kind = 'context_subscription_refresh'
+              AND owner_kind = 'mcp_operation'
             "#,
         )
         .bind(tenant_id.to_string())
@@ -3178,7 +3187,9 @@ async fn update_context_subscription_refresh_job(
             terminal_at = CASE WHEN $17 THEN $16 ELSE NULL END,
             updated_at = $16
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
-          AND work_class = 'context' AND owner_kind = 'mcp_operation'
+          AND work_class = 'context'
+          AND job_kind = 'context_subscription_refresh'
+          AND owner_kind = 'mcp_operation'
         "#,
     )
     .bind(&current.tenant_id)
@@ -4641,6 +4652,7 @@ async fn load_mcp_discovery_job(
         .await?
         .ok_or(RepositoryError::NotFound("MCP discovery Job"))?;
     if row.try_get::<String, _>("work_class")? != "mcp"
+        || row.try_get::<String, _>("job_kind")? != "mcp_discovery"
         || row.try_get::<String, _>("owner_kind")? != "mcp_operation"
     {
         return Err(RepositoryError::CorruptRow(
@@ -4923,6 +4935,8 @@ async fn complete_mcp_discovery_job(
             worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
             heartbeat_at = NULL, terminal_at = $8, updated_at = $8
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_discovery'
+          AND owner_kind = 'mcp_operation'
           AND state = 'running' AND worker_id = $4 AND lease_epoch = $5
           AND lease_token_digest = $6
         "#,
@@ -4970,6 +4984,8 @@ async fn update_resolved_mcp_discovery_job(
             worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
             heartbeat_at = NULL, terminal_at = $11, updated_at = $12
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_discovery'
+          AND owner_kind = 'mcp_operation'
           AND state = 'running' AND worker_id = $4 AND lease_epoch = $5
           AND lease_token_digest = $6
         "#,
@@ -5017,6 +5033,7 @@ async fn update_owner_terminal_mcp_discovery_job(
             worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
             heartbeat_at = NULL, terminal_at = $7, updated_at = $7
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_discovery'
           AND owner_kind = 'mcp_operation' AND owner_id = $4
           AND state IN ('ready', 'leased', 'running', 'retry_scheduled', 'cancelling')
         "#,
@@ -5057,7 +5074,9 @@ async fn update_recovered_mcp_discovery_job(
             worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
             heartbeat_at = NULL, terminal_at = $11, updated_at = $12
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
-          AND lease_epoch = $4 AND owner_kind = 'mcp_operation' AND owner_id = $5
+          AND lease_epoch = $4
+          AND work_class = 'mcp' AND job_kind = 'mcp_discovery'
+          AND owner_kind = 'mcp_operation' AND owner_id = $5
           AND state IN ('leased', 'running') AND lease_expires_at <= $6
         "#,
     )
@@ -8058,6 +8077,7 @@ impl PgRepository {
               AND subscription.payload #>> '{session,state}' IN ('ready', 'degraded')
               AND (subscription.payload #>> '{session,expires_at}')::timestamptz > $3
               AND job.work_class = 'mcp'
+              AND job.job_kind = 'mcp_subscription'
               AND job.owner_kind = 'mcp_operation'
               AND job.owner_id = subscription.invocation_id
               AND job.state = 'waiting'
@@ -8241,6 +8261,7 @@ impl PgRepository {
               AND subscription.terminal_at IS NULL
               AND subscription.deadline > $2
               AND job.work_class = 'mcp'
+              AND job.job_kind = 'mcp_subscription'
               AND job.owner_kind = 'mcp_operation'
               AND job.owner_id = subscription.invocation_id
               AND job.terminal_at IS NULL
@@ -8647,6 +8668,7 @@ async fn load_mcp_subscription_job(
         .await?
         .ok_or(RepositoryError::NotFound("MCP subscription Job"))?;
     if row.try_get::<String, _>("work_class")? != "mcp"
+        || row.try_get::<String, _>("job_kind")? != "mcp_subscription"
         || row.try_get::<String, _>("owner_kind")? != "mcp_operation"
     {
         return Err(RepositoryError::CorruptRow(
@@ -9580,7 +9602,9 @@ async fn update_mcp_subscription_job_for_session(
             lease_expires_at = CASE WHEN $8 THEN NULL ELSE lease_expires_at END,
             heartbeat_at = CASE WHEN $8 THEN NULL ELSE heartbeat_at END,
             terminal_at = $9, updated_at = $10
-        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_subscription'
+          AND owner_kind = 'mcp_operation' AND state = 'running'
         "#,
     )
     .bind(subscription.tenant_id.to_string())
@@ -9614,7 +9638,9 @@ async fn wake_mcp_subscription_job(
         SET state = 'ready', version = version + 1,
             wake_kind = NULL, wake_state = NULL, wake_generation = 0,
             scheduled_at = $4, updated_at = $4
-        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'waiting'
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_subscription'
+          AND owner_kind = 'mcp_operation' AND state = 'waiting'
         "#,
     )
     .bind(tenant_id.to_string())
@@ -9645,6 +9671,8 @@ async fn requeue_recovered_mcp_subscription_job(
             lease_expires_at = NULL, heartbeat_at = NULL,
             scheduled_at = $4, retry_at = NULL, updated_at = $4
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_subscription'
+          AND owner_kind = 'mcp_operation'
           AND state IN ('leased', 'running', 'waiting')
         "#,
     )
@@ -9677,6 +9705,8 @@ async fn terminalize_recovered_mcp_subscription_job(
             lease_expires_at = NULL, heartbeat_at = NULL,
             retry_at = NULL, terminal_at = $4, updated_at = $4
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_subscription'
+          AND owner_kind = 'mcp_operation'
           AND state IN ('leased', 'running', 'waiting') AND terminal_at IS NULL
         "#,
     )
@@ -9706,7 +9736,9 @@ async fn park_mcp_subscription_job(
             wake_kind = 'remote_invocation', wake_state = 'pending', wake_generation = $4,
             worker_id = NULL, lease_token_digest = NULL,
             lease_expires_at = NULL, heartbeat_at = NULL, updated_at = $5
-        WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_subscription'
+          AND owner_kind = 'mcp_operation' AND state = 'running'
         "#,
     )
     .bind(subscription.tenant_id.to_string())

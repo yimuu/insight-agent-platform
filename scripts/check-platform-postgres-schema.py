@@ -331,6 +331,18 @@ def main():
             errors.append(
                 f"{path.relative_to(ROOT)} uses the unregistered sandbox_job owner kind"
             )
+        if path.name == "mcp_repository.rs":
+            for work_class in ("mcp", "context"):
+                missing_kind = re.compile(
+                    rf"(?:job\.)?work_class = '{work_class}'\s+"
+                    rf"AND (?:job\.)?owner_kind = 'mcp_operation'"
+                )
+                for match in missing_kind.finditer(source):
+                    line = source.count("\n", 0, match.start()) + 1
+                    errors.append(
+                        f"{path.relative_to(ROOT)}:{line} {work_class} MCP-owned Job "
+                        "predicate lacks exact job_kind"
+                    )
 
     if errors:
         for error in errors:

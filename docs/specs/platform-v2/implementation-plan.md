@@ -712,6 +712,13 @@
 > `ContextQueryRemote`、`ContextSubscriptionRefresh` exact JobKind采样，避免Dataset build或其他Context owner混计；sampler与permit/PostgreSQL health
 > 共同受process supervision。目标13/13、strict Clippy、Context部署、observability/redaction/format门禁通过；无fresh PG、production scrape或
 > remote fault，仅关闭三条Context Worker durable backlog/recovery仓库内L1接线。
+>
+> 2026-08-27 implementation evidence：r332收紧MCP-owned shared Job的typed authority：discovery recovery/loader/CAS只接受
+> `McpDiscovery + Mcp + mcp_operation`，logical subscription reconcile/recovery/loader/CAS只接受
+> `McpSubscription + Mcp + mcp_operation`，Context subscription refresh scan/loader/CAS只接受
+> `ContextSubscriptionRefresh + Context + mcp_operation`。独立schema checker新增缺失exact `job_kind`谓词的负向门禁；PostgreSQL lib
+> 14/14、MCP subscription 2/2、OAuth 8/8与strict Clippy通过。测试环境未配置fresh PostgreSQL，故本批只关闭仓储静态/L1边界，L2事务、
+> production worker composition与L4～L6仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
