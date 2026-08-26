@@ -623,6 +623,11 @@ Docker/Helm的deferred Firecracker/microVM provider；首发WASI/gVisor Sandbox�
 dependency series缺口。observability、Sandbox deployment与redaction门禁通过；至此first-release production Egress client L1接线完整，但production scrape、
 真实fault及L4～L5仍Pending。
 
+r321在上述跨crate接线后重跑workspace all-target/all-feature L1～L3门禁，发现rolling-summary fixture把18轮串行SQLite summary压力与仅3秒的无关
+owner retirement deadline耦合，单测可稳定触发`RUN_INTERRUPTED`。该fixture现把owner lease扩大为30秒，而heartbeat仍为1秒，production配置/owner逻辑及专用
+lease失败测试均未改变。修复后目标测试与完整workspace tests通过，两个外部S3 fixture保持ignored；workspace strict Clippy、format及doc tests也通过。该批只
+稳定仓库门禁，不提供外部S3、production scrape、Kubernetes/runsc或L4～L6证据。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

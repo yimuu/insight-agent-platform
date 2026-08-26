@@ -436,6 +436,9 @@ r319为production Callback API OAuth exchange client注入Egress observer并与P
 r320以observability静态清单锁定七个first-release production Egress client全部注入observer；余下no-op仅限测试/fixture及release明确排除的
 Firecracker/microVM provider，首发WASI/gVisor Sandbox没有Egress client。门禁通过；production scrape、真实fault及L4～L5仍Pending。
 
+r321修复完整workspace门禁发现的rolling-summary测试时序耦合：18轮串行SQLite summary fixture使用30秒测试专用owner lease，production owner逻辑不变。
+修复后全workspace all-target/all-feature tests、strict Clippy、format与doc tests通过；两个外部S3 fixture仍ignored，L4～L6无新增证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

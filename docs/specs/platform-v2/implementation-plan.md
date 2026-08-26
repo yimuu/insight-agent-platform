@@ -657,6 +657,11 @@
 > deferred Firecracker/microVM provider可保留no-op。首发WASI/gVisor Sandbox不使用Egress client，因此r319的“Sandbox待注入”不是release缺口。observability、
 > Sandbox deployment及redaction门禁通过；production scrape/真实fault与L4～L5仍Pending。
 
+> 2026-08-27 implementation evidence：r321重跑workspace all-target/all-feature门禁时稳定复现rolling-summary fixture在18轮串行SQLite summary
+> 压力下越过仅3秒的无关owner lease并被中断；该测试专用lease改为30秒，heartbeat仍为1秒，production owner逻辑和专用lease failure tests不变。修复后
+> target与完整workspace tests、strict Clippy、format及doc tests通过；两个外部S3 fixture仍ignored。该批不产生外部S3、production scrape、Kubernetes/
+> runsc或L4～L6证据。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

@@ -157,6 +157,9 @@ r320以静态清单确认七个first-release production Egress client均强制�
 client测试、PostgreSQL component fixture及release明确排除的Firecracker/microVM provider。首发WASI/gVisor Sandbox无Egress client，故r319的Sandbox
 待注入表述不构成release缺口。observability、Sandbox deployment与redaction门禁通过；production scrape/真实fault及L4～L5仍Pending。
 
+r321在完整workspace all-target/all-feature门禁中修复rolling-summary测试的无关3秒owner lease时序耦合；测试专用lease改为30秒，production owner逻辑与
+专用lease failure测试不变。修复后目标/全workspace tests、strict Clippy、format与doc tests通过，两个外部S3 fixture保持ignored；无外部或L4～L6新证据。
+
 ## 3. Phase 1 审计
 
 ### 已满足

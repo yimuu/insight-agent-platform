@@ -1610,6 +1610,10 @@ async fn identical_private_content_uses_distinct_scoped_objects() {
 #[tokio::test]
 async fn rolling_summary_is_flat_bounded_and_missing_summary_falls_back_to_recent() {
     let mut config = terminal_config();
+    // This fixture deliberately serializes eighteen conversation turns and rolling-summary writes
+    // through a one-connection SQLite pool. Keep the unrelated owner-retirement deadline outside
+    // that stress window; heartbeat/lease failure semantics have dedicated tests below.
+    config.owner_lease = Duration::from_secs(30);
     config.summary_trigger_tokens = 100_000;
     let fixture = Fixture::new_with(
         CONTEXT_AGENT,
