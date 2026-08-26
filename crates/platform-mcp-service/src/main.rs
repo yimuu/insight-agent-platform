@@ -4,6 +4,8 @@
 //! Task/Elicitation semantics, while the separately deployed Egress Broker owns all network and
 //! late Secret resolution.
 
+mod capacity;
+
 use insight_platform_contracts::{canonical_digest, parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
 use insight_platform_mcp_host::{
@@ -12,6 +14,7 @@ use insight_platform_mcp_host::{
 use insight_platform_mcp_rpc::{
     proto::mcp_host_execution_service_server::McpHostExecutionServiceServer,
     CapabilityWorkerWorkloadIdentity, McpHostGrpcService, McpHostInternalRpcLimits,
+    McpRequestCapacity,
 };
 use insight_platform_observability::{
     process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
@@ -43,6 +46,7 @@ struct ProcessConfig {
     observability_listen_address: String,
     tls_server_name: String,
     maximum_rpc_message_bytes: usize,
+    maximum_in_flight_requests: usize,
     egress: EgressConfig,
     drain_grace_milliseconds: u64,
 }
@@ -123,12 +127,18 @@ impl ProcessConfig {
             return Err(ProcessError::InvalidConfiguration);
         }
         self.host_rpc_limits()?;
+        self.request_capacity()?;
         self.egress_rpc_limits()?;
         Ok(())
     }
 
     fn host_rpc_limits(&self) -> Result<McpHostInternalRpcLimits, ProcessError> {
         McpHostInternalRpcLimits::new(self.maximum_rpc_message_bytes)
+            .map_err(|_| ProcessError::InvalidConfiguration)
+    }
+
+    fn request_capacity(&self) -> Result<McpRequestCapacity, ProcessError> {
+        McpRequestCapacity::new(self.maximum_in_flight_requests)
             .map_err(|_| ProcessError::InvalidConfiguration)
     }
 
@@ -164,9 +174,11 @@ async fn run() -> Result<(), ProcessError> {
         StreamableHttpMcpTransport::new(connector),
     )));
     let maximum = config.host_rpc_limits()?.maximum_message_bytes();
+    let request_capacity = config.request_capacity()?;
     let service = McpHostExecutionServiceServer::new(McpHostGrpcService::new(
         host,
         config.host_rpc_limits()?,
+        request_capacity.clone(),
     ))
     .max_encoding_message_size(maximum)
     .max_decoding_message_size(maximum);
@@ -198,8 +210,12 @@ async fn run() -> Result<(), ProcessError> {
         .serve_with_shutdown(address, server_cancellation.cancelled_owned());
     let mut server_task = tokio::spawn(server);
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("mcp-host", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_capacities(
+            "mcp-host",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            vec![capacity::request_capacity_metric(request_capacity)],
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)
@@ -405,6 +421,7 @@ mod tests {
             observability_listen_address: "0.0.0.0:9090".to_owned(),
             tls_server_name: "platform-mcp-host.platform-mcp-host.svc".to_owned(),
             maximum_rpc_message_bytes: 1_048_576,
+            maximum_in_flight_requests: 8,
             egress: EgressConfig {
                 endpoint: "https://platform-egress-broker.platform-egress.svc:8443/".to_owned(),
                 tls_server_name: "platform-egress-broker.platform-egress.svc".to_owned(),
@@ -429,5 +446,8 @@ mod tests {
         let mut unbounded = config();
         unbounded.maximum_rpc_message_bytes = usize::MAX;
         assert!(unbounded.validate().is_err());
+        let mut no_capacity = config();
+        no_capacity.maximum_in_flight_requests = 0;
+        assert!(no_capacity.validate().is_err());
     }
 }

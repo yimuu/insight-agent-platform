@@ -21,6 +21,7 @@ serde.workspace = true
 serde_jcs.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 x509-parser.workspace = true
@@ -31,6 +32,5 @@ tonic-prost-build.workspace = true
 
 [dev-dependencies]
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }
-tokio.workspace = true
 tokio-stream.workspace = true
 uuid.workspace = true

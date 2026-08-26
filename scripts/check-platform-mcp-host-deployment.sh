@@ -20,6 +20,7 @@ for required in (
     "CAPABILITY_WORKER_WORKLOAD_IDENTITY",
     "parse_strict_json",
     "metadata_digest",
+    "McpRequestCapacity",
 ):
     if required not in rpc:
         failures.append(f"MCP Host RPC boundary is missing {required}")
@@ -34,6 +35,9 @@ for required in (
     "serve_with_shutdown",
     "drain_grace_milliseconds",
     "process_observability_router",
+    "ProcessHttpMetrics::install_with_capacities",
+    "request_capacity_metric",
+    "maximum_in_flight_requests",
 ):
     if required not in source:
         failures.append(f"MCP Host production composition is missing {required}")
@@ -52,6 +56,9 @@ for required in (
     "McpResourceRefreshGrpcService",
     "ContextWorkerWorkloadIdentity",
     "StreamableHttpMcpResourceRefreshProtocol",
+    "ProcessHttpMetrics::install_with_capacities",
+    "request_capacity_metric",
+    "maximum_in_flight_requests",
 ):
     if required not in resource_source:
         failures.append(f"MCP Resource Host production composition is missing {required}")

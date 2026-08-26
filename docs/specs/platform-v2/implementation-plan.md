@@ -520,6 +520,12 @@
 > strict Clippy、Helm/observability/19-pool门禁通过。两个Gateway pool闭合后动态capacity coverage达到15/19；剩余MCP双Host及
 > Security/Egress四个pool。
 
+> 2026-08-26 implementation evidence：r296为MCP Tool Host与MCP Resource Host分别安装构造期必选、process-local的真实RPC admission
+> semaphore；身份与trace interceptor通过后、业务envelope解码前获取permit，饱和稳定返回`ResourceExhausted`，drop后恢复available。两个
+> process均从该owner实时导出fixed `rpc_requests` available/used，配置以closed `maximum_in_flight_requests`受hard max约束。owner/config tests、
+> 真实mTLS测试、受影响PostgreSQL fixtures编译、strict Clippy及MCP/observability部署门禁通过。动态capacity coverage达到17/19；仅剩Security
+> Authority与Egress Broker两个pool，production Prometheus scrape、telemetry backend/RBAC/retention及L4～L6仍保持Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

@@ -3849,6 +3849,9 @@ async fn run_remote_http_worker_process_recovery(
         let host_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let host_address = host_listener.local_addr().unwrap();
         drop(host_listener);
+        let host_observability_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host_observability_address = host_observability_listener.local_addr().unwrap();
+        drop(host_observability_listener);
         let host_config_path = PathBuf::from(format!("{temp_prefix}-mcp-host.json"));
         let host_cert_path = PathBuf::from(format!("{temp_prefix}-mcp-host.pem"));
         let host_key_path = PathBuf::from(format!("{temp_prefix}-mcp-host-key.pem"));
@@ -3863,8 +3866,10 @@ async fn run_remote_http_worker_process_recovery(
         let host_config = json!({
             "schema_version": 1,
             "listen_address": host_address.to_string(),
+            "observability_listen_address": host_observability_address.to_string(),
             "tls_server_name": "mcp.test",
             "maximum_rpc_message_bytes": 1048576,
+            "maximum_in_flight_requests": 8,
             "egress": {
                 "endpoint": format!("https://{address}/"),
                 "tls_server_name": "egress.test",

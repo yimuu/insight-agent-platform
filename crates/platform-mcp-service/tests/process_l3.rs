@@ -474,6 +474,9 @@ async fn production_host_kill_and_restart_preserves_safe_replay_boundary() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let host_address = listener.local_addr().unwrap();
     drop(listener);
+    let observability_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let observability_address = observability_listener.local_addr().unwrap();
+    drop(observability_listener);
     let prefix = format!("/tmp/platform-mcp-host-process-l3-{}", std::process::id());
     let config_path = PathBuf::from(format!("{prefix}.json"));
     let ca_path = PathBuf::from(format!("{prefix}-ca.pem"));
@@ -484,8 +487,10 @@ async fn production_host_kill_and_restart_preserves_safe_replay_boundary() {
     let config = serde_json::json!({
         "schema_version": 1,
         "listen_address": host_address.to_string(),
+        "observability_listen_address": observability_address.to_string(),
         "tls_server_name": "mcp-host.test",
         "maximum_rpc_message_bytes": 1048576,
+        "maximum_in_flight_requests": 8,
         "egress": {
             "endpoint": format!("https://{egress_address}/"),
             "tls_server_name": "egress.test",

@@ -23,6 +23,7 @@ use insight_platform_rpc_trace::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{error::Error, fmt, sync::Arc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
@@ -50,6 +51,44 @@ const CANCEL_OPERATION: &str = "mcp_host.cancel_remote_task.v1";
 const CANCEL_OUTCOME: &str = "mcp_host.cancel_remote_task_outcome.v1";
 const REFRESH_RESOURCES_OPERATION: &str = "mcp_host.refresh_resources.v1";
 const REFRESH_RESOURCES_OUTCOME: &str = "mcp_host.refresh_resources_outcome.v1";
+pub const MAX_MCP_REQUESTS_IN_FLIGHT_HARD: usize = 4_096;
+
+#[derive(Clone)]
+pub struct McpRequestCapacity {
+    permits: Arc<Semaphore>,
+    maximum_in_flight: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpRequestCapacitySnapshot {
+    pub maximum_in_flight: usize,
+    pub available: usize,
+}
+
+impl McpRequestCapacity {
+    pub fn new(maximum_in_flight: usize) -> Result<Self, McpHostRpcError> {
+        if !(1..=MAX_MCP_REQUESTS_IN_FLIGHT_HARD).contains(&maximum_in_flight) {
+            return Err(McpHostRpcError::InvalidConfiguration);
+        }
+        Ok(Self {
+            permits: Arc::new(Semaphore::new(maximum_in_flight)),
+            maximum_in_flight,
+        })
+    }
+
+    fn try_acquire(&self) -> Result<OwnedSemaphorePermit, Status> {
+        Arc::clone(&self.permits)
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("MCP Host request capacity is saturated"))
+    }
+
+    pub fn snapshot(&self) -> McpRequestCapacitySnapshot {
+        McpRequestCapacitySnapshot {
+            maximum_in_flight: self.maximum_in_flight,
+            available: self.permits.available_permits(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McpHostInternalRpcLimits {
@@ -400,11 +439,20 @@ impl ContextSubscriptionRefreshBackend for McpResourceRefreshGrpcClient {
 pub struct McpResourceRefreshGrpcService<B> {
     backend: Arc<B>,
     limits: McpHostInternalRpcLimits,
+    capacity: McpRequestCapacity,
 }
 
 impl<B> McpResourceRefreshGrpcService<B> {
-    pub fn new(backend: Arc<B>, limits: McpHostInternalRpcLimits) -> Self {
-        Self { backend, limits }
+    pub fn new(
+        backend: Arc<B>,
+        limits: McpHostInternalRpcLimits,
+        capacity: McpRequestCapacity,
+    ) -> Self {
+        Self {
+            backend,
+            limits,
+            capacity,
+        }
     }
 }
 
@@ -418,6 +466,7 @@ where
         request: Request<ClosedMcpHostEnvelope>,
     ) -> Result<Response<ClosedMcpHostEnvelope>, Status> {
         let trace = trace_context(&request)?;
+        let _permit = self.capacity.try_acquire()?;
         scope_trace(trace, async {
             let wire: RefreshResourcesWire = decode_envelope(
                 request.into_inner(),
@@ -450,11 +499,20 @@ where
 pub struct McpHostGrpcService<C> {
     host: Arc<C>,
     limits: McpHostInternalRpcLimits,
+    capacity: McpRequestCapacity,
 }
 
 impl<C> McpHostGrpcService<C> {
-    pub fn new(host: Arc<C>, limits: McpHostInternalRpcLimits) -> Self {
-        Self { host, limits }
+    pub fn new(
+        host: Arc<C>,
+        limits: McpHostInternalRpcLimits,
+        capacity: McpRequestCapacity,
+    ) -> Self {
+        Self {
+            host,
+            limits,
+            capacity,
+        }
     }
 }
 
@@ -468,6 +526,7 @@ where
         request: Request<ClosedMcpHostEnvelope>,
     ) -> Result<Response<ClosedMcpHostEnvelope>, Status> {
         let trace = trace_context(&request)?;
+        let _permit = self.capacity.try_acquire()?;
         scope_trace(trace, async {
             let wire: ExecuteWire =
                 decode_envelope(request.into_inner(), EXECUTE_OPERATION, self.limits)?;
@@ -492,6 +551,7 @@ where
         request: Request<ClosedMcpHostEnvelope>,
     ) -> Result<Response<ClosedMcpHostEnvelope>, Status> {
         let trace = trace_context(&request)?;
+        let _permit = self.capacity.try_acquire()?;
         scope_trace(trace, async {
             let wire: CancelWire =
                 decode_envelope(request.into_inner(), CANCEL_OPERATION, self.limits)?;
@@ -719,6 +779,23 @@ mod tests {
     }
 
     #[test]
+    fn request_capacity_is_bounded_and_tracks_owned_permits() {
+        assert!(McpRequestCapacity::new(0).is_err());
+        assert!(McpRequestCapacity::new(MAX_MCP_REQUESTS_IN_FLIGHT_HARD + 1).is_err());
+
+        let capacity = McpRequestCapacity::new(1).unwrap();
+        assert_eq!(capacity.snapshot().available, 1);
+        let permit = capacity.try_acquire().unwrap();
+        assert_eq!(capacity.snapshot().available, 0);
+        assert_eq!(
+            capacity.try_acquire().unwrap_err().code(),
+            tonic::Code::ResourceExhausted
+        );
+        drop(permit);
+        assert_eq!(capacity.snapshot().available, 1);
+    }
+
+    #[test]
     fn workload_identity_accepts_only_one_exact_authorized_uri() {
         let mut ca_parameters = CertificateParams::default();
         ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -822,7 +899,11 @@ mod tests {
         );
         let limits = McpHostInternalRpcLimits::new(65_536).unwrap();
         let service = proto::mcp_host_execution_service_server::McpHostExecutionServiceServer::new(
-            McpHostGrpcService::new(Arc::new(UnreachableHost), limits),
+            McpHostGrpcService::new(
+                Arc::new(UnreachableHost),
+                limits,
+                McpRequestCapacity::new(8).unwrap(),
+            ),
         );
         let service = tonic::service::interceptor::InterceptedService::new(
             service,

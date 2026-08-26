@@ -489,6 +489,11 @@ used使用established减idle，available包含idle及尚可合法建立的槽位
 0→1，drop后pool异步归还并在有界时间恢复0。Gateway tests、strict Clippy及部署/observability门禁通过。动态capacity coverage达到15/19；
 剩余MCP双Host与Security/Egress四个pool及production scrape/L4～L6保持Pending。
 
+r296为MCP Tool Host与MCP Resource Host各自安装构造期必选的process-local RPC admission semaphore，并从同一owner导出fixed
+`rpc_requests` available/used。身份及trace interceptor先于permit获取，permit又先于业务decode；饱和稳定返回`ResourceExhausted`，释放后
+available恢复。closed配置/hard max、owner/config tests、真实mTLS、受影响PostgreSQL fixtures编译、strict Clippy及MCP/observability门禁通过。
+动态capacity coverage达到17/19；Security Authority、Egress Broker、production scrape、telemetry backend/RBAC/retention及L4～L6保持Pending。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

@@ -2283,6 +2283,7 @@ async fn run_subscription_process_l3(
         "listen_address": resource_host_address.to_string(),
         "observability_listen_address": resource_host_observability.to_string(),
         "maximum_rpc_message_bytes": 1048576,
+        "maximum_in_flight_requests": 8,
         "database_max_connections": 4,
         "database_acquire_timeout_milliseconds": 5000,
         "egress": {
@@ -2540,6 +2541,7 @@ async fn run_subscription_protocol_process_l3(
         "listen_address": resource_host_address.to_string(),
         "observability_listen_address": available_address().to_string(),
         "maximum_rpc_message_bytes": 1048576,
+        "maximum_in_flight_requests": 8,
         "database_max_connections": 4,
         "database_acquire_timeout_milliseconds": 5000,
         "egress": {

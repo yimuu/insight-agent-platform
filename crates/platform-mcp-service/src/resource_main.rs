@@ -1,5 +1,7 @@
 //! Independently scalable MCP Resource Refresh Host for Context subscription Jobs.
 
+mod capacity;
+
 use insight_platform_contracts::{canonical_digest, parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
 use insight_platform_mcp_host::{
@@ -7,7 +9,8 @@ use insight_platform_mcp_host::{
 };
 use insight_platform_mcp_rpc::{
     proto::mcp_resource_refresh_service_server::McpResourceRefreshServiceServer,
-    ContextWorkerWorkloadIdentity, McpHostInternalRpcLimits, McpResourceRefreshGrpcService,
+    ContextWorkerWorkloadIdentity, McpHostInternalRpcLimits, McpRequestCapacity,
+    McpResourceRefreshGrpcService,
 };
 use insight_platform_observability::{
     process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
@@ -41,6 +44,7 @@ struct ProcessConfig {
     listen_address: String,
     observability_listen_address: String,
     maximum_rpc_message_bytes: usize,
+    maximum_in_flight_requests: usize,
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
     egress: EgressConfig,
@@ -125,12 +129,18 @@ impl ProcessConfig {
             return Err(ProcessError::InvalidConfiguration);
         }
         self.host_rpc_limits()?;
+        self.request_capacity()?;
         self.egress_rpc_limits()?;
         Ok(())
     }
 
     fn host_rpc_limits(&self) -> Result<McpHostInternalRpcLimits, ProcessError> {
         McpHostInternalRpcLimits::new(self.maximum_rpc_message_bytes)
+            .map_err(|_| ProcessError::InvalidConfiguration)
+    }
+
+    fn request_capacity(&self) -> Result<McpRequestCapacity, ProcessError> {
+        McpRequestCapacity::new(self.maximum_in_flight_requests)
             .map_err(|_| ProcessError::InvalidConfiguration)
     }
 
@@ -175,10 +185,14 @@ async fn run() -> Result<(), ProcessError> {
     let host = Arc::new(McpResourceRefreshHost::new(repository, protocol));
     let limits = config.host_rpc_limits()?;
     let maximum = limits.maximum_message_bytes();
-    let service =
-        McpResourceRefreshServiceServer::new(McpResourceRefreshGrpcService::new(host, limits))
-            .max_encoding_message_size(maximum)
-            .max_decoding_message_size(maximum);
+    let request_capacity = config.request_capacity()?;
+    let service = McpResourceRefreshServiceServer::new(McpResourceRefreshGrpcService::new(
+        host,
+        limits,
+        request_capacity.clone(),
+    ))
+    .max_encoding_message_size(maximum)
+    .max_decoding_message_size(maximum);
     let service = tonic::service::interceptor::InterceptedService::new(
         service,
         ContextWorkerWorkloadIdentity,
@@ -211,8 +225,12 @@ async fn run() -> Result<(), ProcessError> {
         .serve_with_shutdown(address, server_cancellation.cancelled_owned());
     let mut server_task = tokio::spawn(server);
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("mcp-resource-host", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_capacities(
+            "mcp-resource-host",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            vec![capacity::request_capacity_metric(request_capacity)],
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -398,3 +416,47 @@ impl fmt::Display for ProcessError {
 }
 
 impl Error for ProcessError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> ProcessConfig {
+        ProcessConfig {
+            schema_version: 1,
+            listen_address: "0.0.0.0:9443".to_owned(),
+            observability_listen_address: "0.0.0.0:9090".to_owned(),
+            maximum_rpc_message_bytes: 1_048_576,
+            maximum_in_flight_requests: 8,
+            database_max_connections: 4,
+            database_acquire_timeout_milliseconds: 5_000,
+            egress: EgressConfig {
+                endpoint: "https://platform-egress-broker.platform-egress.svc:8443/".to_owned(),
+                tls_server_name: "platform-egress-broker.platform-egress.svc".to_owned(),
+                connect_timeout_milliseconds: 1_000,
+                request_timeout_milliseconds: 30_000,
+                maximum_rpc_metadata_bytes: 65_536,
+                maximum_rpc_payload_bytes: 1_048_576,
+            },
+            drain_grace_milliseconds: 30_000,
+        }
+    }
+
+    #[test]
+    fn config_closes_listener_database_rpc_egress_and_drain_limits() {
+        config().validate().unwrap();
+        let mut overlapping_listener = config();
+        overlapping_listener.observability_listen_address =
+            overlapping_listener.listen_address.clone();
+        assert!(overlapping_listener.validate().is_err());
+        let mut no_capacity = config();
+        no_capacity.maximum_in_flight_requests = 0;
+        assert!(no_capacity.validate().is_err());
+        let mut unbounded_database = config();
+        unbounded_database.database_max_connections = u32::MAX;
+        assert!(unbounded_database.validate().is_err());
+        let mut plaintext = config();
+        plaintext.egress.endpoint = "http://egress:8443/".to_owned();
+        assert!(plaintext.validate().is_err());
+    }
+}
