@@ -612,6 +612,11 @@ r318把共享Egress observer注入production MCP Tool Host、Resource Host与OAu
 tests、strict Clippy、MCP Host/Cleanup deployment、observability与redaction门禁通过；本轮无production scrape或真实fault，Callback/Sandbox Egress client
 仍待注入。
 
+r319把共享Egress observer注入production Callback API的OAuth exchange client，并与既有PostgreSQL sampler共用process metrics；实际exchange RPC
+只输出固定`mcp-callback-api + egress + outcome`，不携带OAuth state/code、tenant/task、endpoint、token或error，不改变callback receipt、commit或readiness
+语义。binary tests、strict Clippy、Callback deployment、observability与redaction门禁通过；本轮无production scrape或真实fault，Sandbox Egress client仍待
+注入。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

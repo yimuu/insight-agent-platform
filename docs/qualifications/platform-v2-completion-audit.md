@@ -150,6 +150,9 @@ r318为production MCP Tool Host、Resource Host与OAuth Cleanup Worker注入Egre
 Egress。Tool/Resource/OAuth/cleanup/subscription实际transport只导出固定role/dependency/outcome。四组target tests、strict Clippy及MCP部署/observability/
 redaction门禁通过；无production scrape或真实fault，Callback/Sandbox Egress client仍待注入。
 
+r319为production Callback API OAuth exchange client注入Egress observer并与PostgreSQL sampler同surface；实际RPC只导出固定role/dependency/
+outcome。binary tests、strict Clippy及Callback部署/observability/redaction门禁通过；无production scrape或真实fault，Sandbox Egress client仍待注入。
+
 ## 3. Phase 1 审计
 
 ### 已满足

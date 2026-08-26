@@ -6,7 +6,7 @@
 
 mod dependency_observer;
 
-use dependency_observer::install_postgres_dependency_metrics;
+use dependency_observer::install_callback_dependency_metrics;
 
 use axum::{
     extract::{Extension, Request},
@@ -312,8 +312,8 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::SchemaMismatch)?;
     let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
-    let (dependency_metrics, postgres_observer) =
-        install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
+    let (dependency_metrics, postgres_observer, egress_observer) =
+        install_callback_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
 
     let rpc_limits = EgressInternalRpcLimits::new(
         config.maximum_rpc_metadata_bytes,
@@ -321,7 +321,11 @@ async fn run() -> Result<(), ProcessError> {
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let egress_channel = connect_egress(&config).await?;
-    let broker = Arc::new(EgressBrokerGrpcClient::new(egress_channel, rpc_limits));
+    let broker = Arc::new(EgressBrokerGrpcClient::new_with_observer(
+        egress_channel,
+        rpc_limits,
+        egress_observer,
+    ));
     let states = Arc::new(
         config
             .oauth_state

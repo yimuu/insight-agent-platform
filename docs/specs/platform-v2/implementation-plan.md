@@ -648,6 +648,10 @@
 > role/dependency/outcome，不输出server/endpoint、tenant/task/resource、payload或error。四组binary target tests、strict Clippy、MCP Host/Cleanup
 > deployment、observability及redaction门禁通过；无production scrape/真实fault，Callback/Sandbox Egress client与L4～L5仍Pending。
 
+> 2026-08-27 implementation evidence：r319把共享Egress observer注入production Callback API OAuth exchange client并与PostgreSQL sampler
+> 同surface；实际RPC只导出固定`mcp-callback-api + egress + outcome`，不输出OAuth state/code、tenant/task、endpoint、token或error。binary tests、
+> strict Clippy、Callback deployment、observability及redaction门禁通过；无production scrape/真实fault，Sandbox Egress client与L4～L5仍Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

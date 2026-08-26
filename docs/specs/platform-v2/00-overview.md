@@ -430,6 +430,9 @@ r318为production MCP Tool/Resource Host与OAuth Cleanup Worker注入Egress obse
 各实际transport只导出固定role/dependency/outcome。目标测试、strict Clippy及MCP部署/observability/redaction门禁通过；production scrape、真实fault、
 Callback/Sandbox Egress client及L4～L5仍Pending。
 
+r319为production Callback API OAuth exchange client注入Egress observer并与PostgreSQL sampler同surface；实际RPC只导出固定role/dependency/outcome。
+目标测试、strict Clippy及Callback部署/observability/redaction门禁通过；production scrape、真实fault、Sandbox Egress client及L4～L5仍Pending。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
