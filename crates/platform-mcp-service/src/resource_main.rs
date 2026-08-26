@@ -1,6 +1,9 @@
 //! Independently scalable MCP Resource Refresh Host for Context subscription Jobs.
 
 mod capacity;
+mod dependency_observer;
+
+use dependency_observer::install_postgres_dependency_metrics;
 
 use insight_platform_contracts::{canonical_digest, parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
@@ -15,7 +18,9 @@ use insight_platform_mcp_rpc::{
 use insight_platform_observability::{
     process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
-use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{
@@ -175,7 +180,10 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
+    let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
+    let (dependency_metrics, postgres_observer) =
+        install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let egress = Arc::new(EgressBrokerGrpcClient::new(
         connect_egress(&config).await?,
         config.egress_rpc_limits()?,
@@ -217,6 +225,12 @@ async fn run() -> Result<(), ProcessError> {
         .parse()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
     let cancellation = CancellationToken::new();
+    let postgres_health = run_postgres_health_sampler(
+        database_health_pool,
+        postgres_observer,
+        cancellation.child_token(),
+    );
+    let mut postgres_health_task = tokio::spawn(postgres_health);
     let server_cancellation = cancellation.child_token();
     let server = Server::builder()
         .tls_config(tls)
@@ -230,7 +244,8 @@ async fn run() -> Result<(), ProcessError> {
             PROCESS_OBSERVABILITY_OPERATIONS,
             vec![capacity::request_capacity_metric(request_capacity)],
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -246,21 +261,55 @@ async fn run() -> Result<(), ProcessError> {
     eprintln!("platform-mcp-resource-host started");
     tokio::select! {
         signal = shutdown_signal() => {
-            signal?;
             cancellation.cancel();
-            drain(&config, &mut server_task, &mut observability_task).await
+            let drain_result = drain(
+                &config,
+                &mut server_task,
+                &mut observability_task,
+                &mut postgres_health_task,
+            ).await;
+            signal?;
+            drain_result
         }
         result = &mut server_task => {
             cancellation.cancel();
-            result.map_err(|_| ProcessError::ServerFailed)?
-                .map_err(|_| ProcessError::ServerFailed)?;
+            let server_result = result.map_err(|_| ProcessError::ServerFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ServerFailed));
+            let observability_result = observability_task.await
+                .map_err(|_| ProcessError::ObservabilityFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+            let postgres_result = postgres_health_task.await
+                .map_err(|_| ProcessError::DependencyObserverFailed);
+            server_result?;
+            observability_result?;
+            postgres_result?;
             Err(ProcessError::ServerExitedUnexpectedly)
         }
         result = &mut observability_task => {
             cancellation.cancel();
-            result.map_err(|_| ProcessError::ObservabilityFailed)?
-                .map_err(|_| ProcessError::ObservabilityFailed)?;
+            let observability_result = result.map_err(|_| ProcessError::ObservabilityFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+            let server_result = server_task.await.map_err(|_| ProcessError::ServerFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ServerFailed));
+            let postgres_result = postgres_health_task.await
+                .map_err(|_| ProcessError::DependencyObserverFailed);
+            observability_result?;
+            server_result?;
+            postgres_result?;
             Err(ProcessError::ObservabilityFailed)
+        }
+        result = &mut postgres_health_task => {
+            cancellation.cancel();
+            let postgres_result = result.map_err(|_| ProcessError::DependencyObserverFailed);
+            let server_result = server_task.await.map_err(|_| ProcessError::ServerFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ServerFailed));
+            let observability_result = observability_task.await
+                .map_err(|_| ProcessError::ObservabilityFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+            postgres_result?;
+            server_result?;
+            observability_result?;
+            Err(ProcessError::DependencyObserverFailed)
         }
     }
 }
@@ -269,6 +318,7 @@ async fn drain(
     config: &ProcessConfig,
     server: &mut tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
     observability: &mut tokio::task::JoinHandle<Result<(), std::io::Error>>,
+    postgres_health: &mut tokio::task::JoinHandle<()>,
 ) -> Result<(), ProcessError> {
     let timeout = Duration::from_millis(config.drain_grace_milliseconds);
     tokio::time::timeout(timeout, server)
@@ -281,6 +331,10 @@ async fn drain(
         .map_err(|_| ProcessError::DrainTimeout)?
         .map_err(|_| ProcessError::ObservabilityFailed)?
         .map_err(|_| ProcessError::ObservabilityFailed)?;
+    tokio::time::timeout(timeout, postgres_health)
+        .await
+        .map_err(|_| ProcessError::DrainTimeout)?
+        .map_err(|_| ProcessError::DependencyObserverFailed)?;
     Ok(())
 }
 
@@ -388,6 +442,7 @@ enum ProcessError {
     ServerFailed,
     DrainTimeout,
     ServerExitedUnexpectedly,
+    DependencyObserverFailed,
     ObservabilityFailed,
 }
 
@@ -409,6 +464,9 @@ impl fmt::Display for ProcessError {
             Self::DrainTimeout => formatter.write_str("MCP Resource Host drain grace expired"),
             Self::ServerExitedUnexpectedly => {
                 formatter.write_str("MCP Resource Host exited unexpectedly")
+            }
+            Self::DependencyObserverFailed => {
+                formatter.write_str("MCP Resource Host dependency observer failed")
             }
             Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }

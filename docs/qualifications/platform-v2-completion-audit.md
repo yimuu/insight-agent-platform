@@ -100,6 +100,11 @@ r307把Context Native、Remote与Subscription三个restricted PostgreSQL pool接
 均cancel并join其余组件；同时补齐Subscription此前异常分支未等待peer的问题，不改变readiness。shared adapter、三binary tests及strict Clippy通过；本轮无
 真实PG成功fixture或production scrape，Remote Egress与Subscription MCP Host调用观测仍待后续批次。
 
+r308把MCP Resource Host与OAuth Cleanup Worker各自restricted PostgreSQL pool接到共享15秒sampler，只导出固定
+`component_role + postgresql + outcome`。Resource Host sampler进入RPC/HTTP cancel与bounded drain，Cleanup sampler在signal/HTTP/sampler退出时cancel并等待peer；
+两者均不改变readiness，也不安装尚未接线的Egress series。两个adapter与binary tests、strict Clippy通过；本轮无真实PG成功fixture或production scrape，
+MCP Tool/Resource/Cleanup的Egress实际调用观测仍待统一RPC observer批次。
+
 ## 3. Phase 1 审计
 
 ### 已满足

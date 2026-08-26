@@ -4,6 +4,10 @@
 //! cleanup authorization. Secret deletion crosses the MCP Host mTLS Egress RPC; this process has
 //! no Secret Manager credential or unrestricted external egress.
 
+mod dependency_observer;
+
+use dependency_observer::install_postgres_dependency_metrics;
+
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, JsonLimits, ResourceId, ResourceKind, Sha256Digest,
 };
@@ -14,10 +18,13 @@ use insight_platform_mcp_host::{
 use insight_platform_observability::{
     process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
-use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{error::Error, fmt, io::Read as _, path::PathBuf, sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 use url::Url;
 use uuid::Uuid;
@@ -158,7 +165,10 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
+    let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
+    let (dependency_metrics, postgres_observer) =
+        install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let rpc_limits = EgressInternalRpcLimits::new(
         config.maximum_rpc_metadata_bytes,
         config.maximum_rpc_payload_bytes,
@@ -178,7 +188,8 @@ async fn run() -> Result<(), ProcessError> {
 
     let metrics = Arc::new(
         ProcessHttpMetrics::install("mcp-cleanup-worker", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
+            .map_err(|_| ProcessError::InvalidConfiguration)?
+            .with_dependency_observations(dependency_metrics),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -194,6 +205,13 @@ async fn run() -> Result<(), ProcessError> {
     });
     metrics.mark_ready();
 
+    let cancellation = CancellationToken::new();
+    let mut postgres_health = tokio::spawn(run_postgres_health_sampler(
+        database_health_pool,
+        postgres_observer,
+        cancellation.child_token(),
+    ));
+
     let mut interval =
         tokio::time::interval(Duration::from_millis(config.poll_interval_milliseconds));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -201,17 +219,35 @@ async fn run() -> Result<(), ProcessError> {
     loop {
         tokio::select! {
             _ = &mut shutdown => {
+                cancellation.cancel();
                 let _ = http_shutdown.send(());
-                http.await
-                    .map_err(|_| ProcessError::ObservabilityFailed)?
-                    .map_err(|_| ProcessError::ObservabilityFailed)?;
+                let http_result = http.await.map_err(|_| ProcessError::ObservabilityFailed)
+                    .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+                let postgres_result = postgres_health.await
+                    .map_err(|_| ProcessError::DependencyObserverFailed);
+                http_result?;
+                postgres_result?;
                 return Ok(());
             },
             result = &mut http => {
-                result
-                    .map_err(|_| ProcessError::ObservabilityFailed)?
-                    .map_err(|_| ProcessError::ObservabilityFailed)?;
+                cancellation.cancel();
+                let http_result = result.map_err(|_| ProcessError::ObservabilityFailed)
+                    .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+                let postgres_result = postgres_health.await
+                    .map_err(|_| ProcessError::DependencyObserverFailed);
+                http_result?;
+                postgres_result?;
                 return Err(ProcessError::ObservabilityFailed);
+            },
+            result = &mut postgres_health => {
+                cancellation.cancel();
+                let _ = http_shutdown.send(());
+                let postgres_result = result.map_err(|_| ProcessError::DependencyObserverFailed);
+                let http_result = http.await.map_err(|_| ProcessError::ObservabilityFailed)
+                    .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+                postgres_result?;
+                http_result?;
+                return Err(ProcessError::DependencyObserverFailed);
             },
             _ = interval.tick() => {
                 if worker.run_once().await.is_err() {
@@ -333,6 +369,7 @@ enum ProcessError {
     DatabaseUnavailable,
     SchemaMismatch,
     EgressUnavailable,
+    DependencyObserverFailed,
     ObservabilityFailed,
 }
 
@@ -347,6 +384,9 @@ impl fmt::Display for ProcessError {
             Self::DatabaseUnavailable => formatter.write_str("database is unavailable"),
             Self::SchemaMismatch => formatter.write_str("database schema does not match candidate"),
             Self::EgressUnavailable => formatter.write_str("Egress Broker is unavailable"),
+            Self::DependencyObserverFailed => {
+                formatter.write_str("MCP Cleanup dependency observer failed")
+            }
             Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }
     }
