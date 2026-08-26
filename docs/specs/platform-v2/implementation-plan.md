@@ -628,6 +628,11 @@
 > observer port。真实mTLS成功、不可达端点失败测试及strict Clippy通过。本批尚未在production process composition注入observer，因此不宣称role Egress
 > series、production scrape/fault或L4～L5闭合。
 
+> 2026-08-27 implementation evidence：r315把共享Egress observer注入production Model Worker，与既有PostgreSQL/NATS dependency metrics
+> 共用同一process surface；实际Model建连、stream read和cancel RPC结果只映射为固定`model-worker + egress + success|failure`，不输出provider、endpoint、
+> tenant/run、payload或error，也不改变readiness和业务状态机。adapter/binary tests、strict Clippy、Model deployment、observability及redaction门禁通过；
+> 本轮无production scrape/真实fault，其他Egress client role与L4～L5仍Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

@@ -1,3 +1,4 @@
+use insight_platform_egress_rpc::{EgressRpcDependencyObserver, EgressRpcDependencyOutcome};
 use insight_platform_model_worker::{ModelNatsDependencyObserver, ModelNatsDependencyOutcome};
 use insight_platform_observability::{
     DependencyObservationMetrics, DependencyObservationOutcome, MetricsInstallError,
@@ -30,6 +31,16 @@ impl PostgresHealthObserver for ModelDependencyObserver {
     }
 }
 
+impl EgressRpcDependencyObserver for ModelDependencyObserver {
+    fn observe(&self, outcome: EgressRpcDependencyOutcome) {
+        observe(
+            &self.metrics,
+            PlatformDependency::Egress,
+            matches!(outcome, EgressRpcDependencyOutcome::Success),
+        );
+    }
+}
+
 fn observe(metrics: &DependencyObservationMetrics, dependency: PlatformDependency, success: bool) {
     metrics
         .observe(
@@ -47,6 +58,7 @@ pub struct InstalledModelDependencyMetrics {
     pub process: Arc<DependencyObservationMetrics>,
     pub nats: Arc<dyn ModelNatsDependencyObserver>,
     pub postgres: Arc<dyn PostgresHealthObserver>,
+    pub egress: Arc<dyn EgressRpcDependencyObserver>,
 }
 
 pub fn install_model_dependency_metrics(
@@ -54,16 +66,19 @@ pub fn install_model_dependency_metrics(
     let metrics = Arc::new(DependencyObservationMetrics::install(&[
         PlatformDependency::Postgresql,
         PlatformDependency::Nats,
+        PlatformDependency::Egress,
     ])?);
     let observer = Arc::new(ModelDependencyObserver {
         metrics: Arc::clone(&metrics),
     });
     let nats: Arc<dyn ModelNatsDependencyObserver> = observer.clone();
-    let postgres: Arc<dyn PostgresHealthObserver> = observer;
+    let postgres: Arc<dyn PostgresHealthObserver> = observer.clone();
+    let egress: Arc<dyn EgressRpcDependencyObserver> = observer;
     Ok(InstalledModelDependencyMetrics {
         process: metrics,
         nats,
         postgres,
+        egress,
     })
 }
 
@@ -81,12 +96,16 @@ mod tests {
         dependencies
             .postgres
             .observe(PostgresHealthOutcome::Success);
+        dependencies
+            .egress
+            .observe(EgressRpcDependencyOutcome::Failure);
         let metrics = ProcessHttpMetrics::install("model-worker", PROCESS_OBSERVABILITY_OPERATIONS)
             .unwrap()
             .with_dependency_observations(dependencies.process);
         let rendered = metrics.render_prometheus();
         assert!(rendered.contains("dependency=\"nats\",outcome=\"failure\"} 1"));
         assert!(rendered.contains("dependency=\"postgresql\",outcome=\"success\"} 1"));
+        assert!(rendered.contains("dependency=\"egress\",outcome=\"failure\"} 1"));
         assert!(!rendered.contains("server="));
         assert!(!rendered.contains("subject="));
         assert!(!rendered.contains("tenant="));

@@ -311,9 +311,12 @@ async fn run() -> Result<(), ProcessError> {
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let observability_pools = pools.clone();
-    let egress = Arc::new(EgressBrokerGrpcClient::new(
+    let dependency_metrics =
+        install_model_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
+    let egress = Arc::new(EgressBrokerGrpcClient::new_with_observer(
         connect_egress(&config).await?,
         config.rpc_limits()?,
+        dependency_metrics.egress,
     ));
     let connector: Arc<dyn ModelProviderWireConnector> = egress.clone();
     let mut registry = InstalledModelAdapterRegistry::default();
@@ -342,8 +345,6 @@ async fn run() -> Result<(), ProcessError> {
     validate_bounded_file(&nats_ca_path, MAX_TLS_FILE_BYTES)?;
     validate_bounded_file(&nats_certificate_path, MAX_TLS_FILE_BYTES)?;
     validate_bounded_file(&nats_private_key_path, MAX_TLS_FILE_BYTES)?;
-    let dependency_metrics =
-        install_model_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let (live_delta_sink, live_delta_driver) = BufferedNatsModelLiveDeltaSink::new_with_observer(
         config.live_delta_config(nats_ca_path, nats_certificate_path, nats_private_key_path)?,
         limits,

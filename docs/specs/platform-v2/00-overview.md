@@ -414,6 +414,10 @@ r314为共享Egress RPC client建立closed transport observation port，覆盖Mo
 OAuth/cleanup/Tool/Resource/subscription的实际tonic返回边界；observer只接收success/failure，不接收业务身份、endpoint、payload或error，本地拒绝不污染计数。
 真实mTLS成功与不可达端点失败测试及strict Clippy通过。各production process尚未注入该port，故role Egress series、production scrape/fault及L4～L5仍Pending。
 
+r315把该port注入production Model Worker并接入既有PostgreSQL/NATS process metrics surface；实际Model建连、stream read与cancel仅导出固定
+`model-worker + egress + outcome`，不改变readiness或业务语义。目标测试、strict Clippy和部署/observability/redaction门禁通过；production scrape、真实
+Egress fault、其他client role及L4～L5仍Pending。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

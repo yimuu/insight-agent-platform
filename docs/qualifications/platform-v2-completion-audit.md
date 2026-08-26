@@ -134,6 +134,10 @@ r314为共享Egress RPC client补齐只接收fixed success/failure的transport o
 OAuth/cleanup/Tool/Resource/subscription均只在实际tonic返回边界观测，本地编码/校验拒绝不污染计数，业务失败不冒充transport failure。真实mTLS成功与不可达端点
 失败测试、strict Clippy通过。该批尚未把observer注入各production binary，故role Egress series、production scrape/fault与L4～L5仍为缺口。
 
+r315把该observer注入production Model Worker并合入现有PostgreSQL/NATS process metrics surface；Model建连、stream read与cancel只导出固定
+`model-worker + egress + outcome`，不暴露业务或错误字段。adapter/binary tests、strict Clippy及部署/observability/redaction门禁通过；无production scrape或
+真实fault证据，其余Egress client role仍待注入。
+
 ## 3. Phase 1 审计
 
 ### 已满足

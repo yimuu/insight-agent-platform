@@ -591,6 +591,11 @@ r314为共享`EgressBrokerGrpcClient`增加只接收fixed success/failure的tran
 成功与不可达端点失败测试及strict Clippy通过；本批只建立共享client port，尚未把observer注入各production process，故不生成role Egress series，也不提供
 production scrape/fault或L4～L5证据。
 
+r315把共享Egress observer注入production Model Worker，并与既有PostgreSQL/NATS observer共用同一process metrics surface；只有真实Model Egress
+建连、stream read与cancel RPC结果形成固定`model-worker + egress + success|failure` series，不携带provider、endpoint、tenant/run、payload或error，且不改变
+readiness、adapter或cancellation语义。adapter/binary tests、strict Clippy、Model deployment、observability与redaction门禁通过；本轮没有production scrape、
+真实Egress fault或L4～L5证据，其余Egress client role仍待注入。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。
