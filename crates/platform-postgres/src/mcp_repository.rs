@@ -13,6 +13,7 @@ use crate::repository::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use insight_platform_artifacts::StageWorkloadArtifact;
 use insight_platform_artifacts::{
     ArtifactAwaitingStageSnapshot, ArtifactJobPayload, ArtifactReferenceSnapshot,
 };
@@ -4857,6 +4858,50 @@ async fn load_mcp_discovery_job(
         owner_id: row.try_get("owner_id")?,
         invocation_id: row.try_get("invocation_id")?,
         payload,
+    })
+}
+
+pub(crate) struct McpDiscoveryArtifactStageAuthority {
+    pub trace: insight_platform_contracts::TraceIdentityV1,
+    pub principal_id: ResourceId,
+}
+
+pub(crate) async fn require_mcp_discovery_artifact_stage_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &StageWorkloadArtifact,
+    database_now: DateTime<Utc>,
+) -> Result<McpDiscoveryArtifactStageAuthority, RepositoryError> {
+    let job = load_mcp_discovery_job(
+        transaction,
+        &command.tenant_id,
+        &command.producer_job_id,
+        true,
+    )
+    .await?;
+    let operation_id = job
+        .owner_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if operation_id.kind() != ResourceKind::McpOperation {
+        return Err(RepositoryError::CorruptRow(
+            "MCP discovery Job owner is invalid".to_owned(),
+        ));
+    }
+    let operation =
+        load_mcp_discovery_operation(transaction, &command.tenant_id, &operation_id, true).await?;
+    require_exact_mcp_discovery_job_fence(&job, &operation, &command.producer_fence, database_now)?;
+    let preallocation = &operation.payload.admission.artifact_preallocation;
+    if operation.state != McpDiscoveryOperationState::Running
+        || operation.job_id != command.producer_job_id
+        || preallocation.verification_job_id != command.verification_job_id
+        || preallocation.artifact_id != command.artifact_id
+        || preallocation.blob_id != command.blob_id
+    {
+        return Err(RepositoryError::StaleFence);
+    }
+    Ok(McpDiscoveryArtifactStageAuthority {
+        trace: job.trace,
+        principal_id: operation.payload.admission.principal_id.clone(),
     })
 }
 

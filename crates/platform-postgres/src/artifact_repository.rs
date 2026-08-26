@@ -37,7 +37,7 @@ use insight_platform_artifacts::{
     SchedulerRunValueReadRequest, SchedulerRunValueRequestResolver, SchedulerSkillPackageLease,
     SchedulerSkillPackageReadRequest, SchedulerSkillPackageRequestResolver,
     SchedulerTypedPlanLease, SchedulerTypedPlanReadRequest, SchedulerTypedPlanRequestResolver,
-    UploadGrantSnapshot,
+    StageWorkloadArtifact, StagedWorkloadArtifact, UploadGrantSnapshot,
 };
 use insight_platform_contracts::{
     ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, BlobIntegrityState,
@@ -56,6 +56,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::{collections::BTreeSet, str::FromStr};
 
+use crate::mcp_repository::require_mcp_discovery_artifact_stage_authority;
 use crate::repository::ArtifactWorkerRole;
 
 pub struct PgArtifactTransaction {
@@ -580,6 +581,78 @@ pub(crate) async fn reserve_internal_artifact_staging_quota(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+async fn load_staged_workload_artifact(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &StageWorkloadArtifact,
+    verification_job_version: u64,
+) -> Result<StagedWorkloadArtifact, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT artifact.blob_id, artifact.expected_size_bytes, artifact.expected_digest,
+               artifact.declared_media_type, artifact.version AS artifact_version,
+               blob.backend, blob.storage_binding_digest, blob.object_reference_ciphertext,
+               blob.object_generation, blob.key_id, blob.encryption_domain_id,
+               blob.content_digest, blob.size_bytes, blob.version AS blob_version
+        FROM insight_platform.artifacts AS artifact
+        JOIN insight_platform.artifact_blobs AS blob
+          ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+        WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
+          AND blob.blob_id = $3
+        FOR UPDATE OF artifact, blob
+        "#,
+    )
+    .bind(command.tenant_id.to_string())
+    .bind(command.artifact_id.to_string())
+    .bind(command.blob_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "staged Artifact replay is incomplete",
+    ))?;
+    let size_bytes = u64::try_from(row.try_get::<i64, _>("size_bytes")?)
+        .map_err(|_| RepositoryError::CorruptRow("negative staged Blob size".to_owned()))?;
+    let expected_size = u64::try_from(row.try_get::<i64, _>("expected_size_bytes")?)
+        .map_err(|_| RepositoryError::CorruptRow("negative staged Artifact size".to_owned()))?;
+    if row.try_get::<Option<String>, _>("blob_id")? != Some(command.blob_id.to_string())
+        || expected_size != command.size_bytes
+        || row.try_get::<Option<String>, _>("expected_digest")?
+            != Some(command.content_digest.to_string())
+        || row.try_get::<Option<String>, _>("declared_media_type")?
+            != Some(command.media_type.clone())
+        || row.try_get::<String, _>("backend")? != command.storage_backend
+        || row.try_get::<String, _>("storage_binding_digest")?
+            != command.storage_binding_digest.to_string()
+        || row.try_get::<Vec<u8>, _>("object_reference_ciphertext")?
+            != command.object_reference_ciphertext
+        || row.try_get::<Option<String>, _>("object_generation")?
+            != Some(command.object_generation.clone())
+        || row.try_get::<String, _>("key_id")? != command.key_id
+        || row.try_get::<String, _>("encryption_domain_id")?
+            != command.encryption_domain_id.to_string()
+        || row.try_get::<Option<String>, _>("content_digest")?
+            != Some(command.content_digest.to_string())
+        || size_bytes != command.size_bytes
+    {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    let staged = StagedWorkloadArtifact {
+        schema_version: 1,
+        artifact_id: command.artifact_id.clone(),
+        blob_id: command.blob_id.clone(),
+        verification_job_id: command.verification_job_id.clone(),
+        content_digest: command.content_digest.clone(),
+        size_bytes,
+        object_generation: command.object_generation.clone(),
+        artifact_version: u64::try_from(row.try_get::<i64, _>("artifact_version")?)
+            .map_err(|_| RepositoryError::CorruptRow("negative Artifact version".to_owned()))?,
+        blob_version: u64::try_from(row.try_get::<i64, _>("blob_version")?)
+            .map_err(|_| RepositoryError::CorruptRow("negative Blob version".to_owned()))?,
+        verification_job_version,
+    };
+    staged.validate()?;
+    Ok(staged)
 }
 
 #[async_trait::async_trait]
@@ -1921,6 +1994,252 @@ pub struct RecoveredArtifactJob {
 }
 
 impl PgRepository {
+    pub async fn stage_workload_artifact(
+        &self,
+        command: StageWorkloadArtifact,
+    ) -> Result<CommandOutcome<StagedWorkloadArtifact>, RepositoryError> {
+        let mut transaction = self.pool().begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let producer = require_mcp_discovery_artifact_stage_authority(
+            &mut transaction,
+            &command,
+            database_now,
+        )
+        .await?;
+        let verification_job = sqlx::query(
+            r#"
+            SELECT state, version, worker_id, lease_token_digest, lease_expires_at,
+                   payload_schema_version, payload, payload_digest
+            FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND job_id = $2 AND job_kind = 'artifact_scan'
+              AND work_class = 'artifact' AND owner_kind = 'artifact' AND owner_id = $3
+            FOR UPDATE
+            "#,
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.verification_job_id.to_string())
+        .bind(command.artifact_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound(
+            "preallocated Artifact verification Job",
+        ))?;
+        let payload = payload_from_row(
+            &verification_job,
+            "payload_schema_version",
+            "payload",
+            "payload_digest",
+        )?;
+        let payload: ArtifactJobPayload = decode_typed_payload(&payload, "Artifact Job")?;
+        payload
+            .validate_for_owner(&command.artifact_id)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let verification_job_version =
+            u64::try_from(verification_job.try_get::<i64, _>("version")?).map_err(|_| {
+                RepositoryError::CorruptRow("negative Artifact Job version".to_owned())
+            })?;
+
+        if let ArtifactJobPayload::Scan { scan } = &payload {
+            if scan.operation_id != command.verification_job_id
+                || scan.artifact_id != command.artifact_id
+                || scan.blob_id != command.blob_id
+                || scan.object_generation != command.object_generation
+            {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            let staged =
+                load_staged_workload_artifact(&mut transaction, &command, verification_job_version)
+                    .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(staged));
+        }
+        let ArtifactJobPayload::AwaitingStage { stage } = payload else {
+            return Err(RepositoryError::Conflict(
+                "Artifact verification Job is not awaiting stage",
+            ));
+        };
+        command.validate_for(&stage, database_now)?;
+        if command.verification_job_id == command.producer_job_id
+            || verification_job.try_get::<String, _>("state")? != "waiting"
+            || verification_job_version != 1
+            || verification_job
+                .try_get::<Option<String>, _>("worker_id")?
+                .is_some()
+            || verification_job
+                .try_get::<Option<String>, _>("lease_token_digest")?
+                .is_some()
+            || verification_job
+                .try_get::<Option<DateTime<Utc>>, _>("lease_expires_at")?
+                .is_some()
+        {
+            return Err(RepositoryError::Conflict(
+                "Artifact verification Job cannot be staged",
+            ));
+        }
+        require_exact_artifact_scan_policy(
+            &mut transaction,
+            &command.tenant_id,
+            &stage.artifact_io_policy_revision,
+        )
+        .await?;
+
+        let metadata = command.metadata()?;
+        let metadata_payload = TypedPayload::from_versioned(1, &metadata, 262_144)?;
+        let security_domain_digest = command
+            .security_domain(&stage)?
+            .canonical_digest()?
+            .to_string();
+        let size_bytes = to_i64(command.size_bytes, "staged Artifact size")?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.artifact_blobs (
+                tenant_id, blob_id, backend, storage_binding_digest,
+                security_domain_digest, object_reference_ciphertext, object_generation,
+                key_id, encryption_domain_id, content_digest, size_bytes, state
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'staging')
+            "#,
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.blob_id.to_string())
+        .bind(&command.storage_backend)
+        .bind(command.storage_binding_digest.to_string())
+        .bind(security_domain_digest)
+        .bind(&command.object_reference_ciphertext)
+        .bind(&command.object_generation)
+        .bind(&command.key_id)
+        .bind(command.encryption_domain_id.to_string())
+        .bind(command.content_digest.to_string())
+        .bind(size_bytes)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.artifacts (
+                tenant_id, artifact_id, blob_id, purpose, classification,
+                expected_size_bytes, expected_digest, declared_media_type,
+                verified_media_type, state, version, metadata_schema_version, metadata,
+                metadata_digest, retention_policy_revision_id, retain_until, created_by,
+                created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 'uploaded', 1,
+                      $9, $10, $11, $12, $13, $14, $15, $15)
+            "#,
+        )
+        .bind(command.tenant_id.to_string())
+        .bind(command.artifact_id.to_string())
+        .bind(command.blob_id.to_string())
+        .bind(stage.purpose.as_str())
+        .bind(stage.classification.as_str())
+        .bind(size_bytes)
+        .bind(command.content_digest.to_string())
+        .bind(&command.media_type)
+        .bind(metadata_payload.schema_version)
+        .bind(&metadata_payload.value)
+        .bind(&metadata_payload.digest)
+        .bind(stage.retention_policy_revision.revision_id.to_string())
+        .bind(stage.retain_until)
+        .bind(producer.principal_id.to_string())
+        .bind(database_now)
+        .execute(&mut *transaction)
+        .await?;
+        ensure_one(
+            sqlx::query(
+                r#"
+                UPDATE insight_platform.artifacts
+                SET state = 'verifying', version = 2, updated_at = $3
+                WHERE tenant_id = $1 AND artifact_id = $2 AND state = 'uploaded' AND version = 1
+                "#,
+            )
+            .bind(command.tenant_id.to_string())
+            .bind(command.artifact_id.to_string())
+            .bind(database_now)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected(),
+            "staged Artifact verification transition",
+        )?;
+        let next_job_version = verification_job_version
+            .checked_add(1)
+            .ok_or(RepositoryError::Conflict("Artifact Job version"))?;
+        let scan_payload = command.scan_payload(&stage, 2, 1, next_job_version)?;
+        let scan_typed = TypedPayload::new(1, &scan_payload)?;
+        ensure_one(
+            sqlx::query(
+                r#"
+                UPDATE insight_platform.jobs
+                SET state = 'ready', version = $4, scheduled_at = $5,
+                    request_digest = $6, payload_schema_version = $7,
+                    payload = $8, payload_digest = $9, updated_at = $5
+                WHERE tenant_id = $1 AND job_id = $2 AND owner_id = $3
+                  AND state = 'waiting' AND version = 1 AND worker_id IS NULL
+                "#,
+            )
+            .bind(command.tenant_id.to_string())
+            .bind(command.verification_job_id.to_string())
+            .bind(command.artifact_id.to_string())
+            .bind(to_i64(
+                next_job_version,
+                "Artifact verification Job version",
+            )?)
+            .bind(database_now)
+            .bind(command.content_digest.to_string())
+            .bind(scan_typed.schema_version)
+            .bind(&scan_typed.value)
+            .bind(&scan_typed.digest)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected(),
+            "Artifact verification Job stage wake",
+        )?;
+        let event_id = ResourceId::from_uuid_v7(ResourceKind::Event, uuid::Uuid::now_v7())
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let outbox_id = ResourceId::from_uuid_v7(ResourceKind::OutboxEvent, uuid::Uuid::now_v7())
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let tenant_id = command.tenant_id.to_string();
+        let artifact_id = command.artifact_id.to_string();
+        append_scheduler_event_with_trace(
+            &mut transaction,
+            producer.trace,
+            &tenant_id,
+            &event_id,
+            &outbox_id,
+            "artifact",
+            &artifact_id,
+            2,
+            None,
+            "artifact.workload_staged",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "backend_evidence_digest": command.backend_evidence_digest,
+                    "blob_id": command.blob_id,
+                    "content_digest": command.content_digest,
+                    "producer_job_id": command.producer_job_id,
+                    "size_bytes": command.size_bytes,
+                    "state": "verifying",
+                    "verification_job_id": command.verification_job_id,
+                }),
+            )?,
+        )
+        .await?;
+        let staged = StagedWorkloadArtifact {
+            schema_version: 1,
+            artifact_id: command.artifact_id,
+            blob_id: command.blob_id,
+            verification_job_id: command.verification_job_id,
+            content_digest: command.content_digest,
+            size_bytes: command.size_bytes,
+            object_generation: command.object_generation,
+            artifact_version: 2,
+            blob_version: 1,
+            verification_job_version: next_job_version,
+        };
+        staged.validate()?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(staged))
+    }
+
     pub async fn resolve_public_artifact_prepare_authority(
         &self,
         tenant_id: ResourceId,

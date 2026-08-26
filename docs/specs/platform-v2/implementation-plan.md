@@ -770,6 +770,13 @@
 > transaction以预分配identity和CR-199 policy closure预留tenant `artifact.staging_bytes` quota、写quota ledger，并创建exact `ArtifactScan + Artifact`
 > waiting Job；该variant不会被scan claim、不会公开为Operation，也不允许进入leased recovery/backend failure路径。Artifact 31/31、PostgreSQL lib
 > 14/14及相关strict Clippy通过；本轮无fresh PostgreSQL，`StageWorkloadArtifact`的Artifact/Blob创建与waiting→ready CAS仍Pending。
+>
+> 2026-08-27 implementation evidence：r341新增closed `StageWorkloadArtifact`/`StagedWorkloadArtifact`，绑定MCP Host caller、current producer
+> Job fence、预分配Artifact/Blob/verification Job、exact content digest/length/media及加密storage generation evidence。PostgreSQL authority按固定锁序
+> 重验current MCP operation/lease与exact ArtifactIo Policy；首次调用原子创建Blob/Artifact、执行`Uploaded -> Verifying`、把预建Job从
+> `AwaitingStage/waiting` CAS为`Scan/ready`并写Event/Outbox；同owner generation重试逐字段核对既有物理证据并返回同一identity，漂移fail closed。
+> Artifact 31/31、PostgreSQL lib 14/14及相关strict Clippy通过；本轮无fresh PostgreSQL，内部stage RPC、Data Worker object write adapter与L2事务
+> kill-window仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

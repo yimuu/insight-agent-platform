@@ -1,8 +1,9 @@
 use crate::{
-    ArtifactBlobCleanupSnapshot, ArtifactBlobRecord, ArtifactCommandError,
-    ArtifactDeletionEvidence, ArtifactDeletionJobSnapshot, ArtifactDeletionMode,
-    ArtifactMetadataSnapshot, ArtifactOperationRecord, ArtifactRecord, CompleteArtifactDeletion,
-    CompletedArtifactDeletion, MAX_ARTIFACT_RETRY_BACKOFF_MILLISECONDS,
+    ArtifactBlobCleanupSnapshot, ArtifactBlobRecord, ArtifactBlobSecurityDomain,
+    ArtifactCommandError, ArtifactDeletionEvidence, ArtifactDeletionJobSnapshot,
+    ArtifactDeletionMode, ArtifactMetadataSnapshot, ArtifactOperationRecord, ArtifactRecord,
+    CompleteArtifactDeletion, CompletedArtifactDeletion, MAX_ARTIFACT_RETRY_BACKOFF_MILLISECONDS,
+    MAX_BACKEND_BYTES, MAX_KEY_ID_BYTES, MAX_OBJECT_REFERENCE_BYTES,
 };
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
@@ -335,6 +336,154 @@ pub struct ArtifactAwaitingStageSnapshot {
     pub retry_backoff_milliseconds: u64,
     pub retain_until: DateTime<Utc>,
     pub deadline: DateTime<Utc>,
+}
+
+/// Closed, credential-free evidence submitted by a trusted producer after the Data Worker has
+/// persisted one exact object generation. Object locators remain encrypted and are never accepted
+/// from public or untrusted callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageWorkloadArtifact {
+    pub schema_version: u32,
+    pub tenant_id: ResourceId,
+    pub caller: insight_platform_contracts::ArtifactWorkloadAudience,
+    pub producer_job_id: ResourceId,
+    pub producer_fence: JobFence,
+    pub verification_job_id: ResourceId,
+    pub artifact_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub content_digest: Sha256Digest,
+    pub size_bytes: u64,
+    pub media_type: String,
+    pub storage_backend: String,
+    pub storage_binding_digest: Sha256Digest,
+    pub object_reference_ciphertext: Vec<u8>,
+    pub object_generation: String,
+    pub key_id: String,
+    pub encryption_domain_id: ResourceId,
+    pub backend_evidence_digest: Sha256Digest,
+    pub staged_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StagedWorkloadArtifact {
+    pub schema_version: u32,
+    pub artifact_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub verification_job_id: ResourceId,
+    pub content_digest: Sha256Digest,
+    pub size_bytes: u64,
+    pub object_generation: String,
+    pub artifact_version: u64,
+    pub blob_version: u64,
+    pub verification_job_version: u64,
+}
+
+impl StagedWorkloadArtifact {
+    pub fn validate(&self) -> Result<(), ArtifactWorkError> {
+        if self.schema_version != 1
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.blob_id.kind() != ResourceKind::InternalBlob
+            || self.verification_job_id.kind() != ResourceKind::Job
+            || self.size_bytes == 0
+            || !valid_object_generation(&self.object_generation)
+            || self.artifact_version == 0
+            || self.blob_version == 0
+            || self.verification_job_version == 0
+        {
+            return Err(ArtifactWorkError::InvalidEvidence);
+        }
+        Ok(())
+    }
+}
+
+impl StageWorkloadArtifact {
+    pub fn validate_for(
+        &self,
+        awaiting: &ArtifactAwaitingStageSnapshot,
+        now: DateTime<Utc>,
+    ) -> Result<(), ArtifactWorkError> {
+        awaiting.validate()?;
+        if self.schema_version != 1
+            || self.tenant_id.kind() != ResourceKind::Tenant
+            || self.caller != insight_platform_contracts::ArtifactWorkloadAudience::McpHost
+            || self.producer_job_id != awaiting.producer_job_id
+            || self.verification_job_id == self.producer_job_id
+            || self.producer_fence.expected_version == 0
+            || self.producer_fence.worker_process_generation_id.kind()
+                != ResourceKind::WorkerProcessGeneration
+            || self.producer_fence.lease_generation == 0
+            || self.verification_job_id.kind() != ResourceKind::Job
+            || self.artifact_id != awaiting.artifact_id
+            || self.blob_id != awaiting.blob_id
+            || self.size_bytes == 0
+            || self.size_bytes > awaiting.maximum_bytes
+            || self.media_type != awaiting.declared_media_type
+            || !valid_code(&self.storage_backend, MAX_BACKEND_BYTES)
+            || self.object_reference_ciphertext.is_empty()
+            || self.object_reference_ciphertext.len() > MAX_OBJECT_REFERENCE_BYTES
+            || !valid_object_generation(&self.object_generation)
+            || self.key_id.is_empty()
+            || self.key_id.len() > MAX_KEY_ID_BYTES
+            || self.key_id.chars().any(char::is_control)
+            || self.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || self.staged_at > now
+            || self.staged_at > awaiting.deadline
+            || now > awaiting.deadline
+        {
+            return Err(ArtifactWorkError::InvalidCommand);
+        }
+        Ok(())
+    }
+
+    pub fn metadata(&self) -> Result<ArtifactMetadataSnapshot, ArtifactWorkError> {
+        ArtifactMetadataSnapshot::new(None, self.verification_job_id.clone())
+            .map_err(|_| ArtifactWorkError::InvalidCommand)
+    }
+
+    pub fn security_domain(
+        &self,
+        awaiting: &ArtifactAwaitingStageSnapshot,
+    ) -> Result<ArtifactBlobSecurityDomain, ArtifactWorkError> {
+        self.validate_for(awaiting, self.staged_at)?;
+        Ok(ArtifactBlobSecurityDomain {
+            schema_version: 1,
+            classification: awaiting.classification,
+            retention_policy_revision_id: awaiting.retention_policy_revision.revision_id.clone(),
+            encryption_domain_id: self.encryption_domain_id.clone(),
+        })
+    }
+
+    pub fn scan_payload(
+        &self,
+        awaiting: &ArtifactAwaitingStageSnapshot,
+        artifact_version: u64,
+        blob_version: u64,
+        verification_job_version: u64,
+    ) -> Result<ArtifactJobPayload, ArtifactWorkError> {
+        self.validate_for(awaiting, self.staged_at)?;
+        let payload = ArtifactJobPayload::Scan {
+            scan: ArtifactScanJobSnapshot {
+                schema_version: 1,
+                scan_kind: ArtifactScanKind::Initial,
+                operation_id: self.verification_job_id.clone(),
+                artifact_id: self.artifact_id.clone(),
+                blob_id: self.blob_id.clone(),
+                expected_artifact_version: artifact_version,
+                expected_blob_version: blob_version,
+                expected_operation_version: verification_job_version,
+                object_generation: self.object_generation.clone(),
+                scan_policy_revision: awaiting.artifact_io_policy_revision.clone(),
+                scanner_contract_digest: awaiting.scanner_contract_digest.clone(),
+                ruleset_digest: awaiting.ruleset_digest.clone(),
+                evidence_ttl_milliseconds: awaiting.evidence_ttl_milliseconds,
+                retry_backoff_milliseconds: awaiting.retry_backoff_milliseconds,
+            },
+        };
+        payload.validate_for_owner(&self.artifact_id)?;
+        Ok(payload)
+    }
 }
 
 impl ArtifactAwaitingStageSnapshot {
@@ -1954,7 +2103,51 @@ mod tests {
             unreachable!("fixture is an awaiting-stage payload");
         };
         stage.retain_until = stage.deadline;
+        let stage = stage.clone();
         assert!(payload.validate_for_owner(&artifact_id).is_ok());
+
+        let verification_job_id = id(ResourceKind::Job, 0x818);
+        let command = StageWorkloadArtifact {
+            schema_version: 1,
+            tenant_id: id(ResourceKind::Tenant, 0x819),
+            caller: insight_platform_contracts::ArtifactWorkloadAudience::McpHost,
+            producer_job_id: stage.producer_job_id.clone(),
+            producer_fence: JobFence {
+                expected_version: 3,
+                worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x820),
+                lease_generation: 2,
+                token_digest: digest("producer-fence"),
+            },
+            verification_job_id: verification_job_id.clone(),
+            artifact_id: stage.artifact_id.clone(),
+            blob_id: stage.blob_id.clone(),
+            content_digest: digest("descriptor-bytes"),
+            size_bytes: 4_096,
+            media_type: stage.declared_media_type.clone(),
+            storage_backend: "s3".to_owned(),
+            storage_binding_digest: digest("storage-binding"),
+            object_reference_ciphertext: vec![1, 2, 3],
+            object_generation: "generation-1".to_owned(),
+            key_id: "artifact-kek-v1".to_owned(),
+            encryption_domain_id: id(ResourceKind::EncryptionDomain, 0x821),
+            backend_evidence_digest: digest("backend-evidence"),
+            staged_at: now,
+        };
+        assert!(command.validate_for(&stage, now).is_ok());
+        let scan = command.scan_payload(&stage, 2, 1, 2).unwrap();
+        assert!(scan.validate_for_owner(&artifact_id).is_ok());
+        let ArtifactJobPayload::Scan { scan } = scan else {
+            unreachable!("stage creates an initial scan payload");
+        };
+        assert_eq!(scan.operation_id, verification_job_id);
+        assert_eq!(scan.object_generation, "generation-1");
+
+        let mut oversized = command;
+        oversized.size_bytes = stage.maximum_bytes + 1;
+        assert_eq!(
+            oversized.validate_for(&stage, now),
+            Err(ArtifactWorkError::InvalidCommand)
+        );
     }
 
     struct Fixture {
