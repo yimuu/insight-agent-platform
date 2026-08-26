@@ -571,6 +571,12 @@
 > Data Worker read/work pool各一个sampler，并与现有HTTP/RPC/worker共同cancel/drain，sampler意外退出使process fail closed。不可用pool、pre-cancel及
 > 三binary tests、strict Clippy通过；可选真实database成功test已checked-in，但本轮本地PG16未运行，因此没有新增真实成功fixture或production scrape证据。
 
+> 2026-08-27 implementation evidence：r305将Model Worker既有restricted PostgreSQL pool接到共享15秒sampler，并在实际NATS TLS connect、
+> 每批publish+flush和shutdown drain返回边界记录fixed success/failure；observer不接收server、subject、tenant/run、payload或error，本地校验与
+> backpressure不污染依赖计数。两个observer进入既有JoinSet cancel/drain且不改变readiness。真实连接失败、adapter、library/binary tests及strict Clippy
+> 通过；可选真实TLS NATS fixture已同时验证connect/publish观测，但本轮未配置外部fixture，因此没有新增真实NATS/PG或production scrape证据；Model Egress
+> 流式RPC观测仍待后续独立批次。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

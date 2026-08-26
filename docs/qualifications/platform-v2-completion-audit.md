@@ -85,6 +85,11 @@ r304以共享15秒只读`SELECT 1::bigint` sampler补齐Artifact Gateway、Data 
 不改变readiness、不暴露连接/SQL/error字段，并与各process shutdown/drain闭合。不可用pool、pre-cancel及三binary tests与strict Clippy通过；可选
 真实database成功test已checked-in，但本轮没有运行中的本地PG16，因此该fixture未产生新证据。production PostgreSQL/S3/KMS scrape/fault与L5 profile仍待外部环境。
 
+r305把Model Worker PostgreSQL pool接入同一15秒sampler，并在实际NATS TLS connect、publish+flush和drain返回边界记录fixed success/failure；
+observer不接收server、subject、tenant/run、payload或error。两个observer与permit、worker、cancel、live-delta和HTTP组件共用既有JoinSet cancel/drain，
+不改变readiness。真实连接失败、adapter、library/binary tests及strict Clippy通过；可选真实TLS NATS fixture已扩展为同时验证connect与publish成功观测，
+但本轮未配置该外部fixture，故没有新增真实NATS/PG成功或production scrape证据。Model Egress流式RPC观测仍待后续独立批次。
+
 ## 3. Phase 1 审计
 
 ### 已满足

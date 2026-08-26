@@ -538,6 +538,12 @@ Artifact Gateway/Maintenance各接一个sampler，Data Worker对独立read/work 
 process fail closed。不可用pool、pre-cancel及三binary lifecycle tests、strict Clippy通过；可选真实database成功test已checked-in，但本轮无运行中的
 PG16，故该fixture未取得新证据，production PostgreSQL health仍须L4实际scrape。
 
+r305将Model Worker既有restricted PostgreSQL pool接到共享sampler，并为NATS live-delta driver增加nominal observer port。NATS只在实际TLS
+connect、每批publish+flush及shutdown drain返回后报告success/failure；server、subject、tenant/run、payload和error均不跨越port，本地envelope或
+backpressure拒绝不冒充依赖失败。PostgreSQL sampler与NATS/permit/claim/cancel/HTTP组件共用既有JoinSet cancellation/drain，且不改变readiness。
+实际连接失败、adapter、library/binary tests和strict Clippy通过；可选真实TLS NATS fixture已同时断言connect/publish success，但本轮未配置该fixture，
+故未取得新的真实NATS/PG或production scrape证据。Model Egress streaming observation仍归后续批次。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

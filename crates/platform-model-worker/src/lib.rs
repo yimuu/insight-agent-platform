@@ -60,6 +60,25 @@ pub const MODEL_WORKER_ROLE: &str = "model-worker";
 pub const MODEL_LIVE_NATS_SUBJECT_PREFIX: &str = "insight.platform.v1.run.live";
 const MAX_LIVE_DELTA_PUBLISH_BATCH_MESSAGES: usize = 64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelNatsDependencyOutcome {
+    Success,
+    Failure,
+}
+
+/// Receives only the result of an actual NATS connect, publish/flush, or drain operation. Server
+/// addresses, subjects, tenant/run identities, payloads and error details never cross this port.
+pub trait ModelNatsDependencyObserver: Send + Sync {
+    fn observe(&self, outcome: ModelNatsDependencyOutcome);
+}
+
+#[derive(Debug)]
+struct NoopModelNatsDependencyObserver;
+
+impl ModelNatsDependencyObserver for NoopModelNatsDependencyObserver {
+    fn observe(&self, _outcome: ModelNatsDependencyOutcome) {}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelLiveDeltaNatsSettings {
     pub servers: Vec<String>,
@@ -252,12 +271,21 @@ pub struct NatsModelLiveDeltaDriver {
     receiver: mpsc::Receiver<QueuedModelLiveDelta>,
     config: ModelLiveDeltaNatsConfig,
     counters: Arc<ModelLiveDeltaCounters>,
+    dependency_observer: Arc<dyn ModelNatsDependencyObserver>,
 }
 
 impl BufferedNatsModelLiveDeltaSink {
     pub fn new(
         config: ModelLiveDeltaNatsConfig,
         limits: ModelTurnLimits,
+    ) -> Result<(Self, NatsModelLiveDeltaDriver), ModelLiveDeltaError> {
+        Self::new_with_observer(config, limits, Arc::new(NoopModelNatsDependencyObserver))
+    }
+
+    pub fn new_with_observer(
+        config: ModelLiveDeltaNatsConfig,
+        limits: ModelTurnLimits,
+        dependency_observer: Arc<dyn ModelNatsDependencyObserver>,
     ) -> Result<(Self, NatsModelLiveDeltaDriver), ModelLiveDeltaError> {
         config.validate()?;
         let (sender, receiver) = mpsc::channel(config.settings.maximum_pending_messages);
@@ -275,6 +303,7 @@ impl BufferedNatsModelLiveDeltaSink {
             receiver,
             config,
             counters,
+            dependency_observer,
         };
         Ok((sink, driver))
     }
@@ -405,8 +434,12 @@ impl NatsModelLiveDeltaDriver {
                 biased;
                 _ = cancellation.cancelled() => return Ok(self.counters.snapshot()),
                 result = &mut connect => match result {
-                    Ok(client) => client,
+                    Ok(client) => {
+                        self.dependency_observer.observe(ModelNatsDependencyOutcome::Success);
+                        client
+                    },
                     Err(()) => {
+                        self.dependency_observer.observe(ModelNatsDependencyOutcome::Failure);
                         self.counters.transport_failures.fetch_add(1, Ordering::Relaxed);
                         tokio::select! {
                             _ = cancellation.cancelled() => return Ok(self.counters.snapshot()),
@@ -419,7 +452,15 @@ impl NatsModelLiveDeltaDriver {
                 tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => {
-                        let _ = tokio::time::timeout(self.config.settings.drain_timeout, client.drain()).await;
+                        let drained = tokio::time::timeout(
+                            self.config.settings.drain_timeout,
+                            client.drain(),
+                        ).await;
+                        self.dependency_observer.observe(if matches!(drained, Ok(Ok(()))) {
+                            ModelNatsDependencyOutcome::Success
+                        } else {
+                            ModelNatsDependencyOutcome::Failure
+                        });
                         return Ok(self.counters.snapshot());
                     }
                     item = self.receiver.recv() => {
@@ -447,10 +488,12 @@ impl NatsModelLiveDeltaDriver {
                         .await
                         .is_ok()
                         {
+                            self.dependency_observer.observe(ModelNatsDependencyOutcome::Success);
                             self.counters
                                 .published
                                 .fetch_add(published as u64, Ordering::Relaxed);
                         } else {
+                            self.dependency_observer.observe(ModelNatsDependencyOutcome::Failure);
                             self.counters.transport_failures.fetch_add(1, Ordering::Relaxed);
                             break;
                         }
@@ -2655,6 +2698,53 @@ mod tests {
         assert_eq!(sink.report().dropped_oversized, 1);
     }
 
+    #[derive(Default)]
+    struct RecordingNatsDependencyObserver {
+        successes: AtomicU64,
+        failures: AtomicU64,
+    }
+
+    impl ModelNatsDependencyObserver for RecordingNatsDependencyObserver {
+        fn observe(&self, outcome: ModelNatsDependencyOutcome) {
+            match outcome {
+                ModelNatsDependencyOutcome::Success => {
+                    self.successes.fetch_add(1, Ordering::Relaxed);
+                }
+                ModelNatsDependencyOutcome::Failure => {
+                    self.failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_nats_connect_failure_reports_only_a_fixed_failure() {
+        let limits = ModelTurnLimits::from_profile(&checked_in_hard_limit_profile()).unwrap();
+        let mut config = live_delta_config(1, 1_048_576);
+        config.settings.servers = vec!["tls://127.0.0.1:1".to_owned()];
+        config.settings.connect_timeout = Duration::from_millis(50);
+        config.settings.reconnect_backoff = Duration::from_millis(10);
+        let observer = Arc::new(RecordingNatsDependencyObserver::default());
+        let observer_port: Arc<dyn ModelNatsDependencyObserver> = observer.clone();
+        let (_sink, driver) =
+            BufferedNatsModelLiveDeltaSink::new_with_observer(config, limits, observer_port)
+                .unwrap();
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(driver.run(cancellation.child_token()));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while observer.failures.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
+        assert_eq!(observer.successes.load(Ordering::Relaxed), 0);
+        assert!(observer.failures.load(Ordering::Relaxed) >= 1);
+    }
+
     #[tokio::test]
     async fn real_tls_nats_publishes_live_delta_when_configured() {
         let (Ok(server), Ok(ca), Ok(certificate), Ok(private_key)) = (
@@ -2690,7 +2780,11 @@ mod tests {
                 .unwrap();
         let mut subscriber = subscriber_client.subscribe(subject).await.unwrap();
         subscriber_client.flush().await.unwrap();
-        let (sink, driver) = BufferedNatsModelLiveDeltaSink::new(config, limits).unwrap();
+        let observer = Arc::new(RecordingNatsDependencyObserver::default());
+        let observer_port: Arc<dyn ModelNatsDependencyObserver> = observer.clone();
+        let (sink, driver) =
+            BufferedNatsModelLiveDeltaSink::new_with_observer(config, limits, observer_port)
+                .unwrap();
         let cancellation = CancellationToken::new();
         let task = tokio::spawn(driver.run(cancellation.child_token()));
         sink.enqueue(event.clone());
@@ -2709,6 +2803,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        assert!(observer.successes.load(Ordering::Relaxed) >= 2);
+        assert_eq!(observer.failures.load(Ordering::Relaxed), 0);
     }
 
     #[test]

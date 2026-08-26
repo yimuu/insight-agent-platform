@@ -4,6 +4,10 @@
 //! durable Job/ModelTurn authority, Provider traffic crosses the Model Worker mTLS Egress RPC,
 //! and all Model request/response values remain bounded Inline data.
 
+mod dependency_observer;
+
+use dependency_observer::install_model_dependency_metrics;
+
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, InstalledModelAdapter,
     JsonLimits, ResourceId, ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
@@ -26,7 +30,9 @@ use insight_platform_observability::{
     process_observability_router, run_worker_permit_sampler, update_worker_permits,
     ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
-use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+};
 use insight_platform_worker::LocalWorkerPools;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -294,6 +300,7 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
+    let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
     let process_generation_id =
         ResourceId::from_uuid_v7(ResourceKind::WorkerProcessGeneration, Uuid::now_v7())
@@ -335,9 +342,12 @@ async fn run() -> Result<(), ProcessError> {
     validate_bounded_file(&nats_ca_path, MAX_TLS_FILE_BYTES)?;
     validate_bounded_file(&nats_certificate_path, MAX_TLS_FILE_BYTES)?;
     validate_bounded_file(&nats_private_key_path, MAX_TLS_FILE_BYTES)?;
-    let (live_delta_sink, live_delta_driver) = BufferedNatsModelLiveDeltaSink::new(
+    let dependency_metrics =
+        install_model_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
+    let (live_delta_sink, live_delta_driver) = BufferedNatsModelLiveDeltaSink::new_with_observer(
         config.live_delta_config(nats_ca_path, nats_certificate_path, nats_private_key_path)?,
         limits,
+        dependency_metrics.nats,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let host = Arc::new(ModelAdapterHost::new(
@@ -380,7 +390,8 @@ async fn run() -> Result<(), ProcessError> {
             PROCESS_OBSERVABILITY_OPERATIONS,
             Arc::clone(&permit_metrics),
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics.process),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -392,6 +403,16 @@ async fn run() -> Result<(), ProcessError> {
     let permit_cancellation = cancellation.child_token();
     components.spawn(async move {
         run_worker_permit_sampler(permit_metrics, observability_pools, permit_cancellation).await;
+        Ok(())
+    });
+    let postgres_cancellation = cancellation.child_token();
+    components.spawn(async move {
+        run_postgres_health_sampler(
+            database_health_pool,
+            dependency_metrics.postgres,
+            postgres_cancellation,
+        )
+        .await;
         Ok(())
     });
     let driver_cancellation = cancellation.child_token();
