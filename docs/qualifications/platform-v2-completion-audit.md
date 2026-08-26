@@ -73,6 +73,10 @@ r301建立六种固定dependency与两种固定outcome的共享指标owner，并
 身份前置拒绝不会计为数据库失败，未安装依赖不能被动态创建。shared/Authority tests与strict Clippy通过。其余role的NATS、S3、KMS、Secret、
 Egress及PostgreSQL真实调用接线仍是仓库内缺口，production scrape和L5 health profile仍是外部门禁。
 
+r302把Egress Broker的Secret/KMS series接到七类实际AWS SDK请求返回边界；本地校验或容量拒绝不污染外部依赖失败计数，observer不接收任何
+identity、provider、endpoint、ARN、error或Secret material。Secret/Egress tests、strict Clippy、redaction与部署门禁通过。真实AWS fault/rotation、
+production scrape及L5 profile仍待外部环境；其他role的Egress/NATS/S3/PostgreSQL接线仍是仓库内缺口。
+
 ## 3. Phase 1 审计
 
 ### 已满足

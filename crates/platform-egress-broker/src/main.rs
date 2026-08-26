@@ -33,11 +33,13 @@ use insight_platform_egress_rpc::{
 };
 use insight_platform_model_adapters::BrokeredModelProviderWireConnector;
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, DependencyObservationMetrics, DependencyObservationOutcome,
+    PlatformDependency, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_secret_broker::{
     AwsSecretProviderCatalog, AwsSecretProviderCatalogConfig, BrokeredMcpOAuthSecretStore,
-    BrokeredSecretMaterialResolver, SecretBrokerLimits,
+    BrokeredSecretMaterialResolver, SecretBrokerLimits, SecretExternalDependency,
+    SecretExternalDependencyObserver, SecretExternalDependencyOutcome,
 };
 use insight_platform_security_rpc::{SecurityInternalRpcLimits, SecuritySecretAuthorityGrpcClient};
 use serde::Deserialize;
@@ -66,6 +68,30 @@ const MAX_CONFIG_BYTES: usize = 16 * 1_048_576;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
 const MCP_STATE_KEY_BYTES: usize = 32;
 const MCP_STATE_KEY_DIRECTORY: &str = "/etc/insight/mcp-state-keys";
+
+struct EgressSecretDependencyObserver {
+    metrics: Arc<DependencyObservationMetrics>,
+}
+
+impl SecretExternalDependencyObserver for EgressSecretDependencyObserver {
+    fn observe(
+        &self,
+        dependency: SecretExternalDependency,
+        outcome: SecretExternalDependencyOutcome,
+    ) {
+        let dependency = match dependency {
+            SecretExternalDependency::Kms => PlatformDependency::Kms,
+            SecretExternalDependency::Secret => PlatformDependency::Secret,
+        };
+        let outcome = match outcome {
+            SecretExternalDependencyOutcome::Success => DependencyObservationOutcome::Success,
+            SecretExternalDependencyOutcome::Failure => DependencyObservationOutcome::Failure,
+        };
+        self.metrics
+            .observe(dependency, outcome)
+            .expect("Egress Broker installs Secret and KMS dependency metrics");
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -330,9 +356,21 @@ async fn run() -> Result<(), ProcessError> {
         authority_channel,
         security_limits,
     ));
-    let provider_catalog = AwsSecretProviderCatalog::install(config.secret_provider_catalog)
-        .await
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let dependency_metrics = Arc::new(
+        DependencyObservationMetrics::install(&[
+            PlatformDependency::Kms,
+            PlatformDependency::Secret,
+        ])
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let provider_catalog = AwsSecretProviderCatalog::install_with_observer(
+        config.secret_provider_catalog,
+        Arc::new(EgressSecretDependencyObserver {
+            metrics: Arc::clone(&dependency_metrics),
+        }),
+    )
+    .await
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
     provider_catalog
         .check_readiness()
         .await
@@ -511,7 +549,8 @@ async fn run() -> Result<(), ProcessError> {
             PROCESS_OBSERVABILITY_OPERATIONS,
             capacities,
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics),
     );
 
     let maximum = rpc_limits.maximum_message_bytes();
@@ -795,5 +834,36 @@ mod tests {
             "/etc/insight/other/current"
         )));
         assert!(!valid_projected_secret_path(Path::new("current")));
+    }
+
+    #[test]
+    fn secret_dependency_observer_maps_only_secret_and_kms_outcomes() {
+        let dependencies = Arc::new(
+            DependencyObservationMetrics::install(&[
+                PlatformDependency::Kms,
+                PlatformDependency::Secret,
+            ])
+            .unwrap(),
+        );
+        let observer = EgressSecretDependencyObserver {
+            metrics: Arc::clone(&dependencies),
+        };
+        observer.observe(
+            SecretExternalDependency::Secret,
+            SecretExternalDependencyOutcome::Success,
+        );
+        observer.observe(
+            SecretExternalDependency::Kms,
+            SecretExternalDependencyOutcome::Failure,
+        );
+        let metrics =
+            ProcessHttpMetrics::install("egress-secret-broker", PROCESS_OBSERVABILITY_OPERATIONS)
+                .unwrap()
+                .with_dependency_observations(dependencies);
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains("dependency=\"secret\",outcome=\"success\"} 1"));
+        assert!(rendered.contains("dependency=\"kms\",outcome=\"failure\"} 1"));
+        assert!(!rendered.contains("provider"));
+        assert!(!rendered.contains("endpoint"));
     }
 }

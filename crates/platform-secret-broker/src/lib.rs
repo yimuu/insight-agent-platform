@@ -87,6 +87,40 @@ pub enum SecretBrokerConfigurationError {
     ProviderCatalogTooLarge,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretExternalDependency {
+    Kms,
+    Secret,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretExternalDependencyOutcome {
+    Success,
+    Failure,
+}
+
+/// Process-installed observer for actual external SDK calls. Implementations receive no provider
+/// identity, endpoint, tenant, binding, error text or secret material.
+pub trait SecretExternalDependencyObserver: Send + Sync {
+    fn observe(
+        &self,
+        dependency: SecretExternalDependency,
+        outcome: SecretExternalDependencyOutcome,
+    );
+}
+
+#[derive(Debug)]
+struct NoopSecretExternalDependencyObserver;
+
+impl SecretExternalDependencyObserver for NoopSecretExternalDependencyObserver {
+    fn observe(
+        &self,
+        _dependency: SecretExternalDependency,
+        _outcome: SecretExternalDependencyOutcome,
+    ) {
+    }
+}
+
 /// Non-clone decrypted reference to an object owned by the external Secret Provider.
 pub struct OpaqueSecretReference(Vec<u8>);
 

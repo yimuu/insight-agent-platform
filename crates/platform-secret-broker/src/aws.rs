@@ -4,12 +4,14 @@
 //! chain, while every provider endpoint, KMS key and namespace is frozen by the CandidateManifest.
 
 use super::{
-    InstalledSecretProvider, InstalledSecretProviderCatalog, OpaqueSecretReference,
-    ProviderPreparedSecretVersion, ProviderSecretMaterial, ProviderStoredMcpOAuthTokenSecret,
-    ProviderStoredMcpOAuthTransientSecretBundle, SealedSecretReference,
-    SecretProviderDeleteDisposition, SecretProviderDeleteError, SecretProviderPrepareError,
-    SecretProviderResolveError, SecretReferenceSealError, SecretReferenceSealer,
-    SecretReferenceUnsealError, SecretReferenceUnsealer, MAX_OPAQUE_SECRET_REFERENCE_BYTES,
+    InstalledSecretProvider, InstalledSecretProviderCatalog, NoopSecretExternalDependencyObserver,
+    OpaqueSecretReference, ProviderPreparedSecretVersion, ProviderSecretMaterial,
+    ProviderStoredMcpOAuthTokenSecret, ProviderStoredMcpOAuthTransientSecretBundle,
+    SealedSecretReference, SecretExternalDependency, SecretExternalDependencyObserver,
+    SecretExternalDependencyOutcome, SecretProviderDeleteDisposition, SecretProviderDeleteError,
+    SecretProviderPrepareError, SecretProviderResolveError, SecretReferenceSealError,
+    SecretReferenceSealer, SecretReferenceUnsealError, SecretReferenceUnsealer,
+    MAX_OPAQUE_SECRET_REFERENCE_BYTES,
 };
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -184,6 +186,13 @@ impl AwsSecretProviderCatalog {
     pub async fn install(
         config: AwsSecretProviderCatalogConfig,
     ) -> Result<Self, AwsSecretProviderConfigError> {
+        Self::install_with_observer(config, Arc::new(NoopSecretExternalDependencyObserver)).await
+    }
+
+    pub async fn install_with_observer(
+        config: AwsSecretProviderCatalogConfig,
+        observer: Arc<dyn SecretExternalDependencyObserver>,
+    ) -> Result<Self, AwsSecretProviderConfigError> {
         config.validate()?;
         let mut installed: Vec<Arc<dyn InstalledSecretProvider>> = Vec::new();
         let mut kms = HashMap::new();
@@ -231,12 +240,14 @@ impl AwsSecretProviderCatalog {
             let kms_binding = Arc::new(AwsKmsBinding {
                 client: kms_client,
                 key_id: Arc::clone(&kms_key_arn),
+                observer: Arc::clone(&observer),
             });
             kms.insert(provider_id.clone(), Arc::clone(&kms_binding));
             readiness.push(AwsProviderReadiness {
                 secrets: secrets.clone(),
                 readiness_secret_id: Arc::from(provider.readiness_secret_id),
                 kms: kms_binding,
+                observer: Arc::clone(&observer),
             });
             installed.push(Arc::new(AwsSecretsManagerProvider {
                 provider_id,
@@ -244,6 +255,7 @@ impl AwsSecretProviderCatalog {
                 kms_key_arn,
                 secret_arn_prefix,
                 secret_name_prefix: Arc::from(provider.secret_name_prefix),
+                observer: Arc::clone(&observer),
             }));
         }
         let providers = InstalledSecretProviderCatalog::new(installed)
@@ -279,28 +291,40 @@ struct AwsProviderReadiness {
     secrets: SecretsClient,
     readiness_secret_id: Arc<str>,
     kms: Arc<AwsKmsBinding>,
+    observer: Arc<dyn SecretExternalDependencyObserver>,
 }
 
 impl AwsProviderReadiness {
     async fn check(&self) -> Result<(), AwsSecretProviderReadinessError> {
-        let secret = self
+        let result = self
             .secrets
             .describe_secret()
             .secret_id(&*self.readiness_secret_id)
             .send()
-            .await
-            .map_err(|_| AwsSecretProviderReadinessError::SecretsManagerUnavailable)?;
+            .await;
+        observe_external(
+            &self.observer,
+            SecretExternalDependency::Secret,
+            result.is_ok(),
+        );
+        let secret =
+            result.map_err(|_| AwsSecretProviderReadinessError::SecretsManagerUnavailable)?;
         if secret.arn() != Some(&*self.readiness_secret_id) || secret.deleted_date().is_some() {
             return Err(AwsSecretProviderReadinessError::SecretsManagerInvalidEvidence);
         }
-        let key = self
+        let result = self
             .kms
             .client
             .describe_key()
             .key_id(&*self.kms.key_id)
             .send()
-            .await
-            .map_err(|_| AwsSecretProviderReadinessError::KmsUnavailable)?;
+            .await;
+        observe_external(
+            &self.observer,
+            SecretExternalDependency::Kms,
+            result.is_ok(),
+        );
+        let key = result.map_err(|_| AwsSecretProviderReadinessError::KmsUnavailable)?;
         let metadata = key
             .key_metadata()
             .ok_or(AwsSecretProviderReadinessError::KmsInvalidEvidence)?;
@@ -319,6 +343,7 @@ impl AwsProviderReadiness {
 struct AwsKmsBinding {
     client: KmsClient,
     key_id: Arc<str>,
+    observer: Arc<dyn SecretExternalDependencyObserver>,
 }
 
 struct AwsSecretReferenceKms {
@@ -352,7 +377,7 @@ impl SecretReferenceSealer for AwsSecretReferenceKms {
             binding_generation,
             &binding.key_id,
         );
-        let output = binding
+        let result = binding
             .client
             .encrypt()
             .key_id(&*binding.key_id)
@@ -360,17 +385,22 @@ impl SecretReferenceSealer for AwsSecretReferenceKms {
             .set_encryption_context(Some(context))
             .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
             .send()
-            .await
-            .map_err(|error| match error.as_service_error() {
-                Some(service)
-                    if service.is_disabled_exception()
-                        || service.is_kms_invalid_state_exception()
-                        || service.is_not_found_exception() =>
-                {
-                    SecretReferenceSealError::Rejected
-                }
-                _ => SecretReferenceSealError::Unavailable,
-            })?;
+            .await;
+        observe_external(
+            &binding.observer,
+            SecretExternalDependency::Kms,
+            result.is_ok(),
+        );
+        let output = result.map_err(|error| match error.as_service_error() {
+            Some(service)
+                if service.is_disabled_exception()
+                    || service.is_kms_invalid_state_exception()
+                    || service.is_not_found_exception() =>
+            {
+                SecretReferenceSealError::Rejected
+            }
+            _ => SecretReferenceSealError::Unavailable,
+        })?;
         if output.key_id() != Some(&*binding.key_id)
             || output.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
         {
@@ -412,7 +442,7 @@ impl SecretReferenceUnsealer for AwsSecretReferenceKms {
             binding_record.generation,
             &binding.key_id,
         );
-        let output = binding
+        let result = binding
             .client
             .decrypt()
             .key_id(&*binding.key_id)
@@ -420,21 +450,26 @@ impl SecretReferenceUnsealer for AwsSecretReferenceKms {
             .set_encryption_context(Some(context))
             .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
             .send()
-            .await
-            .map_err(|error| match error.as_service_error() {
-                Some(service)
-                    if service.is_incorrect_key_exception()
-                        || service.is_invalid_ciphertext_exception()
-                        || service.is_invalid_grant_token_exception()
-                        || service.is_invalid_key_usage_exception()
-                        || service.is_not_found_exception()
-                        || service.is_disabled_exception()
-                        || service.is_kms_invalid_state_exception() =>
-                {
-                    SecretReferenceUnsealError::Rejected
-                }
-                _ => SecretReferenceUnsealError::Unavailable,
-            })?;
+            .await;
+        observe_external(
+            &binding.observer,
+            SecretExternalDependency::Kms,
+            result.is_ok(),
+        );
+        let output = result.map_err(|error| match error.as_service_error() {
+            Some(service)
+                if service.is_incorrect_key_exception()
+                    || service.is_invalid_ciphertext_exception()
+                    || service.is_invalid_grant_token_exception()
+                    || service.is_invalid_key_usage_exception()
+                    || service.is_not_found_exception()
+                    || service.is_disabled_exception()
+                    || service.is_kms_invalid_state_exception() =>
+            {
+                SecretReferenceUnsealError::Rejected
+            }
+            _ => SecretReferenceUnsealError::Unavailable,
+        })?;
         if output.key_id() != Some(&*binding.key_id)
             || output.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
             || output.ciphertext_for_recipient().is_some()
@@ -523,6 +558,7 @@ struct AwsSecretsManagerProvider {
     kms_key_arn: Arc<str>,
     secret_arn_prefix: Arc<str>,
     secret_name_prefix: Arc<str>,
+    observer: Arc<dyn SecretExternalDependencyObserver>,
 }
 
 impl fmt::Debug for AwsSecretsManagerProvider {
@@ -634,24 +670,30 @@ impl InstalledSecretProvider for AwsSecretsManagerProvider {
         if output.version_id() != reference.version_id.as_deref() {
             return Err(SecretProviderDeleteError::Rejected);
         }
-        self.client
+        let result = self
+            .client
             .delete_secret()
             .secret_id(&reference.secret_id)
             .recovery_window_in_days(7)
             .send()
-            .await
-            .map_err(|error| match error.as_service_error() {
-                Some(service) if service.is_resource_not_found_exception() => {
-                    SecretProviderDeleteError::OutcomeUncertain
-                }
-                Some(service)
-                    if service.is_invalid_parameter_exception()
-                        || service.is_invalid_request_exception() =>
-                {
-                    SecretProviderDeleteError::Rejected
-                }
-                _ => SecretProviderDeleteError::OutcomeUncertain,
-            })?;
+            .await;
+        observe_external(
+            &self.observer,
+            SecretExternalDependency::Secret,
+            result.is_ok(),
+        );
+        result.map_err(|error| match error.as_service_error() {
+            Some(service) if service.is_resource_not_found_exception() => {
+                SecretProviderDeleteError::OutcomeUncertain
+            }
+            Some(service)
+                if service.is_invalid_parameter_exception()
+                    || service.is_invalid_request_exception() =>
+            {
+                SecretProviderDeleteError::Rejected
+            }
+            _ => SecretProviderDeleteError::OutcomeUncertain,
+        })?;
         Ok(SecretProviderDeleteDisposition::Deleted)
     }
 
@@ -840,21 +882,24 @@ impl AwsSecretsManagerProvider {
         if let Some(stage) = &reference.version_stage {
             request = request.version_stage(stage);
         }
-        let output = request
-            .send()
-            .await
-            .map_err(|error| match error.as_service_error() {
-                Some(service) if service.is_resource_not_found_exception() => {
-                    SecretProviderResolveError::NotFound
-                }
-                Some(service)
-                    if service.is_invalid_parameter_exception()
-                        || service.is_invalid_request_exception() =>
-                {
-                    SecretProviderResolveError::Rejected
-                }
-                _ => SecretProviderResolveError::Unavailable,
-            })?;
+        let result = request.send().await;
+        observe_external(
+            &self.observer,
+            SecretExternalDependency::Secret,
+            result.is_ok(),
+        );
+        let output = result.map_err(|error| match error.as_service_error() {
+            Some(service) if service.is_resource_not_found_exception() => {
+                SecretProviderResolveError::NotFound
+            }
+            Some(service)
+                if service.is_invalid_parameter_exception()
+                    || service.is_invalid_request_exception() =>
+            {
+                SecretProviderResolveError::Rejected
+            }
+            _ => SecretProviderResolveError::Unavailable,
+        })?;
         if !secret_identity_matches(&reference.secret_id, &output) {
             return Err(SecretProviderResolveError::InvalidEvidence);
         }
@@ -865,11 +910,18 @@ impl AwsSecretsManagerProvider {
         &self,
         secret_id: &str,
     ) -> Result<bool, SecretProviderDeleteError> {
-        self.client
+        let result = self
+            .client
             .describe_secret()
             .secret_id(secret_id)
             .send()
-            .await
+            .await;
+        observe_external(
+            &self.observer,
+            SecretExternalDependency::Secret,
+            result.is_ok(),
+        );
+        result
             .map(|output| output.deleted_date().is_some())
             .map_err(|error| match error.as_service_error() {
                 Some(service) if service.is_resource_not_found_exception() => {
@@ -939,6 +991,11 @@ impl AwsSecretsManagerProvider {
             .secret_binary(SecretBlob::new(std::mem::take(&mut bytes)))
             .send()
             .await;
+        observe_external(
+            &self.observer,
+            SecretExternalDependency::Secret,
+            result.is_ok(),
+        );
         bytes.fill(0);
         match result {
             Ok(output) => {
@@ -1037,6 +1094,21 @@ impl AwsSecretsManagerProvider {
             },
         })
     }
+}
+
+fn observe_external(
+    observer: &Arc<dyn SecretExternalDependencyObserver>,
+    dependency: SecretExternalDependency,
+    success: bool,
+) {
+    observer.observe(
+        dependency,
+        if success {
+            SecretExternalDependencyOutcome::Success
+        } else {
+            SecretExternalDependencyOutcome::Failure
+        },
+    );
 }
 
 struct StoredPreparedSecret {

@@ -521,6 +521,11 @@ success/failure；安装时拒绝空集、重复或超量依赖，运行时拒�
 Security Authority首先在两条真实PostgreSQL repository调用完成后记录结果，认证前置拒绝不冒充数据库故障，并与既有真实SQLx pool capacity
 共用同一process metrics surface。shared owner与Authority tests及strict Clippy通过；其余role真实调用边界、对应alerts和production scrape仍待接入。
 
+r302把Egress Broker的Secret/KMS dependency health接到AWS SDK真实请求返回边界。Secret Broker定义不含任何业务标识的observer port；
+Secrets Manager的describe/get/delete/create与KMS的describe/encrypt/decrypt只在实际`send`返回后记录success/failure，本地catalog、policy、reference、
+identity或permit拒绝不冒充外部故障。Egress composition把两种nominal依赖映射到shared `secret`/`kms` series，并与既有11-lane capacity同surface导出；
+observer不接收tenant、provider、endpoint、ARN、错误或Secret正文。Secret/Egress tests、strict Clippy及部署/redaction门禁通过；真实AWS fault仍归L4～L5。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。
