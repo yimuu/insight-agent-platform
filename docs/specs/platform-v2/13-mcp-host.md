@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-197 |
-| 日期 | 2026-08-26 |
+| 状态 | Accepted / CR-198 |
+| 日期 | 2026-08-27 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
+
+> CR-198 impact：discovery admission预分配Artifact/Blob、一个`ArtifactScan` Job及stage/verify quota/policy/retention closure。MCP Job只拥有
+> 远端descriptor attempt和最终Discovery owner transaction；Artifact Data Worker最多把候选推进`Verified`。两者通过Event/Outbox durable wake
+> 交接，最终事务才执行`Verified -> Ready`、Evidence Link、Discovery Snapshot和两个Job结算。内部验证Job不是public Operation。
 
 > CR-197 impact：Worker→Host→Egress的mTLS RPC必须传播03合法parent；Host/Egress各生成child span。Egress发往remote Streamable HTTP、OAuth
 > token endpoint或subscription stream时剥离内部`traceparent`、`tracestate`和`baggage`，远端返回同名header也不进入内部context。
@@ -88,6 +92,20 @@ discovery是durable Job，结果是immutable Discovery Snapshot，包含：
 Public discovery command必须显式携带当前principal可用的`authorization_binding_id`与bounded deadline。Host在创建Job的同一事务
 重验binding tenant、principal kind/generation、exact MCP Deployment、audience、scope、credential generation与expiry；Gateway不得
 通过“第一条可用binding”、active head或自由header猜测授权。Receipt replay返回第一次冻结的binding与Job结果。
+
+同一admission事务还必须创建exact Artifact、Blob与`ArtifactScan` Job，冻结media、maximum bytes、expected digest mode、classification、
+retention、stage/verify policy、quota reservation和MCP owner generation。该内部Job初始等待stage，不单独投影为public Operation；任一identity、
+policy、quota或retention闭包无法冻结时，MCP Job不得进入可领取状态。
+
+Egress discovery只返回有界canonical descriptor bytes及其digest、count、protocol negotiation和safe failure evidence，不接收object locator，
+也不写数据库。MCP Worker用exact current MCP fence和预分配identity调用Artifact Data Worker的closed `StageWorkloadArtifact`；相同owner generation
+与digest重试返回同一stage结果，冲突digest fail closed。成功stage唤醒`ArtifactScan` Job，MCP Job记录不含正文的bounded transport evidence后
+进入durable wait并释放permit。
+
+Artifact Data Worker领取验证Job并最多推进Artifact到`Verified`，以Event/Outbox唤醒MCP owner。恢复后的MCP attempt若观察到匹配的Verified
+evidence，不得再次dispatch远端；它在一个PostgreSQL事务中锁定MCP Job、验证Job、Artifact、Blob、quota与Receipt，原子执行
+`Verified -> Ready`、创建`Evidence` ArtifactLink和immutable Discovery Snapshot、terminalize MCP Job、结算验证Job/配额并写Event/Outbox。
+错generation/digest、Rejected/Quarantined、超时或取消以closed failure结算；任何崩溃窗口都不得留下Ready但无Link/Snapshot的Artifact。
 
 ## 6. Tool、Resource 与Prompt
 

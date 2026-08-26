@@ -1,10 +1,34 @@
-# Platform v2 00～18 Cross-review（CR-197）
+# Platform v2 00～18 Cross-review（CR-198）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-197 Accepted |
-| 日期 | 2026-08-26 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-197 durable trace propagation feedback |
+| 状态 | Closed / CR-198 Accepted |
+| 日期 | 2026-08-27 |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-198 MCP discovery Artifact handoff feedback |
+
+### CR-198 MCP discovery Artifact handoff impact review
+
+production discovery driver接线确认13的直接Discovery Snapshot commit假设结果Artifact已经Ready，但15要求internal producer在owner Job开始前
+预分配Artifact closure，并禁止Data Worker推进Ready。若MCP Worker自行写object/验证，或先Ready再分别写Link/Snapshot，都会绕过Artifact
+authority并产生部分提交。CR-198使用既有MCP discovery Job与一个预分配的shared `ArtifactScan` Job形成durable两段交接。
+
+| Spec | CR-198结论 |
+|---|---|
+| 00～02 | clean `/v1`、plane、Resource lifecycle与exact Deployment binding不变；登记两段交接，不新增resource noun |
+| 03 | 两个Job各自拥有lease/current state，以typed payload、Event/Outbox wake连接；最终owner事务重验双方fence并原子结算 |
+| 04 | admission在外部I/O前冻结stage/verify quota、classification、retention与Policy；Secret仍只在Egress最后一跳解析 |
+| 05～12 | Plan/Run/Subagent/Skill/Capability/Context contracts不变；discovery不是Run leaf、Invocation或Context Observation |
+| 13 | MCP Job拥有远端descriptor attempt与最终Snapshot；Egress只返回bounded bytes/evidence，Worker经closed Artifact stage后durable park |
+| 14 | Sandbox无变化；不得借Sandbox或脚本执行discovery/scan |
+| 15 | Data Worker拥有stage与`ArtifactScan` Job，最多推进Verified；MCP owner事务推进Ready并创建Evidence Link/Snapshot |
+| 16 | Model Inline-only与ModelTurn不变；descriptor正文不进入Model输出路径 |
+| 17 | public command/Operation仍只投影MCP Job；内部Artifact/Blob/verify Job与storage evidence不公开 |
+| 18 | `mcp_host` role新增独立discovery workload pool；Artifact仍三role，增加stage/verify/wake/finalize kill与capacity矩阵 |
+
+复核覆盖state ownership、IDs、closed JSON/protobuf schema、errors、transactions、events、permissions、capacity、failure recovery与fixtures：
+Artifact/Blob/verify Job identity由admission生成并冻结，Egress和public caller不能覆盖；stage/verify/owner finalize分别使用exact latest fence；
+Rejected/Quarantined/timeout/cancel有closed settlement；message丢失由PostgreSQL scan恢复。CR-198不新增table、aggregate、public route、WorkClass、
+JobKind、ComponentRole、Artifact role或Secret路径。受影响00、03、13、15、17、18恢复Accepted / CR-198，Implementation Authorization恢复有效。
 
 ### CR-197 durable trace identity and transport impact review
 
@@ -804,10 +828,13 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 28. r329以`jobs.job_kind`贯通baseline、全部Job写读与Artifact/Context热claim，并把managed MCP physical session收敛到合法共享Job owner；
     Sandbox capability与managed MCP session由closed JobKind区分。checker锁定INSERT完整性且禁止JSON kind热路由/未注册SQL owner，不新增表、
     aggregate、public字段或兼容路径；fresh PG16与production-equivalent资格仍按18独立取证。
+29. Acceptance 36：CR-198 discovery admission预分配exact Artifact/Blob/`ArtifactScan` Job与quota/policy/retention closure；Egress仅返回bounded canonical bytes，
+    Data Worker最多推进Verified，MCP owner以durable wake恢复并在一个事务中创建Ready Evidence Link、Discovery Snapshot及双Job结算。L1～L4
+    覆盖wrong identity/fence/digest、message全丢、所有stage/verify/finalize kill窗口及独立pool饱和，且无新增表、JobKind、role或public DTO。
 
 ## 16. 未决项
 
-CR-193合同范围没有未关闭P0/P1。Acceptance 35与既有13～34形成单一闭包，00～18状态为Accepted。
+CR-198合同范围没有未关闭P0/P1。Acceptance 36与既有13～35形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

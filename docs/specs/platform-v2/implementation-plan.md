@@ -1,10 +1,15 @@
-# Platform v2 四阶段实现计划（CR-197）
+# Platform v2 四阶段实现计划（CR-198）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-197 trace implementation complete; observability and external L4～L6 pending |
-| 日期 | 2026-08-26 |
-| 合同输入 | 00～18、cross-review CR-197、ADR-0001、ADR-0002、AGENTS.md |
+| 状态 | In Progress / CR-198 MCP discovery Artifact handoff authorized; external L4～L6 pending |
+| 日期 | 2026-08-27 |
+| 合同输入 | 00～18、cross-review CR-198、ADR-0001、ADR-0002、AGENTS.md |
+
+> CR-198 implementation order：先扩展discovery admission/payload，一次预分配Artifact、Blob、`ArtifactScan` Job及stage/verify closure；再实现
+> Egress bounded descriptor response和Artifact Data Worker `StageWorkloadArtifact`/verify wake；随后把Discovery Worker改为transport→stage→park与
+> verified wake→单事务finalize两条恢复路径；最后增加独立discovery workload pool、queue/dependency/capacity metrics及L1～L4 kill矩阵。
+> 禁止MCP Worker直接写object/扫描、Data Worker直推Ready、public暴露verify Job，或用内存future/message receipt代替durable wake。
 
 > CR-197 implementation order：先生成03 `TraceId/TraceIdentityV1/W3cTraceParent` nominal contracts和17 public projections，再将trace ID
 > 加入Run/Job/Event的owner snapshots与PostgreSQL baseline；随后接公共HTTP middleware、各internal mTLS RPC和durable reclaim，最后以第三方
@@ -920,6 +925,9 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 3. **Remote MCP Host**
 
    - Streamable HTTP negotiation、显式authorization binding的discovery、Tool/Resource/Prompt projection、Task/Elicitation、OAuth和subscription；
+   - discovery admission预分配Artifact/Blob/`ArtifactScan` Job；Egress只返回bounded canonical descriptor bytes，Data Worker stage/verify后
+     以durable wake恢复MCP owner，最终事务原子创建Ready Evidence Link与Discovery Snapshot并结算双方Job/配额；
+   - `mcp_host` ComponentRole下使用独立discovery workload pool，不复用Tool Host或Resource Host的DB/permit；
    - Egress Broker last-hop Secret resolution、catalog endpoint、SSRF/TLS/redirect/DNS/rate/byte/time limits；
    - 无stdio process、persistent Sandbox session或session child Job。
 

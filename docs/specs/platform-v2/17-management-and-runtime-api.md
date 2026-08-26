@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-197 |
-| 日期 | 2026-08-26 |
+| 状态 | Accepted / CR-198 |
+| 日期 | 2026-08-27 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-198 impact：public MCP discovery command、Receipt replay与Operation DTO仍只投影MCP owner Job。预分配Artifact/Blob、内部
+> `ArtifactScan` Job、stage proof、verification evidence和storage locator均不进入public request/response；调用方不能选择、替换或轮询内部Job。
 
 > CR-197 impact：公共请求可省略`traceparent`并由Gateway生成，也可提交03 exact version-00 parent；非法parent、任意`tracestate`或`baggage`
 > 以`invalid_request`拒绝。Gateway返回`trace-id` response header，`ApiProblemV1.trace_id`与SSE durable Event trace ID均取同一opaque ID；调用方

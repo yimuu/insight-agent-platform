@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-197 |
-| 日期 | 2026-08-26 |
+| 状态 | Accepted / CR-198 |
+| 日期 | 2026-08-27 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
+
+> CR-198 impact：MCP discovery使用`mcp_host` ComponentRole下独立workload pool，拥有自己的ServiceAccount、restricted PostgreSQL pool、
+> Egress/Artifact Data Worker mTLS clients、claim/permit/queue metrics与bounded drain；不复用RPC-only Tool Host或subscription Resource Host的
+> pool。Artifact验证仍由既有Data Worker role/pool执行。资格增加stage前后、verify前后、wake后/final owner commit前后的kill/reclaim窗口。
 
 > CR-197 impact：qualification增加public traceparent正负、Gateway→Scheduler/Worker→MCP/Egress/Sandbox/Artifact跨进程同trace/new-span、
 > kill/reclaim continuity、Event/problem correlation和第三方零trace-header计数。`tracestate`/`baggage`、payload/identity canary必须在动态采集结果中
@@ -248,6 +252,14 @@ RBAC、NetworkPolicy和Context/MCP各自饱和验证只有允许的Context→Hos
 CR-194 L1增加`resources/list` closed registry、Resources capability与ReadOnly effect、独立per-method limits及unknown/missing limit拒绝；L3的
 full reconcile fake server必须观察一次有界list和对允许集合的有界read，任一步骤响应后强杀均只允许同一ReadOnly Job的新attempt重读，且Host、
 Job/Event/Receipt与日志均不保存remote body或自由URI。
+
+CR-198 L1覆盖discovery admission预分配闭包、canonical descriptor limits、same-generation stage幂等、wrong digest/fence拒绝及Verified-only
+Data Worker；L2 fresh PostgreSQL覆盖MCP Job与`ArtifactScan` Job的typed关联、stage wake、verify wake、最终`Verified -> Ready` + Evidence Link +
+Discovery Snapshot + 双Job/quota结算的单事务first-winner。L3使用独立Discovery Worker、Egress Broker、Artifact Data Worker和真实Streamable HTTP/
+object storage fixture，在远端response前后、stage commit前后、verify前后、owner wake后/final commit前分别kill/reclaim；证明remote副作用只按
+ReadOnly重试合同发生、stage不重复创建candidate、Data Worker不直推Ready、message全丢仍由DB恢复、stale fence零写入且最终只有一个Snapshot/Link。
+L4验证discovery pool的ServiceAccount、DB/Egress/Artifact mTLS、NetworkPolicy、PDB/HPA与CapacityProfile聚合；任一discovery或Artifact verify lane
+饱和不得消耗Tool Host、Resource Host、Context、Capability、Model或Sandbox保留容量。
 
 L4 rollout preflight必须从待资格cluster读取live Deployment/DaemonSet、NetworkPolicy、PDB与HPA inventory，并对照同一production
 CandidateManifest和CapacityProfile fail closed验证：closed ComponentRole closure、exact digest image、controller observed generation、全部

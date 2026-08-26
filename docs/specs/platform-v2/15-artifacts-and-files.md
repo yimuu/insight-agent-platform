@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-197 |
-| 日期 | 2026-08-20 |
+| 状态 | Accepted / CR-198 |
+| 日期 | 2026-08-27 |
 | 依赖 | 02、03、04、07、09、10、12、13 |
 | 直接下游 | 16、17、18 |
+
+> CR-198 impact：MCP discovery与其他internal producer一样必须在owner Job开始前预分配Artifact/Blob、`ArtifactScan` Job及完整
+> stage/verify closure。Data Worker拥有stage和验证Job lease，最多推进到`Verified`；业务owner收到durable wake后，在自己的terminal
+> transaction中推进`Ready`并同时创建typed Link与业务结果。该交接不增加producer role、表、WorkClass或JobKind。
 
 > CR-197 impact：Gateway/Data Worker/Maintenance与Sandbox/Model/Scheduler调用传播同一trace ID；storage SDK/object request不接收平台内部
 > correlation header。object key、upload target/proof、locator和正文禁止进入span attribute；Artifact/Blob/Grant状态仍是唯一业务authority。
@@ -135,6 +139,10 @@ classification和retention。不接受object key或通用owner JSON。
 
 同一owner generation重试必须返回同一Artifact identity或stable conflict，不得无界创建candidate。
 
+admission必须同时创建一个shared `ArtifactScan` Job并在payload中双向冻结owner Job、Artifact、Blob、purpose、expected generation、
+stage/verify policy与quota reservation。验证Job在stage完成前保持不可领取的durable wait；`StageWorkloadArtifact`成功事务只推进candidate、
+使该Job到期可领并写Event/Outbox wake，不terminalize业务owner。MCP等producer可在等待期间释放自身permit，重启后只从PostgreSQL恢复。
+
 ### 5.3 Verification
 
 verify按kind/purpose的published profile执行：
@@ -149,6 +157,9 @@ verify按kind/purpose的published profile执行：
 success推进`Uploaded -> Verifying -> Verified`，failure推进`Rejected`或`Quarantined`。verification Job与Artifact状态
 同事务协调，但Job不是第二Artifact current-state authority。
 
+成功验证在同一事务中保存bounded `VerificationEvidence`、推进`Verified`、结算验证attempt并向exact owner Job发出durable wake；它不得推进
+`Ready`、创建ArtifactLink或写Discovery/RunValue等业务结果。Rejected/Quarantined同样以durable wake让owner按其closed failure合同结算。
+
 ### 5.4 Ready commit
 
 业务owner terminal事务必须重新锁定：
@@ -160,6 +171,10 @@ success推进`Uploaded -> Verifying -> Verified`，failure推进`Rejected`或`Qu
 
 然后原子推进Ready、创建ArtifactLink/RunValue、提交owner outcome、关闭Job、settle quota并写Event/Outbox。
 任一失败不得留下可读的无owner Artifact。
+
+若owner使用独立Artifact验证Job，terminal事务还必须锁定该Job及其latest terminal verification evidence，确认其owner/Artifact/Blob/
+generation与当前业务Job payload精确匹配。事务原子推进`Verified -> Ready`、创建typed Link和业务结果、terminalize或确认验证Job已终态、
+settle双方reservation并写Receipt/Event/Outbox；任何字段漂移均不得通过重新stage或重新dispatch外部副作用来修复。
 
 ## 6. ArtifactLink 与所有权
 

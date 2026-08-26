@@ -2,11 +2,18 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-197 |
-| 日期 | 2026-08-26 |
+| 状态 | Accepted / CR-198 |
+| 日期 | 2026-08-27 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
+
+> 2026-08-27 implementation feedback（CR-198）：production MCP discovery接线发现，13允许owner Job在结果Artifact已经
+> `Ready`后创建Discovery Snapshot，而15要求Capability/Context/MCP/Sandbox在owner Job开始前预分配Artifact/Blob、验证Job、配额与
+> retention closure，并且只有owner terminal transaction可原子执行`Verified -> Ready`、创建typed Link与业务结果。CR-198冻结两段持久化
+> 交接：MCP discovery Job只负责远端descriptor attempt；Artifact Data Worker以预分配的shared `ArtifactScan` Job完成stage/verify并最多推进
+> `Verified`；随后MCP owner由durable wake恢复，在一个事务中推进Ready、创建Evidence Link与Discovery Snapshot并结算两个Job。无新表、
+> aggregate、public route、WorkClass、JobKind或Artifact role；内部Artifact验证Job不投影为public discovery Operation。
 
 > 2026-08-26 implementation feedback（CR-197）：最终observability审计确认规范要求全组件传播trace identity，但machine/runtime合同没有
 > 一个可在Job lease、进程终止和恢复后重建的durable owner；仅转发自由`traceparent`会允许调用方伪造关联，也会在新Worker恢复时断链。
@@ -164,10 +171,10 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Accepted / CR-197 | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | Accepted / CR-198 | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-197 | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-196 | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-197 | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-198 | PostgreSQL、事务、Outbox、Lease、恢复 |
 | 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-197 | 多租户、授权、Secret、Effect、Quota、Approval |
 | 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-186 | Agent Interface、Typed Plan、Model Loop |
 | 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-197 | Run、NodeExecution、暂停、重试、取消 |
@@ -177,12 +184,12 @@ Platform v2 采用以下不可逆的架构决定：
 | 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-197 | 调用协议、幂等、同步快路径、异步恢复 |
 | 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-186 | Skill Package、发现、选择、绑定和依赖 |
 | 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-197 | ContextSource、检索、引用和数据权限 |
-| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-197 | MCP Transport、OAuth、投影、Task 和 Subscription |
+| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-198 | MCP Transport、OAuth、投影、Task 和 Subscription |
 | 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-197 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
-| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-197 | S3、内容寻址、上传、生命周期和内容安全 |
+| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-198 | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-197 | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-197 | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-197 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-198 | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-198 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得
