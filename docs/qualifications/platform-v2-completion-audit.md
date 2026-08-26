@@ -120,6 +120,11 @@ r311把Management/Runtime Gateway各自restricted PostgreSQL pool接到共享15�
 shutdown grace实际bounded drain，超时中止残余任务；readiness和HTTP/API语义不变。adapter/8个binary tests与strict Clippy通过；本轮无真实PG成功fixture或
 production scrape，Runtime Artifact RPC observation仍待后续统一RPC observer批次。
 
+r312补齐反向审计发现的间接SQLx owner：Orchestration Worker通过`PostgresConnectionBulkheads`持有business/critical-control两个pool，现均接到共享15秒
+sampler并汇总为固定`component_role + postgresql + outcome`，不暴露pool、database、SQL或error；既有每秒Job/Outbox backlog/lag观测保持独立。signal、HTTP、
+runtime-finished或sampler退出都会关闭runtime、HTTP、sampler和bulkheads，readiness不变且不预装Artifact RPC series。adapter/binary tests与strict Clippy通过；
+本轮无真实PG成功fixture或production scrape，Artifact Scheduler实际RPC观测仍待后续批次。
+
 ## 3. Phase 1 审计
 
 ### 已满足

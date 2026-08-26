@@ -1,5 +1,9 @@
 //! Deployable durable orchestration process for the clean-cut Platform v1 candidate.
 
+mod dependency_observer;
+
+use dependency_observer::install_postgres_dependency_metrics;
+
 use insight_platform_artifact_rpc::{ArtifactInternalRpcLimits, ArtifactSchedulerGrpcClient};
 use insight_platform_artifacts::MAX_TYPED_PLAN_ARTIFACT_BYTES;
 use insight_platform_contracts::{
@@ -13,6 +17,7 @@ use insight_platform_observability::{
 };
 use insight_platform_orchestrator::{ExpressionLimits, PlanLimits};
 use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler,
     operational_metrics::{observe_durable_job_queue, observe_durable_outbox},
     repository::SafetyScanShard,
     verify_schema,
@@ -29,6 +34,7 @@ use insight_platform_runtime::{
 use insight_platform_worker::LocalWorkerPools;
 use serde::Deserialize;
 use std::{error::Error, fmt, io::Read as _, path::PathBuf, sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 use url::Url;
 use uuid::Uuid;
@@ -278,6 +284,10 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(bulkheads.critical_control_pool())
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
+    let business_health_pool = bulkheads.business_pool().clone();
+    let critical_control_health_pool = bulkheads.critical_control_pool().clone();
+    let (dependency_metrics, postgres_observer) =
+        install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let artifact_client = Arc::new(connect_artifact(&config).await?);
     let process_generation_id: ResourceId = format!(
         "{}_{}",
@@ -308,12 +318,14 @@ async fn run() -> Result<(), ProcessError> {
             PROCESS_OBSERVABILITY_OPERATIONS,
             Arc::clone(&operational_metrics),
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityFailed)?;
     let (http_shutdown, http_shutdown_receiver) = tokio::sync::oneshot::channel();
+    let mut http_shutdown = Some(http_shutdown);
     let router = process_observability_router(Arc::clone(&metrics));
     let mut http = tokio::spawn(async move {
         axum::serve(listener, router)
@@ -324,6 +336,22 @@ async fn run() -> Result<(), ProcessError> {
     });
     metrics.mark_ready();
     eprintln!("platform-orchestration-worker started");
+    let dependency_cancellation = CancellationToken::new();
+    let sampler_cancellation = dependency_cancellation.child_token();
+    let mut dependency_health = tokio::spawn(async move {
+        tokio::join!(
+            run_postgres_health_sampler(
+                business_health_pool,
+                Arc::clone(&postgres_observer),
+                sampler_cancellation.child_token(),
+            ),
+            run_postgres_health_sampler(
+                critical_control_health_pool,
+                postgres_observer,
+                sampler_cancellation,
+            ),
+        );
+    });
     let mut health = tokio::time::interval(Duration::from_secs(1));
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let shutdown = shutdown_signal();
@@ -331,20 +359,53 @@ async fn run() -> Result<(), ProcessError> {
     loop {
         tokio::select! {
             signal = &mut shutdown => {
-                signal?;
-                runtime.shutdown().await.map_err(|_| ProcessError::RuntimeFailed)?;
-                let _ = http_shutdown.send(());
-                http.await.map_err(|_| ProcessError::ObservabilityFailed)?
-                    .map_err(|_| ProcessError::ObservabilityFailed)?;
+                dependency_cancellation.cancel();
+                let runtime_result = runtime.shutdown().await
+                    .map_err(|_| ProcessError::RuntimeFailed);
+                if let Some(sender) = http_shutdown.take() {
+                    let _ = sender.send(());
+                }
+                let http_result = http.await.map_err(|_| ProcessError::ObservabilityFailed)
+                    .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+                let dependency_result = dependency_health.await
+                    .map_err(|_| ProcessError::DependencyObserverFailed);
                 bulkheads.close().await;
+                signal?;
+                runtime_result?;
+                http_result?;
+                dependency_result?;
                 return Ok(());
             }
             result = &mut http => {
-                result.map_err(|_| ProcessError::ObservabilityFailed)?
-                    .map_err(|_| ProcessError::ObservabilityFailed)?;
-                runtime.shutdown().await.map_err(|_| ProcessError::RuntimeFailed)?;
+                dependency_cancellation.cancel();
+                let http_result = result.map_err(|_| ProcessError::ObservabilityFailed)
+                    .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+                let runtime_result = runtime.shutdown().await
+                    .map_err(|_| ProcessError::RuntimeFailed);
+                let dependency_result = dependency_health.await
+                    .map_err(|_| ProcessError::DependencyObserverFailed);
                 bulkheads.close().await;
+                http_result?;
+                runtime_result?;
+                dependency_result?;
                 return Err(ProcessError::ObservabilityFailed);
+            }
+            result = &mut dependency_health => {
+                dependency_cancellation.cancel();
+                let dependency_result = result
+                    .map_err(|_| ProcessError::DependencyObserverFailed);
+                let runtime_result = runtime.shutdown().await
+                    .map_err(|_| ProcessError::RuntimeFailed);
+                if let Some(sender) = http_shutdown.take() {
+                    let _ = sender.send(());
+                }
+                let http_result = http.await.map_err(|_| ProcessError::ObservabilityFailed)
+                    .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+                bulkheads.close().await;
+                dependency_result?;
+                runtime_result?;
+                http_result?;
+                return Err(ProcessError::DependencyObserverFailed);
             }
             _ = health.tick() => {
                 update_operational_metrics(&operational_metrics, &observability_pools, &runtime);
@@ -368,8 +429,20 @@ async fn run() -> Result<(), ProcessError> {
                     Err(_) => operational_metrics.observe_database_failure(),
                 }
                 if runtime.is_finished() {
-                    runtime.shutdown().await.map_err(|_| ProcessError::RuntimeFailed)?;
+                    dependency_cancellation.cancel();
+                    let runtime_result = runtime.shutdown().await
+                        .map_err(|_| ProcessError::RuntimeFailed);
+                    if let Some(sender) = http_shutdown.take() {
+                        let _ = sender.send(());
+                    }
+                    let http_result = http.await.map_err(|_| ProcessError::ObservabilityFailed)
+                        .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+                    let dependency_result = dependency_health.await
+                        .map_err(|_| ProcessError::DependencyObserverFailed);
                     bulkheads.close().await;
+                    runtime_result?;
+                    http_result?;
+                    dependency_result?;
                     return Err(ProcessError::RuntimeExitedUnexpectedly);
                 }
             }
@@ -518,6 +591,7 @@ enum ProcessError {
     SignalUnavailable,
     RuntimeFailed,
     RuntimeExitedUnexpectedly,
+    DependencyObserverFailed,
     ObservabilityFailed,
 }
 
@@ -540,6 +614,9 @@ impl fmt::Display for ProcessError {
             Self::RuntimeFailed => formatter.write_str("orchestration runtime failed"),
             Self::RuntimeExitedUnexpectedly => {
                 formatter.write_str("orchestration runtime exited unexpectedly")
+            }
+            Self::DependencyObserverFailed => {
+                formatter.write_str("orchestration dependency observer failed")
             }
             Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }

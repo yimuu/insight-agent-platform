@@ -610,6 +610,12 @@
 > adapter/8个binary tests、strict Clippy、Gateway deployment、redaction与observability门禁通过；本轮无新增真实PG或production scrape证据，Runtime
 > Artifact RPC observation仍待统一RPC observer批次。
 
+> 2026-08-27 implementation evidence：r312补齐反向审计发现的间接SQLx owner：Orchestration Worker通过`PostgresConnectionBulkheads`持有
+> business/critical-control两个pool，现均接到共享15秒sampler并汇总为固定`component_role + postgresql + outcome`，不暴露pool、database、SQL或error；
+> 既有Job/Outbox backlog/lag query保持独立。signal、HTTP、runtime-finished或sampler退出都会关闭runtime、HTTP、sampler和bulkheads，readiness不变且不预装
+> Artifact RPC series。adapter/binary tests、strict Clippy、Orchestration deployment、redaction与observability门禁通过；本轮无新增真实PG或production scrape
+> 证据，Artifact Scheduler observation仍待后续批次。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

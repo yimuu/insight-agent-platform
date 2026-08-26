@@ -575,6 +575,11 @@ r311为Management与Runtime Gateway各自restricted SQLx pool安装共享Postgre
 配置的完整shutdown grace现在用于实际bounded drain，超时中止残余任务；readiness与HTTP/API语义不变。adapter/8个binary tests、strict Clippy、Gateway
 deployment、redaction与observability门禁通过；本轮没有新的真实PG或production scrape证据，Runtime Artifact RPC observation仍待统一RPC observer批次。
 
+r312补齐反向审计发现的间接SQLx owner：Orchestration Worker通过`PostgresConnectionBulkheads`持有business与critical-control两个pool，现均接到共享
+15秒sampler并汇总为固定`component_role + postgresql + success|failure`，不输出pool、database、SQL或error；既有Job/Outbox backlog/lag query保持独立。
+signal、HTTP、runtime-finished或sampler退出都会关闭runtime、HTTP、sampler与bulkheads，readiness不变且不预装Artifact Scheduler RPC series。adapter/binary
+tests、strict Clippy、Orchestration deployment、redaction与observability门禁通过；本轮没有新的真实PG或production scrape证据，Artifact observation仍待后续批次。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。
