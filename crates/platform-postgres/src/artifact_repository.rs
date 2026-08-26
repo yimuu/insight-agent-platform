@@ -42,7 +42,7 @@ use insight_platform_artifacts::{
 use insight_platform_contracts::{
     ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, BlobIntegrityState,
     CommandOutcome, DataClassification, DeploymentClosure, Effect, ExactVersionRef,
-    FrozenSlotTarget, JobState, Permission, PolicyKind, PrincipalKind, PrincipalSnapshot,
+    FrozenSlotTarget, JobKind, JobState, Permission, PolicyKind, PrincipalKind, PrincipalSnapshot,
     PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
     SandboxArtifactIoPolicyDocument, Sha256Digest, TenantConfig, WorkClass,
 };
@@ -3806,10 +3806,10 @@ impl ArtifactTransaction for PgArtifactTransaction {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, state,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, state,
                 attempt_limit, scheduled_at, deadline, request_digest,
                 payload_schema_version, payload, payload_digest, trace_id
-            ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'waiting',
+            ) VALUES ($1, $2, 'artifact_scan', 'artifact', 'artifact', $3, 'waiting',
                       1, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
@@ -5206,11 +5206,11 @@ impl ArtifactTransaction for PgArtifactTransaction {
             sqlx::query(
                 r#"
                 INSERT INTO insight_platform.jobs (
-                    tenant_id, job_id, work_class, owner_kind, owner_id, state,
+                    tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, state,
                     attempt_limit, scheduled_at, deadline, request_digest,
                     payload_schema_version, payload, payload_digest, created_at, updated_at,
                     trace_id
-                ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'waiting',
+                ) VALUES ($1, $2, 'artifact_delete', 'artifact', 'artifact', $3, 'waiting',
                           $4, $10, $5, $6, $7, $8, $9, $10, $10, $11)
                 "#,
             )
@@ -5360,11 +5360,11 @@ impl ArtifactTransaction for PgArtifactTransaction {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, state,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, state,
                 attempt_limit, scheduled_at, deadline, request_digest,
                 payload_schema_version, payload, payload_digest, created_at, updated_at,
                 trace_id
-            ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'ready',
+            ) VALUES ($1, $2, 'artifact_delete', 'artifact', 'artifact', $3, 'ready',
                       $4, $5, $6, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )
@@ -6489,6 +6489,15 @@ async fn insert_artifact_scan_job(
         .job
         .validate_for_owner(insert.artifact_id)
         .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let job_kind = match &insert.job {
+        ArtifactJobPayload::Scan { .. } => JobKind::ArtifactScan,
+        ArtifactJobPayload::Rescan { .. } => JobKind::ArtifactRescan,
+        ArtifactJobPayload::Delete { .. } | ArtifactJobPayload::BlobCleanup { .. } => {
+            return Err(RepositoryError::InvalidInput(
+                "Artifact scan insertion received a non-scan Job".to_owned(),
+            ));
+        }
+    };
     let payload = TypedPayload::new(1, &insert.job)?;
     let attempt_limit = i32::try_from(insert.limits.maximum_job_attempts()).map_err(|_| {
         RepositoryError::InvalidInput("Artifact scan attempt limit exceeds integer".to_owned())
@@ -6496,11 +6505,11 @@ async fn insert_artifact_scan_job(
     sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id,
             state, attempt_limit, scheduled_at, deadline, request_digest,
             payload_schema_version, payload, payload_digest
             , trace_id
-        ) VALUES ($1, $2, 'artifact', 'artifact', $3,
+        ) VALUES ($1, $2, $12, 'artifact', 'artifact', $3,
                   'ready', $4, $5, $6, $7, $8, $9, $10, $11)
         "#,
     )
@@ -6515,6 +6524,7 @@ async fn insert_artifact_scan_job(
     .bind(&payload.value)
     .bind(&payload.digest)
     .bind(insert.trace_id.to_string())
+    .bind(job_kind.as_str())
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -6962,11 +6972,11 @@ async fn insert_scan_duplicate_blob_cleanup_job(
     sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id,
             state, attempt_limit, scheduled_at, deadline, request_digest,
             payload_schema_version, payload, payload_digest
             , trace_id
-        ) VALUES ($1, $2, 'artifact', 'internal_blob', $3,
+        ) VALUES ($1, $2, 'artifact_blob_cleanup', 'artifact', 'internal_blob', $3,
                   'ready', $4, $5, $6, $7, $8, $9, $10,
                   (SELECT trace_id FROM insight_platform.jobs
                    WHERE tenant_id = $1 AND job_id = $11))

@@ -761,7 +761,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 2. 文档链接、编号、状态、术语、ID、owner、schema version和table budget对齐；
 3. `git diff --check`通过；
 4. implementation-plan的每个phase都只从Reviewed合同引用可观测行为和分层证据；
-5. 批准前不对外声明target API、topology、capacity、schema v7或runtime已经上线。
+5. 批准前不对外声明target API、topology、capacity、schema v8或runtime已经上线。
 6. gVisor topology复核确认Launcher Kubernetes权限不传播给Controller/WASI/guest，admission与RBAC是结构性双闸，Pod status不成为第二Job authority。
    Launcher process generation由同Pod非特权attestor经shared PID namespace与Pod-local UDS封装；只有Launcher container持有
    scoped projected Kubernetes token，attestor/guest均无API或host authority。
@@ -801,6 +801,9 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 26. Selection document不保存自引用digest；Policy `rules_digest`唯一等于document canonical digest，exact Revision/Deployment binding冻结runtime identity。
 27. r328将03已要求的Job kind落实为18项closed nominal registry及25项`JobKind × WorkClass × OwnerKind`machine mapping；该实施对齐不改变
     表预算、authority、public route、Plan/Profile版本或首发拓扑。PostgreSQL typed column与所有claim predicate贯通前仍是implementation gap。
+28. r329以`jobs.job_kind`贯通baseline、全部Job写读与Artifact/Context热claim，并把managed MCP physical session收敛到合法共享Job owner；
+    Sandbox capability与managed MCP session由closed JobKind区分。checker锁定INSERT完整性且禁止JSON kind热路由/未注册SQL owner，不新增表、
+    aggregate、public字段或兼容路径；fresh PG16与production-equivalent资格仍按18独立取证。
 
 ## 16. 未决项
 

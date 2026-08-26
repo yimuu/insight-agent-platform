@@ -468,6 +468,12 @@ r328修复剩余Artifact/Context/MCP队列审计暴露的上游合同缺口：�
 kind/work-class/owner三元组，生成registry与Python checker fail closed。contracts全目标、生成漂移与strict Clippy门禁通过；baseline typed column、
 31个production INSERT/读取及claim JSON hot predicate替换仍待下一批，因此不宣称JobKind persistence或剩余queue metrics闭合。
 
+r329把该machine contract贯通clean baseline与PostgreSQL repository：`jobs.job_kind`成为NOT NULL typed hot column，全部production/test Job INSERT与
+row decode按25项合法三元组fail closed；Artifact Data/Maintenance和Context Native/Remote领取改用typed kind，managed MCP Sandbox session收敛为
+共享Job的`owner_kind=job`，Sandbox指标进一步固定到`SandboxCapabilityExecution`而不混入MCP session。schema contract升至v8，独立checker锁定
+Job INSERT完整性、禁止JSON kind热谓词与未注册`sandbox_job` SQL owner。PostgreSQL all-target 35/35入口、strict Clippy和baseline checker通过；
+本轮没有fresh PG16 authority或production scrape，故不把这些本地门禁解释为L2/L4～L6新证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

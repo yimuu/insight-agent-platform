@@ -3129,13 +3129,13 @@ impl SandboxGatewayAuthority for PgRepository {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id,
                 run_id, node_id,
                 state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
                 deadline, priority, request_digest, quota_reservation_id,
                 payload_schema_version, payload, payload_digest, created_at, updated_at,
                 trace_id
-            ) VALUES ($1, $2, 'sandbox', 'job', $3, $4, $5, $6,
+            ) VALUES ($1, $2, 'sandbox_capability_execution', 'sandbox', 'job', $3, $4, $5, $6,
                       'ready', 1, 0, 1, 0, $7, $8, 0, $9, $10,
                       $11, $12, $13, $7, $7, $14)
             "#,

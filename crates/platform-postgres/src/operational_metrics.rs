@@ -1,6 +1,6 @@
 //! Read-only, bounded operational observations from the durable PostgreSQL authority.
 
-use insight_platform_contracts::WorkClass;
+use insight_platform_contracts::{JobKind, WorkClass};
 use sqlx::{PgPool, Row};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -26,9 +26,9 @@ pub enum DurableJobOwnerKind {
 }
 
 impl DurableJobOwnerKind {
-    const fn as_str(self) -> &'static str {
+    const fn selector(self) -> (&'static str, JobKind) {
         match self {
-            Self::SandboxExecution => "job",
+            Self::SandboxExecution => ("job", JobKind::SandboxCapabilityExecution),
         }
     }
 }
@@ -37,7 +37,7 @@ pub async fn observe_durable_job_queue(
     pool: &PgPool,
     work_class: WorkClass,
 ) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
-    observe_durable_job_queue_inner(pool, work_class, None).await
+    observe_durable_job_queue_inner(pool, work_class, None, None).await
 }
 
 pub async fn observe_durable_job_queue_for_owner(
@@ -45,13 +45,16 @@ pub async fn observe_durable_job_queue_for_owner(
     work_class: WorkClass,
     owner_kind: DurableJobOwnerKind,
 ) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
-    observe_durable_job_queue_inner(pool, work_class, Some(owner_kind.as_str())).await
+    let (owner_kind, job_kind) = owner_kind.selector();
+    observe_durable_job_queue_inner(pool, work_class, Some(owner_kind), Some(job_kind.as_str()))
+        .await
 }
 
 async fn observe_durable_job_queue_inner(
     pool: &PgPool,
     work_class: WorkClass,
     owner_kind: Option<&str>,
+    job_kind: Option<&str>,
 ) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
     let row = sqlx::query(
         r#"
@@ -69,6 +72,7 @@ async fn observe_durable_job_queue_inner(
             CROSS JOIN authority_now
             WHERE job.work_class = $1
               AND ($2::text IS NULL OR job.owner_kind = $2)
+              AND ($3::text IS NULL OR job.job_kind = $3)
               AND job.terminal_at IS NULL
               AND job.worker_id IS NULL
               AND job.state IN ('ready', 'retry_scheduled')
@@ -86,6 +90,7 @@ async fn observe_durable_job_queue_inner(
             CROSS JOIN authority_now
             WHERE job.work_class = $1
               AND ($2::text IS NULL OR job.owner_kind = $2)
+              AND ($3::text IS NULL OR job.job_kind = $3)
               AND job.terminal_at IS NULL
               AND job.worker_id IS NOT NULL
               AND job.lease_expires_at <= authority_now.observed_at
@@ -99,6 +104,7 @@ async fn observe_durable_job_queue_inner(
     )
     .bind(work_class.as_str())
     .bind(owner_kind)
+    .bind(job_kind)
     .fetch_one(pool)
     .await?;
 

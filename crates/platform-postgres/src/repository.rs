@@ -6,20 +6,20 @@ use insight_platform_context::{
     PrepareContextDispatch,
 };
 use insight_platform_contracts::{
-    canonical_digest, canonical_json, checked_in_hard_limit_profile, is_execution_work_owner_pair,
+    canonical_digest, canonical_json, checked_in_hard_limit_profile, is_job_kind_work_owner_triple,
     ActiveTarget, AdministrativeGate, AgentResourceSpec, ArtifactRef, AuthoringPackage,
     CandidateSelectionPolicyDocument, ClosedJsonSchema, ClosedJsonValue, CommandAudit,
     CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle,
     ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure,
     FailureClass, FailureCode, FailureSource, FrozenSlotTarget, HardLimitProfile,
-    InstallationPrincipalBinding, InvocationState, JobState, JsonLimits, NodeExecutionState,
-    Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind, PolicyReferenceRole,
-    PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
-    PublicRunEventType, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
-    ResourceDraftPayload, ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState,
-    SchedulerPriority, ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, TraceId, TraceIdentityV1, ValueRef, WorkClass,
-    MAX_RESOURCE_DEPENDENCIES,
+    InstallationPrincipalBinding, InvocationState, JobKind, JobState, JsonLimits,
+    NodeExecutionState, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
+    PolicyReferenceRole, PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind,
+    PrincipalSnapshot, PublicRunEventType, PublishedVersionPayload, RegistryResourceKind,
+    ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind, Retryability,
+    RunBindingsSnapshot, RunState, SchedulerPriority, ScopeState, SecretBindingPayload,
+    SecretPurpose, Sha256Digest, TenantConfig, TenantPrincipalPayload, TraceId, TraceIdentityV1,
+    ValueRef, WorkClass, MAX_RESOURCE_DEPENDENCIES,
 };
 use insight_platform_invocations::{
     decide_control as decide_capability_control, AdmitCapabilityInvocation, CapabilityControlKind,
@@ -3699,11 +3699,11 @@ impl PgRegistryTransaction {
         let row = sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, state,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, state,
                 attempt_limit, scheduled_at, deadline, priority, request_digest,
                 payload_schema_version, payload, payload_digest
             ) VALUES (
-                $1, $2, 'registry_validation', 'job', $3, $4, 'ready',
+                $1, $2, 'registry_validation', 'registry_validation', 'job', $3, $4, 'ready',
                 $5, GREATEST($6, clock_timestamp()), $7, 0, $8, $9, $10, $11
             )
             RETURNING *
@@ -4429,18 +4429,19 @@ impl PgRepository {
         let row = sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, invocation_id,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, invocation_id,
                 run_id, node_id, state, attempt_limit, scheduled_at, deadline, priority,
                 request_digest, effect_key_digest, payload_schema_version, payload, payload_digest
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, 'ready', $10,
-                GREATEST($11, clock_timestamp()), $12, $13, $14, $15, $16, $17, $18
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'ready', $11,
+                GREATEST($12, clock_timestamp()), $13, $14, $15, $16, $17, $18, $19
             )
             RETURNING *
             "#,
         )
         .bind(command.tenant_id)
         .bind(command.job_id)
+        .bind(command.job_kind)
         .bind(command.work_class)
         .bind(command.owner_kind)
         .bind(command.owner_id)
@@ -4467,7 +4468,7 @@ impl PgRepository {
         self.claim_jobs_filtered(command, None).await
     }
 
-    /// Claims Artifact work through a closed physical-role lane. The JSON predicate is part of
+    /// Claims Artifact work through a closed physical-role lane. The typed Job-kind predicate is part of
     /// the same `FOR UPDATE SKIP LOCKED` transaction as the lease, so one Artifact role cannot
     /// temporarily steal another role's work and starve its dedicated queue.
     pub async fn claim_artifact_jobs(
@@ -4475,7 +4476,7 @@ impl PgRepository {
         command: ClaimArtifactJobs,
     ) -> Result<Vec<JobRecord>, RepositoryError> {
         command.validate()?;
-        let payload_kinds = command.role.payload_kinds();
+        let job_kinds = command.role.job_kinds();
         self.claim_jobs_filtered(
             ClaimJobs {
                 work_class: WorkClass::Artifact.as_str().to_owned(),
@@ -4484,7 +4485,7 @@ impl PgRepository {
                 lease_milliseconds: command.lease_milliseconds,
                 lease_token_digests: command.lease_token_digests,
             },
-            Some(payload_kinds),
+            Some(job_kinds),
         )
         .await
     }
@@ -4492,7 +4493,7 @@ impl PgRepository {
     async fn claim_jobs_filtered(
         &self,
         command: ClaimJobs,
-        artifact_payload_kinds: Option<&'static [&'static str]>,
+        artifact_job_kinds: Option<&'static [&'static str]>,
     ) -> Result<Vec<JobRecord>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -4509,7 +4510,7 @@ impl PgRepository {
               AND scheduled_at <= $3
               AND (retry_at IS NULL OR retry_at <= $3)
               AND deadline > $3
-              AND ($4::text[] IS NULL OR payload ->> 'kind' = ANY($4::text[]))
+              AND ($4::text[] IS NULL OR job_kind = ANY($4::text[]))
             ORDER BY priority DESC, COALESCE(retry_at, scheduled_at), job_id
             FOR UPDATE SKIP LOCKED
             LIMIT $2
@@ -4518,7 +4519,7 @@ impl PgRepository {
         .bind(&command.work_class)
         .bind(i64::from(command.limit))
         .bind(database_now)
-        .bind(artifact_payload_kinds.map(|kinds| kinds.to_vec()))
+        .bind(artifact_job_kinds.map(|kinds| kinds.to_vec()))
         .fetch_all(&mut *transaction)
         .await?;
         let mut claimed = Vec::with_capacity(candidates.len());
@@ -13358,11 +13359,11 @@ pub(crate) async fn handoff_model_tool_continuation_in_transaction(
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
                 state, attempt_limit, scheduled_at, deadline, priority, request_digest,
                 payload_schema_version, payload, payload_digest
             ) VALUES (
-                $1, $2, 'orchestration', 'node_execution', $3,
+                $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
                 'ready', $5, $6, $7, $8, $9, $10, $11, $12
             ) RETURNING *
@@ -13789,11 +13790,11 @@ async fn settle_external_leaf_success_in_transaction(
     let continuation_job = sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
             state, attempt_limit, scheduled_at, deadline, priority, request_digest,
             payload_schema_version, payload, payload_digest
         ) VALUES (
-            $1, $2, 'orchestration', 'node_execution', $3,
+            $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
             'ready', $5, $6, $7, $8, $9, $10, $11, $12
         ) RETURNING *
@@ -14062,11 +14063,11 @@ async fn settle_external_leaf_failure_in_transaction(
     let convergence_job = sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
             state, attempt_limit, scheduled_at, deadline, priority, request_digest,
             payload_schema_version, payload, payload_digest
         ) VALUES (
-            $1, $2, 'orchestration', 'node_execution', $3,
+            $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
             'ready', $5, $6, $7, $8, $9, $10, $11, $12
         ) RETURNING *
@@ -14807,11 +14808,11 @@ pub(crate) async fn settle_capability_leaf_success_in_transaction(
     let continuation_job = sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
             state, attempt_limit, scheduled_at, deadline, priority, request_digest,
             payload_schema_version, payload, payload_digest
         ) VALUES (
-            $1, $2, 'orchestration', 'node_execution', $3,
+            $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
             'ready', $5, $6, $7, $8, $9, $10, $11, $12
         ) RETURNING *
@@ -15108,11 +15109,11 @@ pub(crate) async fn settle_model_tool_success_in_transaction(
             sqlx::query(
                 r#"
                 INSERT INTO insight_platform.jobs (
-                    tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+                    tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
                     state, attempt_limit, scheduled_at, deadline, priority, request_digest,
                     payload_schema_version, payload, payload_digest
                 ) VALUES (
-                    $1, $2, 'orchestration', 'node_execution', $3,
+                    $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
                     'ready', $5, $6, $7, $8, $9, $10, $11, $12
                 ) RETURNING *
@@ -17406,11 +17407,11 @@ async fn mutate_orchestration_controller_step(
         let row = sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
                 state, attempt_limit, scheduled_at, deadline, priority, request_digest,
                 payload_schema_version, payload, payload_digest
             ) VALUES (
-                $1, $2, 'orchestration', 'node_execution', $3,
+                $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
                 'ready', $5, $6, $7, $8, $9, $10, $11, $12
             ) RETURNING *
@@ -17672,11 +17673,11 @@ async fn mutate_orchestration_controller_step(
             let row = sqlx::query(
                 r#"
                 INSERT INTO insight_platform.jobs (
-                    tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+                    tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
                     state, attempt_limit, scheduled_at, deadline, priority, request_digest,
                     payload_schema_version, payload, payload_digest
                 ) VALUES (
-                    $1, $2, 'orchestration', 'node_execution', $3,
+                    $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
                     'ready', $5, $6, $7, $8, $9, $10, $11, $12
                 ) RETURNING *
@@ -18294,11 +18295,11 @@ async fn settle_loop_iteration_and_wake_continuation(
     let job = sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
             state, attempt_limit, scheduled_at, deadline, priority, request_digest,
             payload_schema_version, payload, payload_digest
         ) VALUES (
-            $1, $2, 'orchestration', 'node_execution', $3,
+            $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
             'ready', $5, $6, $7, $8, $9, $10, $11, $12
         ) RETURNING *
@@ -18728,11 +18729,11 @@ async fn settle_map_item_and_maybe_wake_settlement(
             let job = sqlx::query(
                 r#"
                 INSERT INTO insight_platform.jobs (
-                    tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+                    tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
                     state, attempt_limit, scheduled_at, deadline, priority, request_digest,
                     payload_schema_version, payload, payload_digest
                 ) VALUES (
-                    $1, $2, 'orchestration', 'node_execution', $3,
+                    $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
                     'ready', $5, $6, $7, $8, $9, $10, $11, $12
                 ) RETURNING *
@@ -19132,11 +19133,11 @@ async fn settle_parallel_leg_and_maybe_wake_join(
             let job = sqlx::query(
                 r#"
                 INSERT INTO insight_platform.jobs (
-                    tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+                    tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
                     state, attempt_limit, scheduled_at, deadline, priority, request_digest,
                     payload_schema_version, payload, payload_digest
                 ) VALUES (
-                    $1, $2, 'orchestration', 'node_execution', $3,
+                    $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
                     'ready', $5, $6, $7, $8, $9, $10, $11, $12
                 ) RETURNING *
@@ -19583,11 +19584,11 @@ async fn activate_error_boundary_handler(
     let row = sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
             state, attempt_limit, scheduled_at, deadline, priority, request_digest,
             payload_schema_version, payload, payload_digest
         ) VALUES (
-            $1, $2, 'orchestration', 'node_execution', $3,
+            $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
             'ready', $5, $6, $7, $8, $9, $10, $11, $12
         ) RETURNING *
@@ -21457,11 +21458,11 @@ async fn mutate_deferred_orchestration_child_run(
     let child_job = sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
             state, attempt_limit, scheduled_at, deadline, priority, request_digest,
             payload_schema_version, payload, payload_digest
         ) VALUES (
-            $1, $2, 'orchestration', 'node_execution', $3,
+            $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
             'ready', $5, $6, $7, $8, $9, $10, $11, $12
         )
@@ -22057,11 +22058,11 @@ async fn mutate_terminal_child_run(
     let resume_job = sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
             state, attempt_limit, scheduled_at, deadline, priority, request_digest,
             payload_schema_version, payload, payload_digest
         ) VALUES (
-            $1, $2, 'orchestration', 'node_execution', $3,
+            $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
             $5, $6, $7, $8, $9, $10, $11, $12, $13
         )
@@ -22610,11 +22611,11 @@ async fn mutate_resolved_orchestration_task(
     let job = sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, invocation_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, invocation_id,
             run_id, node_id, state, attempt_limit, scheduled_at, deadline, priority,
             request_digest, effect_key_digest, payload_schema_version, payload, payload_digest
         ) VALUES (
-            $1, $2, 'orchestration', 'node_execution', $3,
+            $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
             (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), NULL,
             $4, $3, 'ready', $5, $6, $7, $8,
             $9, NULL, $10, $11, $12
@@ -27453,11 +27454,11 @@ impl PgRunTransaction {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, trace_id, run_id, node_id,
                 state, attempt_limit, scheduled_at, deadline, priority, request_digest,
                 payload_schema_version, payload, payload_digest
             ) VALUES (
-                $1, $2, 'orchestration', 'node_execution', $3,
+                $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3,
                 (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4), $4, $3,
                 'ready', $5, clock_timestamp(), $6, 0, $7, $8, $9, $10
             )
@@ -28152,6 +28153,7 @@ pub struct DeploymentRecord {
 pub struct NewJob {
     pub tenant_id: String,
     pub job_id: String,
+    pub job_kind: String,
     pub work_class: String,
     pub owner_kind: String,
     pub owner_id: String,
@@ -28187,12 +28189,16 @@ impl NewJob {
             .work_class
             .parse::<WorkClass>()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let job_kind = self
+            .job_kind
+            .parse::<JobKind>()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         let owner_id = self
             .owner_id
             .parse::<ResourceId>()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         if self.owner_kind != owner_id.kind().descriptor().name
-            || !is_execution_work_owner_pair(work_class, owner_id.kind())
+            || !is_job_kind_work_owner_triple(job_kind, work_class, owner_id.kind())
         {
             return Err(RepositoryError::InvalidInput(
                 "work class and typed owner pair are not registered".to_owned(),
@@ -28216,6 +28222,7 @@ impl NewJob {
 pub struct JobRecord {
     pub tenant_id: String,
     pub job_id: String,
+    pub job_kind: String,
     pub work_class: String,
     pub owner_kind: String,
     pub owner_id: String,
@@ -28363,10 +28370,10 @@ pub enum ArtifactWorkerRole {
 }
 
 impl ArtifactWorkerRole {
-    const fn payload_kinds(self) -> &'static [&'static str] {
+    const fn job_kinds(self) -> &'static [&'static str] {
         match self {
-            Self::DataWorker => &["scan", "rescan"],
-            Self::Maintenance => &["delete", "blob_cleanup"],
+            Self::DataWorker => &["artifact_scan", "artifact_rescan"],
+            Self::Maintenance => &["artifact_delete", "artifact_blob_cleanup"],
         }
     }
 }
@@ -35121,6 +35128,10 @@ fn orchestration_signal_target_from_row(
 }
 
 pub(crate) fn job_from_row(row: PgRow) -> Result<JobRecord, RepositoryError> {
+    let job_kind: String = row.try_get("job_kind")?;
+    let job_kind_value = job_kind
+        .parse::<JobKind>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     let work_class: String = row.try_get("work_class")?;
     let work_class_value = work_class
         .parse::<WorkClass>()
@@ -35135,7 +35146,7 @@ pub(crate) fn job_from_row(row: PgRow) -> Result<JobRecord, RepositoryError> {
         .parse::<JobState>()
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     if owner_kind != typed_owner.kind().descriptor().name
-        || !is_execution_work_owner_pair(work_class_value, typed_owner.kind())
+        || !is_job_kind_work_owner_triple(job_kind_value, work_class_value, typed_owner.kind())
     {
         return Err(RepositoryError::CorruptRow(
             "Job work class and typed owner pair are not registered".to_owned(),
@@ -35144,6 +35155,7 @@ pub(crate) fn job_from_row(row: PgRow) -> Result<JobRecord, RepositoryError> {
     Ok(JobRecord {
         tenant_id: row.try_get("tenant_id")?,
         job_id: row.try_get("job_id")?,
+        job_kind,
         work_class,
         owner_kind,
         owner_id,
@@ -35848,6 +35860,7 @@ mod tests {
         let job = JobRecord {
             tenant_id: "ten_0198f1c3-8f49-7c3e-b1f3-773c28367b90".to_owned(),
             job_id: "job_0198f1c3-8f49-7c3e-b1f3-773c28367b91".to_owned(),
+            job_kind: "sandbox_capability_execution".to_owned(),
             work_class: "sandbox".to_owned(),
             owner_kind: "job".to_owned(),
             owner_id: "job_0198f1c3-8f49-7c3e-b1f3-773c28367b92".to_owned(),
@@ -35906,12 +35919,12 @@ mod tests {
             Err(RepositoryError::InvalidInput(_))
         ));
         assert_eq!(
-            ArtifactWorkerRole::DataWorker.payload_kinds(),
-            &["scan", "rescan"]
+            ArtifactWorkerRole::DataWorker.job_kinds(),
+            &["artifact_scan", "artifact_rescan"]
         );
         assert_eq!(
-            ArtifactWorkerRole::Maintenance.payload_kinds(),
-            &["delete", "blob_cleanup"]
+            ArtifactWorkerRole::Maintenance.job_kinds(),
+            &["artifact_delete", "artifact_blob_cleanup"]
         );
     }
 

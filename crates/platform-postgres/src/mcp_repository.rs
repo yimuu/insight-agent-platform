@@ -1203,11 +1203,11 @@ impl PgRepository {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id,
                 state, attempt_limit, scheduled_at, deadline, priority, request_digest,
                 payload_schema_version, payload, payload_digest, created_at, updated_at,
                 trace_id
-            ) VALUES ($1, $2, 'mcp', 'mcp_operation', $3, $3,
+            ) VALUES ($1, $2, 'mcp_discovery', 'mcp', 'mcp_operation', $3, $3,
                       'ready', $4, $5, $6, 0, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )
@@ -2086,11 +2086,11 @@ impl PgRepository {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id,
                 state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
                 deadline, priority, request_digest, payload_schema_version, payload,
                 payload_digest, created_at, updated_at, trace_id
-            ) VALUES ($1, $2, 'context', 'mcp_operation', $3, $3,
+            ) VALUES ($1, $2, 'context_subscription_refresh', 'context', 'mcp_operation', $3, $3,
                       'ready', 1, 0, $4, 0, $5, $6, 0, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )
@@ -6222,11 +6222,11 @@ impl PgRegistryTransaction {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id,
                 state, attempt_limit, scheduled_at, deadline, priority, request_digest,
                 payload_schema_version, payload, payload_digest, created_at, updated_at,
                 trace_id
-            ) VALUES ($1, $2, 'mcp', 'mcp_operation', $3, $3,
+            ) VALUES ($1, $2, 'mcp_subscription', 'mcp', 'mcp_operation', $3, $3,
                       'ready', $4, $5, $6, 0, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )
@@ -6440,12 +6440,12 @@ impl PgRepository {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id,
                 state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
                 deadline, priority, request_digest, quota_reservation_id,
                 payload_schema_version, payload, payload_digest, created_at, updated_at,
                 trace_id
-            ) VALUES ($1, $2, 'sandbox', 'sandbox_job', $3, $4,
+            ) VALUES ($1, $2, 'sandbox_managed_mcp_session', 'sandbox', 'job', $3, $4,
                       'ready', 1, 0, 1, 0, $5, $6, 0, $7, $8,
                       $9, $10, $11, $5, $5, $12)
             "#,
@@ -6515,7 +6515,9 @@ impl PgRepository {
             r#"
             SELECT job.*
             FROM insight_platform.jobs AS job
-            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'sandbox_job'
+            WHERE job.work_class = 'sandbox'
+              AND job.job_kind = 'sandbox_managed_mcp_session'
+              AND job.owner_kind = 'job'
               AND job.state IN ('leased', 'running')
               AND job.lease_expires_at <= $1 AND job.terminal_at IS NULL
               AND job.worker_id IS NOT NULL AND job.lease_epoch > 0
@@ -6684,7 +6686,9 @@ impl PgRepository {
              AND subscription.invocation_id = job.invocation_id
              AND subscription.invocation_kind = 'mcp_subscription'
              AND subscription.state = 'pending'
-            WHERE job.work_class = 'sandbox' AND job.owner_kind = 'sandbox_job'
+            WHERE job.work_class = 'sandbox'
+              AND job.job_kind = 'sandbox_managed_mcp_session'
+              AND job.owner_kind = 'job'
               AND job.state = 'ready' AND job.terminal_at IS NULL
               AND job.worker_id IS NULL AND job.scheduled_at <= $1
               AND job.deadline > $1
@@ -7029,7 +7033,9 @@ impl PgRepository {
             SELECT invocation_id
             FROM insight_platform.jobs
             WHERE tenant_id = $1 AND job_id = $2
-              AND work_class = 'sandbox' AND owner_kind = 'sandbox_job'
+              AND work_class = 'sandbox'
+              AND job_kind = 'sandbox_managed_mcp_session'
+              AND owner_kind = 'job'
             "#,
         )
         .bind(command.tenant_id.to_string())
@@ -8819,7 +8825,9 @@ async fn persist_managed_mcp_sandbox_claim(
             lease_expires_at = $9, heartbeat_at = $10,
             retry_at = NULL, updated_at = $11
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
-          AND work_class = 'sandbox' AND owner_kind = 'sandbox_job'
+          AND work_class = 'sandbox'
+          AND job_kind = 'sandbox_managed_mcp_session'
+          AND owner_kind = 'job'
           AND state = 'ready' AND worker_id IS NULL AND terminal_at IS NULL
         "#,
     )
@@ -8872,7 +8880,9 @@ async fn update_managed_mcp_sandbox_session_job(
             payload_schema_version = $14, payload = $15, payload_digest = $16,
             started_at = COALESCE(started_at, $17), updated_at = $17
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
-          AND work_class = 'sandbox' AND owner_kind = 'sandbox_job'
+          AND work_class = 'sandbox'
+          AND job_kind = 'sandbox_managed_mcp_session'
+          AND owner_kind = 'job'
           AND terminal_at IS NULL
         "#,
     )
@@ -8942,7 +8952,9 @@ async fn update_requeued_managed_mcp_sandbox_session_job(
             payload_schema_version = $5, payload = $6, payload_digest = $7,
             updated_at = $8
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
-          AND work_class = 'sandbox' AND owner_kind = 'sandbox_job'
+          AND work_class = 'sandbox'
+          AND job_kind = 'sandbox_managed_mcp_session'
+          AND owner_kind = 'job'
           AND state = 'leased' AND terminal_at IS NULL
         "#,
     )
@@ -8999,7 +9011,9 @@ async fn update_terminal_managed_mcp_sandbox_session_job(
             payload_schema_version = $6, payload = $7, payload_digest = $8,
             terminal_at = $9, updated_at = $9
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3
-          AND work_class = 'sandbox' AND owner_kind = 'sandbox_job'
+          AND work_class = 'sandbox'
+          AND job_kind = 'sandbox_managed_mcp_session'
+          AND owner_kind = 'job'
           AND terminal_at IS NULL
         "#,
     )

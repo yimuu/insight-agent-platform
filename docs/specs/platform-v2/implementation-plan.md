@@ -697,6 +697,11 @@
 > hot predicate为typed relational column。第一批上游修复建立18项nominal `JobKind`和25项合法kind/work-class/owner三元组，生成
 > `registries.json`并由Python checker逐项锁定。contracts全目标、生成漂移与strict Clippy通过；baseline column、31个production INSERT/读取、
 > owner-kind收敛与claim predicate替换仍待下一批，不能宣称持久化或剩余backlog metrics完成。
+>
+> 2026-08-27 implementation evidence：r329新增baseline `jobs.job_kind`并贯通全部production/test writer、row decoder与closed triple validation；
+> Artifact Data/Maintenance和Context Native/Remote claim改用typed relational kind，managed MCP Sandbox session使用共享Job owner，Sandbox metrics按
+> exact capability-execution kind采样。schema contract v8及独立checker拒绝遗漏INSERT、JSON kind热路由和`sandbox_job` SQL owner；PostgreSQL
+> all-target 35/35入口、strict Clippy与baseline checker通过。本轮无fresh PG16/production scrape/runsc，L2真实事务与L4～L6结论不变。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
@@ -774,7 +779,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 ### 3.1 目标
 
-建立后续代码唯一依赖的machine contract和schema v7基线，先删除过度authority，不立即实现所有runtime。
+建立后续代码唯一依赖的machine contract和schema v8基线，先删除过度authority，不立即实现所有runtime。
 
 ### 3.2 实现批次
 
@@ -785,7 +790,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
    - 保证RunValueId、JobId、ArtifactId等不共享同UUID alias；
    - 从owner types/registries生成或校验JSON Schema/OpenAPI/protobuf/Receipt projection。
 
-2. **Minimal migration v7**
+2. **Minimal migration v8**
 
    - 确认candidate schema尚未生产发布；
    - 用一个reviewed baseline migration替换未发布的1～35候选集；
@@ -811,7 +816,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 - owner/ID/kind registries的正负矩阵和codegen/conformance通过；
 - fresh PostgreSQL 16/17执行唯一baseline成功，tenant/FK/CAS/lease/Receipt/Event/Outbox fixture通过；
-- schema v7表数与ADR目标一致，但行为测试而非表数作为完成证据；
+- schema v8表数与ADR目标一致，但行为测试而非表数作为完成证据；
 - default build/deployment不包含五类推迟authority；
 - `cargo fmt --check`、workspace `cargo check`、相关Clippy/tests和migration smoke通过。
 
@@ -972,7 +977,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 ## 8. 总体完成标准
 
-Platform v2只在Phase 1～4全部exit gate通过、CR-171影响规范推进为Accepted、schema v7与migration实际发布、
+Platform v2只在Phase 1～4全部exit gate通过、CR-171影响规范推进为Accepted、schema v8与migration实际发布、
 production CapacityProfile经L4～L6证明、GitOps clean cut完成后，才能宣称完成。
 
 本计划本身不完成任何phase；它只是Reviewed合同的执行顺序。

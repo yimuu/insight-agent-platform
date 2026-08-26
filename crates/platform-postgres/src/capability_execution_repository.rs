@@ -3326,13 +3326,13 @@ async fn insert_capability_job(
     sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id,
             run_id, node_id, state, version, attempt_no, attempt_limit, lease_epoch,
             scheduled_at, deadline, priority, request_digest, effect_key_digest,
             payload_schema_version, payload, payload_digest, created_at, updated_at,
             trace_id
         ) VALUES (
-            $1, $2, $3, 'capability_invocation', $4, $4,
+            $1, $2, 'capability_invocation', $3, 'capability_invocation', $4, $4,
             $5, $6, 'ready', 1, 0, $7, 0,
             $8, $9, 0, $10, $11, $12, $13, $14, $15, $15,
             (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $5)
@@ -3700,7 +3700,7 @@ pub(crate) async fn insert_capability_input_task(
             invocation_id, state, generation, version, response_schema_digest,
             principal_snapshot_schema_version, payload_schema_version, payload,
             payload_digest, deadline, created_at, updated_at, trace_id
-        ) VALUES ($1, $2, $3, 'capability_invocation', $4, $5, $6, $4,
+        ) VALUES ($1, $2, 'capability_invocation', $3, 'capability_invocation', $4, $5, $6, $4,
                   'pending', 1, 1, $7, 1, $8, $9, $10, $11, $12, $12,
                   (SELECT trace_id FROM insight_platform.invocations
                    WHERE tenant_id = $1 AND invocation_id = $4))

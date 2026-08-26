@@ -238,5 +238,10 @@ r328把03既有Job kind要求落实为closed machine registry与合法kind/work-
 Native/Remote/subscription、MCP discovery/subscription及两种Sandbox physical work。生成合同、Python checker、contracts tests与strict Clippy通过；
 本批尚未把kind写入PostgreSQL typed hot column，scheduler/claim SQL仍不得据此宣称已完成迁移。
 
+r329将上述kind写入`jobs.job_kind`并用于Artifact与Context的热领取索引/谓词。Sandbox capability与managed MCP session虽共享
+`WorkClass::Sandbox + owner_kind=job`，仍以不同JobKind形成互斥lane；Controller backlog sampler只选择`SandboxCapabilityExecution`。
+owner payload的backend/workload字段仍在claim后作冻结闭包重验，但不再承担队列路由权威。all-target入口与strict Clippy通过；无fresh PG或production
+scrape，因此仅关闭repository scheduling contract，不推进L4/L5。
+
 CR-193确认长调用heartbeat推进Job version只更新owner terminal fence，不创建新physical attempt，也不改变subscription refresh的
 `execution_identity_digest`；只有lease generation/token或attempt number变化才产生新identity。测试必须覆盖至少一次heartbeat后的成功提交。

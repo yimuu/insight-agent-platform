@@ -784,6 +784,7 @@ CREATE INDEX quota_ledger_correlation_idx
 CREATE TABLE insight_platform.jobs (
     tenant_id text NOT NULL,
     job_id text NOT NULL,
+    job_kind text NOT NULL,
     work_class text NOT NULL,
     owner_kind text NOT NULL,
     owner_id text NOT NULL,
@@ -828,6 +829,7 @@ CREATE TABLE insight_platform.jobs (
     CONSTRAINT jobs_node_fk FOREIGN KEY (tenant_id, node_id)
         REFERENCES insight_platform.run_nodes (tenant_id, node_id),
     CONSTRAINT jobs_id_ck CHECK (insight_platform.is_platform_id(job_id)),
+    CONSTRAINT jobs_kind_ck CHECK (job_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT jobs_work_class_ck CHECK (work_class ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT jobs_owner_kind_ck CHECK (owner_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT jobs_owner_id_ck CHECK (insight_platform.is_platform_id(owner_id)),
@@ -879,7 +881,7 @@ CREATE UNIQUE INDEX jobs_live_owner_uq
     ON insight_platform.jobs (tenant_id, work_class, owner_kind, owner_id)
     WHERE terminal_at IS NULL;
 CREATE INDEX jobs_claim_idx
-    ON insight_platform.jobs (work_class, state, COALESCE(retry_at, scheduled_at), priority DESC, job_id)
+    ON insight_platform.jobs (work_class, job_kind, state, COALESCE(retry_at, scheduled_at), priority DESC, job_id)
     WHERE terminal_at IS NULL AND worker_id IS NULL;
 CREATE INDEX jobs_lease_idx
     ON insight_platform.jobs (lease_expires_at, tenant_id, job_id)

@@ -178,8 +178,8 @@ def main():
         errors.append("schema contract has missing or unknown top-level fields")
     if contract.get("contract") != "insight.platform/v1/postgres-baseline":
         errors.append("schema contract identity is invalid")
-    if contract.get("schema_contract_version") != 7:
-        errors.append("schema contract version must be 7")
+    if contract.get("schema_contract_version") != 8:
+        errors.append("schema contract version must be 8")
     if contract.get("postgres_major") != 16:
         errors.append("PostgreSQL major version must be 16")
     if contract.get("schema") != "insight_platform":
@@ -279,7 +279,16 @@ def main():
         required_columns = {
             "resources": {"resource_kind", "lifecycle_state", "gate_state", "version"},
             "runs": {"state", "version", "public_sequence", "bindings"},
-            "jobs": {"state", "version", "attempt_no", "lease_epoch", "lease_expires_at"},
+            "jobs": {
+                "job_kind",
+                "work_class",
+                "owner_kind",
+                "state",
+                "version",
+                "attempt_no",
+                "lease_epoch",
+                "lease_expires_at",
+            },
             "tasks": {"state", "generation", "version", "deadline"},
             "events": {"aggregate_kind", "aggregate_id", "event_type", "payload_digest"},
             "receipts": {"receipt_kind", "idempotency_key_digest", "request_digest"},
@@ -297,6 +306,31 @@ def main():
             missing = required.difference(table_columns(table_bodies.get(table, "")))
             if missing:
                 errors.append(f"{table} lacks required columns {sorted(missing)}")
+
+    rust_paths = sorted((CRATE / "src").glob("*.rs")) + sorted(
+        (CRATE / "tests").glob("*.rs")
+    )
+    job_insert_pattern = re.compile(
+        r"INSERT INTO insight_platform\.jobs\s*\((?P<columns>.*?)\)\s*VALUES",
+        re.DOTALL,
+    )
+    for path in rust_paths:
+        source = path.read_text(encoding="utf-8")
+        for match in job_insert_pattern.finditer(source):
+            columns = {
+                column.strip() for column in match.group("columns").split(",")
+            }
+            if "job_kind" not in columns:
+                line = source.count("\n", 0, match.start()) + 1
+                errors.append(f"{path.relative_to(ROOT)}:{line} Job INSERT lacks job_kind")
+        if path.parent.name == "src" and "payload ->> 'kind'" in source:
+            errors.append(
+                f"{path.relative_to(ROOT)} uses JSON payload kind as a hot Job predicate"
+            )
+        if path.parent.name == "src" and "owner_kind = 'sandbox_job'" in source:
+            errors.append(
+                f"{path.relative_to(ROOT)} uses the unregistered sandbox_job owner kind"
+            )
 
     if errors:
         for error in errors:

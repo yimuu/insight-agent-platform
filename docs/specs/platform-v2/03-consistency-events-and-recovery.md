@@ -81,7 +81,12 @@ Job可作为Artifact/Receipt等关联的typed owner，但首版Job kind-owner re
 
 r328实现上述既有合同的internal nominal `JobKind` machine registry：18个closed kind及25个合法
 `JobKind × WorkClass × OwnerKind`三元组由Rust单一owner生成到`registries.json`，每个三元组必须投影到既有execution work-owner pair。
-该批只闭合上游machine contract；baseline `jobs.kind`、repository读写和JSON hot-predicate替换仍待下一实现批次，不能将r328视为持久化完成证据。
+该批只闭合上游machine contract；baseline `jobs.job_kind`、repository读写和JSON hot-predicate替换仍待下一实现批次，不能将r328视为持久化完成证据。
+
+r329把该合同落实到clean baseline `jobs.job_kind`与全部repository读写。创建和读取均重验closed三元组；Artifact/Context claim的lane选择只读typed
+relational kind，JSONB只保留冻结闭包与低频证据。managed MCP physical session继续复用共享Job，合法owner为其logical Job ID，且以
+`SandboxManagedMcpSession + Sandbox + Job`与Capability Sandbox execution区分，不再发明`sandbox_job` owner kind。独立schema checker逐个扫描
+production/test Job INSERT并拒绝JSON kind热谓词或未注册SQL owner。该证据闭合仓库内持久化合同，但没有替代fresh PostgreSQL concurrency/recovery gate。
 
 `WorkClass::Context`的合法owner为`ContextQuery`、`ContextDataset`，以及仅用于MCP Resource subscription refresh/reconcile的
 `McpOperation`。最后一种pair必须由Context application owner transaction重载同tenant `invocation_kind=mcp_subscription` row、exact

@@ -669,6 +669,11 @@ predicate要求。上游修复先交付18项nominal `JobKind`、25项closed kind
 生成漂移、Python合同与strict Clippy门禁通过。该证据只关闭machine contract，不提供baseline persistence、repository/claim迁移、剩余queue series、
 production scrape或L4～L5证据。
 
+r329完成JobKind持久化迁移：baseline/schema contract v8、全部Job writer/reader、Artifact/Context typed claim与managed MCP Sandbox owner均对齐closed
+三元组；Sandbox durable sampler同时增加exact JobKind selector，修正r327仅凭owner无法长期区分两种共享Job的问题。独立baseline checker禁止遗漏
+`job_kind`的INSERT、JSON kind热路由及`sandbox_job` SQL owner；PostgreSQL all-target 35/35入口与strict Clippy通过。运行环境未提供fresh PG16、真实
+production Prometheus或runsc，因此本批是仓库内L1/静态L2门禁，不新增production backlog series、fault或L4～L6证据。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

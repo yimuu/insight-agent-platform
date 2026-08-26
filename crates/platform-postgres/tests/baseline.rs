@@ -94,6 +94,7 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
         .create_job(NewJob {
             tenant_id: TENANT_ID.to_owned(),
             job_id: JOB_ID.to_owned(),
+            job_kind: "interaction".to_owned(),
             work_class: "interaction".to_owned(),
             owner_kind: "interaction".to_owned(),
             owner_id: JOB_OWNER_ID.to_owned(),

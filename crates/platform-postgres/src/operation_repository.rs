@@ -348,6 +348,7 @@ mod tests {
         JobRecord {
             tenant_id: id(ResourceKind::Tenant, 1),
             job_id: id(ResourceKind::Job, 2),
+            job_kind: "artifact_scan".to_owned(),
             work_class: "artifact".to_owned(),
             owner_kind: "artifact".to_owned(),
             owner_id: id(ResourceKind::Artifact, 3),

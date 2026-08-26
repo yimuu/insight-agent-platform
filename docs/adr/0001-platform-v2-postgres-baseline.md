@@ -196,7 +196,7 @@ Artifact 必须引用 exact Retention Policy Revision。该 Revision 的 `Policy
 `ArtifactRetentionPolicy`，且 `rules_digest` 必须等于 policy document 的 canonical digest。首个 tenant retention revision 与其
 自持有的 authoring Artifact 构成有意的 bootstrap 闭环，因此只有 `artifacts_retention_policy_fk` 是
 `DEFERRABLE INITIALLY DEFERRED`；onboarding 必须在同一事务内同时建立并在 commit 时满足两端 FK，不允许 nullable policy、
-sentinel revision 或提交后补边。Blob安全域和clean-cut ID/owner约束修正不增加表；目标schema contract version为7。
+sentinel revision 或提交后补边。Blob安全域、clean-cut ID/owner约束与typed Job kind修正不增加表；目标schema contract version为8。
 
 ### 5.7 Quota 与 Scheduler
 
@@ -249,7 +249,7 @@ Rust 语义。绕过 repository 的直接业务写入不属于支持的接口；
 重写后的单一`0001`必须通过：
 
 1. 静态解析与 `git diff --check`；
-2. fresh PostgreSQL 16 apply，表数量精确为23且schema contract version精确为7；
+2. fresh PostgreSQL 16 apply，表数量精确为23且schema contract version精确为8；
 3. 所有表/列/index 与本 ADR 的 machine schema contract 一致；
 4. tenant/FK/unique/payload-size negative fixture；
 5. Job claim/heartbeat/stale fence/retry/wake/terminal concurrency fixture；

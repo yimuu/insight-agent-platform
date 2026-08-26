@@ -2546,13 +2546,13 @@ async fn seed_running_model_orchestration(
     sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, run_id, node_id,
             state, version, attempt_no, attempt_limit, lease_epoch, worker_id,
             lease_token_digest, lease_expires_at, heartbeat_at, scheduled_at, deadline,
             request_digest, quota_reservation_id, payload_schema_version, payload,
             payload_digest, started_at, created_at, updated_at, trace_id
         ) VALUES (
-            $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
+            $1, $2, 'orchestration_node', 'orchestration', 'node_execution', $3, $4, $3,
             'running', 2, 1, 3, 1, $5, $6, $7, $8, $8, $9,
             $10, $11, $12, $13, $14, $8, $8, $8,
             '0123456789abcdef0123456789abcdef'

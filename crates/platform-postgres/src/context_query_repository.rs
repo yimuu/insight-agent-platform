@@ -24,9 +24,9 @@ use insight_platform_context::{
     PreparedContextDispatch, WakeContextDispatch, CONTEXT_QUOTA_LINES,
 };
 use insight_platform_contracts::{
-    canonical_digest, ArtifactPurpose, ArtifactReferenceKind, CommandOutcome,
+    canonical_digest, ArtifactPurpose, ArtifactReferenceKind, CommandOutcome, ContextBackendKind,
     ContextConsistencyPolicy, ContextDatasetGenerationSpec, ContextQueryState, DeploymentClosure,
-    EntityLifecycle, ExactDatasetGenerationRef, JobState, NodeExecutionState, Permission,
+    EntityLifecycle, ExactDatasetGenerationRef, JobKind, JobState, NodeExecutionState, Permission,
     PlanNodeKind, PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument,
     ResourceId, ResourceKind, RunState, Sha256Digest, ValueRef, WorkClass,
 };
@@ -215,6 +215,7 @@ impl PgRepository {
              AND query.invocation_id = job.owner_id
              AND query.invocation_kind = 'context'
             WHERE job.work_class = 'context'
+              AND job.job_kind = 'context_query_native'
               AND job.owner_kind = 'context_query'
               AND job.state IN ('ready', 'retry_scheduled')
               AND job.scheduled_at <= clock_timestamp()
@@ -222,7 +223,6 @@ impl PgRepository {
               AND job.deadline > clock_timestamp()
               AND job.attempt_no < job.attempt_limit
               AND query.payload #>> '{admission,context_closure,required_worker_manifest_digest}' = $2
-              AND query.payload #>> '{admission,implementation,contract,backend,kind}' = 'native_catalog'
               AND query.payload #>> '{admission,implementation,contract,backend,adapter_contract_digest}' = $3
               AND query.payload #>> '{admission,context_closure,backend,kind}' = 'native_catalog'
               AND query.payload #>> '{admission,context_closure,backend,installed_adapter_digest}' = $4
@@ -267,6 +267,7 @@ impl PgRepository {
              AND query.invocation_id = job.owner_id
              AND query.invocation_kind = 'context'
             WHERE job.work_class = 'context'
+              AND job.job_kind = 'context_query_remote'
               AND job.owner_kind = 'context_query'
               AND job.state IN ('ready', 'retry_scheduled')
               AND job.scheduled_at <= clock_timestamp()
@@ -274,7 +275,6 @@ impl PgRepository {
               AND job.deadline > clock_timestamp()
               AND job.attempt_no < job.attempt_limit
               AND query.payload #>> '{admission,context_closure,required_worker_manifest_digest}' = $2
-              AND query.payload #>> '{admission,implementation,contract,backend,kind}' = 'remote_search'
               AND query.payload #>> '{admission,context_closure,backend,kind}' = 'remote_search'
             ORDER BY job.priority DESC, COALESCE(job.retry_at, job.scheduled_at), job.job_id
             LIMIT $1
@@ -1283,16 +1283,33 @@ async fn insert_context_job(
     prepared: &PreparedContextDispatch,
 ) -> Result<(), RepositoryError> {
     let payload = TypedPayload::from_versioned(1, &prepared.job_payload, 1_048_576)?;
+    let job_kind = match prepared
+        .query
+        .payload
+        .admission
+        .implementation
+        .contract
+        .backend
+        .kind()
+    {
+        ContextBackendKind::NativeCatalog => JobKind::ContextQueryNative,
+        ContextBackendKind::RemoteSearch => JobKind::ContextQueryRemote,
+        _ => {
+            return Err(RepositoryError::InvalidInput(
+                "Context backend has no first-release Worker lane".to_owned(),
+            ));
+        }
+    };
     sqlx::query(
         r#"
         INSERT INTO insight_platform.jobs (
-            tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id,
             run_id, node_id, state, version, attempt_no, attempt_limit, lease_epoch,
             scheduled_at, deadline, priority, request_digest,
             payload_schema_version, payload, payload_digest, created_at, updated_at,
             trace_id
         ) VALUES (
-            $1, $2, 'context', 'context_query', $3, $3,
+            $1, $2, $14, 'context', 'context_query', $3, $3,
             $4, $5, 'ready', 1, 0, $6, 0,
             $7, $8, 0, $9, $10, $11, $12, $13, $13,
             (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4)
@@ -1314,6 +1331,7 @@ async fn insert_context_job(
     .bind(&payload.value)
     .bind(&payload.digest)
     .bind(prepared.query.updated_at)
+    .bind(job_kind.as_str())
     .execute(&mut **transaction)
     .await?;
     Ok(())

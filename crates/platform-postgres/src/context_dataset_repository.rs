@@ -91,11 +91,11 @@ impl PgRepository {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, work_class, owner_kind, owner_id, state,
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, state,
                 attempt_limit, scheduled_at, deadline, priority, request_digest,
                 payload_schema_version, payload, payload_digest, created_at, updated_at,
                 trace_id
-            ) VALUES ($1, $2, 'context', 'context_dataset', $3, 'ready',
+            ) VALUES ($1, $2, 'context_dataset_build', 'context', 'context_dataset', $3, 'ready',
                       $4, $5, $6, 0, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )

@@ -13,17 +13,17 @@
     "is_sha256(text)",
     "is_trace_id(text)"
   ],
-  "migration_set_digest": "sha256:d48e706c1837d9a5dc50f78de1bb4d604b8361591513e17809d0b59e3c31cb3b",
+  "migration_set_digest": "sha256:ba5080ceb152d56d54684f8345f0809b947bb880b660a904995b293d9b9d7612",
   "migrations": [
     {
-      "checksum": "sha256:434d5e657f6033c9dd3ae7554574ccae401316c5e795f3830fc6b5682b66dc3a",
+      "checksum": "sha256:97d0cd00f8751f7ce6b4e73c379906030ecb60bf4d1ce3efcfb0bb74845ec23b",
       "name": "platform_baseline",
       "version": 1
     }
   ],
   "postgres_major": 16,
   "schema": "insight_platform",
-  "schema_contract_version": 7,
+  "schema_contract_version": 8,
   "table_count": 23,
   "tables": [
     "artifact_blobs",
