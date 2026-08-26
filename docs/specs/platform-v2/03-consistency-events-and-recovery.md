@@ -2,10 +2,28 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-193 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-26 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
+
+> CR-197 impact：定义恢复安全的trace identity。Run admission或非Run command admission拥有一个`TraceIdentityV1`；由其创建的Job、Task、
+> Event和Outbox snapshot复制同一trace ID。lease/attempt/Worker变化不改变trace ID，每个实际执行/RPC hop只生成新的span ID。trace字段不进入
+> request/idempotency/payload/result/effect digest，不参与CAS、fence、first-winner或业务索引唯一性。
+
+### Durable trace identity
+
+```rust
+struct TraceIdentityV1 {
+    schema_version: u32, // exact 1
+    trace_id: TraceId,   // 32 lowercase hex, 16 bytes, not all zero
+}
+```
+
+首版W3C parent只接受exact `00-{trace_id}-{parent_span_id}-{flags}`：trace ID为32位小写hex且非全零，span ID为16位小写hex且非全零，
+flags只能是`00|01`。`tracestate`和`baggage`不进入平台内部合同。公共入口缺少parent时生成新trace；格式错误时以`invalid_request`拒绝。
+内部mTLS RPC必须携带合法parent；receiver只把它用于correlation并生成child span，不从中读取tenant、principal、Run、Job或其他业务identity。
+durable recovery从owner snapshot恢复同一trace ID并生成新span，绝不复用已终止process的span ID。
 
 ## 1. 决策摘要
 

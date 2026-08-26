@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-187 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-25 |
 | 依赖 | 02、03、04、06、07、09、10、15 |
 | 直接下游 | 17、18 |
+
+> CR-197 impact：ModelTurn/Job复制Run trace identity，tool loop所有Turn/Invocation保持同一trace ID并使用新span。Egress调用provider时剥离
+> 平台内部trace header；prompt/response/tool arguments、provider URL与tenant/model高基数identity仍不得进入trace attribute。
 
 > CR-181 impact：ModelLoop由05 Plan v4冻结model/skill/capability slots、input/output、route和全部budget；Model Worker不能从
 > prompt/tool intent扩大bindings、budget或选择另一个output port。

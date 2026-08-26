@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-193 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-26 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
+
+> CR-197 impact：ContextQuery/Dataset/subscription refresh Job复制其admission trace ID；MCP Host/Egress内部hop传播同一trace ID与新span。
+> Remote Context请求不向第三方转发平台trace header，query、URI、tenant/source identity仍不得成为trace attribute。
 
 > CR-181 impact：ContextQuery由05 Plan v4冻结Context slot、request/result port、item limit与resume；Scheduler、Context Worker和
 > public API不得另行提供dataset head、schema、classification或continuation。

@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-196 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
+
+> CR-197 impact：Worker→Host→Egress的mTLS RPC必须传播03合法parent；Host/Egress各生成child span。Egress发往remote Streamable HTTP、OAuth
+> token endpoint或subscription stream时剥离内部`traceparent`、`tracestate`和`baggage`，远端返回同名header也不进入内部context。
 
 > CR-181 impact：MCP Tool作为Capability backend只消费10已冻结Invocation snapshot；Host不得读取Plan slot、重新选择Deployment、
 > 改写node output port或直接创建resume Job。MCP Resource作为Context backend同样只消费12的exact query snapshot。

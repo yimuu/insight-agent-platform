@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-193 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
+
+> CR-197 impact：每个claim从durable Job/owner snapshot加载trace ID并安装本attempt context；heartbeat不创建业务span，dispatch/RPC/commit
+> 各生成有界child span。Worker强杀后reclaim保持trace ID、生成新span ID。缺失/非法内部`traceparent`在解码业务envelope前拒绝，但不得改变
+> lease/fence事实。
 
 > CR-188 impact：Capability Native/Remote Worker startup manifest必须分别报告exact installed adapter/protocol codec集合；claim在
 > PostgreSQL owner transaction重验Invocation冻结的required Worker manifest，dispatcher再重验exact codec descriptor。现有WorkClass、

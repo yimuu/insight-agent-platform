@@ -2,11 +2,17 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-196 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-26 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
+
+> 2026-08-26 implementation feedback（CR-197）：最终observability审计确认规范要求全组件传播trace identity，但machine/runtime合同没有
+> 一个可在Job lease、进程终止和恢复后重建的durable owner；仅转发自由`traceparent`会允许调用方伪造关联，也会在新Worker恢复时断链。
+> CR-197按03→04/06/07→08/10/12～16→17/18冻结`TraceIdentityV1`：Run或非Run command admission生成/接受一个合法W3C trace ID，
+> durable owner snapshot只保存该低敏opaque ID；每个进程/RPC hop生成新span ID。trace不参与tenant、principal、owner、Receipt、request digest、
+> fence、policy或业务状态判断，首版Egress不向第三方转发内部trace header。无新表、aggregate、public route、WorkClass或Secret路径。
 
 > 2026-08-26 implementation feedback（CR-196）：真实OAuth token exchange审计发现CR-195只为MCP Streamable HTTP endpoint安装显式
 > trust bundle，`ReqwestMcpOAuthCredentialBroker`仍读取默认CA集合。CR-196将同一exact Trust Policy编译结果加入OAuth verification/startup
@@ -158,25 +164,25 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Accepted / CR-193 | 总体路线、规范模板、依赖和完成定义 |
-| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-192 | 系统架构、领域对象和所有权边界 |
-| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-189 | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-193 | PostgreSQL、事务、Outbox、Lease、恢复 |
-| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-192 | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-184 | Agent Interface、Typed Plan、Model Loop |
-| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-184 | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-193 | Scheduler、Worker、Lease、背压和隔舱并发 |
-| 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-182 | Child Run、父子通信、取消传播和循环限制 |
+| 00 | `00-overview.md` | Accepted / CR-197 | 总体路线、规范模板、依赖和完成定义 |
+| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-197 | 系统架构、领域对象和所有权边界 |
+| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-196 | ID、Resource、Version、Deployment、Binding |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-197 | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-197 | 多租户、授权、Secret、Effect、Quota、Approval |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-186 | Agent Interface、Typed Plan、Model Loop |
+| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-197 | Run、NodeExecution、暂停、重试、取消 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-197 | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-197 | Child Run、父子通信、取消传播和循环限制 |
 | 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / CR-188 | Capability Interface、Implementation、Registry |
-| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-188 | 调用协议、幂等、同步快路径、异步恢复 |
-| 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-185 | Skill Package、发现、选择、绑定和依赖 |
-| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-193 | ContextSource、检索、引用和数据权限 |
-| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-193 | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-181 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
-| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-185 | S3、内容寻址、上传、生命周期和内容安全 |
-| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-187 | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-193 | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-193 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-197 | 调用协议、幂等、同步快路径、异步恢复 |
+| 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-186 | Skill Package、发现、选择、绑定和依赖 |
+| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-197 | ContextSource、检索、引用和数据权限 |
+| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-197 | MCP Transport、OAuth、投影、Task 和 Subscription |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-197 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
+| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-197 | S3、内容寻址、上传、生命周期和内容安全 |
+| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-197 | Provider、Model Profile、ModelTurn、流式响应和预算 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-197 | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-197 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得

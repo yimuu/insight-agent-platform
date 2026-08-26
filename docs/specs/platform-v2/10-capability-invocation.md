@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-188 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-25 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
+
+> CR-197 impact：Invocation/Job复制Run trace identity，Native/Sandbox/MCP/Remote dispatch各生成child span。Egress只在平台侧记录remote-call span，
+> 首版剥离内部`traceparent`/`tracestate`/`baggage`且不允许Implementation header模板重新加入这些名字。
 
 > CR-181 impact：Agent Plan发起的Invocation只能由05 Plan v4 CapabilityCall owner mutation创建；public/internal caller不得提交
 > selected Deployment、input/output port、schema、deadline、retry或resume target。

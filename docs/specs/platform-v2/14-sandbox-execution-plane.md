@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-181 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-21 |
 | 依赖 | 03、04、07、09、10、15 |
 | 直接下游 | 17、18 |
+
+> CR-197 impact：Controller、Executor、attestor、Artifact broker与guest bootstrap沿用Sandbox Job trace ID并生成per-hop span；trace metadata不进入
+> guest environment、stdin、package、Artifact正文或attestation identity，也不影响Job fence/physical outcome。
 
 > CR-181 impact：Sandbox只执行10已准入的exact Capability Invocation Job；Controller/Executor不得解释Plan、选择candidate、
 > 绑定RunValue port或创建Run continuation。

@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-196 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-26 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
+
+> CR-197 impact：`PrincipalContext`引用03 `TraceIdentityV1`，但trace是非授权correlation data。任何header都不能覆盖credential-derived tenant、
+> principal、roles或permissions。禁止`tracestate`、`baggage`、tenant/user/resource ID、Secret、URL和正文进入trace attribute；首版Egress剥离所有
+> 内部trace header后才调用第三方。
 
 > 2026-08-24 implementation feedback（CR-181）：05的external leaf允许一个slot冻结多个exact candidate，但此前04只定义
 > Selection Policy identity，没有可执行decision/evidence合同。CR-181冻结候选选择输入、输出和提交时重验边界，禁止Scheduler/
@@ -58,7 +62,7 @@ struct PrincipalContext {
     credential_id_digest: Digest,
     issued_at: Timestamp,
     expires_at: Timestamp,
-    trace_id: TraceId,
+    trace: TraceIdentityV1,
 }
 ```
 

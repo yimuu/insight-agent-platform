@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-196 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-26 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
+
+> CR-197 impact：qualification增加public traceparent正负、Gateway→Scheduler/Worker→MCP/Egress/Sandbox/Artifact跨进程同trace/new-span、
+> kill/reclaim continuity、Event/problem correlation和第三方零trace-header计数。`tracestate`/`baggage`、payload/identity canary必须在动态采集结果中
+> 为零；静态source扫描不能替代该门禁。
 
 > CR-181 impact：资格矩阵增加Plan v4 external leaf dispatch、candidate selection、result binding与crash recovery；静态manifest或
 > repository单元fixture不能替代多进程owner-boundary证据。

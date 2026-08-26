@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-196 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-26 |
 | 依赖 | [`00-overview.md`](00-overview.md) |
 | 直接下游 | 02、03、04、05、18 |
+
+> CR-197 impact：跨plane correlation由03的durable `TraceIdentityV1`和每hop ephemeral span组成。Gateway、Scheduler、Worker、MCP、
+> Sandbox、Artifact、Security/Egress只传播opaque trace ID和新span parent；不得把trace header当作tenant/owner authority，也不得向首版第三方
+> provider/MCP/Context endpoint转发内部`traceparent`。该共享transport concern不改变plane ownership或增加服务。
 
 ## 1. 决策摘要
 

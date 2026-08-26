@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-184 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-25 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
+
+> CR-197 impact：root Run在admission冻结03 `TraceIdentityV1`；Run、Node和所有派生Job/Event沿用同一trace ID。恢复、retry、wait wake和
+> terminal convergence生成新span但不得更换trace ID。trace不属于Run binding、Plan input、Scope环境或state-machine decision evidence。
 
 > Persistence ruling：逻辑 work 及其 current execution 统一由 03 的 `Job` 表达，Attempt 仅是
 > `(JobId, lease_generation)` 标识的历史观测；Continuation 统一为 Job 内的 `WakeContract`，HumanTask

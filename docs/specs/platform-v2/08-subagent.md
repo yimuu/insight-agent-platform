@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-182 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-20 |
 | 依赖 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`10-capability-invocation.md`](10-capability-invocation.md) |
 | 直接下游 | 17、18 |
+
+> CR-197 impact：child Run继承root trace ID并建立独立child admission span；它不继承parent span栈、`tracestate`、`baggage`或debug attributes。
+> parent/child terminal linking沿用trace ID但仍只以durable ChildRunLink事实决定状态。
 
 > Persistence ruling：ChildRunLink 是 Run/Node 的 typed relation 与 snapshot，不建立独立 lifecycle、transition、budget
 > 或 interaction 表族；历史关系写入共享 Run/Node/Event/Task/Quota 聚合。

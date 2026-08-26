@@ -1,10 +1,15 @@
-# Platform v2 四阶段实现计划（CR-196）
+# Platform v2 四阶段实现计划（CR-197）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-196 implemented; external L3 and L4～L6 pending |
+| 状态 | In Progress / CR-197 authorized; trace implementation and external L4～L6 pending |
 | 日期 | 2026-08-26 |
-| 合同输入 | 00～18、cross-review CR-196、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-197、ADR-0001、ADR-0002、AGENTS.md |
+
+> CR-197 implementation order：先生成03 `TraceId/TraceIdentityV1/W3cTraceParent` nominal contracts和17 public projections，再将trace ID
+> 加入Run/Job/Event的owner snapshots与PostgreSQL baseline；随后接公共HTTP middleware、各internal mTLS RPC和durable reclaim，最后以第三方
+> fake endpoint零header计数与动态canary关闭18。任何只在process task-local中转发、恢复后换trace ID、把span持久化或让trace参与业务digest的
+> patch均不计实现证据。
 
 > 2026-08-26 implementation feedback：OAuth Callback真实token endpoint L3审计发现OAuth reqwest adapter仍使用默认CA，CR-195只闭合了
 > MCP Streamable HTTP catalog。CR-196按00～18复核后要求OAuth installed verification binding同时冻结exact Trust Policy与bounded PEM roots；

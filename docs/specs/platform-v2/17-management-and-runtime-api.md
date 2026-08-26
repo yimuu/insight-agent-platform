@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-193 |
+| 状态 | Accepted / CR-197 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-197 impact：公共请求可省略`traceparent`并由Gateway生成，也可提交03 exact version-00 parent；非法parent、任意`tracestate`或`baggage`
+> 以`invalid_request`拒绝。Gateway返回`trace-id` response header，`ApiProblemV1.trace_id`与SSE durable Event trace ID均取同一opaque ID；调用方
+> 不能用它覆盖任何tenant/owner字段。内部RPC必须传播同一trace ID并生成新span ID。
 
 > CR-181 impact：public/internal API不暴露Plan leaf dispatch命令，也不接受selected Deployment、slot、port、schema、Task/Wake
 > definition、child entry、retry/deadline或resume target；这些字段只由Scheduler到owner repository的closed internal command承载并重验。

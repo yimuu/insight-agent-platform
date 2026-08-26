@@ -1,10 +1,31 @@
-# Platform v2 00～18 Cross-review（CR-196）
+# Platform v2 00～18 Cross-review（CR-197）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-196 Accepted |
+| 状态 | Closed / CR-197 Accepted |
 | 日期 | 2026-08-26 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-196 OAuth token TLS trust feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-197 durable trace propagation feedback |
+
+### CR-197 durable trace identity and transport impact review
+
+实现审计确认01/18要求跨进程trace，但现有合同只有部分Model/Sandbox digest，无法在通用Job恢复后重建，也未规定第三方header边界。
+受影响规范先进入Draft / Architecture Revision；按03→04/06/07→08/10/12～16→17/18完成以下复核后恢复Accepted：
+
+| Spec | CR-197结论 |
+|---|---|
+| 00/01 | trace是跨plane correlation concern，不是新plane、service或business authority |
+| 02/05/09/11 | Resource lifecycle、Plan、Capability registry和Skill package不保存或选择trace，合同不变 |
+| 03 | 唯一定义`TraceIdentityV1`与exact W3C v00 parent；durable owner复制trace ID，span ID只属于物理hop |
+| 04 | trace不授予tenant/principal权限；禁止baggage、敏感/高基数attribute和第三方header传播 |
+| 06～08 | root/child Run、Job、wait、recovery保持trace ID，但state/fence/first-winner语义不依赖trace |
+| 10、12～16 | 各execution owner复制trace ID；内部mTLS hop生成child span，Egress/storage/guest边界剥离header |
+| 17 | public absent/good/bad parent、response/problem/Event correlation冻结；无新route |
+| 18 | L1～L4增加格式、跨进程、kill/reclaim、动态canary和第三方零header证据 |
+
+复核覆盖state ownership、ID、JSON schema、errors、transactions、events、permissions、capacity、failure recovery与fixtures：trace ID可作为
+bounded typed snapshot字段和Event correlation字段，但不得进入Receipt request digest、owner CAS、Job lease/fence、quota、selection或业务索引；
+span不持久化。CR-197不新增table、aggregate、route、WorkClass、Secret路径或外部header。受影响规范恢复Accepted / CR-197，Implementation
+Authorization恢复有效。
 
 ### CR-196 OAuth token endpoint explicit TLS trust impact review
 
