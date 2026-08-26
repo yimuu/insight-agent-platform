@@ -1,0 +1,11 @@
+{
+  "$id": "urn:insight:platform:v1:schema:TraceId",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Opaque W3C trace ID: 16 bytes as canonical lowercase hexadecimal, excluding all zero.",
+  "maxLength": 32,
+  "minLength": 32,
+  "pattern": "^(?!0{32}$)[0-9a-f]{32}$",
+  "title": "TraceId",
+  "type": "string",
+  "x-platform-max-bytes": 32
+}

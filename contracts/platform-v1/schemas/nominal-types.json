@@ -51,6 +51,18 @@
       "pinned_reference": "urn:insight:platform:v1:nominal:OpaqueRunEventCursor@sha256:a4d9d7e618b20ff918c66bf6f3b3300eec314da3074b34fe5dd05aa18438ff33"
     },
     {
+      "canonical_digest": "sha256:f229de40ce930197945417d2d0885f67c5fb151d310981ae8da8eb79952aceda",
+      "name": "TraceId",
+      "path": "schemas/nominal/trace-id.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:TraceId@sha256:f229de40ce930197945417d2d0885f67c5fb151d310981ae8da8eb79952aceda"
+    },
+    {
+      "canonical_digest": "sha256:131c06b5bf4632ddd48ec036fa1e1cdf003bc7c44f87fbcd02057ca3432bb74d",
+      "name": "TraceIdentityV1",
+      "path": "schemas/nominal/trace-identity-v1.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:TraceIdentityV1@sha256:131c06b5bf4632ddd48ec036fa1e1cdf003bc7c44f87fbcd02057ca3432bb74d"
+    },
+    {
       "canonical_digest": "sha256:3d11c3a9848b65b6ee13c396fb586e4869d1d12dc7436cedde6a611339b5187b",
       "name": "UtcTimestamp",
       "path": "schemas/nominal/utc-timestamp.schema.json",
@@ -61,6 +73,12 @@
       "name": "UuidV7Id",
       "path": "schemas/nominal/uuid-v7-id.schema.json",
       "pinned_reference": "urn:insight:platform:v1:nominal:UuidV7Id@sha256:1843ef7d553078fa1605b239ed268e11a3ac7c6a4d0210a3b534eea04f9d38a8"
+    },
+    {
+      "canonical_digest": "sha256:599482cfaabf9d4838ab2bbd7d96e126768982fc0ed9f4651957461f3c57527d",
+      "name": "W3cTraceParent",
+      "path": "schemas/nominal/w3c-traceparent.schema.json",
+      "pinned_reference": "urn:insight:platform:v1:nominal:W3cTraceParent@sha256:599482cfaabf9d4838ab2bbd7d96e126768982fc0ed9f4651957461f3c57527d"
     }
   ]
 }

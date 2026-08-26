@@ -1,0 +1,11 @@
+{
+  "$id": "urn:insight:platform:v1:schema:W3cTraceParent",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Exact first-release W3C version-00 parent. Only trace flags 00 and 01 are accepted.",
+  "maxLength": 55,
+  "minLength": 55,
+  "pattern": "^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-(00|01)$",
+  "title": "W3cTraceParent",
+  "type": "string",
+  "x-platform-max-bytes": 55
+}

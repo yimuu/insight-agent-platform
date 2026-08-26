@@ -25,8 +25,11 @@ pub fn nominal_schemas() -> BTreeMap<&'static str, Value> {
             "OpaqueRunEventCursor",
             cursor_schema("OpaqueRunEventCursor"),
         ),
+        ("TraceId", trace_id_schema()),
+        ("TraceIdentityV1", trace_identity_schema()),
         ("UtcTimestamp", utc_timestamp_schema()),
         ("UuidV7Id", resource_id_schema()),
+        ("W3cTraceParent", w3c_traceparent_schema()),
     ])
 }
 
@@ -76,6 +79,17 @@ pub fn nominal_schema_files() -> BTreeMap<&'static str, (&'static str, Value)> {
             ),
         ),
         (
+            "TraceId",
+            ("schemas/nominal/trace-id.schema.json", trace_id_schema()),
+        ),
+        (
+            "TraceIdentityV1",
+            (
+                "schemas/nominal/trace-identity-v1.schema.json",
+                trace_identity_schema(),
+            ),
+        ),
+        (
             "UtcTimestamp",
             (
                 "schemas/nominal/utc-timestamp.schema.json",
@@ -87,6 +101,13 @@ pub fn nominal_schema_files() -> BTreeMap<&'static str, (&'static str, Value)> {
             (
                 "schemas/nominal/uuid-v7-id.schema.json",
                 resource_id_schema(),
+            ),
+        ),
+        (
+            "W3cTraceParent",
+            (
+                "schemas/nominal/w3c-traceparent.schema.json",
+                w3c_traceparent_schema(),
             ),
         ),
     ])
@@ -212,6 +233,51 @@ fn utc_timestamp_schema() -> Value {
             "minLength": 27,
             "maxLength": 27,
             "x-platform-max-bytes": 27
+        }),
+    )
+}
+
+fn trace_id_body() -> Value {
+    json!({
+        "type": "string",
+        "description": "Opaque W3C trace ID: 16 bytes as canonical lowercase hexadecimal, excluding all zero.",
+        "pattern": "^(?!0{32}$)[0-9a-f]{32}$",
+        "minLength": 32,
+        "maxLength": 32,
+        "x-platform-max-bytes": 32
+    })
+}
+
+fn trace_id_schema() -> Value {
+    schema_document("TraceId", trace_id_body())
+}
+
+fn trace_identity_schema() -> Value {
+    schema_document(
+        "TraceIdentityV1",
+        json!({
+            "type": "object",
+            "description": "Durable recovery-safe correlation identity. Span IDs are never persisted here.",
+            "properties": {
+                "schema_version": {"type": "integer", "const": 1},
+                "trace_id": trace_id_body()
+            },
+            "required": ["schema_version", "trace_id"],
+            "additionalProperties": false
+        }),
+    )
+}
+
+fn w3c_traceparent_schema() -> Value {
+    schema_document(
+        "W3cTraceParent",
+        json!({
+            "type": "string",
+            "description": "Exact first-release W3C version-00 parent. Only trace flags 00 and 01 are accepted.",
+            "pattern": "^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-(00|01)$",
+            "minLength": 55,
+            "maxLength": 55,
+            "x-platform-max-bytes": 55
         }),
     )
 }

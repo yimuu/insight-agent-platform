@@ -1,0 +1,26 @@
+{
+  "$id": "urn:insight:platform:v1:schema:TraceIdentityV1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Durable recovery-safe correlation identity. Span IDs are never persisted here.",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "trace_id": {
+      "description": "Opaque W3C trace ID: 16 bytes as canonical lowercase hexadecimal, excluding all zero.",
+      "maxLength": 32,
+      "minLength": 32,
+      "pattern": "^(?!0{32}$)[0-9a-f]{32}$",
+      "type": "string",
+      "x-platform-max-bytes": 32
+    }
+  },
+  "required": [
+    "schema_version",
+    "trace_id"
+  ],
+  "title": "TraceIdentityV1",
+  "type": "object"
+}

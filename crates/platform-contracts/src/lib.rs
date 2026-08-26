@@ -24,6 +24,7 @@ pub mod sandbox_policy;
 pub mod schema;
 pub mod security;
 pub mod state;
+pub mod trace;
 pub mod types;
 pub mod worker;
 
@@ -100,6 +101,10 @@ pub use state::{
     JobState, McpAuthorizationState, McpSessionState, ModelTurnState, NodeExecutionState,
     PrincipalBindingState, PrincipalIdentityState, RunState, SandboxJobState, ScopeState,
     SecretBindingState, WakeContractState,
+};
+pub use trace::{
+    SpanId, TraceContractError, TraceFlags, TraceId, TraceIdentityV1, W3cTraceParent,
+    SPAN_ID_HEX_LENGTH, TRACE_ID_HEX_LENGTH,
 };
 pub use types::{
     ApiProblem, ArtifactRef, DecimalMoney, DeclaredFailureCode, DurablePublicRunEventData, Failure,
