@@ -15,10 +15,12 @@ name = "platform-mcp-resource-host"
 path = "src/resource_main.rs"
 
 [dependencies]
+chrono.workspace = true
 axum.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-egress-rpc.workspace = true
 insight-platform-mcp-host.workspace = true
+insight-platform-jobs.workspace = true
 insight-platform-mcp-rpc.workspace = true
 insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
@@ -29,6 +31,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

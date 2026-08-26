@@ -730,6 +730,12 @@
 > execute兼容封装。远端I/O期间heartbeat提升Job version后，prepared snapshot/resolution只允许同worker、同lease generation、同token且更高version
 > 的fence替换；错token与非递增version fail closed，最终Receipt/terminal transaction使用最新fence。MCP Host 57/57与strict Clippy通过；本批只关闭
 > heartbeat/commit L1组合缺口，production claim loop、真实Egress discovery/Artifact路径与L2/L3仍Pending。
+>
+> 2026-08-27 implementation evidence：r335在MCP service crate新增durable discovery driver：claim前以独立Semaphore预留permit，exact-kind
+> claim后执行leased -> running，远端prepare期间按小于lease三分之一的间隔heartbeat并把最新fence注入commit；attempt identity digest不含可变
+> expected version。bounded recovery按observation区分unstarted requeue、running retry、exhausted terminal，并在剩余deadline短于backoff时等待下一轮
+> timeout而非构造非法命令；shutdown有bounded drain。新driver tests 2/2与service all-target strict Clippy通过。该库尚未接入production binary，
+> Egress discovery/Artifact adapter、fresh PostgreSQL竞争与L3仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

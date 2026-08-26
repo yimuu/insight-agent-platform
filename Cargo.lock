@@ -2877,6 +2877,7 @@ dependencies = [
  "insight-platform-capability-adapters",
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
+ "insight-platform-jobs",
  "insight-platform-mcp-host",
  "insight-platform-mcp-rpc",
  "insight-platform-model-adapters",
@@ -2891,6 +2892,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "url",
+ "uuid",
 ]
 
 [[package]]

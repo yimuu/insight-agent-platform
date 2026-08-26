@@ -498,6 +498,11 @@ r334把MCP discovery执行改为prepare/refresh-fence/commit三段式：远端I/
 prepared结果只能接受同worker、同lease generation、同token且严格递增的fence；错token与旧version在commit前fail closed。既有`execute`仍作为无
 heartbeat封装。MCP Host 57/57与strict Clippy通过；该L1改造尚未接入production driver，也不替代fresh PostgreSQL竞争或真实协议L3证据。
 
+r335新增MCP discovery durable driver库：独立permit在claim前预留，exact Job从leased启动为running，prepare期间持续heartbeat并以最新fence提交；
+physical attempt digest排除可变expected version。恢复循环依据typed attempt计数选择unstarted requeue、running retry或exhausted terminal，deadline
+不足一个backoff时等待数据库时间推进后再timeout；进程取消使用bounded drain。driver tests 2/2与service all-target strict Clippy通过；尚未接入
+production binary和真实Egress discovery/Artifact端口，因此不新增fresh PostgreSQL L2或process/protocol L3证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
