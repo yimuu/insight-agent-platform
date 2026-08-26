@@ -777,6 +777,11 @@
 > `AwaitingStage/waiting` CAS为`Scan/ready`并写Event/Outbox；同owner generation重试逐字段核对既有物理证据并返回同一identity，漂移fail closed。
 > Artifact 31/31、PostgreSQL lib 14/14及相关strict Clippy通过；本轮无fresh PostgreSQL，内部stage RPC、Data Worker object write adapter与L2事务
 > kill-window仍Pending。
+>
+> 2026-08-27 implementation evidence：r342新增Artifact Data Worker专用`StageWorkloadArtifact` unary gRPC与closed canonical request/response
+> envelope；wire DTO只携带bounded canonical descriptor bytes/digest、exact producer fence和预分配identity，明确排除object locator、storage binding、
+> encryption domain与backend evidence。服务端要求exact MCP Host SPIFFE identity及trace interceptor，client/server均重验canonical digest和closed Rust
+> DTO。Artifact RPC 8/8（含真实loopback mTLS，因sandbox禁止监听而在批准的外部执行环境验证）通过；进程侧object write adapter与RPC service注册仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

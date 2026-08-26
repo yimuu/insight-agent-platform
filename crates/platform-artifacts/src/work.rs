@@ -16,12 +16,14 @@ use insight_platform_jobs::{
     JobProjection,
 };
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt};
+use sha2::{Digest as _, Sha256};
+use std::{error::Error, fmt, fmt::Write as _};
 
 const MAX_ARTIFACT_REASON_BYTES: usize = 64;
 const MAX_ARTIFACT_OBJECT_GENERATION_BYTES: usize = 255;
 const MAX_ARTIFACT_BACKEND_FAILURE_BYTES: usize = 1_024;
 const MAX_ARTIFACT_EVIDENCE_TTL_MILLISECONDS: u64 = 7 * 24 * 60 * 60 * 1_000;
+pub const MAX_WORKLOAD_ARTIFACT_STAGE_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone)]
 pub struct ScheduleInitialArtifactScan {
@@ -363,6 +365,49 @@ pub struct StageWorkloadArtifact {
     pub encryption_domain_id: ResourceId,
     pub backend_evidence_digest: Sha256Digest,
     pub staged_at: DateTime<Utc>,
+}
+
+/// RPC-safe producer request. Storage selection, encrypted locators and backend evidence are
+/// deliberately absent because they are owned by the Artifact Data Worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageWorkloadArtifactRequest {
+    pub schema_version: u32,
+    pub tenant_id: ResourceId,
+    pub producer_job_id: ResourceId,
+    pub producer_fence: JobFence,
+    pub verification_job_id: ResourceId,
+    pub artifact_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub descriptor_bytes: Vec<u8>,
+    pub descriptor_digest: Sha256Digest,
+    pub media_type: String,
+}
+
+impl StageWorkloadArtifactRequest {
+    pub fn validate(&self) -> Result<(), ArtifactWorkError> {
+        if self.schema_version != 1
+            || self.tenant_id.kind() != ResourceKind::Tenant
+            || self.producer_job_id.kind() != ResourceKind::Job
+            || self.producer_fence.expected_version == 0
+            || self.producer_fence.worker_process_generation_id.kind()
+                != ResourceKind::WorkerProcessGeneration
+            || self.producer_fence.lease_generation == 0
+            || self.verification_job_id.kind() != ResourceKind::Job
+            || self.verification_job_id == self.producer_job_id
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.blob_id.kind() != ResourceKind::InternalBlob
+            || self.descriptor_bytes.is_empty()
+            || self.descriptor_bytes.len() > MAX_WORKLOAD_ARTIFACT_STAGE_BYTES
+            || self.media_type.is_empty()
+            || self.media_type.len() > 255
+            || self.media_type.chars().any(char::is_control)
+            || raw_digest(&self.descriptor_bytes) != self.descriptor_digest
+        {
+            return Err(ArtifactWorkError::InvalidCommand);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1920,6 +1965,15 @@ fn valid_media_type(value: &str) -> bool {
         })
 }
 
+fn raw_digest(bytes: &[u8]) -> Sha256Digest {
+    let mut value = String::with_capacity(71);
+    value.push_str("sha256:");
+    for byte in Sha256::digest(bytes) {
+        write!(&mut value, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    value.parse().expect("SHA-256 encoding is canonical")
+}
+
 fn valid_code(value: &str, maximum: usize) -> bool {
     !value.is_empty()
         && value.len() <= maximum
@@ -2148,6 +2202,23 @@ mod tests {
             oversized.validate_for(&stage, now),
             Err(ArtifactWorkError::InvalidCommand)
         );
+
+        let descriptor_bytes = br#"{"objects":[]}"#.to_vec();
+        let mut request = StageWorkloadArtifactRequest {
+            schema_version: 1,
+            tenant_id: id(ResourceKind::Tenant, 0x822),
+            producer_job_id: stage.producer_job_id.clone(),
+            producer_fence: oversized.producer_fence.clone(),
+            verification_job_id: id(ResourceKind::Job, 0x823),
+            artifact_id: stage.artifact_id.clone(),
+            blob_id: stage.blob_id.clone(),
+            descriptor_digest: raw_digest(&descriptor_bytes),
+            descriptor_bytes,
+            media_type: stage.declared_media_type.clone(),
+        };
+        assert!(request.validate().is_ok());
+        request.descriptor_bytes.push(b' ');
+        assert_eq!(request.validate(), Err(ArtifactWorkError::InvalidCommand));
     }
 
     struct Fixture {

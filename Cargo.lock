@@ -2469,6 +2469,7 @@ dependencies = [
  "futures",
  "insight-platform-artifacts",
  "insight-platform-contracts",
+ "insight-platform-jobs",
  "insight-platform-rpc-trace",
  "insight-platform-sandbox",
  "prost",

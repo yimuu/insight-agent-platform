@@ -11,6 +11,7 @@ use insight_platform_artifacts::{
     SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerRunValueReader,
     SchedulerSkillPackageReadError, SchedulerSkillPackageReadRequest, SchedulerSkillPackageReader,
     SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest, SchedulerTypedPlanReader,
+    StageWorkloadArtifactRequest, StagedWorkloadArtifact,
 };
 use insight_platform_contracts::{
     parse_strict_json, ArtifactRef, JsonLimits, ResourceKind, Sha256Digest,
@@ -43,13 +44,16 @@ pub mod proto {
 }
 
 use proto::{
+    artifact_data_worker_service_client::ArtifactDataWorkerServiceClient,
+    artifact_data_worker_service_server::ArtifactDataWorkerService,
     artifact_gvisor_guest_service_client::ArtifactGvisorGuestServiceClient,
     artifact_gvisor_guest_service_server::ArtifactGvisorGuestService,
     artifact_sandbox_broker_service_client::ArtifactSandboxBrokerServiceClient,
     artifact_sandbox_broker_service_server::ArtifactSandboxBrokerService,
     artifact_scheduler_service_client::ArtifactSchedulerServiceClient,
     artifact_scheduler_service_server::ArtifactSchedulerService, ArtifactReadChunk,
-    ClosedArtifactReadRequest, ClosedGvisorGuestPlan,
+    ClosedArtifactReadRequest, ClosedArtifactWriteRequest, ClosedArtifactWriteResponse,
+    ClosedGvisorGuestPlan,
 };
 
 pub const ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
@@ -57,6 +61,7 @@ pub const MODEL_WORKER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/work
 pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-controller";
 pub const SCHEDULER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/scheduler";
+pub const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
 pub const MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD: usize = 1_048_576;
 pub const MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD: usize = 262_144;
 const WASI_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.wasi.read/v1";
@@ -71,6 +76,7 @@ const GVISOR_GUEST_AUTHORIZE_OPERATION: &str = "artifact.gvisor.guest.authorize/
 const GVISOR_GUEST_READ_OPERATION: &str = "artifact.gvisor.guest.read/v1";
 const GVISOR_GUEST_PACKAGE_CHUNK_OPERATION: &str = "artifact.gvisor.guest.package.chunk/v1";
 const GVISOR_GUEST_INPUT_CHUNK_OPERATION: &str = "artifact.gvisor.guest.input.chunk/v1";
+const WORKLOAD_ARTIFACT_STAGE_OPERATION: &str = "artifact.data-worker.workload.stage/v1";
 const RPC_MESSAGE_OVERHEAD_BYTES: usize = 8_192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +174,164 @@ impl tonic::service::Interceptor for SchedulerWorkloadIdentity {
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), SCHEDULER_WORKLOAD_IDENTITY)?;
         require_trace_interceptor(request)
+    }
+}
+
+/// Authorizes only the independently deployed MCP Host at the workload stage boundary.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct McpHostWorkloadIdentity;
+
+impl tonic::service::Interceptor for McpHostWorkloadIdentity {
+    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        let certificates = request
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        let leaf = certificates
+            .first()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        require_exact_workload_uri(leaf.as_ref(), MCP_HOST_WORKLOAD_IDENTITY)?;
+        require_trace_interceptor(request)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactWorkloadStageError {
+    Denied,
+    StaleFence,
+    Conflict,
+    Unavailable,
+    Integrity,
+}
+
+#[async_trait]
+pub trait ArtifactWorkloadStageAuthority: Send + Sync {
+    async fn stage_workload_artifact(
+        &self,
+        request: StageWorkloadArtifactRequest,
+    ) -> Result<StagedWorkloadArtifact, ArtifactWorkloadStageError>;
+}
+
+pub struct ArtifactDataWorkerGrpcService<A> {
+    authority: Arc<A>,
+    rpc_limits: ArtifactInternalRpcLimits,
+}
+
+impl<A> ArtifactDataWorkerGrpcService<A> {
+    pub fn new(authority: Arc<A>, rpc_limits: ArtifactInternalRpcLimits) -> Self {
+        Self {
+            authority,
+            rpc_limits,
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl<A> ArtifactDataWorkerService for ArtifactDataWorkerGrpcService<A>
+where
+    A: ArtifactWorkloadStageAuthority + 'static,
+{
+    async fn stage_workload_artifact(
+        &self,
+        request: Request<ClosedArtifactWriteRequest>,
+    ) -> Result<Response<ClosedArtifactWriteResponse>, Status> {
+        let command: StageWorkloadArtifactRequest = decode_write_request(
+            request.into_inner(),
+            WORKLOAD_ARTIFACT_STAGE_OPERATION,
+            self.rpc_limits,
+        )?;
+        command
+            .validate()
+            .map_err(|_| Status::invalid_argument("Artifact stage request is invalid"))?;
+        let staged = self
+            .authority
+            .stage_workload_artifact(command)
+            .await
+            .map_err(map_workload_stage_server_error)?;
+        staged
+            .validate()
+            .map_err(|_| Status::data_loss("Artifact stage result is invalid"))?;
+        encode_write_response(WORKLOAD_ARTIFACT_STAGE_OPERATION, &staged, self.rpc_limits)
+            .map(Response::new)
+            .map_err(Status::from)
+    }
+}
+
+type TracedArtifactDataWorkerServiceClient = ArtifactDataWorkerServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
+>;
+
+#[derive(Clone)]
+pub struct ArtifactDataWorkerGrpcClient {
+    client: TracedArtifactDataWorkerServiceClient,
+    rpc_limits: ArtifactInternalRpcLimits,
+}
+
+impl ArtifactDataWorkerGrpcClient {
+    pub fn new(channel: tonic::transport::Channel, rpc_limits: ArtifactInternalRpcLimits) -> Self {
+        let maximum = rpc_limits.maximum_message_bytes();
+        Self {
+            client: ArtifactDataWorkerServiceClient::with_interceptor(channel, PropagateTrace)
+                .max_encoding_message_size(maximum)
+                .max_decoding_message_size(maximum),
+            rpc_limits,
+        }
+    }
+
+    pub async fn stage_workload_artifact(
+        &self,
+        command: StageWorkloadArtifactRequest,
+    ) -> Result<StagedWorkloadArtifact, ArtifactWorkloadStageError> {
+        command
+            .validate()
+            .map_err(|_| ArtifactWorkloadStageError::Integrity)?;
+        let request =
+            encode_write_request(WORKLOAD_ARTIFACT_STAGE_OPERATION, &command, self.rpc_limits)
+                .map_err(|_| ArtifactWorkloadStageError::Integrity)?;
+        let mut client = self.client.clone();
+        let response = client
+            .stage_workload_artifact(request)
+            .await
+            .map_err(map_workload_stage_client_error)?
+            .into_inner();
+        let staged: StagedWorkloadArtifact =
+            decode_write_response(response, WORKLOAD_ARTIFACT_STAGE_OPERATION, self.rpc_limits)
+                .map_err(|_| ArtifactWorkloadStageError::Integrity)?;
+        staged
+            .validate()
+            .map_err(|_| ArtifactWorkloadStageError::Integrity)?;
+        Ok(staged)
+    }
+}
+
+fn map_workload_stage_server_error(error: ArtifactWorkloadStageError) -> Status {
+    match error {
+        ArtifactWorkloadStageError::Denied => Status::permission_denied("Artifact stage is denied"),
+        ArtifactWorkloadStageError::StaleFence => {
+            Status::failed_precondition("Artifact producer fence is stale")
+        }
+        ArtifactWorkloadStageError::Conflict => {
+            Status::already_exists("Artifact stage evidence conflicts")
+        }
+        ArtifactWorkloadStageError::Unavailable => {
+            Status::unavailable("Artifact Data Worker is unavailable")
+        }
+        ArtifactWorkloadStageError::Integrity => {
+            Status::data_loss("Artifact stage evidence is invalid")
+        }
+    }
+}
+
+fn map_workload_stage_client_error(status: Status) -> ArtifactWorkloadStageError {
+    match status.code() {
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
+            ArtifactWorkloadStageError::Denied
+        }
+        tonic::Code::FailedPrecondition => ArtifactWorkloadStageError::StaleFence,
+        tonic::Code::AlreadyExists | tonic::Code::Aborted => ArtifactWorkloadStageError::Conflict,
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+            ArtifactWorkloadStageError::Unavailable
+        }
+        _ => ArtifactWorkloadStageError::Integrity,
     }
 }
 
@@ -1210,6 +1374,74 @@ fn encode_request<T: Serialize>(
     })
 }
 
+fn encode_write_request<T: Serialize>(
+    operation: &str,
+    value: &T,
+    limits: ArtifactInternalRpcLimits,
+) -> Result<ClosedArtifactWriteRequest, ArtifactRpcError> {
+    let encoded = encode_request(operation, value, limits)?;
+    Ok(ClosedArtifactWriteRequest {
+        schema_version: encoded.schema_version,
+        operation: encoded.operation,
+        canonical_request_json: encoded.canonical_request_json,
+        request_digest: encoded.request_digest,
+    })
+}
+
+fn decode_write_request<T: DeserializeOwned>(
+    envelope: ClosedArtifactWriteRequest,
+    expected_operation: &str,
+    limits: ArtifactInternalRpcLimits,
+) -> Result<T, ArtifactRpcError> {
+    decode_request(
+        ClosedArtifactReadRequest {
+            schema_version: envelope.schema_version,
+            operation: envelope.operation,
+            canonical_request_json: envelope.canonical_request_json,
+            request_digest: envelope.request_digest,
+        },
+        expected_operation,
+        limits,
+    )
+}
+
+fn encode_write_response<T: Serialize>(
+    operation: &str,
+    value: &T,
+    limits: ArtifactInternalRpcLimits,
+) -> Result<ClosedArtifactWriteResponse, ArtifactRpcError> {
+    let canonical_response_json =
+        serde_jcs::to_vec(value).map_err(|_| ArtifactRpcError::InvalidEnvelope)?;
+    if canonical_response_json.is_empty()
+        || canonical_response_json.len() > limits.maximum_request_bytes()
+    {
+        return Err(ArtifactRpcError::InvalidEnvelope);
+    }
+    Ok(ClosedArtifactWriteResponse {
+        schema_version: ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION,
+        operation: operation.to_owned(),
+        response_digest: digest_bytes(&canonical_response_json).to_string(),
+        canonical_response_json,
+    })
+}
+
+fn decode_write_response<T: DeserializeOwned>(
+    envelope: ClosedArtifactWriteResponse,
+    expected_operation: &str,
+    limits: ArtifactInternalRpcLimits,
+) -> Result<T, ArtifactRpcError> {
+    decode_request(
+        ClosedArtifactReadRequest {
+            schema_version: envelope.schema_version,
+            operation: envelope.operation,
+            canonical_request_json: envelope.canonical_response_json,
+            request_digest: envelope.response_digest,
+        },
+        expected_operation,
+        limits,
+    )
+}
+
 fn decode_request<T: DeserializeOwned>(
     envelope: ClosedArtifactReadRequest,
     expected_operation: &str,
@@ -1891,6 +2123,63 @@ mod tests {
             limits
         )
         .is_err());
+    }
+
+    #[test]
+    fn workload_stage_wire_excludes_storage_authority_and_binds_bytes() {
+        let limits = ArtifactInternalRpcLimits::default();
+        let descriptor_bytes = br#"{"objects":[]}"#.to_vec();
+        let request = StageWorkloadArtifactRequest {
+            schema_version: 1,
+            tenant_id: id(ResourceKind::Tenant),
+            producer_job_id: id(ResourceKind::Job),
+            producer_fence: insight_platform_jobs::JobFence {
+                expected_version: 3,
+                worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+                lease_generation: 2,
+                token_digest: digest('a'),
+            },
+            verification_job_id: id(ResourceKind::Job),
+            artifact_id: id(ResourceKind::Artifact),
+            blob_id: id(ResourceKind::InternalBlob),
+            descriptor_digest: digest_bytes(&descriptor_bytes),
+            descriptor_bytes,
+            media_type: "application/vnd.insight.mcp-discovery+json".to_owned(),
+        };
+        request.validate().unwrap();
+        let envelope =
+            encode_write_request(WORKLOAD_ARTIFACT_STAGE_OPERATION, &request, limits).unwrap();
+        let decoded: StageWorkloadArtifactRequest =
+            decode_write_request(envelope, WORKLOAD_ARTIFACT_STAGE_OPERATION, limits).unwrap();
+        assert_eq!(decoded, request);
+        let encoded = serde_json::to_value(&decoded).unwrap();
+        assert!(encoded.get("object_reference_ciphertext").is_none());
+        assert!(encoded.get("storage_binding_digest").is_none());
+        assert!(encoded.get("encryption_domain_id").is_none());
+
+        let staged = StagedWorkloadArtifact {
+            schema_version: 1,
+            artifact_id: decoded.artifact_id,
+            blob_id: decoded.blob_id,
+            verification_job_id: decoded.verification_job_id,
+            content_digest: decoded.descriptor_digest,
+            size_bytes: u64::try_from(decoded.descriptor_bytes.len()).unwrap(),
+            object_generation: "generation-1".to_owned(),
+            artifact_version: 2,
+            blob_version: 1,
+            verification_job_version: 2,
+        };
+        let response =
+            encode_write_response(WORKLOAD_ARTIFACT_STAGE_OPERATION, &staged, limits).unwrap();
+        assert_eq!(
+            decode_write_response::<StagedWorkloadArtifact>(
+                response,
+                WORKLOAD_ARTIFACT_STAGE_OPERATION,
+                limits,
+            )
+            .unwrap(),
+            staged
+        );
     }
 
     #[test]

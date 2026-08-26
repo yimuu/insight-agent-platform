@@ -29,6 +29,13 @@ service ArtifactGvisorGuestService {
   rpc ReadGuestArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
 }
 
+// Internal-only workload output boundary. The MCP Host is the only first-release caller; the
+// request contains encrypted storage evidence and exact durable Job fences, never credentials or
+// a caller-selected object key.
+service ArtifactDataWorkerService {
+  rpc StageWorkloadArtifact(ClosedArtifactWriteRequest) returns (ClosedArtifactWriteResponse);
+}
+
 message ClosedArtifactReadRequest {
   uint32 schema_version = 1;
   string operation = 2;
@@ -53,4 +60,18 @@ message ClosedGvisorGuestPlan {
   string operation = 2;
   bytes canonical_plan_json = 3;
   string plan_digest = 4;
+}
+
+message ClosedArtifactWriteRequest {
+  uint32 schema_version = 1;
+  string operation = 2;
+  bytes canonical_request_json = 3;
+  string request_digest = 4;
+}
+
+message ClosedArtifactWriteResponse {
+  uint32 schema_version = 1;
+  string operation = 2;
+  bytes canonical_response_json = 3;
+  string response_digest = 4;
 }
