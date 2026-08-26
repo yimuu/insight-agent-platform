@@ -460,6 +460,10 @@ application Helm/Docker closure与exact GitOps environment closure共同形成`d
 签名均进入canonical release-bundle index并再次签名。仓库门禁只证明producer结构与本地合同通过；
 registry、GitOps和目标环境验证尚未运行，故L6 gate仍为Pending。
 
+r289复核当前render closure并更正累计计数：subscription Context Worker与MCP Resource Host使15个role对应19个隔离pool，动态permit覆盖为
+9/19；r248～r267的17-pool数字保留为历史批次证据。Security/Egress deployment checker同时登记既有CR-192 `RefreshMcpResources` method，
+以exact 13-method集合继续拒绝任意额外RPC。该批仅修复门禁/审计漂移，不改变protocol或部署拓扑。
+
 r283为独立MCP OAuth PKCE Cleanup Worker接入shared process observability。readiness位于closed config、PostgreSQL/schema、mTLS Egress client
 和durable cleanup owner之后，HTTP listener提前退出会使process失败；Helm以HTTP probe、独立Service/ServiceMonitor及Prometheus-only ingress
 替换原PID探针，同时保持数据库与Egress的exact出口。binary tests、strict Clippy和chart静态正负门禁通过；该process surface不计作新的

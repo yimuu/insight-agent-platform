@@ -363,6 +363,11 @@ WorkerManifest、唯一baseline migration、contract/config/limit/policy/qualifi
 Rust `validate-production-candidate`通过。该批实现可执行的signed candidate producer，但尚无实际外部registry/GitOps运行产物、人工审批
 或production-equivalent L4～L6运行证据，因此`signed_supply_chain`仍不得标记passed。
 
+r289最终静态复核确认subscription Context Worker与MCP Resource Host加入后，15个ComponentRole当前映射为19个隔离workload pool，
+其中9个LocalWorkerPools具备动态permit指标；早期r248～r267记录的17-pool是当时历史证据，不再代表当前拓扑。Security/Egress全局门禁同步
+纳入CR-192 `RefreshMcpResources` closed RPC，继续要求Egress只暴露13个reviewed remote-only method。全局render、observability、redaction和
+strict workspace Clippy通过；该更正不新增role、RPC或authority，也不替代live L4。
+
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
 storage与audit closure全部由服务端拥有；upload target是唯一显式Secret-bearing响应例外。Public Gateway不取得storage authority，Artifact Gateway
 不信任自由principal header，两者以exact audience mTLS连接并由Artifact Gateway从PostgreSQL重绑定current principal。

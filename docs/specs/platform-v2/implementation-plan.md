@@ -474,6 +474,10 @@
 > timestamp。测试报告、migration、SBOM及Candidate signature由canonical release-bundle index传递闭合并再次签名。静态供应链门禁、负向fixture、
 > Platform v1合同检查及Rust production candidate validator通过。该实现提供L6执行入口，不构成registry/GitOps/人工promotion或目标环境gate通过。
 
+> 2026-08-26 implementation evidence：r289最终render复核确认CR-192后当前闭包为15-role/19-pool，Context subscription pool使动态permit
+> coverage达到9/19；此前17-pool/8-pool描述只保留为历史批次证据。Security/Egress checker补入已实现的`RefreshMcpResources`并继续exact
+> 验证13个remote-only RPC。全局workload/observability/redaction/deployment checker与workspace strict Clippy通过；不改变L4～L6 Pending边界。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`
