@@ -1,5 +1,9 @@
 //! Deployable public Gateway for the clean-cut Platform `/v1` contract.
 
+mod dependency_observer;
+
+use dependency_observer::install_postgres_dependency_metrics;
+
 use async_trait::async_trait;
 use axum::{
     extract::{Extension, Request, State},
@@ -62,14 +66,15 @@ use insight_platform_invocations::{
 use insight_platform_jobs::WakeSource;
 use insight_platform_mcp_host::CreateMcpDiscoveryOperation;
 use insight_platform_observability::{
-    OperationalCapacityMetric, OperationalCapacitySnapshot, OperationalCapacitySource,
-    ProcessHttpMetrics,
+    DependencyObservationMetrics, OperationalCapacityMetric, OperationalCapacitySnapshot,
+    OperationalCapacitySource, ProcessHttpMetrics,
 };
 use insight_platform_orchestrator::{
     AdmitRun, PlanNodeKey, RequestRunCancel, RunInputValue, SetRunPause,
 };
 use insight_platform_postgres::{
     artifact_repository::{ArtifactDeletionApprovalDecision, ResolveArtifactDeletionApproval},
+    dependency_health::run_postgres_health_sampler,
     operation_repository::{
         project_context_dataset_build_operation, project_registry_validation_operation,
         OperationReadError,
@@ -102,6 +107,7 @@ use std::{
     task::{Context, Poll},
     time::{Duration, Instant},
 };
+use tokio_util::sync::CancellationToken;
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_GATEWAY_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_GATEWAY_CONFIG_DIGEST";
@@ -175,26 +181,38 @@ impl OperationalCapacitySource for PostgresPoolCapacity {
     }
 }
 
+#[cfg(test)]
 fn install_gateway_metrics_with_postgres(
     role: ProcessRole,
     pool: sqlx::PgPool,
     maximum_connections: u32,
 ) -> Arc<ProcessHttpMetrics> {
+    install_gateway_metrics_with_postgres_and_dependencies(role, pool, maximum_connections, None)
+}
+
+fn install_gateway_metrics_with_postgres_and_dependencies(
+    role: ProcessRole,
+    pool: sqlx::PgPool,
+    maximum_connections: u32,
+    dependencies: Option<Arc<DependencyObservationMetrics>>,
+) -> Arc<ProcessHttpMetrics> {
     let source: Arc<dyn OperationalCapacitySource> = Arc::new(PostgresPoolCapacity {
         pool,
         maximum_connections,
     });
-    Arc::new(
-        ProcessHttpMetrics::install_with_capacities(
-            role.component_role(),
-            GATEWAY_HTTP_OPERATIONS,
-            vec![OperationalCapacityMetric::new(
-                "postgresql_connections",
-                source,
-            )],
-        )
-        .expect("static Gateway capacity metric labels are valid"),
+    let metrics = ProcessHttpMetrics::install_with_capacities(
+        role.component_role(),
+        GATEWAY_HTTP_OPERATIONS,
+        vec![OperationalCapacityMetric::new(
+            "postgresql_connections",
+            source,
+        )],
     )
+    .expect("static Gateway capacity metric labels are valid");
+    Arc::new(match dependencies {
+        Some(dependencies) => metrics.with_dependency_observations(dependencies),
+        None => metrics,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -2676,6 +2694,9 @@ enum ProcessError {
     Io(std::io::Error),
     Database(sqlx::Error),
     Schema(insight_platform_postgres::AuthoritySchemaError),
+    ServerUnavailable,
+    DependencyObserverUnavailable,
+    ShutdownDeadlineExceeded,
 }
 
 impl fmt::Display for ProcessError {
@@ -2685,6 +2706,13 @@ impl fmt::Display for ProcessError {
             Self::Io(error) => write!(formatter, "I/O failed: {error}"),
             Self::Database(error) => write!(formatter, "database failed: {error}"),
             Self::Schema(error) => write!(formatter, "schema verification failed: {error}"),
+            Self::ServerUnavailable => formatter.write_str("Gateway HTTP server unavailable"),
+            Self::DependencyObserverUnavailable => {
+                formatter.write_str("Gateway dependency observer unavailable")
+            }
+            Self::ShutdownDeadlineExceeded => {
+                formatter.write_str("Gateway shutdown deadline exceeded")
+            }
         }
     }
 }
@@ -2758,9 +2786,8 @@ fn install_run_event_cursor_codec(
         .map_err(|_| ProcessError::InvalidConfiguration)
 }
 
-async fn shutdown_signal(grace: Duration) {
+async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
-    tokio::time::sleep(grace.min(Duration::from_secs(1))).await;
 }
 
 #[tokio::main]
@@ -2791,13 +2818,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .connect(&database_url)
         .await?;
     verify_schema(&pool).await.map_err(ProcessError::Schema)?;
+    let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool.clone()));
     let listener = tokio::net::TcpListener::bind(&config.listen_address).await?;
-    let metrics =
-        install_gateway_metrics_with_postgres(config.role, pool, config.database_max_connections);
+    let (dependency_metrics, postgres_observer) =
+        install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
+    let metrics = install_gateway_metrics_with_postgres_and_dependencies(
+        config.role,
+        pool,
+        config.database_max_connections,
+        Some(dependency_metrics),
+    );
     metrics.mark_ready();
     tracing::info!(listen_address = %config.listen_address, "public gateway ready");
-    axum::serve(
+    let cancellation = CancellationToken::new();
+    let server = axum::serve(
         listener,
         build_router(
             config.role,
@@ -2812,11 +2847,58 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
         )?,
     )
-    .with_graceful_shutdown(shutdown_signal(Duration::from_millis(
-        config.shutdown_grace_milliseconds,
-    )))
-    .await?;
-    Ok(())
+    .with_graceful_shutdown(cancellation.child_token().cancelled_owned());
+    let mut server = tokio::spawn(async move { server.await });
+    let mut postgres_health = tokio::spawn(run_postgres_health_sampler(
+        database_health_pool,
+        postgres_observer,
+        cancellation.child_token(),
+    ));
+    let shutdown_grace = Duration::from_millis(config.shutdown_grace_milliseconds);
+    let result = tokio::select! {
+        _ = shutdown_signal() => {
+            cancellation.cancel();
+            let drained = tokio::time::timeout(shutdown_grace, async {
+                let (server_result, postgres_result) = tokio::join!(
+                    &mut server,
+                    &mut postgres_health,
+                );
+                server_result.map_err(|_| ProcessError::ServerUnavailable)?
+                    .map_err(ProcessError::Io)?;
+                postgres_result.map_err(|_| ProcessError::DependencyObserverUnavailable)
+            }).await;
+            match drained {
+                Ok(result) => result,
+                Err(_) => {
+                    server.abort();
+                    postgres_health.abort();
+                    let _ = tokio::join!(server, postgres_health);
+                    Err(ProcessError::ShutdownDeadlineExceeded)
+                }
+            }
+        }
+        result = &mut server => {
+            cancellation.cancel();
+            let server_result = result.map_err(|_| ProcessError::ServerUnavailable)
+                .and_then(|result| result.map_err(ProcessError::Io));
+            let postgres_result = postgres_health.await
+                .map_err(|_| ProcessError::DependencyObserverUnavailable);
+            server_result?;
+            postgres_result?;
+            Err(ProcessError::ServerUnavailable)
+        }
+        result = &mut postgres_health => {
+            cancellation.cancel();
+            let postgres_result = result
+                .map_err(|_| ProcessError::DependencyObserverUnavailable);
+            let server_result = server.await.map_err(|_| ProcessError::ServerUnavailable)
+                .and_then(|result| result.map_err(ProcessError::Io));
+            postgres_result?;
+            server_result?;
+            Err(ProcessError::DependencyObserverUnavailable)
+        }
+    };
+    result.map_err(Into::into)
 }
 
 #[cfg(test)]

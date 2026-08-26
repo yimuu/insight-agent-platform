@@ -115,6 +115,11 @@ r310把Callback API restricted PostgreSQL command pool接到共享15秒sampler�
 超时中止残余任务；readiness与callback outcome语义不变，也不预装Egress series。adapter/binary tests与strict Clippy通过；本轮无真实PG成功fixture或
 production scrape，OAuth Egress实际调用观测仍待统一RPC observer批次。
 
+r311把Management/Runtime Gateway各自restricted PostgreSQL pool接到共享15秒sampler，并与已有connection capacity共用process metrics surface；
+每个部署只导出自身固定`component_role + postgresql + outcome`，不暴露database、pool、SQL或error。signal、HTTP server与sampler互相监督，使用配置的完整
+shutdown grace实际bounded drain，超时中止残余任务；readiness和HTTP/API语义不变。adapter/8个binary tests与strict Clippy通过；本轮无真实PG成功fixture或
+production scrape，Runtime Artifact RPC observation仍待后续统一RPC observer批次。
+
 ## 3. Phase 1 审计
 
 ### 已满足

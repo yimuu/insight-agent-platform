@@ -604,6 +604,12 @@
 > 正常shutdown共用既有grace，超时中止残余任务；readiness与callback outcome不变，也不预装Egress series。adapter/binary tests、strict Clippy、Callback
 > deployment、redaction与observability门禁通过；本轮无新增真实PG或production scrape证据，OAuth Egress observation仍待统一RPC observer批次。
 
+> 2026-08-27 implementation evidence：r311把Management/Runtime Gateway各自restricted PostgreSQL pool接到共享15秒sampler，并与已有
+> connection capacity共用process metrics surface；每个deployment只导出自身固定`component_role + postgresql + outcome`，不暴露database、pool、SQL或
+> error。signal、HTTP server与sampler互相监督，配置的完整shutdown grace用于实际bounded drain，超时中止残余任务；readiness与HTTP/API不变。
+> adapter/8个binary tests、strict Clippy、Gateway deployment、redaction与observability门禁通过；本轮无新增真实PG或production scrape证据，Runtime
+> Artifact RPC observation仍待统一RPC observer批次。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`
