@@ -652,6 +652,12 @@ Model expired-lease lag及跨role durable observation failure三条symptom-first
 PostgreSQL baseline compile、strict Clippy、Model deployment、observability/redaction及format/diff门禁通过；未配置fresh PostgreSQL或production
 Prometheus，故该证据只关闭Model backlog/recovery L1 wiring，不推进L2或L4～L5。
 
+r326在Capability crate内增加共享typed durable queue sampler，Native与Remote production binary分别冻结
+`WorkClass::CapabilityNative|CapabilityRemote`，各自以business pool clone观察authority并附加到既有process surface；两个sampler与permit/双PostgreSQL
+health sampler同受取消和异常退出监督。指标仅含固定role与`due|expired_lease`，查询失败保留last-known gauge。两条symptom-first alert用closed固定role
+集合覆盖Native/Remote并按role分组，runbook明确Remote外部effect不得手工重放。目标13/13、strict Clippy、双部署、observability/redaction及format/diff
+门禁通过；无fresh PostgreSQL或production scrape，故只关闭这两个WorkClass的L1 backlog/recovery wiring，不推进L2或L4～L5。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

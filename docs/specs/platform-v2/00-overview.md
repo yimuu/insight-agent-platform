@@ -456,6 +456,10 @@ r325抽取共享durable Job queue metrics owner并由Orchestration复用；Model
 门禁同步接线。相关目标26/26、baseline编译、strict Clippy及部署/observability/redaction门禁通过；本轮未配置fresh PostgreSQL或production scrape，
 因此只关闭Model backlog/recovery仓库内L1接线，L2/L4～L5仍Pending。
 
+r326为Capability Native/Remote两个production binary复用crate内共享sampler，分别按唯一typed `WorkClass::CapabilityNative`与
+`WorkClass::CapabilityRemote`导出durable backlog/recovery lag；双角色共享固定告警但保留`component_role`隔离。目标13/13、strict Clippy、双部署、
+observability/redaction/format/diff门禁通过；本轮无fresh PostgreSQL或production scrape，只关闭两条Capability queue的仓库内L1接线。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

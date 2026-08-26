@@ -1,8 +1,10 @@
 //! Deployable native Capability Worker for the clean-cut Platform v1 candidate.
 
 mod dependency_observer;
+mod durable_queue_observer;
 
 use dependency_observer::install_capability_dependency_metrics;
+use durable_queue_observer::run_durable_job_queue_sampler;
 
 use insight_platform_capability_adapters::{
     CapabilityAdapterWorker, CapabilityDispatcher, InstalledNativeAdapter, InstalledNativeRegistry,
@@ -18,7 +20,8 @@ use insight_platform_contracts::{
 };
 use insight_platform_observability::{
     process_observability_router, run_worker_permit_sampler, update_worker_permits,
-    ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    DurableJobQueueMetrics, ProcessHttpMetrics, WorkerPermitMetrics,
+    PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{
     dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
@@ -212,6 +215,7 @@ async fn run() -> Result<(), ProcessError> {
     let observability_pools = pools.clone();
     let business_health_pool = business_pool.clone();
     let critical_control_health_pool = critical_control_pool.clone();
+    let durable_queue_pool = business_pool.clone();
     let claim_repository = Arc::new(PgRepository::new(business_pool.clone()));
     let commit_repository = PgRepository::new(business_pool.clone());
     let heartbeat_repository = Arc::new(PgRepository::new(critical_control_pool.clone()));
@@ -234,6 +238,7 @@ async fn run() -> Result<(), ProcessError> {
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let permit_metrics = Arc::new(WorkerPermitMetrics::default());
+    let durable_queue_metrics = Arc::new(DurableJobQueueMetrics::default());
     update_worker_permits(&permit_metrics, &observability_pools);
     let dependency_metrics = install_capability_dependency_metrics(false)
         .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -245,6 +250,7 @@ async fn run() -> Result<(), ProcessError> {
             Arc::clone(&permit_metrics),
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_durable_job_queue(Arc::clone(&durable_queue_metrics))
         .with_dependency_observations(dependency_metrics.process),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
@@ -269,6 +275,12 @@ async fn run() -> Result<(), ProcessError> {
             run_postgres_health_sampler(
                 critical_control_health_pool,
                 dependency_metrics.postgres,
+                sampler_cancellation.child_token(),
+            ),
+            run_durable_job_queue_sampler(
+                durable_queue_pool,
+                durable_queue_metrics,
+                WorkClass::CapabilityNative,
                 sampler_cancellation,
             ),
         );

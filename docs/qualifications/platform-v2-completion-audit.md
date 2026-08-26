@@ -177,6 +177,10 @@ r325抽取共享durable Job queue metrics owner并让Orchestration复用；query
 门禁同步完成。相关目标26/26、baseline compile、strict Clippy及部署/observability/redaction门禁通过；未运行fresh PostgreSQL或production scrape，
 因此仅关闭Model backlog/recovery L1接线，其他role、L2及L4～L5仍Pending。
 
+r326为Capability Native/Remote production binary接入crate内共享typed sampler，分别冻结唯一`CapabilityNative|CapabilityRemote` WorkClass；双角色
+backlog/recovery alert按固定`component_role`隔离并配套runbook。目标13/13、strict Clippy、双部署、observability/redaction/format/diff门禁通过；
+未运行fresh PostgreSQL或production scrape，故仅关闭两条Capability queue的L1接线。
+
 ## 3. Phase 1 审计
 
 ### 已满足

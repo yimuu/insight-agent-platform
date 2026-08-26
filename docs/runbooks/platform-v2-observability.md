@@ -80,6 +80,20 @@ PostgreSQL time and provider cancellation/recovery outcomes. Preserve the frozen
 and Job fence. Never clear lease fields or force terminal state through direct SQL; allow the Model
 owner recovery transaction to settle the lost attempt.
 
+## InsightPlatformCapabilityDurableJobLagHigh
+
+Use the fixed `component_role` to distinguish Native from Remote Capability work, then compare due
+count and age with that role's business permits and PostgreSQL health. For Remote, also correlate
+Egress and MCP Host dependency outcomes without adding endpoint or codec labels. Do not move work
+between WorkClasses or edit Job priority/state; repair the dependency or use qualified GitOps scale.
+
+## InsightPlatformCapabilityExpiredLeaseRecoveryLagHigh
+
+Identify the fixed Native or Remote role, then check Worker restarts, critical-control permits,
+PostgreSQL time, fence failures and the applicable external dependency. Preserve Invocation, quota
+and Job fencing. Never clear leases or replay non-idempotent Remote effects by hand; let the owning
+Capability recovery transaction choose the safe terminal or retry path.
+
 ## InsightPlatformDurableObservationFailureRatioHigh
 
 Confirm the affected fixed `component_role`, then correlate PostgreSQL transport health and pool

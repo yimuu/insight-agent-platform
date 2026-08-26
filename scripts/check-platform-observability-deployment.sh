@@ -44,6 +44,8 @@ failures << "must render one PrometheusRule and one dashboard" unless rules.leng
 
 alerts = rules.flat_map { |document| document.dig("spec", "groups").to_a.flat_map { |group| group["rules"].to_a } }
 expected = %w[
+  InsightPlatformCapabilityDurableJobLagHigh
+  InsightPlatformCapabilityExpiredLeaseRecoveryLagHigh
   InsightPlatformCriticalControlPermitsExhausted
   InsightPlatformDependencyFailureRatioHigh
   InsightPlatformDueOutboxLagHigh
@@ -122,8 +124,8 @@ dependency_owner_contracts = {
   "crates/platform-artifact-service/src/main.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
   "crates/platform-artifact-service/src/bin/maintenance.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
   "crates/platform-model-worker/src/main.rs" => %w[install_model_dependency_metrics new_with_observer run_postgres_health_sampler with_durable_job_queue WorkClass::Model],
-  "crates/platform-capability-worker/src/main.rs" => ["install_capability_dependency_metrics(false)", "run_postgres_health_sampler"],
-  "crates/platform-capability-worker/src/remote_main.rs" => ["install_capability_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler"],
+  "crates/platform-capability-worker/src/main.rs" => ["install_capability_dependency_metrics(false)", "run_postgres_health_sampler", "with_durable_job_queue", "WorkClass::CapabilityNative"],
+  "crates/platform-capability-worker/src/remote_main.rs" => ["install_capability_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler", "with_durable_job_queue", "WorkClass::CapabilityRemote"],
   "crates/platform-context-worker/src/main.rs" => ["install_context_dependency_metrics(false)", "run_postgres_health_sampler"],
   "crates/platform-context-worker/src/remote_main.rs" => ["install_context_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler"],
   "crates/platform-context-worker/src/subscription_main.rs" => ["install_context_dependency_metrics(false)", "run_postgres_health_sampler"],
