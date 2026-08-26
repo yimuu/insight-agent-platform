@@ -2432,6 +2432,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]
@@ -3048,6 +3050,8 @@ dependencies = [
  "insight-platform-contracts",
  "tokio",
  "tonic",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3378,6 +3382,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

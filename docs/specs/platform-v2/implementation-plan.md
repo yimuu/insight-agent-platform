@@ -496,6 +496,12 @@
 > 通过。该证据关闭shared metrics adapter的component real-socket scrape与动态metric payload负向切片，不替代Prometheus deployment scrape、
 > log/trace动态采集审计或L4 NetworkPolicy/RBAC。
 
+> 2026-08-26 implementation evidence：r292为公共HTTP与内部RPC task-local correlation安装fixed tracing spans，动态采集分别验证公共parent
+> trace ID、每hop span ID、accepted/rejected context outcome与internal same-trace/new-span字段存在。真实loopback OpenAI-compatible provider测试把
+> prompt、response、token、query、tenant identity、`tracestate`和`baggage` canary送过production reqwest/tracing路径，允许的request/response
+> metadata events存在且全部canary为零；公共扩展header拒绝span和RPC canary采集同样为零。相关tests、strict Clippy与静态redaction门禁通过。
+> 连同r291，该证据关闭仓库component L3动态metric/log/trace payload canary，不替代production telemetry backend、RBAC/retention或L4～L6。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

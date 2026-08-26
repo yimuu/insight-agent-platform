@@ -13,3 +13,7 @@ path = "src/lib.rs"
 insight-platform-contracts.workspace = true
 tokio.workspace = true
 tonic.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

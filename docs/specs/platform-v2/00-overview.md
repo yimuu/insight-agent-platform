@@ -372,6 +372,11 @@ r291以真实loopback TCP listener启动shared production observability Router�
 `/metrics`；采集结果只出现fixed `other/rejected` series，全部canary及header名称为零。该证据关闭metrics adapter的component real-socket
 scrape与动态metric payload负向切片，不替代Prometheus deployment scrape、log/trace动态采集、telemetry RBAC/retention或L4～L6。
 
+r292为公共HTTP及内部RPC correlation安装fixed tracing spans；动态采集证明公共parent trace ID、per-hop span ID、accepted/rejected outcome与
+internal same-trace/new-span字段存在。真实loopback provider路径注入prompt、response、token、query、tenant identity、`tracestate`和`baggage`
+canary，production tracing只采集bounded request/response metadata且全部canary为零；公共扩展header拒绝span与RPC采集也为零。连同r291，仓库
+component L3动态metric/log/trace payload canary闭合；production telemetry backend、RBAC/retention及L4～L6仍未完成。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

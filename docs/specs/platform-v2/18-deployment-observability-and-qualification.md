@@ -468,6 +468,12 @@ canary的未知请求，再实际抓取`/metrics` Prometheus text；未知operat
 并验证真实content type和graceful shutdown。该证据关闭shared metrics adapter的component real-socket scrape及动态metric payload负向切片，
 不替代Prometheus deployment scrape、log/trace动态采集审计、telemetry RBAC/retention或L4～L6。
 
+r292为公共HTTP与内部RPC task-local correlation增加fixed tracing spans。动态采集证明公共parent trace ID、每hop span ID、accepted/rejected
+context outcome和internal same-trace/new-span字段存在。真实loopback OpenAI-compatible provider测试将prompt、response、token、query、tenant
+identity、`tracestate`和`baggage` canary实际送入production reqwest/tracing路径，允许的request/response metadata events存在而全部canary为零；
+公共扩展header拒绝span与RPC canary采集同样为零。连同r291，该证据关闭component L3动态metric/log/trace payload canary；production
+telemetry backend、RBAC/retention、Prometheus deployment scrape与L4～L6仍是独立门禁。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

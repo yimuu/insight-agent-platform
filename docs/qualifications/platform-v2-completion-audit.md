@@ -37,8 +37,8 @@ Phase 3的MCP subscription真实HTTPS、OAuth Cleanup/Egress删除链及Callback
 | HTTP observability | shared bounded-label owner；全部19个ComponentRole workload pool、Sandbox两种process attestor及OAuth Cleanup Worker具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency；真实TCP fixture验证Prometheus text scrape和metric canary为零 | process wiring与component real-socket scrape闭合，不代表Prometheus deployment scrape或完整业务observability |
 | Dashboard/alerts | 独立chart提供role-filtered process/HTTP、Orchestration及Outbox业务dashboard、12条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代完整业务SLI或真实alert delivery |
 | Worker/queue telemetry | Orchestration、Model、Capability Native/Remote、Context Native/Remote/Subscription、Sandbox WASI/gVisor共9个pool从各自LocalWorkerPools导出business/critical-control available/used permit；Orchestration另有active jobs、claim/recovery outcome及PostgreSQL authority的due/expired-lease Job与due/expired-claim/dead Outbox count、oldest lag及observation health | Orchestration Job和shared Outbox backlog/recovery lag及9/19 pool permit L1 telemetry闭合；其余role authority及saturation仍待接线 |
-| Trace correlation | public W3C入口、Run/Invocation/Job/Task/Event/Outbox durable owner及首版MCP/Egress/Artifact/Sandbox/Security mTLS/UDS hop保持同一trace ID/new span；reclaim恢复原trace，provider与guest/storage边界不转发header | CR-197 machine/runtime与component L3连续性闭合；不替代production telemetry backend验证 |
-| Telemetry redaction | production Rust source静态门禁拒绝identity、Secret、prompt/response、object key及URL进入structured tracing或插值日志；真实TCP metrics fixture验证payload/identity、`tracestate`与`baggage` canary在scrape中为零 | source-level与dynamic metrics负向合同；不替代log/trace动态采集审计、RBAC/retention或production验证 |
+| Trace correlation | public W3C入口、Run/Invocation/Job/Task/Event/Outbox durable owner及首版MCP/Egress/Artifact/Sandbox/Security mTLS/UDS hop保持同一trace ID/new span；fixed public/internal spans的动态采集验证parent trace、per-hop span与context outcome，reclaim恢复原trace，provider与guest/storage边界不转发header | CR-197 machine/runtime、component L3连续性与动态correlation采集闭合；不替代production telemetry backend验证 |
+| Telemetry redaction | production Rust source静态门禁拒绝identity、Secret、prompt/response、object key及URL进入structured tracing或插值日志；真实TCP metrics与真实loopback provider tracing动态注入payload/identity/token/query、`tracestate`及`baggage` canary，采集结果均为零且允许的bounded metadata存在 | source-level与component L3 dynamic metric/log/trace负向合同闭合；不替代RBAC/retention或production backend验证 |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator；live topology/workload preflight对照Candidate/Capacity并拒绝rollout、image、config、identity、安全和容量漂移 | 可验证证据形状与preflight行为，不证明任一外部门禁通过 |
 | Runbooks | production dependency recovery与GitOps clean-cut手册已提交 | 操作准备完成，execution evidence pending |
@@ -172,7 +172,7 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 2. 全部19个ComponentRole workload pool及Sandbox process attestor已有shared process metrics；Orchestration、Model、Capability Native/Remote、
    Context Native/Remote/Subscription、Sandbox WASI/gVisor共9个pool已有动态permit指标，Orchestration另有claim/recovery指标，production tracing/log字段已有
    静态脱敏门禁；Orchestration现另有PostgreSQL authority的due/expired-lease Job及due/expired-claim/dead Outbox backlog/lag与observation health；仍缺其余role
-   backlog/dependency health、其余10个pool的role saturation、动态payload采集审计和production scrape证据。
+   backlog/dependency health、其余10个pool的role saturation和production Prometheus scrape证据。
 3. 全部19个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP/Orchestration/Outbox dashboard及逐alert
    runbook已扩展到13个panel和12条alert，包含Orchestration Job、shared Outbox lag/dead queue及PostgreSQL observation failure；其他role backlog/
    dependency与saturation对应的panel/alert仍待指标owner接线后补齐。
@@ -193,7 +193,7 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 按上游到下游执行，且每批通过后提交：
 
-1. 补其他role dependency/recovery/permit业务指标和动态payload采集审计；
+1. 补其他role dependency/recovery/permit业务指标；
 2. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
 3. 在受保护CI environment实际运行signed candidate producer并把exact bundle交给GitOps environment repository；
 4. 外部L4～L6、GitOps clean cut、current文档与规范归档。

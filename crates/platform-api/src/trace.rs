@@ -10,6 +10,7 @@ use insight_platform_contracts::{
     ApiProblem, ApiProblemCode, ResourceId, ResourceKind, SpanId, TraceFlags, TraceId,
     TraceIdentityV1, W3cTraceParent, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
+use tracing::Instrument as _;
 
 pub const TRACEPARENT_HEADER: &str = "traceparent";
 pub const TRACESTATE_HEADER: &str = "tracestate";
@@ -60,24 +61,58 @@ pub fn current_trace_id() -> TraceId {
 }
 
 pub async fn establish_public_trace(mut request: Request, next: Next) -> Response {
+    let parent_supplied = request.headers().contains_key(TRACEPARENT_HEADER);
     let context = match parse_public_trace(request.headers()) {
         Ok(context) => context,
         Err(()) => {
             let context = PublicTraceContext::generate();
+            let span = public_trace_span(context, "rejected", "generated");
             return ACTIVE_PUBLIC_TRACE
-                .scope(context, async move {
-                    with_trace_header(invalid_trace_problem(), context.identity.trace_id)
-                })
+                .scope(
+                    context,
+                    async move {
+                        with_trace_header(invalid_trace_problem(), context.identity.trace_id)
+                    }
+                    .instrument(span),
+                )
                 .await;
         }
     };
+    let span = public_trace_span(
+        context,
+        "accepted",
+        if parent_supplied {
+            "parent"
+        } else {
+            "generated"
+        },
+    );
     request.extensions_mut().insert(context);
     ACTIVE_PUBLIC_TRACE
-        .scope(context, async move {
-            let response = next.run(request).await;
-            with_trace_header(response, context.identity.trace_id)
-        })
+        .scope(
+            context,
+            async move {
+                let response = next.run(request).await;
+                with_trace_header(response, context.identity.trace_id)
+            }
+            .instrument(span),
+        )
         .await
+}
+
+fn public_trace_span(
+    context: PublicTraceContext,
+    context_outcome: &'static str,
+    trace_source: &'static str,
+) -> tracing::Span {
+    tracing::info_span!(
+        "platform.public_request",
+        trace_id = %context.identity.trace_id,
+        span_id = %context.gateway_span_id,
+        trace_flags = ?context.flags,
+        context_outcome,
+        trace_source,
+    )
 }
 
 fn parse_public_trace(headers: &axum::http::HeaderMap) -> Result<PublicTraceContext, ()> {
@@ -143,7 +178,35 @@ pub fn trace_context(request: &axum::http::Request<Body>) -> Option<&PublicTrace
 mod tests {
     use super::*;
     use axum::{routing::get, Router};
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+    };
     use tower::ServiceExt;
+
+    #[derive(Clone, Default)]
+    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedTelemetryWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry {
+        type Writer = CapturedTelemetryWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedTelemetryWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl io::Write for CapturedTelemetryWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn traced_router() -> Router {
         Router::new()
@@ -238,6 +301,66 @@ mod tests {
                 .unwrap()
                 .parse::<TraceId>()
                 .is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_public_trace_capture_rejects_extended_context_without_leaking_it() {
+        const TRACE_ID: &str = "0af7651916cd43dd8448eb211c80319c";
+        const TRACESTATE_CANARY: &str = "vendor=trace-canary-49fa124a";
+        const BAGGAGE_CANARY: &str = "private=baggage-canary-ff8ad715";
+
+        let captured = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW)
+            .with_writer(captured.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+
+        let accepted = traced_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/test")
+                    .header(
+                        TRACEPARENT_HEADER,
+                        format!("00-{TRACE_ID}-b7ad6b7169203331-01"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+
+        for (name, value) in [
+            (TRACESTATE_HEADER, TRACESTATE_CANARY),
+            (BAGGAGE_HEADER, BAGGAGE_CANARY),
+        ] {
+            let rejected = traced_router()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/test")
+                        .header(name, value)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let telemetry = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(telemetry.contains("platform.public_request"));
+        assert!(telemetry.contains(&format!("trace_id={TRACE_ID}")));
+        assert!(telemetry.contains("trace_flags=Sampled"));
+        assert!(telemetry.contains("context_outcome=\"accepted\""));
+        assert!(telemetry.contains("context_outcome=\"rejected\""));
+        assert!(telemetry.contains("trace_source=\"parent\""));
+        assert!(telemetry.contains("trace_source=\"generated\""));
+        for forbidden in [TRACESTATE_CANARY, BAGGAGE_CANARY] {
+            assert!(!telemetry.contains(forbidden), "trace leaked {forbidden}");
         }
     }
 }

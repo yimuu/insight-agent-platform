@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    io,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use futures::StreamExt;
 use insight_engine::execution::{stop_pair, ExecutionControl, RunError};
@@ -20,6 +25,36 @@ use tokio::{
     net::TcpListener,
     sync::Notify,
 };
+
+#[derive(Clone, Default)]
+struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedTelemetryWriter(Arc<Mutex<Vec<u8>>>);
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry {
+    type Writer = CapturedTelemetryWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        CapturedTelemetryWriter(Arc::clone(&self.0))
+    }
+}
+
+impl io::Write for CapturedTelemetryWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedTelemetry {
+    fn rendered(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
 
 fn control() -> ExecutionControl {
     let (_, stop) = stop_pair();
@@ -871,6 +906,88 @@ async fn openai_complete_path_sends_stream_false_and_normalizes_response_and_usa
     );
     assert_eq!(usage.total_tokens, Some(17));
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_provider_tracing_emits_metadata_without_dynamic_payload_canaries() {
+    const PROMPT_CANARY: &str = "prompt-canary-4dd3d8a1";
+    const RESPONSE_CANARY: &str = "response-canary-f4ab12ef";
+    const TOKEN_CANARY: &str = "token-canary-f52634ce";
+    const QUERY_CANARY: &str = "query-canary-f0a8d049";
+    const IDENTITY_CANARY: &str = "tenant-canary-a309dcd1";
+    const TRACESTATE_CANARY: &str = "vendor=trace-canary-49fa124a";
+    const BAGGAGE_CANARY: &str = "private=baggage-canary-ff8ad715";
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_request_json(&mut socket).await;
+        let encoded = request.to_string();
+        for expected in [
+            PROMPT_CANARY,
+            IDENTITY_CANARY,
+            TRACESTATE_CANARY,
+            BAGGAGE_CANARY,
+        ] {
+            assert!(encoded.contains(expected));
+        }
+        write_json_response(
+            &mut socket,
+            &json!({
+                "choices":[{
+                    "message":{"role":"assistant","content":RESPONSE_CANARY},
+                    "finish_reason":"stop"
+                }]
+            }),
+        )
+        .await;
+    });
+
+    let captured = CapturedTelemetry::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(captured.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let request = ChatRequest {
+        messages: vec![ChatMessage::from_text(
+            ChatRole::User,
+            format!("{PROMPT_CANARY} {IDENTITY_CANARY} {TRACESTATE_CANARY} {BAGGAGE_CANARY}"),
+        )],
+        ..default_chat_request()
+    };
+    let response = model(
+        format!("http://{address}/v1?marker={QUERY_CANARY}"),
+        Some(TOKEN_CANARY.to_owned()),
+    )
+    .chat(request)
+    .await
+    .unwrap();
+    assert_eq!(response.text, RESPONSE_CANARY);
+    server.await.unwrap();
+
+    let telemetry = captured.rendered();
+    assert!(telemetry.contains("event_name=\"openai.request\""));
+    assert!(telemetry.contains("event_name=\"openai.response\""));
+    assert!(telemetry.contains("request_mode=\"complete\""));
+    assert!(telemetry.contains("messages_count=1"));
+    assert!(telemetry.contains("upstream_bytes="));
+    for forbidden in [
+        PROMPT_CANARY,
+        RESPONSE_CANARY,
+        TOKEN_CANARY,
+        QUERY_CANARY,
+        IDENTITY_CANARY,
+        TRACESTATE_CANARY,
+        BAGGAGE_CANARY,
+    ] {
+        assert!(
+            !telemetry.contains(forbidden),
+            "telemetry leaked {forbidden}"
+        );
+    }
 }
 
 #[tokio::test]

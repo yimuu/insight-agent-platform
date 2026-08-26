@@ -7,6 +7,7 @@
 use insight_platform_contracts::{SpanId, TraceFlags, TraceIdentityV1, W3cTraceParent};
 use std::future::Future;
 use tonic::{metadata::MetadataValue, Request, Status};
+use tracing::Instrument as _;
 
 pub const TRACEPARENT_METADATA: &str = "traceparent";
 pub const TRACESTATE_METADATA: &str = "tracestate";
@@ -56,7 +57,15 @@ pub async fn scope_trace<F>(context: RpcTraceContext, future: F) -> F::Output
 where
     F: Future,
 {
-    ACTIVE_RPC_TRACE.scope(context, future).await
+    let span = tracing::info_span!(
+        "platform.internal_rpc",
+        trace_id = %context.identity.trace_id,
+        span_id = %context.span_id,
+        trace_flags = ?context.flags,
+    );
+    ACTIVE_RPC_TRACE
+        .scope(context, future.instrument(span))
+        .await
 }
 
 pub fn current_trace() -> Result<RpcTraceContext, Status> {
@@ -141,6 +150,34 @@ fn invalid_trace_status() -> Status {
 mod tests {
     use super::*;
     use insight_platform_contracts::TraceId;
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+    };
+
+    #[derive(Clone, Default)]
+    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedTelemetryWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry {
+        type Writer = CapturedTelemetryWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedTelemetryWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl io::Write for CapturedTelemetryWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn identity() -> TraceIdentityV1 {
         TraceIdentityV1::new(
@@ -246,5 +283,41 @@ mod tests {
             current_trace().unwrap_err().code(),
             tonic::Code::InvalidArgument
         );
+    }
+
+    #[tokio::test]
+    async fn dynamic_trace_capture_contains_correlation_without_context_canaries() {
+        const TRACESTATE_CANARY: &str = "vendor=trace-canary-49fa124a";
+        const BAGGAGE_CANARY: &str = "private=baggage-canary-ff8ad715";
+        const PAYLOAD_CANARY: &str = "payload-canary-4e27b98f";
+
+        let captured = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW)
+            .with_writer(captured.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let context = RpcTraceContext::start(identity(), TraceFlags::Sampled).unwrap();
+        scope_trace(context, async {
+            tracing::info!(
+                event_name = "rpc.canary_exercised",
+                "RPC trace canary exercised"
+            );
+            let _opaque_payload = [TRACESTATE_CANARY, BAGGAGE_CANARY, PAYLOAD_CANARY];
+            assert_eq!(current_trace().unwrap(), context);
+        })
+        .await;
+
+        let telemetry = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(telemetry.contains("platform.internal_rpc"));
+        assert!(telemetry.contains(&format!("trace_id={}", context.identity.trace_id)));
+        assert!(telemetry.contains(&format!("span_id={}", context.span_id)));
+        assert!(telemetry.contains("trace_flags=Sampled"));
+        assert!(telemetry.contains("event_name=\"rpc.canary_exercised\""));
+        for forbidden in [TRACESTATE_CANARY, BAGGAGE_CANARY, PAYLOAD_CANARY] {
+            assert!(!telemetry.contains(forbidden), "trace leaked {forbidden}");
+        }
     }
 }
