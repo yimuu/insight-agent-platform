@@ -15,6 +15,7 @@ use insight_platform_artifacts::{
 use insight_platform_contracts::{
     parse_strict_json, ArtifactRef, JsonLimits, ResourceKind, Sha256Digest,
 };
+use insight_platform_rpc_trace::{require_trace_interceptor, PropagateTrace};
 use insight_platform_sandbox::{
     AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapError, GvisorGuestBootstrapRequest,
     GvisorGuestExecutionPlan, GvisorGuestPodIdentity, WasiArtifactBroker, WasiArtifactReadPurpose,
@@ -150,7 +151,7 @@ impl tonic::service::Interceptor for SandboxControllerWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), SANDBOX_CONTROLLER_WORKLOAD_IDENTITY)?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -166,7 +167,7 @@ impl tonic::service::Interceptor for SchedulerWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), SCHEDULER_WORKLOAD_IDENTITY)?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -323,9 +324,13 @@ fn validate_chunk(
 
 /// Credential-free client used only by the Sandbox Controller. The closed WASI method keeps
 /// runtime selection out of untrusted requests.
+type TracedArtifactSandboxBrokerServiceClient = ArtifactSandboxBrokerServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
+>;
+
 #[derive(Clone)]
 pub struct ArtifactSandboxBrokerGrpcClient {
-    client: ArtifactSandboxBrokerServiceClient<tonic::transport::Channel>,
+    client: TracedArtifactSandboxBrokerServiceClient,
     rpc_limits: ArtifactInternalRpcLimits,
 }
 
@@ -333,7 +338,7 @@ impl ArtifactSandboxBrokerGrpcClient {
     pub fn new(channel: tonic::transport::Channel, rpc_limits: ArtifactInternalRpcLimits) -> Self {
         let maximum = rpc_limits.maximum_message_bytes();
         Self {
-            client: ArtifactSandboxBrokerServiceClient::new(channel)
+            client: ArtifactSandboxBrokerServiceClient::with_interceptor(channel, PropagateTrace)
                 .max_encoding_message_size(maximum)
                 .max_decoding_message_size(maximum),
             rpc_limits,
@@ -377,7 +382,7 @@ impl WasiArtifactBroker for ArtifactSandboxBrokerGrpcClient {
 
 #[derive(Clone)]
 pub struct ArtifactSchedulerGrpcClient {
-    client: ArtifactSchedulerServiceClient<tonic::transport::Channel>,
+    client: TracedArtifactSchedulerServiceClient,
     rpc_limits: ArtifactInternalRpcLimits,
 }
 
@@ -385,13 +390,17 @@ impl ArtifactSchedulerGrpcClient {
     pub fn new(channel: tonic::transport::Channel, rpc_limits: ArtifactInternalRpcLimits) -> Self {
         let maximum = rpc_limits.maximum_message_bytes();
         Self {
-            client: ArtifactSchedulerServiceClient::new(channel)
+            client: ArtifactSchedulerServiceClient::with_interceptor(channel, PropagateTrace)
                 .max_encoding_message_size(maximum)
                 .max_decoding_message_size(maximum),
             rpc_limits,
         }
     }
 }
+
+type TracedArtifactSchedulerServiceClient = ArtifactSchedulerServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
+>;
 
 #[async_trait]
 impl SchedulerTypedPlanReader for ArtifactSchedulerGrpcClient {
@@ -1545,7 +1554,10 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use futures::StreamExt as _;
-    use insight_platform_contracts::{ArtifactRef, DataClassification, ResourceId, ResourceKind};
+    use insight_platform_contracts::{
+        ArtifactRef, DataClassification, ResourceId, ResourceKind, TraceFlags, TraceIdentityV1,
+    };
+    use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose, SanType,
@@ -2072,13 +2084,29 @@ mod tests {
             &fixture.sandbox_controller_key_pem,
         )
         .await;
-        let client = ArtifactSandboxBrokerGrpcClient::new(accepted_channel, rpc_limits);
-        assert_eq!(
-            WasiArtifactBroker::read_exact(&client, wasi_request(&bytes))
-                .await
+        let mut missing_trace_client =
+            ArtifactSandboxBrokerServiceClient::new(accepted_channel.clone());
+        let missing_trace = missing_trace_client
+            .read_wasi_artifact(
+                encode_request(
+                    WASI_ARTIFACT_READ_OPERATION,
+                    &wasi_request(&bytes),
+                    rpc_limits,
+                )
                 .unwrap(),
-            bytes
-        );
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(missing_trace.code(), tonic::Code::InvalidArgument);
+        let client = ArtifactSandboxBrokerGrpcClient::new(accepted_channel, rpc_limits);
+        let trace =
+            RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap();
+        let read = scope_trace(trace, async {
+            WasiArtifactBroker::read_exact(&client, wasi_request(&bytes)).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(read, bytes);
         assert_eq!(broker.wasi_calls.load(Ordering::Acquire), 1);
 
         let wrong_channel = channel(
@@ -2104,6 +2132,7 @@ mod tests {
         assert_eq!(broker.wasi_calls.load(Ordering::Acquire), 1);
 
         drop(client);
+        drop(missing_trace_client);
         drop(wrong_client);
         shutdown_sender.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), server)
@@ -2162,30 +2191,49 @@ mod tests {
             &fixture.scheduler_key_pem,
         )
         .await;
-        let client = ArtifactSchedulerGrpcClient::new(accepted_channel, rpc_limits);
-        assert_eq!(
-            SchedulerTypedPlanReader::read_exact(&client, scheduler_request(&bytes))
-                .await
+        let mut missing_trace_client =
+            ArtifactSchedulerServiceClient::new(accepted_channel.clone());
+        let missing_trace = missing_trace_client
+            .read_typed_plan(
+                encode_request(
+                    SCHEDULER_TYPED_PLAN_READ_OPERATION,
+                    &scheduler_request(&bytes),
+                    rpc_limits,
+                )
                 .unwrap(),
-            bytes
-        );
-        assert_eq!(broker.typed_plan_calls.load(Ordering::Acquire), 1);
-        assert_eq!(
-            SchedulerRunValueReader::read_exact(&client, scheduler_run_value_request(&bytes))
-                .await
-                .unwrap(),
-            bytes
-        );
-        assert_eq!(broker.run_value_calls.load(Ordering::Acquire), 1);
-        assert_eq!(
-            SchedulerSkillPackageReader::read_exact(
-                &client,
-                scheduler_skill_package_request(&bytes),
             )
             .await
-            .unwrap(),
-            bytes
-        );
+            .unwrap_err();
+        assert_eq!(missing_trace.code(), tonic::Code::InvalidArgument);
+        let client = ArtifactSchedulerGrpcClient::new(accepted_channel, rpc_limits);
+        let trace =
+            RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap();
+        scope_trace(trace, async {
+            assert_eq!(
+                SchedulerTypedPlanReader::read_exact(&client, scheduler_request(&bytes))
+                    .await
+                    .unwrap(),
+                bytes
+            );
+            assert_eq!(broker.typed_plan_calls.load(Ordering::Acquire), 1);
+            assert_eq!(
+                SchedulerRunValueReader::read_exact(&client, scheduler_run_value_request(&bytes),)
+                    .await
+                    .unwrap(),
+                bytes
+            );
+            assert_eq!(broker.run_value_calls.load(Ordering::Acquire), 1);
+            assert_eq!(
+                SchedulerSkillPackageReader::read_exact(
+                    &client,
+                    scheduler_skill_package_request(&bytes),
+                )
+                .await
+                .unwrap(),
+                bytes
+            );
+        })
+        .await;
         assert_eq!(broker.skill_package_calls.load(Ordering::Acquire), 1);
 
         let wrong_channel = channel(
@@ -2213,6 +2261,7 @@ mod tests {
         assert_eq!(broker.skill_package_calls.load(Ordering::Acquire), 1);
 
         drop(client);
+        drop(missing_trace_client);
         drop(wrong_client);
         shutdown_sender.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), server)

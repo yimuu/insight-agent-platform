@@ -21,6 +21,7 @@ insight-platform-invocations.workspace = true
 insight-platform-models.workspace = true
 insight-platform-orchestrator.workspace = true
 insight-platform-postgres.workspace = true
+insight-platform-rpc-trace.workspace = true
 insight-platform-sandbox.workspace = true
 insight-platform-sandbox-rpc.workspace = true
 insight-platform-tasks.workspace = true

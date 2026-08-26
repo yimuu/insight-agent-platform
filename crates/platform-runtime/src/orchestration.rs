@@ -2,11 +2,14 @@
 
 use crate::{CoordinatorIdentityFactory, IdentityFactoryError};
 use async_trait::async_trait;
-use insight_platform_contracts::{HardLimitProfile, ResourceId, ResourceKind, WorkClass};
+use insight_platform_contracts::{
+    HardLimitProfile, ResourceId, ResourceKind, TraceFlags, WorkClass,
+};
 use insight_platform_postgres::repository::{
     ClaimOrchestrationJobs, ClaimedOrchestrationJob, OrchestrationClaimSlot, PgRepository,
     RepositoryError, MAX_ORCHESTRATION_QUOTA_LINES,
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use insight_platform_worker::{
     ActiveLocalJobPermit, ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError,
     LocalWorkerPools,
@@ -582,10 +585,20 @@ where
         for (claimed, permit) in claimed.into_iter().zip(permits) {
             let executor = Arc::clone(&self.executor);
             let job_shutdown = generation_shutdown.clone();
+            let trace = RpcTraceContext::start(claimed.job.trace, TraceFlags::NotSampled).map_err(
+                |_| {
+                    DriveError::Fatal(WorkCoordinatorError::CorruptClaim(
+                        "repository returned an invalid Job trace identity",
+                    ))
+                },
+            )?;
             active.spawn(async move {
-                executor
-                    .execute(ActiveOrchestrationJob::new(claimed, job_shutdown, permit))
-                    .await
+                scope_trace(trace, async move {
+                    executor
+                        .execute(ActiveOrchestrationJob::new(claimed, job_shutdown, permit))
+                        .await
+                })
+                .await
             });
         }
         Ok(DriveResult::Claimed { filled_reservation })
@@ -1022,7 +1035,13 @@ mod tests {
 
     #[async_trait]
     impl OrchestrationJobExecutor for FakeExecutor {
-        async fn execute(&self, _job: ActiveOrchestrationJob) -> ExecutionDisposition {
+        async fn execute(&self, job: ActiveOrchestrationJob) -> ExecutionDisposition {
+            assert_eq!(
+                insight_platform_rpc_trace::current_trace()
+                    .unwrap()
+                    .identity,
+                job.claimed().job.trace
+            );
             self.started.fetch_add(1, Ordering::Release);
             if self.block {
                 self.release.notified().await;

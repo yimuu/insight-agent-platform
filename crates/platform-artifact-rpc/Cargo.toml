@@ -14,6 +14,7 @@ async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-rpc-trace.workspace = true
 insight-platform-artifacts.workspace = true
 insight-platform-sandbox.workspace = true
 prost.workspace = true
