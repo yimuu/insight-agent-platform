@@ -447,6 +447,7 @@ impl ClaimSandboxJobs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimedSandboxJob {
+    pub trace: insight_platform_contracts::TraceIdentityV1,
     pub request: SandboxExecutionRequest,
     pub fence: JobFence,
     pub usage_reservation_id: ResourceId,
@@ -656,6 +657,9 @@ impl ClaimedSandboxJob {
         now: DateTime<Utc>,
         limits: SandboxCommandLimits,
     ) -> Result<(), SandboxWorkerContractError> {
+        self.trace
+            .validate()
+            .map_err(|_| SandboxWorkerContractError::InvalidClaim)?;
         self.request.validate_at(now, limits)?;
         if self.fence.expected_version == 0
             || self.fence.lease_generation == 0

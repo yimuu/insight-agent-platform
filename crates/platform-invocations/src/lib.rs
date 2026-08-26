@@ -924,6 +924,7 @@ impl CapabilityInvocationPayload {
 pub struct CapabilityInvocationRecord {
     pub tenant_id: ResourceId,
     pub invocation_id: ResourceId,
+    pub trace: insight_platform_contracts::TraceIdentityV1,
     pub run_id: ResourceId,
     pub node_execution_id: ResourceId,
     pub owner_kind: ResourceKind,
@@ -946,6 +947,9 @@ pub struct CapabilityInvocationRecord {
 
 impl CapabilityInvocationRecord {
     pub fn validate(&self) -> Result<(), InvocationError> {
+        self.trace
+            .validate()
+            .map_err(|_| InvocationError::InvalidCurrentState)?;
         self.payload.validate_for(self.state)?;
         self.payload
             .admission
@@ -1331,6 +1335,7 @@ pub fn decide_capability_admission(
     let record = CapabilityInvocationRecord {
         tenant_id: command.audit.tenant_id.clone(),
         invocation_id: command.invocation_id.clone(),
+        trace: command.audit.trace,
         run_id: command.run_id.clone(),
         node_execution_id: command.node_execution_id.clone(),
         owner_kind: command.origin.owner_kind(),
@@ -1879,6 +1884,7 @@ mod tests {
         let current = CapabilityInvocationRecord {
             tenant_id: tenant.clone(),
             invocation_id: invocation_id.clone(),
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             run_id,
             node_execution_id: node_id.clone(),
             owner_kind: ResourceKind::NodeExecution,

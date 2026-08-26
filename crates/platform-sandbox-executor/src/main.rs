@@ -1,12 +1,14 @@
 use hyper_util::rt::TokioIo;
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
-    ResourceKind, SandboxIsolationClass, Sha256Digest, WorkClass, WorkerManifest,
+    ResourceKind, SandboxIsolationClass, Sha256Digest, TraceFlags, TraceIdentityV1, WorkClass,
+    WorkerManifest,
 };
 use insight_platform_observability::{
     process_observability_router, run_worker_permit_sampler, update_worker_permits,
     ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use insight_platform_sandbox::{
     InstalledSandboxBackendDescriptor, InstalledSandboxBackendRegistry,
     RegisterWasiExecutorProcessGeneration, SandboxCommandLimits, SandboxExecutionControlRouter,
@@ -228,14 +230,19 @@ async fn run() -> Result<(), ProcessError> {
             rpc_limits,
             config.process_registration_attestor_identity_digest.clone(),
         ));
-    let process_identity = registration
-        .register(RegisterWasiExecutorProcessGeneration {
+    let registration_trace =
+        RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled)
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let process_identity = scope_trace(
+        registration_trace,
+        registration.register(RegisterWasiExecutorProcessGeneration {
             worker_process_generation_id: process_generation_id.clone(),
             worker_manifest_digest: worker_manifest_digest.clone(),
             isolation_backend_contract_digest: config.backend_contract_digest.clone(),
-        })
-        .await
-        .map_err(|_| ProcessError::AttestorUnavailable)?;
+        }),
+    )
+    .await
+    .map_err(|_| ProcessError::AttestorUnavailable)?;
 
     let channel = connect_authority(&config).await?;
     let authority = Arc::new(SandboxAuthorityGrpcClient::new(channel.clone(), rpc_limits));

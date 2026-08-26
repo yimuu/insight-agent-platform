@@ -2294,6 +2294,7 @@ impl PgRepository {
                 .bind_lease_generation(next.lease_generation)
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
             let claimed_job = ClaimedSandboxJob {
+                trace: leased.trace,
                 request,
                 fence: insight_platform_jobs::JobFence {
                     expected_version: next.version,
@@ -3152,7 +3153,7 @@ impl SandboxGatewayAuthority for PgRepository {
         .bind(payload.schema_version)
         .bind(&payload.value)
         .bind(&payload.digest)
-        .bind(command.audit.trace.trace_id.to_string())
+        .bind(invocation.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         append_command_event(

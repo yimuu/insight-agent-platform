@@ -15,6 +15,9 @@ use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ArtifactRef, CommandOutcome, HardLimitProfile, JsonLimits,
     Sha256Digest,
 };
+use insight_platform_rpc_trace::{
+    require_trace_interceptor, scope_trace, trace_context, PropagateTrace,
+};
 #[cfg(test)]
 use insight_platform_sandbox::ScopedArtifactGrant;
 use insight_platform_sandbox::{
@@ -61,6 +64,21 @@ use proto::{
     ClosedSandboxEnvelope, SandboxArtifactChunkEnvelope,
 };
 
+type TracedSandboxExecutorAuthorityServiceClient = SandboxExecutorAuthorityServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
+>;
+type TracedSandboxExecutorBrokerServiceClient = SandboxExecutorBrokerServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
+>;
+type TracedSandboxProcessIsolationAttestorServiceClient =
+    SandboxProcessIsolationAttestorServiceClient<
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
+    >;
+type TracedSandboxExecutorProcessRegistrationServiceClient =
+    SandboxExecutorProcessRegistrationServiceClient<
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
+    >;
+
 pub const SANDBOX_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
 pub const WASI_EXECUTOR_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-executor.wasi";
@@ -97,7 +115,7 @@ impl tonic::service::Interceptor for WasiExecutorWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), WASI_EXECUTOR_WORKLOAD_IDENTITY)?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -113,7 +131,7 @@ impl tonic::service::Interceptor for SandboxControllerWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), SANDBOX_CONTROLLER_WORKLOAD_IDENTITY)?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -132,7 +150,7 @@ impl tonic::service::Interceptor for MicroVmExecutorWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), MICROVM_EXECUTOR_WORKLOAD_IDENTITY)?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -151,7 +169,7 @@ impl tonic::service::Interceptor for MicroVmProviderWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), MICROVM_PROVIDER_WORKLOAD_IDENTITY)?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -205,7 +223,10 @@ pub struct WasiExecutorNodeRegistrationIdentity;
 
 impl tonic::service::Interceptor for WasiExecutorNodeRegistrationIdentity {
     fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
-        authorize_node_registration(request, WASI_EXECUTOR_WORKLOAD_IDENTITY)
+        require_trace_interceptor(authorize_node_registration(
+            request,
+            WASI_EXECUTOR_WORKLOAD_IDENTITY,
+        )?)
     }
 }
 
@@ -216,13 +237,13 @@ pub struct SandboxExecutorNodeRegistrationIdentity;
 
 impl tonic::service::Interceptor for SandboxExecutorNodeRegistrationIdentity {
     fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
-        authorize_node_registration_roles(
+        require_trace_interceptor(authorize_node_registration_roles(
             request,
             &[
                 WASI_EXECUTOR_WORKLOAD_IDENTITY,
                 GVISOR_EXECUTOR_WORKLOAD_IDENTITY,
             ],
-        )
+        )?)
     }
 }
 
@@ -363,7 +384,7 @@ impl SandboxInternalRpcLimits {
 
 #[derive(Clone)]
 pub struct SandboxAuthorityGrpcClient {
-    client: SandboxExecutorAuthorityServiceClient<tonic::transport::Channel>,
+    client: TracedSandboxExecutorAuthorityServiceClient,
     limits: SandboxInternalRpcLimits,
 }
 
@@ -371,9 +392,12 @@ impl SandboxAuthorityGrpcClient {
     pub fn new(channel: tonic::transport::Channel, limits: SandboxInternalRpcLimits) -> Self {
         let maximum = limits.maximum_message_bytes();
         Self {
-            client: SandboxExecutorAuthorityServiceClient::new(channel)
-                .max_encoding_message_size(maximum)
-                .max_decoding_message_size(maximum),
+            client: SandboxExecutorAuthorityServiceClient::with_interceptor(
+                channel,
+                PropagateTrace,
+            )
+            .max_encoding_message_size(maximum)
+            .max_decoding_message_size(maximum),
             limits,
         }
     }
@@ -382,7 +406,7 @@ impl SandboxAuthorityGrpcClient {
         &self,
         request: &Req,
         invoke: impl for<'a> FnOnce(
-            &'a mut SandboxExecutorAuthorityServiceClient<tonic::transport::Channel>,
+            &'a mut TracedSandboxExecutorAuthorityServiceClient,
             Request<ClosedSandboxEnvelope>,
         ) -> std::pin::Pin<
             Box<
@@ -482,7 +506,7 @@ impl SandboxManagedMcpSessionAuthorityGrpcClient {
 
 #[derive(Clone)]
 pub struct SandboxBrokerGrpcClient {
-    client: SandboxExecutorBrokerServiceClient<tonic::transport::Channel>,
+    client: TracedSandboxExecutorBrokerServiceClient,
     limits: SandboxInternalRpcLimits,
 }
 
@@ -495,14 +519,14 @@ pub struct SandboxMicroVmBrokerGrpcClient {
 
 #[derive(Clone)]
 pub struct SandboxProcessIsolationAttestorGrpcClient {
-    client: SandboxProcessIsolationAttestorServiceClient<tonic::transport::Channel>,
+    client: TracedSandboxProcessIsolationAttestorServiceClient,
     limits: SandboxInternalRpcLimits,
     attestor_identity_digest: Sha256Digest,
 }
 
 #[derive(Clone)]
 pub struct SandboxExecutorProcessRegistrationGrpcClient {
-    client: SandboxExecutorProcessRegistrationServiceClient<tonic::transport::Channel>,
+    client: TracedSandboxExecutorProcessRegistrationServiceClient,
     limits: SandboxInternalRpcLimits,
     attestor_identity_digest: Sha256Digest,
 }
@@ -777,9 +801,12 @@ impl SandboxProcessIsolationAttestorGrpcClient {
     ) -> Self {
         let maximum = limits.maximum_message_bytes();
         Self {
-            client: SandboxProcessIsolationAttestorServiceClient::new(channel)
-                .max_encoding_message_size(maximum)
-                .max_decoding_message_size(maximum),
+            client: SandboxProcessIsolationAttestorServiceClient::with_interceptor(
+                channel,
+                PropagateTrace,
+            )
+            .max_encoding_message_size(maximum)
+            .max_decoding_message_size(maximum),
             limits,
             attestor_identity_digest,
         }
@@ -794,9 +821,12 @@ impl SandboxExecutorProcessRegistrationGrpcClient {
     ) -> Self {
         let maximum = limits.maximum_message_bytes();
         Self {
-            client: SandboxExecutorProcessRegistrationServiceClient::new(channel)
-                .max_encoding_message_size(maximum)
-                .max_decoding_message_size(maximum),
+            client: SandboxExecutorProcessRegistrationServiceClient::with_interceptor(
+                channel,
+                PropagateTrace,
+            )
+            .max_encoding_message_size(maximum)
+            .max_decoding_message_size(maximum),
             limits,
             attestor_identity_digest,
         }
@@ -958,7 +988,7 @@ impl SandboxBrokerGrpcClient {
     pub fn new(channel: tonic::transport::Channel, limits: SandboxInternalRpcLimits) -> Self {
         let maximum = limits.maximum_message_bytes();
         Self {
-            client: SandboxExecutorBrokerServiceClient::new(channel)
+            client: SandboxExecutorBrokerServiceClient::with_interceptor(channel, PropagateTrace)
                 .max_encoding_message_size(maximum)
                 .max_decoding_message_size(maximum),
             limits,
@@ -969,7 +999,7 @@ impl SandboxBrokerGrpcClient {
         &self,
         request: &Req,
         invoke: impl for<'a> FnOnce(
-            &'a mut SandboxExecutorBrokerServiceClient<tonic::transport::Channel>,
+            &'a mut TracedSandboxExecutorBrokerServiceClient,
             Request<ClosedSandboxEnvelope>,
         ) -> std::pin::Pin<
             Box<
@@ -2864,54 +2894,60 @@ where
         &self,
         request: Request<ClosedSandboxEnvelope>,
     ) -> Result<Response<Self::ReadExactArtifactStream>, Status> {
-        let request: WasiArtifactReadRequest = decode(request.into_inner(), self.limits)?;
-        let grant_shape_valid = match request.purpose {
-            WasiArtifactReadPurpose::RuntimeBundle => request.read_grant.is_none(),
-            WasiArtifactReadPurpose::InputValue => request.read_grant.is_some(),
-        };
-        if request.worker_process_generation_id.kind()
-            != insight_platform_contracts::ResourceKind::WorkerProcessGeneration
-            || request.tenant_id.kind() != insight_platform_contracts::ResourceKind::Tenant
-            || request.sandbox_job_id.kind() != insight_platform_contracts::ResourceKind::Job
-            || request.lease_generation == 0
-            || request.maximum_bytes == 0
-            || request.maximum_bytes > self.limits.maximum_message_bytes
-            || request.artifact.validate().is_err()
-            || u64::try_from(request.maximum_bytes)
-                .ok()
-                .is_none_or(|maximum| maximum < request.artifact.byte_length())
-            || !grant_shape_valid
-        {
-            return Err(Status::invalid_argument("invalid Artifact read bound"));
-        }
-        let permit = self.artifact_response_capacity.try_acquire()?;
-        let maximum = request.maximum_bytes;
-        let artifact = request.artifact.clone();
-        let deadline = request.deadline;
-        let read_budget = sandbox_artifact_server_deadline_budget(deadline)?;
-        let value = tokio::time::timeout(read_budget, self.artifacts.read_exact(request))
-            .await
-            .map_err(|_| Status::deadline_exceeded("WASI Artifact read deadline elapsed"))?
-            .map_err(artifact_status)?;
-        if value.len() > maximum
-            || u64::try_from(value.len()).ok() != Some(artifact.byte_length())
-            || bytes_digest(&value)? != *artifact.content_digest()
-        {
-            return Err(Status::failed_precondition(
-                "WASI Artifact integrity failed",
+        let trace = trace_context(&request)?;
+        scope_trace(trace, async {
+            let request: WasiArtifactReadRequest = decode(request.into_inner(), self.limits)?;
+            let grant_shape_valid = match request.purpose {
+                WasiArtifactReadPurpose::RuntimeBundle => request.read_grant.is_none(),
+                WasiArtifactReadPurpose::InputValue => request.read_grant.is_some(),
+            };
+            if request.worker_process_generation_id.kind()
+                != insight_platform_contracts::ResourceKind::WorkerProcessGeneration
+                || request.tenant_id.kind() != insight_platform_contracts::ResourceKind::Tenant
+                || request.sandbox_job_id.kind() != insight_platform_contracts::ResourceKind::Job
+                || request.lease_generation == 0
+                || request.maximum_bytes == 0
+                || request.maximum_bytes > self.limits.maximum_message_bytes
+                || request.artifact.validate().is_err()
+                || u64::try_from(request.maximum_bytes)
+                    .ok()
+                    .is_none_or(|maximum| maximum < request.artifact.byte_length())
+                || !grant_shape_valid
+            {
+                return Err(Status::invalid_argument("invalid Artifact read bound"));
+            }
+            let permit = self.artifact_response_capacity.try_acquire()?;
+            let maximum = request.maximum_bytes;
+            let artifact = request.artifact.clone();
+            let deadline = request.deadline;
+            let read_budget = sandbox_artifact_server_deadline_budget(deadline)?;
+            let value = tokio::time::timeout(read_budget, self.artifacts.read_exact(request))
+                .await
+                .map_err(|_| Status::deadline_exceeded("WASI Artifact read deadline elapsed"))?
+                .map_err(artifact_status)?;
+            if value.len() > maximum
+                || u64::try_from(value.len()).ok() != Some(artifact.byte_length())
+                || bytes_digest(&value)? != *artifact.content_digest()
+            {
+                return Err(Status::failed_precondition(
+                    "WASI Artifact integrity failed",
+                ));
+            }
+            let chunk_bytes = sandbox_artifact_chunk_bytes(self.limits).map_err(|_| {
+                Status::resource_exhausted("Sandbox RPC message bound is too small")
+            })?;
+            let stream_budget = sandbox_artifact_server_deadline_budget(deadline)?;
+            let stream: Self::ReadExactArtifactStream = Box::pin(SandboxArtifactChunkStream::new(
+                value,
+                permit,
+                chunk_bytes,
+                artifact.byte_length(),
+                artifact.content_digest().to_string(),
+                stream_budget,
             ));
-        }
-        let chunk_bytes = sandbox_artifact_chunk_bytes(self.limits)
-            .map_err(|_| Status::resource_exhausted("Sandbox RPC message bound is too small"))?;
-        let stream_budget = sandbox_artifact_server_deadline_budget(deadline)?;
-        Ok(Response::new(Box::pin(SandboxArtifactChunkStream::new(
-            value,
-            permit,
-            chunk_bytes,
-            artifact.byte_length(),
-            artifact.content_digest().to_string(),
-            stream_budget,
-        ))))
+            Ok(Response::new(stream))
+        })
+        .await
     }
 
     async fn validate_wasi_value(
@@ -2970,24 +3006,27 @@ where
         &self,
         request: Request<ClosedSandboxEnvelope>,
     ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
-        let request: ProveSandboxProcessGenerationAbsent =
-            decode(request.into_inner(), self.limits)?;
-        let evidence = self
-            .process_isolation
-            .prove_absent(request)
-            .await
-            .map_err(|error| match error {
-                SandboxProcessGenerationIsolationError::StillLive => {
-                    Status::aborted("process generation is still live")
-                }
-                SandboxProcessGenerationIsolationError::Unavailable => {
-                    Status::unavailable("process isolation authority unavailable")
-                }
-                SandboxProcessGenerationIsolationError::Rejected => {
-                    Status::failed_precondition("process absence proof rejected")
-                }
-            })?;
-        Ok(Response::new(encode(&evidence, self.limits)?))
+        let trace = trace_context(&request)?;
+        scope_trace(trace, async {
+            let request: ProveSandboxProcessGenerationAbsent =
+                decode(request.into_inner(), self.limits)?;
+            let evidence =
+                self.process_isolation.prove_absent(request).await.map_err(
+                    |error| match error {
+                        SandboxProcessGenerationIsolationError::StillLive => {
+                            Status::aborted("process generation is still live")
+                        }
+                        SandboxProcessGenerationIsolationError::Unavailable => {
+                            Status::unavailable("process isolation authority unavailable")
+                        }
+                        SandboxProcessGenerationIsolationError::Rejected => {
+                            Status::failed_precondition("process absence proof rejected")
+                        }
+                    },
+                )?;
+            Ok(Response::new(encode(&evidence, self.limits)?))
+        })
+        .await
     }
 }
 
@@ -3002,31 +3041,35 @@ where
         &self,
         request: Request<ClosedSandboxEnvelope>,
     ) -> Result<Response<ClosedSandboxEnvelope>, Status> {
-        let command: ClaimSandboxJobs = decode(request.into_inner(), self.limits)?;
-        command
-            .validate(
-                self.limits.maximum_claim_batch,
-                self.limits.maximum_lease_milliseconds,
-            )
-            .map_err(|_| Status::invalid_argument("invalid Sandbox claim"))?;
-        self.process_registration
-            .verify_registered(VerifyWasiExecutorProcessGeneration {
-                worker_process_generation_id: command.worker_process_generation_id.clone(),
-                worker_manifest_digest: command.worker_manifest_digest.clone(),
-                isolation_backend_contract_digest: command
-                    .isolation_backend_contract_digest
-                    .clone(),
-                executor_identity_digest: command.executor_identity_digest.clone(),
-                attestor_route: command.attestor_route.clone(),
-            })
-            .await
-            .map_err(registration_status)?;
-        let result = self
-            .authority
-            .claim_sandbox_jobs(command)
-            .await
-            .map_err(claim_status)?;
-        Ok(Response::new(encode(&result, self.limits)?))
+        let trace = trace_context(&request)?;
+        scope_trace(trace, async {
+            let command: ClaimSandboxJobs = decode(request.into_inner(), self.limits)?;
+            command
+                .validate(
+                    self.limits.maximum_claim_batch,
+                    self.limits.maximum_lease_milliseconds,
+                )
+                .map_err(|_| Status::invalid_argument("invalid Sandbox claim"))?;
+            self.process_registration
+                .verify_registered(VerifyWasiExecutorProcessGeneration {
+                    worker_process_generation_id: command.worker_process_generation_id.clone(),
+                    worker_manifest_digest: command.worker_manifest_digest.clone(),
+                    isolation_backend_contract_digest: command
+                        .isolation_backend_contract_digest
+                        .clone(),
+                    executor_identity_digest: command.executor_identity_digest.clone(),
+                    attestor_route: command.attestor_route.clone(),
+                })
+                .await
+                .map_err(registration_status)?;
+            let result = self
+                .authority
+                .claim_sandbox_jobs(command)
+                .await
+                .map_err(claim_status)?;
+            Ok(Response::new(encode(&result, self.limits)?))
+        })
+        .await
     }
 
     async fn commit_sandbox_phase(
@@ -3608,7 +3651,9 @@ mod tests {
     use hyper_util::rt::TokioIo;
     use insight_platform_contracts::{
         checked_in_hard_limit_profile, ArtifactRef, DataClassification, ResourceId, ResourceKind,
+        TraceFlags, TraceIdentityV1,
     };
+    use insight_platform_rpc_trace::{request_with_trace, require_trace, RpcTraceContext};
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose, SanType,
@@ -3627,6 +3672,16 @@ mod tests {
 
     fn attestor_route() -> insight_platform_sandbox::NodeAttestorRoute {
         "https://10.0.0.7:9443".parse().unwrap()
+    }
+
+    fn rpc_trace() -> RpcTraceContext {
+        RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap()
+    }
+
+    fn traced_request<T>(message: T) -> Request<T> {
+        let mut request = request_with_trace(message, rpc_trace()).unwrap();
+        require_trace(&mut request).unwrap();
+        request
     }
 
     fn certificate_with_sans(subject_alt_names: Vec<SanType>) -> Vec<u8> {
@@ -4625,8 +4680,14 @@ mod tests {
         )
         .await;
         let mut client = SandboxExecutorAuthorityServiceClient::new(channel);
-        let accepted = client
+        let missing_trace = client
             .claim_sandbox_jobs(Request::new(encode(&command, limits).unwrap()))
+            .await
+            .unwrap_err();
+        assert_eq!(missing_trace.code(), tonic::Code::InvalidArgument);
+        assert_eq!(authority.claims.load(Ordering::Acquire), 0);
+        let accepted = client
+            .claim_sandbox_jobs(traced_request(encode(&command, limits).unwrap()))
             .await
             .unwrap();
         assert!(
@@ -5089,10 +5150,13 @@ mod tests {
         let request =
             wasi_artifact_request(b"deadline", Utc::now() + chrono::Duration::milliseconds(50));
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            WasiArtifactBroker::read_exact(&client, request),
-        )
+        let result = scope_trace(rpc_trace(), async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                WasiArtifactBroker::read_exact(&client, request),
+            )
+            .await
+        })
         .await
         .unwrap();
         assert_eq!(result, Err(WasiArtifactBrokerError::Unavailable));
@@ -5184,7 +5248,7 @@ mod tests {
         let request = wasi_artifact_request(&[], Utc::now() + chrono::Duration::seconds(30));
 
         let mut stream = service
-            .read_exact_artifact(Request::new(encode(&request, limits).unwrap()))
+            .read_exact_artifact(traced_request(encode(&request, limits).unwrap()))
             .await
             .unwrap()
             .into_inner();
@@ -5637,12 +5701,15 @@ mod tests {
             &fixture.gvisor_key_pem,
         )
         .await;
-        let registration = SandboxExecutorProcessRegistrationGrpcClient::new(
-            registration_channel,
-            limits,
-            attestor_identity_digest.clone(),
+        let registration = scope_trace(
+            rpc_trace(),
+            SandboxExecutorProcessRegistrationGrpcClient::new(
+                registration_channel,
+                limits,
+                attestor_identity_digest.clone(),
+            )
+            .register(registration_request.clone()),
         )
-        .register(registration_request.clone())
         .await
         .unwrap();
         assert_eq!(isolation.registrations.load(Ordering::Acquire), 1);
@@ -5702,7 +5769,9 @@ mod tests {
             limits,
             attestor_identity_digest,
         );
-        client.prove_absent(request.clone()).await.unwrap();
+        scope_trace(rpc_trace(), client.prove_absent(request.clone()))
+            .await
+            .unwrap();
         assert_eq!(isolation.calls.load(Ordering::Acquire), 1);
 
         let wrong_identity = SandboxProcessIsolationAttestorGrpcClient::new(
@@ -5711,7 +5780,7 @@ mod tests {
             format!("sha256:{}", "e".repeat(64)).parse().unwrap(),
         );
         assert_eq!(
-            wrong_identity.prove_absent(request.clone()).await,
+            scope_trace(rpc_trace(), wrong_identity.prove_absent(request.clone())).await,
             Err(SandboxProcessGenerationIsolationError::Rejected)
         );
         assert_eq!(isolation.calls.load(Ordering::Acquire), 2);

@@ -7,8 +7,10 @@
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
-    HardLimitProfile, ResourceId, ResourceIdError, ResourceKind, Sha256Digest, WorkClass,
+    HardLimitProfile, ResourceId, ResourceIdError, ResourceKind, Sha256Digest, TraceFlags,
+    TraceIdentityV1, WorkClass,
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use insight_platform_sandbox::{
     ClaimSandboxJobs, ClaimedSandboxJob, ExecuteSandboxJob, SandboxClaimAuthority,
     SandboxClaimFailure, SandboxExecutionAuthority, SandboxExecutionControlRouter,
@@ -362,9 +364,12 @@ where
             .collect::<Result<Vec<_>, _>>()
             .map_err(SandboxExecutorDriverError::Identity)?;
         let expected_tokens = lease_token_digests.iter().cloned().collect::<BTreeSet<_>>();
-        let claimed = self
-            .claim_authority
-            .claim_sandbox_jobs(ClaimSandboxJobs {
+        let claim_trace =
+            RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled)
+                .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?;
+        let claimed = scope_trace(
+            claim_trace,
+            self.claim_authority.claim_sandbox_jobs(ClaimSandboxJobs {
                 worker_process_generation_id: self.pools.snapshot().worker_process_generation_id,
                 worker_manifest_digest: self.pools.snapshot().worker_manifest_digest,
                 isolation_backend_contract_digest: self
@@ -377,9 +382,10 @@ where
                     .map_err(|_| SandboxExecutorDriverError::InvalidGeneratedCommand)?,
                 lease_milliseconds: self.config.lease_milliseconds,
                 lease_token_digests,
-            })
-            .await
-            .map_err(SandboxExecutorDriverError::Claim)?;
+            }),
+        )
+        .await
+        .map_err(SandboxExecutorDriverError::Claim)?;
         if claimed.is_empty() {
             return Ok(0);
         }
@@ -393,11 +399,13 @@ where
         }
         let count = claimed.len();
         for (claimed, permit) in claimed.into_iter().zip(permits) {
+            let trace = RpcTraceContext::start(claimed.trace, TraceFlags::NotSampled)
+                .map_err(|_| SandboxExecutorDriverError::CorruptClaim)?;
             let command = self.execution_command(claimed)?;
             let executor = Arc::clone(&self.executor);
             active.spawn(async move {
                 let _permit = permit;
-                executor.execute(command).await
+                scope_trace(trace, executor.execute(command)).await
             });
         }
         Ok(count)

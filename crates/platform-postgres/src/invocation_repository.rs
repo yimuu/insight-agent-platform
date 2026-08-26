@@ -1791,6 +1791,11 @@ fn capability_invocation_from_row(
     let record = CapabilityInvocationRecord {
         tenant_id: parse_id(&row.try_get::<String, _>("tenant_id")?, "Invocation tenant")?,
         invocation_id: parse_id(&row.try_get::<String, _>("invocation_id")?, "Invocation")?,
+        trace: insight_platform_contracts::TraceIdentityV1::new(
+            row.try_get::<String, _>("trace_id")?
+                .parse::<insight_platform_contracts::TraceId>()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        ),
         run_id: parse_id(&row.try_get::<String, _>("run_id")?, "Invocation Run")?,
         node_execution_id: parse_id(&row.try_get::<String, _>("node_id")?, "Invocation Node")?,
         owner_kind,

@@ -1263,6 +1263,11 @@ async fn seed(pool: &PgPool, repository: &PgRepository, fixture: &Fixture) {
     let invocation = CapabilityInvocationRecord {
         tenant_id: fixture.tenant_id.clone(),
         invocation_id: fixture.command.request.invocation_id.clone(),
+        trace: insight_platform_contracts::TraceIdentityV1::new(
+            "0123456789abcdef0123456789abcdef"
+                .parse::<insight_platform_contracts::TraceId>()
+                .unwrap(),
+        ),
         run_id: run_id.clone(),
         node_execution_id: node_id.clone(),
         owner_kind: ResourceKind::NodeExecution,
@@ -1437,6 +1442,11 @@ async fn insert_derived_sandbox_invocation(
     let invocation = CapabilityInvocationRecord {
         tenant_id: fixture.tenant_id.clone(),
         invocation_id: request.invocation_id.clone(),
+        trace: insight_platform_contracts::TraceIdentityV1::new(
+            "0123456789abcdef0123456789abcdef"
+                .parse::<insight_platform_contracts::TraceId>()
+                .unwrap(),
+        ),
         run_id: run_id.clone(),
         node_execution_id: node_id.clone(),
         owner_kind: ResourceKind::NodeExecution,
@@ -2774,6 +2784,10 @@ async fn sandbox_fixture() {
         .unwrap();
     assert_eq!(claimed.len(), 1);
     let mut claimed = claimed[0].clone();
+    assert_eq!(
+        claimed.trace.trace_id.to_string(),
+        "0123456789abcdef0123456789abcdef"
+    );
     let heartbeat = repository
         .heartbeat_sandbox_execution(HeartbeatSandboxExecution {
             tenant_id: fixture.tenant_id.clone(),

@@ -2662,6 +2662,7 @@ mod tests {
         let record = CapabilityInvocationRecord {
             tenant_id,
             invocation_id,
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             run_id,
             node_execution_id: node_id.clone(),
             owner_kind: ResourceKind::NodeExecution,
