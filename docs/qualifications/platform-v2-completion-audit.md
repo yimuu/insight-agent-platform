@@ -142,6 +142,10 @@ r316只为production Capability Remote Worker安装Egress observer，HTTP/gRPC�
 同surface；Native路径保持PostgreSQL-only且显式无Egress observer。target tests、strict Clippy及双角色部署/observability/redaction门禁通过；无production
 scrape或真实fault，其余Egress/MCP client仍待注入。
 
+r317只为production Remote Context Worker安装Egress observer并与PostgreSQL sampler同surface；Native/Subscription保持PostgreSQL-only，实际查询
+RPC仅导出固定role/dependency/outcome。四组target tests、strict Clippy及Context部署/observability/redaction门禁通过；无production scrape或真实fault，
+其余Egress/MCP client仍待注入。
+
 ## 3. Phase 1 审计
 
 ### 已满足

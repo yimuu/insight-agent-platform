@@ -169,8 +169,9 @@ async fn run() -> Result<(), ProcessError> {
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let permit_metrics = Arc::new(WorkerPermitMetrics::default());
     update_worker_permits(&permit_metrics, &observability_pools);
-    let dependency_metrics =
-        install_context_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
+    let dependency_metrics = install_context_dependency_metrics(false)
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    debug_assert!(dependency_metrics.egress.is_none());
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_worker_permits(
             "context-native-worker",

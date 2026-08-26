@@ -422,6 +422,10 @@ r316只在production Capability Remote Worker注入Egress observer，HTTP/gRPC�
 Native继续保持PostgreSQL-only。目标测试、strict Clippy和双角色部署/observability/redaction门禁通过；production scrape、真实fault、其他Egress/MCP client
 及L4～L5仍Pending。
 
+r317只在production Remote Context Worker注入Egress observer并复用其PostgreSQL metrics surface；Native/Subscription保持PostgreSQL-only，实际查询
+RPC仅导出固定role/dependency/outcome。目标测试、strict Clippy和Context部署/observability/redaction门禁通过；production scrape、真实fault、其他
+Egress/MCP client及L4～L5仍Pending。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

@@ -11,7 +11,9 @@ use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
     ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
-use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
+use insight_platform_egress_rpc::{
+    EgressBrokerGrpcClient, EgressInternalRpcLimits, EgressRpcDependencyObserver,
+};
 use insight_platform_observability::{
     process_observability_router, run_worker_permit_sampler, update_worker_permits,
     ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
@@ -176,14 +178,22 @@ async fn run() -> Result<(), ProcessError> {
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let observability_pools = pools.clone();
-    let connector = Arc::new(connect_egress(&config).await?);
+    let dependency_metrics =
+        install_context_dependency_metrics(true).map_err(|_| ProcessError::InvalidConfiguration)?;
+    let connector = Arc::new(
+        connect_egress(
+            &config,
+            dependency_metrics
+                .egress
+                .ok_or(ProcessError::InvalidConfiguration)?,
+        )
+        .await?,
+    );
     let driver =
         RemoteContextWorkerDriver::new(repository, pools, connector, config.driver_config()?)
             .map_err(|_| ProcessError::InvalidConfiguration)?;
     let permit_metrics = Arc::new(WorkerPermitMetrics::default());
     update_worker_permits(&permit_metrics, &observability_pools);
-    let dependency_metrics =
-        install_context_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_worker_permits(
             "context-remote-worker",
@@ -276,7 +286,10 @@ async fn run() -> Result<(), ProcessError> {
     }
 }
 
-async fn connect_egress(config: &ProcessConfig) -> Result<EgressBrokerGrpcClient, ProcessError> {
+async fn connect_egress(
+    config: &ProcessConfig,
+    dependency_observer: Arc<dyn EgressRpcDependencyObserver>,
+) -> Result<EgressBrokerGrpcClient, ProcessError> {
     let limits = EgressInternalRpcLimits::new(
         config.maximum_rpc_metadata_bytes,
         config.maximum_rpc_payload_bytes,
@@ -307,7 +320,11 @@ async fn connect_egress(config: &ProcessConfig) -> Result<EgressBrokerGrpcClient
         .connect()
         .await
         .map_err(|_| ProcessError::EgressUnavailable)?;
-    Ok(EgressBrokerGrpcClient::new(channel, limits))
+    Ok(EgressBrokerGrpcClient::new_with_observer(
+        channel,
+        limits,
+        dependency_observer,
+    ))
 }
 
 #[cfg(unix)]
