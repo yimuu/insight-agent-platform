@@ -622,6 +622,12 @@
 > tenant字段。Helm负向阈值、13-alert inventory、panel expression、HTTPS runbook锚点与低基数checker通过；该批只闭合消费端合同，不提供production scrape、
 > 真实fault或L5 profile证据。
 
+> 2026-08-27 implementation evidence：r314为共享`EgressBrokerGrpcClient`增加closed transport observer，只接收success/failure，并在Model
+> 建连/流读取/取消、Capability HTTP/gRPC调用与取消、Remote Context、MCP OAuth/cleanup/Tool/Resource，以及subscription建连、首帧和持续读取的实际tonic
+> 返回边界记录结果。本地编码/校验拒绝零观测，成功transport承载业务`Failed`仍记录success；metadata、tenant、provider、endpoint、payload和error均不跨越
+> observer port。真实mTLS成功、不可达端点失败测试及strict Clippy通过。本批尚未在production process composition注入observer，因此不宣称role Egress
+> series、production scrape/fault或L4～L5闭合。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

@@ -700,15 +700,43 @@ enum ModelStreamFrame {
     Failed(ModelAdapterFailure),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressRpcDependencyOutcome {
+    Success,
+    Failure,
+}
+
+/// Receives only the result of an actual Egress Broker gRPC transport operation. Request metadata,
+/// endpoint, provider, tenant/resource identity, payload and error details never cross this port.
+pub trait EgressRpcDependencyObserver: Send + Sync {
+    fn observe(&self, outcome: EgressRpcDependencyOutcome);
+}
+
+#[derive(Debug)]
+struct NoopEgressRpcDependencyObserver;
+
+impl EgressRpcDependencyObserver for NoopEgressRpcDependencyObserver {
+    fn observe(&self, _outcome: EgressRpcDependencyOutcome) {}
+}
+
 #[derive(Clone)]
 pub struct EgressBrokerGrpcClient {
     client: TracedEgressBrokerServiceClient,
     limits: EgressInternalRpcLimits,
     mcp_subscription_sink: Option<Arc<dyn McpStreamableHttpSubscriptionSink>>,
+    dependency_observer: Arc<dyn EgressRpcDependencyObserver>,
 }
 
 impl EgressBrokerGrpcClient {
     pub fn new(channel: tonic::transport::Channel, limits: EgressInternalRpcLimits) -> Self {
+        Self::new_with_observer(channel, limits, Arc::new(NoopEgressRpcDependencyObserver))
+    }
+
+    pub fn new_with_observer(
+        channel: tonic::transport::Channel,
+        limits: EgressInternalRpcLimits,
+        dependency_observer: Arc<dyn EgressRpcDependencyObserver>,
+    ) -> Self {
         let maximum = limits.maximum_message_bytes();
         Self {
             client: EgressBrokerServiceClient::with_interceptor(channel, PropagateTrace)
@@ -716,6 +744,7 @@ impl EgressBrokerGrpcClient {
                 .max_decoding_message_size(maximum),
             limits,
             mcp_subscription_sink: None,
+            dependency_observer,
         }
     }
 
@@ -726,6 +755,14 @@ impl EgressBrokerGrpcClient {
         self.mcp_subscription_sink = Some(sink);
         self
     }
+}
+
+fn observe_egress_rpc(observer: &Arc<dyn EgressRpcDependencyObserver>, success: bool) {
+    observer.observe(if success {
+        EgressRpcDependencyOutcome::Success
+    } else {
+        EgressRpcDependencyOutcome::Failure
+    });
 }
 
 type TracedEgressBrokerServiceClient = EgressBrokerServiceClient<
@@ -743,29 +780,34 @@ impl ModelProviderWireConnector for EgressBrokerGrpcClient {
         let envelope = encode_model_request(request, self.limits)
             .map_err(|_| model_rpc_failure("model_egress_rpc_request_invalid", false, deadline))?;
         let mut client = self.client.clone();
-        let incoming = client
-            .open_model_provider(Request::new(envelope))
-            .await
+        let response = client.open_model_provider(Request::new(envelope)).await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let incoming = response
             .map_err(|status| model_status_failure(status, deadline))?
             .into_inner();
         let limits = self.limits;
+        let dependency_observer = Arc::clone(&self.dependency_observer);
         let stream = stream::unfold(
-            (incoming, false),
-            move |(mut incoming, terminal)| async move {
+            (incoming, false, dependency_observer),
+            move |(mut incoming, terminal, dependency_observer)| async move {
                 if terminal {
                     return None;
                 }
-                match incoming.message().await {
+                let response = incoming.message().await;
+                observe_egress_rpc(&dependency_observer, response.is_ok());
+                match response {
                     Ok(Some(envelope)) => match decode_metadata::<ModelStreamFrame>(
                         envelope,
                         MODEL_PROVIDER_FRAME,
                         limits,
                     ) {
-                        Ok(ModelStreamFrame::Event(event)) => Some((Ok(event), (incoming, false))),
+                        Ok(ModelStreamFrame::Event(event)) => {
+                            Some((Ok(event), (incoming, false, dependency_observer)))
+                        }
                         Ok(ModelStreamFrame::Failed(failure))
                             if failure.validate_wire_shape(deadline, Utc::now()).is_ok() =>
                         {
-                            Some((Err(failure), (incoming, true)))
+                            Some((Err(failure), (incoming, true, dependency_observer)))
                         }
                         Ok(ModelStreamFrame::Failed(_)) => Some((
                             Err(model_rpc_failure(
@@ -773,7 +815,7 @@ impl ModelProviderWireConnector for EgressBrokerGrpcClient {
                                 true,
                                 deadline,
                             )),
-                            (incoming, true),
+                            (incoming, true, dependency_observer),
                         )),
                         Err(_) => Some((
                             Err(model_rpc_failure(
@@ -781,13 +823,13 @@ impl ModelProviderWireConnector for EgressBrokerGrpcClient {
                                 true,
                                 deadline,
                             )),
-                            (incoming, true),
+                            (incoming, true, dependency_observer),
                         )),
                     },
                     Ok(None) => None,
                     Err(status) => Some((
                         Err(model_status_failure(status, deadline)),
-                        (incoming, true),
+                        (incoming, true, dependency_observer),
                     )),
                 }
             },
@@ -807,10 +849,9 @@ impl ModelProviderWireConnector for EgressBrokerGrpcClient {
         let envelope = encode_metadata(&(protocol, request), CANCEL_MODEL_PROVIDER, self.limits)
             .map_err(|_| model_rpc_failure("model_egress_rpc_cancel_invalid", false, deadline))?;
         let mut client = self.client.clone();
-        let response = client
-            .cancel_model_provider(Request::new(envelope))
-            .await
-            .map_err(|status| model_status_failure(status, deadline))?;
+        let response = client.cancel_model_provider(Request::new(envelope)).await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response = response.map_err(|status| model_status_failure(status, deadline))?;
         match decode_metadata::<UnaryOutcome<ModelAdapterCancelOutcome, ModelAdapterFailure>>(
             response.into_inner(),
             MODEL_PROVIDER_CANCEL_OUTCOME,
@@ -848,8 +889,9 @@ impl HttpNetworkTransport for EgressBrokerGrpcClient {
         let mut client = self.client.clone();
         let response = client
             .round_trip_capability_http(Request::new(envelope))
-            .await
-            .map_err(capability_status_failure)?;
+            .await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response = response.map_err(capability_status_failure)?;
         match decode_http_outcome(response.into_inner(), self.limits)? {
             UnaryOutcome::Succeeded(response) => {
                 response.validate(response_limits).map_err(|_| {
@@ -867,6 +909,7 @@ impl HttpNetworkTransport for EgressBrokerGrpcClient {
     ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
         capability_cancel(
             self.client.clone(),
+            Arc::clone(&self.dependency_observer),
             request,
             CANCEL_CAPABILITY_HTTP,
             CAPABILITY_HTTP_CANCEL_OUTCOME,
@@ -890,10 +933,9 @@ impl GrpcNetworkTransport for EgressBrokerGrpcClient {
         let envelope = encode_grpc_request(request, self.limits)
             .map_err(|_| capability_rpc_failure("capability_egress_rpc_request_invalid", false))?;
         let mut client = self.client.clone();
-        let response = client
-            .unary_capability_grpc(Request::new(envelope))
-            .await
-            .map_err(capability_status_failure)?;
+        let response = client.unary_capability_grpc(Request::new(envelope)).await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response = response.map_err(capability_status_failure)?;
         match decode_grpc_outcome(response.into_inner(), self.limits)? {
             UnaryOutcome::Succeeded(response) => {
                 response.validate(response_limits).map_err(|_| {
@@ -911,6 +953,7 @@ impl GrpcNetworkTransport for EgressBrokerGrpcClient {
     ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
         capability_cancel(
             self.client.clone(),
+            Arc::clone(&self.dependency_observer),
             request,
             CANCEL_CAPABILITY_GRPC,
             CAPABILITY_GRPC_CANCEL_OUTCOME,
@@ -933,9 +976,9 @@ impl RemoteContextSearchConnector for EgressBrokerGrpcClient {
         let envelope = encode_metadata(&request, QUERY_REMOTE_CONTEXT, self.limits)
             .map_err(|_| remote_context_rpc_failure("context_egress_rpc_request_invalid", false))?;
         let mut client = self.client.clone();
-        let response = client
-            .query_remote_context(Request::new(envelope))
-            .await
+        let response = client.query_remote_context(Request::new(envelope)).await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response = response
             .map_err(|_| remote_context_rpc_failure("context_egress_rpc_unavailable", true))?;
         match decode_metadata::<UnaryOutcome<RemoteContextSearchResponse, RemoteContextFailure>>(
             response.into_inner(),
@@ -983,8 +1026,9 @@ impl McpOAuthCredentialBroker for EgressBrokerGrpcClient {
         let mut client = self.client.clone();
         let response = client
             .exchange_mcp_o_auth_authorization_code(Request::new(envelope))
-            .await
-            .map_err(mcp_oauth_status_failure)?;
+            .await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response = response.map_err(mcp_oauth_status_failure)?;
         let outcome: UnaryOutcome<McpOAuthAuthorizedGrant, McpOAuthCredentialFailureWire> =
             decode_metadata(
                 response.into_inner(),
@@ -1017,8 +1061,9 @@ impl McpOAuthPkceSecretCleaner for EgressBrokerGrpcClient {
         let mut client = self.client.clone();
         let response = client
             .delete_mcp_o_auth_pkce_secret(Request::new(envelope))
-            .await
-            .map_err(mcp_oauth_cleanup_status_failure)?;
+            .await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response = response.map_err(mcp_oauth_cleanup_status_failure)?;
         match decode_metadata::<
             UnaryOutcome<McpOAuthPkceSecretCleanupDisposition, McpOAuthPkceCleanupFailureWire>,
         >(
@@ -1046,8 +1091,10 @@ impl McpStreamableHttpConnector for EgressBrokerGrpcClient {
         let mut client = self.client.clone();
         let response = client
             .execute_mcp_streamable_http(Request::new(envelope))
-            .await
-            .map_err(|status| mcp_rpc_status_failure(status, request_identity.clone()))?;
+            .await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response =
+            response.map_err(|status| mcp_rpc_status_failure(status, request_identity.clone()))?;
         let outcome: UnaryOutcome<McpOperationOutcome, McpTransportFailure> = decode_metadata(
             response.into_inner(),
             MCP_STREAMABLE_HTTP_OUTCOME,
@@ -1082,10 +1129,10 @@ impl McpStreamableHttpConnector for EgressBrokerGrpcClient {
         let envelope = encode_metadata(&request, CANCEL_MCP_REMOTE_TASK, self.limits)
             .map_err(|_| mcp_rpc_rejected("mcp_egress_rpc_cancel_invalid"))?;
         let mut client = self.client.clone();
-        let response = client
-            .cancel_mcp_remote_task(Request::new(envelope))
-            .await
-            .map_err(|status| mcp_rpc_status_failure(status, request_identity.clone()))?;
+        let response = client.cancel_mcp_remote_task(Request::new(envelope)).await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response =
+            response.map_err(|status| mcp_rpc_status_failure(status, request_identity.clone()))?;
         match decode_metadata::<UnaryOutcome<McpRemoteTaskCancelOutcome, McpTransportFailure>>(
             response.into_inner(),
             MCP_REMOTE_TASK_CANCEL_OUTCOME,
@@ -1123,10 +1170,10 @@ impl McpResourceRefreshConnector for EgressBrokerGrpcClient {
         let envelope = encode_metadata(&request, REFRESH_MCP_RESOURCES, self.limits)
             .map_err(|_| mcp_rpc_rejected("mcp_resource_refresh_rpc_request_invalid"))?;
         let mut client = self.client.clone();
-        let response = client
-            .refresh_mcp_resources(Request::new(envelope))
-            .await
-            .map_err(|status| mcp_rpc_status_failure(status, request_identity.clone()))?;
+        let response = client.refresh_mcp_resources(Request::new(envelope)).await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response =
+            response.map_err(|status| mcp_rpc_status_failure(status, request_identity.clone()))?;
         match decode_metadata::<
             UnaryOutcome<McpResourceRefreshTransportEvidence, McpTransportFailure>,
         >(
@@ -1193,9 +1240,11 @@ impl McpStreamableHttpSubscriptionConnector for EgressBrokerGrpcClient {
             .map_err(|_| mcp_rpc_rejected("mcp_egress_subscription_request_invalid"))?;
         let request_stream = tokio_stream::wrappers::ReceiverStream::new(request_receiver);
         let mut client = self.client.clone();
-        let mut response_stream = client
+        let response_stream = client
             .stream_mcp_streamable_http_subscription(Request::new(request_stream))
-            .await
+            .await;
+        observe_egress_rpc(&self.dependency_observer, response_stream.is_ok());
+        let mut response_stream = response_stream
             .map_err(|_| {
                 mcp_rpc_uncertain(
                     "mcp_egress_subscription_establish_rpc_uncertain",
@@ -1203,9 +1252,9 @@ impl McpStreamableHttpSubscriptionConnector for EgressBrokerGrpcClient {
                 )
             })?
             .into_inner();
-        let response = response_stream
-            .message()
-            .await
+        let response = response_stream.message().await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response = response
             .map_err(|_| {
                 mcp_rpc_uncertain(
                     "mcp_egress_subscription_establish_response_invalid",
@@ -1243,6 +1292,7 @@ impl McpStreamableHttpSubscriptionConnector for EgressBrokerGrpcClient {
                         sink,
                         request,
                         request_digest,
+                        dependency_observer: Arc::clone(&self.dependency_observer),
                     }),
                 ))
             }
@@ -1270,6 +1320,7 @@ struct EgressRpcMcpSubscriptionActivation {
     sink: Arc<dyn McpStreamableHttpSubscriptionSink>,
     request: McpStreamableHttpSubscriptionRequest,
     request_digest: Sha256Digest,
+    dependency_observer: Arc<dyn EgressRpcDependencyObserver>,
 }
 
 #[async_trait]
@@ -1320,7 +1371,9 @@ impl EgressRpcMcpSubscriptionActivation {
             )
         })?;
         loop {
-            let envelope = self.response_stream.message().await.map_err(|_| {
+            let response = self.response_stream.message().await;
+            observe_egress_rpc(&self.dependency_observer, response.is_ok());
+            let envelope = response.map_err(|_| {
                 mcp_rpc_uncertain(
                     "mcp_egress_subscription_stream_rpc_uncertain",
                     self.request_digest.clone(),
@@ -1443,6 +1496,7 @@ impl EgressRpcMcpSubscriptionActivation {
 
 async fn capability_cancel(
     mut client: TracedEgressBrokerServiceClient,
+    dependency_observer: Arc<dyn EgressRpcDependencyObserver>,
     request: CapabilityTransportCancelRequest,
     request_operation: &'static str,
     response_operation: &'static str,
@@ -1463,9 +1517,9 @@ async fn capability_cancel(
         .map_err(|_| capability_rpc_failure("capability_egress_rpc_cancel_invalid", false))?;
     let envelope = encode_metadata(&request, request_operation, limits)
         .map_err(|_| capability_rpc_failure("capability_egress_rpc_cancel_invalid", false))?;
-    let response = invoke(&mut client, Request::new(envelope))
-        .await
-        .map_err(capability_status_failure)?;
+    let response = invoke(&mut client, Request::new(envelope)).await;
+    observe_egress_rpc(&dependency_observer, response.is_ok());
+    let response = response.map_err(capability_status_failure)?;
     match decode_metadata::<
         UnaryOutcome<CapabilityTransportCancelOutcome, CapabilityAdapterFailure>,
     >(response.into_inner(), response_operation, limits)
@@ -2552,9 +2606,26 @@ mod tests {
         KeyPair, KeyUsagePurpose, SanType,
     };
     use tonic::transport::{
-        server::TcpIncoming, Certificate, ClientTlsConfig, Endpoint, Identity, Server,
+        server::TcpIncoming, Certificate, Channel, ClientTlsConfig, Endpoint, Identity, Server,
         ServerTlsConfig,
     };
+
+    #[derive(Default)]
+    struct RecordingDependencyObserver {
+        outcomes: std::sync::Mutex<Vec<EgressRpcDependencyOutcome>>,
+    }
+
+    impl EgressRpcDependencyObserver for RecordingDependencyObserver {
+        fn observe(&self, outcome: EgressRpcDependencyOutcome) {
+            self.outcomes.lock().unwrap().push(outcome);
+        }
+    }
+
+    impl RecordingDependencyObserver {
+        fn outcomes(&self) -> Vec<EgressRpcDependencyOutcome> {
+            self.outcomes.lock().unwrap().clone()
+        }
+    }
 
     fn traced_request<T>(message: T) -> Request<T> {
         request_with_trace(
@@ -3022,12 +3093,12 @@ mod tests {
         }
     }
 
-    async fn connect(
+    async fn connect_channel(
         address: std::net::SocketAddr,
         fixture: &MtlsFixture,
         certificate: &str,
         key: &str,
-    ) -> EgressBrokerServiceClient<tonic::transport::Channel> {
+    ) -> Channel {
         let endpoint = Endpoint::from_shared(format!("https://{address}"))
             .unwrap()
             .tls_config(
@@ -3037,7 +3108,40 @@ mod tests {
                     .identity(Identity::from_pem(certificate, key)),
             )
             .unwrap();
-        EgressBrokerServiceClient::new(endpoint.connect().await.unwrap())
+        endpoint.connect().await.unwrap()
+    }
+
+    async fn connect(
+        address: std::net::SocketAddr,
+        fixture: &MtlsFixture,
+        certificate: &str,
+        key: &str,
+    ) -> EgressBrokerServiceClient<Channel> {
+        EgressBrokerServiceClient::new(connect_channel(address, fixture, certificate, key).await)
+    }
+
+    #[tokio::test]
+    async fn client_observes_an_actual_transport_failure_without_request_metadata() {
+        let observer = Arc::new(RecordingDependencyObserver::default());
+        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let client = EgressBrokerGrpcClient::new_with_observer(
+            channel,
+            EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap(),
+            observer.clone(),
+        );
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            HttpNetworkTransport::cancel(&client, capability_cancel_request()),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(
+            observer.outcomes(),
+            vec![EgressRpcDependencyOutcome::Failure]
+        );
     }
 
     #[tokio::test]
@@ -3110,6 +3214,33 @@ mod tests {
             outcome,
             UnaryOutcome::Succeeded(CapabilityTransportCancelOutcome::Accepted)
         ));
+
+        let observer = Arc::new(RecordingDependencyObserver::default());
+        let observed_capability = EgressBrokerGrpcClient::new_with_observer(
+            connect_channel(
+                address,
+                &fixture,
+                &fixture.capability_certificate_pem,
+                &fixture.capability_key_pem,
+            )
+            .await,
+            limits,
+            observer.clone(),
+        );
+        assert_eq!(
+            scope_trace(
+                RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled)
+                    .unwrap(),
+                HttpNetworkTransport::cancel(&observed_capability, capability_cancel_request()),
+            )
+            .await
+            .unwrap(),
+            CapabilityTransportCancelOutcome::Accepted
+        );
+        assert_eq!(
+            observer.outcomes(),
+            vec![EgressRpcDependencyOutcome::Success]
+        );
 
         let remote_envelope = encode_metadata(
             &serde_json::json!({"schema_version": 1}),

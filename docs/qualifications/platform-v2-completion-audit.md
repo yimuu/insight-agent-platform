@@ -130,6 +130,10 @@ r313把14-panel dashboard中的scheduler-only PostgreSQL panel扩展为按`compo
 role/dependency分诊且禁止记录endpoint/database/subject/object/error/tenant字段。Helm负向阈值、alert inventory、panel expression与runbook锚点checker通过；该批只闭合
 消费端合同，不产生production scrape或fault-injection证据。
 
+r314为共享Egress RPC client补齐只接收fixed success/failure的transport observer；Model streaming、Capability HTTP/gRPC、Remote Context、MCP
+OAuth/cleanup/Tool/Resource/subscription均只在实际tonic返回边界观测，本地编码/校验拒绝不污染计数，业务失败不冒充transport failure。真实mTLS成功与不可达端点
+失败测试、strict Clippy通过。该批尚未把observer注入各production binary，故role Egress series、production scrape/fault与L4～L5仍为缺口。
+
 ## 3. Phase 1 审计
 
 ### 已满足

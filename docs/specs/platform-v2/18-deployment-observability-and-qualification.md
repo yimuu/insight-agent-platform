@@ -585,6 +585,12 @@ r313把14-panel runtime dashboard中的scheduler-only PostgreSQL panel扩展为�
 fixed role/dependency分诊并明确禁止endpoint、database、subject、object key、error或tenant数据。Helm负向阈值、13-alert inventory、panel expression、HTTPS
 runbook锚点与低基数checker通过；该批闭合仓库内消费端合同，不提供production scrape、真实fault或L5 profile证据。
 
+r314为共享`EgressBrokerGrpcClient`增加只接收fixed success/failure的transport observer，并在Model建连/流读取/取消、Capability HTTP/gRPC
+调用与取消、Remote Context、MCP OAuth/cleanup/Tool/Resource及subscription建连/首帧/持续读取的实际tonic返回边界记录结果。请求编码、closed validation等
+本地拒绝不产生观测；成功传输后返回业务`Failed`仍是transport success。observer不接收metadata、tenant、provider、endpoint、payload或error。真实mTLS
+成功与不可达端点失败测试及strict Clippy通过；本批只建立共享client port，尚未把observer注入各production process，故不生成role Egress series，也不提供
+production scrape/fault或L4～L5证据。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。
