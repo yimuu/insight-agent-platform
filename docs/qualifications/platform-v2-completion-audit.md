@@ -2,7 +2,7 @@
 
 状态：In Progress / repository and production gaps remain
 
-日期：2026-08-26
+日期：2026-08-27
 
 本审计按 `00-overview.md` 的统一完成定义和 `implementation-plan.md` 四阶段 exit gate 核对当前工作树。
 它记录可以复现的证据与缺口，不改变合同，也不把存在源码、测试或静态清单等同于 production behavior。
@@ -58,6 +58,12 @@ fresh PostgreSQL 16验证checkout/drop使used 0→1→0；unit tests、strict Cl
 r298从Egress Broker 11个真实Semaphore owner导出Secret、Model、Capability、Context、MCP及subscription bridge capacity。OAuth/bridge owner
 tests验证占用、饱和拒绝及释放恢复；真实HTTPS/mTLS、strict workspace Clippy及Security/Egress、observability门禁通过。19/19 pool动态capacity
 L1接线闭合；production scrape、完整dependency health、L5 mixed-load/saturation profile、telemetry backend/RBAC/retention及L4～L6保持Pending。
+
+r299使用两个全新PG16 baseline（主authority、独立Model conformance）、真实NATS和当前production process binaries完成串行workspace
+all-target/all-feature回归，退出码0；两个外部S3测试显式ignored。workspace format、strict Clippy、doc tests及最新OAuth 8/8真实TLS/kill-recovery
+复验通过。该批同时关闭Scheduling JSON-null候选污染、terminal transaction serialization重试、MCP trace、OAuth exact token binding/event kind、
+数据库时钟timer和多进程fixture scoping缺口。本轮没有Model TLS NATS process fixture、外部S3/KMS、production scrape或L4～L6环境，故本审计
+仍为In Progress，不生成release通过证据、不执行clean cut。
 
 ## 3. Phase 1 审计
 

@@ -2879,6 +2879,7 @@ dependencies = [
  "insight-platform-model-adapters",
  "insight-platform-observability",
  "insight-platform-postgres",
+ "insight-platform-rpc-trace",
  "rcgen",
  "serde",
  "serde_json",

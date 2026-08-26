@@ -505,6 +505,12 @@ available 1→0→1且在外呼前拒绝，bridge测试证明pending/active随re
 Clippy及Security/Egress、observability门禁通过。19/19 pool动态capacity L1接线闭合；production Prometheus scrape、完整dependency health、
 L5 mixed-load/saturation profile、telemetry backend/RBAC/retention及L4～L6保持Pending。
 
+r299在全新PG16主/Model隔离baseline、真实NATS和当前production process binaries上完成workspace all-target/all-feature串行L1～L3门禁，
+退出码0；两个需要外部S3的测试仍显式ignored。OAuth callback/token endpoint/Egress/Cleanup Worker真实TLS与kill-recovery在最新代码上8/8，
+Scheduling、terminal retry、trace、timer、global queue与multi-process fixture边界同步收敛；workspace format、strict Clippy及doc tests通过。
+该证据不含Model TLS NATS process fixture、外部S3/KMS、production Prometheus scrape、telemetry backend、production-equivalent Kubernetes/runsc、
+L5 mixed load/soak/restore或L6 rollout/rollback，故L4～L6及clean cut继续为release blocker。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

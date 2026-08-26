@@ -71,7 +71,10 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     process::{Child, Stdio},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU16, Ordering},
+        Arc,
+    },
     time::{Duration as StdDuration, Instant},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -84,9 +87,19 @@ const OAUTH_EXCHANGE_EGRESS_CONFIG_ENV: &str = "PLATFORM_OAUTH_EXCHANGE_EGRESS_F
 const OAUTH_EXCHANGE_CALLBACK_CONFIG_ENV: &str = "PLATFORM_OAUTH_EXCHANGE_CALLBACK_FIXTURE_CONFIG";
 const OAUTH_TOKEN_ENDPOINT_CONFIG_ENV: &str = "PLATFORM_OAUTH_TOKEN_ENDPOINT_FIXTURE_CONFIG";
 
+static OAUTH_FIXTURE_NAMESPACE: AtomicU16 = AtomicU16::new(0xb100);
+static OAUTH_FIXTURE_NAMESPACE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn select_fixture_namespace(namespace: u16) -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = OAUTH_FIXTURE_NAMESPACE_LOCK.lock().await;
+    OAUTH_FIXTURE_NAMESPACE.store(namespace, Ordering::SeqCst);
+    guard
+}
+
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
+    let namespace = OAUTH_FIXTURE_NAMESPACE.load(Ordering::SeqCst);
     format!(
-        "{}_0198f1c8-32e4-75e1-a9e8-d95ca0f6{suffix:04x}",
+        "{}_0198f1c8-32e4-75e1-a9e8-d95c{namespace:04x}{suffix:04x}",
         kind.descriptor().prefix
     )
     .parse()
@@ -97,6 +110,17 @@ fn sha(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
         .unwrap()
+}
+
+fn namespaced_digest(label: &str) -> Sha256Digest {
+    let namespace = OAUTH_FIXTURE_NAMESPACE.load(Ordering::SeqCst);
+    canonical_digest(&serde_json::json!({
+        "phase4_mcp_oauth": label,
+        "fixture_namespace": namespace,
+    }))
+    .unwrap()
+    .parse()
+    .unwrap()
 }
 
 fn exact(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef {
@@ -619,8 +643,8 @@ async fn seed(pool: &PgPool, repository: &PgRepository, fixture: &Fixture) {
     repository
         .create_principal(NewPrincipal {
             principal_id: fixture.principal_id.clone(),
-            authentication_authority_digest: sha('4'),
-            subject_digest: sha('5'),
+            authentication_authority_digest: namespaced_digest("authentication_authority"),
+            subject_digest: namespaced_digest("subject"),
             installation_bindings: PrincipalBindingsPayload {
                 installation_bindings: vec![],
             },
@@ -1108,26 +1132,19 @@ impl McpOAuthTokenVerifier for ProcessOAuthVerifier {
 
 struct ProcessOAuthTokenStore {
     marker_path: PathBuf,
+    token_secret_binding: ExactSecretBindingRef,
 }
 
 impl ProcessOAuthTokenStore {
     fn stored(
+        &self,
         preparation: &McpOAuthTokenPreparation,
         now: DateTime<Utc>,
     ) -> StoredMcpOAuthTokenSecret {
         StoredMcpOAuthTokenSecret {
             schema_version: 1,
             preparation_digest: preparation.preparation_digest.clone(),
-            token_secret_binding: ExactSecretBindingRef::build(
-                id(ResourceKind::SecretBinding, 0xd0),
-                1,
-                preparation.token_secret_provider_id.clone(),
-                preparation.token_credential_purpose.clone(),
-                SecretResolutionPolicy::Pinned {
-                    opaque_version_identity_digest: sha('c'),
-                },
-            )
-            .unwrap(),
+            token_secret_binding: self.token_secret_binding.clone(),
             granted_scopes: preparation.requested_scopes.clone(),
             audience_identity_digest: preparation.audience_identity_digest.clone(),
             issuer_identity_digest: preparation.issuer_identity_digest.clone(),
@@ -1149,7 +1166,7 @@ impl McpOAuthTokenStore for ProcessOAuthTokenStore {
         Ok(self
             .marker_path
             .exists()
-            .then(|| Self::stored(preparation, now)))
+            .then(|| self.stored(preparation, now)))
     }
 
     async fn store_prepared(
@@ -1161,7 +1178,7 @@ impl McpOAuthTokenStore for ProcessOAuthTokenStore {
     ) -> Result<StoredMcpOAuthTokenSecret, McpOAuthTokenStoreError> {
         std::fs::write(&self.marker_path, preparation.preparation_digest.as_str())
             .map_err(|_| McpOAuthTokenStoreError::WriteUncertain)?;
-        Ok(Self::stored(preparation, now))
+        Ok(self.stored(preparation, now))
     }
 }
 
@@ -1173,6 +1190,7 @@ struct OAuthExchangeEgressProcessConfig {
     server_certificate_pem: String,
     server_key_pem: String,
     verification_binding: InstalledMcpOAuthVerificationBinding,
+    token_secret_binding: ExactSecretBindingRef,
     token_store_marker_path: PathBuf,
     ready_path: PathBuf,
 }
@@ -1190,6 +1208,7 @@ async fn run_oauth_exchange_egress_fixture(config: OAuthExchangeEgressProcessCon
         Arc::new(ProcessOAuthVerifier),
         Arc::new(ProcessOAuthTokenStore {
             marker_path: config.token_store_marker_path,
+            token_secret_binding: config.token_secret_binding,
         }),
         McpOAuthEgressLimits::default(),
     )
@@ -1538,6 +1557,7 @@ fn kill(child: &mut Child) {
 
 #[tokio::test]
 async fn phase4_mcp_oauth_start_is_idempotent_secret_free_and_first_winner() {
+    let _fixture_namespace = select_fixture_namespace(0xb100).await;
     let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
         eprintln!("PLATFORM_TEST_DATABASE_URL is unset; real PostgreSQL fixture skipped");
         return;
@@ -1642,6 +1662,7 @@ async fn phase4_mcp_oauth_start_is_idempotent_secret_free_and_first_winner() {
 
 #[tokio::test]
 async fn phase4_mcp_oauth_cleanup_outbox_claim_is_reclaimable_and_exactly_fenced() {
+    let _fixture_namespace = select_fixture_namespace(0xb101).await;
     let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
         eprintln!("PLATFORM_TEST_DATABASE_URL is unset; real PostgreSQL fixture skipped");
         return;
@@ -1688,7 +1709,7 @@ async fn phase4_mcp_oauth_cleanup_outbox_claim_is_reclaimable_and_exactly_fenced
         INSERT INTO insight_platform.events (
             tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
             trace_id, event_type, visibility, payload_schema_version, payload, payload_digest
-        ) VALUES ($1, $2, 'mcp_authorization', $3, 1,
+        ) VALUES ($1, $2, 'mcp_authorization_binding', $3, 1,
                   '0123456789abcdef0123456789abcdef',
                   'mcp.oauth_authorization_completed', 'internal', $4, $5, $6)
         "#,
@@ -1716,12 +1737,13 @@ async fn phase4_mcp_oauth_cleanup_outbox_claim_is_reclaimable_and_exactly_fenced
     let first = repository
         .claim_due_mcp_oauth_pkce_cleanups(ClaimDueMcpOAuthPkceCleanups {
             claim_owner: worker_a,
-            maximum_claims: 1,
+            maximum_claims: 64,
             lease_milliseconds: 30_000,
         })
         .await
         .unwrap()
-        .pop()
+        .into_iter()
+        .find(|claim| claim.request.task_id == task_id)
         .unwrap();
     assert_eq!(first.request.cause, McpOAuthPkceCleanupCause::Authorized);
     assert_eq!(first.request.task_id, task_id);
@@ -1738,12 +1760,13 @@ async fn phase4_mcp_oauth_cleanup_outbox_claim_is_reclaimable_and_exactly_fenced
     let second = repository
         .claim_due_mcp_oauth_pkce_cleanups(ClaimDueMcpOAuthPkceCleanups {
             claim_owner: worker_b,
-            maximum_claims: 1,
+            maximum_claims: 64,
             lease_milliseconds: 30_000,
         })
         .await
         .unwrap()
-        .pop()
+        .into_iter()
+        .find(|claim| claim.request.task_id == task_id)
         .unwrap();
     assert!(!repository
         .settle_mcp_oauth_pkce_cleanup(&first, McpOAuthPkceCleanupSettlement::Completed,)
@@ -1773,6 +1796,7 @@ async fn phase4_mcp_oauth_cleanup_outbox_claim_is_reclaimable_and_exactly_fenced
 
 #[tokio::test]
 async fn phase4_mcp_oauth_cleanup_process_recovers_egress_and_worker_kill() {
+    let _fixture_namespace = select_fixture_namespace(0xb102).await;
     let (Ok(database_url), Ok(cleanup_binary)) = (
         std::env::var("PLATFORM_TEST_DATABASE_URL"),
         std::env::var("PLATFORM_MCP_CLEANUP_WORKER_BIN"),
@@ -1876,7 +1900,7 @@ async fn phase4_mcp_oauth_cleanup_process_recovers_egress_and_worker_kill() {
         INSERT INTO insight_platform.events (
             tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
             trace_id, event_type, visibility, payload_schema_version, payload, payload_digest
-        ) VALUES ($1, $2, 'mcp_authorization', $3, 1,
+        ) VALUES ($1, $2, 'mcp_authorization_binding', $3, 1,
                   '0123456789abcdef0123456789abcdef',
                   'mcp.oauth_authorization_completed', 'internal', $4, $5, $6)
         "#,
@@ -2063,6 +2087,7 @@ fn oauth_verification_binding(
 
 #[tokio::test]
 async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_commit() {
+    let _fixture_namespace = select_fixture_namespace(0xb103).await;
     let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
         eprintln!("PLATFORM_TEST_DATABASE_URL is unset; OAuth exchange process L3 skipped");
         return;
@@ -2198,6 +2223,7 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
                 server_certificate_pem: rpc_tls.server_cert.clone(),
                 server_key_pem: rpc_tls.server_key.clone(),
                 verification_binding: verification_binding.clone(),
+                token_secret_binding: token_binding.clone(),
                 token_store_marker_path: token_store_marker.clone(),
                 ready_path: ready_path.to_path_buf(),
             })

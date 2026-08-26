@@ -2086,6 +2086,12 @@ fn phase2_claim_worker_process_entry() {
         .unwrap();
     runtime.block_on(async {
         let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
+        let tenant_ids = std::env::var("PLATFORM_PHASE2_TENANT_IDS")
+            .expect("PLATFORM_PHASE2_TENANT_IDS is required for a claim child")
+            .split(',')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(tenant_ids.len(), PHASE2_TENANT_COUNT);
         let profile = checked_in_hard_limit_profile();
         let worker_id = fresh_id(ResourceKind::WorkerProcessGeneration);
         let bulkheads = PostgresConnectionBulkheads::connect(
@@ -2158,8 +2164,9 @@ fn phase2_claim_worker_process_entry() {
             let mut consecutive_empty_observations = 0_u8;
             loop {
                 let ready: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM insight_platform.jobs WHERE work_class = 'orchestration' AND state = 'ready'",
+                    "SELECT count(*) FROM insight_platform.jobs WHERE work_class = 'orchestration' AND state = 'ready' AND tenant_id = ANY($1)",
                 )
+                .bind(&tenant_ids)
                 .fetch_one(bulkheads.critical_control_pool())
                 .await
                 .unwrap();
@@ -2254,6 +2261,7 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
             .unwrap();
 
         let executable = std::env::current_exe().unwrap();
+        let child_tenant_ids = tenant_ids.join(",");
         let mut children = Vec::with_capacity(PHASE2_CHILD_COUNT);
         for ordinal in 0..PHASE2_CHILD_COUNT {
             let child = Command::new(&executable)
@@ -2263,6 +2271,7 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
                 .arg("--test-threads=1")
                 .env("PLATFORM_PHASE2_CLAIM_CHILD", "1")
                 .env("PLATFORM_PHASE2_CHILD_ORDINAL", ordinal.to_string())
+                .env("PLATFORM_PHASE2_TENANT_IDS", &child_tenant_ids)
                 .env("PLATFORM_TEST_DATABASE_URL", &database_url)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())

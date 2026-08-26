@@ -183,6 +183,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber as _;
 
     #[derive(Clone, Default)]
     struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
@@ -317,39 +318,41 @@ mod tests {
             .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW)
             .with_writer(captured.clone())
             .finish();
-        let _subscriber = tracing::subscriber::set_default(subscriber);
-
-        let accepted = traced_router()
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/test")
-                    .header(
-                        TRACEPARENT_HEADER,
-                        format!("00-{TRACE_ID}-b7ad6b7169203331-01"),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
-
-        for (name, value) in [
-            (TRACESTATE_HEADER, TRACESTATE_CANARY),
-            (BAGGAGE_HEADER, BAGGAGE_CANARY),
-        ] {
-            let rejected = traced_router()
+        async {
+            let accepted = traced_router()
                 .oneshot(
                     Request::builder()
                         .uri("/v1/test")
-                        .header(name, value)
+                        .header(
+                            TRACEPARENT_HEADER,
+                            format!("00-{TRACE_ID}-b7ad6b7169203331-01"),
+                        )
                         .body(Body::empty())
                         .unwrap(),
                 )
                 .await
                 .unwrap();
-            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+
+            for (name, value) in [
+                (TRACESTATE_HEADER, TRACESTATE_CANARY),
+                (BAGGAGE_HEADER, BAGGAGE_CANARY),
+            ] {
+                let rejected = traced_router()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/v1/test")
+                            .header(name, value)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+            }
         }
+        .with_subscriber(subscriber)
+        .await;
 
         let telemetry = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
         assert!(telemetry.contains("platform.public_request"));

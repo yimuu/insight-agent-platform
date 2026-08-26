@@ -146,6 +146,11 @@ fn named_digest(label: &str) -> Sha256Digest {
         .unwrap()
 }
 
+fn model_test_database_url() -> Result<String, std::env::VarError> {
+    std::env::var("PLATFORM_MODEL_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("PLATFORM_TEST_DATABASE_URL"))
+}
+
 fn production_model_worker_manifest() -> WorkerManifest {
     WorkerManifest {
         manifest_version: WORKER_MANIFEST_VERSION,
@@ -456,6 +461,7 @@ impl SchedulerSkillPackageResponseBroker for ModelTypedPlanBroker {
 fn model_orchestration_process_config(artifact_endpoint: String) -> serde_json::Value {
     json!({
         "schema_version": 1,
+        "observability_listen_address": reserve_loopback_address(),
         "worker_manifest": WorkerManifest {
             manifest_version: WORKER_MANIFEST_VERSION,
             worker_role: "orchestration-worker".to_owned(),
@@ -505,6 +511,7 @@ fn model_tool_chain_worker_config(egress_endpoint: String, nats_url: String) -> 
     let manifest_digest = manifest.canonical_digest().unwrap();
     json!({
         "schema_version": 1,
+        "observability_listen_address": reserve_loopback_address(),
         "worker_manifest": manifest,
         "installed_adapters": [
             {
@@ -546,6 +553,7 @@ fn model_tool_chain_worker_config(egress_endpoint: String, nats_url: String) -> 
 fn model_tool_chain_capability_worker_config() -> serde_json::Value {
     json!({
         "schema_version": 1,
+        "observability_listen_address": reserve_loopback_address(),
         "worker_manifest": production_capability_worker_manifest(),
         "installed_adapters": [{
             "adapter_id": "builtin.echo",
@@ -670,8 +678,21 @@ fn observe_process_start(child: &mut Child) -> std::thread::JoinHandle<()> {
     let first = started_receiver
         .recv_timeout(StdDuration::from_secs(10))
         .expect("Worker did not report startup");
-    assert!(first.contains("started generation="), "{first}");
+    assert!(
+        matches!(
+            first.as_str(),
+            "platform-orchestration-worker started"
+                | "platform-model-worker started"
+                | "platform-capability-native-worker started"
+        ),
+        "{first}"
+    );
     logger
+}
+
+fn reserve_loopback_address() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().to_string()
 }
 
 fn version(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef {
@@ -3071,6 +3092,7 @@ async fn run_model_worker_process_recovery(
     let manifest_digest = manifest.canonical_digest().unwrap();
     let config = json!({
         "schema_version": 1,
+        "observability_listen_address": reserve_loopback_address(),
         "worker_manifest": manifest,
         "installed_adapters": [
             {
@@ -3112,7 +3134,7 @@ async fn run_model_worker_process_recovery(
         std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
         (path, canonical_digest(value).unwrap())
     };
-    let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
+    let database_url = model_test_database_url().unwrap();
     let spawn_worker = |path: &PathBuf, digest: &str| {
         std::process::Command::new(&binary)
             .env("PLATFORM_MODEL_WORKER_CONFIG", path)
@@ -3144,7 +3166,7 @@ async fn run_model_worker_process_recovery(
     let mut wrong = spawn_worker(&wrong_path, &wrong_digest);
     let wrong_startup = read_model_process_line(wrong.stderr.take().unwrap()).await;
     assert!(
-        wrong_startup.contains("started generation="),
+        wrong_startup.contains("platform-model-worker started"),
         "{wrong_startup}"
     );
     tokio::time::sleep(StdDuration::from_millis(500)).await;
@@ -3156,7 +3178,10 @@ async fn run_model_worker_process_recovery(
     let (config_path, config_digest) = write_config("correct", &config);
     let mut first = spawn_worker(&config_path, &config_digest);
     let startup = read_model_process_line(first.stderr.take().unwrap()).await;
-    assert!(startup.contains("started generation="), "{startup}");
+    assert!(
+        startup.contains("platform-model-worker started"),
+        "{startup}"
+    );
 
     sqlx::query(
         r#"
@@ -3655,8 +3680,10 @@ fn model_turn_is_exact_atomic_quota_accounted_and_first_winner() {
 }
 
 async fn model_turn_fixture() {
-    let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
-        eprintln!("PLATFORM_TEST_DATABASE_URL is unset; real PostgreSQL fixture skipped");
+    let Ok(database_url) = model_test_database_url() else {
+        eprintln!(
+            "PLATFORM_MODEL_TEST_DATABASE_URL and PLATFORM_TEST_DATABASE_URL are unset; real PostgreSQL fixture skipped"
+        );
         return;
     };
     let pool = PgPoolOptions::new()

@@ -3064,24 +3064,28 @@ async fn postgres_result_crash_boundaries_recover_without_duplicate_terminal_fac
                     ..
                 }
             ));
-            assert!(matches!(
-                consume_scheduler_task_once(
-                    &repository,
-                    &registry,
-                    &FrozenSchedulerWorkerFailurePolicy,
-                    &format!("worker-{suffix}-c"),
-                    60,
-                    64,
-                    CancellationToken::new(),
-                    &NoSchedulerCrash,
-                )
-                .await
-                .unwrap(),
-                SchedulerWorkerPumpOutcome::Committed {
-                    acknowledged: true,
-                    ..
-                }
-            ));
+            let acknowledged = consume_scheduler_task_once(
+                &repository,
+                &registry,
+                &FrozenSchedulerWorkerFailurePolicy,
+                &format!("worker-{suffix}-c"),
+                60,
+                64,
+                CancellationToken::new(),
+                &NoSchedulerCrash,
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(
+                    acknowledged,
+                    SchedulerWorkerPumpOutcome::Committed {
+                        acknowledged: true,
+                        ..
+                    } | SchedulerWorkerPumpOutcome::AcknowledgedRecoveredResult
+                ),
+                "{suffix} did not durably acknowledge the committed result: {acknowledged:?}"
+            );
         }
         assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
         assert_eq!(

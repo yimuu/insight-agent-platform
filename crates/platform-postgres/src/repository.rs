@@ -26428,7 +26428,10 @@ async fn enumerate_orchestration_candidates(
               AND node.enqueue_round IS NOT NULL
               AND scope.record_kind = 'scope_instance' AND scope.state = 'open'
               AND scope.terminal_at IS NULL AND scope.deadline > $1
-              AND tenant.config -> 'scheduling_policy' IS NOT NULL
+              -- JSON null is a non-NULL SQL value. Only admit tenants whose closed
+              -- TenantConfig contains the exact Scheduling binding object; otherwise
+              -- one unbound tenant can poison the complete cross-tenant window.
+              AND jsonb_typeof(tenant.config -> 'scheduling_policy') = 'object'
         ), bounded_tenants AS (
             SELECT tenant_id
             FROM eligible

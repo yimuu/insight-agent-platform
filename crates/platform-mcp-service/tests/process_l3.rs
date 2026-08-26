@@ -12,8 +12,8 @@ use insight_platform_contracts::{
     McpAuthorizationPrincipalKind, McpClientCapabilities, McpMetadataPolicy, McpMethodLimits,
     McpNegotiatedCapabilities, McpProtocolPolicyDocument, McpServerExecutionContract,
     McpServerLimits, McpTransportBinding, McpTransportFeatures, PrincipalKind, PublishedMcpMethod,
-    ResourceId, ResourceKind, SecretPurpose, SecretResolutionPolicy, Sha256Digest,
-    MCP_PROTOCOL_BASELINE,
+    ResourceId, ResourceKind, SecretPurpose, SecretResolutionPolicy, Sha256Digest, TraceFlags,
+    TraceIdentityV1, MCP_PROTOCOL_BASELINE,
 };
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
@@ -31,6 +31,7 @@ use insight_platform_model_adapters::{
     ModelProviderWireConnector, ModelProviderWireProtocol, ModelProviderWireRequest,
     ModelProviderWireStream,
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose, SanType,
@@ -556,15 +557,46 @@ async fn production_host_kill_and_restart_preserves_safe_replay_boundary() {
         McpHostInternalRpcLimits::new(1_048_576).unwrap(),
     );
     let (contract, request) = execution_fixture();
-    let pending = tokio::spawn({
+    let mut pending = tokio::spawn({
         let client = client.clone();
         let contract = contract.clone();
         let request = request.clone();
         async move {
-            insight_platform_mcp_host::McpHostClient::execute(&client, &contract, &request).await
+            let trace = RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled)
+                .unwrap();
+            scope_trace(
+                trace,
+                insight_platform_mcp_host::McpHostClient::execute(&client, &contract, &request),
+            )
+            .await
         }
     });
-    connector.first_started.notified().await;
+    let reached_egress = tokio::select! {
+        _ = connector.first_started.notified() => Ok(()),
+        outcome = &mut pending => Err(format!(
+            "MCP Host RPC completed before reaching Egress: {outcome:?}"
+        )),
+        _ = tokio::time::sleep(Duration::from_secs(10)) => Err(
+            "MCP Host RPC did not reach Egress within 10 seconds".to_owned()
+        ),
+    };
+    if let Err(failure) = reached_egress {
+        pending.abort();
+        let _ = first.kill();
+        let _ = first.wait();
+        egress_server.abort();
+        for path in [
+            &config_path,
+            &ca_path,
+            &host_cert_path,
+            &host_key_path,
+            &egress_cert_path,
+            &egress_key_path,
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
+        panic!("{failure}");
+    }
     first.kill().unwrap();
     first.wait().unwrap();
     assert_eq!(pending.await.unwrap(), Err(McpHostError::CompletionUnknown));
@@ -577,9 +609,14 @@ async fn production_host_kill_and_restart_preserves_safe_replay_boundary() {
         connect_client().await,
         McpHostInternalRpcLimits::new(1_048_576).unwrap(),
     );
-    let outcome = insight_platform_mcp_host::McpHostClient::execute(&client, &contract, &request)
-        .await
-        .unwrap();
+    let trace =
+        RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap();
+    let outcome = scope_trace(
+        trace,
+        insight_platform_mcp_host::McpHostClient::execute(&client, &contract, &request),
+    )
+    .await
+    .unwrap();
     assert!(matches!(outcome, McpOperationOutcome::Completed { .. }));
     assert_eq!(connector.calls.load(Ordering::SeqCst), 2);
     second.kill().unwrap();

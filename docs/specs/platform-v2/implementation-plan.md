@@ -539,6 +539,13 @@
 > Security/Egress、observability门禁通过。至此19/19 workload pool均有动态capacity L1接线；production Prometheus scrape、完整dependency health、
 > L5 mixed-load/saturation profile、telemetry backend/RBAC/retention及L4～L6仍保持Pending。
 
+> 2026-08-27 implementation evidence：r299以两个全新PG16 baseline隔离共享主authority与Model conformance全局WDRR，连接真实NATS并使用
+> 当前production process binaries，串行执行`cargo test --locked --workspace --all-targets --all-features`，最终退出码0；两个外部S3测试保持
+> 显式ignored。收敛项包括Scheduling JSON null不再进入候选窗口、terminal PostgreSQL serialization/deadlock同命令有界重试、MCP process
+> trace scope、OAuth callback→cleanup exact token binding与`mcp_authorization_binding`事件解析、数据库时钟timer等待、Q1子进程tenant-scoped
+> drain及durable fixture命名空间。workspace format、strict Clippy、doc tests与fresh OAuth 8/8 TLS/kill-recovery均通过。本轮未提供Model TLS NATS
+> process环境，也未运行外部S3/KMS、production scrape、Kubernetes/runsc或L4～L6；不得据此推进release/cutover状态。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

@@ -435,6 +435,32 @@ async fn isolated_repository() -> Option<(PostgresDurableRepository, PgPool, PgP
     Some((repository, control, admin, schema))
 }
 
+async fn wait_until_timer_due(
+    control: &PgPool,
+    run_id: &RunId,
+    timer_id: &insight_agent_platform::engine::TimerId,
+) {
+    let started = std::time::Instant::now();
+    loop {
+        let due: bool = sqlx::query_scalar(
+            "SELECT deadline_at <= clock_timestamp() FROM timers WHERE run_id=$1 AND timer_id=$2",
+        )
+        .bind(run_id.as_str())
+        .bind(timer_id.as_str())
+        .fetch_one(control)
+        .await
+        .unwrap();
+        if due {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timer {timer_id} for run {run_id} did not become due"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
 async fn cleanup(
     repository: PostgresDurableRepository,
     control: PgPool,
@@ -685,7 +711,7 @@ async fn postgres_timeout_runs_durable_finalizer_before_terminal() {
         .timer_id()
         .unwrap()
         .clone();
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    wait_until_timer_due(&control, &run_id, &timer_id).await;
     let timer_state = sqlx::query_as::<_, (String, String, bool)>(
         "SELECT m.timer_state,a.lifecycle,m.deadline_at <= clock_timestamp()
          FROM timers m JOIN node_activations a
@@ -1361,7 +1387,7 @@ async fn postgres_wait_signal_and_timeout_share_one_durable_first_winner() {
             .unwrap(),
         TransitionOutcome::Committed { .. }
     ));
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    wait_until_timer_due(&control, &signal_run, &timer_id).await;
     let late_timer_key = key("late-timer", &signal_run);
     let late_timer_command = FireTimerCommand::new(signal_run.clone(), timer_id.clone(), None);
     assert_eq!(
@@ -1451,7 +1477,7 @@ async fn postgres_wait_signal_and_timeout_share_one_durable_first_winner() {
         .await
         .unwrap()
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    wait_until_timer_due(&control, &timer_run, &timer_id).await;
     assert!(matches!(
         repository
             .fire_timer(
@@ -1574,7 +1600,7 @@ async fn postgres_wait_signal_and_timeout_share_one_durable_first_winner() {
         .unwrap()
         .unwrap()
         .projection_version();
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    wait_until_timer_due(&control, &race_run, &timer_id).await;
     let signal_key = key("concurrent-signal", &race_run);
     let signal_command =
         ResolveSignalCommand::new(race_run.clone(), activation_id.clone(), signal_id, version);
@@ -1683,6 +1709,7 @@ async fn postgres_late_audit_reconciles_atomically_after_fault_and_restart() {
         .unwrap()
         .clone();
     let signal_id = registration.signal_id().unwrap().clone();
+    let timer_id = registration.timer_id().unwrap().clone();
     assert!(matches!(
         repository
             .receive_signal(
@@ -1721,7 +1748,7 @@ async fn postgres_late_audit_reconciles_atomically_after_fault_and_restart() {
             .unwrap(),
         TransitionOutcome::Committed { .. }
     ));
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    wait_until_timer_due(&control, &signal_run, &timer_id).await;
     let signal_winner_event: String = sqlx::query_scalar(
         "SELECT consumed_event_id FROM signals_inbox
          WHERE run_id=$1 AND target_activation_id=$2",
@@ -1873,7 +1900,7 @@ async fn postgres_late_audit_reconciles_atomically_after_fault_and_restart() {
             .unwrap(),
         TransitionOutcome::Committed { .. }
     ));
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    wait_until_timer_due(&control, &timer_run, &timer_id).await;
     assert!(matches!(
         repository
             .fire_timer(

@@ -307,6 +307,11 @@ fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     .unwrap()
 }
 
+fn reserve_loopback_address() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().to_string()
+}
+
 fn digest(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
         .parse()
@@ -2232,6 +2237,7 @@ async fn run_native_worker_process_recovery(
 
     let config = json!({
         "schema_version": 1,
+        "observability_listen_address": reserve_loopback_address(),
         "worker_manifest": {
             "manifest_version": WORKER_MANIFEST_VERSION,
             "worker_role": "capability.native",
@@ -2290,7 +2296,10 @@ async fn run_native_worker_process_recovery(
         &mut startup,
     )
     .unwrap();
-    assert!(startup.contains("started generation="), "{startup}");
+    assert!(
+        startup.contains("platform-capability-native-worker started"),
+        "{startup}"
+    );
     sqlx::query(
         r#"
         CREATE FUNCTION insight_platform.test_pause_native_capability_commit()
@@ -3430,6 +3439,7 @@ async fn prepare_remote_http_process_fixture(
     RemoteHttpProcessFixture {
         config: json!({
             "schema_version": 1,
+            "observability_listen_address": reserve_loopback_address(),
             "worker_manifest": worker_manifest,
             "installed_http_codecs": [installed_http],
             "installed_grpc_codecs": [installed_grpc],
@@ -3645,7 +3655,7 @@ async fn run_remote_http_worker_process_recovery(
     let mut wrong = spawn_worker(&wrong_path, &wrong_digest);
     let wrong_startup = read_process_stderr_line(wrong.stderr.take().unwrap()).await;
     assert!(
-        wrong_startup.contains("started generation="),
+        wrong_startup.contains("platform-capability-remote-worker started"),
         "{wrong_startup}"
     );
     tokio::time::sleep(StdDuration::from_millis(750)).await;
@@ -3674,7 +3684,10 @@ async fn run_remote_http_worker_process_recovery(
     );
     let mut first = spawn_worker(&config_path, &config_digest);
     let startup = read_process_stderr_line(first.stderr.take().unwrap()).await;
-    assert!(startup.contains("started generation="), "{startup}");
+    assert!(
+        startup.contains("platform-capability-remote-worker started"),
+        "{startup}"
+    );
     sqlx::query(
         r#"
         CREATE FUNCTION insight_platform.test_pause_remote_capability_commit()
@@ -3801,7 +3814,7 @@ async fn run_remote_http_worker_process_recovery(
     let mut wrong_grpc = spawn_worker(&wrong_grpc_path, &wrong_grpc_digest);
     let wrong_grpc_startup = read_process_stderr_line(wrong_grpc.stderr.take().unwrap()).await;
     assert!(
-        wrong_grpc_startup.contains("started generation="),
+        wrong_grpc_startup.contains("platform-capability-remote-worker started"),
         "{wrong_grpc_startup}"
     );
     tokio::time::sleep(StdDuration::from_millis(750)).await;
@@ -3823,7 +3836,7 @@ async fn run_remote_http_worker_process_recovery(
     let mut grpc_first = spawn_worker(&config_path, &config_digest);
     let grpc_startup = read_process_stderr_line(grpc_first.stderr.take().unwrap()).await;
     assert!(
-        grpc_startup.contains("started generation="),
+        grpc_startup.contains("platform-capability-remote-worker started"),
         "{grpc_startup}"
     );
     install_remote_commit_pause(pool).await;
@@ -3975,7 +3988,7 @@ async fn run_remote_http_worker_process_recovery(
         let mut wrong_mcp = spawn_worker(&wrong_mcp_path, &wrong_mcp_digest);
         let wrong_mcp_startup = read_process_stderr_line(wrong_mcp.stderr.take().unwrap()).await;
         assert!(
-            wrong_mcp_startup.contains("started generation="),
+            wrong_mcp_startup.contains("platform-capability-remote-worker started"),
             "{wrong_mcp_startup}"
         );
         tokio::time::sleep(StdDuration::from_millis(750)).await;
@@ -3997,7 +4010,10 @@ async fn run_remote_http_worker_process_recovery(
         let (mcp_config_path, mcp_config_digest) = write_config("mcp", &mcp_config);
         let mut mcp_first = spawn_worker(&mcp_config_path, &mcp_config_digest);
         let mcp_startup = read_process_stderr_line(mcp_first.stderr.take().unwrap()).await;
-        assert!(mcp_startup.contains("started generation="), "{mcp_startup}");
+        assert!(
+            mcp_startup.contains("platform-capability-remote-worker started"),
+            "{mcp_startup}"
+        );
         install_remote_commit_pause(pool).await;
         wait_for_atomic_count(&mcp.calls, 1, StdDuration::from_secs(10)).await;
         wait_for_database_state(pool, &mcp_job_id, "running", StdDuration::from_secs(10)).await;

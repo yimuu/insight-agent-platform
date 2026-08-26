@@ -101,17 +101,29 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
+        atomic::{AtomicU16, AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard,
     },
     time::Duration as StdDuration,
 };
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
+static CONTEXT_FIXTURE_NAMESPACE: AtomicU16 = AtomicU16::new(0xa0f6);
+static CONTEXT_FIXTURE_NAMESPACE_LOCK: Mutex<()> = Mutex::new(());
+
+fn select_fixture_namespace(namespace: u16) -> MutexGuard<'static, ()> {
+    let guard = CONTEXT_FIXTURE_NAMESPACE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    CONTEXT_FIXTURE_NAMESPACE.store(namespace, Ordering::SeqCst);
+    guard
+}
+
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
+    let namespace = CONTEXT_FIXTURE_NAMESPACE.load(Ordering::SeqCst);
     format!(
-        "{}_0198f1c9-32e4-75e1-a9e8-d95ca0f6{suffix:04x}",
+        "{}_0198f1c9-32e4-75e1-a9e8-d95c{namespace:04x}{suffix:04x}",
         kind.descriptor().prefix
     )
     .parse()
@@ -119,10 +131,14 @@ fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
 }
 
 fn named_digest(label: &str) -> Sha256Digest {
-    canonical_digest(&json!({"phase3_context": label}))
-        .unwrap()
-        .parse()
-        .unwrap()
+    let namespace = CONTEXT_FIXTURE_NAMESPACE.load(Ordering::SeqCst);
+    canonical_digest(&json!({
+        "phase3_context": label,
+        "fixture_namespace": namespace,
+    }))
+    .unwrap()
+    .parse()
+    .unwrap()
 }
 
 fn closed_object_schema(property: &str) -> ClosedJsonSchema {
@@ -1937,6 +1953,7 @@ async fn park_direct_context_leaf(
     fixture: &Fixture,
     context_query_id: &ResourceId,
     context_job_id: &ResourceId,
+    active_work_count: i32,
 ) {
     let input_value = json!({"question": "top customers"});
     let input_digest: Sha256Digest = canonical_digest(&input_value).unwrap().parse().unwrap();
@@ -2033,14 +2050,15 @@ async fn park_direct_context_leaf(
     sqlx::query(
         r#"
         UPDATE insight_platform.runs
-        SET state = 'waiting', active_work_count = 1,
-            current_schema_version = $3, current_payload = $4,
-            current_payload_digest = $5
+        SET state = 'waiting', active_work_count = $3,
+            current_schema_version = $4, current_payload = $5,
+            current_payload_digest = $6
         WHERE tenant_id = $1 AND run_id = $2
         "#,
     )
     .bind(fixture.tenant_id.to_string())
     .bind(fixture.run_id.to_string())
+    .bind(active_work_count)
     .bind(current_payload.schema_version)
     .bind(&current_payload.value)
     .bind(&current_payload.digest)
@@ -2398,6 +2416,10 @@ fn text2sql_invocation_command(
 
 #[test]
 fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
+    // These tests share one real database in the workspace gate. Serialize the fixture builder
+    // and assign each scenario a disjoint nominal-ID namespace while preserving its internal
+    // concurrency and cross-process visibility.
+    let _fixture_namespace = select_fixture_namespace(0xa0f6);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_stack_size(16 * 1024 * 1024)
@@ -2985,6 +3007,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         &fixture,
         &created.context_query_id,
         &job_id,
+        1,
     )
     .await;
 
@@ -3634,6 +3657,7 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
         eprintln!("Context Worker binary or dedicated PostgreSQL fixture is unset; process recovery skipped");
         return;
     };
+    let _fixture_namespace = select_fixture_namespace(0xa0f7);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_stack_size(16 * 1024 * 1024)
@@ -3686,6 +3710,7 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
             &fixture,
             &created.context_query_id,
             &job_id,
+            0,
         )
         .await;
 
@@ -3860,6 +3885,7 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
         );
         return;
     };
+    let _fixture_namespace = select_fixture_namespace(0xa0f8);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_stack_size(16 * 1024 * 1024)
@@ -3950,7 +3976,7 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
             CommandOutcome::Applied(_) => {}
             CommandOutcome::Replayed(_) => panic!("fresh remote Context prepare replayed"),
         }
-        park_direct_context_leaf(&pool, &fixture, &created.context_query_id, &job_id).await;
+        park_direct_context_leaf(&pool, &fixture, &created.context_query_id, &job_id, 0).await;
 
         let prefix = PathBuf::from(format!(
             "/tmp/platform-remote-context-worker-process-{}",
@@ -4311,6 +4337,7 @@ fn native_context_process_config(
     let manifest = native_context_worker_manifest(installed_adapter_digest.clone());
     json!({
         "schema_version": 1,
+        "observability_listen_address": reserve_loopback_address(),
         "worker_manifest": manifest,
         "native_catalog": {
             "schema_version": 1,
@@ -4342,6 +4369,7 @@ fn remote_context_process_config(
     let manifest = native_context_worker_manifest(installed_adapter_digest.clone());
     json!({
         "schema_version": 1,
+        "observability_listen_address": reserve_loopback_address(),
         "worker_manifest": manifest,
         "installed_adapter_digest": installed_adapter_digest,
         "egress_endpoint": egress_endpoint,
@@ -4359,9 +4387,15 @@ fn remote_context_process_config(
     })
 }
 
+fn reserve_loopback_address() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().to_string()
+}
+
 fn orchestration_process_config(artifact_endpoint: String) -> serde_json::Value {
     json!({
         "schema_version": 1,
+        "observability_listen_address": reserve_loopback_address(),
         "worker_manifest": WorkerManifest {
             manifest_version: WORKER_MANIFEST_VERSION,
             worker_role: "orchestration-worker".to_owned(),
@@ -4509,7 +4543,15 @@ fn observe_context_worker_start(child: &mut Child) -> std::thread::JoinHandle<()
     let first = started_receiver
         .recv_timeout(StdDuration::from_secs(10))
         .expect("Context Worker did not report startup");
-    assert!(first.contains("started generation="), "{first}");
+    assert!(
+        matches!(
+            first.as_str(),
+            "platform-context-worker started"
+                | "platform-remote-context-worker started"
+                | "platform-orchestration-worker started"
+        ),
+        "{first}"
+    );
     logger
 }
 

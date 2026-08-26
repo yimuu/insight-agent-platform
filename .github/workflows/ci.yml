@@ -92,10 +92,17 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     env:
+      # Durable fixtures share one freshly provisioned PostgreSQL authority and use fixed nominal
+      # identities; each fixture exercises its own internal concurrency, but fixture processes
+      # must not race one another for the same authority rows or tracing dispatcher.
+      RUST_TEST_THREADS: "1"
       RUN_HISTORY_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
       # All durable PostgreSQL gates exercise the same real PG16 service in CI.
       TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
       PLATFORM_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+      # Model conformance performs consecutive global WDRR claims and therefore needs an
+      # independent durable authority rather than competing with earlier fixture tenants.
+      PLATFORM_MODEL_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_model
       TEST_NATS_URL: nats://localhost:4222
       PLATFORM_TEST_NATS_URL: nats://localhost:4222
     services:
@@ -131,6 +138,12 @@ jobs:
         env:
           PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
         run: bash scripts/provision-platform-postgres.sh
+      - name: Provision isolated Model conformance baseline
+        env:
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_model
+        run: |
+          createdb --host localhost --username insight insight_agent_platform_model
+          bash scripts/provision-platform-postgres.sh
       - name: Provision Security Authority least-privilege role
         env:
           PLATFORM_DATABASE_ADMIN_URL: postgres://insight:insight@localhost:5432/insight_agent_platform

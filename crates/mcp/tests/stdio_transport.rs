@@ -176,7 +176,10 @@ async fn stdio_supervisor_reuses_a_process_and_restarts_after_crash() {
 
 #[tokio::test]
 async fn malformed_stdout_timeout_and_cancellation_fail_closed() {
-    let malformed = fixture("malformed", Duration::from_secs(1));
+    // The request budget starts after the child is spawned, but a saturated full-workspace test
+    // run can still delay the fixture before it writes its first stdout line. Keep this branch
+    // focused on malformed protocol data; the dedicated hanging branch below proves the timeout.
+    let malformed = fixture("malformed", Duration::from_secs(5));
     let request = json!({
         "jsonrpc":"2.0",
         "id":1,

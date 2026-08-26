@@ -1478,25 +1478,42 @@ where
                 mutations: allocate_orchestration_terminal_mutations(self.identities.as_ref())
                     .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
             };
-            let mut transaction = self
-                .repository
-                .begin_scheduler_transaction()
-                .await
-                .map_err(classify_repository_failure)?;
-            return match transaction.commit_plan_terminal(terminal).await {
-                Ok(_) => transaction
-                    .commit()
+            for retry in 0..4 {
+                let mut transaction = self
+                    .repository
+                    .begin_scheduler_transaction()
                     .await
-                    .map_err(classify_repository_failure),
-                Err(failure) => {
-                    eprintln!("Plan terminal commit rejected: {failure:?}");
-                    transaction
-                        .rollback()
-                        .await
-                        .map_err(classify_repository_failure)?;
-                    Err(classify_repository_failure(failure))
+                    .map_err(classify_repository_failure)?;
+                match transaction.commit_plan_terminal(terminal.clone()).await {
+                    Ok(_) => match transaction.commit().await {
+                        Ok(()) => return Ok(()),
+                        Err(failure)
+                            if retry < 3 && is_retryable_postgres_transaction_abort(&failure) =>
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                        Err(failure) => {
+                            eprintln!("Plan terminal transaction commit rejected: {failure:?}");
+                            return Err(classify_repository_failure(failure));
+                        }
+                    },
+                    Err(failure) => {
+                        let retryable =
+                            retry < 3 && is_retryable_postgres_transaction_abort(&failure);
+                        transaction
+                            .rollback()
+                            .await
+                            .map_err(classify_repository_failure)?;
+                        if retryable {
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                        eprintln!("Plan terminal commit rejected: {failure:?}");
+                        return Err(classify_repository_failure(failure));
+                    }
                 }
-            };
+            }
+            unreachable!("bounded terminal transaction retry must return on its fourth attempt");
         }
         let controller_failure = matches!(
             command.decision,
@@ -1994,6 +2011,14 @@ fn classify_repository_failure(failure: RepositoryError) -> DurablePlanDriverErr
         | RepositoryError::IdempotencyConflict
         | RepositoryError::CorruptRow(_) => DurablePlanDriverError::InvariantViolation,
     }
+}
+
+fn is_retryable_postgres_transaction_abort(failure: &RepositoryError) -> bool {
+    matches!(
+        failure,
+        RepositoryError::Database(sqlx::Error::Database(database))
+            if matches!(database.code().as_deref(), Some("40001" | "40P01"))
+    )
 }
 
 fn map_materialization_failure(failure: RunValueMaterializationError) -> DurablePlanDriverError {

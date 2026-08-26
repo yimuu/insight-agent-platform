@@ -332,7 +332,7 @@ fn parse_claimed_event(
                 "declined"
             };
             let expected_aggregate_kind = if event_type.ends_with("completed") {
-                "mcp_authorization"
+                "mcp_authorization_binding"
             } else {
                 "mcp_oauth_task"
             };
