@@ -765,6 +765,11 @@
 > ArtifactIo Deployment解析immutable revisions、tenant staging quota account、scanner/rules digest、TTL/backoff与retention deadline，并把它们连同
 > Internal classification、fixed discovery media type及hard maximum bytes纳入admission canonical digest；resolver只返回该冻结closure。wrong schema/
 > digest/期限在Worker前fail closed。MCP Host与PostgreSQL all-target编译通过；waiting `ArtifactScan` Job row、quota reservation和stage仍Pending。
+>
+> 2026-08-27 implementation evidence：r340新增closed `ArtifactAwaitingStageSnapshot`与`ArtifactJobPayload::AwaitingStage`。MCP discovery admission
+> transaction以预分配identity和CR-199 policy closure预留tenant `artifact.staging_bytes` quota、写quota ledger，并创建exact `ArtifactScan + Artifact`
+> waiting Job；该variant不会被scan claim、不会公开为Operation，也不允许进入leased recovery/backend failure路径。Artifact 31/31、PostgreSQL lib
+> 14/14及相关strict Clippy通过；本轮无fresh PostgreSQL，`StageWorkloadArtifact`的Artifact/Blob创建与waiting→ready CAS仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

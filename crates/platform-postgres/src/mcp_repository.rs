@@ -1,4 +1,6 @@
-use crate::artifact_repository::load_internal_artifact_admission_authority;
+use crate::artifact_repository::{
+    load_internal_artifact_admission_authority, reserve_internal_artifact_staging_quota,
+};
 use crate::repository::{
     append_command_event, append_scheduler_event, append_scheduler_event_with_trace,
     claim_command_receipt, decode_deployment_closure, decode_typed_payload,
@@ -11,7 +13,9 @@ use crate::repository::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use insight_platform_artifacts::ArtifactReferenceSnapshot;
+use insight_platform_artifacts::{
+    ArtifactAwaitingStageSnapshot, ArtifactJobPayload, ArtifactReferenceSnapshot,
+};
 use insight_platform_context::{
     AcceptedContextSubscriptionRefresh, AdmitContextSubscriptionRefresh,
     ContextSubscriptionAdmissionAuthority, ContextSubscriptionAdmissionError,
@@ -1158,6 +1162,17 @@ impl PgRepository {
         if closure.server_identity_digest != authorization.audience_identity_digest {
             return Err(RepositoryError::Conflict("MCP discovery server audience"));
         }
+        let discovery_execution = resolve_mcp_base_execution_contract(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.mcp_deployment,
+            &authorization.authorization_binding_id,
+            authorization.generation,
+            &authorization.canonical_digest,
+            &authorization.principal_id,
+            database_now,
+        )
+        .await?;
         let artifact_authority =
             load_internal_artifact_admission_authority(&mut transaction, &command.audit.tenant_id)
                 .await?;
@@ -1179,10 +1194,7 @@ impl PgRepository {
         let artifact_policy = insight_platform_mcp_host::McpDiscoveryArtifactPolicyClosure::build(
             NewMcpDiscoveryArtifactPolicyClosure {
                 quota_account_id: artifact_authority.quota_account_id,
-                maximum_bytes: checked_in_hard_limit_profile()
-                    .artifact
-                    .single_bytes
-                    .hard_max,
+                maximum_bytes: u64::from(discovery_execution.server.limits.maximum_response_bytes),
                 retention_policy_revision: artifact_authority.retention_policy_revision,
                 artifact_io_policy_revision: artifact_authority.artifact_io_policy_revision,
                 scanner_contract_digest: artifact_authority
@@ -1199,6 +1211,16 @@ impl PgRepository {
             },
         )
         .map_err(invalid_mcp_discovery)?;
+        reserve_internal_artifact_staging_quota(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &artifact_policy.quota_account_id,
+            &command.artifact_preallocation.quota_entry_id,
+            &command.artifact_preallocation.artifact_id,
+            artifact_policy.maximum_bytes,
+            &command.audit.request_digest,
+        )
+        .await?;
         let admission = McpDiscoveryAdmission::build(NewMcpDiscoveryAdmission {
             operation_id: command.operation_id.clone(),
             job_id: command.job_id.clone(),
@@ -1223,6 +1245,38 @@ impl PgRepository {
             McpDiscoveryJobPayload::build(&admission).map_err(invalid_mcp_discovery)?;
         let job_typed =
             TypedPayload::with_limit(1, &McpJobPayload::Discovery(job_payload), 1_048_576)?;
+        let artifact_job_payload = ArtifactJobPayload::AwaitingStage {
+            stage: ArtifactAwaitingStageSnapshot {
+                schema_version: 1,
+                producer_job_id: command.job_id.clone(),
+                artifact_id: command.artifact_preallocation.artifact_id.clone(),
+                blob_id: command.artifact_preallocation.blob_id.clone(),
+                quota_account_id: admission.artifact_policy.quota_account_id.clone(),
+                quota_entry_id: command.artifact_preallocation.quota_entry_id.clone(),
+                purpose: ArtifactPurpose::McpResource,
+                classification: admission.artifact_policy.classification,
+                maximum_bytes: admission.artifact_policy.maximum_bytes,
+                declared_media_type: admission.artifact_policy.declared_media_type.clone(),
+                retention_policy_revision: admission
+                    .artifact_policy
+                    .retention_policy_revision
+                    .clone(),
+                artifact_io_policy_revision: admission
+                    .artifact_policy
+                    .artifact_io_policy_revision
+                    .clone(),
+                scanner_contract_digest: admission.artifact_policy.scanner_contract_digest.clone(),
+                ruleset_digest: admission.artifact_policy.ruleset_digest.clone(),
+                evidence_ttl_milliseconds: admission.artifact_policy.evidence_ttl_milliseconds,
+                retry_backoff_milliseconds: admission.artifact_policy.retry_backoff_milliseconds,
+                retain_until: admission.artifact_policy.retain_until,
+                deadline: command.deadline,
+            },
+        };
+        artifact_job_payload
+            .validate_for_owner(&command.artifact_preallocation.artifact_id)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let artifact_job_typed = TypedPayload::new(1, &artifact_job_payload)?;
         sqlx::query(
             r#"
             INSERT INTO insight_platform.invocations (
@@ -1269,6 +1323,46 @@ impl PgRepository {
         .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
+        let artifact_attempt_limit = i32::try_from(
+            checked_in_hard_limit_profile()
+                .run_scheduler
+                .attempts_per_work
+                .q1_default,
+        )
+        .map_err(|_| {
+            RepositoryError::InvalidInput(
+                "Artifact verification attempt limit exceeds integer".to_owned(),
+            )
+        })?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.jobs (
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id,
+                state, attempt_limit, scheduled_at, deadline, priority, request_digest,
+                payload_schema_version, payload, payload_digest, created_at, updated_at,
+                trace_id
+            ) VALUES ($1, $2, 'artifact_scan', 'artifact', 'artifact', $3,
+                      'waiting', $4, $5, $6, 0, $7, $8, $9, $10, $5, $5, $11)
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(
+            command
+                .artifact_preallocation
+                .verification_job_id
+                .to_string(),
+        )
+        .bind(command.artifact_preallocation.artifact_id.to_string())
+        .bind(artifact_attempt_limit)
+        .bind(database_now)
+        .bind(command.deadline)
+        .bind(command.audit.request_digest.to_string())
+        .bind(artifact_job_typed.schema_version)
+        .bind(&artifact_job_typed.value)
+        .bind(&artifact_job_typed.digest)
+        .bind(command.audit.trace.trace_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
         append_command_event(
             &mut transaction,
             &command.audit,
@@ -1280,6 +1374,8 @@ impl PgRepository {
                 1,
                 &serde_json::json!({
                     "authorization_binding_id": command.authorization_binding_id,
+                    "artifact_id": command.artifact_preallocation.artifact_id,
+                    "artifact_verification_job_id": command.artifact_preallocation.verification_job_id,
                     "job_id": command.job_id,
                     "mcp_deployment": command.mcp_deployment,
                     "state": "pending",

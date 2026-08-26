@@ -735,6 +735,7 @@ impl CreateMcpDiscoveryOperation {
             || self.mcp_deployment.validate().is_err()
             || self.authorization_binding_id.kind() != ResourceKind::McpAuthorizationBinding
             || self.artifact_preallocation.validate().is_err()
+            || self.artifact_preallocation.verification_job_id == self.job_id
             || self.attempt_limit == 0
             || self.attempt_limit > 8
             || self.deadline <= now
@@ -1064,6 +1065,7 @@ impl McpDiscoveryAdmission {
             || self.authorization_generation == 0
             || self.principal_id.kind() != ResourceKind::Principal
             || self.artifact_preallocation.validate().is_err()
+            || self.artifact_preallocation.verification_job_id == self.job_id
             || self.artifact_policy.validate_at(self.requested_at).is_err()
             || self.artifact_policy.retain_until < self.deadline
             || self.deadline <= self.requested_at

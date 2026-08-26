@@ -6,8 +6,9 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    canonical_digest, ArtifactState, BlobIntegrityState, CommandAudit, CommandOutcome,
-    ExactVersionRef, JobState, ResourceId, ResourceKind, Sha256Digest,
+    canonical_digest, ArtifactPurpose, ArtifactState, BlobIntegrityState, CommandAudit,
+    CommandOutcome, DataClassification, ExactVersionRef, JobState, ResourceId, ResourceKind,
+    Sha256Digest,
 };
 use insight_platform_jobs::{
     decide_expired_lease, decide_reconciliation, decide_retry, decide_terminal, JobFence,
@@ -313,6 +314,57 @@ pub struct ArtifactScanJobSnapshot {
     pub retry_backoff_milliseconds: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAwaitingStageSnapshot {
+    pub schema_version: u32,
+    pub producer_job_id: ResourceId,
+    pub artifact_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub quota_account_id: ResourceId,
+    pub quota_entry_id: ResourceId,
+    pub purpose: ArtifactPurpose,
+    pub classification: DataClassification,
+    pub maximum_bytes: u64,
+    pub declared_media_type: String,
+    pub retention_policy_revision: ExactVersionRef,
+    pub artifact_io_policy_revision: ExactVersionRef,
+    pub scanner_contract_digest: Sha256Digest,
+    pub ruleset_digest: Sha256Digest,
+    pub evidence_ttl_milliseconds: u64,
+    pub retry_backoff_milliseconds: u64,
+    pub retain_until: DateTime<Utc>,
+    pub deadline: DateTime<Utc>,
+}
+
+impl ArtifactAwaitingStageSnapshot {
+    pub fn validate(&self) -> Result<(), ArtifactWorkError> {
+        if self.schema_version != 1
+            || self.producer_job_id.kind() != ResourceKind::Job
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.blob_id.kind() != ResourceKind::InternalBlob
+            || self.quota_account_id.kind() != ResourceKind::QuotaAccount
+            || self.quota_entry_id.kind() != ResourceKind::QuotaLedgerEntry
+            || self.maximum_bytes == 0
+            || self.declared_media_type.is_empty()
+            || self.declared_media_type.len() > 255
+            || self.retention_policy_revision.resource_kind != ResourceKind::PolicyRevision
+            || self.retention_policy_revision.validate().is_err()
+            || self.artifact_io_policy_revision.resource_kind != ResourceKind::PolicyRevision
+            || self.artifact_io_policy_revision.validate().is_err()
+            || self.evidence_ttl_milliseconds == 0
+            || self.evidence_ttl_milliseconds > 86_400_000
+            || self.retry_backoff_milliseconds == 0
+            || self.retry_backoff_milliseconds > MAX_ARTIFACT_RETRY_BACKOFF_MILLISECONDS
+            || self.retry_backoff_milliseconds >= self.evidence_ttl_milliseconds
+            || self.deadline > self.retain_until
+        {
+            return Err(ArtifactWorkError::InvalidJobPayload);
+        }
+        Ok(())
+    }
+}
+
 impl ArtifactScanJobSnapshot {
     pub fn validate(&self) -> Result<(), ArtifactWorkError> {
         if self.schema_version != 1
@@ -338,6 +390,9 @@ impl ArtifactScanJobSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ArtifactJobPayload {
+    AwaitingStage {
+        stage: ArtifactAwaitingStageSnapshot,
+    },
     Scan {
         scan: ArtifactScanJobSnapshot,
     },
@@ -355,6 +410,10 @@ pub enum ArtifactJobPayload {
 impl ArtifactJobPayload {
     pub fn validate_for_owner(&self, owner_id: &ResourceId) -> Result<(), ArtifactWorkError> {
         match self {
+            Self::AwaitingStage { stage } => {
+                stage.validate()?;
+                require_owner(owner_id, ResourceKind::Artifact, &stage.artifact_id)
+            }
             Self::Scan { scan } if scan.scan_kind == ArtifactScanKind::Initial => {
                 scan.validate()?;
                 require_owner(owner_id, ResourceKind::Artifact, &scan.artifact_id)
@@ -385,6 +444,7 @@ impl ArtifactJobPayload {
 
     pub const fn retry_backoff_milliseconds(&self) -> u64 {
         match self {
+            Self::AwaitingStage { stage } => stage.retry_backoff_milliseconds,
             Self::Scan { scan } | Self::Rescan { scan } => scan.retry_backoff_milliseconds,
             Self::Delete { deletion } => deletion.retry_backoff_milliseconds,
             Self::BlobCleanup { cleanup } => cleanup.retry_backoff_milliseconds,
@@ -405,6 +465,7 @@ impl ArtifactJobPayload {
 
     pub const fn kind_name(&self) -> &'static str {
         match self {
+            Self::AwaitingStage { .. } => "awaiting_stage",
             Self::Scan { .. } => "scan",
             Self::Rescan { .. } => "rescan",
             Self::Delete { .. } => "delete",
@@ -477,6 +538,9 @@ pub fn decide_expired_artifact_attempt(
     let parent_action = match job.state {
         JobState::Ready | JobState::RetryScheduled => ArtifactRecoveryParentAction::None,
         JobState::TimedOut => match payload {
+            ArtifactJobPayload::AwaitingStage { .. } => {
+                return Err(ArtifactWorkError::InvalidTransition);
+            }
             ArtifactJobPayload::Scan { .. } | ArtifactJobPayload::Rescan { .. } => {
                 ArtifactRecoveryParentAction::Scan {
                     artifact_state: ArtifactState::Quarantined,
@@ -491,6 +555,9 @@ pub fn decide_expired_artifact_attempt(
             }
         },
         JobState::ReconciliationRequired => match payload {
+            ArtifactJobPayload::AwaitingStage { .. } => {
+                return Err(ArtifactWorkError::InvalidTransition);
+            }
             ArtifactJobPayload::Scan { .. } | ArtifactJobPayload::Rescan { .. } => {
                 ArtifactRecoveryParentAction::Scan {
                     artifact_state: ArtifactState::Quarantined,
@@ -546,6 +613,9 @@ pub fn decide_artifact_backend_failure(
         return Err(ArtifactWorkError::InvalidJobPayload);
     }
     let (job, parent_action) = match payload {
+        ArtifactJobPayload::AwaitingStage { .. } => {
+            return Err(ArtifactWorkError::InvalidBackendFailure);
+        }
         ArtifactJobPayload::Scan { .. } | ArtifactJobPayload::Rescan { .. }
             if command.failure.retryable =>
         {
@@ -1848,6 +1918,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn awaiting_stage_payload_is_internal_owner_bound_and_not_recoverable() {
+        let now = Utc::now();
+        let artifact_id = id(ResourceKind::Artifact, 0x810);
+        let mut payload = ArtifactJobPayload::AwaitingStage {
+            stage: ArtifactAwaitingStageSnapshot {
+                schema_version: 1,
+                producer_job_id: id(ResourceKind::Job, 0x811),
+                artifact_id: artifact_id.clone(),
+                blob_id: id(ResourceKind::InternalBlob, 0x812),
+                quota_account_id: id(ResourceKind::QuotaAccount, 0x813),
+                quota_entry_id: id(ResourceKind::QuotaLedgerEntry, 0x814),
+                purpose: ArtifactPurpose::McpResource,
+                classification: DataClassification::Internal,
+                maximum_bytes: 1_048_576,
+                declared_media_type: "application/vnd.insight.mcp-discovery+json".to_owned(),
+                retention_policy_revision: version(ResourceKind::PolicyRevision, 0x815),
+                artifact_io_policy_revision: version(ResourceKind::PolicyRevision, 0x816),
+                scanner_contract_digest: digest("scanner"),
+                ruleset_digest: digest("rules"),
+                evidence_ttl_milliseconds: 60_000,
+                retry_backoff_milliseconds: 1_000,
+                retain_until: now + Duration::hours(2),
+                deadline: now + Duration::hours(1),
+            },
+        };
+        assert!(payload.validate_for_owner(&artifact_id).is_ok());
+        assert!(payload
+            .validate_for_owner(&id(ResourceKind::Artifact, 0x817))
+            .is_err());
+        assert_eq!(payload.kind_name(), "awaiting_stage");
+        assert!(!payload.may_have_uncertain_physical_effect());
+        let ArtifactJobPayload::AwaitingStage { stage } = &mut payload else {
+            unreachable!("fixture is an awaiting-stage payload");
+        };
+        stage.retain_until = stage.deadline;
+        assert!(payload.validate_for_owner(&artifact_id).is_ok());
+    }
+
     struct Fixture {
         now: DateTime<Utc>,
         artifact: ArtifactRecord,
@@ -2740,6 +2849,7 @@ mod tests {
         attempt_limit: u32,
     ) -> JobProjection {
         let owner_id = match payload {
+            ArtifactJobPayload::AwaitingStage { stage } => stage.artifact_id.clone(),
             ArtifactJobPayload::Scan { scan } | ArtifactJobPayload::Rescan { scan } => {
                 scan.artifact_id.clone()
             }

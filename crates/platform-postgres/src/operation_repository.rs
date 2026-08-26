@@ -238,6 +238,9 @@ async fn public_kind_and_target(
                         .validate_for_owner(&artifact_id)
                         .map_err(|_| OperationReadError::CorruptAuthority)?;
                     match payload {
+                        ArtifactJobPayload::AwaitingStage { .. } => {
+                            return Err(OperationReadError::NotPublic)
+                        }
                         ArtifactJobPayload::Scan { .. } | ArtifactJobPayload::Rescan { .. } => {
                             PublicJobKind::ArtifactVerify
                         }

@@ -491,6 +491,97 @@ pub(crate) async fn load_internal_artifact_admission_authority(
     })
 }
 
+pub(crate) async fn reserve_internal_artifact_staging_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    quota_account_id: &ResourceId,
+    quota_entry_id: &ResourceId,
+    artifact_id: &ResourceId,
+    amount: u64,
+    request_digest: &Sha256Digest,
+) -> Result<(), RepositoryError> {
+    if quota_account_id.kind() != ResourceKind::QuotaAccount
+        || quota_entry_id.kind() != ResourceKind::QuotaLedgerEntry
+        || artifact_id.kind() != ResourceKind::Artifact
+        || amount == 0
+    {
+        return Err(RepositoryError::InvalidInput(
+            "internal Artifact quota reservation is invalid".to_owned(),
+        ));
+    }
+    let amount = i64::try_from(amount).map_err(|_| {
+        RepositoryError::InvalidInput("Artifact size exceeds PostgreSQL bigint".to_owned())
+    })?;
+    let account = sqlx::query(
+        r#"
+        SELECT scope_kind, scope_id, work_class, metric, limit_value,
+               reserved_value, used_value, version
+        FROM insight_platform.quota_accounts
+        WHERE tenant_id = $1 AND quota_account_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(quota_account_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("Artifact staging quota account"))?;
+    if account.try_get::<String, _>("scope_kind")? != "tenant"
+        || account.try_get::<String, _>("scope_id")? != tenant_id.to_string()
+        || account.try_get::<String, _>("work_class")? != "artifact"
+        || account.try_get::<String, _>("metric")? != "artifact.staging_bytes"
+    {
+        return Err(RepositoryError::InvalidInput(
+            "quota account is not the tenant Artifact staging authority".to_owned(),
+        ));
+    }
+    let limit_value: i64 = account.try_get("limit_value")?;
+    let reserved_value: i64 = account.try_get("reserved_value")?;
+    let used_value: i64 = account.try_get("used_value")?;
+    let version: i64 = account.try_get("version")?;
+    if reserved_value
+        .checked_add(used_value)
+        .and_then(|current| current.checked_add(amount))
+        .is_none_or(|next| next > limit_value)
+    {
+        return Err(RepositoryError::QuotaExceeded);
+    }
+    let next_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.quota_accounts
+        SET reserved_value = reserved_value + $4, version = version + 1,
+            updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND quota_account_id = $2 AND version = $3
+        RETURNING version
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(quota_account_id.to_string())
+    .bind(version)
+    .bind(amount)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Artifact staging quota account"))?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.quota_ledger (
+            tenant_id, quota_entry_id, quota_account_id, correlation_id,
+            entry_kind, reserved_amount, used_amount, account_version, request_digest
+        ) VALUES ($1, $2, $3, $4, 'reserve', $5, 0, $6, $7)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(quota_entry_id.to_string())
+    .bind(quota_account_id.to_string())
+    .bind(artifact_id.to_string())
+    .bind(amount)
+    .bind(next_version)
+    .bind(request_digest.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl ArtifactObjectReadAuthority<GatewayArtifactReadRequest> for PgRepository {
     async fn authorize_object_read(
@@ -2662,6 +2753,11 @@ impl PgRepository {
             receipt_expires_at: slot.receipt_expires_at,
         };
         let execution = match payload {
+            ArtifactJobPayload::AwaitingStage { .. } => {
+                return Err(RepositoryError::CorruptRow(
+                    "unstaged Artifact Job was claimed".to_owned(),
+                ));
+            }
             ArtifactJobPayload::Scan { scan } | ArtifactJobPayload::Rescan { scan } => {
                 let loaded = load_artifact_scan_work_inner(
                     &mut transaction,
@@ -3472,6 +3568,9 @@ async fn lock_artifact_recovery_parents(
     payload: &ArtifactJobPayload,
 ) -> Result<LockedArtifactRecoveryParents, RepositoryError> {
     match payload {
+        ArtifactJobPayload::AwaitingStage { .. } => Err(RepositoryError::CorruptRow(
+            "unstaged Artifact Job acquired a lease".to_owned(),
+        )),
         ArtifactJobPayload::Scan { scan } | ArtifactJobPayload::Rescan { scan } => {
             let _ = load_artifact_scan_work_inner(
                 transaction,
@@ -6592,7 +6691,9 @@ async fn insert_artifact_scan_job(
     let job_kind = match &insert.job {
         ArtifactJobPayload::Scan { .. } => JobKind::ArtifactScan,
         ArtifactJobPayload::Rescan { .. } => JobKind::ArtifactRescan,
-        ArtifactJobPayload::Delete { .. } | ArtifactJobPayload::BlobCleanup { .. } => {
+        ArtifactJobPayload::AwaitingStage { .. }
+        | ArtifactJobPayload::Delete { .. }
+        | ArtifactJobPayload::BlobCleanup { .. } => {
             return Err(RepositoryError::InvalidInput(
                 "Artifact scan insertion received a non-scan Job".to_owned(),
             ));
