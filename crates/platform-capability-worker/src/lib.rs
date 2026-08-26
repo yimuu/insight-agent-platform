@@ -19,7 +19,7 @@ use insight_platform_capability_adapters::{
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, ClosedJsonValue,
     HardLimitProfile, JsonLimits, ResourceId, ResourceIdError, ResourceKind, Sha256Digest,
-    ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
+    TraceFlags, TraceIdentityV1, ValueRef, WorkClass, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_invocations::{
     CapabilityClaimSlot, CapabilityExecutionInputMaterial, CapabilityOutputValue,
@@ -36,6 +36,7 @@ use insight_platform_postgres::{
         SafetyScanShard,
     },
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
 };
@@ -768,6 +769,7 @@ pub struct CapabilityClaimBinding {
     pub lease_generation: u64,
     pub lease_token_digest: Sha256Digest,
     pub request_digest: Sha256Digest,
+    pub trace: TraceIdentityV1,
     pub deadline: DateTime<Utc>,
     pub physical_attempt: u32,
     pub attempt_limit: u32,
@@ -806,6 +808,7 @@ impl ClaimedCapabilityJob for ClaimedCapabilityExecution {
             lease_generation: execution.lease_generation,
             lease_token_digest: self.fence.token_digest.clone(),
             request_digest: execution.admission_digest,
+            trace: self.job.trace,
             deadline: execution.deadline,
             physical_attempt: execution.physical_attempt,
             attempt_limit: execution.attempt_limit,
@@ -1258,11 +1261,13 @@ where
         }
         let count = claimed.len();
         for ((claim, binding), permit) in claimed.into_iter().zip(bindings).zip(permits) {
+            let trace = RpcTraceContext::start(binding.trace, TraceFlags::NotSampled)
+                .map_err(|_| CapabilityWorkerDriverError::CorruptClaim)?;
             let command = self.execution_command(claim, &binding)?;
             let executor = Arc::clone(&self.executor);
             active.spawn(async move {
                 let _permit = permit;
-                executor.execute(command).await
+                scope_trace(trace, executor.execute(command)).await
             });
         }
         Ok(count)
@@ -1466,6 +1471,7 @@ fn validate_claims<C: ClaimedCapabilityJob>(
             || !expected_tokens.contains(&binding.lease_token_digest)
             || !jobs.insert(binding.job_id.clone())
             || !tokens.insert(binding.lease_token_digest.clone())
+            || binding.trace.validate().is_err()
             || binding.quota_reservation_entry_ids.len() != CAPABILITY_QUOTA_LINES
             || binding
                 .quota_reservation_entry_ids
@@ -1631,6 +1637,7 @@ mod tests {
                     lease_generation: 1,
                     lease_token_digest: token,
                     request_digest: digest('b'),
+                    trace: TraceIdentityV1::generate(),
                     deadline: Utc::now() + ChronoDuration::minutes(1),
                     physical_attempt: 1,
                     attempt_limit: 2,

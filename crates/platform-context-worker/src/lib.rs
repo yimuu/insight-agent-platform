@@ -19,7 +19,7 @@ use insight_platform_contracts::{
     ContextCitationStrength, DataClassification, ExternalLeafFailureMutationIds,
     ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
     HardLimitProfile, PlatformFailureCode, ResourceId, ResourceIdError, ResourceKind, Retryability,
-    Sha256Digest, ValueRef, WorkClass,
+    Sha256Digest, TraceFlags, ValueRef, WorkClass,
 };
 use insight_platform_jobs::{JobFence, LeasePolicy};
 use insight_platform_postgres::{
@@ -32,6 +32,7 @@ use insight_platform_postgres::{
     },
     repository::{HeartbeatJob, JobFence as RepositoryJobFence, PgRepository, RepositoryError},
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use insight_platform_worker::{ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPools};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1075,7 +1076,12 @@ async fn execute_subscription_claim(
         .await?;
     claim.attempt.job_fence.expected_version =
         u64::try_from(heartbeat.version).map_err(|_| ContextWorkerError::CorruptClaim)?;
-    let refresh = backend.refresh_subscription_resources(claim.attempt.clone());
+    let trace = RpcTraceContext::start(claim.job.trace, TraceFlags::NotSampled)
+        .map_err(|_| ContextWorkerError::CorruptClaim)?;
+    let refresh = scope_trace(
+        trace,
+        backend.refresh_subscription_resources(claim.attempt.clone()),
+    );
     tokio::pin!(refresh);
     let mut interval = tokio::time::interval(config.heartbeat_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -17,6 +17,9 @@ use insight_platform_mcp_host::{
     McpHostClient, McpHostError, McpHostExecutionContract, McpOperationOutcome,
     McpOperationRequest, McpRemoteTaskCancelOutcome,
 };
+use insight_platform_rpc_trace::{
+    request_with_current_trace, require_trace_interceptor, scope_trace, trace_context,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{error::Error, fmt, sync::Arc};
@@ -276,8 +279,10 @@ impl McpHostClient for McpHostGrpcClient {
         )
         .map_err(|_| McpHostError::Canonicalization)?;
         let mut client = self.client.clone();
+        let rpc_request =
+            request_with_current_trace(envelope).map_err(|_| McpHostError::CompletionUnknown)?;
         let response = client
-            .execute(Request::new(envelope))
+            .execute(rpc_request)
             .await
             .map_err(|_| McpHostError::CompletionUnknown)?
             .into_inner();
@@ -314,8 +319,10 @@ impl McpHostClient for McpHostGrpcClient {
         )
         .map_err(|_| McpHostError::Canonicalization)?;
         let mut client = self.client.clone();
+        let request =
+            request_with_current_trace(envelope).map_err(|_| McpHostError::CompletionUnknown)?;
         let response = client
-            .cancel_remote_task(Request::new(envelope))
+            .cancel_remote_task(request)
             .await
             .map_err(|_| McpHostError::CompletionUnknown)?
             .into_inner();
@@ -367,8 +374,10 @@ impl ContextSubscriptionRefreshBackend for McpResourceRefreshGrpcClient {
         )
         .map_err(|_| ContextSubscriptionExecutionError::Canonicalization)?;
         let mut client = self.client.clone();
+        let request = request_with_current_trace(envelope)
+            .map_err(|_| ContextSubscriptionExecutionError::CompletionUncertain)?;
         let response = client
-            .refresh_resources(Request::new(envelope))
+            .refresh_resources(request)
             .await
             .map_err(|_| ContextSubscriptionExecutionError::CompletionUncertain)?
             .into_inner();
@@ -408,29 +417,33 @@ where
         &self,
         request: Request<ClosedMcpHostEnvelope>,
     ) -> Result<Response<ClosedMcpHostEnvelope>, Status> {
-        let wire: RefreshResourcesWire = decode_envelope(
-            request.into_inner(),
-            REFRESH_RESOURCES_OPERATION,
-            self.limits,
-        )?;
-        if wire.schema_version != 1 || wire.attempt.validate_at(Utc::now()).is_err() {
-            return Err(Status::invalid_argument(
-                "invalid MCP Resource Refresh request",
-            ));
-        }
-        let outcome = match self
-            .backend
-            .refresh_subscription_resources(wire.attempt)
-            .await
-        {
-            Ok(response) => RefreshResourcesWireOutcome::Succeeded(response),
-            Err(failure) => RefreshResourcesWireOutcome::Failed(failure.into()),
-        };
-        Ok(Response::new(encode_envelope(
-            REFRESH_RESOURCES_OUTCOME,
-            &outcome,
-            self.limits,
-        )?))
+        let trace = trace_context(&request)?;
+        scope_trace(trace, async {
+            let wire: RefreshResourcesWire = decode_envelope(
+                request.into_inner(),
+                REFRESH_RESOURCES_OPERATION,
+                self.limits,
+            )?;
+            if wire.schema_version != 1 || wire.attempt.validate_at(Utc::now()).is_err() {
+                return Err(Status::invalid_argument(
+                    "invalid MCP Resource Refresh request",
+                ));
+            }
+            let outcome = match self
+                .backend
+                .refresh_subscription_resources(wire.attempt)
+                .await
+            {
+                Ok(response) => RefreshResourcesWireOutcome::Succeeded(response),
+                Err(failure) => RefreshResourcesWireOutcome::Failed(failure.into()),
+            };
+            Ok(Response::new(encode_envelope(
+                REFRESH_RESOURCES_OUTCOME,
+                &outcome,
+                self.limits,
+            )?))
+        })
+        .await
     }
 }
 
@@ -454,44 +467,52 @@ where
         &self,
         request: Request<ClosedMcpHostEnvelope>,
     ) -> Result<Response<ClosedMcpHostEnvelope>, Status> {
-        let wire: ExecuteWire =
-            decode_envelope(request.into_inner(), EXECUTE_OPERATION, self.limits)?;
-        if wire.schema_version != 1 {
-            return Err(Status::invalid_argument("invalid MCP Host request"));
-        }
-        let outcome = match self.host.execute(&wire.contract, &wire.request).await {
-            Ok(outcome) => WireOutcome::Succeeded(outcome),
-            Err(failure) => WireOutcome::Failed(failure.into()),
-        };
-        Ok(Response::new(encode_envelope(
-            EXECUTE_OUTCOME,
-            &outcome,
-            self.limits,
-        )?))
+        let trace = trace_context(&request)?;
+        scope_trace(trace, async {
+            let wire: ExecuteWire =
+                decode_envelope(request.into_inner(), EXECUTE_OPERATION, self.limits)?;
+            if wire.schema_version != 1 {
+                return Err(Status::invalid_argument("invalid MCP Host request"));
+            }
+            let outcome = match self.host.execute(&wire.contract, &wire.request).await {
+                Ok(outcome) => WireOutcome::Succeeded(outcome),
+                Err(failure) => WireOutcome::Failed(failure.into()),
+            };
+            Ok(Response::new(encode_envelope(
+                EXECUTE_OUTCOME,
+                &outcome,
+                self.limits,
+            )?))
+        })
+        .await
     }
 
     async fn cancel_remote_task(
         &self,
         request: Request<ClosedMcpHostEnvelope>,
     ) -> Result<Response<ClosedMcpHostEnvelope>, Status> {
-        let wire: CancelWire =
-            decode_envelope(request.into_inner(), CANCEL_OPERATION, self.limits)?;
-        if wire.schema_version != 1 {
-            return Err(Status::invalid_argument("invalid MCP Host cancel request"));
-        }
-        let outcome = match self
-            .host
-            .cancel_remote_task(&wire.contract, &wire.request, wire.deadline)
-            .await
-        {
-            Ok(outcome) => WireOutcome::Succeeded(outcome),
-            Err(failure) => WireOutcome::Failed(failure.into()),
-        };
-        Ok(Response::new(encode_envelope(
-            CANCEL_OUTCOME,
-            &outcome,
-            self.limits,
-        )?))
+        let trace = trace_context(&request)?;
+        scope_trace(trace, async {
+            let wire: CancelWire =
+                decode_envelope(request.into_inner(), CANCEL_OPERATION, self.limits)?;
+            if wire.schema_version != 1 {
+                return Err(Status::invalid_argument("invalid MCP Host cancel request"));
+            }
+            let outcome = match self
+                .host
+                .cancel_remote_task(&wire.contract, &wire.request, wire.deadline)
+                .await
+            {
+                Ok(outcome) => WireOutcome::Succeeded(outcome),
+                Err(failure) => WireOutcome::Failed(failure.into()),
+            };
+            Ok(Response::new(encode_envelope(
+                CANCEL_OUTCOME,
+                &outcome,
+                self.limits,
+            )?))
+        })
+        .await
     }
 }
 
@@ -508,7 +529,7 @@ impl tonic::service::Interceptor for CapabilityWorkerWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), CAPABILITY_WORKER_WORKLOAD_IDENTITY)?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -525,7 +546,7 @@ impl tonic::service::Interceptor for ContextWorkerWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), CONTEXT_WORKER_WORKLOAD_IDENTITY)?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -649,6 +670,8 @@ impl From<McpHostRpcError> for Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insight_platform_contracts::{TraceFlags, TraceIdentityV1};
+    use insight_platform_rpc_trace::{request_with_trace, RpcTraceContext};
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose, SanType,
@@ -762,7 +785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_mtls_rejects_other_ca_valid_workloads_before_envelope_decode() {
+    async fn real_mtls_requires_trace_and_rejects_other_workloads_before_decode() {
         let mut ca_parameters = CertificateParams::default();
         ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_parameters.key_usages = vec![
@@ -848,12 +871,19 @@ mod tests {
             metadata_jcs: b"{}".to_vec(),
             metadata_digest: envelope_digest(EXECUTE_OPERATION, b"{}").to_string(),
         };
-        let capability_status = connect(capability_certificate, capability_key)
-            .await
+        let mut capability = connect(capability_certificate, capability_key).await;
+        let missing_trace = capability
             .execute(Request::new(malformed.clone()))
             .await
             .unwrap_err();
-        assert_eq!(capability_status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(missing_trace.code(), tonic::Code::InvalidArgument);
+        let trace =
+            RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap();
+        let malformed_status = capability
+            .execute(request_with_trace(malformed.clone(), trace).unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(malformed_status.code(), tonic::Code::InvalidArgument);
         let model_status = connect(model_certificate, model_key)
             .await
             .execute(Request::new(malformed))

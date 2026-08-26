@@ -29,6 +29,7 @@ insight-platform-contracts.workspace = true
 insight-platform-egress-rpc.workspace = true
 insight-platform-jobs.workspace = true
 insight-platform-mcp-rpc.workspace = true
+insight-platform-rpc-trace.workspace = true
 insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-worker.workspace = true
