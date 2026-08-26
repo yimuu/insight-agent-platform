@@ -16,6 +16,11 @@
 > 降级为installed support校验，只有与tenant exact policy一致才生成upload target。Contracts 100/100、MCP Host 59/59、Artifact 31/31、workspace
 > all-target与相关strict Clippy通过；本轮无fresh PostgreSQL，Data Worker direct object write adapter与L2 zero-I/O/transaction证据仍Pending。
 
+> 2026-08-27 implementation evidence：r344为AWS Artifact provider新增Data Worker-only direct byte stage primitive：provider内部生成closed object key、
+> exact KMS encryption context与加密locator，直接PUT bounded bytes，要求versioned generation并生成绑定tenant/Artifact/Blob/binding/generation/length
+> 的backend evidence。Artifact Broker 8/8与strict Clippy通过；该primitive尚未注册RPC，必须先完成producer fence/waiting Job preflight以证明错fence时
+> KMS/S3 zero-I/O。
+
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。
 > 删除Artifact Gateway对这三项业务默认的所有权；部署配置只保留supported scanner集合与不可放大的hard limits。

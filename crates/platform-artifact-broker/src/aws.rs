@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_kms::{primitives::Blob, types::EncryptionAlgorithmSpec, Client as KmsClient};
 use aws_sdk_s3::presigning::PresigningConfig;
+use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use insight_platform_artifacts::{
     AuthorizedArtifactDeleteObject, AuthorizedArtifactObjectRead, AuthorizedArtifactScanObjectRead,
@@ -369,6 +370,17 @@ pub struct CompletedAwsArtifactUploadEvidence {
     pub backend_evidence_digest: Sha256Digest,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedAwsArtifactObject {
+    pub storage_backend: String,
+    pub storage_binding_digest: Sha256Digest,
+    pub object_reference_ciphertext: Vec<u8>,
+    pub object_generation: String,
+    pub key_id: String,
+    pub observed_size_bytes: u64,
+    pub backend_evidence_digest: Sha256Digest,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AwsArtifactUploadError {
     InvalidRequest,
@@ -411,6 +423,121 @@ impl fmt::Debug for AwsArtifactUploadProvider {
 impl AwsArtifactUploadProvider {
     pub fn storage_binding_digest(&self) -> &Sha256Digest {
         &self.storage_binding_digest
+    }
+
+    pub async fn stage_bytes(
+        &self,
+        request: AwsArtifactUploadRequest<'_>,
+        bytes: Vec<u8>,
+    ) -> Result<StagedAwsArtifactObject, AwsArtifactUploadError> {
+        if request.tenant_id.kind() != ResourceKind::Tenant
+            || request.artifact_id.kind() != ResourceKind::Artifact
+            || request.blob_id.kind() != ResourceKind::InternalBlob
+            || request.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || request.expected_size_bytes == 0
+            || request.expected_size_bytes > self.maximum_object_bytes
+            || usize::try_from(request.expected_size_bytes).ok() != Some(bytes.len())
+            || request.declared_media_type.is_some_and(|value| {
+                value.is_empty()
+                    || value.len() > 255
+                    || !value.is_ascii()
+                    || value.chars().any(char::is_control)
+            })
+        {
+            return Err(AwsArtifactUploadError::InvalidRequest);
+        }
+        let object_key = format!(
+            "v1/{}/{}/{}",
+            request.tenant_id, request.artifact_id, request.blob_id
+        );
+        if !valid_opaque_object_key(&object_key) {
+            return Err(AwsArtifactUploadError::InvalidRequest);
+        }
+        let plaintext = serde_jcs::to_vec(&serde_json::json!({
+            "backend": "s3",
+            "object_key": object_key,
+            "schema_version": 1,
+            "storage_binding_digest": self.storage_binding_digest,
+        }))
+        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
+        let encryption_context = object_encryption_context(
+            request.tenant_id,
+            request.blob_id,
+            &self.storage_binding_digest,
+            request.encryption_domain_id,
+            &self.kms.key_id,
+        );
+        let encrypted = self
+            .kms
+            .client
+            .encrypt()
+            .key_id(&*self.kms.key_id)
+            .plaintext(Blob::new(plaintext))
+            .set_encryption_context(Some(encryption_context))
+            .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
+            .send()
+            .await;
+        observe_external(
+            &self.kms.observer,
+            ArtifactExternalDependency::Kms,
+            encrypted.is_ok(),
+        );
+        let encrypted = encrypted.map_err(|_| AwsArtifactUploadError::KmsUnavailable)?;
+        if encrypted.key_id() != Some(&*self.kms.key_id)
+            || encrypted.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
+        {
+            return Err(AwsArtifactUploadError::InvalidEvidence);
+        }
+        let object_reference_ciphertext = encrypted
+            .ciphertext_blob
+            .ok_or(AwsArtifactUploadError::InvalidEvidence)?
+            .into_inner();
+        let content_length = i64::try_from(request.expected_size_bytes)
+            .map_err(|_| AwsArtifactUploadError::TooLarge)?;
+        let mut put = self
+            .s3
+            .put_object()
+            .bucket(&*self.bucket)
+            .key(&object_key)
+            .content_length(content_length)
+            .body(ByteStream::from(bytes));
+        if let Some(media_type) = request.declared_media_type {
+            put = put.content_type(media_type);
+        }
+        let stored = put.send().await;
+        observe_external(
+            &self.observer,
+            ArtifactExternalDependency::S3,
+            stored.is_ok(),
+        );
+        let stored = stored.map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
+        let object_generation = stored
+            .version_id()
+            .filter(|generation| valid_object_generation(generation))
+            .ok_or(AwsArtifactUploadError::InvalidEvidence)?
+            .to_owned();
+        let backend_evidence_digest = canonical_digest(&serde_json::json!({
+            "artifact_id": request.artifact_id,
+            "blob_id": request.blob_id,
+            "kind": "s3_workload_stage",
+            "object_generation": object_generation,
+            "schema_version": 1,
+            "size_bytes": request.expected_size_bytes,
+            "storage_binding_digest": self.storage_binding_digest,
+            "tenant_id": request.tenant_id,
+        }))
+        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?
+        .parse()
+        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
+        Ok(StagedAwsArtifactObject {
+            storage_backend: "s3".to_owned(),
+            storage_binding_digest: self.storage_binding_digest.clone(),
+            object_reference_ciphertext,
+            object_generation,
+            key_id: self.kms.key_id.to_string(),
+            observed_size_bytes: request.expected_size_bytes,
+            backend_evidence_digest,
+        })
     }
 
     pub async fn prepare_upload(
