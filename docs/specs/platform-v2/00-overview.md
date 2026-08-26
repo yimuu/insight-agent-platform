@@ -494,6 +494,10 @@ mcp_operation`的logical subscription被错误暂领；expired observation携带
 已耗尽running构造唯一合法命令。MCP Host 57/57、PostgreSQL 14/14及strict Clippy通过；本轮未配置fresh PostgreSQL，也尚未组合production
 driver、Egress discovery protocol与Artifact输出，因此不新增L2/L3/L4～L6证据。
 
+r334把MCP discovery执行改为prepare/refresh-fence/commit三段式：远端I/O与PostgreSQL terminal commit之间允许heartbeat更新exact Job version，
+prepared结果只能接受同worker、同lease generation、同token且严格递增的fence；错token与旧version在commit前fail closed。既有`execute`仍作为无
+heartbeat封装。MCP Host 57/57与strict Clippy通过；该L1改造尚未接入production driver，也不替代fresh PostgreSQL竞争或真实协议L3证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

@@ -725,6 +725,11 @@
 > discovery pool暂时领取；expired observation新增validated `physical_attempt/attempt_limit`，Worker可确定构造unstarted requeue、running retry或
 > exhausted terminal recovery，不再猜测`retry_at`。MCP Host 57/57、PostgreSQL 14/14及双crate strict Clippy通过；无fresh PostgreSQL，故L2 claim/
 > recovery竞争、production driver/Egress/Artifact composition与L3以上证据仍Pending。
+>
+> 2026-08-27 implementation evidence：r334将`McpDiscoveryWorker`从单体execute拆为prepare -> refresh exact fence -> commit，同时保留
+> execute兼容封装。远端I/O期间heartbeat提升Job version后，prepared snapshot/resolution只允许同worker、同lease generation、同token且更高version
+> 的fence替换；错token与非递增version fail closed，最终Receipt/terminal transaction使用最新fence。MCP Host 57/57与strict Clippy通过；本批只关闭
+> heartbeat/commit L1组合缺口，production claim loop、真实Egress discovery/Artifact路径与L2/L3仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

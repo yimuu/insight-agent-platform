@@ -1914,8 +1914,8 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
         ))),
         store.clone(),
     );
-    let failure = worker
-        .execute(ExecuteMcpDiscoveryJob {
+    let mut prepared = worker
+        .prepare(ExecuteMcpDiscoveryJob {
             query: query.clone(),
             audit: McpWorkerAudit {
                 tenant_id: query.tenant_id.clone(),
@@ -1932,7 +1932,18 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
             retry_at: now + ChronoDuration::seconds(30),
         })
         .await
-        .unwrap_err();
+        .unwrap();
+    let mut invalid_fence = query.fence.clone();
+    invalid_fence.expected_version += 1;
+    invalid_fence.token_digest = sha('0');
+    assert_eq!(
+        prepared.refresh_fence(invalid_fence),
+        Err(McpDiscoveryWorkerError::InvalidCommand)
+    );
+    let mut heartbeat_fence = query.fence.clone();
+    heartbeat_fence.expected_version += 1;
+    prepared.refresh_fence(heartbeat_fence.clone()).unwrap();
+    let failure = worker.commit(prepared).await.unwrap_err();
     assert_eq!(
         failure,
         McpDiscoveryWorkerError::Persistence(McpDiscoveryPersistenceError::AuthorityUnavailable)
@@ -1945,7 +1956,7 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
         ),
     };
     assert_eq!(commit.operation_id, query.operation_id);
-    assert_eq!(commit.fence, query.fence);
+    assert_eq!(commit.fence, heartbeat_fence);
     assert_eq!(
         commit.snapshot.snapshot_id.kind(),
         ResourceKind::McpDiscoverySnapshot

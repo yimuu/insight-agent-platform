@@ -200,6 +200,38 @@ pub struct McpDiscoveryWorker {
     store: Arc<dyn McpDiscoveryResultStore>,
 }
 
+#[derive(Debug, Clone)]
+enum PreparedMcpDiscoveryCommand {
+    Commit(Box<CommitMcpDiscovery>),
+    Resolve(Box<ResolveMcpDiscoveryAttempt>),
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedMcpDiscovery {
+    command: PreparedMcpDiscoveryCommand,
+}
+
+impl PreparedMcpDiscovery {
+    pub fn refresh_fence(&mut self, fence: JobFence) -> Result<(), McpDiscoveryWorkerError> {
+        let current = match &self.command {
+            PreparedMcpDiscoveryCommand::Commit(command) => &command.fence,
+            PreparedMcpDiscoveryCommand::Resolve(command) => &command.fence,
+        };
+        if fence.expected_version <= current.expected_version
+            || fence.worker_process_generation_id != current.worker_process_generation_id
+            || fence.lease_generation != current.lease_generation
+            || fence.token_digest != current.token_digest
+        {
+            return Err(McpDiscoveryWorkerError::InvalidCommand);
+        }
+        match &mut self.command {
+            PreparedMcpDiscoveryCommand::Commit(command) => command.fence = fence,
+            PreparedMcpDiscoveryCommand::Resolve(command) => command.fence = fence,
+        }
+        Ok(())
+    }
+}
+
 impl McpDiscoveryWorker {
     pub fn new(
         resolver: Arc<dyn McpDiscoveryExecutionContractResolver>,
@@ -217,6 +249,14 @@ impl McpDiscoveryWorker {
         &self,
         command: ExecuteMcpDiscoveryJob,
     ) -> Result<McpDiscoveryWorkerResult, McpDiscoveryWorkerError> {
+        let prepared = self.prepare(command).await?;
+        self.commit(prepared).await
+    }
+
+    pub async fn prepare(
+        &self,
+        command: ExecuteMcpDiscoveryJob,
+    ) -> Result<PreparedMcpDiscovery, McpDiscoveryWorkerError> {
         let started_at = Utc::now();
         command
             .validate_at(started_at)
@@ -237,9 +277,8 @@ impl McpDiscoveryWorker {
             let snapshot = candidate
                 .into_snapshot(command.snapshot_id, &resolved.contract)
                 .map_err(|_| McpDiscoveryWorkerError::InvalidCommand)?;
-            return self
-                .store
-                .commit_mcp_discovery_result(CommitMcpDiscovery {
+            return Ok(PreparedMcpDiscovery {
+                command: PreparedMcpDiscoveryCommand::Commit(Box::new(CommitMcpDiscovery {
                     audit: command.audit,
                     operation_id: command.query.operation_id,
                     job_id: command.query.job_id,
@@ -247,10 +286,8 @@ impl McpDiscoveryWorker {
                     expected_operation_version: resolved.operation_version,
                     artifact_link_id: command.artifact_link_id,
                     snapshot,
-                })
-                .await
-                .map(McpDiscoveryWorkerResult::SnapshotCommitted)
-                .map_err(McpDiscoveryWorkerError::Persistence);
+                })),
+            });
         }
 
         let resolution = match outcome {
@@ -280,18 +317,36 @@ impl McpDiscoveryWorker {
                 },
             },
         };
-        self.store
-            .resolve_mcp_discovery_attempt_result(ResolveMcpDiscoveryAttempt {
+        Ok(PreparedMcpDiscovery {
+            command: PreparedMcpDiscoveryCommand::Resolve(Box::new(ResolveMcpDiscoveryAttempt {
                 audit: command.audit,
                 operation_id: command.query.operation_id,
                 job_id: command.query.job_id,
                 fence: command.query.fence,
                 expected_operation_version: resolved.operation_version,
                 resolution,
-            })
-            .await
-            .map(McpDiscoveryWorkerResult::AttemptResolved)
-            .map_err(McpDiscoveryWorkerError::Persistence)
+            })),
+        })
+    }
+
+    pub async fn commit(
+        &self,
+        prepared: PreparedMcpDiscovery,
+    ) -> Result<McpDiscoveryWorkerResult, McpDiscoveryWorkerError> {
+        match prepared.command {
+            PreparedMcpDiscoveryCommand::Commit(command) => self
+                .store
+                .commit_mcp_discovery_result(*command)
+                .await
+                .map(McpDiscoveryWorkerResult::SnapshotCommitted)
+                .map_err(McpDiscoveryWorkerError::Persistence),
+            PreparedMcpDiscoveryCommand::Resolve(command) => self
+                .store
+                .resolve_mcp_discovery_attempt_result(*command)
+                .await
+                .map(McpDiscoveryWorkerResult::AttemptResolved)
+                .map_err(McpDiscoveryWorkerError::Persistence),
+        }
     }
 }
 
