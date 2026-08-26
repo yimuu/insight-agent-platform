@@ -346,6 +346,12 @@ pub struct BrokeredArtifactScanRead {
     _permit: OwnedSemaphorePermit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactBrokerCapacitySnapshot {
+    pub maximum_in_flight: usize,
+    pub available: usize,
+}
+
 impl BrokeredArtifactScanRead {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
@@ -524,6 +530,10 @@ impl BrokeredSandboxArtifactBroker {
             core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
         })
     }
+
+    pub fn capacity_snapshot(&self) -> ArtifactBrokerCapacitySnapshot {
+        self.core.capacity_snapshot()
+    }
 }
 
 impl BrokeredGatewayArtifactReader {
@@ -537,6 +547,10 @@ impl BrokeredGatewayArtifactReader {
             authority,
             core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
         })
+    }
+
+    pub fn capacity_snapshot(&self) -> ArtifactBrokerCapacitySnapshot {
+        self.core.capacity_snapshot()
     }
 
     pub async fn read(
@@ -561,6 +575,10 @@ impl BrokeredSchedulerTypedPlanReader {
             authority,
             core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
         })
+    }
+
+    pub fn capacity_snapshot(&self) -> ArtifactBrokerCapacitySnapshot {
+        self.core.capacity_snapshot()
     }
 
     pub async fn read(
@@ -599,6 +617,10 @@ impl BrokeredSchedulerRunValueReader {
         })
     }
 
+    pub fn capacity_snapshot(&self) -> ArtifactBrokerCapacitySnapshot {
+        self.core.capacity_snapshot()
+    }
+
     pub async fn read(
         &self,
         request: &SchedulerRunValueReadRequest,
@@ -633,6 +655,10 @@ impl BrokeredSchedulerSkillPackageReader {
             authority,
             core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
         })
+    }
+
+    pub fn capacity_snapshot(&self) -> ArtifactBrokerCapacitySnapshot {
+        self.core.capacity_snapshot()
     }
 
     pub async fn read(
@@ -726,6 +752,10 @@ impl BrokeredArtifactScannerReader {
             authority,
             core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
         })
+    }
+
+    pub fn capacity_snapshot(&self) -> ArtifactBrokerCapacitySnapshot {
+        self.core.capacity_snapshot()
     }
 
     pub async fn read_for_scan(
@@ -834,6 +864,10 @@ impl BrokeredArtifactDeletionBackend {
             authority,
             core: Arc::new(ArtifactBrokerCore::new(unsealer, stores, limits)?),
         })
+    }
+
+    pub fn capacity_snapshot(&self) -> ArtifactBrokerCapacitySnapshot {
+        self.core.capacity_snapshot()
     }
 
     async fn delete_inner(
@@ -1049,6 +1083,13 @@ impl ArtifactBrokerCore {
             limits,
             in_flight: Arc::new(Semaphore::new(limits.maximum_in_flight)),
         })
+    }
+
+    fn capacity_snapshot(&self) -> ArtifactBrokerCapacitySnapshot {
+        ArtifactBrokerCapacitySnapshot {
+            maximum_in_flight: self.limits.maximum_in_flight,
+            available: self.in_flight.available_permits(),
+        }
     }
 
     async fn read_inner<R>(

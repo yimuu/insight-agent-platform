@@ -479,6 +479,11 @@ r293新增closed `insight_platform_capacity_units` surface，并从Sandbox Contr
 capacity exhaustion symptom alert及逐alert runbook。chart正负、真实TCP scrape、相关tests与strict Clippy通过。动态capacity coverage达到
 10/19 pool；其余9个pool仍须由各自真实authority接线，production Prometheus scrape与L4～L6不由此推进。
 
+r294从Artifact三个role的实际audience semaphore导出capacity：Gateway `download`，Data Worker `scan_read`、三类Scheduler read与
+`sandbox_read`，Maintenance `delete`。scrape读取每个独立bulkhead的available/used；owner测试证明exact response lease持有期间available
+归零、并发读取拒绝且drop后恢复。三process tests、strict Clippy、Artifact Helm、14-panel/13-alert observability及19-pool closure门禁通过。
+动态capacity coverage达到13/19；剩余六个pool及production Prometheus scrape/L4～L6仍保持Pending。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

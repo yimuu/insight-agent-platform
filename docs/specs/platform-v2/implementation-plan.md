@@ -508,6 +508,12 @@
 > runbook，chart正负门禁、真实TCP scrape、相关tests和strict Clippy通过。动态capacity coverage达到10/19 pool；其余9个pool必须继续从各自
 > admission、broker或dependency authority接线，不能由配置副本推断。
 
+> 2026-08-26 implementation evidence：r294从Artifact Broker每个实际audience semaphore导出capacity，而非把同一配置值镜像成状态。
+> Gateway固定`download`，Data Worker固定`scan_read`、三类Scheduler read与`sandbox_read`五个独立bulkhead，Maintenance固定`delete`；scrape
+> 直接读取available/used。owner测试证明持有exact response lease时available归零、并发读取被拒绝且drop后恢复；三process tests、strict
+> Clippy、Artifact Helm、14-panel/13-alert observability及19-pool closure门禁通过。三个Artifact pool闭合后动态capacity coverage为13/19；
+> 其余Gateway双pool、MCP双Host及Security/Egress六个pool仍待真实authority接线。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

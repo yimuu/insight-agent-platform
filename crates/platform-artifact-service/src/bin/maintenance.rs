@@ -38,6 +38,10 @@ use std::{
 use tokio::sync::watch;
 use uuid::Uuid;
 
+#[path = "../capacity.rs"]
+mod capacity;
+use capacity::artifact_capacity_metric;
+
 const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_MAINTENANCE_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_ARTIFACT_MAINTENANCE_CONFIG_DIGEST";
 const DATABASE_URL_ENV: &str = "PLATFORM_ARTIFACT_MAINTENANCE_DATABASE_URL";
@@ -170,6 +174,7 @@ async fn run() -> Result<(), MaintenanceError> {
     let backend =
         BrokeredArtifactDeletionBackend::new(repository.clone(), unsealer, stores, broker_limits)
             .map_err(|_| MaintenanceError::InvalidConfiguration)?;
+    let capacity_backend = Arc::new(backend.clone());
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let worker = run_worker(
         Arc::clone(&repository),
@@ -185,8 +190,16 @@ async fn run() -> Result<(), MaintenanceError> {
         .await
         .map_err(|_| MaintenanceError::HttpUnavailable)?;
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("artifact-maintenance", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| MaintenanceError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_capacities(
+            "artifact-maintenance",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            vec![artifact_capacity_metric(
+                "delete",
+                capacity_backend,
+                BrokeredArtifactDeletionBackend::capacity_snapshot,
+            )],
+        )
+        .map_err(|_| MaintenanceError::InvalidConfiguration)?,
     );
     let server = axum::serve(listener, process_observability_router(Arc::clone(&metrics)))
         .with_graceful_shutdown({

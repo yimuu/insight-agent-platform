@@ -381,6 +381,10 @@ r293从Sandbox Controller实际Artifact-response semaphore接入closed operation
 现有owner tests覆盖permit持有/释放。dashboard增至14 panel，并增加持续capacity exhaustion alert与runbook。动态capacity coverage达到10/19
 pool；其余9个pool、production Prometheus scrape、telemetry backend/RBAC/retention及L4～L6仍未完成。
 
+r294将Artifact Gateway的`download`、Data Worker的scanner/三类Scheduler/Sandbox五个read bulkhead及Maintenance的`delete`从各自实际
+Artifact Broker semaphore接入capacity scrape。owner测试证明response lease持有、并发拒绝与drop恢复。三个Artifact pool闭合后动态capacity
+coverage达到13/19；Gateway双pool、MCP双Host及Security/Egress六个pool、production scrape与L4～L6仍未完成。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

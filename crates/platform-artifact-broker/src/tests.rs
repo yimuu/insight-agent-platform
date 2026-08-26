@@ -317,6 +317,13 @@ async fn audience_permit_is_held_until_the_response_lease_is_dropped() {
         .unwrap();
     assert_eq!(held.as_bytes(), bytes);
     assert_eq!(
+        fixture.broker.capacity_snapshot(),
+        ArtifactBrokerCapacitySnapshot {
+            maximum_in_flight: 1,
+            available: 0,
+        }
+    );
+    assert_eq!(
         fixture
             .broker
             .read_wasi_for_response(fixture.request.clone())
@@ -326,6 +333,7 @@ async fn audience_permit_is_held_until_the_response_lease_is_dropped() {
     );
 
     drop(held);
+    assert_eq!(fixture.broker.capacity_snapshot().available, 1);
     assert_eq!(
         fixture
             .broker

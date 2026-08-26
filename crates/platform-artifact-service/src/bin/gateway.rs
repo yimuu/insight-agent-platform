@@ -58,6 +58,10 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tokio_util::sync::CancellationToken;
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
+#[path = "../capacity.rs"]
+mod capacity;
+use capacity::artifact_capacity_metric;
+
 const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CONFIG_DIGEST";
 const DATABASE_URL_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_DATABASE_URL";
@@ -261,21 +265,23 @@ async fn run() -> Result<(), GatewayError> {
         .map_err(|_| GatewayError::ProviderUnavailable)?;
     let repository = Arc::new(PgRepository::new(pool));
     let (uploads, unsealer, stores) = providers.into_gateway_components();
-    let reader = BrokeredGatewayArtifactReader::new(
-        repository.clone(),
-        unsealer,
-        stores,
-        ArtifactBrokerLimits {
-            maximum_in_flight: config.maximum_download_in_flight,
-            maximum_read_bytes: config.maximum_download_bytes,
-            operation_timeout: Duration::from_millis(config.download_timeout_milliseconds),
-        },
-    )
-    .map_err(|_| GatewayError::InvalidConfiguration)?;
+    let reader = Arc::new(
+        BrokeredGatewayArtifactReader::new(
+            repository.clone(),
+            unsealer,
+            stores,
+            ArtifactBrokerLimits {
+                maximum_in_flight: config.maximum_download_in_flight,
+                maximum_read_bytes: config.maximum_download_bytes,
+                operation_timeout: Duration::from_millis(config.download_timeout_milliseconds),
+            },
+        )
+        .map_err(|_| GatewayError::InvalidConfiguration)?,
+    );
     let state = GatewayState {
         repository,
         uploads,
-        reader: Arc::new(reader),
+        reader: Arc::clone(&reader),
         maximum_upload_target_seconds: config.maximum_upload_target_seconds,
         write_encryption_domain_id: config.write_encryption_domain_id,
         scanner_contract_digest: config.scanner_contract_digest,
@@ -302,8 +308,16 @@ async fn run() -> Result<(), GatewayError> {
         .map_err(|_| GatewayError::InvalidConfiguration)?;
     let listener = install_mtls_listener(address).await?;
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("artifact-gateway", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| GatewayError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_capacities(
+            "artifact-gateway",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            vec![artifact_capacity_metric(
+                "download",
+                reader,
+                BrokeredGatewayArtifactReader::capacity_snapshot,
+            )],
+        )
+        .map_err(|_| GatewayError::InvalidConfiguration)?,
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)

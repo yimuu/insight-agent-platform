@@ -8,9 +8,11 @@ use insight_platform_artifact_broker::{
     BrokeredArtifactScannerReader, BrokeredSandboxArtifactBroker, BrokeredSchedulerRunValueReader,
     BrokeredSchedulerSkillPackageReader, BrokeredSchedulerTypedPlanReader,
 };
+mod capacity;
 mod guest_identity;
 mod scan_worker;
 
+use capacity::artifact_capacity_metric;
 use guest_identity::GvisorGuestIdentityConfig;
 use insight_platform_artifact_rpc::{
     proto::{
@@ -68,6 +70,34 @@ struct SchedulerRpcArtifactBroker {
     typed_plan_reader: BrokeredSchedulerTypedPlanReader,
     run_value_reader: BrokeredSchedulerRunValueReader,
     skill_package_reader: BrokeredSchedulerSkillPackageReader,
+}
+
+impl SandboxRpcArtifactBroker {
+    fn capacity_snapshot(
+        &self,
+    ) -> insight_platform_artifact_broker::ArtifactBrokerCapacitySnapshot {
+        self.broker.capacity_snapshot()
+    }
+}
+
+impl SchedulerRpcArtifactBroker {
+    fn typed_plan_capacity(
+        &self,
+    ) -> insight_platform_artifact_broker::ArtifactBrokerCapacitySnapshot {
+        self.typed_plan_reader.capacity_snapshot()
+    }
+
+    fn run_value_capacity(
+        &self,
+    ) -> insight_platform_artifact_broker::ArtifactBrokerCapacitySnapshot {
+        self.run_value_reader.capacity_snapshot()
+    }
+
+    fn skill_package_capacity(
+        &self,
+    ) -> insight_platform_artifact_broker::ArtifactBrokerCapacitySnapshot {
+        self.skill_package_reader.capacity_snapshot()
+    }
 }
 
 struct GvisorGuestMaterializer {
@@ -357,7 +387,7 @@ async fn run() -> Result<(), ProcessError> {
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
-    let scanner = IntegrityArtifactScanner::new(scan_reader, &config.scan_worker);
+    let scanner = IntegrityArtifactScanner::new(Arc::clone(&scan_reader), &config.scan_worker);
     let scheduler_reader = Arc::new(SchedulerRpcArtifactBroker {
         typed_plan_reader: BrokeredSchedulerTypedPlanReader::new(
             read_repository.clone(),
@@ -404,7 +434,7 @@ async fn run() -> Result<(), ProcessError> {
     };
     let scheduler_service = {
         let service = ArtifactSchedulerServiceServer::new(ArtifactSchedulerGrpcService::new(
-            scheduler_reader,
+            Arc::clone(&scheduler_reader),
             rpc_limits,
         ))
         .max_encoding_message_size(maximum)
@@ -487,8 +517,38 @@ async fn run() -> Result<(), ProcessError> {
         scan_shutdown_receiver,
     );
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("artifact-data-worker", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_capacities(
+            "artifact-data-worker",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            vec![
+                artifact_capacity_metric(
+                    "scan_read",
+                    scan_reader,
+                    BrokeredArtifactScannerReader::capacity_snapshot,
+                ),
+                artifact_capacity_metric(
+                    "scheduler_typed_plan",
+                    Arc::clone(&scheduler_reader),
+                    SchedulerRpcArtifactBroker::typed_plan_capacity,
+                ),
+                artifact_capacity_metric(
+                    "scheduler_run_value",
+                    Arc::clone(&scheduler_reader),
+                    SchedulerRpcArtifactBroker::run_value_capacity,
+                ),
+                artifact_capacity_metric(
+                    "scheduler_skill_package",
+                    scheduler_reader,
+                    SchedulerRpcArtifactBroker::skill_package_capacity,
+                ),
+                artifact_capacity_metric(
+                    "sandbox_read",
+                    sandbox_broker,
+                    SandboxRpcArtifactBroker::capacity_snapshot,
+                ),
+            ],
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)
