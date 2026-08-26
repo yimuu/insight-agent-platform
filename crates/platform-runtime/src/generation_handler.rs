@@ -167,6 +167,7 @@ mod tests {
     fn started() -> StartedOrchestrationJob {
         let now = Utc::now();
         let job = JobRecord {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: id(ResourceKind::Tenant, "8801").to_string(),
             job_id: id(ResourceKind::Job, "8802").to_string(),
             work_class: WorkClass::Orchestration.as_str().to_owned(),

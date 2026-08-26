@@ -1555,11 +1555,13 @@ async fn insert_model_job(
             tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
             run_id, node_id, state, version, attempt_no, attempt_limit, lease_epoch,
             scheduled_at, deadline, priority, request_digest, effect_key_digest,
-            payload_schema_version, payload, payload_digest, created_at, updated_at
+            payload_schema_version, payload, payload_digest, created_at, updated_at,
+            trace_id
         ) VALUES (
             $1, $2, 'model', 'model_turn', $3, $3,
             $4, $5, 'ready', 1, 0, $6, 0,
-            $7, $8, 0, $9, NULL, $10, $11, $12, $13, $13
+            $7, $8, 0, $9, NULL, $10, $11, $12, $13, $13,
+            (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $4)
         )
         "#,
     )

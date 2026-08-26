@@ -3807,9 +3807,9 @@ impl ArtifactTransaction for PgArtifactTransaction {
             INSERT INTO insight_platform.jobs (
                 tenant_id, job_id, work_class, owner_kind, owner_id, state,
                 attempt_limit, scheduled_at, deadline, request_digest,
-                payload_schema_version, payload, payload_digest
+                payload_schema_version, payload, payload_digest, trace_id
             ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'waiting',
-                      1, $4, $5, $6, $7, $8, $9)
+                      1, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -3821,6 +3821,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
         .bind(operation_payload.schema_version)
         .bind(&operation_payload.value)
         .bind(&operation_payload.digest)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
 
@@ -4291,6 +4292,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
                     scan: decision.job.clone(),
                 },
                 request_digest: &command.audit.request_digest,
+                trace_id: &command.audit.trace.trace_id,
                 deadline: command.deadline,
                 database_now,
                 limits: self.limits,
@@ -5205,9 +5207,10 @@ impl ArtifactTransaction for PgArtifactTransaction {
                 INSERT INTO insight_platform.jobs (
                     tenant_id, job_id, work_class, owner_kind, owner_id, state,
                     attempt_limit, scheduled_at, deadline, request_digest,
-                    payload_schema_version, payload, payload_digest, created_at, updated_at
+                    payload_schema_version, payload, payload_digest, created_at, updated_at,
+                    trace_id
                 ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'waiting',
-                          $4, $10, $5, $6, $7, $8, $9, $10, $10)
+                          $4, $10, $5, $6, $7, $8, $9, $10, $10, $11)
                 "#,
             )
             .bind(command.audit.tenant_id.to_string())
@@ -5226,6 +5229,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
             .bind(&job_payload.value)
             .bind(&job_payload.digest)
             .bind(database_now)
+            .bind(command.audit.trace.trace_id.to_string())
             .execute(&mut *transaction)
             .await?;
             let task = TaskPayload {
@@ -5356,9 +5360,10 @@ impl ArtifactTransaction for PgArtifactTransaction {
             INSERT INTO insight_platform.jobs (
                 tenant_id, job_id, work_class, owner_kind, owner_id, state,
                 attempt_limit, scheduled_at, deadline, request_digest,
-                payload_schema_version, payload, payload_digest, created_at, updated_at
+                payload_schema_version, payload, payload_digest, created_at, updated_at,
+                trace_id
             ) VALUES ($1, $2, 'artifact', 'artifact', $3, 'ready',
-                      $4, $5, $6, $7, $8, $9, $10, $5, $5)
+                      $4, $5, $6, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -5377,6 +5382,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
         .bind(job_payload.schema_version)
         .bind(&job_payload.value)
         .bind(&job_payload.digest)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         append_command_event(
@@ -6466,6 +6472,7 @@ struct ArtifactScanJobInsert<'a> {
     artifact_id: &'a ResourceId,
     job: ArtifactJobPayload,
     request_digest: &'a Sha256Digest,
+    trace_id: &'a insight_platform_contracts::TraceId,
     deadline: DateTime<Utc>,
     database_now: DateTime<Utc>,
     limits: ArtifactCommandLimits,
@@ -6489,8 +6496,9 @@ async fn insert_artifact_scan_job(
             tenant_id, job_id, work_class, owner_kind, owner_id,
             state, attempt_limit, scheduled_at, deadline, request_digest,
             payload_schema_version, payload, payload_digest
+            , trace_id
         ) VALUES ($1, $2, 'artifact', 'artifact', $3,
-                  'ready', $4, $5, $6, $7, $8, $9, $10)
+                  'ready', $4, $5, $6, $7, $8, $9, $10, $11)
         "#,
     )
     .bind(insert.tenant_id.to_string())
@@ -6503,6 +6511,7 @@ async fn insert_artifact_scan_job(
     .bind(payload.schema_version)
     .bind(&payload.value)
     .bind(&payload.digest)
+    .bind(insert.trace_id.to_string())
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -6953,8 +6962,11 @@ async fn insert_scan_duplicate_blob_cleanup_job(
             tenant_id, job_id, work_class, owner_kind, owner_id,
             state, attempt_limit, scheduled_at, deadline, request_digest,
             payload_schema_version, payload, payload_digest
+            , trace_id
         ) VALUES ($1, $2, 'artifact', 'internal_blob', $3,
-                  'ready', $4, $5, $6, $7, $8, $9, $10)
+                  'ready', $4, $5, $6, $7, $8, $9, $10,
+                  (SELECT trace_id FROM insight_platform.jobs
+                   WHERE tenant_id = $1 AND job_id = $11))
         "#,
     )
     .bind(command.audit.tenant_id.to_string())
@@ -6967,6 +6979,7 @@ async fn insert_scan_duplicate_blob_cleanup_job(
     .bind(payload.schema_version)
     .bind(&payload.value)
     .bind(&payload.digest)
+    .bind(command.scan_job_id.to_string())
     .execute(&mut **transaction)
     .await?;
     Ok(())

@@ -10,12 +10,13 @@
   "functions": [
     "is_bounded_object(jsonb, integer)",
     "is_platform_id(text)",
-    "is_sha256(text)"
+    "is_sha256(text)",
+    "is_trace_id(text)"
   ],
-  "migration_set_digest": "sha256:01ea6b63bbc8eabac588ea7704fb19eccb6b4b841108307c58be1a99b6f26ba6",
+  "migration_set_digest": "sha256:be343c2277d1af07e8e6c1841738a51a0a6d677147f8fb91736a71fdb3af5c6c",
   "migrations": [
     {
-      "checksum": "sha256:b07880925316c939794feab9d3f5d0b1a62b4dc1e3fa3b09f81866182114baa3",
+      "checksum": "sha256:6c43655fc0bc1492d45d25b336db29e5612ac65ffc2de2c0291e04a9e92d42ad",
       "name": "platform_baseline",
       "version": 1
     }

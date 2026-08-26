@@ -688,6 +688,7 @@ fn context_admission_command(
             schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
             request_id,
             correlation_digest,
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
         },
     };
     command

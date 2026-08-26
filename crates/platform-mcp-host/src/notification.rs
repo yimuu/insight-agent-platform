@@ -334,6 +334,7 @@ impl McpSubscriptionIngressIdentityFactory for UuidMcpSubscriptionIngressIdentit
         }))
         .map_err(|_| McpStreamableHttpSubscriptionSinkError::Rejected)?;
         Ok(McpSubscriptionWorkerAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_id.clone(),
             worker_process_generation_id: worker_process_generation_id.clone(),
             receipt_id: Self::new_id(ResourceKind::Receipt)?,

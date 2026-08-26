@@ -97,6 +97,7 @@ fn audit(
     request: char,
 ) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         principal_id: principal_id.clone(),
         principal_kind: PrincipalKind::TenantAdmin,
@@ -151,6 +152,7 @@ fn command(
     let now = Utc::now();
     PrepareArtifact {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id,
             principal_id,
             principal_kind: PrincipalKind::TenantAdmin,
@@ -219,6 +221,7 @@ fn complete_command(
 ) -> CompleteArtifactUpload {
     CompleteArtifactUpload {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: prepared.audit.tenant_id.clone(),
             principal_id: prepared.audit.principal_id.clone(),
             principal_kind: prepared.audit.principal_kind,
@@ -566,6 +569,7 @@ fn finalize_command(
 ) -> FinalizeArtifact {
     FinalizeArtifact {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: prepared.audit.tenant_id.clone(),
             principal_id: prepared.audit.principal_id.clone(),
             principal_kind: prepared.audit.principal_kind,
@@ -2283,6 +2287,7 @@ async fn artifact_upload_lifecycle_fixture() {
 
     let hold_command = PlaceArtifactHold {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_a.clone(),
             principal_id: allowed_principal.clone(),
             principal_kind: PrincipalKind::TenantAdmin,
@@ -2317,6 +2322,7 @@ async fn artifact_upload_lifecycle_fixture() {
     );
     let release_command = ReleaseArtifactHold {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_a.clone(),
             principal_id: allowed_principal.clone(),
             principal_kind: PrincipalKind::TenantAdmin,
@@ -2351,6 +2357,7 @@ async fn artifact_upload_lifecycle_fixture() {
 
     let provenance_command = CreateArtifactProvenance {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_a.clone(),
             principal_id: allowed_principal.clone(),
             principal_kind: PrincipalKind::TenantAdmin,
@@ -2392,6 +2399,7 @@ async fn artifact_upload_lifecycle_fixture() {
     );
     let cyclic_provenance = CreateArtifactProvenance {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_a.clone(),
             principal_id: allowed_principal.clone(),
             principal_kind: PrincipalKind::TenantAdmin,

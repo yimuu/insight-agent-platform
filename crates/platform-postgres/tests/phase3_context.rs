@@ -30,26 +30,27 @@ use insight_platform_context::{
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, AdministrativeGate,
     AgentDeploymentClosure, AgentResourceSpec, ArtifactRef, AuthoringPackage,
-    CanonicalHttpEndpoint, CapabilityArtifactContract, CapabilityBackendBinding,
-    CapabilityBackendContract, CapabilityBackendFeatures, CapabilityBackendKind,
-    CapabilityBackendLimits, CapabilityCancellationKind, CapabilityDataFlowPolicy,
-    CapabilityDeploymentClosure, CapabilityEndpointScheme, CapabilityIdempotencyKind,
-    CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
-    CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
-    CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue, CommandAudit, CommandOutcome,
-    ContextBackendBinding, ContextBackendContract, ContextBackendKind, ContextBackendLimits,
-    ContextBindingSnapshot, ContextCitationContract, ContextCitationStrength,
-    ContextConsistencyMode, ContextConsistencyPolicy, ContextDataPolicyContract,
-    ContextDatasetGenerationSpec, ContextDeploymentClosure, ContextImplementationContract,
-    ContextImplementationResourceSpec, ContextInterfaceLimits, ContextInterfaceResourceSpec,
-    ContextLocatorKind, ContextPaginationContract, ContextQueryState, ContextRankingContract,
-    DataClassification, DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
-    ExactPolicyBinding, ExactVersionRef, ExternalLeafFailureMutationIds,
-    ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
-    FrozenSlotBinding, FrozenSlotTarget, JobState, NativeCapabilityContract, Permission,
-    PermissionSet, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
+    CandidateSelectionMode, CandidateSelectionPolicyDocument, CanonicalHttpEndpoint,
+    CapabilityArtifactContract, CapabilityBackendBinding, CapabilityBackendContract,
+    CapabilityBackendFeatures, CapabilityBackendKind, CapabilityBackendLimits,
+    CapabilityCancellationKind, CapabilityDataFlowPolicy, CapabilityDeploymentClosure,
+    CapabilityEndpointScheme, CapabilityIdempotencyKind, CapabilityImplementationResourceSpec,
+    CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
+    CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
+    CommandAudit, CommandOutcome, ContextBackendBinding, ContextBackendContract,
+    ContextBackendKind, ContextBackendLimits, ContextBindingSnapshot, ContextCitationContract,
+    ContextCitationStrength, ContextConsistencyMode, ContextConsistencyPolicy,
+    ContextDataPolicyContract, ContextDatasetGenerationSpec, ContextDeploymentClosure,
+    ContextImplementationContract, ContextImplementationResourceSpec, ContextInterfaceLimits,
+    ContextInterfaceResourceSpec, ContextLocatorKind, ContextPaginationContract, ContextQueryState,
+    ContextRankingContract, DataClassification, DataRegion, DeploymentClosure, Effect,
+    EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
+    ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds, Failure, FailureClass,
+    FailureCode, FailureSource, FrozenSlotBinding, FrozenSlotTarget, JobState,
+    NativeCapabilityContract, Permission, PermissionSet, PlatformFailureCode,
+    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
+    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, QuotaDimension,
+    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
     RunBindingsSnapshot, SchedulerPriority, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
     TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
     WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
@@ -236,6 +237,7 @@ fn audit(
     operation: &str,
 ) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         principal_id: principal_id.clone(),
         principal_kind: PrincipalKind::AgentRunner,
@@ -646,9 +648,19 @@ async fn seed_policy_versions(
     tenant_id: &ResourceId,
     principal_id: &ResourceId,
     policy_resource: &ResourceId,
-    policies: &[ExactVersionRef],
+    policies: &[(ExactVersionRef, PolicyKind)],
 ) {
-    for (index, exact) in policies.iter().enumerate() {
+    for (index, (exact, policy_kind)) in policies.iter().enumerate() {
+        let selection =
+            (*policy_kind == PolicyKind::Selection).then_some(CandidateSelectionPolicyDocument {
+                schema_version: 1,
+                mode: CandidateSelectionMode::OnlyCandidate,
+                route_schema_digest: None,
+            });
+        let rules_digest = selection.as_ref().map_or_else(
+            || named_digest(&format!("policy-rules-{index}")),
+            |document| document.canonical_digest().unwrap(),
+        );
         insert_version(
             pool,
             tenant_id,
@@ -663,9 +675,9 @@ async fn seed_policy_versions(
                     contract_digest: named_digest(&format!("policy-contract-{index}")),
                     dependency_versions: vec![],
                     policy_versions: vec![],
-                    policy_kind: PolicyKind::Authorization,
-                    rules_digest: named_digest(&format!("policy-rules-{index}")),
-                    selection: None,
+                    policy_kind: *policy_kind,
+                    rules_digest,
+                    selection,
                     scheduling: None,
                     retention: None,
                     model_safety: None,
@@ -812,21 +824,21 @@ async fn seed_fixture_with_backend(
     let trust_policy = version(ResourceKind::PolicyRevision, 0x2b);
     let scheduling_policy = version(ResourceKind::PolicyRevision, 0x2c);
     let mut policies = vec![
-        authorization_policy.clone(),
-        ranking_policy.clone(),
-        parser_policy.clone(),
-        data_policy.clone(),
-        entitlement_policy.clone(),
-        cache_policy.clone(),
-        execution_profile.clone(),
-        invocation_policy.clone(),
-        chunker_policy.clone(),
+        (authorization_policy.clone(), PolicyKind::Authorization),
+        (ranking_policy.clone(), PolicyKind::Ranking),
+        (parser_policy.clone(), PolicyKind::Parser),
+        (data_policy.clone(), PolicyKind::DataFlow),
+        (entitlement_policy.clone(), PolicyKind::Authorization),
+        (cache_policy.clone(), PolicyKind::Authorization),
+        (execution_profile.clone(), PolicyKind::Execution),
+        (invocation_policy.clone(), PolicyKind::Selection),
+        (chunker_policy.clone(), PolicyKind::Chunker),
     ];
     if matches!(&backend_fixture, ContextFixtureBackend::RemoteSearch { .. }) {
         policies.extend([
-            network_policy.clone(),
-            tls_policy.clone(),
-            trust_policy.clone(),
+            (network_policy.clone(), PolicyKind::Network),
+            (tls_policy.clone(), PolicyKind::Tls),
+            (trust_policy.clone(), PolicyKind::Trust),
         ]);
     }
     seed_policy_versions(pool, &tenant_id, &principal_id, &policy_resource, &policies).await;
@@ -1488,12 +1500,13 @@ async fn seed_fixture_with_backend(
         r#"
         INSERT INTO insight_platform.runs (
             tenant_id, run_id, root_run_id, agent_deployment_id, principal_id,
-            state, version, bindings_schema_version, bindings, bindings_digest,
+            state, version, active_work_count, bindings_schema_version, bindings, bindings_digest,
             current_schema_version, current_payload, current_payload_digest,
-            deadline, started_at, created_at, updated_at
+            deadline, started_at, created_at, updated_at, trace_id
         ) VALUES (
-            $1, $2, $2, $3, $4, 'running', 1, $5, $6, $7,
-            $8, $9, $10, $11, $12, $12, $12
+            $1, $2, $2, $3, $4, 'running', 1, 1, $5, $6, $7,
+            $8, $9, $10, $11, $12, $12, $12,
+            '0123456789abcdef0123456789abcdef'
         )
         "#,
     )
@@ -1690,7 +1703,7 @@ impl ClaimEvidence {
 
 async fn seed_running_context_orchestration(
     pool: &PgPool,
-    repository: &PgRepository,
+    _repository: &PgRepository,
     fixture: &Fixture,
 ) -> (RepositoryJobFence, DeferOrchestrationToContextQuery) {
     let input_value = json!({"question": "top customers"});
@@ -1775,20 +1788,7 @@ async fn seed_running_context_orchestration(
     .await
     .unwrap();
 
-    let quota_account_id = id(ResourceKind::QuotaAccount, 0x800);
-    repository
-        .create_quota_account(NewQuotaAccount {
-            tenant_id: fixture.tenant_id.to_string(),
-            quota_account_id: quota_account_id.to_string(),
-            scope_kind: "tenant".to_owned(),
-            scope_id: fixture.tenant_id.to_string(),
-            work_class: WorkClass::Orchestration.as_str().to_owned(),
-            metric: "concurrent_jobs".to_owned(),
-            limit_value: 4,
-            payload: TypedPayload::new(1, &json!({"fixture": "context-owner"})).unwrap(),
-        })
-        .await
-        .unwrap();
+    let quota_account_id = id(ResourceKind::QuotaAccount, 0x53);
     sqlx::query(
         "UPDATE insight_platform.quota_accounts SET reserved_value = 1 WHERE tenant_id = $1 AND quota_account_id = $2",
     )
@@ -1851,11 +1851,12 @@ async fn seed_running_context_orchestration(
             state, version, attempt_no, attempt_limit, lease_epoch, worker_id,
             lease_token_digest, lease_expires_at, heartbeat_at, scheduled_at, deadline,
             request_digest, quota_reservation_id, payload_schema_version, payload,
-            payload_digest, started_at, created_at, updated_at
+            payload_digest, started_at, created_at, updated_at, trace_id
         ) VALUES (
             $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
             'running', 2, 1, 3, 1, $5, $6, $7, $8, $8, $9,
-            $10, $11, $12, $13, $14, $8, $8, $8
+            $10, $11, $12, $13, $14, $8, $8, $8,
+            '0123456789abcdef0123456789abcdef'
         )
         "#,
     )
@@ -2032,7 +2033,7 @@ async fn park_direct_context_leaf(
     sqlx::query(
         r#"
         UPDATE insight_platform.runs
-        SET state = 'waiting', active_work_count = 0,
+        SET state = 'waiting', active_work_count = 1,
             current_schema_version = $3, current_payload = $4,
             current_payload_digest = $5
         WHERE tenant_id = $1 AND run_id = $2
@@ -2079,11 +2080,12 @@ async fn park_direct_context_leaf(
             tenant_id, job_id, work_class, owner_kind, owner_id, run_id, node_id,
             state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
             deadline, request_digest, result_digest, payload_schema_version,
-            payload, payload_digest, started_at, terminal_at, created_at, updated_at
+            payload, payload_digest, started_at, terminal_at, created_at, updated_at,
+            trace_id
         ) VALUES (
             $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
             'succeeded', 3, 1, 3, 1, $5, $6, $7, $8, $9, $10, $11,
-            $5, $5, $5, $5
+            $5, $5, $5, $5, '0123456789abcdef0123456789abcdef'
         )
         "#,
     )

@@ -572,6 +572,7 @@ impl InvocationTransaction for PgInvocationTransaction {
                     &mut transaction,
                     PrepareCapabilityDispatch {
                         audit: insight_platform_contracts::CommandAudit {
+                            trace: insight_platform_contracts::TraceIdentityV1::generate(),
                             tenant_id: current.tenant_id.clone(),
                             principal_id: current.payload.admission.principal.principal_id.clone(),
                             principal_kind: current.payload.admission.principal.principal_kind,

@@ -93,9 +93,10 @@ impl PgRepository {
             INSERT INTO insight_platform.jobs (
                 tenant_id, job_id, work_class, owner_kind, owner_id, state,
                 attempt_limit, scheduled_at, deadline, priority, request_digest,
-                payload_schema_version, payload, payload_digest, created_at, updated_at
+                payload_schema_version, payload, payload_digest, created_at, updated_at,
+                trace_id
             ) VALUES ($1, $2, 'context', 'context_dataset', $3, 'ready',
-                      $4, $5, $6, 0, $7, $8, $9, $10, $5, $5)
+                      $4, $5, $6, 0, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -108,6 +109,7 @@ impl PgRepository {
         .bind(typed.schema_version)
         .bind(&typed.value)
         .bind(&typed.digest)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         terminalize_command_receipt(

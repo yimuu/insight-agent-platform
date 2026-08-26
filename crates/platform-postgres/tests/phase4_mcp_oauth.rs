@@ -383,6 +383,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
     let deadline = now + Duration::minutes(10);
     let intent = McpOAuthAuthorizationStartIntent {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_id.clone(),
             principal_id: principal_id.clone(),
             principal_kind: PrincipalKind::AgentRunner,

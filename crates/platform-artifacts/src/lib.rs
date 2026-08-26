@@ -1984,6 +1984,7 @@ mod tests {
     fn command(now: DateTime<Utc>) -> PrepareArtifact {
         PrepareArtifact {
             audit: CommandAudit {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: id(ResourceKind::Tenant, "1001"),
                 principal_id: id(ResourceKind::Principal, "1002"),
                 principal_kind: PrincipalKind::TenantAdmin,
@@ -2390,6 +2391,7 @@ mod tests {
 
         let mark = MarkArtifactDeletion {
             audit: CommandAudit {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: target.tenant_id.clone(),
                 principal_id: prepared.audit.principal_id.clone(),
                 principal_kind: prepared.audit.principal_kind,

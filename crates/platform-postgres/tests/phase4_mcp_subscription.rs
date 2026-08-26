@@ -1668,6 +1668,7 @@ fn command_audit(
     now: DateTime<Utc>,
 ) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         principal_id: principal_id.clone(),
         principal_kind: PrincipalKind::AgentRunner,
@@ -1781,6 +1782,7 @@ fn worker_audit(
     now: DateTime<Utc>,
 ) -> McpSubscriptionWorkerAudit {
     McpSubscriptionWorkerAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         worker_process_generation_id: worker_id.clone(),
         receipt_id: id(ResourceKind::Receipt, base),
@@ -1901,6 +1903,7 @@ fn context_refresh_admission(
             schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
             request_id: id(ResourceKind::ServerRequest, base),
             correlation_digest: named_digest(&format!("context-refresh-correlation-{base}")),
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
         },
     }
 }
@@ -1938,6 +1941,7 @@ fn context_reconcile_admission(
             schema_version: CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION,
             request_id: id(ResourceKind::ServerRequest, base),
             correlation_digest: named_digest(&format!("context-reconcile-correlation-{base}")),
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
         },
     }
 }

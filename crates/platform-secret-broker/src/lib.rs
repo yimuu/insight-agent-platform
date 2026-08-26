@@ -437,6 +437,7 @@ impl BrokeredMcpOAuthSecretStore {
         let placeholder = preparation_digest.clone();
         let mut command = RegisterPreparedSecretBinding {
             audit: CommandAudit {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: tenant_id.clone(),
                 principal_id: self.service_principal_id.clone(),
                 principal_kind: PrincipalKind::ServiceIdentity,

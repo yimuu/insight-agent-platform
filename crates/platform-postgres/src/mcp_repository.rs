@@ -1202,9 +1202,10 @@ impl PgRepository {
             INSERT INTO insight_platform.jobs (
                 tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
                 state, attempt_limit, scheduled_at, deadline, priority, request_digest,
-                payload_schema_version, payload, payload_digest, created_at, updated_at
+                payload_schema_version, payload, payload_digest, created_at, updated_at,
+                trace_id
             ) VALUES ($1, $2, 'mcp', 'mcp_operation', $3, $3,
-                      'ready', $4, $5, $6, 0, $7, $8, $9, $10, $5, $5)
+                      'ready', $4, $5, $6, 0, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -1217,6 +1218,7 @@ impl PgRepository {
         .bind(job_typed.schema_version)
         .bind(&job_typed.value)
         .bind(&job_typed.digest)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         append_command_event(
@@ -2084,9 +2086,9 @@ impl PgRepository {
                 tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
                 state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
                 deadline, priority, request_digest, payload_schema_version, payload,
-                payload_digest, created_at, updated_at
+                payload_digest, created_at, updated_at, trace_id
             ) VALUES ($1, $2, 'context', 'mcp_operation', $3, $3,
-                      'ready', 1, 0, $4, 0, $5, $6, 0, $7, $8, $9, $10, $5, $5)
+                      'ready', 1, 0, $4, 0, $5, $6, 0, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )
         .bind(command.request.tenant_id.to_string())
@@ -2099,6 +2101,7 @@ impl PgRepository {
         .bind(typed_job.schema_version)
         .bind(&typed_job.value)
         .bind(&typed_job.digest)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
 
@@ -4599,6 +4602,7 @@ async fn load_mcp_discovery_operation(
 }
 
 struct LockedMcpDiscoveryJob {
+    trace: insight_platform_contracts::TraceIdentityV1,
     state: JobState,
     version: u64,
     physical_attempt: u32,
@@ -4651,6 +4655,11 @@ async fn load_mcp_discovery_job(
         .validate()
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     Ok(LockedMcpDiscoveryJob {
+        trace: insight_platform_contracts::TraceIdentityV1::new(
+            row.try_get::<String, _>("trace_id")?
+                .parse::<insight_platform_contracts::TraceId>()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        ),
         state: row
             .try_get::<String, _>("state")?
             .parse::<JobState>()
@@ -4712,6 +4721,7 @@ fn mcp_discovery_job_projection(
         }
     };
     let projection = JobProjection {
+        trace: job.trace,
         tenant_id: tenant_id.clone(),
         job_id: job_id.clone(),
         work_class: insight_platform_contracts::WorkClass::Mcp,
@@ -6208,9 +6218,10 @@ impl PgRegistryTransaction {
             INSERT INTO insight_platform.jobs (
                 tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
                 state, attempt_limit, scheduled_at, deadline, priority, request_digest,
-                payload_schema_version, payload, payload_digest, created_at, updated_at
+                payload_schema_version, payload, payload_digest, created_at, updated_at,
+                trace_id
             ) VALUES ($1, $2, 'mcp', 'mcp_operation', $3, $3,
-                      'ready', $4, $5, $6, 0, $7, $8, $9, $10, $5, $5)
+                      'ready', $4, $5, $6, 0, $7, $8, $9, $10, $5, $5, $11)
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -6223,6 +6234,7 @@ impl PgRegistryTransaction {
         .bind(job_typed.schema_version)
         .bind(&job_typed.value)
         .bind(&job_typed.digest)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         append_command_event(
@@ -6425,10 +6437,11 @@ impl PgRepository {
                 tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
                 state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
                 deadline, priority, request_digest, quota_reservation_id,
-                payload_schema_version, payload, payload_digest, created_at, updated_at
+                payload_schema_version, payload, payload_digest, created_at, updated_at,
+                trace_id
             ) VALUES ($1, $2, 'sandbox', 'sandbox_job', $3, $4,
                       'ready', 1, 0, 1, 0, $5, $6, 0, $7, $8,
-                      $9, $10, $11, $5, $5)
+                      $9, $10, $11, $5, $5, $12)
             "#,
         )
         .bind(identity.tenant_id.to_string())
@@ -6442,6 +6455,7 @@ impl PgRepository {
         .bind(physical_typed.schema_version)
         .bind(&physical_typed.value)
         .bind(&physical_typed.digest)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         park_mcp_subscription_job(&mut transaction, &logical_job, &next, database_now).await?;

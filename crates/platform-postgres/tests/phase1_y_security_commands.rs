@@ -47,6 +47,7 @@ fn audit(
     request: char,
 ) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: id(tenant_id),
         principal_id: id(principal_id),
         principal_kind: PrincipalKind::TenantAdmin,
@@ -309,6 +310,7 @@ async fn security_commands_are_fenced_atomic_and_secret_safe() {
     let preparation_digest = digest('c');
     let mut prepared = RegisterPreparedSecretBinding {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: id(TENANT_ID),
             principal_id: id(BROKER_ID),
             principal_kind: PrincipalKind::ServiceIdentity,

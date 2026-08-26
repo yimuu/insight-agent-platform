@@ -5,11 +5,16 @@
 //! principal, owner, fence, or idempotency authority from metadata.
 
 use insight_platform_contracts::{SpanId, TraceFlags, TraceIdentityV1, W3cTraceParent};
+use std::future::Future;
 use tonic::{metadata::MetadataValue, Request, Status};
 
 pub const TRACEPARENT_METADATA: &str = "traceparent";
 pub const TRACESTATE_METADATA: &str = "tracestate";
 pub const BAGGAGE_METADATA: &str = "baggage";
+
+tokio::task_local! {
+    static ACTIVE_RPC_TRACE: RpcTraceContext;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RpcTraceContext {
@@ -45,6 +50,23 @@ pub fn request_with_trace<T>(message: T, context: RpcTraceContext) -> Result<Req
     let mut request = Request::new(message);
     inject_trace(&mut request, context)?;
     Ok(request)
+}
+
+pub async fn scope_trace<F>(context: RpcTraceContext, future: F) -> F::Output
+where
+    F: Future,
+{
+    ACTIVE_RPC_TRACE.scope(context, future).await
+}
+
+pub fn current_trace() -> Result<RpcTraceContext, Status> {
+    ACTIVE_RPC_TRACE
+        .try_with(|context| *context)
+        .map_err(|_| missing_trace_status())
+}
+
+pub fn request_with_current_trace<T>(message: T) -> Result<Request<T>, Status> {
+    request_with_trace(message, current_trace()?)
 }
 
 pub fn inject_trace<T>(request: &mut Request<T>, context: RpcTraceContext) -> Result<(), Status> {
@@ -169,6 +191,27 @@ mod tests {
         );
         assert_eq!(
             inject_trace(&mut request, caller).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[tokio::test]
+    async fn task_scope_supplies_client_calls_without_process_global_state() {
+        let caller = RpcTraceContext::start(identity(), TraceFlags::NotSampled).unwrap();
+        let request = scope_trace(caller, async { request_with_current_trace(()) })
+            .await
+            .unwrap();
+        assert_eq!(
+            request
+                .metadata()
+                .get(TRACEPARENT_METADATA)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            caller.outbound_parent().to_string()
+        );
+        assert_eq!(
+            current_trace().unwrap_err().code(),
             tonic::Code::InvalidArgument
         );
     }

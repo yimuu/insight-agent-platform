@@ -1833,6 +1833,7 @@ mod tests {
 
     fn command_audit(tenant_id: &ResourceId, base: u16, now: DateTime<Utc>) -> CommandAudit {
         CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_id.clone(),
             principal_id: id(ResourceKind::Principal, base),
             principal_kind: PrincipalKind::TenantAdmin,
@@ -2740,6 +2741,7 @@ mod tests {
             ArtifactJobPayload::BlobCleanup { cleanup } => cleanup.discarded_blob_id.clone(),
         };
         JobProjection {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: id(ResourceKind::Tenant, 120),
             job_id: id(ResourceKind::Job, 121),
             work_class: WorkClass::Artifact,

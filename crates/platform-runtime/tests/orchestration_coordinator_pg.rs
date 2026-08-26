@@ -472,6 +472,7 @@ async fn insert_ready_artifact(
 
 fn audit(suffix: &str) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: id(TENANT_ID),
         principal_id: id(PRINCIPAL_ID),
         principal_kind: PrincipalKind::AgentRunner,
@@ -1229,6 +1230,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         task_transaction
             .resolve_orchestration_task(ResolveOrchestrationTask {
                 audit: CommandAudit {
+                    trace: insight_platform_contracts::TraceIdentityV1::generate(),
                     tenant_id: id(TENANT_ID),
                     principal_id: id(PRINCIPAL_ID),
                     principal_kind: PrincipalKind::AgentRunner,
@@ -2790,6 +2792,7 @@ fn fresh_digest() -> Sha256Digest {
 
 fn fresh_audit(tenant_id: &ResourceId, principal_id: &ResourceId) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         principal_id: principal_id.clone(),
         principal_kind: PrincipalKind::AgentRunner,

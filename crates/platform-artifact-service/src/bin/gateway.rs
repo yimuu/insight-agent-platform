@@ -994,6 +994,7 @@ fn audit(
     deadline: DateTime<Utc>,
 ) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: principal.tenant_id,
         principal_id: principal.principal_id,
         principal_kind: principal.principal_kind,

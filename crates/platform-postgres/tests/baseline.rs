@@ -96,6 +96,7 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
             work_class: "interaction".to_owned(),
             owner_kind: "interaction".to_owned(),
             owner_id: JOB_OWNER_ID.to_owned(),
+            trace_id: insight_platform_contracts::TraceIdentityV1::generate().trace_id,
             invocation_id: None,
             run_id: None,
             node_id: None,

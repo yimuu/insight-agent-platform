@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:f85664b3e406ccaac14ff47580cc9b7986bf99cc77cb036a701dc95092091de0",
+  "contract_digest": "sha256:c4f9210ed01425ea5cb9ede461be27d7d479b7dcbe823209628ce1bb18cc92c1",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -207,10 +207,10 @@
       "sha256": "7c45aabea2dbd1310188b674940c80ddedceccd402f45633aa0316d5f2f06a4d"
     },
     {
-      "bytes": 1912,
+      "bytes": 1964,
       "media_type": "application/json",
       "path": "contracts/platform-v1/examples/foundation-scalars.json",
-      "sha256": "f9f3fe27562d11f13fae15b18f79040066c164dd0f0be5d3f5000716eb9ce68d"
+      "sha256": "12e5cefcbff84e47336a93b79fa92bcde0acc3dbaa5d685ce34095f594bc70c1"
     },
     {
       "bytes": 296,

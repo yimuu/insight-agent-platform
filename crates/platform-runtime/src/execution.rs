@@ -728,6 +728,7 @@ mod tests {
         let now = Utc::now();
         ClaimedOrchestrationJob {
             job: JobRecord {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: id(ResourceKind::Tenant, "6601").to_string(),
                 job_id: id(ResourceKind::Job, "6602").to_string(),
                 work_class: WorkClass::Orchestration.as_str().to_owned(),

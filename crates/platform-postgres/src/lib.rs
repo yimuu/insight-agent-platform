@@ -80,6 +80,7 @@ pub const EXPECTED_FUNCTIONS: &[&str] = &[
     "is_bounded_object(jsonb, integer)",
     "is_platform_id(text)",
     "is_sha256(text)",
+    "is_trace_id(text)",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -810,6 +810,7 @@ pub fn decide_accept(
 ) -> Result<AcceptedSandboxExecution, SandboxContractError> {
     command.validate_at(database_now, limits)?;
     let job = JobProjection {
+        trace: command.audit.trace,
         tenant_id: command.request.tenant_id.clone(),
         job_id: command.request.job_id.clone(),
         work_class: WorkClass::Sandbox,

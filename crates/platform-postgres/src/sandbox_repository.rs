@@ -3132,10 +3132,11 @@ impl SandboxGatewayAuthority for PgRepository {
                 run_id, node_id,
                 state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
                 deadline, priority, request_digest, quota_reservation_id,
-                payload_schema_version, payload, payload_digest, created_at, updated_at
+                payload_schema_version, payload, payload_digest, created_at, updated_at,
+                trace_id
             ) VALUES ($1, $2, 'sandbox', 'job', $3, $4, $5, $6,
                       'ready', 1, 0, 1, 0, $7, $8, 0, $9, $10,
-                      $11, $12, $13, $7, $7)
+                      $11, $12, $13, $7, $7, $14)
             "#,
         )
         .bind(command.request.tenant_id.to_string())
@@ -3151,6 +3152,7 @@ impl SandboxGatewayAuthority for PgRepository {
         .bind(payload.schema_version)
         .bind(&payload.value)
         .bind(&payload.digest)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         append_command_event(

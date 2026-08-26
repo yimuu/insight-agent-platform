@@ -1910,6 +1910,7 @@ mod tests {
         };
         current.validate().unwrap();
         let audit = CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant,
             principal_id,
             principal_kind: PrincipalKind::AgentRunner,

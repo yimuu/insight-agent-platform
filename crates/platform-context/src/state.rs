@@ -587,6 +587,7 @@ pub fn decide_prepare_context_dispatch(
     query.payload.current_job_id = Some(command.job_id.clone());
     query.updated_at = database_now;
     let job = JobProjection {
+        trace: command.audit.trace,
         tenant_id: current.tenant_id.clone(),
         job_id: command.job_id.clone(),
         work_class: WorkClass::Context,
@@ -1354,6 +1355,7 @@ mod tests {
 
     fn audit(tenant_id: &ResourceId, principal_id: &ResourceId, base: u16) -> CommandAudit {
         CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_id.clone(),
             principal_id: principal_id.clone(),
             principal_kind: PrincipalKind::AgentRunner,

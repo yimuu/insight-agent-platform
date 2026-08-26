@@ -801,6 +801,7 @@ pub fn decide_prepare_model_dispatch(
         return Err(ModelTurnError::FirstWinnerLost);
     }
     let job = JobProjection {
+        trace: command.audit.trace,
         tenant_id: current.tenant_id.clone(),
         job_id: command.job_id.clone(),
         work_class: WorkClass::Model,

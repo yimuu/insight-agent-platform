@@ -14,6 +14,14 @@ STRICT
 PARALLEL SAFE
 RETURN candidate ~ '^sha256:[0-9a-f]{64}$';
 
+CREATE FUNCTION insight_platform.is_trace_id(candidate text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+RETURN candidate ~ '^[0-9a-f]{32}$' AND candidate <> '00000000000000000000000000000000';
+
 CREATE FUNCTION insight_platform.is_bounded_object(candidate jsonb, maximum_bytes integer)
 RETURNS boolean
 LANGUAGE sql
@@ -292,6 +300,7 @@ CREATE TABLE insight_platform.runs (
     parent_node_id text,
     agent_deployment_id text NOT NULL,
     principal_id text NOT NULL,
+    trace_id text NOT NULL,
     state text NOT NULL,
     version bigint NOT NULL DEFAULT 1,
     bindings_schema_version integer NOT NULL,
@@ -322,6 +331,7 @@ CREATE TABLE insight_platform.runs (
         REFERENCES insight_platform.deployments (tenant_id, deployment_id),
     CONSTRAINT runs_principal_fk FOREIGN KEY (principal_id)
         REFERENCES insight_platform.principals (principal_id),
+    CONSTRAINT runs_trace_id_ck CHECK (insight_platform.is_trace_id(trace_id)),
     CONSTRAINT runs_id_ck CHECK (insight_platform.is_platform_id(run_id)),
     CONSTRAINT runs_relation_id_ck CHECK (
         insight_platform.is_platform_id(root_run_id)
@@ -775,6 +785,7 @@ CREATE TABLE insight_platform.jobs (
     work_class text NOT NULL,
     owner_kind text NOT NULL,
     owner_id text NOT NULL,
+    trace_id text NOT NULL,
     invocation_id text,
     run_id text,
     node_id text,
@@ -818,6 +829,7 @@ CREATE TABLE insight_platform.jobs (
     CONSTRAINT jobs_work_class_ck CHECK (work_class ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT jobs_owner_kind_ck CHECK (owner_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT jobs_owner_id_ck CHECK (insight_platform.is_platform_id(owner_id)),
+    CONSTRAINT jobs_trace_id_ck CHECK (insight_platform.is_trace_id(trace_id)),
     CONSTRAINT jobs_state_ck CHECK (state ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT jobs_version_ck CHECK (version > 0),
     CONSTRAINT jobs_attempt_ck CHECK (

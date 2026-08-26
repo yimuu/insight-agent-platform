@@ -2264,6 +2264,7 @@ mod deferred_managed_mcp_tests {
         let worker = id(ResourceKind::WorkerProcessGeneration, 75);
         let command = AcceptManagedMcpSandboxSession {
             audit: McpSubscriptionWorkerAudit {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: request.identity.tenant_id.clone(),
                 worker_process_generation_id: worker.clone(),
                 receipt_id: id(ResourceKind::Receipt, 76),
@@ -2334,6 +2335,7 @@ mod deferred_managed_mcp_tests {
 
 fn audit(request: &SandboxExecutionRequest, now: DateTime<Utc>) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: request.tenant_id.clone(),
         principal_id: id(ResourceKind::Principal, 30),
         principal_kind: PrincipalKind::ServiceIdentity,

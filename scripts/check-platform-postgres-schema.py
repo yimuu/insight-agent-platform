@@ -42,6 +42,7 @@ EXPECTED_FUNCTIONS = [
     "is_bounded_object(jsonb, integer)",
     "is_platform_id(text)",
     "is_sha256(text)",
+    "is_trace_id(text)",
 ]
 REJECTED_PHYSICAL_NAMES = {
     "execution_attempts",
@@ -255,7 +256,12 @@ def main():
                 )
             )
         )
-        if function_names != ["is_bounded_object", "is_platform_id", "is_sha256"]:
+        if function_names != [
+            "is_bounded_object",
+            "is_platform_id",
+            "is_sha256",
+            "is_trace_id",
+        ]:
             errors.append("SQL helper function set differs from the contract")
 
         for table, body in table_bodies.items():

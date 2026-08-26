@@ -3329,11 +3329,13 @@ async fn insert_capability_job(
             tenant_id, job_id, work_class, owner_kind, owner_id, invocation_id,
             run_id, node_id, state, version, attempt_no, attempt_limit, lease_epoch,
             scheduled_at, deadline, priority, request_digest, effect_key_digest,
-            payload_schema_version, payload, payload_digest, created_at, updated_at
+            payload_schema_version, payload, payload_digest, created_at, updated_at,
+            trace_id
         ) VALUES (
             $1, $2, $3, 'capability_invocation', $4, $4,
             $5, $6, 'ready', 1, 0, $7, 0,
-            $8, $9, 0, $10, $11, $12, $13, $14, $15, $15
+            $8, $9, 0, $10, $11, $12, $13, $14, $15, $15,
+            (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $5)
         )
         "#,
     )

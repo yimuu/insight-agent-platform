@@ -615,6 +615,7 @@ fn audit(
     request: char,
 ) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         principal_id: principal_id.clone(),
         principal_kind,
@@ -4377,11 +4378,12 @@ async fn run_plan_capability_owner(pool: &PgPool, repository: &PgRepository, fix
             state, version, attempt_no, attempt_limit, lease_epoch, worker_id,
             lease_token_digest, lease_expires_at, heartbeat_at, scheduled_at, deadline,
             request_digest, quota_reservation_id, payload_schema_version, payload,
-            payload_digest, started_at, created_at, updated_at
+            payload_digest, started_at, created_at, updated_at, trace_id
         ) VALUES (
             $1, $2, 'orchestration', 'node_execution', $3, $4, $3,
             'running', 2, 1, 3, 1, $5, $6, $7, $8, $8, $9,
-            $10, $11, $12, $13, $14, $8, $8, $8
+            $10, $11, $12, $13, $14, $8, $8, $8,
+            '0123456789abcdef0123456789abcdef'
         )
         "#,
     )
@@ -5302,10 +5304,11 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             tenant_id, run_id, root_run_id, agent_deployment_id, principal_id,
             state, version, bindings_schema_version, bindings, bindings_digest,
             current_schema_version, current_payload, current_payload_digest,
-            deadline, started_at, created_at, updated_at
+            deadline, started_at, created_at, updated_at, trace_id
         ) VALUES (
             $1, $2, $2, $3, $4, 'running', 1, $5, $6, $7,
-            $8, $9, $10, $11, $12, $12, $12
+            $8, $9, $10, $11, $12, $12, $12,
+            '0123456789abcdef0123456789abcdef'
         )
         "#,
     )

@@ -351,6 +351,7 @@ mod tests {
             work_class: "artifact".to_owned(),
             owner_kind: "artifact".to_owned(),
             owner_id: id(ResourceKind::Artifact, 3),
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             invocation_id: None,
             run_id: None,
             node_id: None,

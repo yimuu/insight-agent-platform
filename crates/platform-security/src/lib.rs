@@ -523,6 +523,7 @@ mod tests {
 
     fn audit() -> CommandAudit {
         CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: "ten_0198f1c3-8f49-7c3e-b1f3-773c28367b80".parse().unwrap(),
             principal_id: "prn_0198f1c3-8f49-7c3e-b1f3-773c28367b81".parse().unwrap(),
             principal_kind: PrincipalKind::TenantAdmin,

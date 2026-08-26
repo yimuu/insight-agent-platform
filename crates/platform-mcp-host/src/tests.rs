@@ -472,6 +472,7 @@ fn oauth_callback_is_state_bound_scope_reducing_and_secret_free() {
     .unwrap();
     let begin = BeginMcpOAuthAuthorization {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_id.clone(),
             principal_id: principal_id.clone(),
             principal_kind: PrincipalKind::AgentRunner,
@@ -2062,6 +2063,7 @@ fn subscription_audit(
     now: DateTime<Utc>,
 ) -> McpSubscriptionWorkerAudit {
     McpSubscriptionWorkerAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         worker_process_generation_id: worker_id.clone(),
         receipt_id: id(ResourceKind::Receipt, base),

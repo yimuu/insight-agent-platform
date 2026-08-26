@@ -50,8 +50,11 @@ CONTRACT_FILES = [
     "contracts/platform-v1/schemas/nominal/failure.schema.json",
     "contracts/platform-v1/schemas/nominal/opaque-list-cursor.schema.json",
     "contracts/platform-v1/schemas/nominal/opaque-run-event-cursor.schema.json",
+    "contracts/platform-v1/schemas/nominal/trace-id.schema.json",
+    "contracts/platform-v1/schemas/nominal/trace-identity-v1.schema.json",
     "contracts/platform-v1/schemas/nominal/utc-timestamp.schema.json",
     "contracts/platform-v1/schemas/nominal/uuid-v7-id.schema.json",
+    "contracts/platform-v1/schemas/nominal/w3c-traceparent.schema.json",
     "contracts/platform-v1/limits/hard-limit-profile.schema.json",
     "contracts/platform-v1/limits/q1-50.json",
     "contracts/platform-v1/fixtures/manifest.json",
@@ -747,8 +750,11 @@ def check_nominal_schemas(errors):
         "Failure",
         "OpaqueListCursor",
         "OpaqueRunEventCursor",
+        "TraceId",
+        "TraceIdentityV1",
         "UtcTimestamp",
         "UuidV7Id",
+        "W3cTraceParent",
     ]
     schemas = registry.get("schemas")
     if not isinstance(schemas, list) or [item.get("name") for item in schemas] != expected_names:

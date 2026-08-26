@@ -677,6 +677,7 @@ mod tests {
 
     fn audit(now: DateTime<Utc>) -> CommandAudit {
         CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: id("ten_0198f1c3-8f49-7c3e-b1f3-773c28367ba2"),
             principal_id: id("prn_0198f1c3-8f49-7c3e-b1f3-773c28367ba3"),
             principal_kind: PrincipalKind::AgentRunner,

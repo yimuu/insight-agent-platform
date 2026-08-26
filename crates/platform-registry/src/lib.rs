@@ -433,6 +433,7 @@ mod tests {
     #[test]
     fn command_audit_rejects_interchangeable_ids() {
         let audit = CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: id("ten_0198f1c3-8f49-7c3e-b1f3-773c28367b90"),
             principal_id: id("prn_0198f1c3-8f49-7c3e-b1f3-773c28367b91"),
             principal_kind: insight_platform_contracts::PrincipalKind::AgentRunner,

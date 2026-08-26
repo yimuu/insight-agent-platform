@@ -949,6 +949,7 @@ mod tests {
             let now = Utc::now();
             let slot = &command.slots[0];
             let job = JobRecord {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: tenant_id.to_string(),
                 job_id: job_id.to_string(),
                 work_class: WorkClass::Orchestration.as_str().to_owned(),

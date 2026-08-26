@@ -974,6 +974,7 @@ pub fn decide_prepare_dispatch(
     let binding = CapabilityJobBinding::from_invocation(current)?;
     let job_payload = CapabilityJobPayload::initial(binding);
     let job = JobProjection {
+        trace: command.audit.trace,
         tenant_id: current.tenant_id.clone(),
         job_id: command.job_id.clone(),
         work_class: capability_work_class(current.payload.admission.backend_kind)?,
@@ -2724,6 +2725,7 @@ mod tests {
 
     fn audit(invocation: &CapabilityInvocationRecord, now: DateTime<Utc>) -> CommandAudit {
         CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: invocation.tenant_id.clone(),
             principal_id: invocation.payload.admission.principal.principal_id.clone(),
             principal_kind: PrincipalKind::AgentRunner,
@@ -2790,6 +2792,7 @@ mod tests {
 
         let sandbox_owner = ResourceId::from_uuid_v7(ResourceKind::Job, job_id.uuid()).unwrap();
         let terminal_job = JobProjection {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: deferred.tenant_id.clone(),
             job_id: job_id.clone(),
             work_class: WorkClass::Sandbox,
@@ -2861,6 +2864,7 @@ mod tests {
         .unwrap();
         let first_owner = ResourceId::from_uuid_v7(ResourceKind::Job, first_job_id.uuid()).unwrap();
         let first_terminal = JobProjection {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: deferred.tenant_id.clone(),
             job_id: first_job_id.clone(),
             work_class: WorkClass::Sandbox,
@@ -2962,6 +2966,7 @@ mod tests {
         .unwrap();
         let sandbox_owner = ResourceId::from_uuid_v7(ResourceKind::Job, job_id.uuid()).unwrap();
         let active_job = JobProjection {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: deferred.tenant_id.clone(),
             job_id,
             work_class: WorkClass::Sandbox,
@@ -3031,6 +3036,7 @@ mod tests {
         .unwrap();
         let sandbox_owner = ResourceId::from_uuid_v7(ResourceKind::Job, job_id.uuid()).unwrap();
         let active_job = JobProjection {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: deferred.tenant_id.clone(),
             job_id,
             work_class: WorkClass::Sandbox,
@@ -3088,6 +3094,7 @@ mod tests {
         )
         .unwrap();
         let terminal = JobProjection {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: deferred.tenant_id.clone(),
             job_id: first_job_id.clone(),
             work_class: WorkClass::Sandbox,

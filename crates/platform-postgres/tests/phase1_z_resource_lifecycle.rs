@@ -94,6 +94,7 @@ fn audit(
     request: char,
 ) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: id(tenant_id),
         principal_id: id(principal_id),
         principal_kind: PrincipalKind::TenantAdmin,

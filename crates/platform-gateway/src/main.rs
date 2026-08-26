@@ -984,6 +984,7 @@ fn new_task_id(kind: ResourceKind) -> Result<ResourceId, TaskApplicationError> {
 
 fn task_command_audit(intent: &ResolveTaskIntent) -> Result<CommandAudit, TaskApplicationError> {
     Ok(CommandAudit {
+        trace: intent.principal.trace,
         tenant_id: intent.principal.tenant_id.clone(),
         principal_id: intent.principal.principal_id.clone(),
         principal_kind: intent.principal.principal_kind,
@@ -1148,6 +1149,7 @@ impl RunApplication for PgRuns {
                 .map_err(|_| RunApplicationError::Internal)
         };
         let audit = CommandAudit {
+            trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id,
             principal_id: intent.principal.principal_id,
             principal_kind: intent.principal.principal_kind,
@@ -1478,6 +1480,7 @@ fn run_control_audit(intent: &ControlRunIntent) -> Result<CommandAudit, RunAppli
             .map_err(|_| RunApplicationError::Internal)
     };
     Ok(CommandAudit {
+        trace: intent.principal.trace,
         tenant_id: intent.principal.tenant_id.clone(),
         principal_id: intent.principal.principal_id.clone(),
         principal_kind: intent.principal.principal_kind,
@@ -1560,6 +1563,7 @@ impl ResourceApplication for PgResources {
         }
         let candidate_resource_id = new_id(intent.resource_kind.id_kind())?;
         let audit = CommandAudit {
+            trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id,
             principal_id: intent.principal.principal_id,
             principal_kind: intent.principal.principal_kind,
@@ -1643,6 +1647,7 @@ impl ResourceApplication for PgResources {
         let operation_id = new_id(ResourceKind::McpOperation)?;
         let job_id = new_id(ResourceKind::Job)?;
         let audit = CommandAudit {
+            trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id.clone(),
             principal_id: intent.principal.principal_id.clone(),
             principal_kind: intent.principal.principal_kind,
@@ -1712,6 +1717,7 @@ impl ResourceApplication for PgResources {
             None => new_id(ResourceKind::ContextDataset)?,
         };
         let audit = CommandAudit {
+            trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id,
             principal_id: intent.principal.principal_id,
             principal_kind: intent.principal.principal_kind,
@@ -1774,6 +1780,7 @@ impl ResourceApplication for PgResources {
         let expected_resource_version = i64::try_from(intent.expected_resource_version)
             .map_err(|_| ResourceApplicationError::Invalid)?;
         let audit = CommandAudit {
+            trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id,
             principal_id: intent.principal.principal_id,
             principal_kind: intent.principal.principal_kind,
@@ -1820,6 +1827,7 @@ impl ResourceApplication for PgResources {
         let expected_resource_version = i64::try_from(intent.expected_resource_version)
             .map_err(|_| ResourceApplicationError::Invalid)?;
         let audit = CommandAudit {
+            trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id,
             principal_id: intent.principal.principal_id,
             principal_kind: intent.principal.principal_kind,
@@ -1958,6 +1966,7 @@ impl ResourceApplication for PgResources {
         let expected_resource_version = i64::try_from(intent.expected_resource_version)
             .map_err(|_| ResourceApplicationError::Invalid)?;
         let audit = CommandAudit {
+            trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id,
             principal_id: intent.principal.principal_id,
             principal_kind: intent.principal.principal_kind,
@@ -2104,6 +2113,7 @@ impl ResourceApplication for PgResources {
         let expected_resource_version = i64::try_from(intent.expected_resource_version)
             .map_err(|_| ResourceApplicationError::Invalid)?;
         let audit = CommandAudit {
+            trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id,
             principal_id: intent.principal.principal_id,
             principal_kind: intent.principal.principal_kind,
@@ -2246,6 +2256,7 @@ fn resource_command_audit(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<CommandAudit, ResourceApplicationError> {
     Ok(CommandAudit {
+        trace: intent.principal.trace,
         tenant_id: intent.principal.tenant_id.clone(),
         principal_id: intent.principal.principal_id.clone(),
         principal_kind: intent.principal.principal_kind,

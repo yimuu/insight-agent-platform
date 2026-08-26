@@ -1,4 +1,4 @@
-use crate::{PrincipalKind, ResourceId, ResourceKind, Sha256Digest};
+use crate::{PrincipalKind, ResourceId, ResourceKind, Sha256Digest, TraceIdentityV1};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
@@ -6,6 +6,8 @@ use std::{error::Error, fmt};
 /// Immutable audit and idempotency identity shared by tenant-scoped commands.
 #[derive(Debug, Clone)]
 pub struct CommandAudit {
+    /// Correlation only. Excluded from request/idempotency/effect digests and CAS decisions.
+    pub trace: TraceIdentityV1,
     pub tenant_id: ResourceId,
     pub principal_id: ResourceId,
     /// Exact tenant binding selected by authentication; tenant commands never search across roles.
@@ -27,7 +29,8 @@ impl CommandAudit {
             (&self.event_id, ResourceKind::Event),
             (&self.outbox_id, ResourceKind::OutboxEvent),
         ];
-        if kinds.iter().any(|(id, expected)| id.kind() != *expected)
+        if self.trace.validate().is_err()
+            || kinds.iter().any(|(id, expected)| id.kind() != *expected)
             || self.principal_kind == PrincipalKind::InstallationOperator
             || self.receipt_expires_at <= now
         {
@@ -165,6 +168,7 @@ mod tests {
     #[test]
     fn audit_ids_are_not_interchangeable() {
         let audit = CommandAudit {
+            trace: TraceIdentityV1::generate(),
             tenant_id: id("ten_0198f1c3-8f49-7c3e-b1f3-773c28367b90"),
             principal_id: id("prn_0198f1c3-8f49-7c3e-b1f3-773c28367b91"),
             principal_kind: PrincipalKind::AgentRunner,

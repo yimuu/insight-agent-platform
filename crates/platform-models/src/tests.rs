@@ -108,6 +108,7 @@ fn audit(
     now: chrono::DateTime<Utc>,
 ) -> CommandAudit {
     CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         principal_id: principal_id.clone(),
         principal_kind: PrincipalKind::AgentRunner,

@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, CommandAudit, ExactSecretBindingRef, JsonLimits,
     PrincipalKind, ResourceId, SecretBindingPayload, SecretBindingState, SecretPurpose,
-    Sha256Digest,
+    Sha256Digest, TraceIdentityV1,
 };
 use insight_platform_security::{
     EncryptedOpaqueReference, PreparedSecretBindingAuthority,
@@ -190,6 +190,7 @@ impl TryFrom<SecretBindingResolutionWire> for SecretBindingResolutionRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommandAuditWire {
+    trace: TraceIdentityV1,
     tenant_id: ResourceId,
     principal_id: ResourceId,
     principal_kind: PrincipalKind,
@@ -204,6 +205,7 @@ struct CommandAuditWire {
 impl From<CommandAudit> for CommandAuditWire {
     fn from(value: CommandAudit) -> Self {
         Self {
+            trace: value.trace,
             tenant_id: value.tenant_id,
             principal_id: value.principal_id,
             principal_kind: value.principal_kind,
@@ -220,6 +222,7 @@ impl From<CommandAudit> for CommandAuditWire {
 impl From<CommandAuditWire> for CommandAudit {
     fn from(value: CommandAuditWire) -> Self {
         Self {
+            trace: value.trace,
             tenant_id: value.tenant_id,
             principal_id: value.principal_id,
             principal_kind: value.principal_kind,
@@ -677,6 +680,7 @@ mod tests {
         let preparation_digest = digest('c');
         let mut command = RegisterPreparedSecretBinding {
             audit: CommandAudit {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id,
                 principal_id: id(ResourceKind::Principal),
                 principal_kind: PrincipalKind::ServiceIdentity,

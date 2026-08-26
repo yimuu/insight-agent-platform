@@ -3139,6 +3139,7 @@ pub fn decide_accept_managed_mcp_sandbox_session(
         .schedule_managed_sandbox_session(current.payload.session.version, link, database_now)
         .map_err(|_| SandboxContractError::InvalidExecutionRequest)?;
     let physical_job = JobProjection {
+        trace: command.audit.trace,
         tenant_id: identity.tenant_id.clone(),
         job_id: identity.physical_job_id.clone(),
         work_class: WorkClass::Sandbox,

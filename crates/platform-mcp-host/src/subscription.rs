@@ -5,7 +5,7 @@ use super::{
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
     CommandAudit, ExactDeploymentRef, JobState, McpAuthorizationPrincipalKind, McpSessionState,
-    McpTransportKind, PrincipalKind, ResourceId, ResourceKind, Sha256Digest,
+    McpTransportKind, PrincipalKind, ResourceId, ResourceKind, Sha256Digest, TraceIdentityV1,
 };
 use insight_platform_jobs::JobFence;
 use serde::{Deserialize, Serialize};
@@ -1042,6 +1042,7 @@ impl CreateMcpResourceSubscription {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpSubscriptionWorkerAudit {
+    pub trace: TraceIdentityV1,
     pub tenant_id: ResourceId,
     pub worker_process_generation_id: ResourceId,
     pub receipt_id: ResourceId,
@@ -1054,7 +1055,8 @@ pub struct McpSubscriptionWorkerAudit {
 
 impl McpSubscriptionWorkerAudit {
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), McpHostError> {
-        if self.tenant_id.kind() != ResourceKind::Tenant
+        if self.trace.validate().is_err()
+            || self.tenant_id.kind() != ResourceKind::Tenant
             || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.receipt_id.kind() != ResourceKind::Receipt
             || self.event_id.kind() != ResourceKind::Event
@@ -1934,6 +1936,7 @@ mod tests {
         let (payload, _) = payload_fixture(now);
         let mut command = SaveMcpSubscriptionSession {
             audit: McpSubscriptionWorkerAudit {
+                trace: TraceIdentityV1::generate(),
                 tenant_id: payload.binding.tenant_id.clone(),
                 worker_process_generation_id: id("wrk", "ab"),
                 receipt_id: id("rcp", "ac"),

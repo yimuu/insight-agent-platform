@@ -309,6 +309,7 @@ mod tests {
             lease_token_digest: token.clone(),
         };
         let job = JobRecord {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id,
             job_id,
             work_class: WorkClass::Orchestration.as_str().to_owned(),

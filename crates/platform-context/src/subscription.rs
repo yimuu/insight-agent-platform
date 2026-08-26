@@ -1,7 +1,9 @@
 use crate::digest_without_field;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use insight_platform_contracts::{ExactDeploymentRef, ResourceId, ResourceKind, Sha256Digest};
+use insight_platform_contracts::{
+    ExactDeploymentRef, ResourceId, ResourceKind, Sha256Digest, TraceIdentityV1,
+};
 use insight_platform_jobs::JobFence;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
@@ -117,12 +119,14 @@ pub struct ContextSubscriptionAdmissionAudit {
     pub schema_version: u32,
     pub request_id: ResourceId,
     pub correlation_digest: Sha256Digest,
+    pub trace: TraceIdentityV1,
 }
 
 impl ContextSubscriptionAdmissionAudit {
     pub fn validate(&self) -> Result<(), ContextSubscriptionAdmissionError> {
         if self.schema_version != CONTEXT_SUBSCRIPTION_ADMISSION_SCHEMA_VERSION
             || self.request_id.kind() != ResourceKind::ServerRequest
+            || self.trace.validate().is_err()
         {
             return Err(ContextSubscriptionAdmissionError::InvalidAudit);
         }

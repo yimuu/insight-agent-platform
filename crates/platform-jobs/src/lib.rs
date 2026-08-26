@@ -5,7 +5,8 @@
 
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
-    is_execution_work_owner_pair, JobState, ResourceId, ResourceKind, Sha256Digest, WorkClass,
+    is_execution_work_owner_pair, JobState, ResourceId, ResourceKind, Sha256Digest,
+    TraceIdentityV1, WorkClass,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, error::Error, fmt};
@@ -147,6 +148,7 @@ impl JobLease {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobProjection {
+    pub trace: TraceIdentityV1,
     pub tenant_id: ResourceId,
     pub job_id: ResourceId,
     pub work_class: WorkClass,
@@ -166,6 +168,9 @@ pub struct JobProjection {
 impl JobProjection {
     pub fn validate(&self) -> Result<(), JobError> {
         self.owner.validate_for(self.work_class)?;
+        self.trace
+            .validate()
+            .map_err(|_| JobError::InvalidProjection)?;
         if self.tenant_id.kind() != ResourceKind::Tenant
             || self.job_id.kind() != ResourceKind::Job
             || self.version == 0
@@ -810,6 +815,7 @@ mod tests {
 
     fn ready(now: DateTime<Utc>) -> JobProjection {
         JobProjection {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: id("ten", "6001"),
             job_id: id("job", "6001"),
             work_class: WorkClass::Orchestration,

@@ -659,6 +659,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
     let network_policy_revision = request.profile.network_policy.clone();
     let artifact_io_policy_revision = request.profile.artifact_io_policy.clone();
     let audit = CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         principal_id: principal_id.clone(),
         principal_kind: PrincipalKind::ServiceIdentity,
@@ -1096,9 +1097,9 @@ async fn seed(pool: &PgPool, repository: &PgRepository, fixture: &Fixture) {
             tenant_id, run_id, root_run_id, agent_deployment_id, principal_id,
             state, version, bindings_schema_version, bindings, bindings_digest,
             current_schema_version, current_payload, current_payload_digest,
-            deadline, started_at, created_at, updated_at
+            deadline, started_at, created_at, updated_at, trace_id
         ) VALUES ($1, $2, $2, $3, $4, 'running', 1, $5, $6, $7, $5, $6, $7,
-                  $8, $9, $9, $9)
+                  $8, $9, $9, $9, '0123456789abcdef0123456789abcdef')
         "#,
     )
     .bind(fixture.tenant_id.to_string())
@@ -2396,6 +2397,7 @@ async fn sandbox_fixture() {
     .await;
     let prestart_command = AcceptSandboxExecution {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: fixture.tenant_id.clone(),
             principal_id: fixture.principal_id.clone(),
             principal_kind: PrincipalKind::ServiceIdentity,
@@ -2424,6 +2426,7 @@ async fn sandbox_fixture() {
     let controlled = prestart_control_transaction
         .control_capability_invocation(ControlCapabilityInvocation {
             audit: CommandAudit {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: fixture.tenant_id.clone(),
                 principal_id: fixture.principal_id.clone(),
                 principal_kind: PrincipalKind::ServiceIdentity,
@@ -2540,6 +2543,7 @@ async fn sandbox_fixture() {
     .await;
     let recovery_admission = AcceptSandboxExecution {
         audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: fixture.tenant_id.clone(),
             principal_id: fixture.principal_id.clone(),
             principal_kind: PrincipalKind::ServiceIdentity,

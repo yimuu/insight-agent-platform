@@ -11,4 +11,5 @@ path = "src/lib.rs"
 
 [dependencies]
 insight-platform-contracts.workspace = true
+tokio.workspace = true
 tonic.workspace = true

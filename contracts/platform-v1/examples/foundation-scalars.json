@@ -48,6 +48,7 @@
     "code": "invalid_request",
     "detail": "One or more fields are invalid.",
     "request_id": "req_0198f1c5-0787-75e1-a9e8-d95ca0f35201",
+    "trace_id": "0123456789abcdef0123456789abcdef",
     "retryable": false,
     "retry_after_ms": null,
     "field_errors": [
