@@ -760,6 +760,11 @@
 > 2026-08-27 implementation evidence：r338修复r329 typed `job_kind`迁移遗漏的五个Runtime all-target fixture；所有人工构造的Orchestration
 > `JobRecord`现显式使用closed `OrchestrationNode` kind，不再依赖缺省或只凭WorkClass猜测。Runtime unit 28/28、process fixture 5/5与strict Clippy
 > 通过；该批不新增行为或资格声明，仅恢复workspace all-target门禁的typed fixture完整性。
+>
+> 2026-08-27 implementation evidence：r339新增MCP discovery Artifact policy closure：owner transaction从TenantConfig exact Retention/
+> ArtifactIo Deployment解析immutable revisions、tenant staging quota account、scanner/rules digest、TTL/backoff与retention deadline，并把它们连同
+> Internal classification、fixed discovery media type及hard maximum bytes纳入admission canonical digest；resolver只返回该冻结closure。wrong schema/
+> digest/期限在Worker前fail closed。MCP Host与PostgreSQL all-target编译通过；waiting `ArtifactScan` Job row、quota reservation和stage仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

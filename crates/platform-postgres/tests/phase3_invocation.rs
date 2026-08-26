@@ -2688,6 +2688,28 @@ async fn seed_remote_mcp_facts(
                 id(ResourceKind::QuotaLedgerEntry, 0x995),
             )
             .unwrap(),
+        artifact_policy: insight_platform_mcp_host::McpDiscoveryArtifactPolicyClosure::build(
+            insight_platform_mcp_host::NewMcpDiscoveryArtifactPolicyClosure {
+                quota_account_id: id(ResourceKind::QuotaAccount, 0x996),
+                maximum_bytes: 1_048_576,
+                retention_policy_revision: ExactVersionRef::new(
+                    id(ResourceKind::PolicyRevision, 0x997),
+                    digest('7'),
+                )
+                .unwrap(),
+                artifact_io_policy_revision: ExactVersionRef::new(
+                    id(ResourceKind::PolicyRevision, 0x998),
+                    digest('8'),
+                )
+                .unwrap(),
+                scanner_contract_digest: digest('9'),
+                ruleset_digest: digest('a'),
+                evidence_ttl_milliseconds: 60_000,
+                retry_backoff_milliseconds: 1_000,
+                retain_until: now + Duration::hours(3),
+            },
+        )
+        .unwrap(),
         requested_at: now - Duration::seconds(3),
         deadline: now + Duration::hours(2),
     })

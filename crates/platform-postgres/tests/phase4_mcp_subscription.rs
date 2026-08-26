@@ -133,6 +133,30 @@ fn discovery_preallocation(
     .unwrap()
 }
 
+fn discovery_artifact_policy(
+    suffix: u16,
+    now: DateTime<Utc>,
+) -> insight_platform_mcp_host::McpDiscoveryArtifactPolicyClosure {
+    insight_platform_mcp_host::McpDiscoveryArtifactPolicyClosure::build(
+        insight_platform_mcp_host::NewMcpDiscoveryArtifactPolicyClosure {
+            quota_account_id: id(ResourceKind::QuotaAccount, suffix),
+            maximum_bytes: 1_048_576,
+            retention_policy_revision: exact(ResourceKind::PolicyRevision, suffix + 1, "retention"),
+            artifact_io_policy_revision: exact(
+                ResourceKind::PolicyRevision,
+                suffix + 2,
+                "artifact-io",
+            ),
+            scanner_contract_digest: named_digest("artifact-scanner-contract"),
+            ruleset_digest: named_digest("artifact-rules"),
+            evidence_ttl_milliseconds: 60_000,
+            retry_backoff_milliseconds: 1_000,
+            retain_until: now + Duration::hours(3),
+        },
+    )
+    .unwrap()
+}
+
 fn named_digest(name: &str) -> Sha256Digest {
     canonical_digest(&serde_json::json!({"fixture": name}))
         .unwrap()
@@ -1544,6 +1568,7 @@ async fn seed(
                 id(ResourceKind::QuotaLedgerEntry, 0x705),
             )
             .unwrap(),
+        artifact_policy: discovery_artifact_policy(0x710, now),
         requested_at: now - Duration::seconds(3),
         deadline: now + Duration::hours(2),
     })

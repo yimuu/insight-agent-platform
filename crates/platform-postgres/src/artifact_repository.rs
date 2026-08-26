@@ -391,6 +391,106 @@ pub struct PublicArtifactPrepareAuthority {
     pub quota_account_id: ResourceId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InternalArtifactAdmissionAuthority {
+    pub retention_policy_revision: ExactVersionRef,
+    pub retention_policy: ArtifactRetentionPolicy,
+    pub artifact_io_policy_revision: ExactVersionRef,
+    pub artifact_io_policy: SandboxArtifactIoPolicyDocument,
+    pub artifact_io_rules_digest: Sha256Digest,
+    pub quota_account_id: ResourceId,
+}
+
+pub(crate) async fn load_internal_artifact_admission_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+) -> Result<InternalArtifactAdmissionAuthority, RepositoryError> {
+    let tenant = sqlx::query(
+        r#"
+        SELECT state, config_schema_version, config, config_digest
+        FROM insight_platform.tenants
+        WHERE tenant_id = $1
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("tenant"))?;
+    if tenant.try_get::<String, _>("state")? != "active" {
+        return Err(RepositoryError::PermissionDenied);
+    }
+    let config_payload =
+        payload_from_row(&tenant, "config_schema_version", "config", "config_digest")?;
+    let config: TenantConfig = decode_typed_payload(&config_payload, "tenant config")?;
+    config
+        .validate()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let retention_policy_deployment =
+        config
+            .artifact_retention_policy
+            .ok_or(RepositoryError::NotFound(
+                "tenant Artifact retention policy",
+            ))?;
+    let artifact_io_policy_deployment = config
+        .artifact_io_policy
+        .ok_or(RepositoryError::NotFound("tenant Artifact I/O policy"))?;
+    let (retention_policy_revision, retention) = load_exact_active_policy_deployment(
+        transaction,
+        tenant_id,
+        &retention_policy_deployment,
+        PolicyKind::Retention,
+    )
+    .await?;
+    let (artifact_io_policy_revision, artifact_io) = load_exact_active_policy_deployment(
+        transaction,
+        tenant_id,
+        &artifact_io_policy_deployment,
+        PolicyKind::ArtifactIo,
+    )
+    .await?;
+    let retention_policy = retention.retention.ok_or_else(|| {
+        RepositoryError::CorruptRow(
+            "Retention policy revision has no Retention document".to_owned(),
+        )
+    })?;
+    let artifact_io_rules_digest = artifact_io.rules_digest;
+    let artifact_io_policy = artifact_io.sandbox_artifact_io.ok_or_else(|| {
+        RepositoryError::CorruptRow(
+            "Artifact I/O policy revision has no ArtifactIo document".to_owned(),
+        )
+    })?;
+    let quota_account_id: String = sqlx::query_scalar(
+        r#"
+        SELECT quota_account_id
+        FROM insight_platform.quota_accounts
+        WHERE tenant_id = $1 AND scope_kind = 'tenant' AND scope_id = $1
+          AND work_class = 'artifact' AND metric = 'artifact.staging_bytes'
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("tenant Artifact staging quota"))?;
+    let quota_account_id = quota_account_id.parse::<ResourceId>().map_err(|_| {
+        RepositoryError::CorruptRow("Artifact quota account ID is invalid".to_owned())
+    })?;
+    if quota_account_id.kind() != ResourceKind::QuotaAccount {
+        return Err(RepositoryError::CorruptRow(
+            "Artifact quota account has the wrong ID kind".to_owned(),
+        ));
+    }
+    Ok(InternalArtifactAdmissionAuthority {
+        retention_policy_revision,
+        retention_policy,
+        artifact_io_policy_revision,
+        artifact_io_policy,
+        artifact_io_rules_digest,
+        quota_account_id,
+    })
+}
+
 #[async_trait::async_trait]
 impl ArtifactObjectReadAuthority<GatewayArtifactReadRequest> for PgRepository {
     async fn authorize_object_read(

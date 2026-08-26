@@ -63,6 +63,21 @@ fn discovery_preallocation_for(
     .unwrap()
 }
 
+fn discovery_artifact_policy(suffix: u16, now: DateTime<Utc>) -> McpDiscoveryArtifactPolicyClosure {
+    McpDiscoveryArtifactPolicyClosure::build(NewMcpDiscoveryArtifactPolicyClosure {
+        quota_account_id: id(ResourceKind::QuotaAccount, suffix),
+        maximum_bytes: 1_048_576,
+        retention_policy_revision: exact(ResourceKind::PolicyRevision, suffix + 1, '7'),
+        artifact_io_policy_revision: exact(ResourceKind::PolicyRevision, suffix + 2, '8'),
+        scanner_contract_digest: sha('9'),
+        ruleset_digest: sha('a'),
+        evidence_ttl_milliseconds: 60_000,
+        retry_backoff_milliseconds: 1_000,
+        retain_until: now + ChronoDuration::hours(1),
+    })
+    .unwrap()
+}
+
 fn exact(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef {
     ExactVersionRef::new(id(kind, suffix), sha(character)).unwrap()
 }
@@ -1597,6 +1612,7 @@ fn discovery_authority_binds_operation_artifact_and_exact_admission() {
             fixture.contract.discovery.snapshot_id.clone(),
             50,
         ),
+        artifact_policy: discovery_artifact_policy(100, now),
         requested_at: now - ChronoDuration::seconds(2),
         deadline: now + ChronoDuration::minutes(10),
     })
@@ -1639,6 +1655,29 @@ fn discovery_preallocation_is_closed_and_digest_bound() {
     let mut tampered = preallocation;
     tampered.snapshot_id = id(ResourceKind::McpDiscoverySnapshot, 90);
     assert_eq!(tampered.validate(), Err(McpHostError::InvalidDiscovery));
+}
+
+#[test]
+fn discovery_artifact_policy_is_server_owned_and_digest_bound() {
+    let now = Utc::now();
+    let policy = discovery_artifact_policy(130, now);
+    assert!(policy.validate_at(now).is_ok());
+    assert_eq!(policy.classification, DataClassification::Internal);
+    assert_eq!(
+        policy.declared_media_type,
+        MCP_DISCOVERY_ARTIFACT_MEDIA_TYPE
+    );
+
+    let mut legacy = policy.clone();
+    legacy.schema_version = 0;
+    assert_eq!(legacy.validate_at(now), Err(McpHostError::InvalidDiscovery));
+
+    let mut tampered = policy;
+    tampered.maximum_bytes += 1;
+    assert_eq!(
+        tampered.validate_at(now),
+        Err(McpHostError::InvalidDiscovery)
+    );
 }
 
 #[test]
@@ -1884,6 +1923,7 @@ fn discovery_resolution_is_bound_to_the_exact_running_job_fence() {
         operation_version: 1,
         admission_digest: sha('8'),
         artifact_preallocation: discovery_preallocation(60),
+        artifact_policy: discovery_artifact_policy(110, now),
         attempt_limit: 3,
         request: McpDiscoveryRequest {
             schema_version: 1,
@@ -1956,6 +1996,7 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
         operation_version: 1,
         admission_digest: sha('8'),
         artifact_preallocation: artifact_preallocation.clone(),
+        artifact_policy: discovery_artifact_policy(120, now),
         attempt_limit: 3,
         request: McpDiscoveryRequest {
             schema_version: 1,

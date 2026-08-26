@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use insight_platform_contracts::{
-    ArtifactRef, CommandAudit, CommandOutcome, ExactDeploymentRef, ExactVersionRef, JobState,
-    McpDeploymentClosure, McpDiscoverySnapshot, McpExperimentalFeature, McpNegotiatedCapabilities,
-    McpProtocolPolicyDocument, McpServerExecutionContract, McpTransportKind, ResourceId,
-    ResourceKind, Sha256Digest,
+    ArtifactRef, CommandAudit, CommandOutcome, DataClassification, ExactDeploymentRef,
+    ExactVersionRef, JobState, McpDeploymentClosure, McpDiscoverySnapshot, McpExperimentalFeature,
+    McpNegotiatedCapabilities, McpProtocolPolicyDocument, McpServerExecutionContract,
+    McpTransportKind, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_jobs::JobFence;
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,7 @@ pub struct ResolvedMcpDiscoveryExecution {
     pub operation_version: u64,
     pub admission_digest: Sha256Digest,
     pub artifact_preallocation: McpDiscoveryArtifactPreallocation,
+    pub artifact_policy: McpDiscoveryArtifactPolicyClosure,
     pub attempt_limit: u32,
     pub contract: McpDiscoveryExecutionContract,
     pub request: McpDiscoveryRequest,
@@ -89,6 +90,7 @@ impl ResolvedMcpDiscoveryExecution {
             || self.attempt_limit == 0
             || self.request.physical_attempt > self.attempt_limit
             || self.artifact_preallocation.validate().is_err()
+            || self.artifact_policy.validate_at(now).is_err()
             || self.contract.validate_canonical_at(now).is_err()
             || self.request.validate_for(&self.contract, now).is_err()
             || self.request.operation_id != query.operation_id
@@ -701,6 +703,7 @@ pub struct NewMcpDiscoveryAdmission {
     pub authorization_context_digest: Sha256Digest,
     pub principal_id: ResourceId,
     pub artifact_preallocation: McpDiscoveryArtifactPreallocation,
+    pub artifact_policy: McpDiscoveryArtifactPolicyClosure,
     pub requested_at: DateTime<Utc>,
     pub deadline: DateTime<Utc>,
 }
@@ -1007,6 +1010,7 @@ pub struct McpDiscoveryAdmission {
     pub authorization_context_digest: Sha256Digest,
     pub principal_id: ResourceId,
     pub artifact_preallocation: McpDiscoveryArtifactPreallocation,
+    pub artifact_policy: McpDiscoveryArtifactPolicyClosure,
     pub requested_at: DateTime<Utc>,
     pub deadline: DateTime<Utc>,
     pub canonical_digest: Sha256Digest,
@@ -1027,6 +1031,7 @@ impl McpDiscoveryAdmission {
             authorization_context_digest: input.authorization_context_digest,
             principal_id: input.principal_id,
             artifact_preallocation: input.artifact_preallocation,
+            artifact_policy: input.artifact_policy,
             requested_at: input.requested_at,
             deadline: input.deadline,
             canonical_digest: placeholder_digest()?,
@@ -1059,7 +1064,96 @@ impl McpDiscoveryAdmission {
             || self.authorization_generation == 0
             || self.principal_id.kind() != ResourceKind::Principal
             || self.artifact_preallocation.validate().is_err()
+            || self.artifact_policy.validate_at(self.requested_at).is_err()
+            || self.artifact_policy.retain_until < self.deadline
             || self.deadline <= self.requested_at
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
+}
+
+pub const MCP_DISCOVERY_ARTIFACT_MEDIA_TYPE: &str = "application/vnd.insight.mcp-discovery+json";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewMcpDiscoveryArtifactPolicyClosure {
+    pub quota_account_id: ResourceId,
+    pub maximum_bytes: u64,
+    pub retention_policy_revision: ExactVersionRef,
+    pub artifact_io_policy_revision: ExactVersionRef,
+    pub scanner_contract_digest: Sha256Digest,
+    pub ruleset_digest: Sha256Digest,
+    pub evidence_ttl_milliseconds: u64,
+    pub retry_backoff_milliseconds: u64,
+    pub retain_until: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpDiscoveryArtifactPolicyClosure {
+    pub schema_version: u32,
+    pub quota_account_id: ResourceId,
+    pub maximum_bytes: u64,
+    pub classification: DataClassification,
+    pub declared_media_type: String,
+    pub retention_policy_revision: ExactVersionRef,
+    pub artifact_io_policy_revision: ExactVersionRef,
+    pub scanner_contract_digest: Sha256Digest,
+    pub ruleset_digest: Sha256Digest,
+    pub evidence_ttl_milliseconds: u64,
+    pub retry_backoff_milliseconds: u64,
+    pub retain_until: DateTime<Utc>,
+    pub canonical_digest: Sha256Digest,
+}
+
+impl McpDiscoveryArtifactPolicyClosure {
+    pub fn build(input: NewMcpDiscoveryArtifactPolicyClosure) -> Result<Self, McpHostError> {
+        let mut closure = Self {
+            schema_version: 1,
+            quota_account_id: input.quota_account_id,
+            maximum_bytes: input.maximum_bytes,
+            classification: DataClassification::Internal,
+            declared_media_type: MCP_DISCOVERY_ARTIFACT_MEDIA_TYPE.to_owned(),
+            retention_policy_revision: input.retention_policy_revision,
+            artifact_io_policy_revision: input.artifact_io_policy_revision,
+            scanner_contract_digest: input.scanner_contract_digest,
+            ruleset_digest: input.ruleset_digest,
+            evidence_ttl_milliseconds: input.evidence_ttl_milliseconds,
+            retry_backoff_milliseconds: input.retry_backoff_milliseconds,
+            retain_until: input.retain_until,
+            canonical_digest: placeholder_digest()?,
+        };
+        closure.validate_shape()?;
+        closure.canonical_digest = digest_without_field(&closure, "canonical_digest")?;
+        Ok(closure)
+    }
+
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), McpHostError> {
+        self.validate_shape()?;
+        if self.retain_until <= now
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> Result<(), McpHostError> {
+        if self.schema_version != 1
+            || self.quota_account_id.kind() != ResourceKind::QuotaAccount
+            || self.maximum_bytes == 0
+            || self.classification != DataClassification::Internal
+            || self.declared_media_type != MCP_DISCOVERY_ARTIFACT_MEDIA_TYPE
+            || self.retention_policy_revision.resource_kind != ResourceKind::PolicyRevision
+            || self.retention_policy_revision.validate().is_err()
+            || self.artifact_io_policy_revision.resource_kind != ResourceKind::PolicyRevision
+            || self.artifact_io_policy_revision.validate().is_err()
+            || self.evidence_ttl_milliseconds == 0
+            || self.evidence_ttl_milliseconds > 86_400_000
+            || self.retry_backoff_milliseconds == 0
+            || self.retry_backoff_milliseconds > 60_000
+            || self.retry_backoff_milliseconds >= self.evidence_ttl_milliseconds
         {
             return Err(McpHostError::InvalidDiscovery);
         }

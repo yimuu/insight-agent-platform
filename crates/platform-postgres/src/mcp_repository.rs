@@ -1,3 +1,4 @@
+use crate::artifact_repository::load_internal_artifact_admission_authority;
 use crate::repository::{
     append_command_event, append_scheduler_event, append_scheduler_event_with_trace,
     claim_command_receipt, decode_deployment_closure, decode_typed_payload,
@@ -60,11 +61,12 @@ use insight_platform_mcp_host::{
     McpSubscriptionReconcileAuthority, McpSubscriptionReconcileScan, McpSubscriptionRecord,
     McpSubscriptionRecoveryAuthority, McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan,
     McpSubscriptionState, McpSubscriptionTransportTerminationAuthority, McpSubscriptionWorkerAudit,
-    NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission, NewMcpDiscoveryExecutionContract,
-    NewMcpDiscoverySnapshotRecord, NewMcpHostExecutionContract, NewMcpResourceSubscriptionBinding,
-    ReactivateMcpAuthorizationBinding, RecoverDueMcpSubscription, RecoverExpiredMcpDiscoveryJob,
-    ReportMcpSubscriptionSessionLoss, ReportMcpSubscriptionTransportTermination,
-    ResolveMcpDiscoveryAttempt, ResolvedContextSubscriptionRefresh, ResolvedMcpDiscoveryExecution,
+    NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission, NewMcpDiscoveryArtifactPolicyClosure,
+    NewMcpDiscoveryExecutionContract, NewMcpDiscoverySnapshotRecord, NewMcpHostExecutionContract,
+    NewMcpResourceSubscriptionBinding, ReactivateMcpAuthorizationBinding,
+    RecoverDueMcpSubscription, RecoverExpiredMcpDiscoveryJob, ReportMcpSubscriptionSessionLoss,
+    ReportMcpSubscriptionTransportTermination, ResolveMcpDiscoveryAttempt,
+    ResolvedContextSubscriptionRefresh, ResolvedMcpDiscoveryExecution,
     ResolvedMcpOAuthAuthorizationStart, ResolvedMcpSubscriptionExecution,
     SaveMcpSubscriptionSession, TransitionMcpAuthorizationBinding, WakeMcpSubscriptionReconcile,
     MCP_OAUTH_PKCE_SECRET_PURPOSE,
@@ -1156,6 +1158,47 @@ impl PgRepository {
         if closure.server_identity_digest != authorization.audience_identity_digest {
             return Err(RepositoryError::Conflict("MCP discovery server audience"));
         }
+        let artifact_authority =
+            load_internal_artifact_admission_authority(&mut transaction, &command.audit.tenant_id)
+                .await?;
+        let minimum_retention_seconds = i64::try_from(
+            artifact_authority
+                .retention_policy
+                .minimum_retention_seconds,
+        )
+        .map_err(|_| {
+            RepositoryError::CorruptRow(
+                "Artifact retention duration exceeds clock representation".to_owned(),
+            )
+        })?;
+        let minimum_retain_until = database_now
+            .checked_add_signed(chrono::Duration::seconds(minimum_retention_seconds))
+            .ok_or_else(|| {
+                RepositoryError::InvalidInput("Artifact retention deadline overflows".to_owned())
+            })?;
+        let artifact_policy = insight_platform_mcp_host::McpDiscoveryArtifactPolicyClosure::build(
+            NewMcpDiscoveryArtifactPolicyClosure {
+                quota_account_id: artifact_authority.quota_account_id,
+                maximum_bytes: checked_in_hard_limit_profile()
+                    .artifact
+                    .single_bytes
+                    .hard_max,
+                retention_policy_revision: artifact_authority.retention_policy_revision,
+                artifact_io_policy_revision: artifact_authority.artifact_io_policy_revision,
+                scanner_contract_digest: artifact_authority
+                    .artifact_io_policy
+                    .scanner_contract_digest,
+                ruleset_digest: artifact_authority.artifact_io_rules_digest,
+                evidence_ttl_milliseconds: artifact_authority
+                    .artifact_io_policy
+                    .verification_evidence_ttl_milliseconds,
+                retry_backoff_milliseconds: artifact_authority
+                    .artifact_io_policy
+                    .verification_retry_backoff_milliseconds,
+                retain_until: command.deadline.max(minimum_retain_until),
+            },
+        )
+        .map_err(invalid_mcp_discovery)?;
         let admission = McpDiscoveryAdmission::build(NewMcpDiscoveryAdmission {
             operation_id: command.operation_id.clone(),
             job_id: command.job_id.clone(),
@@ -1168,6 +1211,7 @@ impl PgRepository {
             authorization_context_digest: authorization.canonical_digest,
             principal_id: authorization.principal_id,
             artifact_preallocation: command.artifact_preallocation.clone(),
+            artifact_policy,
             requested_at: database_now,
             deadline: command.deadline,
         })
@@ -4232,6 +4276,7 @@ impl McpDiscoveryExecutionContractResolver for PgRepository {
             operation_version: operation.version,
             admission_digest: admission.canonical_digest.clone(),
             artifact_preallocation: admission.artifact_preallocation.clone(),
+            artifact_policy: admission.artifact_policy.clone(),
             attempt_limit: job.attempt_limit,
             contract,
             request: McpDiscoveryRequest {
