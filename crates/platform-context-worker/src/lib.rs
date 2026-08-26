@@ -940,7 +940,9 @@ async fn execute_remote_claim(
         token_digest: token.clone(),
     };
     let request = remote_request(&claim, &fence)?;
-    let query = connector.query(request);
+    let trace = RpcTraceContext::start(claim.job.trace, TraceFlags::NotSampled)
+        .map_err(|_| ContextWorkerError::CorruptClaim)?;
+    let query = scope_trace(trace, connector.query(request));
     tokio::pin!(query);
     let mut interval = tokio::time::interval(config.heartbeat_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

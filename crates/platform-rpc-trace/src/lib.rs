@@ -110,6 +110,17 @@ pub fn require_trace_interceptor(mut request: Request<()>) -> Result<Request<()>
     Ok(request)
 }
 
+/// Tonic client interceptor that projects the current process-local hop into required metadata.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PropagateTrace;
+
+impl tonic::service::Interceptor for PropagateTrace {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        inject_trace(&mut request, current_trace()?)?;
+        Ok(request)
+    }
+}
+
 pub fn trace_context<T>(request: &Request<T>) -> Result<RpcTraceContext, Status> {
     request
         .extensions()
@@ -192,6 +203,27 @@ mod tests {
         assert_eq!(
             inject_trace(&mut request, caller).unwrap_err().code(),
             tonic::Code::InvalidArgument
+        );
+    }
+
+    #[tokio::test]
+    async fn client_interceptor_requires_scope_and_injects_exact_parent() {
+        let mut interceptor = PropagateTrace;
+        assert_eq!(
+            tonic::service::Interceptor::call(&mut interceptor, Request::new(()))
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        let caller = RpcTraceContext::start(identity(), TraceFlags::Sampled).unwrap();
+        let request = scope_trace(caller, async {
+            tonic::service::Interceptor::call(&mut interceptor, Request::new(()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            request.metadata().get(TRACEPARENT_METADATA).unwrap(),
+            caller.outbound_parent().to_string().as_str()
         );
     }
 

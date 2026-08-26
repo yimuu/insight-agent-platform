@@ -5,7 +5,9 @@
 //! `published_at`, so the Phase 5 committed-event dispatcher can still project the same Event.
 
 use async_trait::async_trait;
-use insight_platform_contracts::{ResourceId, ResourceKind, Sha256Digest};
+use insight_platform_contracts::{
+    ResourceId, ResourceKind, Sha256Digest, TraceId, TraceIdentityV1,
+};
 use insight_platform_mcp_host::{
     ClaimDueMcpOAuthPkceCleanups, ClaimedMcpOAuthPkceCleanup, McpOAuthPkceCleanupCause,
     McpOAuthPkceCleanupDeliveryError, McpOAuthPkceCleanupHint, McpOAuthPkceCleanupOutbox,
@@ -102,7 +104,7 @@ impl McpOAuthPkceCleanupOutbox for PgRepository {
                    claimed.claim_epoch, claimed.publish_attempts,
                    event.aggregate_kind, event.aggregate_id, event.event_type,
                    event.visibility, event.payload_schema_version, event.payload,
-                   event.payload_digest
+                   event.payload_digest, event.trace_id
             FROM claimed
             JOIN insight_platform.events AS event
               ON event.tenant_id = claimed.tenant_id
@@ -308,6 +310,12 @@ fn parse_claimed_event(
     let event_type: String = row
         .try_get("event_type")
         .map_err(|_| McpOAuthPkceCleanupDeliveryError::CorruptEvent)?;
+    let trace = TraceIdentityV1::new(
+        row.try_get::<String, _>("trace_id")
+            .map_err(|_| McpOAuthPkceCleanupDeliveryError::CorruptEvent)?
+            .parse::<TraceId>()
+            .map_err(|_| McpOAuthPkceCleanupDeliveryError::CorruptEvent)?,
+    );
     let aggregate_kind: String = row
         .try_get("aggregate_kind")
         .map_err(|_| McpOAuthPkceCleanupDeliveryError::CorruptEvent)?;
@@ -377,6 +385,7 @@ fn parse_claimed_event(
         claim_owner,
         claim_epoch,
         publish_attempts,
+        trace,
         request: McpOAuthPkceCleanupRequest {
             tenant_id,
             task_id,

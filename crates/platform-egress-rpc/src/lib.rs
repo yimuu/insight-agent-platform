@@ -39,6 +39,7 @@ use insight_platform_model_adapters::{
     ModelAdapterFailureClass, ModelProviderWireConnector, ModelProviderWireEvent,
     ModelProviderWireProtocol, ModelProviderWireRequest, ModelProviderWireStream,
 };
+use insight_platform_rpc_trace::{require_trace_interceptor, PropagateTrace};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -543,7 +544,7 @@ impl tonic::service::Interceptor for EgressCallerWorkloadIdentity {
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         let role = closed_workload_role(leaf.as_ref())?;
         request.extensions_mut().insert(role);
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -682,7 +683,7 @@ enum ModelStreamFrame {
 
 #[derive(Clone)]
 pub struct EgressBrokerGrpcClient {
-    client: EgressBrokerServiceClient<tonic::transport::Channel>,
+    client: TracedEgressBrokerServiceClient,
     limits: EgressInternalRpcLimits,
     mcp_subscription_sink: Option<Arc<dyn McpStreamableHttpSubscriptionSink>>,
 }
@@ -691,7 +692,7 @@ impl EgressBrokerGrpcClient {
     pub fn new(channel: tonic::transport::Channel, limits: EgressInternalRpcLimits) -> Self {
         let maximum = limits.maximum_message_bytes();
         Self {
-            client: EgressBrokerServiceClient::new(channel)
+            client: EgressBrokerServiceClient::with_interceptor(channel, PropagateTrace)
                 .max_encoding_message_size(maximum)
                 .max_decoding_message_size(maximum),
             limits,
@@ -707,6 +708,10 @@ impl EgressBrokerGrpcClient {
         self
     }
 }
+
+type TracedEgressBrokerServiceClient = EgressBrokerServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
+>;
 
 #[async_trait]
 impl ModelProviderWireConnector for EgressBrokerGrpcClient {
@@ -1418,13 +1423,13 @@ impl EgressRpcMcpSubscriptionActivation {
 }
 
 async fn capability_cancel(
-    mut client: EgressBrokerServiceClient<tonic::transport::Channel>,
+    mut client: TracedEgressBrokerServiceClient,
     request: CapabilityTransportCancelRequest,
     request_operation: &'static str,
     response_operation: &'static str,
     limits: EgressInternalRpcLimits,
     invoke: impl for<'a> FnOnce(
-        &'a mut EgressBrokerServiceClient<tonic::transport::Channel>,
+        &'a mut TracedEgressBrokerServiceClient,
         Request<ClosedEgressEnvelope>,
     ) -> Pin<
         Box<
@@ -2502,8 +2507,10 @@ mod tests {
     use insight_platform_contracts::{
         CanonicalHttpEndpoint, CapabilityBackendKind, CapabilityEndpointScheme, ExactDeploymentRef,
         ExactSecretBindingRef, ExactVersionRef, McpClientCapabilities, McpNegotiatedCapabilities,
-        ResourceId, ResourceKind, SecretPurpose, SecretResolutionPolicy, MCP_PROTOCOL_BASELINE,
+        ResourceId, ResourceKind, SecretPurpose, SecretResolutionPolicy, TraceFlags,
+        TraceIdentityV1, MCP_PROTOCOL_BASELINE,
     };
+    use insight_platform_rpc_trace::{request_with_trace, RpcTraceContext};
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose, SanType,
@@ -2512,6 +2519,14 @@ mod tests {
         server::TcpIncoming, Certificate, ClientTlsConfig, Endpoint, Identity, Server,
         ServerTlsConfig,
     };
+
+    fn traced_request<T>(message: T) -> Request<T> {
+        request_with_trace(
+            message,
+            RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap(),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn envelope_binds_operation_metadata_and_raw_payload() {
@@ -3030,10 +3045,18 @@ mod tests {
             &fixture.capability_key_pem,
         )
         .await;
+        assert_eq!(
+            capability
+                .cancel_capability_http(Request::new(envelope.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
         let outcome: UnaryOutcome<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> =
             decode_metadata(
                 capability
-                    .cancel_capability_http(Request::new(envelope.clone()))
+                    .cancel_capability_http(traced_request(envelope.clone()))
                     .await
                     .unwrap()
                     .into_inner(),
@@ -3054,7 +3077,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             capability
-                .query_remote_context(Request::new(remote_envelope.clone()))
+                .query_remote_context(traced_request(remote_envelope.clone()))
                 .await
                 .unwrap_err()
                 .code(),
@@ -3069,7 +3092,7 @@ mod tests {
         .await;
         assert_eq!(
             context
-                .query_remote_context(Request::new(remote_envelope))
+                .query_remote_context(traced_request(remote_envelope))
                 .await
                 .unwrap_err()
                 .code(),
@@ -3085,7 +3108,7 @@ mod tests {
         .await;
         assert_eq!(
             model
-                .cancel_capability_http(Request::new(envelope.clone()))
+                .cancel_capability_http(traced_request(envelope.clone()))
                 .await
                 .unwrap_err()
                 .code(),
@@ -3112,7 +3135,7 @@ mod tests {
             encode_metadata(&oauth_authorization, DELETE_MCP_OAUTH_PKCE_SECRET, limits).unwrap();
         assert_eq!(
             capability
-                .delete_mcp_o_auth_pkce_secret(Request::new(oauth_envelope.clone()))
+                .delete_mcp_o_auth_pkce_secret(traced_request(oauth_envelope.clone()))
                 .await
                 .unwrap_err()
                 .code(),
@@ -3129,7 +3152,7 @@ mod tests {
             McpOAuthPkceSecretCleanupDisposition,
             McpOAuthPkceCleanupFailureWire,
         > = decode_metadata(
-            mcp.delete_mcp_o_auth_pkce_secret(Request::new(oauth_envelope))
+            mcp.delete_mcp_o_auth_pkce_secret(traced_request(oauth_envelope))
                 .await
                 .unwrap()
                 .into_inner(),
@@ -3150,14 +3173,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             capability
-                .execute_mcp_streamable_http(Request::new(mcp_operation_envelope.clone()))
+                .execute_mcp_streamable_http(traced_request(mcp_operation_envelope.clone()))
                 .await
                 .unwrap_err()
                 .code(),
             tonic::Code::PermissionDenied
         );
         assert_eq!(
-            mcp.execute_mcp_streamable_http(Request::new(mcp_operation_envelope))
+            mcp.execute_mcp_streamable_http(traced_request(mcp_operation_envelope))
                 .await
                 .unwrap_err()
                 .code(),
@@ -3172,14 +3195,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             capability
-                .cancel_mcp_remote_task(Request::new(mcp_cancel_envelope.clone()))
+                .cancel_mcp_remote_task(traced_request(mcp_cancel_envelope.clone()))
                 .await
                 .unwrap_err()
                 .code(),
             tonic::Code::PermissionDenied
         );
         assert_eq!(
-            mcp.cancel_mcp_remote_task(Request::new(mcp_cancel_envelope))
+            mcp.cancel_mcp_remote_task(traced_request(mcp_cancel_envelope))
                 .await
                 .unwrap_err()
                 .code(),
@@ -3194,7 +3217,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             capability
-                .stream_mcp_streamable_http_subscription(Request::new(stream::iter(vec![
+                .stream_mcp_streamable_http_subscription(traced_request(stream::iter(vec![
                     subscription_envelope.clone(),
                 ])))
                 .await
@@ -3203,7 +3226,7 @@ mod tests {
             tonic::Code::PermissionDenied
         );
         assert_eq!(
-            mcp.stream_mcp_streamable_http_subscription(Request::new(stream::iter(vec![
+            mcp.stream_mcp_streamable_http_subscription(traced_request(stream::iter(vec![
                 subscription_envelope,
             ])))
             .await
@@ -3221,7 +3244,7 @@ mod tests {
         .await;
         assert_eq!(
             unknown
-                .cancel_capability_http(Request::new(envelope))
+                .cancel_capability_http(traced_request(envelope))
                 .await
                 .unwrap_err()
                 .code(),

@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use insight_platform_contracts::{
-    ExactSecretBindingRef, ResourceId, ResourceKind, SecretResolutionPolicy,
+    ExactSecretBindingRef, ResourceId, ResourceKind, SecretResolutionPolicy, TraceFlags,
+    TraceIdentityV1,
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, sync::Arc};
 
@@ -231,6 +233,7 @@ pub struct ClaimedMcpOAuthPkceCleanup {
     pub claim_owner: ResourceId,
     pub claim_epoch: u64,
     pub publish_attempts: u32,
+    pub trace: TraceIdentityV1,
     pub request: McpOAuthPkceCleanupRequest,
 }
 
@@ -243,6 +246,7 @@ impl ClaimedMcpOAuthPkceCleanup {
             || self.event_id.kind() != ResourceKind::Event
             || self.claim_owner.kind() != ResourceKind::WorkerProcessGeneration
             || self.claim_epoch == 0
+            || self.trace.validate().is_err()
         {
             return Err(McpOAuthPkceCleanupDeliveryError::CorruptEvent);
         }
@@ -403,23 +407,26 @@ impl McpOAuthPkceCleanupWorker {
         };
         for claim in claims {
             claim.validate()?;
-            let settlement = match self.consumer.consume(claim.request.clone()).await {
-                Ok(_) => McpOAuthPkceCleanupSettlement::Completed,
-                Err(McpOAuthPkceCleanupError::Rejected(code)) => {
-                    McpOAuthPkceCleanupSettlement::DeadLetter { failure_code: code }
-                }
-                Err(McpOAuthPkceCleanupError::TemporarilyUnavailable(code))
-                | Err(McpOAuthPkceCleanupError::OutcomeUncertain(code)) => {
-                    McpOAuthPkceCleanupSettlement::Retry {
-                        failure_code: code,
-                        delay_milliseconds: retry_delay(
-                            claim.publish_attempts,
-                            self.config.retry_base_milliseconds,
-                            self.config.retry_maximum_milliseconds,
-                        ),
+            let trace = RpcTraceContext::start(claim.trace, TraceFlags::NotSampled)
+                .map_err(|_| McpOAuthPkceCleanupDeliveryError::CorruptEvent)?;
+            let settlement =
+                match scope_trace(trace, self.consumer.consume(claim.request.clone())).await {
+                    Ok(_) => McpOAuthPkceCleanupSettlement::Completed,
+                    Err(McpOAuthPkceCleanupError::Rejected(code)) => {
+                        McpOAuthPkceCleanupSettlement::DeadLetter { failure_code: code }
                     }
-                }
-            };
+                    Err(McpOAuthPkceCleanupError::TemporarilyUnavailable(code))
+                    | Err(McpOAuthPkceCleanupError::OutcomeUncertain(code)) => {
+                        McpOAuthPkceCleanupSettlement::Retry {
+                            failure_code: code,
+                            delay_milliseconds: retry_delay(
+                                claim.publish_attempts,
+                                self.config.retry_base_milliseconds,
+                                self.config.retry_maximum_milliseconds,
+                            ),
+                        }
+                    }
+                };
             let settled = self
                 .outbox
                 .settle_mcp_oauth_pkce_cleanup(&claim, settlement)
@@ -577,6 +584,7 @@ mod tests {
             claim_owner: id(ResourceKind::WorkerProcessGeneration, 8),
             claim_epoch: 1,
             publish_attempts: attempts,
+            trace: TraceIdentityV1::generate(),
             request: request(),
         }
     }

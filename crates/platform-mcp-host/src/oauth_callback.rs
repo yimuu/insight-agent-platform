@@ -8,8 +8,9 @@ use insight_platform_contracts::{
     exact_secret_binding_purposes_match, CanonicalHttpEndpoint, CapabilityEndpointScheme,
     McpAuthPolicyDocument, McpDeploymentClosure, McpOAuthClientAuthenticationKind,
     McpOAuthTaskBinding, McpServerExecutionContract, McpTransportKind, ResourceId, ResourceKind,
-    Sha256Digest,
+    Sha256Digest, TraceFlags, TraceIdentityV1,
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 use url::Url;
@@ -555,6 +556,7 @@ impl McpOAuthCallbackIngress {
         raw_query: &[u8],
         now: DateTime<Utc>,
     ) -> Result<McpOAuthCallbackIngressOutcome, McpOAuthCallbackError> {
+        let trace = TraceIdentityV1::generate();
         let parsed = parse_mcp_oauth_callback_query(raw_query)?;
         let state_digest = mcp_oauth_state_digest(&parsed.state)?;
         let identity = self
@@ -586,11 +588,15 @@ impl McpOAuthCallbackIngress {
         let (resolution, wire_outcome_digest) = match parsed.outcome {
             McpOAuthCallbackWireOutcome::AuthorizationCode(code) => {
                 let code_digest = sensitive_digest("mcp_oauth_code_v1", &code)?;
-                let grant = self
-                    .broker
-                    .exchange_authorization_code(&contract, code, now)
-                    .await
-                    .map_err(map_broker_error)?;
+                let rpc_trace = RpcTraceContext::start(trace, TraceFlags::NotSampled)
+                    .map_err(|_| McpOAuthCallbackError::Rejected("mcp_oauth_trace_invalid"))?;
+                let grant = scope_trace(
+                    rpc_trace,
+                    self.broker
+                        .exchange_authorization_code(&contract, code, now),
+                )
+                .await
+                .map_err(map_broker_error)?;
                 grant
                     .validate_for_binding(&contract.binding, now)
                     .map_err(|_| McpOAuthCallbackError::Rejected("mcp_oauth_grant_invalid"))?;
@@ -639,7 +645,7 @@ impl McpOAuthCallbackIngress {
             ))?;
         let command = CompleteMcpOAuthCallback {
             audit: McpOAuthCallbackAudit {
-                trace: insight_platform_contracts::TraceIdentityV1::generate(),
+                trace,
                 tenant_id: contract.tenant_id,
                 callback_ingress_generation_id: self.config.callback_ingress_generation_id.clone(),
                 receipt_id: ids.receipt_id,

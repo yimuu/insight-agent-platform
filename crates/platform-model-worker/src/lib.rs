@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, HardLimitProfile, JobState, ModelTurnState, ResourceId,
-    ResourceIdError, ResourceKind, Sha256Digest, WorkClass,
+    ResourceIdError, ResourceKind, Sha256Digest, TraceFlags, TraceIdentityV1, WorkClass,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_model_adapters::{
@@ -30,6 +30,7 @@ use insight_platform_postgres::{
     },
     repository::{PgRepository, RepositoryError, SafetyScanShard},
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use insight_platform_worker::{
     ClaimBatchHardLimit, ClaimedJobIdentity, LocalWorkerPoolError, LocalWorkerPools,
 };
@@ -599,6 +600,7 @@ pub struct ModelClaimBinding {
     pub lease_generation: u64,
     pub lease_token_digest: Sha256Digest,
     pub request_digest: Sha256Digest,
+    pub trace: TraceIdentityV1,
     pub quota_reservation_entry_ids: Vec<ResourceId>,
 }
 
@@ -640,6 +642,7 @@ impl ClaimedModelJob for ClaimedModelExecution {
             lease_generation: self.fence.lease_generation,
             lease_token_digest: self.fence.token_digest.clone(),
             request_digest: self.turn.payload.admission.request_digest.clone(),
+            trace: self.job.trace,
             quota_reservation_entry_ids: self.quota_entry_ids.clone(),
         })
     }
@@ -1691,11 +1694,13 @@ where
         }
         let count = claimed.len();
         for ((claim, binding), permit) in claimed.into_iter().zip(bindings).zip(permits) {
+            let trace = RpcTraceContext::start(binding.trace, TraceFlags::NotSampled)
+                .map_err(|_| ModelWorkerDriverError::CorruptClaim)?;
             let command = self.execution_command(claim, &binding)?;
             let executor = Arc::clone(&self.executor);
             active.spawn(async move {
                 let _permit = permit;
-                executor.execute(command).await
+                scope_trace(trace, executor.execute(command)).await
             });
         }
         Ok(count)
@@ -1910,6 +1915,7 @@ fn validate_claims<C: ClaimedModelJob>(
             || !expected_tokens.contains(&binding.lease_token_digest)
             || !jobs.insert(binding.job_id.clone())
             || !tokens.insert(binding.lease_token_digest.clone())
+            || binding.trace.validate().is_err()
             || binding.quota_reservation_entry_ids.len() != MODEL_QUOTA_LINES
             || binding
                 .quota_reservation_entry_ids
@@ -2171,6 +2177,7 @@ mod tests {
                     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                         .parse()
                         .unwrap(),
+                trace: TraceIdentityV1::generate(),
                 quota_reservation_entry_ids: slot.quota_entry_ids,
             })])
         }
