@@ -21,6 +21,8 @@ alerts:
   minimumRecoveryRate: 0.01
   maximumFailureRatio: 0.05
   maximumRecoveryFailureRatio: 0.1
+  maximumDependencyFailureRatio: 0.2
+  minimumDependencyObservations: 3
   maximumP95Seconds: 2
   maximumDueJobLagSeconds: 30
   maximumExpiredLeaseLagSeconds: 60

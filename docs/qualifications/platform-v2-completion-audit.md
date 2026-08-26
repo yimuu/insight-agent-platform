@@ -125,6 +125,11 @@ sampler并汇总为固定`component_role + postgresql + outcome`，不暴露pool
 runtime-finished或sampler退出都会关闭runtime、HTTP、sampler和bulkheads，readiness不变且不预装Artifact RPC series。adapter/binary tests与strict Clippy通过；
 本轮无真实PG成功fixture或production scrape，Artifact Scheduler实际RPC观测仍待后续批次。
 
+r313把14-panel dashboard中的scheduler-only PostgreSQL panel扩展为按`component_role + dependency + outcome`聚合的六依赖概览，并以通用
+`InsightPlatformDependencyFailureRatioHigh`替换scheduler-only alert。告警必须同时超过closed失败率与最小观测数，避免单次provider/tenant失败触发；runbook按固定
+role/dependency分诊且禁止记录endpoint/database/subject/object/error/tenant字段。Helm负向阈值、alert inventory、panel expression与runbook锚点checker通过；该批只闭合
+消费端合同，不产生production scrape或fault-injection证据。
+
 ## 3. Phase 1 审计
 
 ### 已满足
@@ -253,7 +258,7 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
    静态脱敏门禁；Orchestration现另有PostgreSQL authority的due/expired-lease Job及due/expired-claim/dead Outbox backlog/lag与observation health；仍缺其余role
    backlog/dependency health、production Prometheus scrape及L5 mixed-load/saturation profile证据。
 3. 全部19个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP/Orchestration/Outbox dashboard及逐alert
-   runbook已扩展到14个panel和13条alert，包含operational capacity、Orchestration Job、shared Outbox lag/dead queue及PostgreSQL observation failure；其他role backlog/
+   runbook已扩展到14个panel和13条alert，包含operational capacity、Orchestration Job、shared Outbox lag/dead queue及通用dependency failure ratio；其他role backlog/
    dependency与saturation对应的panel/alert仍待指标owner接线后补齐。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
    mTLS与live identity enforcement仍须production-equivalent L4验证。

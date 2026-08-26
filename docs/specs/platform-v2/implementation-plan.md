@@ -616,6 +616,12 @@
 > Artifact RPC series。adapter/binary tests、strict Clippy、Orchestration deployment、redaction与observability门禁通过；本轮无新增真实PG或production scrape
 > 证据，Artifact Scheduler observation仍待后续批次。
 
+> 2026-08-27 implementation evidence：r313把14-panel dashboard中的scheduler-only PostgreSQL panel扩展为按固定
+> `component_role + dependency + outcome`聚合的六依赖概览，并用通用`InsightPlatformDependencyFailureRatioHigh`替换scheduler-only alert。告警需同时
+> 超过closed失败率与最小观测数，避免单次provider/tenant失败触发；runbook只按fixed role/dependency分诊且禁止endpoint、database、subject、object key、error或
+> tenant字段。Helm负向阈值、13-alert inventory、panel expression、HTTPS runbook锚点与低基数checker通过；该批只闭合消费端合同，不提供production scrape、
+> 真实fault或L5 profile证据。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

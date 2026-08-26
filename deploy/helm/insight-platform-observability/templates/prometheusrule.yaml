@@ -85,14 +85,14 @@ spec:
             summary: Expired orchestration leases remain unrecovered
             description: Expired orchestration Job leases have exceeded the bounded recovery-lag threshold.
             runbook_url: {{ printf "%s#insightplatformexpiredleaserecoverylaghigh" .Values.alerts.runbookBaseUrl | quote }}
-        - alert: InsightPlatformPostgresObservationFailing
-          expr: increase(insight_platform_dependency_observations_total{component_role="scheduler-recovery",dependency="postgresql",outcome="failure"}[{{ .Values.alerts.evaluationWindow }}]) > 0
+        - alert: InsightPlatformDependencyFailureRatioHigh
+          expr: (sum by (component_role, dependency) (increase(insight_platform_dependency_observations_total{outcome="failure"}[{{ .Values.alerts.evaluationWindow }}])) / clamp_min(sum by (component_role, dependency) (increase(insight_platform_dependency_observations_total[{{ .Values.alerts.evaluationWindow }}])), 1)) > {{ .Values.alerts.maximumDependencyFailureRatio }} and sum by (component_role, dependency) (increase(insight_platform_dependency_observations_total[{{ .Values.alerts.evaluationWindow }}])) >= {{ .Values.alerts.minimumDependencyObservations }}
           for: {{ .Values.alerts.dependencyFailureFor }}
           labels: {severity: warning, owner: platform-runtime}
           annotations:
-            summary: Scheduler PostgreSQL observation is failing
-            description: The read-only durable queue observation cannot read PostgreSQL authority.
-            runbook_url: {{ printf "%s#insightplatformpostgresobservationfailing" .Values.alerts.runbookBaseUrl | quote }}
+            summary: A Platform dependency failure ratio is elevated
+            description: A fixed component role and dependency kind have sustained failures at a meaningful observation volume.
+            runbook_url: {{ printf "%s#insightplatformdependencyfailureratiohigh" .Values.alerts.runbookBaseUrl | quote }}
     - name: insight-platform.outbox
       rules:
         - alert: InsightPlatformDueOutboxLagHigh

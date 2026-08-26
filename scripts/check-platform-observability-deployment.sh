@@ -14,6 +14,8 @@ for mutation in \
   '--set-json alerts.labels=null' \
   '--set alerts.maximumFailureRatio=1' \
   '--set alerts.maximumRecoveryFailureRatio=1' \
+  '--set alerts.maximumDependencyFailureRatio=1' \
+  '--set alerts.minimumDependencyObservations=0' \
   '--set alerts.minimumRecoveryRate=0' \
   '--set alerts.maximumDueJobLagSeconds=0' \
   '--set alerts.maximumExpiredLeaseLagSeconds=0' \
@@ -40,6 +42,7 @@ failures << "must render one PrometheusRule and one dashboard" unless rules.leng
 alerts = rules.flat_map { |document| document.dig("spec", "groups").to_a.flat_map { |group| group["rules"].to_a } }
 expected = %w[
   InsightPlatformCriticalControlPermitsExhausted
+  InsightPlatformDependencyFailureRatioHigh
   InsightPlatformDueOutboxLagHigh
   InsightPlatformDurableJobLagHigh
   InsightPlatformExpiredLeaseRecoveryLagHigh
@@ -48,7 +51,6 @@ expected = %w[
   InsightPlatformHttpLatencyHigh
   InsightPlatformOperationalCapacityExhausted
   InsightPlatformOutboxDeadEventsPresent
-  InsightPlatformPostgresObservationFailing
   InsightPlatformRecoveryFailureRatioHigh
   InsightPlatformTelemetryMissing
   InsightPlatformWorkloadNotReady
@@ -69,6 +71,14 @@ unless dashboards.empty?
   begin
     dashboard = JSON.parse(dashboards.first.dig("data", "insight-platform-runtime.json").to_s)
     failures << "dashboard lacks the eight minimum symptom panels" unless dashboard.fetch("panels", []).length >= 8
+    dependency_panels = dashboard.fetch("panels", []).select { |panel| panel.fetch("title", "").include?("Dependency") }
+    failures << "dashboard lacks the fixed dependency outcome panel" unless dependency_panels.any? do |panel|
+      panel.fetch("targets", []).any? do |target|
+        expression = target.fetch("expr", "")
+        expression.include?("insight_platform_dependency_observations_total") &&
+          expression.include?("component_role, dependency, outcome")
+      end
+    end
   rescue JSON::ParserError => error
     failures << "dashboard JSON is invalid: #{error.message}"
   end

@@ -66,12 +66,15 @@ Worker loss, database time, and fencing errors before changing recovery cadence.
 columns directly or lend business capacity to recovery; owner recovery transactions must settle the
 expired lease.
 
-## InsightPlatformPostgresObservationFailing
+## InsightPlatformDependencyFailureRatioHigh
 
-Confirm the scheduler critical-control PostgreSQL pool can acquire a connection and execute bounded
-read-only queries. Correlate failures with readiness and recovery scan failures. The exporter keeps
-the last valid gauge snapshot, so do not interpret an unchanged backlog as healthy while this alert
-is active. Follow the dependency recovery runbook and retain the reserved connection boundary.
+Use only the fixed `component_role` and `dependency` labels to identify the affected boundary, then
+correlate the failure ratio with readiness, capacity, latency, rollout events and the owning
+dependency's provider telemetry. For PostgreSQL, preserve business and critical-control pool
+separation and compare durable queue observations. For NATS, S3, KMS, Secret or Egress, distinguish
+a component-wide transport failure from a single rejected business request. Follow the dependency
+recovery runbook; do not paste endpoints, database names, subjects, object keys, provider identities,
+error text or tenant data into the incident record.
 
 ## InsightPlatformDueOutboxLagHigh
 
