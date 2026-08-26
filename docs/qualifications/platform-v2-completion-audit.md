@@ -65,6 +65,10 @@ all-target/all-feature回归，退出码0；两个外部S3测试显式ignored。
 数据库时钟timer和多进程fixture scoping缺口。本轮没有Model TLS NATS process fixture、外部S3/KMS、production scrape或L4～L6环境，故本审计
 仍为In Progress，不生成release通过证据、不执行clean cut。
 
+r300把最终release evidence validator与实际证据bytes绑定：每个manifest artifact link必须在显式artifact root下解析为同名普通文件，且
+byte length与流式SHA-256必须匹配；缺失、symlink和内容漂移均拒绝。target tests、strict Clippy、contract与candidate pipeline检查通过。
+这关闭了伪造自洽manifest即可通过最终CLI的仓库门禁缺口，但没有提供任何production artifact或推进L4～L6状态。
+
 ## 3. Phase 1 审计
 
 ### 已满足

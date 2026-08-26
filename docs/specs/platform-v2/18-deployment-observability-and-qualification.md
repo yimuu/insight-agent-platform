@@ -511,6 +511,11 @@ Scheduling、terminal retry、trace、timer、global queue与multi-process fixtu
 该证据不含Model TLS NATS process fixture、外部S3/KMS、production Prometheus scrape、telemetry backend、production-equivalent Kubernetes/runsc、
 L5 mixed load/soak/restore或L6 rollout/rollback，故L4～L6及clean cut继续为release blocker。
 
+r300收紧最终release evidence门禁：`validate-release-evidence`除Profile、Candidate、Capacity与Evidence manifest外，必须接收只读artifact root；
+每个`artifact_links[].name`必须解析为root下同名的真实普通文件，CLI流式重算byte length和SHA-256并拒绝缺失、符号链接、长度或digest漂移。
+因此仅在manifest内部构造自洽digest/link不再能冒充content-addressed资格证据。target tests、strict Clippy、generated contract及candidate pipeline
+门禁通过；该修正只保证L6 validator fail closed，不产生任何外部L4～L6通过证据。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

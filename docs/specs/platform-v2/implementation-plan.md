@@ -546,6 +546,11 @@
 > drain及durable fixture命名空间。workspace format、strict Clippy、doc tests与fresh OAuth 8/8 TLS/kill-recovery均通过。本轮未提供Model TLS NATS
 > process环境，也未运行外部S3/KMS、production scrape、Kubernetes/runsc或L4～L6；不得据此推进release/cutover状态。
 
+> 2026-08-27 implementation evidence：r300修复最终QualificationEvidence门禁只验证manifest内部引用、未解析实际artifact bytes的缺口。
+> `validate-release-evidence`现在强制接收artifact root，并对每个closed artifact name读取真实普通文件、流式重算byte length与SHA-256；缺失、
+> symlink、长度或digest漂移全部fail closed。CLI/unit负向测试、target strict Clippy、Platform v1 contract与candidate pipeline检查通过。
+> 该门禁强化不生成Candidate、Capacity或L4～L6 evidence，也不改变外部qualification与人工promotion的Pending状态。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

@@ -55,8 +55,12 @@ cargo run --locked -p insight-platform-contracts --bin platform-qualification --
   contracts/platform-v1/qualification/production-release-profile.json \
   "$PLATFORM_CAPACITY_PROFILE" \
   "$PLATFORM_CANDIDATE_MANIFEST" \
-  "$PLATFORM_QUALIFICATION_OUTPUT_DIR/qualification-evidence.json"
+  "$PLATFORM_QUALIFICATION_OUTPUT_DIR/qualification-evidence.json" \
+  "$PLATFORM_QUALIFICATION_OUTPUT_DIR/artifacts"
 ```
+
+`artifact_links[].name`必须逐一解析为artifact root下同名的普通文件；最终门禁会流式重算每个文件的byte length和SHA-256，拒绝缺失文件、
+符号链接、长度漂移或digest漂移，不能只提交自洽但没有实际证据bytes的manifest。
 
 只有该命令通过、GitOps environment repository收到同一exact digest且人工批准promotion后，才可归档通过报告并更新
 implementation plan。任何missing/failed gate、profile/candidate漂移或evidence digest无法解析都保持Pending。

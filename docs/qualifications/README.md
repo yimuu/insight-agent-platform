@@ -29,7 +29,8 @@ Platform v2 production release使用checked-in
 runner完成测试后，还必须用同一工具验证exact CandidateManifest与QualificationEvidenceManifest。
 
 Evidence manifest只能引用content digest、媒体类型和长度，不保存Secret、URL、对象key或测试正文。每个required gate
-必须恰有一个`passed`或`failed`结果，并且每个结果的evidence digest必须解析到manifest内的artifact link。
+必须恰有一个`passed`或`failed`结果，并且每个结果的evidence digest必须解析到manifest内的artifact link。最终release validator还必须接收
+只读artifact root，读取每个link同名的普通文件并重算长度与SHA-256；缺失、symlink或内容漂移均fail closed。
 缺失、skip、错误layer、不同profile/candidate digest或任一failed gate都不能通过release evidence门禁。
 
 checked-in profile只是资格要求，不是通过报告、CapacityProfile或promotion授权；L4～L6未实际运行前，本目录和
