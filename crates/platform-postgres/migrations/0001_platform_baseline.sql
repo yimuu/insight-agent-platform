@@ -649,6 +649,7 @@ ALTER TABLE insight_platform.runs
 CREATE TABLE insight_platform.invocations (
     tenant_id text NOT NULL,
     invocation_id text NOT NULL,
+    trace_id text NOT NULL,
     invocation_kind text NOT NULL,
     owner_kind text NOT NULL,
     owner_id text NOT NULL,
@@ -684,6 +685,7 @@ CREATE TABLE insight_platform.invocations (
     CONSTRAINT invocations_output_fk FOREIGN KEY (tenant_id, output_value_id)
         REFERENCES insight_platform.run_values (tenant_id, value_id),
     CONSTRAINT invocations_id_ck CHECK (insight_platform.is_platform_id(invocation_id)),
+    CONSTRAINT invocations_trace_id_ck CHECK (insight_platform.is_trace_id(trace_id)),
     CONSTRAINT invocations_kind_ck CHECK (invocation_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT invocations_owner_kind_ck CHECK (owner_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT invocations_owner_id_ck CHECK (insight_platform.is_platform_id(owner_id)),
@@ -886,6 +888,7 @@ CREATE INDEX jobs_lease_idx
 CREATE TABLE insight_platform.tasks (
     tenant_id text NOT NULL,
     task_id text NOT NULL,
+    trace_id text NOT NULL,
     task_kind text NOT NULL,
     owner_kind text NOT NULL,
     owner_id text NOT NULL,
@@ -917,6 +920,7 @@ CREATE TABLE insight_platform.tasks (
     CONSTRAINT tasks_response_value_fk FOREIGN KEY (tenant_id, response_value_id)
         REFERENCES insight_platform.run_values (tenant_id, value_id),
     CONSTRAINT tasks_id_ck CHECK (insight_platform.is_platform_id(task_id)),
+    CONSTRAINT tasks_trace_id_ck CHECK (insight_platform.is_trace_id(trace_id)),
     CONSTRAINT tasks_kind_ck CHECK (task_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT tasks_owner_kind_ck CHECK (owner_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT tasks_owner_id_ck CHECK (insight_platform.is_platform_id(owner_id)),

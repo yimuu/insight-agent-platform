@@ -1249,12 +1249,13 @@ async fn insert_context_query(
             logical_key, run_id, node_id, deployment_id, state, version,
             input_value_id, output_value_id, effect_key_digest,
             payload_schema_version, payload, payload_digest, deadline,
-            retry_at, started_at, terminal_at, created_at, updated_at
+            retry_at, started_at, terminal_at, created_at, updated_at, trace_id
         ) VALUES (
             $1, $2, 'context', 'node_execution', $3,
             $4, $5, $3, $6, $7, $8,
             $9, NULL, NULL, $10, $11, $12, $13,
-            NULL, NULL, NULL, $14, $14
+            NULL, NULL, NULL, $14, $14,
+            (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $5)
         )
         "#,
     )

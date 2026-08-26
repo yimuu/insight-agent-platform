@@ -20082,11 +20082,11 @@ async fn mutate_deferred_orchestration_task(
             tenant_id, task_id, task_kind, owner_kind, owner_id, run_id, node_id,
             invocation_id, state, generation, version, response_schema_digest,
             principal_snapshot_schema_version, payload_schema_version, payload, payload_digest,
-            response_value_id, deadline, responded_at
+            response_value_id, deadline, responded_at, trace_id
         ) VALUES (
             $1, $2, $3, 'node_execution', $4, $5, $4,
             NULL, 'pending', 1, 1, $6,
-            1, $7, $8, $9, NULL, $10, NULL
+            1, $7, $8, $9, NULL, $10, NULL, $11
         )
         RETURNING *
         "#,
@@ -20106,6 +20106,7 @@ async fn mutate_deferred_orchestration_task(
     .bind(&task_payload.value)
     .bind(&task_payload.digest)
     .bind(command.task_deadline)
+    .bind(current_job.trace.trace_id.to_string())
     .fetch_one(&mut **transaction)
     .await?;
     let task = task_from_row(task)?;
@@ -27139,12 +27140,24 @@ pub(crate) async fn append_scheduler_event(
     } else {
         sqlx::query_scalar(
             r#"
-            SELECT trace_id
-            FROM insight_platform.jobs
-            WHERE tenant_id = $1
-              AND (job_id = $2 OR (owner_kind = $3 AND owner_id = $2))
-            ORDER BY (job_id = $2) DESC, updated_at DESC, job_id DESC
-            LIMIT 1
+            SELECT COALESCE(
+                (
+                    SELECT trace_id
+                    FROM insight_platform.jobs
+                    WHERE tenant_id = $1
+                      AND (job_id = $2 OR (owner_kind = $3 AND owner_id = $2))
+                    ORDER BY (job_id = $2) DESC, updated_at DESC, job_id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT trace_id FROM insight_platform.tasks
+                    WHERE tenant_id = $1 AND task_id = $2
+                ),
+                (
+                    SELECT trace_id FROM insight_platform.invocations
+                    WHERE tenant_id = $1 AND invocation_id = $2
+                )
+            )
             "#,
         )
         .bind(tenant_id)
@@ -28312,6 +28325,7 @@ fn validate_claimed_job_payload(job: &JobRecord) -> Result<(), RepositoryError> 
 pub struct TaskRecord {
     pub tenant_id: String,
     pub task_id: String,
+    pub trace: TraceIdentityV1,
     pub task_kind: TaskKind,
     pub owner_kind: String,
     pub owner_id: String,
@@ -35337,6 +35351,11 @@ fn task_from_row(row: PgRow) -> Result<TaskRecord, RepositoryError> {
     let record = TaskRecord {
         tenant_id: row.try_get("tenant_id")?,
         task_id,
+        trace: TraceIdentityV1::new(
+            row.try_get::<String, _>("trace_id")?
+                .parse::<TraceId>()
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+        ),
         task_kind,
         owner_kind: row.try_get("owner_kind")?,
         owner_id: row.try_get("owner_id")?,

@@ -768,10 +768,10 @@ async fn seed_approved_deletion_task(
         INSERT INTO insight_platform.tasks (
             tenant_id, task_id, task_kind, owner_kind, owner_id, state,
             principal_snapshot_schema_version, payload_schema_version, payload,
-            payload_digest, deadline, responded_at, created_at, updated_at
+            payload_digest, deadline, responded_at, created_at, updated_at, trace_id
         ) VALUES ($1, $2, 'approval', 'artifact', $3, 'approved',
                   1, $4, $5, $6, statement_timestamp() + interval '1 hour',
-                  statement_timestamp(), statement_timestamp(), statement_timestamp())
+                  statement_timestamp(), statement_timestamp(), statement_timestamp(), $7)
         "#,
     )
     .bind(command.audit.tenant_id.to_string())
@@ -780,6 +780,7 @@ async fn seed_approved_deletion_task(
     .bind(payload.schema_version)
     .bind(payload.value)
     .bind(payload.digest)
+    .bind(command.audit.trace.trace_id.to_string())
     .execute(pool)
     .await
     .unwrap();

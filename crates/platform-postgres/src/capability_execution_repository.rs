@@ -3699,9 +3699,11 @@ pub(crate) async fn insert_capability_input_task(
             tenant_id, task_id, task_kind, owner_kind, owner_id, run_id, node_id,
             invocation_id, state, generation, version, response_schema_digest,
             principal_snapshot_schema_version, payload_schema_version, payload,
-            payload_digest, deadline, created_at, updated_at
+            payload_digest, deadline, created_at, updated_at, trace_id
         ) VALUES ($1, $2, $3, 'capability_invocation', $4, $5, $6, $4,
-                  'pending', 1, 1, $7, 1, $8, $9, $10, $11, $12, $12)
+                  'pending', 1, 1, $7, 1, $8, $9, $10, $11, $12, $12,
+                  (SELECT trace_id FROM insight_platform.invocations
+                   WHERE tenant_id = $1 AND invocation_id = $4))
         "#,
     )
     .bind(invocation.tenant_id.to_string())

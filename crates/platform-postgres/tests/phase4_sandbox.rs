@@ -1305,9 +1305,11 @@ async fn seed(pool: &PgPool, repository: &PgRepository, fixture: &Fixture) {
             tenant_id, invocation_id, invocation_kind, owner_kind, owner_id,
             logical_key, run_id, node_id, deployment_id, state, version,
             input_value_id, effect_key_digest, payload_schema_version, payload,
-            payload_digest, deadline, started_at, created_at, updated_at
+            payload_digest, deadline, started_at, created_at, updated_at, trace_id
         ) VALUES ($1, $2, 'capability', 'node_execution', $3, $4, $5, $3,
-                  $6, 'ready', 1, $7, $8, $9, $10, $11, $12, NULL, $13, $13)
+                  $6, 'ready', 1, $7, $8, $9, $10, $11, $12, NULL, $13, $13,
+                  (SELECT trace_id FROM insight_platform.runs
+                   WHERE tenant_id = $1 AND run_id = $5))
         "#,
     )
     .bind(fixture.tenant_id.to_string())
@@ -1462,9 +1464,11 @@ async fn insert_derived_sandbox_invocation(
             tenant_id, invocation_id, invocation_kind, owner_kind, owner_id,
             logical_key, run_id, node_id, deployment_id, state, version,
             input_value_id, effect_key_digest, payload_schema_version, payload,
-            payload_digest, deadline, started_at, created_at, updated_at
+            payload_digest, deadline, started_at, created_at, updated_at, trace_id
         ) VALUES ($1, $2, 'capability', 'node_execution', $3, $4, $5, $3,
-                  $6, 'ready', 1, $7, $8, $9, $10, $11, $12, NULL, $13, $13)
+                  $6, 'ready', 1, $7, $8, $9, $10, $11, $12, NULL, $13, $13,
+                  (SELECT trace_id FROM insight_platform.runs
+                   WHERE tenant_id = $1 AND run_id = $5))
         "#,
     )
     .bind(fixture.tenant_id.to_string())

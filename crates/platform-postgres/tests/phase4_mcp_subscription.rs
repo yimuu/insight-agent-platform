@@ -1536,9 +1536,9 @@ async fn seed(
         INSERT INTO insight_platform.invocations (
             tenant_id, invocation_id, invocation_kind, owner_kind, owner_id,
             logical_key, deployment_id, state, payload_schema_version, payload,
-            payload_digest, deadline, terminal_at, created_at, updated_at
+            payload_digest, deadline, terminal_at, created_at, updated_at, trace_id
         ) VALUES ($1, $2, 'mcp_discovery', 'mcp_operation', $2,
-                  'fixture-discovery', $3, 'succeeded', $4, $5, $6, $7, $8, $8, $8)
+                  'fixture-discovery', $3, 'succeeded', $4, $5, $6, $7, $8, $8, $8, $9)
         "#,
     )
     .bind(tenant_id.to_string())
@@ -1549,6 +1549,7 @@ async fn seed(
     .bind(operation_payload.digest)
     .bind(now + Duration::hours(2))
     .bind(now)
+    .bind(insight_platform_contracts::TraceId::new().to_string())
     .execute(pool)
     .await
     .unwrap();

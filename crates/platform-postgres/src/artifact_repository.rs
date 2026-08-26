@@ -5258,11 +5258,11 @@ impl ArtifactTransaction for PgArtifactTransaction {
                     invocation_id, state, generation, version, response_schema_digest,
                     principal_snapshot_schema_version, payload_schema_version, payload,
                     payload_digest, response_value_id, deadline, responded_at,
-                    created_at, updated_at
+                    created_at, updated_at, trace_id
                 ) VALUES (
                     $1, $2, 'approval', 'artifact', $3, NULL, NULL,
                     NULL, 'pending', 1, 1, NULL,
-                    1, $4, $5, $6, NULL, $7, NULL, $8, $8
+                    1, $4, $5, $6, NULL, $7, NULL, $8, $8, $9
                 )
                 "#,
             )
@@ -5274,6 +5274,7 @@ impl ArtifactTransaction for PgArtifactTransaction {
             .bind(&task_payload.digest)
             .bind(command.deadline)
             .bind(database_now)
+            .bind(command.audit.trace.trace_id.to_string())
             .execute(&mut *transaction)
             .await?;
             append_command_event(

@@ -1598,12 +1598,13 @@ async fn insert_capability_invocation(
             logical_key, run_id, node_id, deployment_id, state, version,
             input_value_id, output_value_id, effect_key_digest,
             payload_schema_version, payload, payload_digest, deadline,
-            retry_at, started_at, terminal_at, created_at, updated_at
+            retry_at, started_at, terminal_at, created_at, updated_at, trace_id
         ) VALUES (
             $1, $2, 'capability', $3, $4,
             $5, $6, $7, $8, $9, $10,
             $11, NULL, $12, $13, $14, $15, $16,
-            NULL, NULL, NULL, $17, $17
+            NULL, NULL, NULL, $17, $17,
+            (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $6)
         )
         "#,
     )
@@ -1668,11 +1669,13 @@ async fn insert_approval_task(
             invocation_id, state, generation, version, response_schema_digest,
             principal_snapshot_schema_version, payload_schema_version, payload,
             payload_digest, response_value_id, deadline, responded_at,
-            created_at, updated_at
+            created_at, updated_at, trace_id
         ) VALUES (
             $1, $2, 'approval', 'capability_invocation', $3, $4, $5,
             $3, 'pending', 1, 1, NULL,
-            1, $6, $7, $8, NULL, $9, NULL, $10, $10
+            1, $6, $7, $8, NULL, $9, NULL, $10, $10,
+            (SELECT trace_id FROM insight_platform.invocations
+             WHERE tenant_id = $1 AND invocation_id = $3)
         )
         "#,
     )

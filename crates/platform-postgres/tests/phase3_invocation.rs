@@ -1181,6 +1181,26 @@ async fn run_capability_phase3_fixture() {
     };
     assert_eq!(prepared.invocation.version, applied.version + 1);
     assert_eq!(prepared.job.state, "ready");
+    let execution_trace_ids: (String, String, String) = sqlx::query_as(
+        r#"
+        SELECT run.trace_id, invocation.trace_id, job.trace_id
+        FROM insight_platform.runs AS run
+        JOIN insight_platform.invocations AS invocation
+          ON invocation.tenant_id = run.tenant_id AND invocation.run_id = run.run_id
+        JOIN insight_platform.jobs AS job
+          ON job.tenant_id = invocation.tenant_id
+         AND job.invocation_id = invocation.invocation_id
+        WHERE run.tenant_id = $1 AND invocation.invocation_id = $2 AND job.job_id = $3
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(applied.invocation_id.to_string())
+    .bind(capability_job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(execution_trace_ids.0, execution_trace_ids.1);
+    assert_eq!(execution_trace_ids.0, execution_trace_ids.2);
     let worker_id = id(ResourceKind::WorkerProcessGeneration, 0x304);
     let lease_token = digest('3');
     let claim_slot = CapabilityClaimSlot {
@@ -1344,6 +1364,26 @@ async fn run_capability_phase3_fixture() {
         execute_admit(&repository, approval.clone()).await.unwrap(),
         CommandOutcome::Replayed(record) if record == awaiting
     ));
+    let task_trace_ids: (String, String, String) = sqlx::query_as(
+        r#"
+        SELECT run.trace_id, invocation.trace_id, task.trace_id
+        FROM insight_platform.runs AS run
+        JOIN insight_platform.invocations AS invocation
+          ON invocation.tenant_id = run.tenant_id AND invocation.run_id = run.run_id
+        JOIN insight_platform.tasks AS task
+          ON task.tenant_id = invocation.tenant_id
+         AND task.invocation_id = invocation.invocation_id
+        WHERE run.tenant_id = $1 AND invocation.invocation_id = $2 AND task.task_id = $3
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(awaiting.invocation_id.to_string())
+    .bind(approval.approval_task_id.as_ref().unwrap().to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(task_trace_ids.0, task_trace_ids.1);
+    assert_eq!(task_trace_ids.0, task_trace_ids.2);
 
     let mut wrong_rule = approval_resolution(&fixture, &approval, 0x1a0, true);
     wrong_rule.eligible_principal_rule_digest = digest('b');
@@ -2644,7 +2684,7 @@ async fn seed_remote_mcp_facts(
         .unwrap();
     let operation_payload = TypedPayload::from_versioned(1, &operation_payload, 1_048_576).unwrap();
     sqlx::query(
-        "INSERT INTO insight_platform.invocations (tenant_id, invocation_id, invocation_kind, owner_kind, owner_id, logical_key, deployment_id, state, payload_schema_version, payload, payload_digest, deadline, terminal_at, created_at, updated_at) VALUES ($1, $2, 'mcp_discovery', 'mcp_operation', $2, 'remote-mcp-process-discovery', $3, 'succeeded', $4, $5, $6, $7, $8, $8, $8)",
+        "INSERT INTO insight_platform.invocations (tenant_id, invocation_id, invocation_kind, owner_kind, owner_id, logical_key, deployment_id, state, payload_schema_version, payload, payload_digest, deadline, terminal_at, created_at, updated_at, trace_id) VALUES ($1, $2, 'mcp_discovery', 'mcp_operation', $2, 'remote-mcp-process-discovery', $3, 'succeeded', $4, $5, $6, $7, $8, $8, $8, $9)",
     )
     .bind(fixture.tenant_id.to_string())
     .bind(source_operation_id.to_string())
@@ -2654,6 +2694,7 @@ async fn seed_remote_mcp_facts(
     .bind(operation_payload.digest)
     .bind(now + Duration::hours(2))
     .bind(now)
+    .bind(insight_platform_contracts::TraceId::new().to_string())
     .execute(pool)
     .await
     .unwrap();

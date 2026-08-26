@@ -13,10 +13,10 @@
     "is_sha256(text)",
     "is_trace_id(text)"
   ],
-  "migration_set_digest": "sha256:a87b4c68603708044648d126175604c9ab9ca80f7b0e4d6d8e791b35551444d8",
+  "migration_set_digest": "sha256:d48e706c1837d9a5dc50f78de1bb4d604b8361591513e17809d0b59e3c31cb3b",
   "migrations": [
     {
-      "checksum": "sha256:cf46fc51c3d548f978e29c6563bee269ac762b6060f1ce3105420801770f1021",
+      "checksum": "sha256:434d5e657f6033c9dd3ae7554574ccae401316c5e795f3830fc6b5682b66dc3a",
       "name": "platform_baseline",
       "version": 1
     }

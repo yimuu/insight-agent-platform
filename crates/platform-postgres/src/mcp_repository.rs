@@ -1183,9 +1183,9 @@ impl PgRepository {
             INSERT INTO insight_platform.invocations (
                 tenant_id, invocation_id, invocation_kind, owner_kind, owner_id,
                 logical_key, deployment_id, state, version, payload_schema_version,
-                payload, payload_digest, deadline, created_at, updated_at
+                payload, payload_digest, deadline, created_at, updated_at, trace_id
             ) VALUES ($1, $2, 'mcp_discovery', 'mcp_operation', $2,
-                      $3, $4, 'pending', 1, $5, $6, $7, $8, $9, $9)
+                      $3, $4, 'pending', 1, $5, $6, $7, $8, $9, $9, $10)
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -1197,6 +1197,7 @@ impl PgRepository {
         .bind(&operation_typed.digest)
         .bind(command.deadline)
         .bind(database_now)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
@@ -5677,10 +5678,11 @@ async fn insert_mcp_oauth_task(
             tenant_id, task_id, task_kind, owner_kind, owner_id, run_id, node_id,
             invocation_id, state, generation, version, response_schema_digest,
             principal_snapshot_schema_version, payload_schema_version, payload,
-            payload_digest, response_value_id, deadline, responded_at, created_at, updated_at
+            payload_digest, response_value_id, deadline, responded_at, created_at, updated_at,
+            trace_id
         ) VALUES ($1, $2, 'external_authorization', 'mcp_authorization_binding', $3,
                   NULL, NULL, NULL, 'pending', 1, 1, NULL, 1, $4, $5, $6,
-                  NULL, $7, NULL, $8, $8)
+                  NULL, $7, NULL, $8, $8, $9)
         "#,
     )
     .bind(command.audit.tenant_id.to_string())
@@ -5691,6 +5693,7 @@ async fn insert_mcp_oauth_task(
     .bind(&payload.digest)
     .bind(command.deadline)
     .bind(database_now)
+    .bind(command.audit.trace.trace_id.to_string())
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -6199,9 +6202,9 @@ impl PgRegistryTransaction {
             INSERT INTO insight_platform.invocations (
                 tenant_id, invocation_id, invocation_kind, owner_kind, owner_id,
                 logical_key, deployment_id, state, payload_schema_version, payload,
-                payload_digest, deadline, created_at, updated_at
+                payload_digest, deadline, created_at, updated_at, trace_id
             ) VALUES ($1, $2, 'mcp_subscription', 'mcp_operation', $2,
-                      $3, $4, 'pending', $5, $6, $7, $8, $9, $9)
+                      $3, $4, 'pending', $5, $6, $7, $8, $9, $9, $10)
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -6213,6 +6216,7 @@ impl PgRegistryTransaction {
         .bind(&operation_typed.digest)
         .bind(command.deadline)
         .bind(database_now)
+        .bind(command.audit.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
