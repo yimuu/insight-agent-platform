@@ -118,6 +118,7 @@ fn artifact_worker_audit(
     request: char,
 ) -> ArtifactWorkerAudit {
     ArtifactWorkerAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
         tenant_id: tenant_id.clone(),
         worker_process_generation_id: worker_process_generation_id.clone(),
         receipt_id: id(ResourceKind::Receipt, base),

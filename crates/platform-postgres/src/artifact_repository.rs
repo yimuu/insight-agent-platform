@@ -1,7 +1,7 @@
 use crate::repository::{
-    append_command_event, append_scheduler_event, begin_read_only_repeatable,
-    claim_command_receipt, decode_typed_payload, job_from_row, job_projection,
-    load_current_principal_snapshot, load_exact_active_policy_deployment,
+    append_command_event, append_scheduler_event, append_scheduler_event_with_trace,
+    begin_read_only_repeatable, claim_command_receipt, decode_typed_payload, job_from_row,
+    job_projection, load_current_principal_snapshot, load_exact_active_policy_deployment,
     load_exact_selection_policy_for_tenant, load_job_for_update_by_text, load_task_for_update,
     payload_from_row, require_tenant_permission, run_bindings_from_row,
     safety_scan_cursor_from_row, safety_scan_page, terminalize_command_receipt,
@@ -2551,6 +2551,7 @@ impl PgRepository {
             .parse::<Sha256Digest>()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         let audit = ArtifactWorkerAudit {
+            trace: current.trace,
             tenant_id: tenant_id.clone(),
             worker_process_generation_id: fence.worker_process_generation_id.clone(),
             receipt_id: slot.receipt_id,
@@ -5941,8 +5942,9 @@ async fn append_artifact_worker_event(
     event_type: &str,
     payload: &TypedPayload,
 ) -> Result<(), RepositoryError> {
-    append_scheduler_event(
+    append_scheduler_event_with_trace(
         transaction,
+        audit.trace,
         &audit.tenant_id.to_string(),
         &audit.event_id,
         &audit.outbox_id,

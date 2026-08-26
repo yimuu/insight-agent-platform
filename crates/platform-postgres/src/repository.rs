@@ -539,6 +539,7 @@ impl PgRepository {
             65_536,
         )?;
         let event_id = format!("evt_{}", command.request_id.uuid().hyphenated());
+        let trace = TraceIdentityV1::generate();
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(0x4950_424f_4f54_5354_i64)
@@ -579,13 +580,15 @@ impl PgRepository {
                 r#"
                 INSERT INTO insight_platform.events (
                     tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
-                    event_type, visibility, payload_schema_version, payload, payload_digest
-                ) VALUES (NULL, $1, 'principal', $2, 1, 'installation.bootstrap',
-                          'internal', $3, $4, $5)
+                    trace_id, event_type, visibility, payload_schema_version, payload,
+                    payload_digest
+                ) VALUES (NULL, $1, 'principal', $2, 1, $3, 'installation.bootstrap',
+                          'internal', $4, $5, $6)
                 "#,
             )
             .bind(&event_id)
             .bind(command.principal_id.to_string())
+            .bind(trace.trace_id.to_string())
             .bind(event_payload.schema_version)
             .bind(&event_payload.value)
             .bind(&event_payload.digest)
@@ -1320,7 +1323,7 @@ impl PgRepository {
         }
         let rows = sqlx::query(
             r#"
-            SELECT event_id, aggregate_kind, aggregate_id, aggregate_version,
+            SELECT event_id, aggregate_kind, aggregate_id, aggregate_version, trace_id,
                    public_sequence, event_type, payload, occurred_at
             FROM insight_platform.events
             WHERE tenant_id = $1 AND run_id = $2 AND visibility = 'public'
@@ -4793,14 +4796,16 @@ impl PgRepository {
             r#"
             INSERT INTO insight_platform.events (
                 tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
-                run_id, event_type, visibility, payload_schema_version, payload, payload_digest
-            ) VALUES ($1, $2, 'job', $3, $4, $5, $6, 'internal', $7, $8, $9)
+                trace_id, run_id, event_type, visibility, payload_schema_version, payload,
+                payload_digest
+            ) VALUES ($1, $2, 'job', $3, $4, $5, $6, $7, 'internal', $8, $9, $10)
             "#,
         )
         .bind(&command.fence.tenant_id)
         .bind(&command.event_id)
         .bind(&command.fence.job_id)
         .bind(job.version)
+        .bind(job.trace.trace_id.to_string())
         .bind(&job.run_id)
         .bind(&command.event_type)
         .bind(command.event_payload.schema_version)
@@ -4811,13 +4816,14 @@ impl PgRepository {
         sqlx::query(
             r#"
             INSERT INTO insight_platform.outbox_events (
-                tenant_id, outbox_id, event_id
-            ) VALUES ($1, $2, $3)
+                tenant_id, outbox_id, event_id, trace_id
+            ) VALUES ($1, $2, $3, $4)
             "#,
         )
         .bind(&command.fence.tenant_id)
         .bind(&command.outbox_id)
         .bind(&command.event_id)
+        .bind(job.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
@@ -27122,6 +27128,92 @@ pub(crate) async fn append_scheduler_event(
     event_type: &str,
     payload: &TypedPayload,
 ) -> Result<(), RepositoryError> {
+    let trace_id: String = if let Some(run_id) = run_id {
+        sqlx::query_scalar(
+            "SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(run_id)
+        .fetch_one(&mut **transaction)
+        .await?
+    } else {
+        sqlx::query_scalar(
+            r#"
+            SELECT trace_id
+            FROM insight_platform.jobs
+            WHERE tenant_id = $1
+              AND (job_id = $2 OR (owner_kind = $3 AND owner_id = $2))
+            ORDER BY (job_id = $2) DESC, updated_at DESC, job_id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(aggregate_id)
+        .bind(aggregate_kind)
+        .fetch_one(&mut **transaction)
+        .await?
+    };
+    insert_scheduler_event(
+        transaction,
+        tenant_id,
+        event_id,
+        outbox_id,
+        aggregate_kind,
+        aggregate_id,
+        aggregate_version,
+        &trace_id,
+        run_id,
+        event_type,
+        payload,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn append_scheduler_event_with_trace(
+    transaction: &mut Transaction<'_, Postgres>,
+    trace: TraceIdentityV1,
+    tenant_id: &str,
+    event_id: &ResourceId,
+    outbox_id: &ResourceId,
+    aggregate_kind: &str,
+    aggregate_id: &str,
+    aggregate_version: i64,
+    run_id: Option<&str>,
+    event_type: &str,
+    payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    let trace_id = trace.trace_id.to_string();
+    insert_scheduler_event(
+        transaction,
+        tenant_id,
+        event_id,
+        outbox_id,
+        aggregate_kind,
+        aggregate_id,
+        aggregate_version,
+        &trace_id,
+        run_id,
+        event_type,
+        payload,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_scheduler_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    event_id: &ResourceId,
+    outbox_id: &ResourceId,
+    aggregate_kind: &str,
+    aggregate_id: &str,
+    aggregate_version: i64,
+    trace_id: &str,
+    run_id: Option<&str>,
+    event_type: &str,
+    payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
     let public_event_type = public_run_event_type(aggregate_kind, event_type, &payload.value);
     let public_sequence = match (run_id, public_event_type) {
         (Some(run_id), Some(_)) => {
@@ -27138,9 +27230,9 @@ pub(crate) async fn append_scheduler_event(
         r#"
         INSERT INTO insight_platform.events (
             tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
-            run_id, public_sequence, event_type, visibility,
+            trace_id, run_id, public_sequence, event_type, visibility,
             payload_schema_version, payload, payload_digest
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         "#,
     )
     .bind(tenant_id)
@@ -27148,6 +27240,7 @@ pub(crate) async fn append_scheduler_event(
     .bind(aggregate_kind)
     .bind(aggregate_id)
     .bind(aggregate_version)
+    .bind(trace_id)
     .bind(run_id)
     .bind(public_sequence)
     .bind(event_type)
@@ -27159,13 +27252,14 @@ pub(crate) async fn append_scheduler_event(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id, trace_id)
+        VALUES ($1, $2, $3, $4)
         "#,
     )
     .bind(tenant_id)
     .bind(outbox_id.to_string())
     .bind(event_id.to_string())
+    .bind(trace_id)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -27873,6 +27967,7 @@ pub struct RunResultRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicRunEventRecord {
     pub event_id: ResourceId,
+    pub trace_id: TraceId,
     pub sequence: u64,
     pub event_type: PublicRunEventType,
     pub source_id: ResourceId,
@@ -32560,9 +32655,9 @@ async fn append_command_event_version(
         r#"
         INSERT INTO insight_platform.events (
             tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
-            run_id, public_sequence, event_type, visibility,
+            trace_id, run_id, public_sequence, event_type, visibility,
             payload_schema_version, payload, payload_digest
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         "#,
     )
     .bind(audit.tenant_id.to_string())
@@ -32570,6 +32665,7 @@ async fn append_command_event_version(
     .bind(aggregate_kind)
     .bind(aggregate_id)
     .bind(aggregate_version)
+    .bind(audit.trace.trace_id.to_string())
     .bind(run_id)
     .bind(public_sequence)
     .bind(event_type)
@@ -32581,13 +32677,14 @@ async fn append_command_event_version(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id, trace_id)
+        VALUES ($1, $2, $3, $4)
         "#,
     )
     .bind(audit.tenant_id.to_string())
     .bind(audit.outbox_id.to_string())
     .bind(audit.event_id.to_string())
+    .bind(audit.trace.trace_id.to_string())
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -32697,6 +32794,10 @@ fn public_run_event_from_row(row: PgRow) -> Result<PublicRunEventRecord, Reposit
         .try_get::<String, _>("aggregate_id")?
         .parse::<ResourceId>()
         .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let trace_id = row
+        .try_get::<String, _>("trace_id")?
+        .parse::<TraceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
     let source_kind = event_type.durable_source_kind().ok_or_else(|| {
         RepositoryError::CorruptRow("durable public Event has no source kind".to_owned())
     })?;
@@ -32721,6 +32822,7 @@ fn public_run_event_from_row(row: PgRow) -> Result<PublicRunEventRecord, Reposit
     }
     Ok(PublicRunEventRecord {
         event_id,
+        trace_id,
         sequence,
         event_type,
         source_id,

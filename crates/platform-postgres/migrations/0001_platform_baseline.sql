@@ -949,6 +949,7 @@ CREATE TABLE insight_platform.events (
     aggregate_kind text NOT NULL,
     aggregate_id text NOT NULL,
     aggregate_version bigint,
+    trace_id text NOT NULL,
     run_id text,
     public_sequence bigint,
     event_type text NOT NULL,
@@ -967,6 +968,7 @@ CREATE TABLE insight_platform.events (
     CONSTRAINT events_aggregate_version_ck CHECK (
         aggregate_version IS NULL OR aggregate_version > 0
     ),
+    CONSTRAINT events_trace_id_ck CHECK (insight_platform.is_trace_id(trace_id)),
     CONSTRAINT events_public_sequence_ck CHECK (
         public_sequence IS NULL OR (run_id IS NOT NULL AND public_sequence > 0)
     ),
@@ -981,6 +983,7 @@ CREATE TABLE insight_platform.events (
     CONSTRAINT events_payload_ck CHECK (insight_platform.is_bounded_object(payload, 1048576)),
     CONSTRAINT events_payload_digest_ck CHECK (insight_platform.is_sha256(payload_digest)),
     CONSTRAINT events_tenant_event_uq UNIQUE (tenant_id, event_id),
+    CONSTRAINT events_tenant_event_trace_uq UNIQUE (tenant_id, event_id, trace_id),
     CONSTRAINT events_aggregate_version_type_uq UNIQUE (
         tenant_id, aggregate_kind, aggregate_id, aggregate_version, event_type
     ),
@@ -1061,6 +1064,7 @@ CREATE TABLE insight_platform.outbox_events (
     tenant_id text NOT NULL,
     outbox_id text NOT NULL,
     event_id text NOT NULL,
+    trace_id text NOT NULL,
     state text NOT NULL DEFAULT 'pending',
     publish_attempts integer NOT NULL DEFAULT 0,
     next_publish_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -1072,9 +1076,10 @@ CREATE TABLE insight_platform.outbox_events (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (tenant_id, outbox_id),
-    CONSTRAINT outbox_events_event_fk FOREIGN KEY (tenant_id, event_id)
-        REFERENCES insight_platform.events (tenant_id, event_id),
+    CONSTRAINT outbox_events_event_fk FOREIGN KEY (tenant_id, event_id, trace_id)
+        REFERENCES insight_platform.events (tenant_id, event_id, trace_id),
     CONSTRAINT outbox_events_id_ck CHECK (insight_platform.is_platform_id(outbox_id)),
+    CONSTRAINT outbox_events_trace_id_ck CHECK (insight_platform.is_trace_id(trace_id)),
     CONSTRAINT outbox_events_state_ck CHECK (state ~ '^[a-z][a-z0-9_]{0,63}$'),
     CONSTRAINT outbox_events_attempts_ck CHECK (publish_attempts >= 0),
     CONSTRAINT outbox_events_claim_epoch_ck CHECK (claim_epoch >= 0),

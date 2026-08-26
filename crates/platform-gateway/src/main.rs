@@ -1408,6 +1408,7 @@ impl RunApplication for PgRuns {
                     .ok_or(RunApplicationError::Internal)?;
                 Ok(RunEventProjectionV1 {
                     event_id: event.event_id,
+                    trace_id: event.trace_id,
                     sequence: event.sequence,
                     event_type: event.event_type,
                     source_kind,

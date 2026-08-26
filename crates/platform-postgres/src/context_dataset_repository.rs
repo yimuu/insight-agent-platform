@@ -380,26 +380,28 @@ impl PgRepository {
             r#"
             INSERT INTO insight_platform.events (
                 tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
-                event_type, visibility, payload_schema_version, payload, payload_digest
+                trace_id, event_type, visibility, payload_schema_version, payload, payload_digest
             ) VALUES ($1, $2, 'context_dataset', $3, $4,
-                      'context.dataset_generation_created', 'internal', $5, $6, $7)
+                      $5, 'context.dataset_generation_created', 'internal', $6, $7, $8)
             "#,
         )
         .bind(command.tenant_id.to_string())
         .bind(command.event_id.to_string())
         .bind(command.dataset_id.to_string())
         .bind(revision_no)
+        .bind(current.trace.trace_id.to_string())
         .bind(event_payload.schema_version)
         .bind(&event_payload.value)
         .bind(&event_payload.digest)
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
-            "INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id) VALUES ($1, $2, $3)",
+            "INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id, trace_id) VALUES ($1, $2, $3, $4)",
         )
         .bind(command.tenant_id.to_string())
         .bind(command.outbox_id.to_string())
         .bind(command.event_id.to_string())
+        .bind(current.trace.trace_id.to_string())
         .execute(&mut *transaction)
         .await?;
         let record = job_from_row(row)?;

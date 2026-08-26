@@ -1,6 +1,7 @@
 use crate::repository::{
-    append_command_event, append_scheduler_event, claim_command_receipt, decode_deployment_closure,
-    decode_typed_payload, decode_versioned_payload, job_from_row, job_projection, load_deployment,
+    append_command_event, append_scheduler_event, append_scheduler_event_with_trace,
+    claim_command_receipt, decode_deployment_closure, decode_typed_payload,
+    decode_versioned_payload, job_from_row, job_projection, load_deployment,
     load_job_for_update_by_text, load_resource, load_resource_for_update, load_task_for_update,
     payload_from_row, require_ready_run_artifact, require_tenant_permission, task_projection,
     terminalize_command_receipt, validate_deployment_closure_exists,
@@ -841,8 +842,9 @@ impl PgRegistryTransaction {
                     command.task_id.clone(),
                 )
             };
-        append_scheduler_event(
+        append_scheduler_event_with_trace(
             &mut transaction,
+            command.audit.trace,
             &command.audit.tenant_id.to_string(),
             &command.audit.event_id,
             &command.audit.outbox_id,

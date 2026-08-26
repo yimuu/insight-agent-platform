@@ -89,6 +89,7 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
         .fetch_one(&pool)
         .await
         .unwrap();
+    let trace_id = insight_platform_contracts::TraceIdentityV1::generate().trace_id;
     repository
         .create_job(NewJob {
             tenant_id: TENANT_ID.to_owned(),
@@ -96,7 +97,7 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
             work_class: "interaction".to_owned(),
             owner_kind: "interaction".to_owned(),
             owner_id: JOB_OWNER_ID.to_owned(),
-            trace_id: insight_platform_contracts::TraceIdentityV1::generate().trace_id,
+            trace_id,
             invocation_id: None,
             run_id: None,
             node_id: None,
@@ -195,6 +196,24 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
     };
     let outcome = repository.commit_job(commit.clone()).await.unwrap();
     assert!(matches!(outcome, JobCommitOutcome::Committed(_)));
+    let persisted_trace: (String, String) = sqlx::query_as(
+        r#"
+        SELECT event.trace_id, outbox.trace_id
+        FROM insight_platform.events AS event
+        JOIN insight_platform.outbox_events AS outbox
+          ON outbox.tenant_id = event.tenant_id
+         AND outbox.event_id = event.event_id
+         AND outbox.trace_id = event.trace_id
+        WHERE event.tenant_id = $1 AND event.event_id = $2
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(EVENT_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_trace.0, trace_id.to_string());
+    assert_eq!(persisted_trace.1, persisted_trace.0);
     let replay = repository.commit_job(commit.clone()).await.unwrap();
     assert!(matches!(replay, JobCommitOutcome::Replayed { .. }));
 

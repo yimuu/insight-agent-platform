@@ -526,6 +526,7 @@ fn oauth_callback_is_state_bound_scope_reducing_and_secret_free() {
     .unwrap();
     let mut callback = CompleteMcpOAuthCallback {
         audit: McpOAuthCallbackAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_id.clone(),
             callback_ingress_generation_id: id(ResourceKind::WorkerProcessGeneration, 101),
             receipt_id: id(ResourceKind::Receipt, 102),

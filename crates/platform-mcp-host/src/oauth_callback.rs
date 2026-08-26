@@ -639,6 +639,7 @@ impl McpOAuthCallbackIngress {
             ))?;
         let command = CompleteMcpOAuthCallback {
             audit: McpOAuthCallbackAudit {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: contract.tenant_id,
                 callback_ingress_generation_id: self.config.callback_ingress_generation_id.clone(),
                 receipt_id: ids.receipt_id,

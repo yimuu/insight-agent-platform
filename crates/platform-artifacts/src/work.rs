@@ -759,6 +759,7 @@ impl ArtifactScanEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactWorkerAudit {
+    pub trace: insight_platform_contracts::TraceIdentityV1,
     pub tenant_id: ResourceId,
     pub worker_process_generation_id: ResourceId,
     pub receipt_id: ResourceId,
@@ -771,7 +772,8 @@ pub struct ArtifactWorkerAudit {
 
 impl ArtifactWorkerAudit {
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ArtifactWorkError> {
-        if self.tenant_id.kind() != ResourceKind::Tenant
+        if self.trace.validate().is_err()
+            || self.tenant_id.kind() != ResourceKind::Tenant
             || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.receipt_id.kind() != ResourceKind::Receipt
             || self.event_id.kind() != ResourceKind::Event
@@ -1945,6 +1947,7 @@ mod tests {
         .seal()
         .unwrap();
         let audit = ArtifactWorkerAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id,
             worker_process_generation_id: worker_id.clone(),
             receipt_id: id(ResourceKind::Receipt, 11),
@@ -2022,6 +2025,7 @@ mod tests {
             retry_backoff_milliseconds: 100,
         };
         let audit = ArtifactWorkerAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id,
             worker_process_generation_id: worker_id.clone(),
             receipt_id: id(ResourceKind::Receipt, 86),
@@ -2083,6 +2087,7 @@ mod tests {
             retry_backoff_milliseconds: 100,
         };
         let audit = ArtifactWorkerAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id,
             worker_process_generation_id: worker_id.clone(),
             receipt_id: id(ResourceKind::Receipt, 96),
@@ -2694,6 +2699,7 @@ mod tests {
         let worker = id(ResourceKind::WorkerProcessGeneration, 41);
         let command = CommitArtifactBlobCleanup {
             audit: ArtifactWorkerAudit {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: blob.tenant_id.clone(),
                 worker_process_generation_id: worker.clone(),
                 receipt_id: id(ResourceKind::Receipt, 42),
@@ -2878,6 +2884,7 @@ mod tests {
         lease.expires_at = fixture.now + Duration::seconds(30);
         let command = CommitArtifactAttemptFailure {
             audit: ArtifactWorkerAudit {
+                trace: insight_platform_contracts::TraceIdentityV1::generate(),
                 tenant_id: current.tenant_id.clone(),
                 worker_process_generation_id: lease.worker_process_generation_id.clone(),
                 receipt_id: id(ResourceKind::Receipt, 123),

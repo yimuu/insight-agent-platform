@@ -14,8 +14,8 @@ use futures::stream;
 use insight_platform_contracts::{
     canonical_digest, ApiProblem, ApiProblemCode, DataClassification, DurablePublicRunEventData,
     EventDurability, OpaqueRunEventCursor, PublicRunEvent, PublicRunEventSourceKind,
-    PublicRunEventType, ResourceId, ResourceKind, RunState, Sha256Digest, UtcTimestamp, ValueRef,
-    MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
+    PublicRunEventType, ResourceId, ResourceKind, RunState, Sha256Digest, TraceId, UtcTimestamp,
+    ValueRef, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use ring::hmac;
 use serde::{Deserialize, Serialize};
@@ -133,6 +133,7 @@ pub struct ReadRunIntent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunEventProjectionV1 {
     pub event_id: ResourceId,
+    pub trace_id: TraceId,
     pub sequence: u64,
     pub event_type: PublicRunEventType,
     pub source_kind: PublicRunEventSourceKind,
@@ -475,7 +476,7 @@ async fn read_run_events(
             cursor: Some(cursor.clone()),
             sequence: Some(projection.sequence),
             schema_version: 1,
-            trace_id: crate::trace::current_trace_id(),
+            trace_id: projection.trace_id,
             event_type: projection.event_type,
             durability: EventDurability::Durable,
             occurred_at: UtcTimestamp::from_datetime(projection.occurred_at),
@@ -1168,6 +1169,7 @@ mod tests {
             Ok((intent.after_sequence < 1)
                 .then(|| RunEventProjectionV1 {
                     event_id: id(ResourceKind::Event, 41),
+                    trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".parse().unwrap(),
                     sequence: 1,
                     event_type: PublicRunEventType::RunQueued,
                     source_kind: PublicRunEventSourceKind::Run,
@@ -1235,14 +1237,15 @@ mod tests {
             crate::trace::establish_public_trace,
         ));
         let run_id = id(ResourceKind::Run, 3);
-        let trace_id = "0af7651916cd43dd8448eb211c80319c";
+        let request_trace_id = "0af7651916cd43dd8448eb211c80319c";
+        let event_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
         let response = router
             .oneshot(
                 Request::builder()
                     .uri(format!("/v1/runs/{run_id}/events"))
                     .header(
                         crate::trace::TRACEPARENT_HEADER,
-                        format!("00-{trace_id}-b7ad6b7169203331-01"),
+                        format!("00-{request_trace_id}-b7ad6b7169203331-01"),
                     )
                     .extension(principal(now))
                     .body(Body::empty())
@@ -1259,12 +1262,16 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("text/event-stream"));
-        assert_eq!(response.headers()[crate::trace::TRACE_ID_HEADER], trace_id);
+        assert_eq!(
+            response.headers()[crate::trace::TRACE_ID_HEADER],
+            request_trace_id
+        );
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains("event: run.queued"));
         assert!(body.contains(&format!("\"run_id\":\"{run_id}\"")));
-        assert!(body.contains(&format!("\"trace_id\":\"{trace_id}\"")));
+        assert!(body.contains(&format!("\"trace_id\":\"{event_trace_id}\"")));
+        assert!(!body.contains(&format!("\"trace_id\":\"{request_trace_id}\"")));
         assert!(body.contains("\"source_kind\":\"run\""));
         assert!(!body.contains("payload"));
         assert!(!body.contains("principal"));

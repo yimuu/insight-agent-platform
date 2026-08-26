@@ -1970,6 +1970,7 @@ mod tests {
         let event_suffix = format!("{base}2");
         let outbox_suffix = format!("{base}3");
         ArtifactWorkerAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id: tenant_id.clone(),
             worker_process_generation_id: worker_process_generation_id.clone(),
             receipt_id: id(ResourceKind::Receipt, &receipt_suffix),

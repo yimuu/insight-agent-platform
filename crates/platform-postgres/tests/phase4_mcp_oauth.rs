@@ -1687,8 +1687,9 @@ async fn phase4_mcp_oauth_cleanup_outbox_claim_is_reclaimable_and_exactly_fenced
         r#"
         INSERT INTO insight_platform.events (
             tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
-            event_type, visibility, payload_schema_version, payload, payload_digest
+            trace_id, event_type, visibility, payload_schema_version, payload, payload_digest
         ) VALUES ($1, $2, 'mcp_authorization', $3, 1,
+                  '0123456789abcdef0123456789abcdef',
                   'mcp.oauth_authorization_completed', 'internal', $4, $5, $6)
         "#,
     )
@@ -1702,7 +1703,7 @@ async fn phase4_mcp_oauth_cleanup_outbox_claim_is_reclaimable_and_exactly_fenced
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id) VALUES ($1, $2, $3)",
+        "INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id, trace_id) VALUES ($1, $2, $3, '0123456789abcdef0123456789abcdef')",
     )
     .bind(tenant_id.to_string())
     .bind(outbox_id.to_string())
@@ -1874,8 +1875,9 @@ async fn phase4_mcp_oauth_cleanup_process_recovers_egress_and_worker_kill() {
         r#"
         INSERT INTO insight_platform.events (
             tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
-            event_type, visibility, payload_schema_version, payload, payload_digest
+            trace_id, event_type, visibility, payload_schema_version, payload, payload_digest
         ) VALUES ($1, $2, 'mcp_authorization', $3, 1,
+                  '0123456789abcdef0123456789abcdef',
                   'mcp.oauth_authorization_completed', 'internal', $4, $5, $6)
         "#,
     )
@@ -1889,7 +1891,7 @@ async fn phase4_mcp_oauth_cleanup_process_recovers_egress_and_worker_kill() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id) VALUES ($1, $2, $3)",
+        "INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id, trace_id) VALUES ($1, $2, $3, '0123456789abcdef0123456789abcdef')",
     )
     .bind(fixture.tenant_id.to_string())
     .bind(outbox_id.to_string())

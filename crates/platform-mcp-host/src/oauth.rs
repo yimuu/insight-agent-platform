@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     CommandAudit, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, McpOAuthTaskBinding,
     PrincipalKind, PrincipalSnapshot, ResourceId, ResourceKind, SecretPurpose,
-    SecretResolutionPolicy, Sha256Digest,
+    SecretResolutionPolicy, Sha256Digest, TraceIdentityV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -261,6 +261,7 @@ impl McpOAuthCallbackResolution {
 /// It contains no raw state, authorization code, token, cookie or caller-controlled URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpOAuthCallbackAudit {
+    pub trace: TraceIdentityV1,
     pub tenant_id: ResourceId,
     pub callback_ingress_generation_id: ResourceId,
     pub receipt_id: ResourceId,
@@ -274,7 +275,8 @@ pub struct McpOAuthCallbackAudit {
 
 impl McpOAuthCallbackAudit {
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), McpHostError> {
-        if self.tenant_id.kind() != ResourceKind::Tenant
+        if self.trace.validate().is_err()
+            || self.tenant_id.kind() != ResourceKind::Tenant
             || self.callback_ingress_generation_id.kind() != ResourceKind::WorkerProcessGeneration
             || self.receipt_id.kind() != ResourceKind::Receipt
             || self.event_id.kind() != ResourceKind::Event
