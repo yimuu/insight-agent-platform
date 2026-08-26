@@ -39,7 +39,9 @@ use insight_platform_model_adapters::{
     ModelAdapterFailureClass, ModelProviderWireConnector, ModelProviderWireEvent,
     ModelProviderWireProtocol, ModelProviderWireRequest, ModelProviderWireStream,
 };
-use insight_platform_rpc_trace::{require_trace_interceptor, PropagateTrace};
+use insight_platform_rpc_trace::{
+    require_trace_interceptor, scope_trace, trace_context, PropagateTrace,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -1551,47 +1553,49 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<Self::OpenModelProviderStream>, Status> {
         require_role(&request, EgressCallerRole::ModelWorker)?;
+        let trace = trace_context(&request)?;
         let request = decode_model_request(request.into_inner(), self.limits)?;
         let limits = self.limits;
-        let stream: Self::OpenModelProviderStream = match self.model.open(request).await {
-            Ok(upstream) => Box::pin(stream::unfold(
-                (upstream, false),
-                move |(mut upstream, terminal)| async move {
-                    if terminal {
-                        return None;
-                    }
-                    match upstream.next().await {
-                        Some(Ok(event)) => Some((
-                            encode_metadata(
-                                &ModelStreamFrame::Event(event),
-                                MODEL_PROVIDER_FRAME,
-                                limits,
-                            )
-                            .map_err(Status::from),
-                            (upstream, false),
-                        )),
-                        Some(Err(failure)) => Some((
-                            encode_metadata(
-                                &ModelStreamFrame::Failed(failure),
-                                MODEL_PROVIDER_FRAME,
-                                limits,
-                            )
-                            .map_err(Status::from),
-                            (upstream, true),
-                        )),
-                        None => None,
-                    }
-                },
-            )),
-            Err(failure) => Box::pin(stream::once(async move {
-                encode_metadata(
-                    &ModelStreamFrame::Failed(failure),
-                    MODEL_PROVIDER_FRAME,
-                    limits,
-                )
-                .map_err(Status::from)
-            })),
-        };
+        let stream: Self::OpenModelProviderStream =
+            match scope_trace(trace, self.model.open(request)).await {
+                Ok(upstream) => Box::pin(stream::unfold(
+                    (upstream, false),
+                    move |(mut upstream, terminal)| async move {
+                        if terminal {
+                            return None;
+                        }
+                        match upstream.next().await {
+                            Some(Ok(event)) => Some((
+                                encode_metadata(
+                                    &ModelStreamFrame::Event(event),
+                                    MODEL_PROVIDER_FRAME,
+                                    limits,
+                                )
+                                .map_err(Status::from),
+                                (upstream, false),
+                            )),
+                            Some(Err(failure)) => Some((
+                                encode_metadata(
+                                    &ModelStreamFrame::Failed(failure),
+                                    MODEL_PROVIDER_FRAME,
+                                    limits,
+                                )
+                                .map_err(Status::from),
+                                (upstream, true),
+                            )),
+                            None => None,
+                        }
+                    },
+                )),
+                Err(failure) => Box::pin(stream::once(async move {
+                    encode_metadata(
+                        &ModelStreamFrame::Failed(failure),
+                        MODEL_PROVIDER_FRAME,
+                        limits,
+                    )
+                    .map_err(Status::from)
+                })),
+            };
         Ok(Response::new(stream))
     }
 
@@ -1600,12 +1604,13 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::ModelWorker)?;
+        let trace = trace_context(&request)?;
         let (protocol, cancel): (ModelProviderWireProtocol, ModelAdapterCancelRequest) =
             decode_metadata(request.into_inner(), CANCEL_MODEL_PROVIDER, self.limits)?;
         cancel
             .validate_shape_at(Utc::now())
             .map_err(|_| Status::invalid_argument("invalid Model Provider cancel"))?;
-        let outcome = match self.model.cancel(protocol, cancel).await {
+        let outcome = match scope_trace(trace, self.model.cancel(protocol, cancel)).await {
             Ok(outcome) => UnaryOutcome::Succeeded(outcome),
             Err(failure) => UnaryOutcome::Failed(failure),
         };
@@ -1621,8 +1626,9 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::CapabilityWorker)?;
+        let trace = trace_context(&request)?;
         let request = decode_http_request(request.into_inner(), self.limits)?;
-        let outcome = match self.http.round_trip(request).await {
+        let outcome = match scope_trace(trace, self.http.round_trip(request)).await {
             Ok(response) => UnaryOutcome::Succeeded(response),
             Err(failure) => UnaryOutcome::Failed(failure),
         };
@@ -1634,12 +1640,13 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::CapabilityWorker)?;
+        let trace = trace_context(&request)?;
         let request: CapabilityTransportCancelRequest =
             decode_metadata(request.into_inner(), CANCEL_CAPABILITY_HTTP, self.limits)?;
         request
             .validate_at(Utc::now())
             .map_err(|_| Status::invalid_argument("invalid Capability HTTP cancel"))?;
-        let outcome = match self.http.cancel(request).await {
+        let outcome = match scope_trace(trace, self.http.cancel(request)).await {
             Ok(outcome) => UnaryOutcome::Succeeded(outcome),
             Err(failure) => UnaryOutcome::Failed(failure),
         };
@@ -1655,8 +1662,9 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::CapabilityWorker)?;
+        let trace = trace_context(&request)?;
         let request = decode_grpc_request(request.into_inner(), self.limits)?;
-        let outcome = match self.grpc.unary(request).await {
+        let outcome = match scope_trace(trace, self.grpc.unary(request)).await {
             Ok(response) => UnaryOutcome::Succeeded(response),
             Err(failure) => UnaryOutcome::Failed(failure),
         };
@@ -1668,12 +1676,13 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::CapabilityWorker)?;
+        let trace = trace_context(&request)?;
         let request: CapabilityTransportCancelRequest =
             decode_metadata(request.into_inner(), CANCEL_CAPABILITY_GRPC, self.limits)?;
         request
             .validate_at(Utc::now())
             .map_err(|_| Status::invalid_argument("invalid Capability gRPC cancel"))?;
-        let outcome = match self.grpc.cancel(request).await {
+        let outcome = match scope_trace(trace, self.grpc.cancel(request)).await {
             Ok(outcome) => UnaryOutcome::Succeeded(outcome),
             Err(failure) => UnaryOutcome::Failed(failure),
         };
@@ -1689,6 +1698,7 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::ContextWorker)?;
+        let trace = trace_context(&request)?;
         let connector = self
             .remote_context
             .as_ref()
@@ -1698,7 +1708,7 @@ where
         request
             .validate_at(Utc::now())
             .map_err(|_| Status::invalid_argument("invalid Remote Context request"))?;
-        let outcome = match connector.query(request).await {
+        let outcome = match scope_trace(trace, connector.query(request)).await {
             Ok(response) => UnaryOutcome::Succeeded(response),
             Err(failure) => {
                 failure.validate().map_err(|_| {
@@ -1721,6 +1731,7 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::McpHost)?;
+        let trace = trace_context(&request)?;
         let broker = self
             .mcp_oauth
             .as_ref()
@@ -1736,9 +1747,11 @@ where
             .map_err(|_| Status::invalid_argument("invalid MCP OAuth exchange contract"))?;
         let code = SensitiveOAuthValue::from_decoded(code, MAX_MCP_OAUTH_CODE_BYTES)
             .map_err(|_| Status::invalid_argument("invalid MCP OAuth authorization code"))?;
-        let outcome = match broker
-            .exchange_authorization_code(&contract, code, now)
-            .await
+        let outcome = match scope_trace(
+            trace,
+            broker.exchange_authorization_code(&contract, code, now),
+        )
+        .await
         {
             Ok(grant) => {
                 grant
@@ -1762,6 +1775,7 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::McpHost)?;
+        let trace = trace_context(&request)?;
         let cleaner = self
             .mcp_oauth_pkce_cleaner
             .as_ref()
@@ -1773,7 +1787,7 @@ where
         )?;
         validate_cleanup_authorization(&authorization)
             .map_err(|_| Status::invalid_argument("invalid MCP OAuth PKCE cleanup"))?;
-        let outcome = match cleaner.delete_exact(&authorization).await {
+        let outcome = match scope_trace(trace, cleaner.delete_exact(&authorization)).await {
             Ok(disposition) => UnaryOutcome::Succeeded(disposition),
             Err(failure) => UnaryOutcome::Failed(McpOAuthPkceCleanupFailureWire::from(failure)),
         };
@@ -1789,6 +1803,7 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::McpHost)?;
+        let trace = trace_context(&request)?;
         let connector = self
             .mcp_streamable_http
             .as_ref()
@@ -1798,7 +1813,7 @@ where
             EXECUTE_MCP_STREAMABLE_HTTP,
             self.limits,
         )?;
-        let outcome = match connector.execute(request).await {
+        let outcome = match scope_trace(trace, connector.execute(request)).await {
             Ok(outcome) => UnaryOutcome::Succeeded(outcome),
             Err(failure) => {
                 failure.validate_wire_shape().map_err(|_| {
@@ -1819,6 +1834,7 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::McpHost)?;
+        let trace = trace_context(&request)?;
         let connector = self.mcp_resource_refresh.as_ref().ok_or_else(|| {
             Status::unavailable("MCP Resource Refresh connector is not installed")
         })?;
@@ -1827,7 +1843,7 @@ where
         request
             .validate_at(Utc::now())
             .map_err(|_| Status::invalid_argument("invalid MCP Resource Refresh request"))?;
-        let outcome = match connector.refresh_resources(request.clone()).await {
+        let outcome = match scope_trace(trace, connector.refresh_resources(request.clone())).await {
             Ok(evidence)
                 if evidence.execution_identity_digest == request.execution_identity_digest
                     && evidence.request_digest == request.request_digest
@@ -1864,13 +1880,14 @@ where
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
         require_role(&request, EgressCallerRole::McpHost)?;
+        let trace = trace_context(&request)?;
         let connector = self
             .mcp_streamable_http
             .as_ref()
             .ok_or_else(|| Status::unavailable("MCP Streamable HTTP connector is not installed"))?;
         let request: McpStreamableHttpRequest =
             decode_metadata(request.into_inner(), CANCEL_MCP_REMOTE_TASK, self.limits)?;
-        let outcome = match connector.cancel_remote_task(request).await {
+        let outcome = match scope_trace(trace, connector.cancel_remote_task(request)).await {
             Ok(outcome) => UnaryOutcome::Succeeded(outcome),
             Err(failure) => {
                 failure.validate_wire_shape().map_err(|_| {
@@ -1891,6 +1908,7 @@ where
         request: Request<tonic::Streaming<ClosedEgressEnvelope>>,
     ) -> Result<Response<Self::StreamMcpStreamableHttpSubscriptionStream>, Status> {
         require_role(&request, EgressCallerRole::McpHost)?;
+        let trace = trace_context(&request)?;
         let connector = self
             .mcp_streamable_http_subscription
             .as_ref()
@@ -1915,7 +1933,8 @@ where
         )?;
         let request_deadline = request.deadline;
         let (sender, receiver) = mpsc::channel(bridge.bridge_limits.event_buffer_capacity);
-        let pending = match bridge.establish(connector.as_ref(), request).await {
+        let pending = match scope_trace(trace, bridge.establish(connector.as_ref(), request)).await
+        {
             Ok((prepared, pending)) => {
                 sender
                     .send(encode_metadata(
@@ -1958,7 +1977,7 @@ where
         let bridge = Arc::clone(bridge);
         let activation_sender = sender.clone();
         let limits = self.limits;
-        tokio::spawn(async move {
+        tokio::spawn(scope_trace(trace, async move {
             let remaining = (request_deadline - Utc::now())
                 .to_std()
                 .unwrap_or_default()
@@ -1989,7 +2008,7 @@ where
                 }
                 Err(_) => bridge.discard_pending(pending).await,
             }
-        });
+        }));
         drop(sender);
         let stream = stream::unfold(receiver, |mut receiver| async move {
             receiver
@@ -2851,6 +2870,8 @@ mod tests {
             &self,
             _request: CapabilityTransportCancelRequest,
         ) -> Result<CapabilityTransportCancelOutcome, CapabilityAdapterFailure> {
+            insight_platform_rpc_trace::current_trace()
+                .expect("Egress handler installs the received trace for dependencies");
             Ok(CapabilityTransportCancelOutcome::Accepted)
         }
     }

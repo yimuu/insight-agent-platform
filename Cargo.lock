@@ -3323,6 +3323,7 @@ dependencies = [
  "base64",
  "chrono",
  "insight-platform-contracts",
+ "insight-platform-rpc-trace",
  "insight-platform-security",
  "prost",
  "protoc-bin-vendored",

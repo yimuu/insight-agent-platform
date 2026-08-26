@@ -13,6 +13,7 @@ use insight_platform_contracts::{
     PrincipalKind, ResourceId, SecretBindingPayload, SecretBindingState, SecretPurpose,
     Sha256Digest, TraceIdentityV1,
 };
+use insight_platform_rpc_trace::{require_trace_interceptor, PropagateTrace};
 use insight_platform_security::{
     EncryptedOpaqueReference, PreparedSecretBindingAuthority,
     PreparedSecretBindingRegistrationDisposition, PreparedSecretBindingRegistrationError,
@@ -80,7 +81,7 @@ impl tonic::service::Interceptor for EgressBrokerWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), EGRESS_BROKER_WORKLOAD_IDENTITY)?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
@@ -351,7 +352,7 @@ impl TryFrom<PreparedRegistrationOutcomeWire> for PreparedSecretBindingRegistrat
 
 #[derive(Clone)]
 pub struct SecuritySecretAuthorityGrpcClient {
-    client: SecuritySecretAuthorityServiceClient<tonic::transport::Channel>,
+    client: TracedSecuritySecretAuthorityServiceClient,
     limits: SecurityInternalRpcLimits,
 }
 
@@ -359,13 +360,17 @@ impl SecuritySecretAuthorityGrpcClient {
     pub fn new(channel: tonic::transport::Channel, limits: SecurityInternalRpcLimits) -> Self {
         let maximum = limits.maximum_message_bytes();
         Self {
-            client: SecuritySecretAuthorityServiceClient::new(channel)
+            client: SecuritySecretAuthorityServiceClient::with_interceptor(channel, PropagateTrace)
                 .max_encoding_message_size(maximum)
                 .max_decoding_message_size(maximum),
             limits,
         }
     }
 }
+
+type TracedSecuritySecretAuthorityServiceClient = SecuritySecretAuthorityServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
+>;
 
 #[async_trait]
 impl SecretBindingResolutionAuthority for SecuritySecretAuthorityGrpcClient {
@@ -620,7 +625,10 @@ impl From<SecurityRpcError> for Status {
 mod tests {
     use super::*;
     use chrono::Duration;
-    use insight_platform_contracts::{ResourceKind, SecretResolutionPolicy};
+    use insight_platform_contracts::{
+        ResourceKind, SecretResolutionPolicy, TraceFlags, TraceIdentityV1,
+    };
+    use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose, SanType,
@@ -644,6 +652,10 @@ mod tests {
 
     fn purpose() -> SecretPurpose {
         "mcp.oauth.token".parse().unwrap()
+    }
+
+    fn rpc_trace() -> RpcTraceContext {
+        RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap()
     }
 
     fn resolution_record(
@@ -917,11 +929,30 @@ mod tests {
             &fixture.egress_key_pem,
         )
         .await;
-        let client = SecuritySecretAuthorityGrpcClient::new(accepted_channel, limits);
-        let resolved = client
-            .load_for_resolution(&tenant_id, &secret_binding_id)
+        let mut missing_trace_client =
+            SecuritySecretAuthorityServiceClient::new(accepted_channel.clone());
+        let missing_trace = missing_trace_client
+            .load_secret_binding(Request::new(
+                encode(
+                    &LoadSecretBindingRequest {
+                        schema_version: 1,
+                        tenant_id: tenant_id.clone(),
+                        secret_binding_id: secret_binding_id.clone(),
+                    },
+                    limits,
+                )
+                .unwrap(),
+            ))
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(missing_trace.code(), tonic::Code::InvalidArgument);
+        let client = SecuritySecretAuthorityGrpcClient::new(accepted_channel, limits);
+        let resolved = scope_trace(
+            rpc_trace(),
+            client.load_for_resolution(&tenant_id, &secret_binding_id),
+        )
+        .await
+        .unwrap();
         assert_eq!(resolved.tenant_id, tenant_id);
         assert_eq!(resolved.secret_binding_id, secret_binding_id);
         assert_eq!(authority.resolution_calls.load(Ordering::Acquire), 1);
@@ -932,21 +963,25 @@ mod tests {
             provider_id,
         );
         let expected = command.exact_binding().unwrap();
-        let registered = client.register_prepared(command).await.unwrap();
+        let registered = scope_trace(rpc_trace(), client.register_prepared(command))
+            .await
+            .unwrap();
         assert_eq!(registered.exact_binding, expected);
         assert_eq!(authority.registration_calls.load(Ordering::Acquire), 1);
 
         authority
             .drift_registration_outcome
             .store(true, Ordering::Release);
-        let rejected_drift = client
-            .register_prepared(registration_command(
+        let rejected_drift = scope_trace(
+            rpc_trace(),
+            client.register_prepared(registration_command(
                 tenant_id.clone(),
                 id(ResourceKind::SecretBinding),
                 expected.provider_id,
-            ))
-            .await
-            .unwrap_err();
+            )),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             rejected_drift,
             PreparedSecretBindingRegistrationError::Rejected
@@ -980,6 +1015,7 @@ mod tests {
         assert_eq!(authority.registration_calls.load(Ordering::Acquire), 2);
 
         drop(client);
+        drop(missing_trace_client);
         drop(wrong_client);
         shutdown_sender.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), server)
