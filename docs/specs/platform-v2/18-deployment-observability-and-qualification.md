@@ -463,6 +463,11 @@ durable reclaim/restart从owner记录恢复原trace ID；Egress provider及gViso
 strict Clippy、真实mTLS/UDS和fresh PostgreSQL 16恢复测试通过。该证据关闭CR-197 component L3 trace连续性，不替代动态payload审计、真实
 Prometheus scrape、telemetry RBAC/retention或L4～L6。
 
+r291以真实loopback TCP listener启动shared production observability Router。客户端先发送包含payload/identity、`tracestate`与`baggage`
+canary的未知请求，再实际抓取`/metrics` Prometheus text；未知operation只计入fixed `other/rejected`，采集正文中的全部canary与header名称均为零，
+并验证真实content type和graceful shutdown。该证据关闭shared metrics adapter的component real-socket scrape及动态metric payload负向切片，
+不替代Prometheus deployment scrape、log/trace动态采集审计、telemetry RBAC/retention或L4～L6。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

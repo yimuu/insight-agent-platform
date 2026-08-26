@@ -490,6 +490,12 @@
 > 16 Sandbox/OAuth恢复测试通过。该证据关闭CR-197 trace implementation与component L3连续性，不替代动态payload采集审计、真实Prometheus
 > scrape、telemetry RBAC/retention或L4～L6。
 
+> 2026-08-26 implementation evidence：r291以真实loopback TCP listener启动shared production observability Router，由HTTP客户端先发送包含
+> payload/identity、`tracestate`和`baggage` canary的未知请求，再从`/metrics`执行Prometheus text scrape。响应证明未知operation只进入fixed
+> `other/rejected` series，采集正文中所有canary及header名称均为零，并验证真实content type与graceful shutdown。crate tests和strict Clippy
+> 通过。该证据关闭shared metrics adapter的component real-socket scrape与动态metric payload负向切片，不替代Prometheus deployment scrape、
+> log/trace动态采集审计或L4 NetworkPolicy/RBAC。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

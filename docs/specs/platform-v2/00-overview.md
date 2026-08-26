@@ -368,6 +368,10 @@ r290完成CR-197 machine/runtime projection：公共HTTP严格校验W3C `tracepa
 PostgreSQL 16恢复测试通过。该证据关闭CR-197 trace implementation与component L3连续性；动态payload审计、真实scrape、telemetry
 RBAC/retention及L4～L6仍未完成。
 
+r291以真实loopback TCP listener启动shared production observability Router，发送payload/identity、`tracestate`和`baggage` canary后再抓取
+`/metrics`；采集结果只出现fixed `other/rejected` series，全部canary及header名称为零。该证据关闭metrics adapter的component real-socket
+scrape与动态metric payload负向切片，不替代Prometheus deployment scrape、log/trace动态采集、telemetry RBAC/retention或L4～L6。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

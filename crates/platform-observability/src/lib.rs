@@ -650,6 +650,7 @@ fn valid_label(value: &str) -> bool {
 mod tests {
     use super::*;
     use axum::body::Body;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tower::ServiceExt as _;
 
     const OPERATIONS: &[&str] = &["live", "ready", "metrics", "runs", "other"];
@@ -706,6 +707,68 @@ mod tests {
         let response = router.oneshot(request("/metrics")).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+    }
+
+    async fn scrape_over_tcp(address: std::net::SocketAddr, request: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        String::from_utf8(response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn real_tcp_scrape_is_bounded_and_payload_canaries_are_absent() {
+        const PAYLOAD_CANARY: &str = "payload-canary-4e27b98f";
+        const IDENTITY_CANARY: &str = "tenant-canary-a309dcd1";
+        const TRACESTATE_CANARY: &str = "vendor=trace-canary-49fa124a";
+        const BAGGAGE_CANARY: &str = "private=baggage-canary-ff8ad715";
+
+        let metrics = Arc::new(
+            ProcessHttpMetrics::install("scheduler-recovery", PROCESS_OBSERVABILITY_OPERATIONS)
+                .unwrap(),
+        );
+        metrics.mark_ready();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let cancellation = CancellationToken::new();
+        let server_cancellation = cancellation.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, process_observability_router(metrics))
+                .with_graceful_shutdown(server_cancellation.cancelled_owned())
+                .await
+                .unwrap();
+        });
+
+        let canary_request = format!(
+            "GET /{PAYLOAD_CANARY} HTTP/1.1\r\nHost: {IDENTITY_CANARY}\r\ntracestate: {TRACESTATE_CANARY}\r\nbaggage: {BAGGAGE_CANARY}\r\nConnection: close\r\n\r\n"
+        );
+        let canary_response = scrape_over_tcp(address, &canary_request).await;
+        assert!(canary_response.starts_with("HTTP/1.1 404"));
+
+        let scrape = scrape_over_tcp(
+            address,
+            "GET /metrics HTTP/1.1\r\nHost: prometheus\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(scrape.starts_with("HTTP/1.1 200"));
+        assert!(scrape.contains("content-type: text/plain; version=0.0.4; charset=utf-8"));
+        assert!(scrape.contains(
+            "insight_platform_http_requests_total{component_role=\"scheduler-recovery\",operation=\"other\",outcome=\"rejected\"} 1"
+        ));
+        for forbidden in [
+            PAYLOAD_CANARY,
+            IDENTITY_CANARY,
+            TRACESTATE_CANARY,
+            BAGGAGE_CANARY,
+            "tracestate",
+            "baggage",
+        ] {
+            assert!(!scrape.contains(forbidden), "scrape leaked {forbidden}");
+        }
+
+        cancellation.cancel();
+        server.await.unwrap();
     }
 
     #[test]
