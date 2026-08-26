@@ -532,6 +532,12 @@ generation、limit或catalog拒绝不冒充外部调用。共享observer不接�
 nominal observer映射到自身process metrics，并保持既有独立capacity与权限。Broker/三binary tests、strict Clippy、redaction及Artifact/observability
 部署门禁通过；PostgreSQL health、真实S3/KMS fault和production scrape仍归后续批次/L4～L5。
 
+r304增加共享PostgreSQL dependency health sampler：每15秒从现有restricted SQLx pool执行一次只读`SELECT 1::bigint`，只向nominal observer
+报告success/failure；不携带URL、database、role、SQL或错误详情，不改变readiness，missed tick不追赶且shutdown可中断正在等待的probe。
+Artifact Gateway/Maintenance各接一个sampler，Data Worker对独立read/work pool各接一个；sampler和HTTP/RPC/worker进入同一cancel/drain边界，意外停止使
+process fail closed。不可用pool、pre-cancel及三binary lifecycle tests、strict Clippy通过；可选真实database成功test已checked-in，但本轮无运行中的
+PG16，故该fixture未取得新证据，production PostgreSQL health仍须L4实际scrape。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

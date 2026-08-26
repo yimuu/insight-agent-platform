@@ -566,6 +566,11 @@
 > Gateway、Data Worker、Maintenance各自映射到本role fixed `s3`/`kms` series，不共享process state或扩大存储权限。Broker/三binary tests、
 > strict Clippy、redaction和Artifact/observability部署门禁通过；Artifact PostgreSQL health及production S3/KMS fault仍待后续批次/L4～L5。
 
+> 2026-08-27 implementation evidence：r304增加共享15秒PostgreSQL health sampler，从role既有restricted SQLx pool执行只读
+> `SELECT 1::bigint`并仅上报fixed success/failure；不改变readiness，不追赶missed tick，shutdown可中断probe。Artifact Gateway/Maintenance各一个、
+> Data Worker read/work pool各一个sampler，并与现有HTTP/RPC/worker共同cancel/drain，sampler意外退出使process fail closed。不可用pool、pre-cancel及
+> 三binary tests、strict Clippy通过；可选真实database成功test已checked-in，但本轮本地PG16未运行，因此没有新增真实成功fixture或production scrape证据。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

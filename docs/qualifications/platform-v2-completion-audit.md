@@ -81,6 +81,10 @@ r303把Artifact三role的S3/KMS series接到KMS encrypt/decrypt/describe及S3 he
 binding、key、generation或limit拒绝不污染依赖计数，observer不接收业务或存储标识。Broker/三binary tests、strict Clippy、redaction及部署门禁
 通过。Artifact PostgreSQL health仍是仓库内缺口；真实S3/KMS fault、production scrape与L5 profile仍是外部门禁。
 
+r304以共享15秒只读`SELECT 1::bigint` sampler补齐Artifact Gateway、Data Worker read/work pool和Maintenance PostgreSQL health接线；sampler
+不改变readiness、不暴露连接/SQL/error字段，并与各process shutdown/drain闭合。不可用pool、pre-cancel及三binary tests与strict Clippy通过；可选
+真实database成功test已checked-in，但本轮没有运行中的本地PG16，因此该fixture未产生新证据。production PostgreSQL/S3/KMS scrape/fault与L5 profile仍待外部环境。
+
 ## 3. Phase 1 审计
 
 ### 已满足

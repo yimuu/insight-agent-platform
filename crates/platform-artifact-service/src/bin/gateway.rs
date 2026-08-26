@@ -32,7 +32,9 @@ use insight_platform_contracts::{
 use insight_platform_observability::{
     process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
-use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+};
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
@@ -259,11 +261,12 @@ async fn run() -> Result<(), GatewayError> {
     verify_schema(&pool)
         .await
         .map_err(|_| GatewayError::SchemaMismatch)?;
-    let (dependency_metrics, dependency_observer) =
+    let database_health_pool = pool.clone();
+    let dependency_metrics =
         install_artifact_dependency_metrics().map_err(|_| GatewayError::InvalidConfiguration)?;
     let providers = AwsArtifactProviderCatalog::install_with_observer(
         config.artifact_provider_catalog,
-        dependency_observer,
+        dependency_metrics.artifact,
     )
     .await
     .map_err(|_| GatewayError::InvalidConfiguration)?;
@@ -326,13 +329,19 @@ async fn run() -> Result<(), GatewayError> {
             )],
         )
         .map_err(|_| GatewayError::InvalidConfiguration)?
-        .with_dependency_observations(dependency_metrics),
+        .with_dependency_observations(dependency_metrics.process),
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)
             .await
             .map_err(|_| GatewayError::ObservabilityUnavailable)?;
     let cancellation = CancellationToken::new();
+    let postgres_health = run_postgres_health_sampler(
+        database_health_pool,
+        dependency_metrics.postgres,
+        cancellation.child_token(),
+    );
+    tokio::pin!(postgres_health);
     let http_cancellation = cancellation.child_token();
     let mut http = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -365,6 +374,14 @@ async fn run() -> Result<(), GatewayError> {
                 .map_err(|_| GatewayError::HttpUnavailable)?;
             return Err(GatewayError::ObservabilityUnavailable);
         }
+        _ = &mut postgres_health => {
+            cancellation.cancel();
+            http.await.map_err(|_| GatewayError::HttpUnavailable)?
+                .map_err(|_| GatewayError::HttpUnavailable)?;
+            observability.await.map_err(|_| GatewayError::ObservabilityUnavailable)?
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+            return Err(GatewayError::DependencyObserverUnavailable);
+        }
     }
     tokio::time::timeout(
         Duration::from_millis(config.shutdown_grace_milliseconds),
@@ -375,7 +392,9 @@ async fn run() -> Result<(), GatewayError> {
             observability
                 .await
                 .map_err(|_| GatewayError::ObservabilityUnavailable)?
-                .map_err(|_| GatewayError::ObservabilityUnavailable)
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+            postgres_health.await;
+            Ok(())
         },
     )
     .await
@@ -1189,6 +1208,7 @@ enum GatewayError {
     ProviderUnavailable,
     HttpUnavailable,
     ObservabilityUnavailable,
+    DependencyObserverUnavailable,
     ShutdownDeadlineExceeded,
 }
 
@@ -1204,6 +1224,9 @@ impl fmt::Display for GatewayError {
             Self::HttpUnavailable => formatter.write_str("Artifact Gateway HTTP unavailable"),
             Self::ObservabilityUnavailable => {
                 formatter.write_str("Artifact Gateway observability unavailable")
+            }
+            Self::DependencyObserverUnavailable => {
+                formatter.write_str("Artifact Gateway dependency observer stopped")
             }
             Self::ShutdownDeadlineExceeded => {
                 formatter.write_str("Artifact Gateway shutdown deadline exceeded")

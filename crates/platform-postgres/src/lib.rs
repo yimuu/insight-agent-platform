@@ -8,6 +8,7 @@ pub mod artifact_repository;
 pub mod capability_execution_repository;
 pub mod context_dataset_repository;
 pub mod context_query_repository;
+pub mod dependency_health;
 pub mod invocation_repository;
 mod mcp_oauth_cleanup_outbox;
 pub mod mcp_repository;

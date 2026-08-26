@@ -16,6 +16,7 @@ use insight_platform_observability::{
 };
 use insight_platform_postgres::{
     artifact_repository::{ArtifactExecutionSlot, StartedArtifactExecution},
+    dependency_health::run_postgres_health_sampler,
     repository::{
         ArtifactWorkerRole, ClaimArtifactJobs, JobFence as RepositoryJobFence, JobRecord,
         PgRepository,
@@ -36,6 +37,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[path = "../capacity.rs"]
@@ -164,13 +166,14 @@ async fn run() -> Result<(), MaintenanceError> {
     verify_schema(&pool)
         .await
         .map_err(|_| MaintenanceError::SchemaMismatch)?;
+    let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
     let broker_limits = config.broker_limits()?;
-    let (dependency_metrics, dependency_observer) = install_artifact_dependency_metrics()
+    let dependency_metrics = install_artifact_dependency_metrics()
         .map_err(|_| MaintenanceError::InvalidConfiguration)?;
     let providers = AwsArtifactProviderCatalog::install_with_observer(
         config.artifact_provider_catalog,
-        dependency_observer,
+        dependency_metrics.artifact,
     )
     .await
     .map_err(|_| MaintenanceError::InvalidConfiguration)?;
@@ -208,7 +211,7 @@ async fn run() -> Result<(), MaintenanceError> {
             )],
         )
         .map_err(|_| MaintenanceError::InvalidConfiguration)?
-        .with_dependency_observations(dependency_metrics),
+        .with_dependency_observations(dependency_metrics.process),
     );
     let server = axum::serve(listener, process_observability_router(Arc::clone(&metrics)))
         .with_graceful_shutdown({
@@ -218,19 +221,32 @@ async fn run() -> Result<(), MaintenanceError> {
             }
         })
         .into_future();
+    let dependency_cancellation = CancellationToken::new();
+    let postgres_health = run_postgres_health_sampler(
+        database_health_pool,
+        dependency_metrics.postgres,
+        dependency_cancellation.child_token(),
+    );
     tokio::pin!(worker);
     tokio::pin!(server);
+    tokio::pin!(postgres_health);
     metrics.mark_ready();
     tokio::select! {
         result = &mut worker => result.map_err(|_| MaintenanceError::WorkerUnavailable),
         result = &mut server => result.map_err(|_| MaintenanceError::HttpUnavailable),
+        _ = &mut postgres_health => Err(MaintenanceError::DependencyObserverUnavailable),
         signal = shutdown_signal() => {
             signal?;
+            dependency_cancellation.cancel();
             let _ = shutdown_sender.send(true);
             tokio::time::timeout(
                 Duration::from_millis(config.shutdown_grace_milliseconds),
                 async {
-                    let (worker, server) = tokio::join!(&mut worker, &mut server);
+                    let (worker, server, _) = tokio::join!(
+                        &mut worker,
+                        &mut server,
+                        &mut postgres_health,
+                    );
                     worker.map_err(|_| MaintenanceError::WorkerUnavailable)?;
                     server.map_err(|_| MaintenanceError::HttpUnavailable)
                 },
@@ -471,6 +487,7 @@ enum MaintenanceError {
     ProviderUnavailable,
     HttpUnavailable,
     WorkerUnavailable,
+    DependencyObserverUnavailable,
     SignalUnavailable,
     ShutdownDeadlineExceeded,
 }
@@ -487,6 +504,9 @@ impl fmt::Display for MaintenanceError {
             Self::HttpUnavailable => formatter.write_str("Artifact Maintenance HTTP unavailable"),
             Self::WorkerUnavailable => {
                 formatter.write_str("Artifact Maintenance worker unavailable")
+            }
+            Self::DependencyObserverUnavailable => {
+                formatter.write_str("Artifact Maintenance dependency observer stopped")
             }
             Self::SignalUnavailable => formatter.write_str("shutdown signal unavailable"),
             Self::ShutdownDeadlineExceeded => formatter.write_str("shutdown deadline exceeded"),

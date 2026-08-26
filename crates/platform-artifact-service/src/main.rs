@@ -39,7 +39,9 @@ use insight_platform_contracts::{
 use insight_platform_observability::{
     process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
-use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+};
 use insight_platform_sandbox::{
     AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapAuthority, GvisorGuestBootstrapError,
     GvisorGuestBootstrapRequest,
@@ -51,6 +53,7 @@ use std::{
     error::Error, fmt, future::IntoFuture, io::Read as _, net::SocketAddr, path::PathBuf,
     sync::Arc, time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_DATA_WORKER_CONFIG";
@@ -369,13 +372,13 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&work_pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
-    let read_repository = Arc::new(PgRepository::new(read_pool));
-    let work_repository = Arc::new(PgRepository::new(work_pool));
-    let (dependency_metrics, dependency_observer) =
+    let read_repository = Arc::new(PgRepository::new(read_pool.clone()));
+    let work_repository = Arc::new(PgRepository::new(work_pool.clone()));
+    let dependency_metrics =
         install_artifact_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let providers = AwsArtifactProviderCatalog::install_with_observer(
         config.artifact_provider_catalog.clone(),
-        dependency_observer,
+        dependency_metrics.artifact,
     )
     .await
     .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -556,7 +559,7 @@ async fn run() -> Result<(), ProcessError> {
             ],
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?
-        .with_dependency_observations(dependency_metrics),
+        .with_dependency_observations(dependency_metrics.process),
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)
@@ -570,18 +573,34 @@ async fn run() -> Result<(), ProcessError> {
         let _ = observability_shutdown_receiver.await;
     })
     .into_future();
+    let dependency_cancellation = CancellationToken::new();
+    let postgres_read_health = run_postgres_health_sampler(
+        read_pool,
+        Arc::clone(&dependency_metrics.postgres),
+        dependency_cancellation.child_token(),
+    );
+    let postgres_work_health = run_postgres_health_sampler(
+        work_pool,
+        dependency_metrics.postgres,
+        dependency_cancellation.child_token(),
+    );
     tokio::pin!(controller_server);
     tokio::pin!(guest_server);
     tokio::pin!(scan_worker);
     tokio::pin!(observability);
+    tokio::pin!(postgres_read_health);
+    tokio::pin!(postgres_work_health);
     metrics.mark_ready();
     tokio::select! {
         result = &mut controller_server => result.map_err(|_| ProcessError::RpcUnavailable),
         result = &mut guest_server => result.map_err(|_| ProcessError::RpcUnavailable),
         result = &mut scan_worker => result.map_err(|_| ProcessError::WorkerUnavailable),
         result = &mut observability => result.map_err(|_| ProcessError::ObservabilityUnavailable),
+        _ = &mut postgres_read_health => Err(ProcessError::DependencyObserverUnavailable),
+        _ = &mut postgres_work_health => Err(ProcessError::DependencyObserverUnavailable),
         signal = shutdown_signal() => {
             signal?;
+            dependency_cancellation.cancel();
             let _ = controller_shutdown_sender.send(());
             let _ = guest_shutdown_sender.send(());
             let _ = observability_shutdown_sender.send(());
@@ -589,11 +608,13 @@ async fn run() -> Result<(), ProcessError> {
             tokio::time::timeout(
                 Duration::from_millis(config.shutdown_grace_milliseconds),
                 async {
-                    let (controller, guest, worker, metrics_server) = tokio::join!(
+                    let (controller, guest, worker, metrics_server, _, _) = tokio::join!(
                         &mut controller_server,
                         &mut guest_server,
                         &mut scan_worker,
                         &mut observability,
+                        &mut postgres_read_health,
+                        &mut postgres_work_health,
                     );
                     controller.map_err(|_| ProcessError::RpcUnavailable)?;
                     guest.map_err(|_| ProcessError::RpcUnavailable)?;
@@ -672,6 +693,7 @@ enum ProcessError {
     RpcUnavailable,
     WorkerUnavailable,
     ObservabilityUnavailable,
+    DependencyObserverUnavailable,
     SignalUnavailable,
     ShutdownDeadlineExceeded,
 }
@@ -690,6 +712,9 @@ impl fmt::Display for ProcessError {
             Self::WorkerUnavailable => formatter.write_str("Artifact worker unavailable"),
             Self::ObservabilityUnavailable => {
                 formatter.write_str("Artifact observability unavailable")
+            }
+            Self::DependencyObserverUnavailable => {
+                formatter.write_str("Artifact dependency observer stopped")
             }
             Self::SignalUnavailable => formatter.write_str("shutdown signal unavailable"),
             Self::ShutdownDeadlineExceeded => formatter.write_str("shutdown deadline exceeded"),
