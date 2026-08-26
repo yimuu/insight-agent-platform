@@ -8,11 +8,13 @@ use insight_platform_artifacts::{
     ArtifactWorkerService,
 };
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, JsonLimits, ResourceId, ResourceKind, Sha256Digest,
+    canonical_digest, parse_strict_json, JobKind, JsonLimits, ResourceId, ResourceKind,
+    Sha256Digest,
 };
 use insight_platform_jobs::JobFence as DomainJobFence;
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, DurableJobQueueMetrics, ProcessHttpMetrics,
+    PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{
     artifact_repository::{ArtifactExecutionSlot, StartedArtifactExecution},
@@ -46,6 +48,9 @@ use capacity::artifact_capacity_metric;
 #[path = "../dependency_observer.rs"]
 mod dependency_observer;
 use dependency_observer::install_artifact_dependency_metrics;
+#[path = "../durable_queue_observer.rs"]
+mod durable_queue_observer;
+use durable_queue_observer::run_artifact_queue_sampler;
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_MAINTENANCE_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_ARTIFACT_MAINTENANCE_CONFIG_DIGEST";
@@ -167,6 +172,7 @@ async fn run() -> Result<(), MaintenanceError> {
         .await
         .map_err(|_| MaintenanceError::SchemaMismatch)?;
     let database_health_pool = pool.clone();
+    let durable_queue_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
     let broker_limits = config.broker_limits()?;
     let dependency_metrics = install_artifact_dependency_metrics()
@@ -200,6 +206,7 @@ async fn run() -> Result<(), MaintenanceError> {
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|_| MaintenanceError::HttpUnavailable)?;
+    let durable_queue_metrics = Arc::new(DurableJobQueueMetrics::default());
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_capacities(
             "artifact-maintenance",
@@ -211,7 +218,8 @@ async fn run() -> Result<(), MaintenanceError> {
             )],
         )
         .map_err(|_| MaintenanceError::InvalidConfiguration)?
-        .with_dependency_observations(dependency_metrics.process),
+        .with_dependency_observations(dependency_metrics.process)
+        .with_durable_job_queue(Arc::clone(&durable_queue_metrics)),
     );
     let server = axum::serve(listener, process_observability_router(Arc::clone(&metrics)))
         .with_graceful_shutdown({
@@ -227,14 +235,22 @@ async fn run() -> Result<(), MaintenanceError> {
         dependency_metrics.postgres,
         dependency_cancellation.child_token(),
     );
+    let durable_queue_sampler = run_artifact_queue_sampler(
+        durable_queue_pool,
+        durable_queue_metrics,
+        &[JobKind::ArtifactDelete, JobKind::ArtifactBlobCleanup],
+        dependency_cancellation.child_token(),
+    );
     tokio::pin!(worker);
     tokio::pin!(server);
     tokio::pin!(postgres_health);
+    tokio::pin!(durable_queue_sampler);
     metrics.mark_ready();
     tokio::select! {
         result = &mut worker => result.map_err(|_| MaintenanceError::WorkerUnavailable),
         result = &mut server => result.map_err(|_| MaintenanceError::HttpUnavailable),
         _ = &mut postgres_health => Err(MaintenanceError::DependencyObserverUnavailable),
+        _ = &mut durable_queue_sampler => Err(MaintenanceError::DependencyObserverUnavailable),
         signal = shutdown_signal() => {
             signal?;
             dependency_cancellation.cancel();
@@ -242,10 +258,11 @@ async fn run() -> Result<(), MaintenanceError> {
             tokio::time::timeout(
                 Duration::from_millis(config.shutdown_grace_milliseconds),
                 async {
-                    let (worker, server, _) = tokio::join!(
+                    let (worker, server, _, _) = tokio::join!(
                         &mut worker,
                         &mut server,
                         &mut postgres_health,
+                        &mut durable_queue_sampler,
                     );
                     worker.map_err(|_| MaintenanceError::WorkerUnavailable)?;
                     server.map_err(|_| MaintenanceError::HttpUnavailable)

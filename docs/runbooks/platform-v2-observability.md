@@ -97,9 +97,10 @@ Capability recovery transaction choose the safe terminal or retry path.
 ## InsightPlatformSandboxDurableJobLagHigh
 
 Compare the Sandbox execution due count and age with Controller readiness, executor admission,
-Artifact response capacity and PostgreSQL health. This series intentionally excludes MCP-owned
-`sandbox_job` work. Do not bypass admission, move work between owners or execute code in the
-Controller; restore the blocked executor/Artifact path or use the qualified GitOps scaling path.
+Artifact response capacity and PostgreSQL health. This series intentionally excludes managed MCP
+session work by selecting the exact Sandbox capability-execution JobKind. Do not bypass admission,
+move work between owners or execute code in the Controller; restore the blocked executor/Artifact
+path or use the qualified GitOps scaling path.
 
 ## InsightPlatformSandboxExpiredLeaseRecoveryLagHigh
 
@@ -107,6 +108,20 @@ Check executor loss, process-generation attestation, database time, Controller f
 critical-control recovery. Preserve the shared Job and physical execution fence; never clear lease
 or attestation fields directly and never fall back to host execution. Recovery must prove the old
 process generation absent before the Controller permits a new physical attempt.
+
+## InsightPlatformArtifactDurableJobLagHigh
+
+Use `component_role` to distinguish Data Worker scan/rescan from Maintenance delete/blob-cleanup
+work. Correlate due count and age with PostgreSQL, S3/KMS dependency outcomes and the role's local
+capacity. Do not move Jobs between roles or edit their kind, priority or state; restore the blocked
+provider path or use the qualified GitOps scaling path.
+
+## InsightPlatformArtifactExpiredLeaseRecoveryLagHigh
+
+Identify the fixed Artifact role, then inspect Worker restarts, PostgreSQL time, object-store/KMS
+outcomes and Artifact owner fencing. Preserve the Artifact/Blob generation and Job lease. Never
+clear a lease or force Ready/Deleted through direct SQL; allow the owning recovery transaction to
+revalidate storage evidence and settle the attempt.
 
 ## InsightPlatformDurableObservationFailureRatioHigh
 

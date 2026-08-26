@@ -10,11 +10,13 @@ use insight_platform_artifact_broker::{
 };
 mod capacity;
 mod dependency_observer;
+mod durable_queue_observer;
 mod guest_identity;
 mod scan_worker;
 
 use capacity::artifact_capacity_metric;
 use dependency_observer::install_artifact_dependency_metrics;
+use durable_queue_observer::run_artifact_queue_sampler;
 use guest_identity::GvisorGuestIdentityConfig;
 use insight_platform_artifact_rpc::{
     proto::{
@@ -34,10 +36,12 @@ use insight_platform_artifacts::{
     SchedulerSkillPackageReadRequest, SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest,
 };
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
+    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JobKind, JsonLimits,
+    Sha256Digest,
 };
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, DurableJobQueueMetrics, ProcessHttpMetrics,
+    PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{
     dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
@@ -526,6 +530,7 @@ async fn run() -> Result<(), ProcessError> {
         config.scan_worker.clone(),
         scan_shutdown_receiver,
     );
+    let durable_queue_metrics = Arc::new(DurableJobQueueMetrics::default());
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_capacities(
             "artifact-data-worker",
@@ -559,7 +564,8 @@ async fn run() -> Result<(), ProcessError> {
             ],
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?
-        .with_dependency_observations(dependency_metrics.process),
+        .with_dependency_observations(dependency_metrics.process)
+        .with_durable_job_queue(Arc::clone(&durable_queue_metrics)),
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)
@@ -580,8 +586,14 @@ async fn run() -> Result<(), ProcessError> {
         dependency_cancellation.child_token(),
     );
     let postgres_work_health = run_postgres_health_sampler(
-        work_pool,
+        work_pool.clone(),
         dependency_metrics.postgres,
+        dependency_cancellation.child_token(),
+    );
+    let durable_queue_sampler = run_artifact_queue_sampler(
+        work_pool,
+        durable_queue_metrics,
+        &[JobKind::ArtifactScan, JobKind::ArtifactRescan],
         dependency_cancellation.child_token(),
     );
     tokio::pin!(controller_server);
@@ -590,6 +602,7 @@ async fn run() -> Result<(), ProcessError> {
     tokio::pin!(observability);
     tokio::pin!(postgres_read_health);
     tokio::pin!(postgres_work_health);
+    tokio::pin!(durable_queue_sampler);
     metrics.mark_ready();
     tokio::select! {
         result = &mut controller_server => result.map_err(|_| ProcessError::RpcUnavailable),
@@ -598,6 +611,7 @@ async fn run() -> Result<(), ProcessError> {
         result = &mut observability => result.map_err(|_| ProcessError::ObservabilityUnavailable),
         _ = &mut postgres_read_health => Err(ProcessError::DependencyObserverUnavailable),
         _ = &mut postgres_work_health => Err(ProcessError::DependencyObserverUnavailable),
+        _ = &mut durable_queue_sampler => Err(ProcessError::DependencyObserverUnavailable),
         signal = shutdown_signal() => {
             signal?;
             dependency_cancellation.cancel();
@@ -608,13 +622,14 @@ async fn run() -> Result<(), ProcessError> {
             tokio::time::timeout(
                 Duration::from_millis(config.shutdown_grace_milliseconds),
                 async {
-                    let (controller, guest, worker, metrics_server, _, _) = tokio::join!(
+                    let (controller, guest, worker, metrics_server, _, _, _) = tokio::join!(
                         &mut controller_server,
                         &mut guest_server,
                         &mut scan_worker,
                         &mut observability,
                         &mut postgres_read_health,
                         &mut postgres_work_health,
+                        &mut durable_queue_sampler,
                     );
                     controller.map_err(|_| ProcessError::RpcUnavailable)?;
                     guest.map_err(|_| ProcessError::RpcUnavailable)?;

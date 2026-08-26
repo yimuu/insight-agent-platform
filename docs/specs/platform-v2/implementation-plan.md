@@ -702,6 +702,11 @@
 > Artifact Data/Maintenance和Context Native/Remote claim改用typed relational kind，managed MCP Sandbox session使用共享Job owner，Sandbox metrics按
 > exact capability-execution kind采样。schema contract v8及独立checker拒绝遗漏INSERT、JSON kind热路由和`sandbox_job` SQL owner；PostgreSQL
 > all-target 35/35入口、strict Clippy与baseline checker通过。本轮无fresh PG16/production scrape/runsc，L2真实事务与L4～L6结论不变。
+>
+> 2026-08-27 implementation evidence：r330以typed multi-JobKind selector分别采样Artifact Data Worker scan/rescan与Maintenance delete/blob-cleanup；
+> sampler受process supervision并接到固定role metrics surface，新增两条role-set due/expired alert、runbook和静态inventory。Artifact目标8/8、baseline
+> 2/2入口、strict Clippy、Artifact部署、observability/redaction/format门禁通过；无fresh PG、production S3/KMS scrape或L4～L5，仅关闭Artifact
+> durable backlog/recovery仓库内L1接线。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

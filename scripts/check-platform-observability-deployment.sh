@@ -44,6 +44,8 @@ failures << "must render one PrometheusRule and one dashboard" unless rules.leng
 
 alerts = rules.flat_map { |document| document.dig("spec", "groups").to_a.flat_map { |group| group["rules"].to_a } }
 expected = %w[
+  InsightPlatformArtifactDurableJobLagHigh
+  InsightPlatformArtifactExpiredLeaseRecoveryLagHigh
   InsightPlatformCapabilityDurableJobLagHigh
   InsightPlatformCapabilityExpiredLeaseRecoveryLagHigh
   InsightPlatformCriticalControlPermitsExhausted
@@ -123,8 +125,8 @@ end
 dependency_owner_contracts = {
   "crates/platform-security-authority/src/main.rs" => %w[install_security_metrics_with_postgres postgresql_dependency_metrics],
   "crates/platform-artifact-service/src/bin/gateway.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
-  "crates/platform-artifact-service/src/main.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
-  "crates/platform-artifact-service/src/bin/maintenance.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
+  "crates/platform-artifact-service/src/main.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler with_durable_job_queue JobKind::ArtifactScan JobKind::ArtifactRescan],
+  "crates/platform-artifact-service/src/bin/maintenance.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler with_durable_job_queue JobKind::ArtifactDelete JobKind::ArtifactBlobCleanup],
   "crates/platform-model-worker/src/main.rs" => %w[install_model_dependency_metrics new_with_observer run_postgres_health_sampler with_durable_job_queue WorkClass::Model],
   "crates/platform-capability-worker/src/main.rs" => ["install_capability_dependency_metrics(false)", "run_postgres_health_sampler", "with_durable_job_queue", "WorkClass::CapabilityNative"],
   "crates/platform-capability-worker/src/remote_main.rs" => ["install_capability_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler", "with_durable_job_queue", "WorkClass::CapabilityRemote"],

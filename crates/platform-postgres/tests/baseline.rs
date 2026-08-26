@@ -1,7 +1,9 @@
 use chrono::{Duration, Utc};
-use insight_platform_contracts::{SchedulerPriority, TenantConfig, WorkClass};
+use insight_platform_contracts::{JobKind, SchedulerPriority, TenantConfig, WorkClass};
 use insight_platform_postgres::{
-    operational_metrics::{observe_durable_job_queue, observe_durable_outbox},
+    operational_metrics::{
+        observe_durable_job_queue, observe_durable_job_queue_for_kinds, observe_durable_outbox,
+    },
     repository::{
         ClaimJobs, CommitJob, HeartbeatJob, JobCommitOutcome, JobFence, JobTerminalState, NewJob,
         NewQuotaAccount, NewTenant, PgRepository, QuotaMutationOutcome, RepositoryError,
@@ -120,6 +122,16 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
     assert!(queue.due_oldest_age_seconds >= 0.0);
     assert_eq!(queue.expired_leases, 0);
     assert_eq!(queue.expired_oldest_lag_seconds, 0.0);
+    assert_eq!(
+        observe_durable_job_queue_for_kinds(
+            &pool,
+            WorkClass::Interaction,
+            &[JobKind::Interaction],
+        )
+        .await
+        .unwrap(),
+        queue
+    );
     assert_eq!(
         observe_durable_job_queue(&pool, WorkClass::Orchestration)
             .await

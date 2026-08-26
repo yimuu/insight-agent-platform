@@ -474,6 +474,11 @@ row decode按25项合法三元组fail closed；Artifact Data/Maintenance和Conte
 Job INSERT完整性、禁止JSON kind热谓词与未注册`sandbox_job` SQL owner。PostgreSQL all-target 35/35入口、strict Clippy和baseline checker通过；
 本轮没有fresh PG16 authority或production scrape，故不把这些本地门禁解释为L2/L4～L6新证据。
 
+r330让Artifact Data Worker按`ArtifactScan|ArtifactRescan`、Maintenance按`ArtifactDelete|ArtifactBlobCleanup`分别观察typed durable queue；两者在同一
+受监督process generation内导出固定due/expired count与lag，查询失败保留上一有效snapshot并触发现有durable observation告警。新增Artifact role-set
+due/expired告警、runbook和静态部署inventory；目标8/8、baseline 2/2入口、strict Clippy及Artifact/observability/redaction门禁通过。无fresh PG、
+production S3/KMS scrape或L4～L5，本批只关闭Artifact两条queue的仓库内L1接线。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

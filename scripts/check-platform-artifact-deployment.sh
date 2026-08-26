@@ -15,6 +15,8 @@ manifest = (root / "crates/platform-artifact-service/Cargo.toml").read_text()
 dockerfile = (root / "Dockerfile").read_text()
 postgres = (root / "crates/platform-postgres/src/repository.rs").read_text()
 artifact_repository = (root / "crates/platform-postgres/src/artifact_repository.rs").read_text()
+data_worker = (root / "crates/platform-artifact-service/src/main.rs").read_text()
+maintenance = (root / "crates/platform-artifact-service/src/bin/maintenance.rs").read_text()
 gateway = (root / "crates/platform-artifact-service/src/bin/gateway.rs").read_text()
 grants = (root / "crates/platform-postgres/artifact-role-grants.sql").read_text()
 failures = []
@@ -24,10 +26,17 @@ for binary in ("platform-artifact-gateway", "platform-artifact-data-worker", "pl
 for boundary in (
     "ArtifactWorkerRole::DataWorker",
     "ArtifactWorkerRole::Maintenance",
-    "payload ->> 'kind' = ANY",
+    "job_kind = ANY",
 ):
     if boundary not in postgres:
         failures.append(f"missing role-gated claim boundary {boundary}")
+for source, kinds in (
+    (data_worker, ("JobKind::ArtifactScan", "JobKind::ArtifactRescan")),
+    (maintenance, ("JobKind::ArtifactDelete", "JobKind::ArtifactBlobCleanup")),
+):
+    for boundary in ("with_durable_job_queue", "run_artifact_queue_sampler", *kinds):
+        if boundary not in source:
+            failures.append(f"missing supervised Artifact durable queue boundary {boundary}")
 for authority in (
     "ArtifactScanObjectReadAuthority",
     "ArtifactDeleteObjectAuthority",

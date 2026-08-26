@@ -316,6 +316,10 @@ production-equivalent saturation/fault qualification分层运行。不以表数�
 
 ## 19. 未决问题
 
+r330把Data Worker的scan/rescan与Maintenance的delete/blob-cleanup按closed JobKind接到各自production process metrics surface；共享Artifact WorkClass
+不再造成role间backlog混计。固定role due/expired alert与runbook要求先关联PostgreSQL、S3/KMS及local capacity，禁止直接改Job或跨role搬移。
+目标测试、strict Clippy和静态部署/observability/redaction门禁通过；production scrape、S3/KMS fault与L4/L5仍按18取证。
+
 CR-181要求Artifact-backed leaf输入在dispatch前后重验Scheduler lease与Run binding，leaf output在owner transaction只绑定Plan声明port；
 wrong Artifact/Blob/grant/generation或读取中lease过期均fail closed。
 

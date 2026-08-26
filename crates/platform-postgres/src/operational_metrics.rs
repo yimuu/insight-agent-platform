@@ -46,15 +46,27 @@ pub async fn observe_durable_job_queue_for_owner(
     owner_kind: DurableJobOwnerKind,
 ) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
     let (owner_kind, job_kind) = owner_kind.selector();
-    observe_durable_job_queue_inner(pool, work_class, Some(owner_kind), Some(job_kind.as_str()))
-        .await
+    let job_kinds = [job_kind.as_str()];
+    observe_durable_job_queue_inner(pool, work_class, Some(owner_kind), Some(&job_kinds)).await
+}
+
+pub async fn observe_durable_job_queue_for_kinds(
+    pool: &PgPool,
+    work_class: WorkClass,
+    job_kinds: &[JobKind],
+) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
+    let job_kinds = job_kinds
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect::<Vec<_>>();
+    observe_durable_job_queue_inner(pool, work_class, None, Some(&job_kinds)).await
 }
 
 async fn observe_durable_job_queue_inner(
     pool: &PgPool,
     work_class: WorkClass,
     owner_kind: Option<&str>,
-    job_kind: Option<&str>,
+    job_kinds: Option<&[&str]>,
 ) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
     let row = sqlx::query(
         r#"
@@ -72,7 +84,7 @@ async fn observe_durable_job_queue_inner(
             CROSS JOIN authority_now
             WHERE job.work_class = $1
               AND ($2::text IS NULL OR job.owner_kind = $2)
-              AND ($3::text IS NULL OR job.job_kind = $3)
+              AND ($3::text[] IS NULL OR job.job_kind = ANY($3))
               AND job.terminal_at IS NULL
               AND job.worker_id IS NULL
               AND job.state IN ('ready', 'retry_scheduled')
@@ -90,7 +102,7 @@ async fn observe_durable_job_queue_inner(
             CROSS JOIN authority_now
             WHERE job.work_class = $1
               AND ($2::text IS NULL OR job.owner_kind = $2)
-              AND ($3::text IS NULL OR job.job_kind = $3)
+              AND ($3::text[] IS NULL OR job.job_kind = ANY($3))
               AND job.terminal_at IS NULL
               AND job.worker_id IS NOT NULL
               AND job.lease_expires_at <= authority_now.observed_at
@@ -104,7 +116,7 @@ async fn observe_durable_job_queue_inner(
     )
     .bind(work_class.as_str())
     .bind(owner_kind)
-    .bind(job_kind)
+    .bind(job_kinds.map(<[_]>::to_vec))
     .fetch_one(pool)
     .await?;
 

@@ -674,6 +674,11 @@ r329完成JobKind持久化迁移：baseline/schema contract v8、全部Job write
 `job_kind`的INSERT、JSON kind热路由及`sandbox_job` SQL owner；PostgreSQL all-target 35/35入口与strict Clippy通过。运行环境未提供fresh PG16、真实
 production Prometheus或runsc，因此本批是仓库内L1/静态L2门禁，不新增production backlog series、fault或L4～L6证据。
 
+r330复用typed multi-JobKind operational selector，把Artifact Data Worker的scan/rescan与Maintenance的delete/blob-cleanup队列分别接入受监督
+PostgreSQL sampler和既有process metrics surface。两条role-set due/expired symptom alert、runbook及静态inventory同步锁定，目标8/8、baseline 2/2
+入口、strict Clippy、Artifact部署、observability和redaction门禁通过。没有fresh PostgreSQL、production Prometheus、S3/KMS fault或L4～L5证据；
+因此只关闭Artifact durable backlog/recovery的仓库内L1 wiring。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。
