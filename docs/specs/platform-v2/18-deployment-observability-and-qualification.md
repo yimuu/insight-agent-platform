@@ -544,6 +544,11 @@ backpressure拒绝不冒充依赖失败。PostgreSQL sampler与NATS/permit/claim
 实际连接失败、adapter、library/binary tests和strict Clippy通过；可选真实TLS NATS fixture已同时断言connect/publish success，但本轮未配置该fixture，
 故未取得新的真实NATS/PG或production scrape证据。Model Egress streaming observation仍归后续批次。
 
+r306为Capability Native与Remote role各自的business及critical-control SQLx pool安装共享PostgreSQL sampler。每个process的两个probe只汇总到固定
+`component_role + postgresql + success|failure` series，不输出database、pool、SQL或error；它们与permit sampler组成一个受监督任务，复用既有
+worker/HTTP cancellation，在正常shutdown join，意外退出使process fail closed，不参与readiness判定。shared adapter、两个binary tests、strict Clippy及
+Native/Remote deployment、redaction和observability门禁通过；本轮没有新的真实PG或production scrape证据，Remote Egress/MCP observation仍待后续批次。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

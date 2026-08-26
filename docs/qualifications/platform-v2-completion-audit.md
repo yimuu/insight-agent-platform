@@ -90,6 +90,11 @@ observer不接收server、subject、tenant/run、payload或error。两个observe
 不改变readiness。真实连接失败、adapter、library/binary tests及strict Clippy通过；可选真实TLS NATS fixture已扩展为同时验证connect与publish成功观测，
 但本轮未配置该外部fixture，故没有新增真实NATS/PG成功或production scrape证据。Model Egress流式RPC观测仍待后续独立批次。
 
+r306把Capability Native/Remote各自独立business与critical-control PostgreSQL pool接到共享15秒sampler；四个probe只汇总到各process固定
+`component_role + postgresql + outcome` series，不暴露database、pool、SQL或error。每个process把permit与两个DB sampler组成受监督任务，和worker/HTTP
+共用cancel并在正常shutdown join；sampler意外退出使process fail closed且不改变readiness。shared adapter、两个binary tests及strict Clippy通过；本轮仍无
+真实PG成功fixture或production scrape，Remote Egress/MCP调用观测留待独立批次。
+
 ## 3. Phase 1 审计
 
 ### 已满足

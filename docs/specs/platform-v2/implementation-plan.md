@@ -577,6 +577,12 @@
 > 通过；可选真实TLS NATS fixture已同时验证connect/publish观测，但本轮未配置外部fixture，因此没有新增真实NATS/PG或production scrape证据；Model Egress
 > 流式RPC观测仍待后续独立批次。
 
+> 2026-08-27 implementation evidence：r306把Capability Native/Remote各自独立business与critical-control PostgreSQL pool接到共享15秒
+> sampler；四个probe只汇总为各process固定`component_role + postgresql + outcome`，不暴露database、pool、SQL或error。每个process把permit与两个DB
+> sampler组成受监督任务，和worker/HTTP共用cancellation并在正常shutdown join，sampler意外退出使process fail closed且不改变readiness。shared adapter、
+> 两个binary tests、strict Clippy及Native/Remote deployment、redaction和observability门禁通过；本轮没有新增真实PG或production scrape证据，Remote
+> Egress/MCP observation仍待后续批次。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

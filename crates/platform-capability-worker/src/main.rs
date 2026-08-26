@@ -1,5 +1,9 @@
 //! Deployable native Capability Worker for the clean-cut Platform v1 candidate.
 
+mod dependency_observer;
+
+use dependency_observer::install_capability_dependency_metrics;
+
 use insight_platform_capability_adapters::{
     CapabilityAdapterWorker, CapabilityDispatcher, InstalledNativeAdapter, InstalledNativeRegistry,
 };
@@ -16,7 +20,9 @@ use insight_platform_observability::{
     process_observability_router, run_worker_permit_sampler, update_worker_permits,
     ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
-use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+};
 use insight_platform_worker::LocalWorkerPools;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -204,6 +210,8 @@ async fn run() -> Result<(), ProcessError> {
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let observability_pools = pools.clone();
+    let business_health_pool = business_pool.clone();
+    let critical_control_health_pool = critical_control_pool.clone();
     let claim_repository = Arc::new(PgRepository::new(business_pool.clone()));
     let commit_repository = PgRepository::new(business_pool.clone());
     let heartbeat_repository = Arc::new(PgRepository::new(critical_control_pool.clone()));
@@ -227,13 +235,16 @@ async fn run() -> Result<(), ProcessError> {
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let permit_metrics = Arc::new(WorkerPermitMetrics::default());
     update_worker_permits(&permit_metrics, &observability_pools);
+    let dependency_metrics =
+        install_capability_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_worker_permits(
             "capability-native-worker",
             PROCESS_OBSERVABILITY_OPERATIONS,
             Arc::clone(&permit_metrics),
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics.process),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -241,11 +252,26 @@ async fn run() -> Result<(), ProcessError> {
     eprintln!("platform-capability-native-worker started");
 
     let cancellation = CancellationToken::new();
-    let _permit_sampler = tokio::spawn(run_worker_permit_sampler(
-        permit_metrics,
-        observability_pools,
-        cancellation.child_token(),
-    ));
+    let sampler_cancellation = cancellation.child_token();
+    let mut sampler_task = tokio::spawn(async move {
+        tokio::join!(
+            run_worker_permit_sampler(
+                permit_metrics,
+                observability_pools,
+                sampler_cancellation.child_token(),
+            ),
+            run_postgres_health_sampler(
+                business_health_pool,
+                Arc::clone(&dependency_metrics.postgres),
+                sampler_cancellation.child_token(),
+            ),
+            run_postgres_health_sampler(
+                critical_control_health_pool,
+                dependency_metrics.postgres,
+                sampler_cancellation,
+            ),
+        );
+    });
     let worker_cancellation = cancellation.child_token();
     let mut worker_task = tokio::spawn(async move { driver.run(worker_cancellation).await });
     let http_cancellation = cancellation.child_token();
@@ -266,6 +292,7 @@ async fn run() -> Result<(), ProcessError> {
             http_task.await
                 .map_err(|_| ProcessError::ObservabilityFailed)?
                 .map_err(|_| ProcessError::ObservabilityFailed)?;
+            sampler_task.await.map_err(|_| ProcessError::DependencyObserverFailed)?;
         }
         result = &mut worker_task => {
             cancellation.cancel();
@@ -274,6 +301,7 @@ async fn run() -> Result<(), ProcessError> {
             http_task.await
                 .map_err(|_| ProcessError::ObservabilityFailed)?
                 .map_err(|_| ProcessError::ObservabilityFailed)?;
+            sampler_task.await.map_err(|_| ProcessError::DependencyObserverFailed)?;
             return Err(ProcessError::WorkerExitedUnexpectedly);
         }
         result = &mut http_task => {
@@ -283,7 +311,19 @@ async fn run() -> Result<(), ProcessError> {
             worker_task.await
                 .map_err(|_| ProcessError::WorkerFailed)?
                 .map_err(|_| ProcessError::WorkerFailed)?;
+            sampler_task.await.map_err(|_| ProcessError::DependencyObserverFailed)?;
             return Err(ProcessError::ObservabilityFailed);
+        }
+        result = &mut sampler_task => {
+            cancellation.cancel();
+            result.map_err(|_| ProcessError::DependencyObserverFailed)?;
+            worker_task.await
+                .map_err(|_| ProcessError::WorkerFailed)?
+                .map_err(|_| ProcessError::WorkerFailed)?;
+            http_task.await
+                .map_err(|_| ProcessError::ObservabilityFailed)?
+                .map_err(|_| ProcessError::ObservabilityFailed)?;
+            return Err(ProcessError::DependencyObserverFailed);
         }
     }
     business_pool.close().await;
@@ -346,6 +386,7 @@ enum ProcessError {
     SignalUnavailable,
     WorkerFailed,
     WorkerExitedUnexpectedly,
+    DependencyObserverFailed,
     ObservabilityFailed,
 }
 
@@ -366,6 +407,9 @@ impl fmt::Display for ProcessError {
             Self::WorkerFailed => formatter.write_str("Capability Worker failed"),
             Self::WorkerExitedUnexpectedly => {
                 formatter.write_str("Capability Worker exited unexpectedly")
+            }
+            Self::DependencyObserverFailed => {
+                formatter.write_str("Capability dependency observer failed")
             }
             Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }
