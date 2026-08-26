@@ -719,6 +719,12 @@
 > `ContextSubscriptionRefresh + Context + mcp_operation`。独立schema checker新增缺失exact `job_kind`谓词的负向门禁；PostgreSQL lib
 > 14/14、MCP subscription 2/2、OAuth 8/8与strict Clippy通过。测试环境未配置fresh PostgreSQL，故本批只关闭仓储静态/L1边界，L2事务、
 > production worker composition与L4～L6仍Pending。
+>
+> 2026-08-27 implementation evidence：r333为production MCP discovery driver补齐两个必要authority primitive：新增
+> `claim_mcp_discovery_jobs`，使`McpDiscovery` typed predicate与`FOR UPDATE SKIP LOCKED` lease在同一事务内执行，logical subscription不能被
+> discovery pool暂时领取；expired observation新增validated `physical_attempt/attempt_limit`，Worker可确定构造unstarted requeue、running retry或
+> exhausted terminal recovery，不再猜测`retry_at`。MCP Host 57/57、PostgreSQL 14/14及双crate strict Clippy通过；无fresh PostgreSQL，故L2 claim/
+> recovery竞争、production driver/Egress/Artifact composition与L3以上证据仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

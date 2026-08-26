@@ -845,6 +845,8 @@ pub struct ExpiredMcpDiscoveryJobObservation {
     pub operation_version: u64,
     pub job_version: u64,
     pub lease_generation: u64,
+    pub physical_attempt: u32,
+    pub attempt_limit: u32,
     pub job_state: JobState,
     pub lease_expires_at: DateTime<Utc>,
     pub deadline: DateTime<Utc>,
@@ -859,6 +861,10 @@ impl ExpiredMcpDiscoveryJobObservation {
             || self.operation_version == 0
             || self.job_version == 0
             || self.lease_generation == 0
+            || self.attempt_limit == 0
+            || self.physical_attempt > self.attempt_limit
+            || (self.job_state == JobState::Leased && self.physical_attempt != 0)
+            || (self.job_state == JobState::Running && self.physical_attempt == 0)
             || !matches!(self.job_state, JobState::Leased | JobState::Running)
             || self.lease_expires_at > self.deadline
             || self.lease_expires_at > self.observed_at

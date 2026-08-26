@@ -489,6 +489,11 @@ loader、recovery和CAS均显式要求各自`job_kind`，不再仅凭`work_class
 exact kind的相邻owner谓词；PostgreSQL lib 14/14、MCP subscription 2/2、OAuth 8/8与strict Clippy通过。本轮没有fresh PostgreSQL或production
 worker运行，因此不新增L2/L3/L4～L6证据；discovery production claim/execute/recovery composition仍是下一实现批次。
 
+r333补齐discovery production driver的typed authority前置：专用claim在shared Job lease事务内固定`McpDiscovery` kind，避免同为`Mcp +
+mcp_operation`的logical subscription被错误暂领；expired observation携带并验证`physical_attempt/attempt_limit`，恢复方可按leased、可重试running与
+已耗尽running构造唯一合法命令。MCP Host 57/57、PostgreSQL 14/14及strict Clippy通过；本轮未配置fresh PostgreSQL，也尚未组合production
+driver、Egress discovery protocol与Artifact输出，因此不新增L2/L3/L4～L6证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

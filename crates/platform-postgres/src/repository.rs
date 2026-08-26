@@ -4490,10 +4490,26 @@ impl PgRepository {
         .await
     }
 
+    /// Claims only durable MCP discovery work. Logical subscription Jobs share the MCP work
+    /// class and owner kind, so the Job-kind predicate must participate in the locking query.
+    pub async fn claim_mcp_discovery_jobs(
+        &self,
+        command: ClaimJobs,
+    ) -> Result<Vec<JobRecord>, RepositoryError> {
+        command.validate()?;
+        if command.work_class != WorkClass::Mcp.as_str() {
+            return Err(RepositoryError::InvalidInput(
+                "MCP discovery claim requires the MCP work class".to_owned(),
+            ));
+        }
+        self.claim_jobs_filtered(command, Some(&["mcp_discovery"]))
+            .await
+    }
+
     async fn claim_jobs_filtered(
         &self,
         command: ClaimJobs,
-        artifact_job_kinds: Option<&'static [&'static str]>,
+        job_kinds: Option<&'static [&'static str]>,
     ) -> Result<Vec<JobRecord>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -4519,7 +4535,7 @@ impl PgRepository {
         .bind(&command.work_class)
         .bind(i64::from(command.limit))
         .bind(database_now)
-        .bind(artifact_job_kinds.map(|kinds| kinds.to_vec()))
+        .bind(job_kinds.map(|kinds| kinds.to_vec()))
         .fetch_all(&mut *transaction)
         .await?;
         let mut claimed = Vec::with_capacity(candidates.len());

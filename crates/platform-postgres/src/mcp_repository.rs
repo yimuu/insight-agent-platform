@@ -1897,7 +1897,7 @@ impl PgRepository {
             r#"
             SELECT operation.tenant_id, operation.invocation_id, operation.version AS operation_version,
                    job.job_id, job.version AS job_version, job.lease_epoch, job.state,
-                   job.lease_expires_at, job.deadline
+                   job.attempt_no, job.attempt_limit, job.lease_expires_at, job.deadline
             FROM insight_platform.jobs AS job
             JOIN insight_platform.invocations AS operation
               ON operation.tenant_id = job.tenant_id
@@ -1926,6 +1926,20 @@ impl PgRepository {
                 operation_version: parse_positive_u64_column(&row, "operation_version")?,
                 job_version: parse_positive_u64_column(&row, "job_version")?,
                 lease_generation: parse_positive_u64_column(&row, "lease_epoch")?,
+                physical_attempt: u32::try_from(row.try_get::<i32, _>("attempt_no")?).map_err(
+                    |_| {
+                        RepositoryError::CorruptRow(
+                            "negative MCP discovery physical attempt".to_owned(),
+                        )
+                    },
+                )?,
+                attempt_limit: u32::try_from(row.try_get::<i32, _>("attempt_limit")?).map_err(
+                    |_| {
+                        RepositoryError::CorruptRow(
+                            "negative MCP discovery attempt limit".to_owned(),
+                        )
+                    },
+                )?,
                 job_state: row
                     .try_get::<String, _>("state")?
                     .parse::<JobState>()
