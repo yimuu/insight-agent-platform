@@ -485,9 +485,14 @@ async fn run() -> Result<(), ProcessError> {
     let observability_pools = pools.clone();
     let business_health_pool = business_pool.clone();
     let critical_control_health_pool = critical_control_pool.clone();
-    let egress = Arc::new(EgressBrokerGrpcClient::new(
+    let dependency_metrics = install_capability_dependency_metrics(true)
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let egress = Arc::new(EgressBrokerGrpcClient::new_with_observer(
         connect_egress(&config).await?,
         config.rpc_limits()?,
+        dependency_metrics
+            .egress
+            .ok_or(ProcessError::InvalidConfiguration)?,
     ));
     let http_transport: Arc<dyn HttpNetworkTransport> = egress.clone();
     let grpc_transport: Arc<dyn GrpcNetworkTransport> = egress;
@@ -564,8 +569,6 @@ async fn run() -> Result<(), ProcessError> {
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let permit_metrics = Arc::new(WorkerPermitMetrics::default());
     update_worker_permits(&permit_metrics, &observability_pools);
-    let dependency_metrics =
-        install_capability_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_worker_permits(
             "capability-remote-worker",

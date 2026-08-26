@@ -138,6 +138,10 @@ r315把该observer注入production Model Worker并合入现有PostgreSQL/NATS pr
 `model-worker + egress + outcome`，不暴露业务或错误字段。adapter/binary tests、strict Clippy及部署/observability/redaction门禁通过；无production scrape或
 真实fault证据，其余Egress client role仍待注入。
 
+r316只为production Capability Remote Worker安装Egress observer，HTTP/gRPC调用与取消映射为固定role/dependency/outcome并与双PostgreSQL sampler
+同surface；Native路径保持PostgreSQL-only且显式无Egress observer。target tests、strict Clippy及双角色部署/observability/redaction门禁通过；无production
+scrape或真实fault，其余Egress/MCP client仍待注入。
+
 ## 3. Phase 1 审计
 
 ### 已满足

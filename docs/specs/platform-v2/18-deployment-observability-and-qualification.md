@@ -596,6 +596,11 @@ r315把共享Egress observer注入production Model Worker，并与既有PostgreS
 readiness、adapter或cancellation语义。adapter/binary tests、strict Clippy、Model deployment、observability与redaction门禁通过；本轮没有production scrape、
 真实Egress fault或L4～L5证据，其余Egress client role仍待注入。
 
+r316把共享Egress observer只注入production Capability Remote Worker的HTTP/gRPC调用与取消client；Remote与既有双PostgreSQL sampler共用process
+metrics surface，Native安装路径仍仅声明PostgreSQL并显式断言没有Egress observer。输出固定`capability-remote-worker + egress + outcome`，不携带codec、
+endpoint、tenant/invocation、payload或error，不改变dispatch/cancel/readiness语义。三个binary target tests、strict Clippy、Native/Remote deployment、
+observability与redaction门禁通过；本轮无production scrape或真实fault，其余Egress/MCP client仍待注入。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

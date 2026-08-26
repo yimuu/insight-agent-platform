@@ -1,3 +1,4 @@
+use insight_platform_egress_rpc::{EgressRpcDependencyObserver, EgressRpcDependencyOutcome};
 use insight_platform_observability::{
     DependencyObservationMetrics, DependencyObservationOutcome, MetricsInstallError,
     PlatformDependency,
@@ -23,22 +24,47 @@ impl PostgresHealthObserver for CapabilityPostgresObserver {
     }
 }
 
+impl EgressRpcDependencyObserver for CapabilityPostgresObserver {
+    fn observe(&self, outcome: EgressRpcDependencyOutcome) {
+        self.metrics
+            .observe(
+                PlatformDependency::Egress,
+                match outcome {
+                    EgressRpcDependencyOutcome::Success => DependencyObservationOutcome::Success,
+                    EgressRpcDependencyOutcome::Failure => DependencyObservationOutcome::Failure,
+                },
+            )
+            .expect("Remote Capability installs its Egress dependency metric");
+    }
+}
+
 pub struct InstalledCapabilityDependencyMetrics {
     pub process: Arc<DependencyObservationMetrics>,
     pub postgres: Arc<dyn PostgresHealthObserver>,
+    pub egress: Option<Arc<dyn EgressRpcDependencyObserver>>,
 }
 
 pub fn install_capability_dependency_metrics(
+    include_egress: bool,
 ) -> Result<InstalledCapabilityDependencyMetrics, MetricsInstallError> {
-    let metrics = Arc::new(DependencyObservationMetrics::install(&[
-        PlatformDependency::Postgresql,
-    ])?);
-    let postgres: Arc<dyn PostgresHealthObserver> = Arc::new(CapabilityPostgresObserver {
+    let dependencies = if include_egress {
+        &[PlatformDependency::Postgresql, PlatformDependency::Egress][..]
+    } else {
+        &[PlatformDependency::Postgresql][..]
+    };
+    let metrics = Arc::new(DependencyObservationMetrics::install(dependencies)?);
+    let observer = Arc::new(CapabilityPostgresObserver {
         metrics: Arc::clone(&metrics),
+    });
+    let postgres: Arc<dyn PostgresHealthObserver> = observer.clone();
+    let egress = include_egress.then(|| {
+        let observer: Arc<dyn EgressRpcDependencyObserver> = observer;
+        observer
     });
     Ok(InstalledCapabilityDependencyMetrics {
         process: metrics,
         postgres,
+        egress,
     })
 }
 
@@ -49,7 +75,8 @@ mod tests {
 
     #[test]
     fn adapter_maps_only_the_fixed_postgresql_outcome() {
-        let dependencies = install_capability_dependency_metrics().unwrap();
+        let dependencies = install_capability_dependency_metrics(false).unwrap();
+        assert!(dependencies.egress.is_none());
         dependencies
             .postgres
             .observe(PostgresHealthOutcome::Failure);
@@ -67,5 +94,29 @@ mod tests {
             assert!(!line.contains("pool="));
             assert!(!line.contains("error="));
         }
+    }
+
+    #[test]
+    fn remote_adapter_adds_only_the_fixed_egress_outcome() {
+        let dependencies = install_capability_dependency_metrics(true).unwrap();
+        dependencies
+            .egress
+            .unwrap()
+            .observe(EgressRpcDependencyOutcome::Success);
+        dependencies
+            .postgres
+            .observe(PostgresHealthOutcome::Failure);
+        let metrics = ProcessHttpMetrics::install(
+            "capability-remote-worker",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+        )
+        .unwrap()
+        .with_dependency_observations(dependencies.process);
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains("dependency=\"egress\",outcome=\"success\"} 1"));
+        assert!(rendered.contains("dependency=\"postgresql\",outcome=\"failure\"} 1"));
+        assert!(!rendered.contains("endpoint="));
+        assert!(!rendered.contains("tenant="));
+        assert!(!rendered.contains("error="));
     }
 }

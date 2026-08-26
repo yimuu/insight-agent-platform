@@ -418,6 +418,10 @@ r315把该port注入production Model Worker并接入既有PostgreSQL/NATS proces
 `model-worker + egress + outcome`，不改变readiness或业务语义。目标测试、strict Clippy和部署/observability/redaction门禁通过；production scrape、真实
 Egress fault、其他client role及L4～L5仍Pending。
 
+r316只在production Capability Remote Worker注入Egress observer，HTTP/gRPC调用与取消仅导出固定role/dependency/outcome并复用既有process surface；
+Native继续保持PostgreSQL-only。目标测试、strict Clippy和双角色部署/observability/redaction门禁通过；production scrape、真实fault、其他Egress/MCP client
+及L4～L5仍Pending。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
