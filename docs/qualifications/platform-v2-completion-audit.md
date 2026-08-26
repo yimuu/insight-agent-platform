@@ -153,6 +153,10 @@ redaction门禁通过；无production scrape或真实fault，Callback/Sandbox Eg
 r319为production Callback API OAuth exchange client注入Egress observer并与PostgreSQL sampler同surface；实际RPC只导出固定role/dependency/
 outcome。binary tests、strict Clippy及Callback部署/observability/redaction门禁通过；无production scrape或真实fault，Sandbox Egress client仍待注入。
 
+r320以静态清单确认七个first-release production Egress client均强制注入observer，新增no-op production构造会fail closed；其余no-op仅存在于shared
+client测试、PostgreSQL component fixture及release明确排除的Firecracker/microVM provider。首发WASI/gVisor Sandbox无Egress client，故r319的Sandbox
+待注入表述不构成release缺口。observability、Sandbox deployment与redaction门禁通过；production scrape/真实fault及L4～L5仍Pending。
+
 ## 3. Phase 1 审计
 
 ### 已满足

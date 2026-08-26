@@ -652,6 +652,11 @@
 > 同surface；实际RPC只导出固定`mcp-callback-api + egress + outcome`，不输出OAuth state/code、tenant/task、endpoint、token或error。binary tests、
 > strict Clippy、Callback deployment、observability及redaction门禁通过；无production scrape/真实fault，Sandbox Egress client与L4～L5仍Pending。
 
+> 2026-08-27 implementation evidence：r320反向扫描全部共享Egress client构造点并在observability checker锁定七个first-release production
+> client必须注入observer；新增no-op production构造会fail closed。仅shared client测试、PostgreSQL component fixture及release Docker/Helm明确排除的
+> deferred Firecracker/microVM provider可保留no-op。首发WASI/gVisor Sandbox不使用Egress client，因此r319的“Sandbox待注入”不是release缺口。observability、
+> Sandbox deployment及redaction门禁通过；production scrape/真实fault与L4～L5仍Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

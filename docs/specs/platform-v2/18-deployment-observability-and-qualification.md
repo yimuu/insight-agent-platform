@@ -617,6 +617,12 @@ r319把共享Egress observer注入production Callback API的OAuth exchange clien
 语义。binary tests、strict Clippy、Callback deployment、observability与redaction门禁通过；本轮无production scrape或真实fault，Sandbox Egress client仍待
 注入。
 
+r320反向清点全部`EgressBrokerGrpcClient`构造点并把清单固化到observability checker：七个first-release production client必须使用
+`new_with_observer`，任何新增no-op production构造均fail closed。余下no-op只允许shared client自身测试、PostgreSQL component fixture和明确不进入release
+Docker/Helm的deferred Firecracker/microVM provider；首发WASI/gVisor Sandbox没有Egress client，故r319所称“Sandbox待注入”更正为非首发路径，不构成release
+dependency series缺口。observability、Sandbox deployment与redaction门禁通过；至此first-release production Egress client L1接线完整，但production scrape、
+真实fault及L4～L5仍Pending。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

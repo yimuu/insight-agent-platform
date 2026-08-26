@@ -31,9 +31,10 @@ for mutation in \
   fi
 done
 
-ruby -rjson -ryaml - "$rendered" "$root/docs/runbooks/platform-v2-observability.md" <<'RUBY'
+ruby -rjson -ryaml - "$rendered" "$root/docs/runbooks/platform-v2-observability.md" "$root" <<'RUBY'
 documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
 runbook = File.read(ARGV.fetch(1))
+root = ARGV.fetch(2)
 failures = []
 rules = documents.select { |document| document["kind"] == "PrometheusRule" }
 dashboards = documents.select { |document| document["kind"] == "ConfigMap" }
@@ -82,6 +83,32 @@ unless dashboards.empty?
   rescue JSON::ParserError => error
     failures << "dashboard JSON is invalid: #{error.message}"
   end
+end
+
+production_egress_clients = %w[
+  crates/platform-callback-api/src/main.rs
+  crates/platform-capability-worker/src/remote_main.rs
+  crates/platform-context-worker/src/remote_main.rs
+  crates/platform-mcp-cleanup-worker/src/main.rs
+  crates/platform-mcp-service/src/main.rs
+  crates/platform-mcp-service/src/resource_main.rs
+  crates/platform-model-worker/src/main.rs
+]
+production_egress_clients.each do |relative|
+  source = File.read(File.join(root, relative))
+  failures << "#{relative} lacks the required Egress dependency observer" unless source.include?("EgressBrokerGrpcClient::new_with_observer(")
+  failures << "#{relative} uses the no-op Egress client constructor" if source.include?("EgressBrokerGrpcClient::new(")
+end
+
+allowed_noop_clients = %w[
+  crates/platform-egress-rpc/src/lib.rs
+  crates/platform-postgres/tests/phase4_mcp_oauth.rs
+  crates/platform-sandbox-microvm/src/main.rs
+]
+Dir.glob(File.join(root, "crates/**/*.rs")).each do |path|
+  next unless File.read(path).include?("EgressBrokerGrpcClient::new(")
+  relative = path.delete_prefix("#{root}/")
+  failures << "unexpected no-op Egress client constructor in #{relative}" unless allowed_noop_clients.include?(relative)
 end
 
 unless failures.empty?
