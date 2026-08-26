@@ -36,6 +36,13 @@ if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platf
   echo "sandbox deployment: Executor shared observability composition is missing" >&2
   exit 1
 fi
+if ! rg -q 'install_sandbox_executor_dependency_metrics' "$root/crates/platform-sandbox-executor/src/main.rs" ||
+   ! rg -q 'NatsSandboxControlListener::bind_with_observer' "$root/crates/platform-sandbox-executor/src/main.rs" ||
+   ! rg -q 'with_dependency_observations' "$root/crates/platform-sandbox-executor/src/main.rs" ||
+   ! rg -q 'SandboxNatsDependencyObserver' "$root/crates/platform-sandbox-rpc/src/control.rs"; then
+  echo "sandbox deployment: Executor NATS dependency observation is missing" >&2
+  exit 1
+fi
 if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-attestor/Cargo.toml" ||
    ! rg -q 'process_observability_router' "$root/crates/platform-sandbox-attestor/src/main.rs"; then
   echo "sandbox deployment: process-attestor shared observability composition is missing" >&2

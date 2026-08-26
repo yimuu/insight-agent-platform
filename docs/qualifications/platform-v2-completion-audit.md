@@ -160,6 +160,10 @@ client测试、PostgreSQL component fixture及release明确排除的Firecracker/
 r321在完整workspace all-target/all-feature门禁中修复rolling-summary测试的无关3秒owner lease时序耦合；测试专用lease改为30秒，production owner逻辑与
 专用lease failure测试不变。修复后目标/全workspace tests、strict Clippy、format与doc tests通过，两个外部S3 fixture保持ignored；无外部或L4～L6新证据。
 
+r322为首发Sandbox WASI/gVisor Executor接入Core NATS dependency observer，实际TLS connect、subscribe/flush、request/reply、stream closure与unsubscribe
+只导出固定role/nats/outcome，本地校验和业务字段不进入指标。RPC/Executor tests、真实mTLS、strict Clippy及Sandbox部署/observability/redaction门禁通过；
+可选真实NATS fixture本轮未配置，故无真实NATS或production scrape新证据。
+
 ## 3. Phase 1 审计
 
 ### 已满足

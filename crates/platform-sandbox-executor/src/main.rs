@@ -1,3 +1,6 @@
+mod dependency_observer;
+
+use dependency_observer::install_sandbox_executor_dependency_metrics;
 use hyper_util::rt::TokioIo;
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
@@ -25,7 +28,7 @@ use insight_platform_sandbox_executor::{
 use insight_platform_sandbox_rpc::{
     NatsSandboxControlListener, NatsSandboxControlTransportConfig, SandboxAuthorityGrpcClient,
     SandboxBrokerGrpcClient, SandboxExecutorProcessRegistrationGrpcClient,
-    SandboxInternalRpcLimits,
+    SandboxInternalRpcLimits, SandboxNatsDependencyObserver, SandboxNatsDependencyOutcome,
 };
 use insight_platform_sandbox_wasi::{
     SystemWasiExecutorClock, WasiExecutorBackendConfig, WasmtimeSandboxExecutorBackend,
@@ -352,9 +355,11 @@ async fn run() -> Result<(), ProcessError> {
         driver_config,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let nats = connect_nats(&config).await?;
+    let (dependency_metrics, nats_observer) = install_sandbox_executor_dependency_metrics()
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let nats = connect_nats(&config, Arc::clone(&nats_observer)).await?;
     let local_sink: Arc<dyn insight_platform_sandbox::SandboxControlSignalSink> = control_router;
-    let listener = NatsSandboxControlListener::bind(
+    let listener = NatsSandboxControlListener::bind_with_observer(
         nats,
         NatsSandboxControlTransportConfig::from_profile(
             &profile,
@@ -363,6 +368,7 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::InvalidConfiguration)?,
         process_generation_id,
         local_sink,
+        nats_observer,
     )
     .await
     .map_err(|_| ProcessError::NatsUnavailable)?;
@@ -375,7 +381,8 @@ async fn run() -> Result<(), ProcessError> {
             PROCESS_OBSERVABILITY_OPERATIONS,
             Arc::clone(&permit_metrics),
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics),
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)
@@ -545,8 +552,11 @@ async fn connect_process_registration_attestor(
         .map_err(|_| ProcessError::AttestorUnavailable)
 }
 
-async fn connect_nats(config: &ExecutorProcessConfig) -> Result<async_nats::Client, ProcessError> {
-    async_nats::ConnectOptions::new()
+async fn connect_nats(
+    config: &ExecutorProcessConfig,
+    dependency_observer: Arc<dyn SandboxNatsDependencyObserver>,
+) -> Result<async_nats::Client, ProcessError> {
+    let result = async_nats::ConnectOptions::new()
         .require_tls(true)
         .add_root_certificates(required_absolute_path(NATS_CA_PATH_ENV)?)
         .add_client_certificate(
@@ -554,8 +564,13 @@ async fn connect_nats(config: &ExecutorProcessConfig) -> Result<async_nats::Clie
             required_absolute_path(NATS_KEY_PATH_ENV)?,
         )
         .connect(&config.nats_endpoint)
-        .await
-        .map_err(|_| ProcessError::NatsUnavailable)
+        .await;
+    dependency_observer.observe(if result.is_ok() {
+        SandboxNatsDependencyOutcome::Success
+    } else {
+        SandboxNatsDependencyOutcome::Failure
+    });
+    result.map_err(|_| ProcessError::NatsUnavailable)
 }
 
 fn required(name: &'static str) -> Result<String, ProcessError> {

@@ -26,6 +26,7 @@ pub use generation_handler::*;
 pub use identity::*;
 pub use insight_platform_sandbox_rpc::{
     NatsSandboxControlListener, NatsSandboxControlSignalSink, NatsSandboxControlTransportConfig,
+    SandboxNatsDependencyObserver, SandboxNatsDependencyOutcome,
     NATS_SANDBOX_CONTROL_SUBJECT_PREFIX,
 };
 pub use orchestration::*;

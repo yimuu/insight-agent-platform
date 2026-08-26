@@ -662,6 +662,11 @@
 > target与完整workspace tests、strict Clippy、format及doc tests通过；两个外部S3 fixture仍ignored。该批不产生外部S3、production scrape、Kubernetes/
 > runsc或L4～L6证据。
 
+> 2026-08-27 implementation evidence：r322为first-release Sandbox WASI/gVisor Executor补齐Core NATS control dependency health。共享
+> observer仅接收success/failure，覆盖实际request、subscribe+flush、reply publish、stream closure、unsubscribe及production TLS connect；本地subject/
+> envelope拒绝不计数，也不输出worker、tenant/job、payload、server或error。RPC/Executor tests、真实mTLS、strict Clippy及Sandbox deployment/
+> observability/redaction门禁通过；可选真实NATS fixture已有观测断言但本轮未配置，故不宣称真实NATS、production scrape或L4～L5完成。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

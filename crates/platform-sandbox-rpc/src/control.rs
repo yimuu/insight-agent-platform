@@ -16,6 +16,33 @@ use tokio_util::sync::CancellationToken;
 
 pub const NATS_SANDBOX_CONTROL_SUBJECT_PREFIX: &str = "insight.platform.v1.sandbox.control";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxNatsDependencyOutcome {
+    Success,
+    Failure,
+}
+
+/// Receives only the outcome of an actual Core NATS operation. Subject, worker generation,
+/// tenant/job identity, payload and error details never cross this port.
+pub trait SandboxNatsDependencyObserver: Send + Sync {
+    fn observe(&self, outcome: SandboxNatsDependencyOutcome);
+}
+
+#[derive(Debug)]
+struct NoopSandboxNatsDependencyObserver;
+
+impl SandboxNatsDependencyObserver for NoopSandboxNatsDependencyObserver {
+    fn observe(&self, _outcome: SandboxNatsDependencyOutcome) {}
+}
+
+fn observe_nats(observer: &Arc<dyn SandboxNatsDependencyObserver>, success: bool) {
+    observer.observe(if success {
+        SandboxNatsDependencyOutcome::Success
+    } else {
+        SandboxNatsDependencyOutcome::Failure
+    });
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NatsSandboxControlTransportConfig {
     maximum_payload_bytes: usize,
@@ -78,11 +105,24 @@ struct SandboxControlTransportResponse {
 pub struct NatsSandboxControlSignalSink {
     client: Client,
     config: NatsSandboxControlTransportConfig,
+    dependency_observer: Arc<dyn SandboxNatsDependencyObserver>,
 }
 
 impl NatsSandboxControlSignalSink {
     pub fn new(client: Client, config: NatsSandboxControlTransportConfig) -> Self {
-        Self { client, config }
+        Self::new_with_observer(client, config, Arc::new(NoopSandboxNatsDependencyObserver))
+    }
+
+    pub fn new_with_observer(
+        client: Client,
+        config: NatsSandboxControlTransportConfig,
+        dependency_observer: Arc<dyn SandboxNatsDependencyObserver>,
+    ) -> Self {
+        Self {
+            client,
+            config,
+            dependency_observer,
+        }
     }
 }
 
@@ -101,9 +141,11 @@ impl SandboxControlSignalSink for NatsSandboxControlSignalSink {
             self.config.request_timeout,
             self.client.request(subject, request.into()),
         )
-        .await
-        .map_err(|_| SandboxControlError::TransportUnavailable)?
-        .map_err(|_| SandboxControlError::TransportUnavailable)?;
+        .await;
+        observe_nats(&self.dependency_observer, matches!(&response, Ok(Ok(_))));
+        let response = response
+            .map_err(|_| SandboxControlError::TransportUnavailable)?
+            .map_err(|_| SandboxControlError::TransportUnavailable)?;
         decode_response(
             &response.payload,
             self.config.maximum_payload_bytes,
@@ -118,6 +160,7 @@ pub struct NatsSandboxControlListener {
     worker_process_generation_id: ResourceId,
     local_sink: Arc<dyn SandboxControlSignalSink>,
     subscriber: Subscriber,
+    dependency_observer: Arc<dyn SandboxNatsDependencyObserver>,
 }
 
 impl NatsSandboxControlListener {
@@ -126,6 +169,23 @@ impl NatsSandboxControlListener {
         config: NatsSandboxControlTransportConfig,
         worker_process_generation_id: ResourceId,
         local_sink: Arc<dyn SandboxControlSignalSink>,
+    ) -> Result<Self, SandboxControlError> {
+        Self::bind_with_observer(
+            client,
+            config,
+            worker_process_generation_id,
+            local_sink,
+            Arc::new(NoopSandboxNatsDependencyObserver),
+        )
+        .await
+    }
+
+    pub async fn bind_with_observer(
+        client: Client,
+        config: NatsSandboxControlTransportConfig,
+        worker_process_generation_id: ResourceId,
+        local_sink: Arc<dyn SandboxControlSignalSink>,
+        dependency_observer: Arc<dyn SandboxNatsDependencyObserver>,
     ) -> Result<Self, SandboxControlError> {
         let subject = config.subject_for(&worker_process_generation_id)?;
         let subscriber = time::timeout(config.request_timeout, async {
@@ -139,14 +199,16 @@ impl NatsSandboxControlListener {
                 .map_err(|_| SandboxControlError::TransportUnavailable)?;
             Ok::<_, SandboxControlError>(subscriber)
         })
-        .await
-        .map_err(|_| SandboxControlError::TransportUnavailable)??;
+        .await;
+        observe_nats(&dependency_observer, matches!(&subscriber, Ok(Ok(_))));
+        let subscriber = subscriber.map_err(|_| SandboxControlError::TransportUnavailable)??;
         Ok(Self {
             client,
             config,
             worker_process_generation_id,
             local_sink,
             subscriber,
+            dependency_observer,
         })
     }
 
@@ -154,12 +216,14 @@ impl NatsSandboxControlListener {
         loop {
             let message = tokio::select! {
                 _ = shutdown.cancelled() => {
-                    let _ = self.subscriber.unsubscribe().await;
+                    let result = self.subscriber.unsubscribe().await;
+                    observe_nats(&self.dependency_observer, result.is_ok());
                     return Ok(());
                 }
                 message = self.subscriber.next() => message,
             };
             let Some(message) = message else {
+                observe_nats(&self.dependency_observer, false);
                 return Err(SandboxControlError::TransportUnavailable);
             };
             let Some(reply) = message.reply else {
@@ -179,10 +243,9 @@ impl NatsSandboxControlListener {
                 delivery,
             };
             let response = encode_bounded(&response, self.config.maximum_payload_bytes)?;
-            self.client
-                .publish(reply, response.into())
-                .await
-                .map_err(|_| SandboxControlError::TransportUnavailable)?;
+            let result = self.client.publish(reply, response.into()).await;
+            observe_nats(&self.dependency_observer, result.is_ok());
+            result.map_err(|_| SandboxControlError::TransportUnavailable)?;
         }
     }
 }

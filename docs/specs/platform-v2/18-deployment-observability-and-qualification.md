@@ -628,6 +628,12 @@ owner retirement deadline耦合，单测可稳定触发`RUN_INTERRUPTED`。该fi
 lease失败测试均未改变。修复后目标测试与完整workspace tests通过，两个外部S3 fixture保持ignored；workspace strict Clippy、format及doc tests也通过。该批只
 稳定仓库门禁，不提供外部S3、production scrape、Kubernetes/runsc或L4～L6证据。
 
+r322补齐first-release Sandbox WASI/gVisor Executor的Core NATS control dependency health。共享transport observer只接收success/failure，并在实际
+request、subscribe+flush、reply publish、stream closure与unsubscribe返回边界记录；Executor另在production TLS connect返回边界记录，并把同一observer注入
+listener。subject/envelope/worker/tenant/job/payload/error不跨越port，本地校验拒绝零观测；两个backend共享固定`component_role + nats + outcome`。
+RPC/Executor tests、真实mTLS、strict Clippy及Sandbox deployment/observability/redaction门禁通过；可选真实NATS fixture已增加request/reply/timeout观测断言，
+但本轮未配置外部NATS，故没有新的真实NATS或production scrape证据。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

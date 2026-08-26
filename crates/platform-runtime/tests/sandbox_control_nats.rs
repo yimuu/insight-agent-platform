@@ -4,6 +4,7 @@ use insight_platform_contracts::{
 };
 use insight_platform_runtime::{
     NatsSandboxControlListener, NatsSandboxControlSignalSink, NatsSandboxControlTransportConfig,
+    SandboxNatsDependencyObserver, SandboxNatsDependencyOutcome,
 };
 use insight_platform_sandbox::{
     SandboxControlDelivery, SandboxControlError, SandboxControlSignalSink, SandboxStopReason,
@@ -55,6 +56,23 @@ struct RecordingLocalSink {
     first_signal_digest: std::sync::Mutex<Option<Sha256Digest>>,
 }
 
+#[derive(Default)]
+struct RecordingDependencyObserver {
+    outcomes: std::sync::Mutex<Vec<SandboxNatsDependencyOutcome>>,
+}
+
+impl SandboxNatsDependencyObserver for RecordingDependencyObserver {
+    fn observe(&self, outcome: SandboxNatsDependencyOutcome) {
+        self.outcomes.lock().unwrap().push(outcome);
+    }
+}
+
+impl RecordingDependencyObserver {
+    fn outcomes(&self) -> Vec<SandboxNatsDependencyOutcome> {
+        self.outcomes.lock().unwrap().clone()
+    }
+}
+
 #[async_trait]
 impl SandboxControlSignalSink for RecordingLocalSink {
     async fn deliver(
@@ -85,11 +103,13 @@ async fn real_nats_routes_only_to_the_exact_executor_generation_when_configured(
     .unwrap();
     let worker_process_generation_id = id(ResourceKind::WorkerProcessGeneration, "3006");
     let local = Arc::new(RecordingLocalSink::default());
-    let listener = NatsSandboxControlListener::bind(
+    let executor_observer = Arc::new(RecordingDependencyObserver::default());
+    let listener = NatsSandboxControlListener::bind_with_observer(
         executor_client,
         config.clone(),
         worker_process_generation_id.clone(),
         local.clone(),
+        executor_observer.clone(),
     )
     .await
     .unwrap();
@@ -97,7 +117,12 @@ async fn real_nats_routes_only_to_the_exact_executor_generation_when_configured(
     let listener_shutdown = shutdown.clone();
     let listener_task = tokio::spawn(listener.run(listener_shutdown));
 
-    let remote = NatsSandboxControlSignalSink::new(controller_client, config);
+    let controller_observer = Arc::new(RecordingDependencyObserver::default());
+    let remote = NatsSandboxControlSignalSink::new_with_observer(
+        controller_client,
+        config,
+        controller_observer.clone(),
+    );
     let exact = signal(worker_process_generation_id);
     assert_eq!(
         remote.deliver(&exact).await.unwrap(),
@@ -120,4 +145,17 @@ async fn real_nats_routes_only_to_the_exact_executor_generation_when_configured(
 
     shutdown.cancel();
     listener_task.await.unwrap().unwrap();
+    assert_eq!(
+        controller_observer.outcomes(),
+        vec![
+            SandboxNatsDependencyOutcome::Success,
+            SandboxNatsDependencyOutcome::Success,
+            SandboxNatsDependencyOutcome::Failure,
+        ]
+    );
+    let executor_outcomes = executor_observer.outcomes();
+    assert!(executor_outcomes.len() >= 4);
+    assert!(executor_outcomes
+        .iter()
+        .all(|outcome| *outcome == SandboxNatsDependencyOutcome::Success));
 }
