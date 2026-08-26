@@ -43,6 +43,17 @@ info:
     Target insight.platform/v1 contract. Operations remain implementing-not-current until
     qualification and clean replacement are complete.
 x-insight-contract-status: implementing-not-current
+x-insight-trace-contract:
+  request-header:
+    name: traceparent
+    required: false
+    schema: {$ref: "#/components/schemas/W3cTraceParent"}
+  forbidden-request-headers: [tracestate, baggage]
+  response-header:
+    name: trace-id
+    required: true
+    schema: {$ref: "#/components/schemas/TraceId"}
+  invariant: The response header, ApiProblem body and SSE event envelope use one request trace ID.
 servers:
   - url: /v1
 paths:
@@ -1037,6 +1048,7 @@ components:
     ApiProblem:
       description: A bounded, stable public problem response.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         Cache-Control:
           $ref: "#/components/headers/NoStore"
       content:
@@ -1046,6 +1058,7 @@ components:
     ResourceResponse:
       description: Current typed Resource projection with a strong aggregate ETag.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
       content:
@@ -1054,6 +1067,7 @@ components:
     ResourceCreatedResponse:
       description: Resource and editable Draft committed atomically or replayed from its Receipt.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         Location: {schema: {type: string, pattern: "^/v1/(agents|skills|capabilities|contexts|models|mcp-servers|policies|sandboxes)/"}}
         ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
@@ -1063,6 +1077,7 @@ components:
     ResourceVersionResponse:
       description: One immutable typed published Version.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
       content:
@@ -1071,6 +1086,7 @@ components:
     DeploymentResponse:
       description: One immutable typed Deployment closure.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
       content:
@@ -1079,6 +1095,7 @@ components:
     DeploymentCreatedResponse:
       description: Immutable Deployment closure committed atomically or replayed from its Receipt.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         Location: {schema: {type: string, pattern: "^/v1/(agents|skills|capabilities|contexts|models|mcp-servers|policies|sandboxes)/.+/deployments/"}}
         ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
@@ -1088,6 +1105,7 @@ components:
     PublishResourceResponse:
       description: Immutable published Version identities from the fenced Draft generation.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
       content:
@@ -1096,6 +1114,7 @@ components:
     OperationAcceptedResponse:
       description: Shared durable Job accepted or replayed.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         Location: {schema: {type: string, pattern: "^/v1/operations/job_"}}
         ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
@@ -1105,6 +1124,7 @@ components:
     RunControlResponse:
       description: The durable control intent winner and current Run projection.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
       content:
@@ -1113,12 +1133,17 @@ components:
     TaskControlResponse:
       description: The durable Task first-winner projection.
       headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
         ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
       content:
         application/json:
           schema: {$ref: "#/components/schemas/TaskViewV1"}
   headers:
+    TraceId:
+      required: true
+      schema:
+        $ref: "#/components/schemas/TraceId"
     NoStore:
       schema:
         type: string
@@ -1819,6 +1844,10 @@ components:
       $ref: ./schemas/nominal/failure.schema.json
     ApiProblem:
       $ref: ./schemas/nominal/api-problem.schema.json
+    TraceId:
+      $ref: ./schemas/nominal/trace-id.schema.json
+    W3cTraceParent:
+      $ref: ./schemas/nominal/w3c-traceparent.schema.json
     OpaqueListCursor:
       $ref: ./schemas/nominal/opaque-list-cursor.schema.json
     OpaqueRunEventCursor:
@@ -2050,6 +2079,12 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
             })
         }).collect::<Vec<_>>(),
         "envelope_invariants": {
+            "all": {
+                "trace_id": "required",
+                "trace_id_nominal": pinned_nominal_reference("TraceId").expect("TraceId nominal schema"),
+                "response_header": "trace-id",
+                "correlation_invariant": "event trace_id equals the request response trace-id"
+            },
             "snapshot": {"event_id": "absent", "sequence": "absent", "cursor": "high_water"},
             "durable": {"event_id": "required", "sequence": "required", "cursor": "required"},
             "live_only": {"event_id": "absent", "sequence": "absent", "cursor": "absent"}

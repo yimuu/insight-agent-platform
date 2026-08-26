@@ -17,6 +17,12 @@
     "approval_task"
   ],
   "envelope_invariants": {
+    "all": {
+      "correlation_invariant": "event trace_id equals the request response trace-id",
+      "response_header": "trace-id",
+      "trace_id": "required",
+      "trace_id_nominal": "urn:insight:platform:v1:nominal:TraceId@sha256:f229de40ce930197945417d2d0885f67c5fb151d310981ae8da8eb79952aceda"
+    },
     "durable": {
       "cursor": "required",
       "event_id": "required",

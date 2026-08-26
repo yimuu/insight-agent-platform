@@ -96,6 +96,7 @@ pub struct AuthenticatedPrincipal {
     pub binding_version: u64,
     pub credential_digest: Sha256Digest,
     pub credential_expires_at: DateTime<Utc>,
+    pub trace: insight_platform_contracts::TraceIdentityV1,
 }
 
 impl AuthenticatedPrincipal {
@@ -106,6 +107,7 @@ impl AuthenticatedPrincipal {
             || self.principal_version == 0
             || self.binding_generation == 0
             || self.binding_version == 0
+            || self.trace.validate().is_err()
         {
             return Err(AuthenticationError::Unauthenticated);
         }
@@ -193,6 +195,7 @@ impl PublicAuthenticationState {
             binding_version: snapshot.binding_version,
             credential_digest: verified.credential_digest,
             credential_expires_at: verified.expires_at,
+            trace: crate::trace::current_trace_context().identity,
         };
         principal.validate()?;
         Ok(principal)
@@ -243,6 +246,7 @@ fn authentication_problem(error: AuthenticationError) -> Response {
         code,
         detail: None,
         request_id,
+        trace_id: crate::trace::current_trace_id(),
         retryable,
         retry_after_ms: retryable.then_some(1_000),
         field_errors: Vec::new(),

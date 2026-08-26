@@ -191,6 +191,7 @@ fn problem(error: OperationApplicationError) -> Response {
         code,
         detail: None,
         request_id,
+        trace_id: crate::trace::current_trace_id(),
         retryable: retry_after,
         retry_after_ms: retry_after.then_some(1_000),
         field_errors: Vec::new(),
@@ -305,6 +306,7 @@ mod tests {
             binding_version: 1,
             credential_digest: digest('a'),
             credential_expires_at: now + Duration::hours(1),
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
         };
         (router, application, principal, operation_id)
     }

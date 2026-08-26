@@ -1,6 +1,6 @@
 use crate::{
     canonical_digest, AdministrativeGate, AuthnStrength, ExactDeploymentRef, Permission,
-    PrincipalBindingState, PrincipalKind, ResourceId, ResourceKind, Sha256Digest,
+    PrincipalBindingState, PrincipalKind, ResourceId, ResourceKind, Sha256Digest, TraceIdentityV1,
 };
 use chrono::{DateTime, Utc};
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -252,11 +252,15 @@ pub struct PrincipalContext {
     pub authn_strength: AuthnStrength,
     pub binding_generation: u64,
     pub expires_at: DateTime<Utc>,
+    pub trace: TraceIdentityV1,
 }
 
 impl PrincipalContext {
     pub fn validate(&self) -> Result<(), SecurityContractError> {
-        if self.principal_id.kind() != ResourceKind::Principal || self.binding_generation == 0 {
+        if self.principal_id.kind() != ResourceKind::Principal
+            || self.binding_generation == 0
+            || self.trace.validate().is_err()
+        {
             return Err(SecurityContractError::InvalidPrincipalContext);
         }
         match (&self.scope, self.principal_kind) {
@@ -653,6 +657,7 @@ mod tests {
             authn_strength: AuthnStrength::MultiFactor,
             binding_generation: 1,
             expires_at: Utc::now() + Duration::from_secs(60),
+            trace: TraceIdentityV1::generate(),
         }
     }
 
@@ -788,6 +793,7 @@ mod tests {
             authn_strength: AuthnStrength::PhishingResistant,
             binding_generation: 1,
             expires_at: Utc::now() + Duration::from_secs(60),
+            trace: TraceIdentityV1::generate(),
         };
         assert_eq!(
             authorize(

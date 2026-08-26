@@ -475,6 +475,7 @@ async fn read_run_events(
             cursor: Some(cursor.clone()),
             sequence: Some(projection.sequence),
             schema_version: 1,
+            trace_id: crate::trace::current_trace_id(),
             event_type: projection.event_type,
             durability: EventDurability::Durable,
             occurred_at: UtcTimestamp::from_datetime(projection.occurred_at),
@@ -998,6 +999,7 @@ fn problem(error: RunApplicationError) -> Response {
         code,
         detail: None,
         request_id,
+        trace_id: crate::trace::current_trace_id(),
         retryable,
         retry_after_ms: retryable.then_some(1_000),
         field_errors: Vec::new(),
@@ -1052,6 +1054,7 @@ mod tests {
             binding_version: 1,
             credential_digest: digest('a'),
             credential_expires_at: now + Duration::hours(1),
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
         }
     }
 
@@ -1227,12 +1230,20 @@ mod tests {
         let router = build_run_router(
             RunHttpState::new(Arc::new(FixtureApplication), Arc::new(FixedClock(now)))
                 .with_event_cursor_codec(codec),
-        );
+        )
+        .layer(axum::middleware::from_fn(
+            crate::trace::establish_public_trace,
+        ));
         let run_id = id(ResourceKind::Run, 3);
+        let trace_id = "0af7651916cd43dd8448eb211c80319c";
         let response = router
             .oneshot(
                 Request::builder()
                     .uri(format!("/v1/runs/{run_id}/events"))
+                    .header(
+                        crate::trace::TRACEPARENT_HEADER,
+                        format!("00-{trace_id}-b7ad6b7169203331-01"),
+                    )
                     .extension(principal(now))
                     .body(Body::empty())
                     .unwrap(),
@@ -1248,10 +1259,12 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("text/event-stream"));
+        assert_eq!(response.headers()[crate::trace::TRACE_ID_HEADER], trace_id);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains("event: run.queued"));
         assert!(body.contains(&format!("\"run_id\":\"{run_id}\"")));
+        assert!(body.contains(&format!("\"trace_id\":\"{trace_id}\"")));
         assert!(body.contains("\"source_kind\":\"run\""));
         assert!(!body.contains("payload"));
         assert!(!body.contains("principal"));

@@ -6,6 +6,7 @@ use crate::{
         FailureClass, FailureSource, PlatformFailureCode, PublicRunEventSourceKind,
         PublicRunEventType, Retryability,
     },
+    TraceId,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -461,6 +462,7 @@ pub struct ApiProblem {
     pub code: ApiProblemCode,
     pub detail: Option<String>,
     pub request_id: ResourceId,
+    pub trace_id: TraceId,
     pub retryable: bool,
     pub retry_after_ms: Option<u64>,
     pub field_errors: Vec<FieldError>,
@@ -555,6 +557,7 @@ pub struct PublicRunEvent {
     pub cursor: Option<OpaqueRunEventCursor>,
     pub sequence: Option<u64>,
     pub schema_version: u32,
+    pub trace_id: TraceId,
     pub event_type: PublicRunEventType,
     pub durability: EventDurability,
     pub occurred_at: UtcTimestamp,

@@ -46,6 +46,7 @@ use insight_platform_api::{
         TaskActionV1, TaskApplication, TaskApplicationError, TaskHttpState, TaskOwnerLinkV1,
         TaskViewV1,
     },
+    trace::establish_public_trace,
 };
 use insight_platform_context::RequestContextDatasetBuild;
 use insight_platform_contracts::{
@@ -2546,7 +2547,8 @@ fn build_router(
         .merge(protected)
         .layer(middleware::from_fn_with_state(role, enforce_process_role))
         .layer(middleware::from_fn(observe_gateway_request))
-        .layer(Extension(metrics)))
+        .layer(Extension(metrics))
+        .layer(middleware::from_fn(establish_public_trace)))
 }
 
 async fn enforce_process_role(

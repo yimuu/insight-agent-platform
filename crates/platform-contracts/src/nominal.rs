@@ -480,6 +480,7 @@ fn api_problem_schema() -> Value {
                     "maxLength": 40,
                     "x-platform-max-bytes": 40
                 },
+                "trace_id": trace_id_body(),
                 "retryable": {"type": "boolean"},
                 "retry_after_ms": nullable(json!({"type": "integer", "minimum": 0, "maximum": 86_400_000_u64})),
                 "field_errors": {
@@ -490,7 +491,7 @@ fn api_problem_schema() -> Value {
                 }
             },
             "required": [
-                "type_uri", "title", "status", "code", "detail", "request_id", "retryable",
+                "type_uri", "title", "status", "code", "detail", "request_id", "trace_id", "retryable",
                 "retry_after_ms", "field_errors"
             ],
             "additionalProperties": false

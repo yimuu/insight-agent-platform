@@ -32,6 +32,7 @@ pub mod operation;
 pub mod resource;
 pub mod run;
 pub mod task;
+pub mod trace;
 
 pub const MCP_OAUTH_CALLBACK_PATH: &str = "/v1/mcp/oauth/callback";
 
@@ -93,6 +94,7 @@ impl McpOAuthCallbackHttpState {
 pub fn build_mcp_oauth_callback_router(state: McpOAuthCallbackHttpState) -> Router {
     Router::new()
         .route(MCP_OAUTH_CALLBACK_PATH, any(handle_mcp_oauth_callback))
+        .layer(axum::middleware::from_fn(trace::establish_public_trace))
         .with_state(state)
 }
 

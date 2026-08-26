@@ -426,6 +426,7 @@ fn problem(error: TaskApplicationError) -> Response {
         code,
         detail: None,
         request_id,
+        trace_id: crate::trace::current_trace_id(),
         retryable,
         retry_after_ms: retryable.then_some(1_000),
         field_errors: Vec::new(),
@@ -469,6 +470,7 @@ mod tests {
             binding_version: 1,
             credential_digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
             credential_expires_at: now + Duration::hours(1),
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
         }
     }
 

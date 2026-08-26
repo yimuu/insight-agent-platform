@@ -124,6 +124,14 @@
       "type": "string",
       "x-platform-max-bytes": 16384
     },
+    "trace_id": {
+      "description": "Opaque W3C trace ID: 16 bytes as canonical lowercase hexadecimal, excluding all zero.",
+      "maxLength": 32,
+      "minLength": 32,
+      "pattern": "^(?!0{32}$)[0-9a-f]{32}$",
+      "type": "string",
+      "x-platform-max-bytes": 32
+    },
     "type_uri": {
       "maxLength": 2048,
       "minLength": 1,
@@ -138,6 +146,7 @@
     "code",
     "detail",
     "request_id",
+    "trace_id",
     "retryable",
     "retry_after_ms",
     "field_errors"
