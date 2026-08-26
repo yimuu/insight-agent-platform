@@ -95,6 +95,11 @@ r306把Capability Native/Remote各自独立business与critical-control PostgreSQ
 共用cancel并在正常shutdown join；sampler意外退出使process fail closed且不改变readiness。shared adapter、两个binary tests及strict Clippy通过；本轮仍无
 真实PG成功fixture或production scrape，Remote Egress/MCP调用观测留待独立批次。
 
+r307把Context Native、Remote与Subscription三个restricted PostgreSQL pool接到共享15秒sampler；每个process仅导出固定
+`component_role + postgresql + outcome`，不暴露database、pool、SQL或error。permit与DB sampler成为受监督任务，所有signal/worker/HTTP/sampler退出路径
+均cancel并join其余组件；同时补齐Subscription此前异常分支未等待peer的问题，不改变readiness。shared adapter、三binary tests及strict Clippy通过；本轮无
+真实PG成功fixture或production scrape，Remote Egress与Subscription MCP Host调用观测仍待后续批次。
+
 ## 3. Phase 1 审计
 
 ### 已满足

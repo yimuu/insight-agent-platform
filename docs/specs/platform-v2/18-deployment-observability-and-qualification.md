@@ -549,6 +549,12 @@ r306为Capability Native与Remote role各自的business及critical-control SQLx 
 worker/HTTP cancellation，在正常shutdown join，意外退出使process fail closed，不参与readiness判定。shared adapter、两个binary tests、strict Clippy及
 Native/Remote deployment、redaction和observability门禁通过；本轮没有新的真实PG或production scrape证据，Remote Egress/MCP observation仍待后续批次。
 
+r307为Context Native、Remote与Subscription三个role的restricted SQLx pool各安装一个共享PostgreSQL sampler，仅汇总到本process固定
+`component_role + postgresql + success|failure` series，不输出database、pool、SQL或error。每个role的permit与DB sampler组成受监督任务；signal、worker、
+HTTP或sampler任一退出都会cancel并join其余组件，Subscription此前异常分支未等待peer的生命周期缺口同时关闭，readiness语义不变。shared adapter、三binary
+tests、strict Clippy、Context部署、redaction与observability门禁通过；本轮没有新的真实PG或production scrape证据，Remote Egress与Subscription MCP Host
+observation仍待后续批次。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

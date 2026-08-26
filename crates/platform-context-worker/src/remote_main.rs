@@ -1,5 +1,9 @@
 //! RemoteSearch Context Worker. Outbound access is available only through mTLS Egress RPC.
 
+mod dependency_observer;
+
+use dependency_observer::install_context_dependency_metrics;
+
 use insight_platform_context_worker::{
     ContextWorkerConfig, ContextWorkerTiming, RemoteContextWorkerDriver, CONTEXT_WORKER_ROLE,
 };
@@ -12,7 +16,9 @@ use insight_platform_observability::{
     process_observability_router, run_worker_permit_sampler, update_worker_permits,
     ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
-use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+};
 use insight_platform_worker::LocalWorkerPools;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
@@ -159,6 +165,7 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
+    let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
     let process_generation_id =
         ResourceId::from_uuid_v7(ResourceKind::WorkerProcessGeneration, Uuid::now_v7())
@@ -175,24 +182,37 @@ async fn run() -> Result<(), ProcessError> {
             .map_err(|_| ProcessError::InvalidConfiguration)?;
     let permit_metrics = Arc::new(WorkerPermitMetrics::default());
     update_worker_permits(&permit_metrics, &observability_pools);
+    let dependency_metrics =
+        install_context_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_worker_permits(
             "context-remote-worker",
             PROCESS_OBSERVABILITY_OPERATIONS,
             Arc::clone(&permit_metrics),
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics.process),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityFailed)?;
     eprintln!("platform-remote-context-worker started");
     let cancellation = CancellationToken::new();
-    let _permit_sampler = tokio::spawn(run_worker_permit_sampler(
-        permit_metrics,
-        observability_pools,
-        cancellation.child_token(),
-    ));
+    let sampler_cancellation = cancellation.child_token();
+    let mut sampler = tokio::spawn(async move {
+        tokio::join!(
+            run_worker_permit_sampler(
+                permit_metrics,
+                observability_pools,
+                sampler_cancellation.child_token(),
+            ),
+            run_postgres_health_sampler(
+                database_health_pool,
+                dependency_metrics.postgres,
+                sampler_cancellation,
+            ),
+        );
+    });
     let worker_cancellation = cancellation.child_token();
     let mut worker = tokio::spawn(async move { driver.run(worker_cancellation).await });
     let http_cancellation = cancellation.child_token();
@@ -205,29 +225,53 @@ async fn run() -> Result<(), ProcessError> {
     metrics.mark_ready();
     tokio::select! {
         signal = wait_for_shutdown_signal() => {
-            signal?;
             cancellation.cancel();
-            worker.await.map_err(|_| ProcessError::WorkerFailed)?
-                .map_err(|_| ProcessError::WorkerFailed)?;
-            http.await.map_err(|_| ProcessError::ObservabilityFailed)?
-                .map_err(|_| ProcessError::ObservabilityFailed)?;
+            let worker_result = worker.await.map_err(|_| ProcessError::WorkerFailed)
+                .and_then(|result| result.map(|_| ()).map_err(|_| ProcessError::WorkerFailed));
+            let http_result = http.await.map_err(|_| ProcessError::ObservabilityFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+            let sampler_result = sampler.await.map_err(|_| ProcessError::DependencyObserverFailed);
+            signal?;
+            worker_result?;
+            http_result?;
+            sampler_result?;
             Ok(())
         }
         result = &mut worker => {
             cancellation.cancel();
-            result.map_err(|_| ProcessError::WorkerFailed)?
-                .map_err(|_| ProcessError::WorkerFailed)?;
-            http.await.map_err(|_| ProcessError::ObservabilityFailed)?
-                .map_err(|_| ProcessError::ObservabilityFailed)?;
+            let worker_result = result.map_err(|_| ProcessError::WorkerFailed)
+                .and_then(|result| result.map(|_| ()).map_err(|_| ProcessError::WorkerFailed));
+            let http_result = http.await.map_err(|_| ProcessError::ObservabilityFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+            let sampler_result = sampler.await.map_err(|_| ProcessError::DependencyObserverFailed);
+            worker_result?;
+            http_result?;
+            sampler_result?;
             Err(ProcessError::WorkerFailed)
         }
         result = &mut http => {
             cancellation.cancel();
-            result.map_err(|_| ProcessError::ObservabilityFailed)?
-                .map_err(|_| ProcessError::ObservabilityFailed)?;
-            worker.await.map_err(|_| ProcessError::WorkerFailed)?
-                .map_err(|_| ProcessError::WorkerFailed)?;
+            let http_result = result.map_err(|_| ProcessError::ObservabilityFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+            let worker_result = worker.await.map_err(|_| ProcessError::WorkerFailed)
+                .and_then(|result| result.map(|_| ()).map_err(|_| ProcessError::WorkerFailed));
+            let sampler_result = sampler.await.map_err(|_| ProcessError::DependencyObserverFailed);
+            http_result?;
+            worker_result?;
+            sampler_result?;
             Err(ProcessError::ObservabilityFailed)
+        }
+        result = &mut sampler => {
+            cancellation.cancel();
+            let sampler_result = result.map_err(|_| ProcessError::DependencyObserverFailed);
+            let worker_result = worker.await.map_err(|_| ProcessError::WorkerFailed)
+                .and_then(|result| result.map(|_| ()).map_err(|_| ProcessError::WorkerFailed));
+            let http_result = http.await.map_err(|_| ProcessError::ObservabilityFailed)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityFailed));
+            sampler_result?;
+            worker_result?;
+            http_result?;
+            Err(ProcessError::DependencyObserverFailed)
         }
     }
 }
@@ -335,6 +379,7 @@ enum ProcessError {
     SchemaMismatch,
     SignalUnavailable,
     WorkerFailed,
+    DependencyObserverFailed,
     ObservabilityFailed,
 }
 
@@ -350,6 +395,9 @@ impl fmt::Display for ProcessError {
             Self::SchemaMismatch => formatter.write_str("database schema does not match candidate"),
             Self::SignalUnavailable => formatter.write_str("shutdown signal is unavailable"),
             Self::WorkerFailed => formatter.write_str("Remote Context Worker failed"),
+            Self::DependencyObserverFailed => {
+                formatter.write_str("Remote Context dependency observer failed")
+            }
             Self::ObservabilityFailed => formatter.write_str("observability server failed"),
         }
     }

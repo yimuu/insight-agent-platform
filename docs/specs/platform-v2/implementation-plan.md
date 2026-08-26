@@ -583,6 +583,12 @@
 > 两个binary tests、strict Clippy及Native/Remote deployment、redaction和observability门禁通过；本轮没有新增真实PG或production scrape证据，Remote
 > Egress/MCP observation仍待后续批次。
 
+> 2026-08-27 implementation evidence：r307把Context Native、Remote与Subscription三个restricted PostgreSQL pool接到共享15秒sampler；
+> 每个process只导出固定`component_role + postgresql + outcome`，不暴露database、pool、SQL或error。permit与DB sampler成为受监督任务，全部
+> signal/worker/HTTP/sampler退出路径均cancel并join其余组件，且修复Subscription异常分支此前未等待peer的问题；readiness不变。shared adapter、三binary
+> tests、strict Clippy、Context deployment、redaction与observability门禁通过；本轮无新增真实PG或production scrape证据，Remote Egress与Subscription MCP
+> Host observation仍待后续批次。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`
