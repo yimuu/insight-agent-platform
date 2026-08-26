@@ -516,6 +516,11 @@ r300收紧最终release evidence门禁：`validate-release-evidence`除Profile�
 因此仅在manifest内部构造自洽digest/link不再能冒充content-addressed资格证据。target tests、strict Clippy、generated contract及candidate pipeline
 门禁通过；该修正只保证L6 validator fail closed，不产生任何外部L4～L6通过证据。
 
+r301增加共享dependency observation owner，dependency维度被Rust enum闭合为PostgreSQL、NATS、S3、KMS、Secret和Egress，outcome仅
+success/failure；安装时拒绝空集、重复或超量依赖，运行时拒绝未安装dependency，因而调用方不能把tenant、provider、endpoint或错误正文变成label。
+Security Authority首先在两条真实PostgreSQL repository调用完成后记录结果，认证前置拒绝不冒充数据库故障，并与既有真实SQLx pool capacity
+共用同一process metrics surface。shared owner与Authority tests及strict Clippy通过；其余role真实调用边界、对应alerts和production scrape仍待接入。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

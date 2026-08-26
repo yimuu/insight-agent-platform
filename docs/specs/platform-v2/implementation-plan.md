@@ -551,6 +551,11 @@
 > symlink、长度或digest漂移全部fail closed。CLI/unit负向测试、target strict Clippy、Platform v1 contract与candidate pipeline检查通过。
 > 该门禁强化不生成Candidate、Capacity或L4～L6 evidence，也不改变外部qualification与人工promotion的Pending状态。
 
+> 2026-08-27 implementation evidence：r301建立共享、低基数dependency observation owner，仅允许PostgreSQL/NATS/S3/KMS/Secret/Egress
+> 六种Rust nominal依赖和success/failure两种结果；空集、重复、超量及未安装依赖均fail closed。Security Authority已在真实
+> `load_for_resolution`/`register_prepared` PostgreSQL repository结果边界接线，前置身份拒绝不污染数据库失败计数，并与实际SQLx pool capacity
+> 同surface导出。owner/Authority tests、format与strict Clippy通过；其余生产role调用边界及对应alert仍待后续批次。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

@@ -9,8 +9,9 @@ use insight_platform_contracts::{
     canonical_digest, parse_strict_json, JsonLimits, ResourceId, Sha256Digest,
 };
 use insight_platform_observability::{
-    process_observability_router, OperationalCapacityMetric, OperationalCapacitySnapshot,
-    OperationalCapacitySource, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, DependencyObservationMetrics, DependencyObservationOutcome,
+    OperationalCapacityMetric, OperationalCapacitySnapshot, OperationalCapacitySource,
+    PlatformDependency, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_security::{
@@ -134,6 +135,7 @@ impl OperationalCapacitySource for PostgresPoolCapacity {
 fn install_security_metrics_with_postgres(
     pool: sqlx::PgPool,
     maximum_connections: u32,
+    dependency_metrics: Arc<DependencyObservationMetrics>,
 ) -> Result<ProcessHttpMetrics, ProcessError> {
     let source: Arc<dyn OperationalCapacitySource> = Arc::new(PostgresPoolCapacity {
         pool,
@@ -147,6 +149,7 @@ fn install_security_metrics_with_postgres(
             source,
         )],
     )
+    .map(|metrics| metrics.with_dependency_observations(dependency_metrics))
     .map_err(|_| ProcessError::InvalidConfiguration)
 }
 
@@ -155,6 +158,7 @@ fn install_security_metrics_with_postgres(
 struct RestrictedSecretAuthority {
     repository: PgRepository,
     service_principal_id: ResourceId,
+    dependency_metrics: Arc<DependencyObservationMetrics>,
 }
 
 #[async_trait]
@@ -164,9 +168,12 @@ impl SecretBindingResolutionAuthority for RestrictedSecretAuthority {
         tenant_id: &ResourceId,
         secret_binding_id: &ResourceId,
     ) -> Result<SecretBindingResolutionRecord, SecretBindingResolutionError> {
-        self.repository
+        let result = self
+            .repository
             .load_for_resolution(tenant_id, secret_binding_id)
-            .await
+            .await;
+        self.observe_postgresql(&result);
+        result
     }
 }
 
@@ -183,7 +190,24 @@ impl PreparedSecretBindingAuthority for RestrictedSecretAuthority {
         {
             return Err(PreparedSecretBindingRegistrationError::Rejected);
         }
-        self.repository.register_prepared(command).await
+        let result = self.repository.register_prepared(command).await;
+        self.observe_postgresql(&result);
+        result
+    }
+}
+
+impl RestrictedSecretAuthority {
+    fn observe_postgresql<T, E>(&self, result: &Result<T, E>) {
+        self.dependency_metrics
+            .observe(
+                PlatformDependency::Postgresql,
+                if result.is_ok() {
+                    DependencyObservationOutcome::Success
+                } else {
+                    DependencyObservationOutcome::Failure
+                },
+            )
+            .expect("Security Authority installs its PostgreSQL dependency metric");
     }
 }
 
@@ -211,13 +235,19 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
+    let dependency_metrics = Arc::new(
+        DependencyObservationMetrics::install(&[PlatformDependency::Postgresql])
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
     let metrics = Arc::new(install_security_metrics_with_postgres(
         pool.clone(),
         config.database_max_connections,
+        Arc::clone(&dependency_metrics),
     )?);
     let authority = Arc::new(RestrictedSecretAuthority {
         repository: PgRepository::new(pool),
         service_principal_id: config.service_principal_id.clone(),
+        dependency_metrics,
     });
 
     let maximum = limits.maximum_message_bytes();
@@ -402,6 +432,10 @@ impl Error for ProcessError {}
 mod tests {
     use super::*;
 
+    fn postgresql_dependency_metrics() -> Arc<DependencyObservationMetrics> {
+        Arc::new(DependencyObservationMetrics::install(&[PlatformDependency::Postgresql]).unwrap())
+    }
+
     #[test]
     fn process_config_has_no_external_or_secret_provider_fields() {
         let config: ProcessConfig = serde_json::from_value(serde_json::json!({
@@ -439,13 +473,18 @@ mod tests {
             .max_connections(4)
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        let metrics = install_security_metrics_with_postgres(pool, 4).unwrap();
+        let metrics =
+            install_security_metrics_with_postgres(pool, 4, postgresql_dependency_metrics())
+                .unwrap();
         let rendered = metrics.render_prometheus();
         assert!(rendered.contains(
             "component_role=\"security-authority\",resource=\"postgresql_connections\",state=\"available\"} 4"
         ));
         assert!(rendered.contains(
             "component_role=\"security-authority\",resource=\"postgresql_connections\",state=\"used\"} 0"
+        ));
+        assert!(rendered.contains(
+            "component_role=\"security-authority\",dependency=\"postgresql\",outcome=\"success\"} 0"
         ));
     }
 
@@ -459,7 +498,12 @@ mod tests {
             .connect(&database_url)
             .await
             .unwrap();
-        let metrics = install_security_metrics_with_postgres(pool.clone(), 2).unwrap();
+        let metrics = install_security_metrics_with_postgres(
+            pool.clone(),
+            2,
+            postgresql_dependency_metrics(),
+        )
+        .unwrap();
         let connection = pool.acquire().await.unwrap();
         assert!(metrics
             .render_prometheus()

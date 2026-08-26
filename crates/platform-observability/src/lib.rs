@@ -24,7 +24,40 @@ const OUTCOMES: [&str; 3] = ["success", "rejected", "failure"];
 const BUCKETS_MILLISECONDS: [u64; 10] = [5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000];
 const MAX_OPERATIONS: usize = 64;
 const MAX_CAPACITY_RESOURCES: usize = 32;
+const MAX_DEPENDENCIES: usize = 6;
 pub const PROCESS_OBSERVABILITY_OPERATIONS: &[&str] = &["live", "ready", "metrics", "other"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PlatformDependency {
+    Postgresql,
+    Nats,
+    S3,
+    Kms,
+    Secret,
+    Egress,
+}
+
+impl PlatformDependency {
+    pub const ALL: [Self; 6] = [
+        Self::Postgresql,
+        Self::Nats,
+        Self::S3,
+        Self::Kms,
+        Self::Secret,
+        Self::Egress,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Postgresql => "postgresql",
+            Self::Nats => "nats",
+            Self::S3 => "s3",
+            Self::Kms => "kms",
+            Self::Secret => "secret",
+            Self::Egress => "egress",
+        }
+    }
+}
 
 pub fn process_observability_router(metrics: Arc<ProcessHttpMetrics>) -> Router {
     Router::new()
@@ -96,6 +129,9 @@ pub enum MetricsInstallError {
     DuplicateCapacityResource,
     TooManyCapacityResources,
     InvalidCapacitySnapshot,
+    MissingDependencies,
+    DuplicateDependency,
+    TooManyDependencies,
 }
 
 impl fmt::Display for MetricsInstallError {
@@ -110,6 +146,9 @@ impl fmt::Display for MetricsInstallError {
             Self::DuplicateCapacityResource => "duplicate capacity resource",
             Self::TooManyCapacityResources => "too many capacity resources",
             Self::InvalidCapacitySnapshot => "invalid capacity snapshot",
+            Self::MissingDependencies => "dependency observations require at least one dependency",
+            Self::DuplicateDependency => "duplicate dependency observation",
+            Self::TooManyDependencies => "too many dependency observations",
         })
     }
 }
@@ -128,6 +167,7 @@ pub struct ProcessHttpMetrics {
     worker_permits: Option<Arc<WorkerPermitMetrics>>,
     orchestration: Option<Arc<OrchestrationOperationalMetrics>>,
     capacities: Vec<OperationalCapacityMetric>,
+    dependency_observations: Option<Arc<DependencyObservationMetrics>>,
 }
 
 impl ProcessHttpMetrics {
@@ -172,6 +212,14 @@ impl ProcessHttpMetrics {
         capacities: Vec<OperationalCapacityMetric>,
     ) -> Result<Self, MetricsInstallError> {
         Self::install_inner(component_role, operations, None, None, capacities)
+    }
+
+    pub fn with_dependency_observations(
+        mut self,
+        dependency_observations: Arc<DependencyObservationMetrics>,
+    ) -> Self {
+        self.dependency_observations = Some(dependency_observations);
+        self
     }
 
     fn install_inner(
@@ -225,6 +273,7 @@ impl ProcessHttpMetrics {
             worker_permits,
             orchestration,
             capacities,
+            dependency_observations: None,
         })
     }
 
@@ -328,7 +377,104 @@ impl ProcessHttpMetrics {
             orchestration.render_prometheus(role, &mut output);
         }
         render_operational_capacities(role, &self.capacities, &mut output);
+        if let Some(dependency_observations) = &self.dependency_observations {
+            dependency_observations.render_prometheus(role, &mut output);
+        }
         output
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyObservationOutcome {
+    Success,
+    Failure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DependencyNotInstalled(pub PlatformDependency);
+
+impl fmt::Display for DependencyNotInstalled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "dependency {} is not installed for this process",
+            self.0.as_str()
+        )
+    }
+}
+
+impl std::error::Error for DependencyNotInstalled {}
+
+#[derive(Debug)]
+struct DependencyObservationCounter {
+    dependency: PlatformDependency,
+    successes: AtomicU64,
+    failures: AtomicU64,
+}
+
+#[derive(Debug)]
+pub struct DependencyObservationMetrics {
+    counters: Vec<DependencyObservationCounter>,
+}
+
+impl DependencyObservationMetrics {
+    pub fn install(dependencies: &[PlatformDependency]) -> Result<Self, MetricsInstallError> {
+        if dependencies.is_empty() {
+            return Err(MetricsInstallError::MissingDependencies);
+        }
+        if dependencies.len() > MAX_DEPENDENCIES {
+            return Err(MetricsInstallError::TooManyDependencies);
+        }
+        let mut dependencies = dependencies.to_vec();
+        dependencies.sort_unstable();
+        if dependencies.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(MetricsInstallError::DuplicateDependency);
+        }
+        Ok(Self {
+            counters: dependencies
+                .into_iter()
+                .map(|dependency| DependencyObservationCounter {
+                    dependency,
+                    successes: AtomicU64::new(0),
+                    failures: AtomicU64::new(0),
+                })
+                .collect(),
+        })
+    }
+
+    pub fn observe(
+        &self,
+        dependency: PlatformDependency,
+        outcome: DependencyObservationOutcome,
+    ) -> Result<(), DependencyNotInstalled> {
+        let counter = self
+            .counters
+            .iter()
+            .find(|counter| counter.dependency == dependency)
+            .ok_or(DependencyNotInstalled(dependency))?;
+        match outcome {
+            DependencyObservationOutcome::Success => &counter.successes,
+            DependencyObservationOutcome::Failure => &counter.failures,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn render_prometheus(&self, role: &str, output: &mut String) {
+        use fmt::Write as _;
+
+        output.push_str(
+            "# HELP insight_platform_dependency_observations_total Bounded dependency operation outcomes.\n\
+             # TYPE insight_platform_dependency_observations_total counter\n",
+        );
+        for counter in &self.counters {
+            for (outcome, value) in [
+                ("success", counter.successes.load(Ordering::Acquire)),
+                ("failure", counter.failures.load(Ordering::Acquire)),
+            ] {
+                let _ = writeln!(output, "insight_platform_dependency_observations_total{{component_role=\"{role}\",dependency=\"{}\",outcome=\"{outcome}\"}} {value}", counter.dependency.as_str());
+            }
+        }
     }
 }
 
@@ -998,6 +1144,84 @@ mod tests {
         let rendered = metrics.render_prometheus();
         assert!(rendered.contains("resource=\"artifact_response\",state=\"available\"} 2"));
         assert!(rendered.contains("resource=\"artifact_response\",state=\"used\"} 3"));
+        assert!(!rendered.contains("tenant"));
+    }
+
+    #[test]
+    fn dependency_observations_require_a_closed_unique_installation() {
+        assert_eq!(
+            DependencyObservationMetrics::install(&[]).unwrap_err(),
+            MetricsInstallError::MissingDependencies
+        );
+        assert_eq!(
+            DependencyObservationMetrics::install(&[
+                PlatformDependency::Egress,
+                PlatformDependency::Egress,
+            ])
+            .unwrap_err(),
+            MetricsInstallError::DuplicateDependency
+        );
+        assert_eq!(
+            DependencyObservationMetrics::install(&[
+                PlatformDependency::Postgresql,
+                PlatformDependency::Nats,
+                PlatformDependency::S3,
+                PlatformDependency::Kms,
+                PlatformDependency::Secret,
+                PlatformDependency::Egress,
+                PlatformDependency::Egress,
+            ])
+            .unwrap_err(),
+            MetricsInstallError::TooManyDependencies
+        );
+    }
+
+    #[test]
+    fn dependency_observations_export_only_fixed_dependency_and_outcome() {
+        let dependencies = Arc::new(
+            DependencyObservationMetrics::install(&[
+                PlatformDependency::Egress,
+                PlatformDependency::Postgresql,
+            ])
+            .unwrap(),
+        );
+        dependencies
+            .observe(
+                PlatformDependency::Postgresql,
+                DependencyObservationOutcome::Success,
+            )
+            .unwrap();
+        dependencies
+            .observe(
+                PlatformDependency::Egress,
+                DependencyObservationOutcome::Failure,
+            )
+            .unwrap();
+        assert_eq!(
+            dependencies
+                .observe(
+                    PlatformDependency::Nats,
+                    DependencyObservationOutcome::Failure,
+                )
+                .unwrap_err(),
+            DependencyNotInstalled(PlatformDependency::Nats)
+        );
+
+        let metrics = ProcessHttpMetrics::install_with_capacities(
+            "artifact-data-worker",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            Vec::new(),
+        )
+        .unwrap()
+        .with_dependency_observations(dependencies);
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains(
+            "component_role=\"artifact-data-worker\",dependency=\"postgresql\",outcome=\"success\"} 1"
+        ));
+        assert!(rendered.contains(
+            "component_role=\"artifact-data-worker\",dependency=\"egress\",outcome=\"failure\"} 1"
+        ));
+        assert!(!rendered.contains("dependency=\"nats\""));
         assert!(!rendered.contains("tenant"));
     }
 }

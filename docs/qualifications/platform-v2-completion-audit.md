@@ -69,6 +69,10 @@ r300把最终release evidence validator与实际证据bytes绑定：每个manife
 byte length与流式SHA-256必须匹配；缺失、symlink和内容漂移均拒绝。target tests、strict Clippy、contract与candidate pipeline检查通过。
 这关闭了伪造自洽manifest即可通过最终CLI的仓库门禁缺口，但没有提供任何production artifact或推进L4～L6状态。
 
+r301建立六种固定dependency与两种固定outcome的共享指标owner，并把Security Authority真实PostgreSQL repository结果接入同一metrics surface；
+身份前置拒绝不会计为数据库失败，未安装依赖不能被动态创建。shared/Authority tests与strict Clippy通过。其余role的NATS、S3、KMS、Secret、
+Egress及PostgreSQL真实调用接线仍是仓库内缺口，production scrape和L5 health profile仍是外部门禁。
+
 ## 3. Phase 1 审计
 
 ### 已满足
