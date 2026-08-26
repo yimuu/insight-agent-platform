@@ -514,6 +514,12 @@
 > Clippy、Artifact Helm、14-panel/13-alert observability及19-pool closure门禁通过。三个Artifact pool闭合后动态capacity coverage为13/19；
 > 其余Gateway双pool、MCP双Host及Security/Egress六个pool仍待真实authority接线。
 
+> 2026-08-26 implementation evidence：r295为Management API与Runtime API各自的SQLx PostgreSQL pool导出fixed
+> `postgresql_connections` capacity。configured maximum是上限，used由实际established减idle计算，available同时包含idle与尚可合法建立的槽位；
+> 不读取SQL、tenant或连接identity。真实PostgreSQL 16测试证明checkout使used从0变1，drop后由pool异步归还并在有界时间恢复0。Gateway tests、
+> strict Clippy、Helm/observability/19-pool门禁通过。两个Gateway pool闭合后动态capacity coverage达到15/19；剩余MCP双Host及
+> Security/Egress四个pool。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

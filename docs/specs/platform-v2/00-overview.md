@@ -385,6 +385,10 @@ r294将Artifact Gateway的`download`、Data Worker的scanner/三类Scheduler/San
 Artifact Broker semaphore接入capacity scrape。owner测试证明response lease持有、并发拒绝与drop恢复。三个Artifact pool闭合后动态capacity
 coverage达到13/19；Gateway双pool、MCP双Host及Security/Egress六个pool、production scrape与L4～L6仍未完成。
 
+r295从Management API与Runtime API各自真实SQLx PostgreSQL pool导出`postgresql_connections` available/used；真实PostgreSQL 16验证
+checkout与异步归还会使series 0→1→0。两个Gateway pool闭合后动态capacity coverage达到15/19；MCP双Host及Security/Egress四个pool、
+production Prometheus scrape与L4～L6仍未完成。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

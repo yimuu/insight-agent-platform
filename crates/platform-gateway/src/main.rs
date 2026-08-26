@@ -61,7 +61,10 @@ use insight_platform_invocations::{
 };
 use insight_platform_jobs::WakeSource;
 use insight_platform_mcp_host::CreateMcpDiscoveryOperation;
-use insight_platform_observability::ProcessHttpMetrics;
+use insight_platform_observability::{
+    OperationalCapacityMetric, OperationalCapacitySnapshot, OperationalCapacitySource,
+    ProcessHttpMetrics,
+};
 use insight_platform_orchestrator::{
     AdmitRun, PlanNodeKey, RequestRunCancel, RunInputValue, SetRunPause,
 };
@@ -148,10 +151,49 @@ fn gateway_operation(path: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn install_gateway_metrics(role: ProcessRole) -> Arc<ProcessHttpMetrics> {
     Arc::new(
         ProcessHttpMetrics::install(role.component_role(), GATEWAY_HTTP_OPERATIONS)
             .expect("static Gateway metric labels are valid"),
+    )
+}
+
+struct PostgresPoolCapacity {
+    pool: sqlx::PgPool,
+    maximum_connections: u32,
+}
+
+impl OperationalCapacitySource for PostgresPoolCapacity {
+    fn snapshot(&self) -> OperationalCapacitySnapshot {
+        let capacity = u64::from(self.maximum_connections);
+        let established = u64::from(self.pool.size());
+        let idle = u64::try_from(self.pool.num_idle()).unwrap_or(u64::MAX);
+        let used = established.saturating_sub(idle).min(capacity);
+        OperationalCapacitySnapshot::new(capacity, capacity.saturating_sub(used))
+            .expect("Gateway PostgreSQL pool preserves its configured maximum")
+    }
+}
+
+fn install_gateway_metrics_with_postgres(
+    role: ProcessRole,
+    pool: sqlx::PgPool,
+    maximum_connections: u32,
+) -> Arc<ProcessHttpMetrics> {
+    let source: Arc<dyn OperationalCapacitySource> = Arc::new(PostgresPoolCapacity {
+        pool,
+        maximum_connections,
+    });
+    Arc::new(
+        ProcessHttpMetrics::install_with_capacities(
+            role.component_role(),
+            GATEWAY_HTTP_OPERATIONS,
+            vec![OperationalCapacityMetric::new(
+                "postgresql_connections",
+                source,
+            )],
+        )
+        .expect("static Gateway capacity metric labels are valid"),
     )
 }
 
@@ -2749,9 +2791,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .connect(&database_url)
         .await?;
     verify_schema(&pool).await.map_err(ProcessError::Schema)?;
-    let repository = Arc::new(PgRepository::new(pool));
+    let repository = Arc::new(PgRepository::new(pool.clone()));
     let listener = tokio::net::TcpListener::bind(&config.listen_address).await?;
-    let metrics = install_gateway_metrics(config.role);
+    let metrics =
+        install_gateway_metrics_with_postgres(config.role, pool, config.database_max_connections);
     metrics.mark_ready();
     tracing::info!(listen_address = %config.listen_address, "public gateway ready");
     axum::serve(
@@ -3066,5 +3109,49 @@ mod tests {
         assert!(rendered.contains("operation=\"other\",outcome=\"failure\",le=\"+Inf\"} 1"));
         assert!(!rendered.contains("run_sensitive"));
         assert!(!rendered.contains("tenant_sensitive"));
+    }
+
+    #[tokio::test]
+    async fn gateway_postgresql_capacity_includes_unopened_pool_slots() {
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let metrics = install_gateway_metrics_with_postgres(ProcessRole::RuntimeApi, pool, 4);
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains("resource=\"postgresql_connections\",state=\"available\"} 4"));
+        assert!(rendered.contains("resource=\"postgresql_connections\",state=\"used\"} 0"));
+    }
+
+    #[tokio::test]
+    async fn gateway_postgresql_capacity_tracks_a_real_checked_out_connection() {
+        let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let metrics =
+            install_gateway_metrics_with_postgres(ProcessRole::ManagementApi, pool.clone(), 2);
+        let connection = pool.acquire().await.unwrap();
+        assert!(metrics
+            .render_prometheus()
+            .contains("resource=\"postgresql_connections\",state=\"used\"} 1"));
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if metrics
+                    .render_prometheus()
+                    .contains("resource=\"postgresql_connections\",state=\"used\"} 0")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("released SQLx connection must return to the idle pool");
     }
 }

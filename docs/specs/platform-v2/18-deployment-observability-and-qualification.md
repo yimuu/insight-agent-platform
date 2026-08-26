@@ -484,6 +484,11 @@ r294从Artifact三个role的实际audience semaphore导出capacity：Gateway `do
 归零、并发读取拒绝且drop后恢复。三process tests、strict Clippy、Artifact Helm、14-panel/13-alert observability及19-pool closure门禁通过。
 动态capacity coverage达到13/19；剩余六个pool及production Prometheus scrape/L4～L6仍保持Pending。
 
+r295从Management API与Runtime API各自实际SQLx PostgreSQL pool导出fixed `postgresql_connections` available/used。capacity使用配置上限，
+used使用established减idle，available包含idle及尚可合法建立的槽位；不导出SQL、tenant或连接identity。真实PostgreSQL 16证明checkout使used
+0→1，drop后pool异步归还并在有界时间恢复0。Gateway tests、strict Clippy及部署/observability门禁通过。动态capacity coverage达到15/19；
+剩余MCP双Host与Security/Egress四个pool及production scrape/L4～L6保持Pending。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。
