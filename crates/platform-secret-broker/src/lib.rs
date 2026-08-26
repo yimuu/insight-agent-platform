@@ -42,6 +42,12 @@ pub const MAX_SECRET_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_PREPARED_SECRET_TTL: ChronoDuration = ChronoDuration::hours(24);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretBrokerCapacitySnapshot {
+    pub maximum_in_flight: usize,
+    pub available: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SecretBrokerLimits {
     pub maximum_in_flight: usize,
     pub maximum_material_bytes: usize,
@@ -406,6 +412,13 @@ impl BrokeredMcpOAuthSecretStore {
         })
     }
 
+    pub fn capacity_snapshot(&self) -> SecretBrokerCapacitySnapshot {
+        SecretBrokerCapacitySnapshot {
+            maximum_in_flight: self.limits.maximum_in_flight,
+            available: self.in_flight.available_permits(),
+        }
+    }
+
     async fn register_provider_secret(
         &self,
         registration: ProviderSecretRegistration<'_>,
@@ -677,6 +690,13 @@ impl BrokeredSecretMaterialResolver {
             limits,
             in_flight: Arc::new(Semaphore::new(limits.maximum_in_flight)),
         })
+    }
+
+    pub fn capacity_snapshot(&self) -> SecretBrokerCapacitySnapshot {
+        SecretBrokerCapacitySnapshot {
+            maximum_in_flight: self.limits.maximum_in_flight,
+            available: self.in_flight.available_permits(),
+        }
     }
 
     async fn resolve_inner(

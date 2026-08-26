@@ -1396,6 +1396,13 @@ impl ReqwestMcpStreamableHttpConnector {
         })
     }
 
+    pub fn capacity_snapshot(&self) -> super::EgressCapacitySnapshot {
+        super::EgressCapacitySnapshot {
+            maximum_in_flight: self.limits.maximum_in_flight,
+            available: self.permits.available_permits(),
+        }
+    }
+
     /// Enables loopback only in explicit protocol-fixture builds. Production binaries do not
     /// enable this feature and retain the public-destination-only guard.
     #[cfg(any(test, feature = "protocol-fixtures"))]
@@ -2851,6 +2858,13 @@ impl ReqwestMcpStreamableHttpSubscriptionConnector {
             limits,
             permits: Arc::new(Semaphore::new(limits.maximum_in_flight)),
         })
+    }
+
+    pub fn capacity_snapshot(&self) -> super::EgressCapacitySnapshot {
+        super::EgressCapacitySnapshot {
+            maximum_in_flight: self.limits.maximum_in_flight,
+            available: self.permits.available_permits(),
+        }
     }
 
     async fn resolve_addresses(

@@ -13,6 +13,7 @@ authority_source = (root / "crates/platform-security-authority/src/main.rs").rea
 egress_core = (root / "crates/platform-egress/Cargo.toml").read_text(encoding="utf-8")
 egress = (root / "crates/platform-egress-broker/Cargo.toml").read_text(encoding="utf-8")
 egress_source = (root / "crates/platform-egress-broker/src/main.rs").read_text(encoding="utf-8")
+egress_capacity = (root / "crates/platform-egress-broker/src/capacity.rs").read_text(encoding="utf-8")
 egress_rpc = (root / "crates/platform-egress-rpc/Cargo.toml").read_text(encoding="utf-8")
 broker = (root / "crates/platform-secret-broker/Cargo.toml").read_text(encoding="utf-8")
 proto = (root / "proto/insight/platform/v1/security_internal.proto").read_text(encoding="utf-8")
@@ -45,6 +46,31 @@ for required in (
 ):
     if required not in authority_source:
         failures.append(f"Security Authority capacity composition is missing {required}")
+for required in (
+    "ProcessHttpMetrics::install_with_capacities",
+    "secret_resolution",
+    "secret_store",
+    "model_provider",
+    "capability_http",
+    "capability_grpc",
+    "remote_context",
+    "mcp_oauth",
+    "mcp_request",
+    "mcp_subscription",
+    "mcp_subscription_bridge",
+):
+    if required not in egress_source:
+        failures.append(f"Egress Broker capacity composition is missing {required}")
+for required in (
+    "EgressCapacitySnapshot",
+    "SecretBrokerCapacitySnapshot",
+    "EgressMcpSubscriptionBridgeCapacitySnapshot",
+    "OperationalCapacitySource",
+    "mcp_subscription_pending",
+    "mcp_subscription_active",
+):
+    if required not in egress_capacity:
+        failures.append(f"Egress Broker capacity adapter is missing {required}")
 for name, manifest in (
     ("Egress core", egress_core),
     ("Egress Broker", egress),

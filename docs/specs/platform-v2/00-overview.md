@@ -399,6 +399,11 @@ established减idle计算，available包含idle与尚可合法建立的槽位，�
 0→1→0；unit tests、strict Clippy及Security/Egress、observability门禁通过。动态capacity coverage达到18/19；仅剩Egress Broker、production
 scrape、telemetry backend/RBAC/retention及L4～L6未完成。
 
+r298从Egress Broker的11个真实隔舱owner导出capacity：Secret resolution/store、Model、HTTP/gRPC Capability、Remote Context、MCP OAuth、
+普通/订阅MCP与subscription bridge pending/active；scrape只读取对应Semaphore maximum/available。OAuth与bridge owner tests验证permit持有、
+饱和拒绝和释放恢复，真实HTTPS/mTLS、strict workspace Clippy及部署/observability门禁通过。动态capacity L1至此覆盖19/19 pool；production
+Prometheus scrape、完整dependency health、L5 mixed-load/saturation profile、telemetry backend/RBAC/retention及L4～L6仍未完成。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

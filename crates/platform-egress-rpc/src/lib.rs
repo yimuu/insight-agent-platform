@@ -315,6 +315,14 @@ pub struct EgressMcpSubscriptionBridge {
     active: Mutex<BTreeMap<McpSubscriptionRouteKey, ActiveMcpSubscriptionRoute>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EgressMcpSubscriptionBridgeCapacitySnapshot {
+    pub maximum_pending: usize,
+    pub pending_available: usize,
+    pub maximum_active: usize,
+    pub active_available: usize,
+}
+
 impl EgressMcpSubscriptionBridge {
     pub fn new(
         limits: EgressInternalRpcLimits,
@@ -333,6 +341,15 @@ impl EgressMcpSubscriptionBridge {
 
     pub fn sink(self: &Arc<Self>) -> Arc<dyn McpStreamableHttpSubscriptionSink> {
         self.clone()
+    }
+
+    pub fn capacity_snapshot(&self) -> EgressMcpSubscriptionBridgeCapacitySnapshot {
+        EgressMcpSubscriptionBridgeCapacitySnapshot {
+            maximum_pending: self.bridge_limits.maximum_pending,
+            pending_available: self.pending_slots.available_permits(),
+            maximum_active: self.bridge_limits.maximum_active,
+            active_available: self.active_slots.available_permits(),
+        }
     }
 
     async fn establish(
@@ -2801,8 +2818,12 @@ mod tests {
         let connector = FixtureSubscriptionConnector {
             sink: bridge.sink(),
         };
+        assert_eq!(bridge.capacity_snapshot().pending_available, 2);
+        assert_eq!(bridge.capacity_snapshot().active_available, 2);
         let request = subscription_request();
         let (prepared, pending) = bridge.establish(&connector, request.clone()).await.unwrap();
+        assert_eq!(bridge.capacity_snapshot().pending_available, 1);
+        assert_eq!(bridge.capacity_snapshot().active_available, 1);
         assert!(bridge.active.lock().await.is_empty());
 
         let (sender, mut receiver) = mpsc::channel(2);

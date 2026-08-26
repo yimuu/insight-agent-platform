@@ -532,6 +532,13 @@
 > observability部署门禁通过。动态capacity coverage达到18/19；仅剩Egress Broker，production scrape、telemetry backend/RBAC/retention及
 > L4～L6仍保持Pending。
 
+> 2026-08-26 implementation evidence：r298从Egress Broker的11个实际隔舱owner导出closed capacity：Secret resolution/store、Model、HTTP/gRPC
+> Capability、Remote Context、MCP OAuth、普通/订阅MCP，以及subscription bridge pending/active。每条series在scrape时直接读取对应Semaphore的
+> maximum/available；不聚合tenant、endpoint、provider或request identity。OAuth饱和测试证明permit持有时available归零、dispatch前拒绝且drop
+> 后恢复，subscription bridge测试证明pending/active分别随reservation变化。owner/RPC/broker tests、真实HTTPS/mTLS、strict workspace Clippy及
+> Security/Egress、observability门禁通过。至此19/19 workload pool均有动态capacity L1接线；production Prometheus scrape、完整dependency health、
+> L5 mixed-load/saturation profile、telemetry backend/RBAC/retention及L4～L6仍保持Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

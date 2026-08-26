@@ -1293,6 +1293,13 @@ impl ReqwestMcpOAuthCredentialBroker {
         })
     }
 
+    pub fn capacity_snapshot(&self) -> super::EgressCapacitySnapshot {
+        super::EgressCapacitySnapshot {
+            maximum_in_flight: self.limits.maximum_in_flight,
+            available: self.permits.available_permits(),
+        }
+    }
+
     /// Enables loopback only in explicit protocol-fixture builds. Production binaries retain the
     /// public-destination-only guard.
     #[cfg(any(test, feature = "protocol-fixtures"))]
@@ -2751,7 +2758,9 @@ mod tests {
             },
         )
         .unwrap();
-        let _occupied = broker.permits.clone().try_acquire_owned().unwrap();
+        assert_eq!(broker.capacity_snapshot().available, 1);
+        let occupied = broker.permits.clone().try_acquire_owned().unwrap();
+        assert_eq!(broker.capacity_snapshot().available, 0);
         let parsed = parse_mcp_oauth_callback_query(b"state=s&code=one-time-code").unwrap();
         let McpOAuthCallbackWireOutcome::AuthorizationCode(code) = parsed.outcome else {
             panic!("fixture must contain a code");
@@ -2768,6 +2777,8 @@ mod tests {
         assert!(!verifier.called.load(Ordering::SeqCst));
         assert_eq!(store.load_calls.load(Ordering::SeqCst), 0);
         assert_eq!(store.store_calls.load(Ordering::SeqCst), 0);
+        drop(occupied);
+        assert_eq!(broker.capacity_snapshot().available, 1);
     }
 
     #[tokio::test]

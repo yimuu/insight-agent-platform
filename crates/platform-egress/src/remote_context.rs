@@ -1,8 +1,9 @@
 use super::{
     capability_http::{capability_url, insert_credential, InstalledHttpCredentialInjection},
-    is_public_destination_ip, parse_endpoint_host, DnsResolutionError, EgressConfigurationError,
-    EgressDnsResolver, ParsedEndpointHost, SecretMaterialResolutionError, SecretMaterialResolver,
-    MAX_DNS_ANSWERS_HARD, MAX_EGRESS_IN_FLIGHT_HARD, MAX_SECRET_MATERIAL_BYTES_HARD,
+    is_public_destination_ip, parse_endpoint_host, DnsResolutionError, EgressCapacitySnapshot,
+    EgressConfigurationError, EgressDnsResolver, ParsedEndpointHost, SecretMaterialResolutionError,
+    SecretMaterialResolver, MAX_DNS_ANSWERS_HARD, MAX_EGRESS_IN_FLIGHT_HARD,
+    MAX_SECRET_MATERIAL_BYTES_HARD,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -243,6 +244,13 @@ impl ReqwestRemoteContextSearchConnector {
             #[cfg(test)]
             allow_loopback_for_protocol_fixture: false,
         })
+    }
+
+    pub fn capacity_snapshot(&self) -> EgressCapacitySnapshot {
+        EgressCapacitySnapshot {
+            maximum_in_flight: self.limits.maximum_in_flight,
+            available: self.permits.available_permits(),
+        }
     }
 
     #[cfg(test)]

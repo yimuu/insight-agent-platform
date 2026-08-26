@@ -58,6 +58,12 @@ pub const MAX_EGRESS_IN_FLIGHT_HARD: usize = 4_096;
 pub const MAX_DNS_ANSWERS_HARD: usize = 64;
 pub const MAX_SECRET_MATERIAL_BYTES_HARD: usize = 16_384;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EgressCapacitySnapshot {
+    pub maximum_in_flight: usize,
+    pub available: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelProviderEgressLimits {
@@ -873,6 +879,13 @@ impl ReqwestModelProviderEgressBroker {
             permits: Arc::new(Semaphore::new(limits.maximum_in_flight)),
             active: Arc::new(Mutex::new(BTreeMap::new())),
         })
+    }
+
+    pub fn capacity_snapshot(&self) -> EgressCapacitySnapshot {
+        EgressCapacitySnapshot {
+            maximum_in_flight: self.limits.maximum_in_flight,
+            available: self.permits.available_permits(),
+        }
     }
 
     fn register(

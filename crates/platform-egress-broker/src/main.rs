@@ -4,6 +4,8 @@
 //! PostgreSQL dependency or credential and reaches durable SecretBinding authority only through
 //! the two-method Security Authority mTLS RPC.
 
+mod capacity;
+
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, JsonLimits, ResourceId, ResourceKind, Sha256Digest,
 };
@@ -29,9 +31,7 @@ use insight_platform_egress_rpc::{
     EgressCallerWorkloadIdentity, EgressInternalRpcLimits, EgressMcpSubscriptionBridge,
     EgressMcpSubscriptionBridgeLimits,
 };
-use insight_platform_model_adapters::{
-    BrokeredModelProviderWireConnector, ModelProviderEgressBroker,
-};
+use insight_platform_model_adapters::BrokeredModelProviderWireConnector;
 use insight_platform_observability::{
     process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
@@ -372,7 +372,7 @@ async fn run() -> Result<(), ProcessError> {
             dns.clone(),
             verification_catalog,
             oauth_verifier,
-            token_store,
+            token_store.clone(),
             config.mcp_oauth_limits,
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?,
@@ -411,7 +411,7 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
 
-    let model_broker: Arc<dyn ModelProviderEgressBroker> = Arc::new(
+    let model_broker = Arc::new(
         ReqwestModelProviderEgressBroker::new(
             InstalledModelProviderEndpointCatalog::new(config.model_endpoints)
                 .map_err(|_| ProcessError::InvalidConfiguration)?,
@@ -421,7 +421,9 @@ async fn run() -> Result<(), ProcessError> {
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
-    let model = Arc::new(BrokeredModelProviderWireConnector::new(model_broker));
+    let model = Arc::new(BrokeredModelProviderWireConnector::new(
+        model_broker.clone(),
+    ));
     let http = Arc::new(
         ReqwestCapabilityHttpEgressTransport::new(
             InstalledCapabilityHttpEndpointCatalog::new(config.capability_http_endpoints)
@@ -449,6 +451,65 @@ async fn run() -> Result<(), ProcessError> {
             secrets,
             dns,
             config.capability_grpc_limits,
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+
+    let mut capacities = vec![
+        capacity::secret_capacity_metric(
+            "secret_resolution",
+            secret_resolver,
+            BrokeredSecretMaterialResolver::capacity_snapshot,
+        ),
+        capacity::secret_capacity_metric(
+            "secret_store",
+            token_store,
+            BrokeredMcpOAuthSecretStore::capacity_snapshot,
+        ),
+        capacity::egress_capacity_metric(
+            "model_provider",
+            model_broker,
+            ReqwestModelProviderEgressBroker::capacity_snapshot,
+        ),
+        capacity::egress_capacity_metric(
+            "capability_http",
+            Arc::clone(&http),
+            ReqwestCapabilityHttpEgressTransport::capacity_snapshot,
+        ),
+        capacity::egress_capacity_metric(
+            "capability_grpc",
+            Arc::clone(&grpc),
+            HyperCapabilityGrpcEgressTransport::capacity_snapshot,
+        ),
+        capacity::egress_capacity_metric(
+            "remote_context",
+            Arc::clone(&remote_context),
+            ReqwestRemoteContextSearchConnector::capacity_snapshot,
+        ),
+        capacity::egress_capacity_metric(
+            "mcp_oauth",
+            Arc::clone(&oauth),
+            ReqwestMcpOAuthCredentialBroker::capacity_snapshot,
+        ),
+        capacity::egress_capacity_metric(
+            "mcp_request",
+            Arc::clone(&mcp_streamable_http),
+            ReqwestMcpStreamableHttpConnector::capacity_snapshot,
+        ),
+        capacity::egress_capacity_metric(
+            "mcp_subscription",
+            Arc::clone(&mcp_streamable_http_subscription),
+            ReqwestMcpStreamableHttpSubscriptionConnector::capacity_snapshot,
+        ),
+    ];
+    capacities.extend(capacity::bridge_capacity_metrics(Arc::clone(
+        &mcp_subscription_bridge,
+    )));
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install_with_capacities(
+            "egress-secret-broker",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            capacities,
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
@@ -499,10 +560,6 @@ async fn run() -> Result<(), ProcessError> {
         .add_service(service)
         .serve_with_shutdown(listen, server_cancellation.cancelled_owned());
     let mut server = tokio::spawn(server);
-    let metrics = Arc::new(
-        ProcessHttpMetrics::install("egress-secret-broker", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
-    );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityFailure)?;
