@@ -312,6 +312,9 @@ mod tests {
             trace: insight_platform_contracts::TraceIdentityV1::generate(),
             tenant_id,
             job_id,
+            job_kind: insight_platform_contracts::JobKind::OrchestrationNode
+                .as_str()
+                .to_owned(),
             work_class: WorkClass::Orchestration.as_str().to_owned(),
             owner_kind: ResourceKind::NodeExecution.descriptor().name.to_owned(),
             owner_id: id(ResourceKind::NodeExecution, "7705").to_string(),

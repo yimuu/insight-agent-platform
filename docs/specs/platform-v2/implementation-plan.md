@@ -756,6 +756,10 @@
 > `scanner_contract_digest`、bounded verification evidence TTL与retry backoff，并要求backoff严格小于evidence lifetime。Artifact Gateway现从
 > TenantConfig exact policy authority复制三项到Artifact operation/scan Job，原进程配置只验证supported scanner与不可放大的上限，漂移时外部I/O前
 > fail closed。contracts 100/100、Artifact三binary 8/8及相关strict Clippy通过；MCP admission复制、Data Worker多scanner manifest与L2/L3仍Pending。
+>
+> 2026-08-27 implementation evidence：r338修复r329 typed `job_kind`迁移遗漏的五个Runtime all-target fixture；所有人工构造的Orchestration
+> `JobRecord`现显式使用closed `OrchestrationNode` kind，不再依赖缺省或只凭WorkClass猜测。Runtime unit 28/28、process fixture 5/5与strict Clippy
+> 通过；该批不新增行为或资格声明，仅恢复workspace all-target门禁的typed fixture完整性。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
