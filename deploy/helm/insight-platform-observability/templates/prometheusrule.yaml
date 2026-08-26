@@ -25,6 +25,14 @@ spec:
             summary: A Platform workload role remains not ready
             description: A bounded component role has not reported Ready during the evaluation window.
             runbook_url: {{ printf "%s#insightplatformworkloadnotready" .Values.alerts.runbookBaseUrl | quote }}
+        - alert: InsightPlatformOperationalCapacityExhausted
+          expr: min by (component_role, resource) (insight_platform_capacity_units{state="available"}) == 0
+          for: {{ .Values.alerts.operationalCapacityExhaustedFor }}
+          labels: {severity: warning, owner: platform-runtime}
+          annotations:
+            summary: A Platform runtime capacity is exhausted
+            description: A fixed process-local capacity authority has no unit available for the sustained alert window.
+            runbook_url: {{ printf "%s#insightplatformoperationalcapacityexhausted" .Values.alerts.runbookBaseUrl | quote }}
     - name: insight-platform.http
       rules:
         - alert: InsightPlatformHttpFailureRatioHigh

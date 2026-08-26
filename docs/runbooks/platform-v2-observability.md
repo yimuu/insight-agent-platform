@@ -6,7 +6,7 @@ credentials, or tokens into dashboards, tickets, or chat.
 
 ## InsightPlatformTelemetryMissing
 
-Confirm Prometheus and ServiceMonitor discovery first, then compare the expected 17 workload pools
+Confirm Prometheus and ServiceMonitor discovery first, then compare the expected 19 workload pools
 with the live target inventory. Check namespace and Pod selectors, NetworkPolicy denial counters,
 and rollout readiness. Treat a total telemetry loss as an observability failure; do not restart
 business dependencies until target discovery and network reachability are distinguished.
@@ -17,6 +17,14 @@ Identify the bounded `component_role`, inspect rollout status and the process st
 then follow the dependency recovery runbook for the failing PostgreSQL, NATS, S3/KMS, Secret,
 Egress, Artifact, or Sandbox authority. Do not page on one tenant/provider failure unless the
 component-level readiness contract itself is unavailable.
+
+## InsightPlatformOperationalCapacityExhausted
+
+Inspect `component_role` and `resource`, then correlate the exhausted authority with request latency,
+rejection outcomes and dependency health. For `sandbox-controller/artifact_response`, verify that
+Artifact response streams are completing and that the Artifact Data Worker is responsive. Preserve
+critical-control capacity and reduce or shed business admission before changing a qualified value.
+Escalate persistent exhaustion for a new CapacityProfile qualification; do not hot-edit limits.
 
 ## InsightPlatformHttpFailureRatioHigh
 

@@ -377,6 +377,10 @@ internal same-trace/new-span字段存在。真实loopback provider路径注入pr
 canary，production tracing只采集bounded request/response metadata且全部canary为零；公共扩展header拒绝span与RPC采集也为零。连同r291，仓库
 component L3动态metric/log/trace payload canary闭合；production telemetry backend、RBAC/retention及L4～L6仍未完成。
 
+r293从Sandbox Controller实际Artifact-response semaphore接入closed operational capacity series，scrape时读取available/used而非配置推断；
+现有owner tests覆盖permit持有/释放。dashboard增至14 panel，并增加持续capacity exhaustion alert与runbook。动态capacity coverage达到10/19
+pool；其余9个pool、production Prometheus scrape、telemetry backend/RBAC/retention及L4～L6仍未完成。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

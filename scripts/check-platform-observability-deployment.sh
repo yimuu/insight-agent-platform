@@ -20,6 +20,7 @@ for mutation in \
   '--set alerts.maximumDueOutboxLagSeconds=0' \
   '--set alerts.maximumExpiredOutboxClaimLagSeconds=0' \
   '--set alerts.outboxDeadFor=' \
+  '--set alerts.operationalCapacityExhaustedFor=' \
   '--set-json dashboard.labels=null'; do
   # shellcheck disable=SC2086
   if helm template platform "$chart" $mutation >/dev/null 2>&1; then
@@ -45,6 +46,7 @@ expected = %w[
   InsightPlatformExpiredOutboxClaimLagHigh
   InsightPlatformHttpFailureRatioHigh
   InsightPlatformHttpLatencyHigh
+  InsightPlatformOperationalCapacityExhausted
   InsightPlatformOutboxDeadEventsPresent
   InsightPlatformPostgresObservationFailing
   InsightPlatformRecoveryFailureRatioHigh

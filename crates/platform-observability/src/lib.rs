@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 const OUTCOMES: [&str; 3] = ["success", "rejected", "failure"];
 const BUCKETS_MILLISECONDS: [u64; 10] = [5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000];
 const MAX_OPERATIONS: usize = 64;
+const MAX_CAPACITY_RESOURCES: usize = 32;
 pub const PROCESS_OBSERVABILITY_OPERATIONS: &[&str] = &["live", "ready", "metrics", "other"];
 
 pub fn process_observability_router(metrics: Arc<ProcessHttpMetrics>) -> Router {
@@ -91,6 +92,10 @@ pub enum MetricsInstallError {
     DuplicateOperation,
     MissingOtherOperation,
     TooManyOperations,
+    InvalidCapacityResource,
+    DuplicateCapacityResource,
+    TooManyCapacityResources,
+    InvalidCapacitySnapshot,
 }
 
 impl fmt::Display for MetricsInstallError {
@@ -101,6 +106,10 @@ impl fmt::Display for MetricsInstallError {
             Self::DuplicateOperation => "duplicate operation",
             Self::MissingOtherOperation => "missing other operation",
             Self::TooManyOperations => "too many operations",
+            Self::InvalidCapacityResource => "invalid capacity resource",
+            Self::DuplicateCapacityResource => "duplicate capacity resource",
+            Self::TooManyCapacityResources => "too many capacity resources",
+            Self::InvalidCapacitySnapshot => "invalid capacity snapshot",
         })
     }
 }
@@ -118,6 +127,7 @@ pub struct ProcessHttpMetrics {
     duration_buckets: Vec<AtomicU64>,
     worker_permits: Option<Arc<WorkerPermitMetrics>>,
     orchestration: Option<Arc<OrchestrationOperationalMetrics>>,
+    capacities: Vec<OperationalCapacityMetric>,
 }
 
 impl ProcessHttpMetrics {
@@ -125,7 +135,7 @@ impl ProcessHttpMetrics {
         component_role: &'static str,
         operations: &'static [&'static str],
     ) -> Result<Self, MetricsInstallError> {
-        Self::install_inner(component_role, operations, None, None)
+        Self::install_inner(component_role, operations, None, None, Vec::new())
     }
 
     pub fn install_with_worker_permits(
@@ -133,7 +143,13 @@ impl ProcessHttpMetrics {
         operations: &'static [&'static str],
         worker_permits: Arc<WorkerPermitMetrics>,
     ) -> Result<Self, MetricsInstallError> {
-        Self::install_inner(component_role, operations, Some(worker_permits), None)
+        Self::install_inner(
+            component_role,
+            operations,
+            Some(worker_permits),
+            None,
+            Vec::new(),
+        )
     }
 
     pub fn install_with_orchestration(
@@ -141,7 +157,21 @@ impl ProcessHttpMetrics {
         operations: &'static [&'static str],
         orchestration: Arc<OrchestrationOperationalMetrics>,
     ) -> Result<Self, MetricsInstallError> {
-        Self::install_inner(component_role, operations, None, Some(orchestration))
+        Self::install_inner(
+            component_role,
+            operations,
+            None,
+            Some(orchestration),
+            Vec::new(),
+        )
+    }
+
+    pub fn install_with_capacities(
+        component_role: &'static str,
+        operations: &'static [&'static str],
+        capacities: Vec<OperationalCapacityMetric>,
+    ) -> Result<Self, MetricsInstallError> {
+        Self::install_inner(component_role, operations, None, None, capacities)
     }
 
     fn install_inner(
@@ -149,6 +179,7 @@ impl ProcessHttpMetrics {
         operations: &'static [&'static str],
         worker_permits: Option<Arc<WorkerPermitMetrics>>,
         orchestration: Option<Arc<OrchestrationOperationalMetrics>>,
+        capacities: Vec<OperationalCapacityMetric>,
     ) -> Result<Self, MetricsInstallError> {
         if !valid_label(component_role) {
             return Err(MetricsInstallError::InvalidComponentRole);
@@ -168,6 +199,20 @@ impl ProcessHttpMetrics {
             .iter()
             .position(|operation| *operation == "other")
             .ok_or(MetricsInstallError::MissingOtherOperation)?;
+        if capacities.len() > MAX_CAPACITY_RESOURCES {
+            return Err(MetricsInstallError::TooManyCapacityResources);
+        }
+        for (index, capacity) in capacities.iter().enumerate() {
+            if !valid_label(capacity.resource) {
+                return Err(MetricsInstallError::InvalidCapacityResource);
+            }
+            if capacities[..index]
+                .iter()
+                .any(|installed| installed.resource == capacity.resource)
+            {
+                return Err(MetricsInstallError::DuplicateCapacityResource);
+            }
+        }
         let series = operations.len() * OUTCOMES.len();
         Ok(Self {
             component_role,
@@ -179,6 +224,7 @@ impl ProcessHttpMetrics {
             duration_buckets: atomics(series * (BUCKETS_MILLISECONDS.len() + 1)),
             worker_permits,
             orchestration,
+            capacities,
         })
     }
 
@@ -277,10 +323,79 @@ impl ProcessHttpMetrics {
         }
         if let Some(worker_permits) = &self.worker_permits {
             worker_permits.render_prometheus(role, &mut output);
-        } else if let Some(orchestration) = &self.orchestration {
+        }
+        if let Some(orchestration) = &self.orchestration {
             orchestration.render_prometheus(role, &mut output);
         }
+        render_operational_capacities(role, &self.capacities, &mut output);
         output
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationalCapacitySnapshot {
+    capacity: u64,
+    available: u64,
+}
+
+impl OperationalCapacitySnapshot {
+    pub fn new(capacity: u64, available: u64) -> Result<Self, MetricsInstallError> {
+        if capacity == 0 || available > capacity {
+            return Err(MetricsInstallError::InvalidCapacitySnapshot);
+        }
+        Ok(Self {
+            capacity,
+            available,
+        })
+    }
+}
+
+pub trait OperationalCapacitySource: Send + Sync {
+    fn snapshot(&self) -> OperationalCapacitySnapshot;
+}
+
+pub struct OperationalCapacityMetric {
+    resource: &'static str,
+    source: Arc<dyn OperationalCapacitySource>,
+}
+
+impl fmt::Debug for OperationalCapacityMetric {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OperationalCapacityMetric")
+            .field("resource", &self.resource)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OperationalCapacityMetric {
+    pub fn new(resource: &'static str, source: Arc<dyn OperationalCapacitySource>) -> Self {
+        Self { resource, source }
+    }
+}
+
+fn render_operational_capacities(
+    role: &str,
+    capacities: &[OperationalCapacityMetric],
+    output: &mut String,
+) {
+    use fmt::Write as _;
+
+    if capacities.is_empty() {
+        return;
+    }
+    output.push_str(
+        "# HELP insight_platform_capacity_units Process-local capacity from the named runtime authority.\n\
+         # TYPE insight_platform_capacity_units gauge\n",
+    );
+    for metric in capacities {
+        let snapshot = metric.source.snapshot();
+        for (state, value) in [
+            ("available", snapshot.available),
+            ("used", snapshot.capacity.saturating_sub(snapshot.available)),
+        ] {
+            let _ = writeln!(output, "insight_platform_capacity_units{{component_role=\"{role}\",resource=\"{}\",state=\"{state}\"}} {value}", metric.resource);
+        }
     }
 }
 
@@ -653,6 +768,14 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tower::ServiceExt as _;
 
+    struct FixedCapacity(OperationalCapacitySnapshot);
+
+    impl OperationalCapacitySource for FixedCapacity {
+        fn snapshot(&self) -> OperationalCapacitySnapshot {
+            self.0
+        }
+    }
+
     const OPERATIONS: &[&str] = &["live", "ready", "metrics", "runs", "other"];
 
     #[test]
@@ -668,6 +791,21 @@ mod tests {
         assert_eq!(
             ProcessHttpMetrics::install("gateway", &["runs"]).unwrap_err(),
             MetricsInstallError::MissingOtherOperation
+        );
+        let source: Arc<dyn OperationalCapacitySource> = Arc::new(FixedCapacity(
+            OperationalCapacitySnapshot::new(2, 1).unwrap(),
+        ));
+        assert_eq!(
+            ProcessHttpMetrics::install_with_capacities(
+                "gateway",
+                OPERATIONS,
+                vec![
+                    OperationalCapacityMetric::new("db", Arc::clone(&source)),
+                    OperationalCapacityMetric::new("db", source),
+                ],
+            )
+            .unwrap_err(),
+            MetricsInstallError::DuplicateCapacityResource
         );
     }
 
@@ -844,5 +982,22 @@ mod tests {
         assert!(rendered.contains("lane=\"business\",state=\"available\"} 1"));
         assert!(rendered.contains("lane=\"business\",state=\"used\"} 3"));
         assert!(!rendered.contains("insight_platform_orchestration_active_jobs"));
+    }
+
+    #[test]
+    fn operational_capacity_exports_only_installed_resource_and_state() {
+        let source = Arc::new(FixedCapacity(
+            OperationalCapacitySnapshot::new(5, 2).unwrap(),
+        ));
+        let metrics = ProcessHttpMetrics::install_with_capacities(
+            "sandbox-controller",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            vec![OperationalCapacityMetric::new("artifact_response", source)],
+        )
+        .unwrap();
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains("resource=\"artifact_response\",state=\"available\"} 2"));
+        assert!(rendered.contains("resource=\"artifact_response\",state=\"used\"} 3"));
+        assert!(!rendered.contains("tenant"));
     }
 }

@@ -10,7 +10,8 @@ use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
 };
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, OperationalCapacityMetric, OperationalCapacitySnapshot,
+    OperationalCapacitySource, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_sandbox::{
@@ -53,6 +54,20 @@ const ARTIFACT_CA_PATH_ENV: &str = "PLATFORM_SANDBOX_ARTIFACT_CA_PATH";
 const ARTIFACT_CERT_PATH_ENV: &str = "PLATFORM_SANDBOX_ARTIFACT_CERT_PATH";
 const ARTIFACT_KEY_PATH_ENV: &str = "PLATFORM_SANDBOX_ARTIFACT_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone)]
+struct ArtifactResponseCapacityObservation(SandboxArtifactResponseCapacity);
+
+impl OperationalCapacitySource for ArtifactResponseCapacityObservation {
+    fn snapshot(&self) -> OperationalCapacitySnapshot {
+        let snapshot = self.0.capacity_snapshot();
+        OperationalCapacitySnapshot::new(
+            u64::try_from(snapshot.maximum_in_flight).unwrap_or(u64::MAX),
+            u64::try_from(snapshot.available).unwrap_or(u64::MAX),
+        )
+        .expect("Sandbox Artifact response semaphore preserves its configured capacity")
+    }
+}
 const MAX_TLS_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD: usize = 4;
 
@@ -264,9 +279,19 @@ async fn run() -> Result<(), ProcessError> {
         .add_service(broker_service)
         .serve_with_shutdown(address, rpc_cancellation.cancelled_owned());
     let mut server = tokio::spawn(server);
+    let capacity_observation: Arc<dyn OperationalCapacitySource> = Arc::new(
+        ArtifactResponseCapacityObservation(artifact_response_capacity),
+    );
     let metrics = Arc::new(
-        ProcessHttpMetrics::install("sandbox-controller", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ProcessHttpMetrics::install_with_capacities(
+            "sandbox-controller",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            vec![OperationalCapacityMetric::new(
+                "artifact_response",
+                capacity_observation,
+            )],
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await

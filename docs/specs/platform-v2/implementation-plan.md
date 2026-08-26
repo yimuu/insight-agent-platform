@@ -502,6 +502,12 @@
 > metadata events存在且全部canary为零；公共扩展header拒绝span和RPC canary采集同样为零。相关tests、strict Clippy与静态redaction门禁通过。
 > 连同r291，该证据关闭仓库component L3动态metric/log/trace payload canary，不替代production telemetry backend、RBAC/retention或L4～L6。
 
+> 2026-08-26 implementation evidence：r293增加closed operational-capacity metrics surface，并从Sandbox Controller实际
+> `SandboxArtifactResponseCapacity` semaphore在scrape时读取configured/available，导出fixed `artifact_response` available/used；持有response
+> permit的现有owner tests证明available下降并在释放后恢复。dashboard增至14 panel，新增持续capacity exhaustion symptom alert及checked-in
+> runbook，chart正负门禁、真实TCP scrape、相关tests和strict Clippy通过。动态capacity coverage达到10/19 pool；其余9个pool必须继续从各自
+> admission、broker或dependency authority接线，不能由配置副本推断。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

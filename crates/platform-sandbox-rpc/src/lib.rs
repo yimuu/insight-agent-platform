@@ -1927,6 +1927,13 @@ pub struct SandboxMicroVmBrokerGrpcService<B, G> {
 #[derive(Clone)]
 pub struct SandboxArtifactResponseCapacity {
     permits: Arc<Semaphore>,
+    maximum_in_flight: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SandboxArtifactResponseCapacitySnapshot {
+    pub maximum_in_flight: usize,
+    pub available: usize,
 }
 
 impl SandboxArtifactResponseCapacity {
@@ -1936,6 +1943,7 @@ impl SandboxArtifactResponseCapacity {
         }
         Ok(Self {
             permits: Arc::new(Semaphore::new(maximum_in_flight)),
+            maximum_in_flight,
         })
     }
 
@@ -1945,9 +1953,16 @@ impl SandboxArtifactResponseCapacity {
         })
     }
 
+    pub fn capacity_snapshot(&self) -> SandboxArtifactResponseCapacitySnapshot {
+        SandboxArtifactResponseCapacitySnapshot {
+            maximum_in_flight: self.maximum_in_flight,
+            available: self.permits.available_permits(),
+        }
+    }
+
     #[cfg(test)]
     fn available_permits(&self) -> usize {
-        self.permits.available_permits()
+        self.capacity_snapshot().available
     }
 }
 

@@ -474,6 +474,11 @@ identity、`tracestate`和`baggage` canary实际送入production reqwest/tracing
 公共扩展header拒绝span与RPC canary采集同样为零。连同r291，该证据关闭component L3动态metric/log/trace payload canary；production
 telemetry backend、RBAC/retention、Prometheus deployment scrape与L4～L6仍是独立门禁。
 
+r293新增closed `insight_platform_capacity_units` surface，并从Sandbox Controller的实际Artifact-response semaphore在scrape时读取fixed
+`artifact_response` available/used。现有owner tests证明response permit持有时available下降、释放后恢复；dashboard扩展为14 panel，并增加持续
+capacity exhaustion symptom alert及逐alert runbook。chart正负、真实TCP scrape、相关tests与strict Clippy通过。动态capacity coverage达到
+10/19 pool；其余9个pool仍须由各自真实authority接线，production Prometheus scrape与L4～L6不由此推进。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。
