@@ -560,6 +560,11 @@ r308为MCP Resource Host和OAuth Cleanup Worker各自的restricted SQLx pool安�
 sampler退出时cancel并等待peer。二者均不改变readiness，且不预装尚未接线的Egress series。两个adapter/binary tests、strict Clippy、MCP Host/Cleanup部署、
 redaction与observability门禁通过；本轮没有新的真实PG或production scrape证据，MCP Tool/Resource/Cleanup Egress observation仍待统一RPC observer批次。
 
+r309为Sandbox Controller restricted PostgreSQL authority pool安装共享sampler，仅汇总固定`component_role + postgresql + success|failure`；probe不占用
+Sandbox execution或Artifact response capacity。sampler与RPC/HTTP复用cancellation及原有shutdown deadline，任一组件异常退出都会cancel并等待peer；
+readiness不变，也不预装尚未接线的Artifact Broker/node attestor RPC series。adapter/binary tests、strict Clippy、Sandbox deployment、redaction与
+observability门禁通过；本轮没有新的真实PG或production scrape证据，Artifact/attestor observation仍待后续批次。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

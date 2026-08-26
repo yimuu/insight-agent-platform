@@ -5,6 +5,10 @@
 //! from the independently deployed Artifact Broker, and old process-generation absence proof comes
 //! from the independently deployed attestor.
 
+mod dependency_observer;
+
+use dependency_observer::install_postgres_dependency_metrics;
+
 use insight_platform_artifact_rpc::{ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcClient};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
@@ -13,7 +17,9 @@ use insight_platform_observability::{
     process_observability_router, OperationalCapacityMetric, OperationalCapacitySnapshot,
     OperationalCapacitySource, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
-use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+};
 use insight_platform_sandbox::{
     NodeAttestorRoute, ProveSandboxProcessGenerationAbsent,
     SandboxProcessGenerationAbsenceEvidence, SandboxProcessGenerationIsolation,
@@ -216,7 +222,10 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
+    let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
+    let (dependency_metrics, postgres_observer) =
+        install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
 
     let artifacts = Arc::new(connect_artifact_broker(&config).await?);
 
@@ -271,6 +280,11 @@ async fn run() -> Result<(), ProcessError> {
         .parse()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
     let cancellation = CancellationToken::new();
+    let mut postgres_health = tokio::spawn(run_postgres_health_sampler(
+        database_health_pool,
+        postgres_observer,
+        cancellation.child_token(),
+    ));
     let rpc_cancellation = cancellation.child_token();
     let server = Server::builder()
         .tls_config(tls)
@@ -291,7 +305,8 @@ async fn run() -> Result<(), ProcessError> {
                 capacity_observation,
             )],
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -311,19 +326,43 @@ async fn run() -> Result<(), ProcessError> {
         }
         result = &mut server => {
             cancellation.cancel();
-            result.map_err(|_| ProcessError::RpcUnavailable)?
-                .map_err(|_| ProcessError::RpcUnavailable)?;
-            observability.await.map_err(|_| ProcessError::ObservabilityUnavailable)?
-                .map_err(|_| ProcessError::ObservabilityUnavailable)?;
+            let rpc_result = result.map_err(|_| ProcessError::RpcUnavailable)
+                .and_then(|result| result.map_err(|_| ProcessError::RpcUnavailable));
+            let observability_result = observability.await
+                .map_err(|_| ProcessError::ObservabilityUnavailable)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityUnavailable));
+            let postgres_result = postgres_health.await
+                .map_err(|_| ProcessError::DependencyObserverUnavailable);
+            rpc_result?;
+            observability_result?;
+            postgres_result?;
             return Err(ProcessError::RpcUnavailable);
         }
         result = &mut observability => {
             cancellation.cancel();
-            result.map_err(|_| ProcessError::ObservabilityUnavailable)?
-                .map_err(|_| ProcessError::ObservabilityUnavailable)?;
-            server.await.map_err(|_| ProcessError::RpcUnavailable)?
-                .map_err(|_| ProcessError::RpcUnavailable)?;
+            let observability_result = result.map_err(|_| ProcessError::ObservabilityUnavailable)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityUnavailable));
+            let rpc_result = server.await.map_err(|_| ProcessError::RpcUnavailable)
+                .and_then(|result| result.map_err(|_| ProcessError::RpcUnavailable));
+            let postgres_result = postgres_health.await
+                .map_err(|_| ProcessError::DependencyObserverUnavailable);
+            observability_result?;
+            rpc_result?;
+            postgres_result?;
             return Err(ProcessError::ObservabilityUnavailable);
+        }
+        result = &mut postgres_health => {
+            cancellation.cancel();
+            let postgres_result = result.map_err(|_| ProcessError::DependencyObserverUnavailable);
+            let rpc_result = server.await.map_err(|_| ProcessError::RpcUnavailable)
+                .and_then(|result| result.map_err(|_| ProcessError::RpcUnavailable));
+            let observability_result = observability.await
+                .map_err(|_| ProcessError::ObservabilityUnavailable)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityUnavailable));
+            postgres_result?;
+            rpc_result?;
+            observability_result?;
+            return Err(ProcessError::DependencyObserverUnavailable);
         }
     }
     tokio::time::timeout(
@@ -336,7 +375,11 @@ async fn run() -> Result<(), ProcessError> {
             observability
                 .await
                 .map_err(|_| ProcessError::ObservabilityUnavailable)?
-                .map_err(|_| ProcessError::ObservabilityUnavailable)
+                .map_err(|_| ProcessError::ObservabilityUnavailable)?;
+            postgres_health
+                .await
+                .map_err(|_| ProcessError::DependencyObserverUnavailable)?;
+            Ok(())
         },
     )
     .await
@@ -593,6 +636,7 @@ enum ProcessError {
     InvalidTls,
     RpcUnavailable,
     ObservabilityUnavailable,
+    DependencyObserverUnavailable,
     ShutdownDeadlineExceeded,
 }
 
@@ -606,6 +650,7 @@ impl fmt::Display for ProcessError {
             Self::InvalidTls => "Controller TLS configuration is invalid",
             Self::RpcUnavailable => "Controller RPC server failed",
             Self::ObservabilityUnavailable => "Controller observability server failed",
+            Self::DependencyObserverUnavailable => "Controller dependency observer failed",
             Self::ShutdownDeadlineExceeded => "Controller graceful shutdown deadline exceeded",
         })
     }

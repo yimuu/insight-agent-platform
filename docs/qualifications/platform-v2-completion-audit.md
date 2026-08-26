@@ -105,6 +105,11 @@ r308把MCP Resource Host与OAuth Cleanup Worker各自restricted PostgreSQL pool�
 两者均不改变readiness，也不安装尚未接线的Egress series。两个adapter与binary tests、strict Clippy通过；本轮无真实PG成功fixture或production scrape，
 MCP Tool/Resource/Cleanup的Egress实际调用观测仍待统一RPC observer批次。
 
+r309把Sandbox Controller restricted PostgreSQL authority pool接到共享15秒sampler，仅导出固定`component_role + postgresql + outcome`；
+probe不消耗Sandbox execution或Artifact response capacity。sampler与RPC/HTTP共用cancellation和原有shutdown deadline，任一组件异常退出都会cancel并等待peer，
+readiness不变且不预装Artifact/attestor RPC series。adapter/binary tests与strict Clippy通过；本轮无真实PG成功fixture或production scrape，Artifact Broker与
+node attestor实际RPC观测仍待后续批次。
+
 ## 3. Phase 1 审计
 
 ### 已满足

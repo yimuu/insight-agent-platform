@@ -594,6 +594,11 @@
 > cancel并等待peer；readiness不变，且不预装尚未接线的Egress series。两个adapter/binary tests、strict Clippy、MCP Host/Cleanup deployment、redaction与
 > observability门禁通过；本轮没有新增真实PG或production scrape证据，MCP Tool/Resource/Cleanup Egress observation仍待统一RPC observer批次。
 
+> 2026-08-27 implementation evidence：r309把Sandbox Controller restricted PostgreSQL authority pool接到共享15秒sampler，仅导出固定
+> `component_role + postgresql + outcome`；probe不占用Sandbox execution或Artifact response capacity。sampler与RPC/HTTP共用cancellation和原有shutdown
+> deadline，任一组件异常退出都会cancel并等待peer；readiness不变且不预装Artifact/attestor RPC series。adapter/binary tests、strict Clippy、Sandbox
+> deployment、redaction与observability门禁通过；本轮无新增真实PG或production scrape证据，Artifact Broker/node attestor observation仍待后续批次。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`
