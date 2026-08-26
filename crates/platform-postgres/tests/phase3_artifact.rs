@@ -449,7 +449,7 @@ fn commit_scan_command(
     // container runtime and test process have sub-second clock skew.
     let observed_at = Utc::now() - Duration::seconds(1);
     let evidence = ArtifactScanEvidenceDraft {
-        schema_version: 1,
+        schema_version: 2,
         scan_kind: scheduled.scan.scan_kind,
         scan_job_id: scheduled.scan_job_id.clone(),
         scan_policy_revision: scheduled.scan.scan_policy_revision.clone(),
@@ -1049,6 +1049,9 @@ async fn seed_artifact_io_policy(
         allowed_output_media_types: vec![],
         maximum_input_artifacts: 1,
         maximum_output_artifacts: 0,
+        scanner_contract_digest: digest('8'),
+        verification_evidence_ttl_milliseconds: 60_000,
+        verification_retry_backoff_milliseconds: 1_000,
         deny_symlink: true,
         deny_hardlink: true,
         deny_device: true,

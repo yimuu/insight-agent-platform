@@ -71,7 +71,7 @@ fn deployment(kind: ResourceKind, suffix: u16, character: char) -> ExactDeployme
 fn policy_closure() -> SandboxExecutionPolicyClosure {
     SandboxExecutionPolicyClosure {
         isolation: SandboxIsolationPolicyDocument {
-            schema_version: 1,
+            schema_version: 2,
             minimum_isolation: SandboxIsolationClass::Wasm,
             allowed_runtime_families: vec![SandboxRuntimeFamily::WasmWasi],
             allowed_trust_classes: vec![CodeTrustClass::BuiltIn],
@@ -126,6 +126,9 @@ fn policy_closure() -> SandboxExecutionPolicyClosure {
             allowed_output_media_types: vec!["application/json".to_owned()],
             maximum_input_artifacts: 64,
             maximum_output_artifacts: 64,
+            scanner_contract_digest: sha('8'),
+            verification_evidence_ttl_milliseconds: 60_000,
+            verification_retry_backoff_milliseconds: 1_000,
             deny_symlink: true,
             deny_hardlink: true,
             deny_device: true,

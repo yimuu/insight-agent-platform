@@ -504,6 +504,18 @@ async fn prepare_upload_inner(
     {
         return Err(HttpError::Forbidden);
     }
+    if authority.artifact_io_policy.scanner_contract_digest != state.scanner_contract_digest
+        || authority
+            .artifact_io_policy
+            .verification_evidence_ttl_milliseconds
+            > state.scan_evidence_ttl_milliseconds
+        || authority
+            .artifact_io_policy
+            .verification_retry_backoff_milliseconds
+            > state.scan_retry_backoff_milliseconds
+    {
+        return Err(HttpError::Unavailable);
+    }
     let target_seconds = state.maximum_upload_target_seconds;
     let target_duration =
         chrono::Duration::seconds(i64::try_from(target_seconds).map_err(|_| HttpError::Invalid)?);
@@ -558,10 +570,14 @@ async fn prepare_upload_inner(
         declared_media_type: request.declared_media_type,
         retention_policy_revision_id: authority.retention_policy_revision.revision_id,
         scan_policy_revision: authority.artifact_io_policy_revision,
-        scanner_contract_digest: state.scanner_contract_digest.clone(),
+        scanner_contract_digest: authority.artifact_io_policy.scanner_contract_digest,
         ruleset_digest: authority.artifact_io_rules_digest,
-        evidence_ttl_milliseconds: state.scan_evidence_ttl_milliseconds,
-        retry_backoff_milliseconds: state.scan_retry_backoff_milliseconds,
+        evidence_ttl_milliseconds: authority
+            .artifact_io_policy
+            .verification_evidence_ttl_milliseconds,
+        retry_backoff_milliseconds: authority
+            .artifact_io_policy
+            .verification_retry_backoff_milliseconds,
         retain_until,
         operation_deadline,
         grant_expires_at: operation_deadline,

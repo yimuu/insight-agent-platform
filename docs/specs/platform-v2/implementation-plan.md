@@ -751,6 +751,11 @@
 > canonical digest进入admission与operation payload；PostgreSQL resolver只返回该exact closure，Worker不再为每个physical attempt临时生成
 > Snapshot/Link，并拒绝candidate Artifact与预分配identity漂移。MCP Host 58/58、service all-target tests与相关四crate strict Clippy通过。
 > 本批尚未创建Artifact/Blob/verification Job rows，也未冻结storage/policy/quota detail，故只关闭identity漂移L1缺口；stage/verify/finalize与L2/L3仍Pending。
+>
+> 2026-08-27 implementation evidence：r337将`SandboxArtifactIoPolicyDocument` clean-cut升级为schema v2，新增exact
+> `scanner_contract_digest`、bounded verification evidence TTL与retry backoff，并要求backoff严格小于evidence lifetime。Artifact Gateway现从
+> TenantConfig exact policy authority复制三项到Artifact operation/scan Job，原进程配置只验证supported scanner与不可放大的上限，漂移时外部I/O前
+> fail closed。contracts 100/100、Artifact三binary 8/8及相关strict Clippy通过；MCP admission复制、Data Worker多scanner manifest与L2/L3仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

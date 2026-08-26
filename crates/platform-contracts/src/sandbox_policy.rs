@@ -8,6 +8,8 @@ use std::collections::BTreeSet;
 pub const MAX_SANDBOX_POLICY_SET_ITEMS: usize = 128;
 pub const MAX_SANDBOX_DESTINATIONS: usize = 64;
 pub const MAX_SANDBOX_MEDIA_TYPE_BYTES: usize = 128;
+pub const MAX_ARTIFACT_VERIFICATION_EVIDENCE_TTL_MILLISECONDS: u64 = 86_400_000;
+pub const MAX_ARTIFACT_VERIFICATION_RETRY_BACKOFF_MILLISECONDS: u64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,6 +213,9 @@ pub struct SandboxArtifactIoPolicyDocument {
     pub allowed_output_media_types: Vec<String>,
     pub maximum_input_artifacts: u32,
     pub maximum_output_artifacts: u32,
+    pub scanner_contract_digest: Sha256Digest,
+    pub verification_evidence_ttl_milliseconds: u64,
+    pub verification_retry_backoff_milliseconds: u64,
     pub deny_symlink: bool,
     pub deny_hardlink: bool,
     pub deny_device: bool,
@@ -222,7 +227,7 @@ pub struct SandboxArtifactIoPolicyDocument {
 
 impl SandboxArtifactIoPolicyDocument {
     pub fn validate(&self) -> Result<(), ResourceContractError> {
-        if self.schema_version != 1
+        if self.schema_version != 2
             || self.allowed_input_media_types.len() > MAX_SANDBOX_POLICY_SET_ITEMS
             || self.allowed_output_media_types.len() > MAX_SANDBOX_POLICY_SET_ITEMS
             || !strictly_sorted_unique(&self.allowed_input_media_types)
@@ -234,6 +239,14 @@ impl SandboxArtifactIoPolicyDocument {
                 .any(|value| !valid_media_type(value))
             || self.maximum_input_artifacts > 64
             || self.maximum_output_artifacts > 64
+            || self.verification_evidence_ttl_milliseconds == 0
+            || self.verification_evidence_ttl_milliseconds
+                > MAX_ARTIFACT_VERIFICATION_EVIDENCE_TTL_MILLISECONDS
+            || self.verification_retry_backoff_milliseconds == 0
+            || self.verification_retry_backoff_milliseconds
+                > MAX_ARTIFACT_VERIFICATION_RETRY_BACKOFF_MILLISECONDS
+            || self.verification_retry_backoff_milliseconds
+                >= self.verification_evidence_ttl_milliseconds
             || !self.deny_symlink
             || !self.deny_hardlink
             || !self.deny_device
@@ -328,4 +341,71 @@ fn valid_media_type(value: &str) -> bool {
                         )
                 })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(character: char) -> Sha256Digest {
+        format!("sha256:{}", character.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    fn artifact_io_policy() -> SandboxArtifactIoPolicyDocument {
+        SandboxArtifactIoPolicyDocument {
+            schema_version: 2,
+            allowed_input_media_types: vec!["application/octet-stream".to_owned()],
+            allowed_output_media_types: vec![],
+            maximum_input_artifacts: 8,
+            maximum_output_artifacts: 0,
+            scanner_contract_digest: digest('8'),
+            verification_evidence_ttl_milliseconds: 60_000,
+            verification_retry_backoff_milliseconds: 1_000,
+            deny_symlink: true,
+            deny_hardlink: true,
+            deny_device: true,
+            deny_fifo: true,
+            deny_socket: true,
+            deny_sparse_file: true,
+            archive_expansion_disabled: true,
+        }
+    }
+
+    #[test]
+    fn artifact_io_v2_freezes_verification_policy() {
+        let policy = artifact_io_policy();
+        assert!(policy.validate().is_ok());
+        assert_eq!(policy.canonical_digest(), policy.canonical_digest());
+    }
+
+    #[test]
+    fn artifact_io_v1_and_unbounded_verification_are_rejected() {
+        let mut legacy = artifact_io_policy();
+        legacy.schema_version = 1;
+        assert_eq!(
+            legacy.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+
+        let mut unbounded = artifact_io_policy();
+        unbounded.verification_evidence_ttl_milliseconds =
+            MAX_ARTIFACT_VERIFICATION_EVIDENCE_TTL_MILLISECONDS + 1;
+        assert_eq!(
+            unbounded.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+    }
+
+    #[test]
+    fn artifact_io_retry_must_fit_inside_evidence_lifetime() {
+        let mut policy = artifact_io_policy();
+        policy.verification_retry_backoff_milliseconds =
+            policy.verification_evidence_ttl_milliseconds;
+        assert_eq!(
+            policy.validate(),
+            Err(ResourceContractError::InvalidPolicyDocument)
+        );
+    }
 }
