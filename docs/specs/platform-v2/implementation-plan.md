@@ -599,6 +599,11 @@
 > deadline，任一组件异常退出都会cancel并等待peer；readiness不变且不预装Artifact/attestor RPC series。adapter/binary tests、strict Clippy、Sandbox
 > deployment、redaction与observability门禁通过；本轮无新增真实PG或production scrape证据，Artifact Broker/node attestor observation仍待后续批次。
 
+> 2026-08-27 implementation evidence：r310把Callback API restricted PostgreSQL command pool接到共享15秒sampler，并附加到既有OAuth callback
+> process metrics；只导出固定`component_role + postgresql + outcome`，不暴露database、pool、SQL、state或error。signal、HTTP server与sampler互相监督，
+> 正常shutdown共用既有grace，超时中止残余任务；readiness与callback outcome不变，也不预装Egress series。adapter/binary tests、strict Clippy、Callback
+> deployment、redaction与observability门禁通过；本轮无新增真实PG或production scrape证据，OAuth Egress observation仍待统一RPC observer批次。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

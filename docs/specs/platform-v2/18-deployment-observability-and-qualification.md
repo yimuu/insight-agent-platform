@@ -565,6 +565,11 @@ Sandbox execution或Artifact response capacity。sampler与RPC/HTTP复用cancell
 readiness不变，也不预装尚未接线的Artifact Broker/node attestor RPC series。adapter/binary tests、strict Clippy、Sandbox deployment、redaction与
 observability门禁通过；本轮没有新的真实PG或production scrape证据，Artifact/attestor observation仍待后续批次。
 
+r310为Callback API restricted PostgreSQL command pool安装共享sampler，并附加到既有OAuth callback process metrics；仅汇总固定
+`component_role + postgresql + success|failure`，不输出database、pool、SQL、OAuth state或error。signal、HTTP server与sampler互相监督，正常shutdown复用
+既有grace，超时会中止残余任务；readiness和callback outcome语义不变，也不预装Egress series。adapter/binary tests、strict Clippy、Callback deployment、
+redaction与observability门禁通过；本轮没有新的真实PG或production scrape证据，OAuth Egress observation仍待统一RPC observer批次。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

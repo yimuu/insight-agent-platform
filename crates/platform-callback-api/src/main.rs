@@ -4,6 +4,10 @@
 //! authorization codes cross the exact MCP Host mTLS Egress RPC and never enter database rows,
 //! events, logs or configuration.
 
+mod dependency_observer;
+
+use dependency_observer::install_postgres_dependency_metrics;
+
 use axum::{
     extract::{Extension, Request},
     http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
@@ -24,8 +28,10 @@ use insight_platform_mcp_host::{
     McpOAuthStateCodecConfig, McpOAuthStateKey, SensitiveMcpOAuthStateKey,
     UuidMcpOAuthCallbackIdentityFactory, MCP_OAUTH_STATE_KEY_BYTES,
 };
-use insight_platform_observability::ProcessHttpMetrics;
-use insight_platform_postgres::{repository::PgRepository, verify_schema};
+use insight_platform_observability::{DependencyObservationMetrics, ProcessHttpMetrics};
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -38,6 +44,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 use url::Url;
 use uuid::Uuid;
@@ -63,11 +70,15 @@ fn callback_operation(path: &str) -> &'static str {
     }
 }
 
-fn install_callback_metrics() -> Arc<ProcessHttpMetrics> {
-    Arc::new(
-        ProcessHttpMetrics::install("mcp-callback-api", CALLBACK_HTTP_OPERATIONS)
-            .expect("static Callback API metric labels are valid"),
-    )
+fn install_callback_metrics(
+    dependencies: Option<Arc<DependencyObservationMetrics>>,
+) -> Arc<ProcessHttpMetrics> {
+    let metrics = ProcessHttpMetrics::install("mcp-callback-api", CALLBACK_HTTP_OPERATIONS)
+        .expect("static Callback API metric labels are valid");
+    Arc::new(match dependencies {
+        Some(dependencies) => metrics.with_dependency_observations(dependencies),
+        None => metrics,
+    })
 }
 
 fn build_process_router(callback: Router, metrics: Arc<ProcessHttpMetrics>) -> Router {
@@ -299,7 +310,10 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
+    let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
+    let (dependency_metrics, postgres_observer) =
+        install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
 
     let rpc_limits = EgressInternalRpcLimits::new(
         config.maximum_rpc_metadata_bytes,
@@ -334,32 +348,62 @@ async fn run() -> Result<(), ProcessError> {
         application,
         Arc::new(SystemMcpOAuthCallbackClock),
     ));
-    let metrics = install_callback_metrics();
+    let metrics = install_callback_metrics(Some(dependency_metrics));
     let router = build_process_router(callback, Arc::clone(&metrics));
     let listener = tokio::net::TcpListener::bind(&config.listen_address)
         .await
         .map_err(|_| ProcessError::ServerFailure)?;
     metrics.mark_ready();
-    let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
-    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-        let _ = shutdown_receiver.await;
-    });
+    let cancellation = CancellationToken::new();
+    let server = axum::serve(listener, router)
+        .with_graceful_shutdown(cancellation.child_token().cancelled_owned());
     let mut server = tokio::spawn(async move { server.await });
-    shutdown_signal().await;
-    let _ = shutdown_sender.send(());
-    match tokio::time::timeout(
-        Duration::from_millis(config.shutdown_grace_milliseconds),
-        &mut server,
-    )
-    .await
-    {
-        Ok(joined) => joined
-            .map_err(|_| ProcessError::ServerFailure)?
-            .map_err(|_| ProcessError::ServerFailure),
-        Err(_) => {
-            server.abort();
-            let _ = server.await;
-            Err(ProcessError::ShutdownTimeout)
+    let mut postgres_health = tokio::spawn(run_postgres_health_sampler(
+        database_health_pool,
+        postgres_observer,
+        cancellation.child_token(),
+    ));
+    let shutdown_grace = Duration::from_millis(config.shutdown_grace_milliseconds);
+    tokio::select! {
+        _ = shutdown_signal() => {
+            cancellation.cancel();
+            let drained = tokio::time::timeout(shutdown_grace, async {
+                let (server_result, postgres_result) = tokio::join!(
+                    &mut server,
+                    &mut postgres_health,
+                );
+                server_result.map_err(|_| ProcessError::ServerFailure)?
+                    .map_err(|_| ProcessError::ServerFailure)?;
+                postgres_result.map_err(|_| ProcessError::DependencyObserverFailure)
+            }).await;
+            match drained {
+                Ok(result) => result,
+                Err(_) => {
+                    server.abort();
+                    postgres_health.abort();
+                    let _ = tokio::join!(server, postgres_health);
+                    Err(ProcessError::ShutdownTimeout)
+                }
+            }
+        }
+        result = &mut server => {
+            cancellation.cancel();
+            let server_result = result.map_err(|_| ProcessError::ServerFailure)
+                .and_then(|result| result.map_err(|_| ProcessError::ServerFailure));
+            let postgres_result = postgres_health.await
+                .map_err(|_| ProcessError::DependencyObserverFailure);
+            server_result?;
+            postgres_result?;
+            Err(ProcessError::ServerFailure)
+        }
+        result = &mut postgres_health => {
+            cancellation.cancel();
+            let postgres_result = result.map_err(|_| ProcessError::DependencyObserverFailure);
+            let server_result = server.await.map_err(|_| ProcessError::ServerFailure)
+                .and_then(|result| result.map_err(|_| ProcessError::ServerFailure));
+            postgres_result?;
+            server_result?;
+            Err(ProcessError::DependencyObserverFailure)
         }
     }
 }
@@ -512,6 +556,7 @@ enum ProcessError {
     SchemaMismatch,
     EgressUnavailable,
     ServerFailure,
+    DependencyObserverFailure,
     ShutdownTimeout,
 }
 
@@ -527,6 +572,9 @@ impl fmt::Display for ProcessError {
             Self::SchemaMismatch => formatter.write_str("database schema does not match candidate"),
             Self::EgressUnavailable => formatter.write_str("Egress Broker is unavailable"),
             Self::ServerFailure => formatter.write_str("callback HTTP server failed"),
+            Self::DependencyObserverFailure => {
+                formatter.write_str("callback dependency observer failed")
+            }
             Self::ShutdownTimeout => formatter.write_str("graceful shutdown timed out"),
         }
     }
@@ -560,7 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_routes_expose_health_and_bounded_metrics() {
-        let metrics = install_callback_metrics();
+        let metrics = install_callback_metrics(None);
         metrics.mark_ready();
         let router = build_process_router(
             Router::new().route(

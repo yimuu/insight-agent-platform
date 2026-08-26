@@ -110,6 +110,11 @@ probe不消耗Sandbox execution或Artifact response capacity。sampler与RPC/HTT
 readiness不变且不预装Artifact/attestor RPC series。adapter/binary tests与strict Clippy通过；本轮无真实PG成功fixture或production scrape，Artifact Broker与
 node attestor实际RPC观测仍待后续批次。
 
+r310把Callback API restricted PostgreSQL command pool接到共享15秒sampler，并附加到既有OAuth callback process metrics；仅导出固定
+`component_role + postgresql + outcome`，不暴露database、pool、SQL、state或error。signal、HTTP server与sampler互相监督，正常shutdown共用既有grace，
+超时中止残余任务；readiness与callback outcome语义不变，也不预装Egress series。adapter/binary tests与strict Clippy通过；本轮无真实PG成功fixture或
+production scrape，OAuth Egress实际调用观测仍待统一RPC observer批次。
+
 ## 3. Phase 1 审计
 
 ### 已满足
