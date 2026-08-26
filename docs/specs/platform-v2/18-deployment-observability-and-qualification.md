@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-198 |
+| 状态 | Accepted / CR-199 |
 | 日期 | 2026-08-27 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
+
+> CR-199 impact：Artifact Data Worker candidate/startup manifest登记bounded supported scanner contract digests；TenantConfig指向的`ArtifactIo` v2
+> scanner digest不受支持时readiness/claim/stage fail closed。L1～L4增加v1/缺字段/超限、policy drift、unsupported scanner与rollout canary矩阵。
 
 > CR-198 impact：MCP discovery使用`mcp_host` ComponentRole下独立workload pool，拥有自己的ServiceAccount、restricted PostgreSQL pool、
 > Egress/Artifact Data Worker mTLS clients、claim/permit/queue metrics与bounded drain；不复用RPC-only Tool Host或subscription Resource Host的

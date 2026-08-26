@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-198 |
+| 状态 | Accepted / CR-199 |
 | 日期 | 2026-08-27 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-199 impact：public Artifact/MCP DTO不增加scanner、TTL或retry字段。Gateway/application只能提交业务意图；owner transaction从TenantConfig
+> exact `ArtifactIo` Policy v2解析并冻结这些服务端事实，错误version/缺字段返回safe invalid configuration且外部I/O为零。
 
 > CR-198 impact：public MCP discovery command、Receipt replay与Operation DTO仍只投影MCP owner Job。预分配Artifact/Blob、内部
 > `ArtifactScan` Job、stage proof、verification evidence和storage locator均不进入public request/response；调用方不能选择、替换或轮询内部Job。

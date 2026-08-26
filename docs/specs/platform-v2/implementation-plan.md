@@ -1,10 +1,14 @@
-# Platform v2 四阶段实现计划（CR-198）
+# Platform v2 四阶段实现计划（CR-199）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-198 MCP discovery Artifact handoff authorized; external L4～L6 pending |
+| 状态 | In Progress / CR-199 Artifact verification policy closure authorized; external L4～L6 pending |
 | 日期 | 2026-08-27 |
-| 合同输入 | 00～18、cross-review CR-198、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-199、ADR-0001、ADR-0002、AGENTS.md |
+
+> CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
+> admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。
+> 删除Artifact Gateway对这三项业务默认的所有权；部署配置只保留supported scanner集合与不可放大的hard limits。
 
 > CR-198 implementation order：先扩展discovery admission/payload，一次预分配Artifact、Blob、`ArtifactScan` Job及stage/verify closure；再实现
 > Egress bounded descriptor response和Artifact Data Worker `StageWorkloadArtifact`/verify wake；随后把Discovery Worker改为transport→stage→park与

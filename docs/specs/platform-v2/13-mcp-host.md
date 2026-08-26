@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-198 |
+| 状态 | Accepted / CR-199 |
 | 日期 | 2026-08-27 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
+
+> CR-199 impact：discovery Artifact closure中的scanner contract、evidence TTL与retry backoff只来自TenantConfig exact `ArtifactIo` Policy v2；
+> MCP caller/Worker不得提供或从Artifact role runtime config猜测。Artifact Data Worker在stage/claim前验证自身installed scanner manifest支持该digest。
 
 > CR-198 impact：discovery admission预分配Artifact/Blob、一个`ArtifactScan` Job及stage/verify quota/policy/retention closure。MCP Job只拥有
 > 远端descriptor attempt和最终Discovery owner transaction；Artifact Data Worker最多把候选推进`Verified`。两者通过Event/Outbox durable wake

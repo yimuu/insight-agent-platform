@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-197 |
+| 状态 | Accepted / CR-199 |
 | 日期 | 2026-08-26 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
+
+> CR-199 impact：`ArtifactIo` Policy document v2除media/file rules外必须冻结`scanner_contract_digest`、bounded verification evidence TTL与
+> retry backoff。Artifact admission只从TenantConfig exact slot解析这些值；调用方、进程默认值或另一role内存配置不能覆盖。Policy `rules_digest`
+> 继续是整个closed document的canonical digest。
 
 > CR-197 impact：`PrincipalContext`引用03 `TraceIdentityV1`，但trace是非授权correlation data。任何header都不能覆盖credential-derived tenant、
 > principal、roles或permissions。禁止`tracestate`、`baggage`、tenant/user/resource ID、Secret、URL和正文进入trace attribute；首版Egress剥离所有
@@ -83,6 +87,23 @@ struct TenantConfigV1 {
     artifact_io_policy: Option<ExactPolicyDeploymentRef>,
 }
 ```
+
+```rust
+struct ArtifactIoPolicyDocumentV2 {
+    schema_version: u32, // exact 2
+    allowed_input_media_types: BoundedSortedSet<MediaType>,
+    allowed_output_media_types: BoundedSortedSet<MediaType>,
+    maximum_input_artifacts: u32,
+    maximum_output_artifacts: u32,
+    scanner_contract_digest: Sha256Digest,
+    verification_evidence_ttl_milliseconds: u64,
+    verification_retry_backoff_milliseconds: u64,
+    // existing deny_symlink/hardlink/device/fifo/socket/sparse/archive flags remain required true
+}
+```
+
+TTL范围为`1..=86_400_000`毫秒，retry backoff为`1..=60_000`毫秒且必须小于TTL；scanner digest绑定Artifact Data Worker
+installed scanner ABI/rules input contract，不是镜像tag、自由模块名或可下载代码。v1、缺字段、unknown field、零值、超限或不满足顺序关系均拒绝。
 
 三个slot彼此独立且只能指向该tenant内enabled、active Resource的exact immutable Policy Deployment；Deployment closure再冻结唯一
 Policy Revision及其digest。绑定command使用Tenant strong
