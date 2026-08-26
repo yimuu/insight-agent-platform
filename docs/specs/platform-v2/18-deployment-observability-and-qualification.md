@@ -373,7 +373,7 @@ failure ratio/p95 latency四条symptom-first alert。全部alert有stable owner/
 
 r264移除LLM、SSE、MCP OAuth、conversation及worker startup production telemetry中的高基数资源/进程标识、manifest digest和原始编码错误，
 并新增source-level CI门禁，拒绝规范列出的identity、Secret、prompt/response、object key及URL字段进入structured tracing或插值日志。
-相关crate tests与strict Clippy通过。该负向静态证据不替代跨进程trace propagation、动态payload采集审计、RBAC/retention或production验证。
+相关crate tests与strict Clippy通过。该负向静态证据不替代动态payload采集审计、RBAC/retention或production验证。
 
 r265将Orchestration已有Coordinator、Safety Recovery和LocalWorkerPools快照接入shared metrics owner，固定导出active jobs、claim/recovery outcome及
 business/critical-control permit available/used；该surface不把process-local wake hint表述成durable queue depth/age。dashboard扩展到8个panel，新增
@@ -454,8 +454,14 @@ PostgreSQL observation failure三条带runbook的symptom alert。该证据只关
 
 r287为shared PostgreSQL Outbox authority增加bounded只读采样，按数据库时间输出fixed `due`、`expired_claim`、`dead` count与适用oldest lag；
 不读取Event payload且不暴露tenant、Outbox/Event、claim owner或失败文本。fresh PostgreSQL 16、strict Clippy、13-panel dashboard、12条
-symptom-first alert与逐alert runbook门禁通过。该证据关闭shared Outbox backlog/recovery L1接线，不替代其他role authority、跨进程trace、
+symptom-first alert与逐alert runbook门禁通过。该证据关闭shared Outbox backlog/recovery L1接线，不替代其他role authority、
 动态payload审计、真实Prometheus scrape或L4～L6。
+
+r290完成CR-197 trace machine/runtime projection。公共HTTP入口严格解析W3C `traceparent`，Run、Invocation、Job、Task、Event与Outbox保存同一
+trace ID；实际MCP、Egress、Artifact、Sandbox与Security mTLS/UDS RPC在workload identity授权后、业务解码前校验trace，并按hop生成新span。
+durable reclaim/restart从owner记录恢复原trace ID；Egress provider及gVisor guest/storage边界保持零平台trace header。合同/schema、workspace
+strict Clippy、真实mTLS/UDS和fresh PostgreSQL 16恢复测试通过。该证据关闭CR-197 component L3 trace连续性，不替代动态payload审计、真实
+Prometheus scrape、telemetry RBAC/retention或L4～L6。
 
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际

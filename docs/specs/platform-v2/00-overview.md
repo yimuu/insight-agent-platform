@@ -360,7 +360,13 @@ L3由此闭合；Secret Manager rotation、容量饱和、真实scrape及L4～L6
 
 r287从shared PostgreSQL Outbox authority以数据库时间导出fixed due/expired-claim/dead count与oldest lag；采样不读取Event payload，也不输出
 tenant、Outbox/Event、claim owner或失败文本。fresh PostgreSQL 16、strict Clippy、13-panel dashboard、12条symptom-first alert及逐alert runbook
-通过。该证据关闭shared Outbox backlog/recovery的L1接线；其他role authority、跨进程trace、动态payload审计、真实scrape及L4～L6仍未完成。
+通过。该证据关闭shared Outbox backlog/recovery的L1接线；其他role authority、动态payload审计、真实scrape及L4～L6仍未完成。
+
+r290完成CR-197 machine/runtime projection：公共HTTP严格校验W3C `traceparent`，Run、Invocation、Job、Task、Event与Outbox持久化同一trace ID；
+首版实际MCP、Egress、Artifact、Sandbox与Security mTLS/UDS RPC在workload identity授权后校验trace，跨hop生成新span，durable reclaim/restart
+恢复原trace ID。Egress provider及gVisor guest/storage边界保持零平台trace header。合同/schema、workspace strict Clippy、真实mTLS/UDS与fresh
+PostgreSQL 16恢复测试通过。该证据关闭CR-197 trace implementation与component L3连续性；动态payload审计、真实scrape、telemetry
+RBAC/retention及L4～L6仍未完成。
 
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并

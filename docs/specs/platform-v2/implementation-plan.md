@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-197 authorized; trace implementation and external L4～L6 pending |
+| 状态 | In Progress / CR-197 trace implementation complete; observability and external L4～L6 pending |
 | 日期 | 2026-08-26 |
 | 合同输入 | 00～18、cross-review CR-197、ADR-0001、ADR-0002、AGENTS.md |
 
@@ -470,7 +470,7 @@
 > fixed `due`、`expired_claim`、`dead`计数及适用的oldest lag，不读取Event payload且不暴露tenant、Outbox/Event/claim owner或失败文本。
 > Orchestration critical-control sampler保留最后有效gauge并将查询结果计入fixed PostgreSQL observation outcome。fresh PostgreSQL 16、strict
 > Clippy、13-panel dashboard、12条symptom-first alert及逐alert runbook门禁通过。该批关闭shared Outbox backlog/recovery L1接线；其他role
-> authority/dependency/saturation、跨进程trace、动态payload审计、真实Prometheus scrape及L4仍未闭合。
+> authority/dependency/saturation、动态payload审计、真实Prometheus scrape及L4仍未闭合。
 
 > 2026-08-26 implementation evidence：r288增加commit-SHA pinned production candidate workflow与确定性生成器；GitOps environment repository
 > 也必须以40位commit SHA只读checkout，其闭包与application Helm/Docker closure共同生成`deployment_config_digest`。两个digest-pinned
@@ -482,6 +482,13 @@
 > 2026-08-26 implementation evidence：r289最终render复核确认CR-192后当前闭包为15-role/19-pool，Context subscription pool使动态permit
 > coverage达到9/19；此前17-pool/8-pool描述只保留为历史批次证据。Security/Egress checker补入已实现的`RefreshMcpResources`并继续exact
 > 验证13个remote-only RPC。全局workload/observability/redaction/deployment checker与workspace strict Clippy通过；不改变L4～L6 Pending边界。
+
+> 2026-08-26 implementation evidence：r290完成CR-197 machine/runtime projection。公共HTTP严格校验W3C `traceparent`并生成或延续同一
+> `TraceIdentityV1`；Run、Invocation、Job、Task、Event与Outbox持久化同一trace ID，reclaim/restart从durable owner恢复而不换trace。首版实际
+> MCP、Egress、Artifact、Sandbox与Security mTLS/UDS RPC均在workload identity授权后、业务解码前校验trace，跨hop保留trace ID并生成新span；
+> Egress provider及gVisor guest/storage边界不转发平台trace header。workspace strict Clippy、合同/schema门禁、真实mTLS/UDS RPC、fresh PostgreSQL
+> 16 Sandbox/OAuth恢复测试通过。该证据关闭CR-197 trace implementation与component L3连续性，不替代动态payload采集审计、真实Prometheus
+> scrape、telemetry RBAC/retention或L4～L6。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
