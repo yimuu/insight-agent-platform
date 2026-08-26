@@ -677,6 +677,12 @@
 > `insight_platform_durable_observations_total`表达。组合render测试锁定dependency series恰好一次，目标tests、strict Clippy、observability/
 > redaction、format与diff门禁通过；本批不提供production scrape、真实fault或L4～L5证据。
 
+> 2026-08-27 implementation evidence：r325抽取共享`DurableJobQueueMetrics`并由Orchestration复用；PostgreSQL query port改为nominal
+> `WorkClass`。Model Worker每秒按唯一`WorkClass::Model`采样authority，固定输出`due|expired_lease` count/oldest lag，失败保留last-known gauges并
+> 仅累加bounded observation outcome。dashboard增加observation panel，并新增Model due、expired-lease和跨role observation failure三条alert及runbook；
+> closed threshold负向门禁通过。相关目标26/26、baseline compile、strict Clippy、部署/observability/redaction/format/diff门禁通过；无fresh
+> PostgreSQL或production scrape，故只关闭Model backlog/recovery仓库内L1，其余role及L2/L4～L5仍Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

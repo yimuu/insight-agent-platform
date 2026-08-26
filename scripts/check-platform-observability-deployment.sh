@@ -16,6 +16,8 @@ for mutation in \
   '--set alerts.maximumRecoveryFailureRatio=1' \
   '--set alerts.maximumDependencyFailureRatio=1' \
   '--set alerts.minimumDependencyObservations=0' \
+  '--set alerts.maximumDurableObservationFailureRatio=1' \
+  '--set alerts.minimumDurableObservations=0' \
   '--set alerts.minimumRecoveryRate=0' \
   '--set alerts.maximumDueJobLagSeconds=0' \
   '--set alerts.maximumExpiredLeaseLagSeconds=0' \
@@ -46,10 +48,13 @@ expected = %w[
   InsightPlatformDependencyFailureRatioHigh
   InsightPlatformDueOutboxLagHigh
   InsightPlatformDurableJobLagHigh
+  InsightPlatformDurableObservationFailureRatioHigh
   InsightPlatformExpiredLeaseRecoveryLagHigh
   InsightPlatformExpiredOutboxClaimLagHigh
   InsightPlatformHttpFailureRatioHigh
   InsightPlatformHttpLatencyHigh
+  InsightPlatformModelDurableJobLagHigh
+  InsightPlatformModelExpiredLeaseRecoveryLagHigh
   InsightPlatformOperationalCapacityExhausted
   InsightPlatformOutboxDeadEventsPresent
   InsightPlatformRecoveryFailureRatioHigh
@@ -116,7 +121,7 @@ dependency_owner_contracts = {
   "crates/platform-artifact-service/src/bin/gateway.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
   "crates/platform-artifact-service/src/main.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
   "crates/platform-artifact-service/src/bin/maintenance.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
-  "crates/platform-model-worker/src/main.rs" => %w[install_model_dependency_metrics new_with_observer run_postgres_health_sampler],
+  "crates/platform-model-worker/src/main.rs" => %w[install_model_dependency_metrics new_with_observer run_postgres_health_sampler with_durable_job_queue WorkClass::Model],
   "crates/platform-capability-worker/src/main.rs" => ["install_capability_dependency_metrics(false)", "run_postgres_health_sampler"],
   "crates/platform-capability-worker/src/remote_main.rs" => ["install_capability_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler"],
   "crates/platform-context-worker/src/main.rs" => ["install_context_dependency_metrics(false)", "run_postgres_health_sampler"],

@@ -66,6 +66,27 @@ Worker loss, database time, and fencing errors before changing recovery cadence.
 columns directly or lend business capacity to recovery; owner recovery transactions must settle the
 expired lease.
 
+## InsightPlatformModelDurableJobLagHigh
+
+Compare Model `due` count and oldest lag with Model business permits, PostgreSQL health, provider
+dependency outcomes, NATS health and rollout events. A growing queue may indicate admission above
+qualified capacity; a small queue with growing age may indicate stalled claims. Do not edit Job
+priority or state directly. Repair the blocked dependency or use the qualified GitOps scaling path.
+
+## InsightPlatformModelExpiredLeaseRecoveryLagHigh
+
+Compare Model expired-lease count and lag with Model critical-control permits, Worker restarts,
+PostgreSQL time and provider cancellation/recovery outcomes. Preserve the frozen ModelTurn, quota
+and Job fence. Never clear lease fields or force terminal state through direct SQL; allow the Model
+owner recovery transaction to settle the lost attempt.
+
+## InsightPlatformDurableObservationFailureRatioHigh
+
+Confirm the affected fixed `component_role`, then correlate PostgreSQL transport health and pool
+capacity. Durable gauge values retain their last successful snapshot, so do not treat a flat gauge
+as proof that the backlog is current while this alert is firing. Restore the bounded read-only
+sampler path; never replace it with payload scans, direct state mutation or high-cardinality labels.
+
 ## InsightPlatformDependencyFailureRatioHigh
 
 Use only the fixed `component_role` and `dependency` labels to identify the affected boundary, then

@@ -28,14 +28,16 @@ use insight_platform_model_worker::{
 use insight_platform_models::ModelTurnLimits;
 use insight_platform_observability::{
     process_observability_router, run_worker_permit_sampler, update_worker_permits,
-    ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    DurableJobQueueMetrics, DurableJobQueueSnapshot, ProcessHttpMetrics, WorkerPermitMetrics,
+    PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{
-    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+    dependency_health::run_postgres_health_sampler, operational_metrics::observe_durable_job_queue,
+    repository::PgRepository, verify_schema,
 };
 use insight_platform_worker::LocalWorkerPools;
 use serde::Deserialize;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
     collections::BTreeSet, error::Error, fmt, io::Read as _, path::PathBuf, sync::Arc,
     time::Duration,
@@ -301,6 +303,7 @@ async fn run() -> Result<(), ProcessError> {
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
     let database_health_pool = pool.clone();
+    let durable_queue_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
     let process_generation_id =
         ResourceId::from_uuid_v7(ResourceKind::WorkerProcessGeneration, Uuid::now_v7())
@@ -384,6 +387,7 @@ async fn run() -> Result<(), ProcessError> {
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let permit_metrics = Arc::new(WorkerPermitMetrics::default());
+    let durable_queue_metrics = Arc::new(DurableJobQueueMetrics::default());
     update_worker_permits(&permit_metrics, &observability_pools);
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_worker_permits(
@@ -392,6 +396,7 @@ async fn run() -> Result<(), ProcessError> {
             Arc::clone(&permit_metrics),
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_durable_job_queue(Arc::clone(&durable_queue_metrics))
         .with_dependency_observations(dependency_metrics.process),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
@@ -412,6 +417,17 @@ async fn run() -> Result<(), ProcessError> {
             database_health_pool,
             dependency_metrics.postgres,
             postgres_cancellation,
+        )
+        .await;
+        Ok(())
+    });
+    let durable_queue_cancellation = cancellation.child_token();
+    components.spawn(async move {
+        run_durable_job_queue_sampler(
+            durable_queue_pool,
+            durable_queue_metrics,
+            WorkClass::Model,
+            durable_queue_cancellation,
         )
         .await;
         Ok(())
@@ -462,6 +478,32 @@ async fn run() -> Result<(), ProcessError> {
             observe_component(result)?;
             drain_components(&mut components).await?;
             Err(ProcessError::WorkerExitedUnexpectedly)
+        }
+    }
+}
+
+async fn run_durable_job_queue_sampler(
+    pool: PgPool,
+    metrics: Arc<DurableJobQueueMetrics>,
+    work_class: WorkClass,
+    cancellation: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return,
+            _ = interval.tick() => {
+                match observe_durable_job_queue(&pool, work_class).await {
+                    Ok(snapshot) => metrics.observe(DurableJobQueueSnapshot {
+                        due_jobs: snapshot.due_jobs,
+                        due_oldest_age_seconds: snapshot.due_oldest_age_seconds,
+                        expired_leases: snapshot.expired_leases,
+                        expired_oldest_lag_seconds: snapshot.expired_oldest_lag_seconds,
+                    }),
+                    Err(_) => metrics.observe_query_failure(),
+                }
+            }
         }
     }
 }

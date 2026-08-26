@@ -28,7 +28,8 @@ data:
         {"id": 11, "type": "timeseries", "title": "Dependency operation outcomes", "targets": [{"expr": "sum by (component_role, dependency, outcome) (rate(insight_platform_dependency_observations_total{component_role=~\"$component_role\"}[5m]))"}], "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24}},
         {"id": 12, "type": "timeseries", "title": "Durable Outbox backlog", "targets": [{"expr": "max by (component_role, queue) (insight_platform_outbox_events{component_role=~\"$component_role\"})"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32}},
         {"id": 13, "type": "timeseries", "title": "Durable Outbox lag seconds", "targets": [{"expr": "max by (component_role, queue) (insight_platform_outbox_lag_seconds{component_role=~\"$component_role\"})"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32}},
-        {"id": 14, "type": "timeseries", "title": "Operational capacity available", "targets": [{"expr": "min by (component_role, resource) (insight_platform_capacity_units{component_role=~\"$component_role\",state=\"available\"})"}], "gridPos": {"h": 8, "w": 24, "x": 0, "y": 40}}
+        {"id": 14, "type": "timeseries", "title": "Operational capacity available", "targets": [{"expr": "min by (component_role, resource) (insight_platform_capacity_units{component_role=~\"$component_role\",state=\"available\"})"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40}},
+        {"id": 15, "type": "timeseries", "title": "Durable observation outcomes", "targets": [{"expr": "sum by (component_role, outcome) (rate(insight_platform_durable_observations_total{component_role=~\"$component_role\"}[5m]))"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40}}
       ]
     }
 {{- end }}

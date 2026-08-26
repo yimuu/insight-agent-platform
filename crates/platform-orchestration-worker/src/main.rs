@@ -409,7 +409,10 @@ async fn run() -> Result<(), ProcessError> {
             }
             _ = health.tick() => {
                 update_operational_metrics(&operational_metrics, &observability_pools, &runtime);
-                match observe_durable_job_queue(bulkheads.critical_control_pool(), "orchestration").await {
+                match observe_durable_job_queue(
+                    bulkheads.critical_control_pool(),
+                    WorkClass::Orchestration,
+                ).await {
                     Ok(snapshot) => operational_metrics.observe_durable_job_queue(DurableJobQueueSnapshot {
                         due_jobs: snapshot.due_jobs,
                         due_oldest_age_seconds: snapshot.due_oldest_age_seconds,

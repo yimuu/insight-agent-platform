@@ -451,6 +451,11 @@ r324修复Orchestration process scrape中的重复Prometheus标签集：PostgreS
 `insight_platform_durable_observations_total`表达。组合render测试锁定同一dependency series只出现一次；目标测试、strict Clippy、
 observability/redaction、format与diff门禁通过。该修复不新增production scrape、fault injection或L4～L5证据。
 
+r325抽取共享durable Job queue metrics owner并由Orchestration复用；Model Worker新增按typed `WorkClass::Model`的PostgreSQL只读sampler，固定导出
+`due`/`expired_lease` count与oldest lag，失败保留上一有效snapshot。dashboard、三条Model/observation symptom alerts及runbook/closed threshold
+门禁同步接线。相关目标26/26、baseline编译、strict Clippy及部署/observability/redaction门禁通过；本轮未配置fresh PostgreSQL或production scrape，
+因此只关闭Model backlog/recovery仓库内L1接线，L2/L4～L5仍Pending。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

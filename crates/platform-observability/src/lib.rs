@@ -166,6 +166,7 @@ pub struct ProcessHttpMetrics {
     duration_buckets: Vec<AtomicU64>,
     worker_permits: Option<Arc<WorkerPermitMetrics>>,
     orchestration: Option<Arc<OrchestrationOperationalMetrics>>,
+    durable_job_queue: Option<Arc<DurableJobQueueMetrics>>,
     capacities: Vec<OperationalCapacityMetric>,
     dependency_observations: Option<Arc<DependencyObservationMetrics>>,
 }
@@ -222,6 +223,14 @@ impl ProcessHttpMetrics {
         self
     }
 
+    pub fn with_durable_job_queue(
+        mut self,
+        durable_job_queue: Arc<DurableJobQueueMetrics>,
+    ) -> Self {
+        self.durable_job_queue = Some(durable_job_queue);
+        self
+    }
+
     fn install_inner(
         component_role: &'static str,
         operations: &'static [&'static str],
@@ -272,6 +281,7 @@ impl ProcessHttpMetrics {
             duration_buckets: atomics(series * (BUCKETS_MILLISECONDS.len() + 1)),
             worker_permits,
             orchestration,
+            durable_job_queue: None,
             capacities,
             dependency_observations: None,
         })
@@ -375,6 +385,9 @@ impl ProcessHttpMetrics {
         }
         if let Some(orchestration) = &self.orchestration {
             orchestration.render_prometheus(role, &mut output);
+        }
+        if let Some(durable_job_queue) = &self.durable_job_queue {
+            durable_job_queue.render_prometheus(role, &mut output);
         }
         render_operational_capacities(role, &self.capacities, &mut output);
         if let Some(dependency_observations) = &self.dependency_observations {
@@ -636,6 +649,80 @@ pub struct DurableJobQueueSnapshot {
     pub expired_oldest_lag_seconds: f64,
 }
 
+#[derive(Debug, Default)]
+pub struct DurableJobQueueMetrics {
+    due_jobs: AtomicU64,
+    due_oldest_age_milliseconds: AtomicU64,
+    expired_leases: AtomicU64,
+    expired_oldest_lag_milliseconds: AtomicU64,
+    observation_successes: AtomicU64,
+    observation_failures: AtomicU64,
+}
+
+impl DurableJobQueueMetrics {
+    pub fn observe(&self, snapshot: DurableJobQueueSnapshot) {
+        self.due_jobs.store(snapshot.due_jobs, Ordering::Release);
+        self.due_oldest_age_milliseconds.store(
+            seconds_to_milliseconds(snapshot.due_oldest_age_seconds),
+            Ordering::Release,
+        );
+        self.expired_leases
+            .store(snapshot.expired_leases, Ordering::Release);
+        self.expired_oldest_lag_milliseconds.store(
+            seconds_to_milliseconds(snapshot.expired_oldest_lag_seconds),
+            Ordering::Release,
+        );
+        self.observe_query_success();
+    }
+
+    pub fn observe_query_success(&self) {
+        self.observation_successes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn observe_query_failure(&self) {
+        self.observation_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn render_prometheus(&self, role: &str, output: &mut String) {
+        use fmt::Write as _;
+
+        output.push_str(
+            "# HELP insight_platform_durable_jobs Durable Job backlog from PostgreSQL authority by fixed queue.\n\
+             # TYPE insight_platform_durable_jobs gauge\n\
+             # HELP insight_platform_durable_job_lag_seconds Oldest durable Job delay from PostgreSQL authority by fixed queue.\n\
+             # TYPE insight_platform_durable_job_lag_seconds gauge\n",
+        );
+        for (queue, count, lag_milliseconds) in [
+            (
+                "due",
+                self.due_jobs.load(Ordering::Acquire),
+                self.due_oldest_age_milliseconds.load(Ordering::Acquire),
+            ),
+            (
+                "expired_lease",
+                self.expired_leases.load(Ordering::Acquire),
+                self.expired_oldest_lag_milliseconds.load(Ordering::Acquire),
+            ),
+        ] {
+            let _ = writeln!(output, "insight_platform_durable_jobs{{component_role=\"{role}\",queue=\"{queue}\"}} {count}");
+            let _ = writeln!(output, "insight_platform_durable_job_lag_seconds{{component_role=\"{role}\",queue=\"{queue}\"}} {}", lag_milliseconds as f64 / 1_000.0);
+        }
+        output.push_str(
+            "# HELP insight_platform_durable_observations_total PostgreSQL-backed durable queue observation outcomes.\n\
+             # TYPE insight_platform_durable_observations_total counter\n",
+        );
+        for (outcome, count) in [
+            (
+                "success",
+                self.observation_successes.load(Ordering::Acquire),
+            ),
+            ("failure", self.observation_failures.load(Ordering::Acquire)),
+        ] {
+            let _ = writeln!(output, "insight_platform_durable_observations_total{{component_role=\"{role}\",outcome=\"{outcome}\"}} {count}");
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct DurableOutboxSnapshot {
     pub due_events: u64,
@@ -658,17 +745,12 @@ pub struct OrchestrationOperationalMetrics {
     recovery_scan_failures: AtomicU64,
     recovery_capacity_skips: AtomicU64,
     recovery_mutations: AtomicU64,
-    durable_due_jobs: AtomicU64,
-    durable_due_oldest_age_milliseconds: AtomicU64,
-    durable_expired_leases: AtomicU64,
-    durable_expired_oldest_lag_milliseconds: AtomicU64,
+    durable_job_queue: DurableJobQueueMetrics,
     durable_outbox_due_events: AtomicU64,
     durable_outbox_due_oldest_age_milliseconds: AtomicU64,
     durable_outbox_expired_claims: AtomicU64,
     durable_outbox_expired_oldest_lag_milliseconds: AtomicU64,
     durable_outbox_dead_events: AtomicU64,
-    durable_observation_successes: AtomicU64,
-    durable_observation_failures: AtomicU64,
 }
 
 impl OrchestrationOperationalMetrics {
@@ -698,25 +780,11 @@ impl OrchestrationOperationalMetrics {
     }
 
     pub fn observe_durable_job_queue(&self, snapshot: DurableJobQueueSnapshot) {
-        self.durable_due_jobs
-            .store(snapshot.due_jobs, Ordering::Release);
-        self.durable_due_oldest_age_milliseconds.store(
-            seconds_to_milliseconds(snapshot.due_oldest_age_seconds),
-            Ordering::Release,
-        );
-        self.durable_expired_leases
-            .store(snapshot.expired_leases, Ordering::Release);
-        self.durable_expired_oldest_lag_milliseconds.store(
-            seconds_to_milliseconds(snapshot.expired_oldest_lag_seconds),
-            Ordering::Release,
-        );
-        self.durable_observation_successes
-            .fetch_add(1, Ordering::Relaxed);
+        self.durable_job_queue.observe(snapshot);
     }
 
     pub fn observe_durable_observation_failure(&self) {
-        self.durable_observation_failures
-            .fetch_add(1, Ordering::Relaxed);
+        self.durable_job_queue.observe_query_failure();
     }
 
     pub fn observe_durable_outbox(&self, snapshot: DurableOutboxSnapshot) {
@@ -734,8 +802,7 @@ impl OrchestrationOperationalMetrics {
         );
         self.durable_outbox_dead_events
             .store(snapshot.dead_events, Ordering::Release);
-        self.durable_observation_successes
-            .fetch_add(1, Ordering::Relaxed);
+        self.durable_job_queue.observe_query_success();
     }
 
     fn render_prometheus(&self, role: &str, output: &mut String) {
@@ -789,29 +856,7 @@ impl OrchestrationOperationalMetrics {
         ] {
             let _ = writeln!(output, "insight_platform_recovery_operations_total{{component_role=\"{role}\",outcome=\"{outcome}\"}} {value}");
         }
-        output.push_str(
-            "# HELP insight_platform_durable_jobs Durable Job backlog from PostgreSQL authority by fixed queue.\n\
-             # TYPE insight_platform_durable_jobs gauge\n\
-             # HELP insight_platform_durable_job_lag_seconds Oldest durable Job delay from PostgreSQL authority by fixed queue.\n\
-             # TYPE insight_platform_durable_job_lag_seconds gauge\n",
-        );
-        for (queue, count, lag_milliseconds) in [
-            (
-                "due",
-                self.durable_due_jobs.load(Ordering::Acquire),
-                self.durable_due_oldest_age_milliseconds
-                    .load(Ordering::Acquire),
-            ),
-            (
-                "expired_lease",
-                self.durable_expired_leases.load(Ordering::Acquire),
-                self.durable_expired_oldest_lag_milliseconds
-                    .load(Ordering::Acquire),
-            ),
-        ] {
-            let _ = writeln!(output, "insight_platform_durable_jobs{{component_role=\"{role}\",queue=\"{queue}\"}} {count}");
-            let _ = writeln!(output, "insight_platform_durable_job_lag_seconds{{component_role=\"{role}\",queue=\"{queue}\"}} {}", lag_milliseconds as f64 / 1_000.0);
-        }
+        self.durable_job_queue.render_prometheus(role, output);
         output.push_str(
             "# HELP insight_platform_outbox_events Durable Outbox backlog from PostgreSQL authority by fixed queue.\n\
              # TYPE insight_platform_outbox_events gauge\n\
@@ -839,22 +884,6 @@ impl OrchestrationOperationalMetrics {
         ] {
             let _ = writeln!(output, "insight_platform_outbox_events{{component_role=\"{role}\",queue=\"{queue}\"}} {count}");
             let _ = writeln!(output, "insight_platform_outbox_lag_seconds{{component_role=\"{role}\",queue=\"{queue}\"}} {}", lag_milliseconds as f64 / 1_000.0);
-        }
-        output.push_str(
-            "# HELP insight_platform_durable_observations_total PostgreSQL-backed durable queue observation outcomes.\n\
-             # TYPE insight_platform_durable_observations_total counter\n",
-        );
-        for (outcome, count) in [
-            (
-                "success",
-                self.durable_observation_successes.load(Ordering::Acquire),
-            ),
-            (
-                "failure",
-                self.durable_observation_failures.load(Ordering::Acquire),
-            ),
-        ] {
-            let _ = writeln!(output, "insight_platform_durable_observations_total{{component_role=\"{role}\",outcome=\"{outcome}\"}} {count}");
         }
     }
 }
@@ -1144,6 +1173,43 @@ mod tests {
         assert!(rendered.contains("lane=\"business\",state=\"available\"} 1"));
         assert!(rendered.contains("lane=\"business\",state=\"used\"} 3"));
         assert!(!rendered.contains("insight_platform_orchestration_active_jobs"));
+    }
+
+    #[test]
+    fn generic_durable_job_queue_retains_last_snapshot_and_fixed_dimensions() {
+        let queue = Arc::new(DurableJobQueueMetrics::default());
+        queue.observe(DurableJobQueueSnapshot {
+            due_jobs: 7,
+            due_oldest_age_seconds: 4.5,
+            expired_leases: 2,
+            expired_oldest_lag_seconds: 1.25,
+        });
+        queue.observe_query_failure();
+        let metrics = ProcessHttpMetrics::install_with_worker_permits(
+            "model-worker",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            Arc::new(WorkerPermitMetrics::default()),
+        )
+        .unwrap()
+        .with_durable_job_queue(queue);
+
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains(
+            "insight_platform_durable_jobs{component_role=\"model-worker\",queue=\"due\"} 7"
+        ));
+        assert!(rendered.contains(
+            "insight_platform_durable_job_lag_seconds{component_role=\"model-worker\",queue=\"expired_lease\"} 1.25"
+        ));
+        assert!(rendered.contains(
+            "insight_platform_durable_observations_total{component_role=\"model-worker\",outcome=\"success\"} 1"
+        ));
+        assert!(rendered.contains(
+            "insight_platform_durable_observations_total{component_role=\"model-worker\",outcome=\"failure\"} 1"
+        ));
+        assert!(!rendered.contains("work_class="));
+        assert!(!rendered.contains("tenant"));
+        assert!(!rendered.contains("database"));
+        assert!(!rendered.contains("error"));
     }
 
     #[test]

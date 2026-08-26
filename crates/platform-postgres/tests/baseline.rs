@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use insight_platform_contracts::{SchedulerPriority, TenantConfig};
+use insight_platform_contracts::{SchedulerPriority, TenantConfig, WorkClass};
 use insight_platform_postgres::{
     operational_metrics::{observe_durable_job_queue, observe_durable_outbox},
     repository::{
@@ -112,7 +112,7 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
         .await
         .unwrap();
 
-    let queue = observe_durable_job_queue(&pool, "interaction")
+    let queue = observe_durable_job_queue(&pool, WorkClass::Interaction)
         .await
         .unwrap();
     assert_eq!(queue.due_jobs, 1);
@@ -120,7 +120,7 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
     assert_eq!(queue.expired_leases, 0);
     assert_eq!(queue.expired_oldest_lag_seconds, 0.0);
     assert_eq!(
-        observe_durable_job_queue(&pool, "orchestration")
+        observe_durable_job_queue(&pool, WorkClass::Orchestration)
             .await
             .unwrap(),
         Default::default()

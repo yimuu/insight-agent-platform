@@ -1,5 +1,6 @@
 //! Read-only, bounded operational observations from the durable PostgreSQL authority.
 
+use insight_platform_contracts::WorkClass;
 use sqlx::{PgPool, Row};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -21,7 +22,7 @@ pub struct DurableOutboxSnapshot {
 
 pub async fn observe_durable_job_queue(
     pool: &PgPool,
-    work_class: &str,
+    work_class: WorkClass,
 ) -> Result<DurableJobQueueSnapshot, sqlx::Error> {
     let row = sqlx::query(
         r#"
@@ -65,7 +66,7 @@ pub async fn observe_durable_job_queue(
         FROM due CROSS JOIN expired
         "#,
     )
-    .bind(work_class)
+    .bind(work_class.as_str())
     .fetch_one(pool)
     .await?;
 

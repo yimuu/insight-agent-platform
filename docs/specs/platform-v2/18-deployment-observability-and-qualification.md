@@ -645,6 +645,13 @@ r324消除Orchestration process surface在r312后形成的重复Prometheus标签
 `insight_platform_durable_observations_total{component_role,outcome}`，并保留last-known snapshot语义。组合render测试断言同一PostgreSQL dependency
 series恰好一次，目标tests、strict Clippy、observability/redaction、format与diff门禁通过；没有production Prometheus scrape、真实fault或L4～L5新增证据。
 
+r325把durable Job backlog renderer抽为共享`DurableJobQueueMetrics`并让Orchestration复用同一owner；PostgreSQL observation API只接受nominal
+`WorkClass`，不再允许自由字符串。Model Worker以独立pool clone每秒只读采样`WorkClass::Model`，输出固定role和`due|expired_lease`，失败只增加
+observation failure并保留last-known gauges，不读取payload或输出tenant/backend/database/error。dashboard增加observation outcomes，新增Model due lag、
+Model expired-lease lag及跨role durable observation failure三条symptom-first alert与逐条runbook，阈值schema负向fail closed。相关目标26/26、
+PostgreSQL baseline compile、strict Clippy、Model deployment、observability/redaction及format/diff门禁通过；未配置fresh PostgreSQL或production
+Prometheus，故该证据只关闭Model backlog/recovery L1 wiring，不推进L2或L4～L5。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

@@ -172,6 +172,11 @@ r324消除Orchestration process scrape中重复的PostgreSQL dependency Promethe
 Job/Outbox查询健康改用独立`insight_platform_durable_observations_total`。组合render测试断言同一dependency series只出现一次；目标tests、strict
 Clippy、observability/redaction、format与diff门禁通过。该仓库内修复不新增production scrape、真实fault或L4～L5证据。
 
+r325抽取共享durable Job queue metrics owner并让Orchestration复用；query port收窄为nominal `WorkClass`。Model Worker按唯一
+`WorkClass::Model`接入PostgreSQL只读backlog/recovery sampler，失败保留last-known gauges；dashboard、三条symptom alert、runbook和closed threshold
+门禁同步完成。相关目标26/26、baseline compile、strict Clippy及部署/observability/redaction门禁通过；未运行fresh PostgreSQL或production scrape，
+因此仅关闭Model backlog/recovery L1接线，其他role、L2及L4～L5仍Pending。
+
 ## 3. Phase 1 审计
 
 ### 已满足
