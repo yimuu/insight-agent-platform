@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-199 |
+| 状态 | Accepted / CR-200 |
 | 日期 | 2026-08-27 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-200 impact：public及producer-facing internal DTO均不增加storage locator/binding/encryption authority字段。owner admission从exact
+> `ArtifactIo` v3冻结选择，Data Worker内部post-write命令才携带加密locator与backend evidence。
 
 > CR-199 impact：public Artifact/MCP DTO不增加scanner、TTL或retry字段。Gateway/application只能提交业务意图；owner transaction从TenantConfig
 > exact `ArtifactIo` Policy v2解析并冻结这些服务端事实，错误version/缺字段返回safe invalid configuration且外部I/O为零。

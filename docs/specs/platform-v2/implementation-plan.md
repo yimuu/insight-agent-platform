@@ -1,10 +1,14 @@
-# Platform v2 四阶段实现计划（CR-199）
+# Platform v2 四阶段实现计划（CR-200）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-199 Artifact verification policy closure authorized; external L4～L6 pending |
+| 状态 | In Progress / CR-200 Artifact storage authority closure authorized; external L4～L6 pending |
 | 日期 | 2026-08-27 |
-| 合同输入 | 00～18、cross-review CR-199、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-200、ADR-0001、ADR-0002、AGENTS.md |
+
+> CR-200 implementation order：先把ArtifactIo Policy升级v3并更新registry/fixtures；再把exact write storage binding digest与encryption domain
+> 冻结进public/internal Artifact admission和waiting stage payload；随后让Data Worker按digest选择installed provider、写object并生成内部storage
+> evidence。producer-facing DTO继续禁止locator/bucket/key/binding/encryption authority；unsupported binding必须在object I/O前fail closed。
 
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。

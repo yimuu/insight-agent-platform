@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-199 |
+| 状态 | Accepted / CR-200 |
 | 日期 | 2026-08-27 |
 | 依赖 | 02、03、04、07、09、10、12、13 |
 | 直接下游 | 16、17、18 |
+
+> CR-200 impact：Artifact stage policy必须从TenantConfig exact `ArtifactIo` v3同时冻结write storage binding digest与encryption domain ID。
+> Data Worker仅可按该digest选择installed provider；MCP/Context/Capability/Sandbox caller不得提交locator、bucket、key、binding或encryption domain。
 
 > CR-199 impact：Artifact verification的scanner contract、evidence TTL与retry backoff归属published `ArtifactIo` Policy v2，而不是Gateway/Data
 > Worker自由配置。所有public/internal admission都从TenantConfig exact slot冻结同一closure；Data Worker startup manifest验证支持的scanner digest，
@@ -117,9 +120,9 @@ storage binding、retention policy revision、scan policy、deadline上限和quo
 retention与scan/Artifact I/O policy必须分别来自04 `TenantConfigV1`的exact `artifact_retention_policy`与`artifact_io_policy` slot；
 staging quota account由唯一`(tenant, tenant scope, artifact work class, artifact.staging_bytes metric)`关系解析。slot缺失或错kind不允许fallback到
 任意active Policy、安装默认或调用方选择。
-Artifact I/O v2的scanner contract、evidence TTL与retry backoff逐字段复制进Artifact operation/scan Job snapshot；Gateway/Data Worker配置只能
-声明支持的scanner digest集合与硬上限，不能提供业务默认。current policy在admission后变化不改写已存Job，unsupported installed digest在stage/
-claim前拒绝且不产生object bytes。
+Artifact I/O v3的scanner contract、evidence TTL、retry backoff、write storage binding digest与encryption domain逐字段复制进Artifact
+operation/scan Job snapshot；Gateway/Data Worker配置只能声明支持的scanner/binding集合与硬上限，不能提供业务默认。current policy在admission后
+变化不改写已存Job，unsupported installed digest在stage/claim前拒绝且不产生object bytes。
 public request中的`purpose`仍需通过principal permission与owner policy的closed allowlist，不能用它取得内部package/evidence权限。
 
 成功响应只公开`schema_version=1`、`artifact_id`、`operation_id`、`upload_grant_id`、Artifact ETag、`upload_target`和

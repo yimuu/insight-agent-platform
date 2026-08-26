@@ -1,10 +1,28 @@
-# Platform v2 00～18 Cross-review（CR-199）
+# Platform v2 00～18 Cross-review（CR-200）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-199 Accepted |
+| 状态 | Closed / CR-200 Accepted |
 | 日期 | 2026-08-27 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-199 Artifact verification policy closure feedback |
+| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-200 Artifact storage authority closure feedback |
+
+### CR-200 Artifact storage authority closure impact review
+
+Data Worker stage RPC接线确认producer DTO正确排除了storage authority，但tenant exact closure没有write binding或encryption domain，继续实现只能
+使用process global default。CR-200把两者收敛到既有`PolicyKind::ArtifactIo` closed document v3。
+
+| Spec | CR-200结论 |
+|---|---|
+| 00～01 | clean `/v1`与plane边界不变；修复tenant storage选择缺少单一authority |
+| 02、04 | ArtifactIo仍走Resource→immutable Version→Deployment→TenantConfig slot；v3新增binding digest与EncryptionDomain ID |
+| 03、05～12、14、16 | ID、Job、Receipt、Event、Run/Capability/Context/Sandbox/Model owner不变 |
+| 13、15 | owner admission冻结v3字段；producer RPC不携带storage authority，Data Worker内部生成locator/evidence |
+| 17 | public/internal producer DTO不暴露bucket/key/binding/encryption domain |
+| 18 | installed catalog登记supported binding digests；增加unsupported/drift/injection zero-I/O矩阵 |
+
+复核覆盖state ownership、IDs/schema、errors、transactions/events、permissions、capacity、failure recovery和fixtures。CR-200不新增table、aggregate、
+PolicyKind、Resource、Deployment variant、public route、ComponentRole、WorkClass、JobKind或Secret路径；受影响规范恢复Accepted / CR-200，
+Implementation Authorization恢复有效。
 
 ### CR-199 Artifact verification policy closure impact review
 
@@ -852,13 +870,13 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 29. Acceptance 36：CR-198 discovery admission预分配exact Artifact/Blob/`ArtifactScan` Job与quota/policy/retention closure；Egress仅返回bounded canonical bytes，
     Data Worker最多推进Verified，MCP owner以durable wake恢复并在一个事务中创建Ready Evidence Link、Discovery Snapshot及双Job结算。L1～L4
     覆盖wrong identity/fence/digest、message全丢、所有stage/verify/finalize kill窗口及独立pool饱和，且无新增表、JobKind、role或public DTO。
-30. Acceptance 37：ArtifactIo Policy v2在一个closed canonical document中冻结scanner contract digest、verification evidence TTL/retry与既有
-    media/file rules；所有Artifact admission从TenantConfig exact slot复制，v1/缺失/超限/unsupported scanner在object I/O与Job claim前fail closed，
-    已存Job不随policy或rollout变化，且无新增PolicyKind、表、role或public字段。
+30. Acceptance 37：ArtifactIo Policy v3在一个closed canonical document中冻结scanner contract digest、verification evidence TTL/retry、
+    write storage binding digest、encryption domain与既有media/file rules；所有Artifact admission从TenantConfig exact slot复制，v1/v2/缺失/
+    超限/unsupported scanner或binding在object I/O与Job claim前fail closed，已存Job不随policy或rollout变化，且无新增PolicyKind、表、role或public字段。
 
 ## 16. 未决项
 
-CR-199合同范围没有未关闭P0/P1。Acceptance 37与既有13～36形成单一闭包，00～18状态为Accepted。
+CR-200合同范围没有未关闭P0/P1。Acceptance 37与既有13～36形成单一闭包，00～18状态为Accepted。
 
 实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
 soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，

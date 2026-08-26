@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-199 |
+| 状态 | Accepted / CR-200 |
 | 日期 | 2026-08-26 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
+
+> CR-200 impact：`ArtifactIo` closed document升级v3，新增exact write storage binding digest与tenant encryption domain ID；仍由同一immutable
+> Policy ResourceVersion和TenantConfig exact slot拥有，process catalog只声明可支持的binding material。
 
 > CR-199 impact：`PolicyKind::ArtifactIo`的closed document升级为v2，新增exact scanner contract digest、verification evidence TTL与retry
 > backoff。它仍由同一Policy ResourceVersion拥有并通过TenantConfig exact Deployment slot选择；不新增PolicyKind、Deployment variant或active head。

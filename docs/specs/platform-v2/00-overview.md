@@ -2,11 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-199 |
+| 状态 | Accepted / CR-200 |
 | 日期 | 2026-08-27 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
+
+> 2026-08-27 implementation feedback（CR-200）：Artifact Data Worker stage接线发现，tenant exact `ArtifactIo` Policy v2未冻结
+> `write_storage_binding_digest`与`encryption_domain_id`，进程只能使用全局write binding且MCP caller又不得提交storage authority。CR-200将两者
+> 加入`ArtifactIo` closed document v3：owner admission冻结exact tenant选择，Data Worker只验证installed binding支持并生成加密locator/evidence。
+> 不新增PolicyKind、表、Resource、Deployment、route、role或Secret路径。
 
 > 2026-08-27 implementation feedback（CR-199）：CR-198 waiting Artifact verification Job接线发现，published `ArtifactIo` Policy只冻结
 > media/file rules；`scanner_contract_digest`、verification evidence TTL与retry backoff仍来自Artifact Gateway进程配置。MCP admission无法从

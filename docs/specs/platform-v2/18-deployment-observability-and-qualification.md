@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-199 |
+| 状态 | Accepted / CR-200 |
 | 日期 | 2026-08-27 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
+
+> CR-200 impact：Artifact Data Worker startup manifest必须登记bounded installed write storage binding digests；tenant v3 policy选择不受支持的
+> binding、错encryption domain kind、catalog drift或caller注入storage authority时，必须在object write前fail closed。L1～L4覆盖zero-I/O与rollout。
 
 > CR-199 impact：Artifact Data Worker candidate/startup manifest登记bounded supported scanner contract digests；TenantConfig指向的`ArtifactIo` v2
 > scanner digest不受支持时readiness/claim/stage fail closed。L1～L4增加v1/缺字段/超限、policy drift、unsupported scanner与rollout canary矩阵。

@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-199 |
+| 状态 | Accepted / CR-200 |
 | 日期 | 2026-08-27 |
 | 依赖 | 02、03、04、07、09、10、12 |
 | 直接下游 | 15、17、18 |
+
+> CR-200 impact：discovery Artifact closure还冻结tenant exact write storage binding digest与encryption domain ID。MCP Worker/RPC不携带locator、
+> bucket、KMS key或storage evidence；Artifact Data Worker从冻结binding选择installed provider并生成这些事实。
 
 > CR-199 impact：discovery Artifact closure中的scanner contract、evidence TTL与retry backoff只来自TenantConfig exact `ArtifactIo` Policy v2；
 > MCP caller/Worker不得提供或从Artifact role runtime config猜测。Artifact Data Worker在stage/claim前验证自身installed scanner manifest支持该digest。
