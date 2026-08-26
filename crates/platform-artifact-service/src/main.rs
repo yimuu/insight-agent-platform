@@ -9,10 +9,12 @@ use insight_platform_artifact_broker::{
     BrokeredSchedulerSkillPackageReader, BrokeredSchedulerTypedPlanReader,
 };
 mod capacity;
+mod dependency_observer;
 mod guest_identity;
 mod scan_worker;
 
 use capacity::artifact_capacity_metric;
+use dependency_observer::install_artifact_dependency_metrics;
 use guest_identity::GvisorGuestIdentityConfig;
 use insight_platform_artifact_rpc::{
     proto::{
@@ -369,9 +371,14 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::SchemaMismatch)?;
     let read_repository = Arc::new(PgRepository::new(read_pool));
     let work_repository = Arc::new(PgRepository::new(work_pool));
-    let providers = AwsArtifactProviderCatalog::install(config.artifact_provider_catalog.clone())
-        .await
-        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let (dependency_metrics, dependency_observer) =
+        install_artifact_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
+    let providers = AwsArtifactProviderCatalog::install_with_observer(
+        config.artifact_provider_catalog.clone(),
+        dependency_observer,
+    )
+    .await
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
     providers
         .check_readiness()
         .await
@@ -548,7 +555,8 @@ async fn run() -> Result<(), ProcessError> {
                 ),
             ],
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics),
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)

@@ -4,10 +4,12 @@
 //! deployment can supply short-lived workload identity (for example Kubernetes web identity).
 
 use super::{
-    valid_opaque_object_key, ArtifactBrokerConfigurationError, ArtifactObjectBytes,
+    valid_opaque_object_key, ArtifactBrokerConfigurationError, ArtifactExternalDependency,
+    ArtifactExternalDependencyObserver, ArtifactExternalDependencyOutcome, ArtifactObjectBytes,
     ArtifactObjectDeletionReceipt, ArtifactObjectMetadata, ArtifactObjectReferenceUnsealError,
     ArtifactObjectReferenceUnsealer, ArtifactObjectStoreError, DecryptedArtifactObjectReference,
-    InstalledArtifactObjectStore, InstalledArtifactObjectStoreCatalog, MAX_ARTIFACT_BROKER_TIMEOUT,
+    InstalledArtifactObjectStore, InstalledArtifactObjectStoreCatalog,
+    NoopArtifactExternalDependencyObserver, MAX_ARTIFACT_BROKER_TIMEOUT,
     MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS,
 };
 use async_trait::async_trait;
@@ -213,6 +215,13 @@ impl AwsArtifactProviderCatalog {
     pub async fn install(
         config: AwsArtifactProviderCatalogConfig,
     ) -> Result<Self, AwsArtifactProviderConfigError> {
+        Self::install_with_observer(config, Arc::new(NoopArtifactExternalDependencyObserver)).await
+    }
+
+    pub async fn install_with_observer(
+        config: AwsArtifactProviderCatalogConfig,
+        observer: Arc<dyn ArtifactExternalDependencyObserver>,
+    ) -> Result<Self, AwsArtifactProviderConfigError> {
         config.validate()?;
 
         let mut kms_by_digest = BTreeMap::new();
@@ -240,6 +249,7 @@ impl AwsArtifactProviderCatalog {
                 Arc::new(AwsKmsKeyBinding {
                     client,
                     key_id: Arc::from(binding.key_id),
+                    observer: Arc::clone(&observer),
                 }),
             );
         }
@@ -278,6 +288,7 @@ impl AwsArtifactProviderCatalog {
                 s3: client.clone(),
                 bucket: Arc::clone(&bucket),
                 kms: Arc::clone(&kms),
+                observer: Arc::clone(&observer),
             });
             kms_by_storage_digest.insert(binding.storage_binding_digest.clone(), Arc::clone(&kms));
             if binding.storage_binding_digest == write_digest {
@@ -287,6 +298,7 @@ impl AwsArtifactProviderCatalog {
                     storage_binding_digest: binding.storage_binding_digest.clone(),
                     maximum_object_bytes: binding.maximum_object_bytes,
                     kms: Arc::clone(&kms),
+                    observer: Arc::clone(&observer),
                 });
             }
             stores.push(Arc::new(AwsS3ObjectStore {
@@ -294,6 +306,7 @@ impl AwsArtifactProviderCatalog {
                 bucket,
                 storage_binding_digest: binding.storage_binding_digest,
                 maximum_object_bytes: binding.maximum_object_bytes,
+                observer: Arc::clone(&observer),
             }));
         }
 
@@ -372,6 +385,7 @@ pub struct AwsArtifactUploadProvider {
     storage_binding_digest: Sha256Digest,
     maximum_object_bytes: u64,
     kms: Arc<AwsKmsKeyBinding>,
+    observer: Arc<dyn ArtifactExternalDependencyObserver>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -437,7 +451,7 @@ impl AwsArtifactUploadProvider {
             request.encryption_domain_id,
             &self.kms.key_id,
         );
-        let encrypted = self
+        let result = self
             .kms
             .client
             .encrypt()
@@ -446,8 +460,13 @@ impl AwsArtifactUploadProvider {
             .set_encryption_context(Some(encryption_context))
             .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
             .send()
-            .await
-            .map_err(|_| AwsArtifactUploadError::KmsUnavailable)?;
+            .await;
+        observe_external(
+            &self.kms.observer,
+            ArtifactExternalDependency::Kms,
+            result.is_ok(),
+        );
+        let encrypted = result.map_err(|_| AwsArtifactUploadError::KmsUnavailable)?;
         if encrypted.key_id() != Some(&*self.kms.key_id)
             || encrypted.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
         {
@@ -534,15 +553,20 @@ impl AwsArtifactUploadProvider {
             return Err(AwsArtifactUploadError::InvalidRequest);
         }
         let object_key = format!("v1/{tenant_id}/{artifact_id}/{blob_id}");
-        let output = self
+        let result = self
             .s3
             .head_object()
             .bucket(&*self.bucket)
             .key(&object_key)
             .set_version_id(expected_generation.map(ToOwned::to_owned))
             .send()
-            .await
-            .map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
+            .await;
+        observe_external(
+            &self.observer,
+            ArtifactExternalDependency::S3,
+            result.is_ok(),
+        );
+        let output = result.map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
         let observed_generation = output
             .version_id()
             .filter(|generation| valid_object_generation(generation))
@@ -593,24 +617,31 @@ struct AwsArtifactProviderReadiness {
     s3: S3Client,
     bucket: Arc<str>,
     kms: Arc<AwsKmsKeyBinding>,
+    observer: Arc<dyn ArtifactExternalDependencyObserver>,
 }
 
 impl AwsArtifactProviderReadiness {
     async fn check(&self) -> Result<(), AwsArtifactProviderReadinessError> {
-        self.s3
-            .head_bucket()
-            .bucket(&*self.bucket)
-            .send()
-            .await
-            .map_err(|_| AwsArtifactProviderReadinessError::StorageUnavailable)?;
-        let output = self
+        let result = self.s3.head_bucket().bucket(&*self.bucket).send().await;
+        observe_external(
+            &self.observer,
+            ArtifactExternalDependency::S3,
+            result.is_ok(),
+        );
+        result.map_err(|_| AwsArtifactProviderReadinessError::StorageUnavailable)?;
+        let result = self
             .kms
             .client
             .describe_key()
             .key_id(&*self.kms.key_id)
             .send()
-            .await
-            .map_err(|_| AwsArtifactProviderReadinessError::KmsUnavailable)?;
+            .await;
+        observe_external(
+            &self.kms.observer,
+            ArtifactExternalDependency::Kms,
+            result.is_ok(),
+        );
+        let output = result.map_err(|_| AwsArtifactProviderReadinessError::KmsUnavailable)?;
         let metadata = output
             .key_metadata()
             .ok_or(AwsArtifactProviderReadinessError::KmsInvalidEvidence)?;
@@ -638,6 +669,7 @@ struct AwsS3ObjectStore {
     bucket: Arc<str>,
     storage_binding_digest: Sha256Digest,
     maximum_object_bytes: u64,
+    observer: Arc<dyn ArtifactExternalDependencyObserver>,
 }
 
 impl fmt::Debug for AwsS3ObjectStore {
@@ -668,27 +700,32 @@ impl InstalledArtifactObjectStore for AwsS3ObjectStore {
         if !valid_opaque_object_key(object_key) || !valid_object_generation(object_generation) {
             return Err(ArtifactObjectStoreError::Rejected);
         }
-        let output = self
+        let result = self
             .client
             .head_object()
             .bucket(&*self.bucket)
             .key(object_key)
             .version_id(object_generation)
             .send()
-            .await
-            .map_err(|error| {
-                if error
-                    .as_service_error()
-                    .is_some_and(|service| service.is_not_found())
-                    || error
-                        .raw_response()
-                        .is_some_and(|response| response.status().as_u16() == 404)
-                {
-                    ArtifactObjectStoreError::NotFound
-                } else {
-                    ArtifactObjectStoreError::Unavailable
-                }
-            })?;
+            .await;
+        observe_external(
+            &self.observer,
+            ArtifactExternalDependency::S3,
+            result.is_ok(),
+        );
+        let output = result.map_err(|error| {
+            if error
+                .as_service_error()
+                .is_some_and(|service| service.is_not_found())
+                || error
+                    .raw_response()
+                    .is_some_and(|response| response.status().as_u16() == 404)
+            {
+                ArtifactObjectStoreError::NotFound
+            } else {
+                ArtifactObjectStoreError::Unavailable
+            }
+        })?;
         metadata_from_s3(
             output.version_id(),
             output.content_length(),
@@ -709,27 +746,32 @@ impl InstalledArtifactObjectStore for AwsS3ObjectStore {
         {
             return Err(ArtifactObjectStoreError::Rejected);
         }
-        let mut output = self
+        let result = self
             .client
             .get_object()
             .bucket(&*self.bucket)
             .key(object_key)
             .version_id(object_generation)
             .send()
-            .await
-            .map_err(|error| {
-                if error
-                    .as_service_error()
-                    .is_some_and(|service| service.is_no_such_key())
-                    || error
-                        .raw_response()
-                        .is_some_and(|response| response.status().as_u16() == 404)
-                {
-                    ArtifactObjectStoreError::NotFound
-                } else {
-                    ArtifactObjectStoreError::Unavailable
-                }
-            })?;
+            .await;
+        observe_external(
+            &self.observer,
+            ArtifactExternalDependency::S3,
+            result.is_ok(),
+        );
+        let mut output = result.map_err(|error| {
+            if error
+                .as_service_error()
+                .is_some_and(|service| service.is_no_such_key())
+                || error
+                    .raw_response()
+                    .is_some_and(|response| response.status().as_u16() == 404)
+            {
+                ArtifactObjectStoreError::NotFound
+            } else {
+                ArtifactObjectStoreError::Unavailable
+            }
+        })?;
         let provider_limit = usize::try_from(self.maximum_object_bytes)
             .unwrap_or(usize::MAX)
             .min(maximum_bytes);
@@ -774,15 +816,20 @@ impl InstalledArtifactObjectStore for AwsS3ObjectStore {
         if !valid_opaque_object_key(object_key) || !valid_object_generation(object_generation) {
             return Err(ArtifactObjectStoreError::Rejected);
         }
-        let output = self
+        let result = self
             .client
             .delete_object()
             .bucket(&*self.bucket)
             .key(object_key)
             .version_id(object_generation)
             .send()
-            .await
-            .map_err(|_| ArtifactObjectStoreError::Unavailable)?;
+            .await;
+        observe_external(
+            &self.observer,
+            ArtifactExternalDependency::S3,
+            result.is_ok(),
+        );
+        let output = result.map_err(|_| ArtifactObjectStoreError::Unavailable)?;
         if output.version_id() != Some(object_generation) || output.delete_marker() == Some(true) {
             return Err(ArtifactObjectStoreError::InvalidEvidence);
         }
@@ -807,6 +854,7 @@ impl InstalledArtifactObjectStore for AwsS3ObjectStore {
 struct AwsKmsKeyBinding {
     client: KmsClient,
     key_id: Arc<str>,
+    observer: Arc<dyn ArtifactExternalDependencyObserver>,
 }
 
 struct AwsKmsArtifactObjectReferenceUnsealer {
@@ -837,7 +885,7 @@ impl AwsKmsArtifactObjectReferenceUnsealer {
             encryption_domain_id,
             key_id,
         );
-        let output = binding
+        let result = binding
             .client
             .decrypt()
             .ciphertext_blob(Blob::new(ciphertext))
@@ -845,21 +893,26 @@ impl AwsKmsArtifactObjectReferenceUnsealer {
             .set_encryption_context(Some(encryption_context))
             .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
             .send()
-            .await
-            .map_err(|error| match error.as_service_error() {
-                Some(service)
-                    if service.is_incorrect_key_exception()
-                        || service.is_invalid_ciphertext_exception()
-                        || service.is_invalid_grant_token_exception()
-                        || service.is_invalid_key_usage_exception()
-                        || service.is_not_found_exception()
-                        || service.is_disabled_exception()
-                        || service.is_kms_invalid_state_exception() =>
-                {
-                    ArtifactObjectReferenceUnsealError::Rejected
-                }
-                _ => ArtifactObjectReferenceUnsealError::Unavailable,
-            })?;
+            .await;
+        observe_external(
+            &binding.observer,
+            ArtifactExternalDependency::Kms,
+            result.is_ok(),
+        );
+        let output = result.map_err(|error| match error.as_service_error() {
+            Some(service)
+                if service.is_incorrect_key_exception()
+                    || service.is_invalid_ciphertext_exception()
+                    || service.is_invalid_grant_token_exception()
+                    || service.is_invalid_key_usage_exception()
+                    || service.is_not_found_exception()
+                    || service.is_disabled_exception()
+                    || service.is_kms_invalid_state_exception() =>
+            {
+                ArtifactObjectReferenceUnsealError::Rejected
+            }
+            _ => ArtifactObjectReferenceUnsealError::Unavailable,
+        })?;
         if output.key_id() != Some(key_id)
             || output.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
             || output.ciphertext_for_recipient().is_some()
@@ -1049,6 +1102,21 @@ fn map_catalog_configuration_error(
             AwsArtifactProviderConfigError::InvalidCatalog
         }
     }
+}
+
+fn observe_external(
+    observer: &Arc<dyn ArtifactExternalDependencyObserver>,
+    dependency: ArtifactExternalDependency,
+    success: bool,
+) {
+    observer.observe(
+        dependency,
+        if success {
+            ArtifactExternalDependencyOutcome::Success
+        } else {
+            ArtifactExternalDependencyOutcome::Failure
+        },
+    );
 }
 
 #[cfg(test)]

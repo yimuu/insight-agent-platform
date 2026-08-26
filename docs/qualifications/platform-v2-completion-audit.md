@@ -77,6 +77,10 @@ r302把Egress Broker的Secret/KMS series接到七类实际AWS SDK请求返回边
 identity、provider、endpoint、ARN、error或Secret material。Secret/Egress tests、strict Clippy、redaction与部署门禁通过。真实AWS fault/rotation、
 production scrape及L5 profile仍待外部环境；其他role的Egress/NATS/S3/PostgreSQL接线仍是仓库内缺口。
 
+r303把Artifact三role的S3/KMS series接到KMS encrypt/decrypt/describe及S3 head-bucket/head/get/delete真实SDK返回边界；本地授权、presign、
+binding、key、generation或limit拒绝不污染依赖计数，observer不接收业务或存储标识。Broker/三binary tests、strict Clippy、redaction及部署门禁
+通过。Artifact PostgreSQL health仍是仓库内缺口；真实S3/KMS fault、production scrape与L5 profile仍是外部门禁。
+
 ## 3. Phase 1 审计
 
 ### 已满足

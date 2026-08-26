@@ -526,6 +526,12 @@ Secrets Manager的describe/get/delete/create与KMS的describe/encrypt/decrypt只
 identity或permit拒绝不冒充外部故障。Egress composition把两种nominal依赖映射到shared `secret`/`kms` series，并与既有11-lane capacity同surface导出；
 observer不接收tenant、provider、endpoint、ARN、错误或Secret正文。Secret/Egress tests、strict Clippy及部署/redaction门禁通过；真实AWS fault仍归L4～L5。
 
+r303把Artifact Gateway、Data Worker与Maintenance三role的S3/KMS health接到Artifact AWS adapter真实SDK请求返回边界。KMS
+encrypt/decrypt/describe与S3 head-bucket/head-object/get-object/delete-object分别记录fixed success/failure；presign、本地授权、binding、object key、
+generation、limit或catalog拒绝不冒充外部调用。共享observer不接收bucket、object、tenant、binding、endpoint、error或bytes，三role各自把同一
+nominal observer映射到自身process metrics，并保持既有独立capacity与权限。Broker/三binary tests、strict Clippy、redaction及Artifact/observability
+部署门禁通过；PostgreSQL health、真实S3/KMS fault和production scrape仍归后续批次/L4～L5。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

@@ -79,6 +79,40 @@ pub enum ArtifactBrokerConfigurationError {
     StorageBindingCatalogTooLarge,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactExternalDependency {
+    S3,
+    Kms,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactExternalDependencyOutcome {
+    Success,
+    Failure,
+}
+
+/// Process-installed observer for actual S3/KMS SDK calls. No storage binding, bucket, key,
+/// tenant, object identity, endpoint, error text or object bytes cross this port.
+pub trait ArtifactExternalDependencyObserver: Send + Sync {
+    fn observe(
+        &self,
+        dependency: ArtifactExternalDependency,
+        outcome: ArtifactExternalDependencyOutcome,
+    );
+}
+
+#[derive(Debug)]
+struct NoopArtifactExternalDependencyObserver;
+
+impl ArtifactExternalDependencyObserver for NoopArtifactExternalDependencyObserver {
+    fn observe(
+        &self,
+        _dependency: ArtifactExternalDependency,
+        _outcome: ArtifactExternalDependencyOutcome,
+    ) {
+    }
+}
+
 /// KMS plaintext. It cannot be cloned or formatted and is zeroed on drop.
 pub struct DecryptedArtifactObjectReference(Vec<u8>);
 

@@ -41,6 +41,9 @@ use uuid::Uuid;
 #[path = "../capacity.rs"]
 mod capacity;
 use capacity::artifact_capacity_metric;
+#[path = "../dependency_observer.rs"]
+mod dependency_observer;
+use dependency_observer::install_artifact_dependency_metrics;
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_MAINTENANCE_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_ARTIFACT_MAINTENANCE_CONFIG_DIGEST";
@@ -163,9 +166,14 @@ async fn run() -> Result<(), MaintenanceError> {
         .map_err(|_| MaintenanceError::SchemaMismatch)?;
     let repository = Arc::new(PgRepository::new(pool));
     let broker_limits = config.broker_limits()?;
-    let providers = AwsArtifactProviderCatalog::install(config.artifact_provider_catalog)
-        .await
+    let (dependency_metrics, dependency_observer) = install_artifact_dependency_metrics()
         .map_err(|_| MaintenanceError::InvalidConfiguration)?;
+    let providers = AwsArtifactProviderCatalog::install_with_observer(
+        config.artifact_provider_catalog,
+        dependency_observer,
+    )
+    .await
+    .map_err(|_| MaintenanceError::InvalidConfiguration)?;
     providers
         .check_readiness()
         .await
@@ -199,7 +207,8 @@ async fn run() -> Result<(), MaintenanceError> {
                 BrokeredArtifactDeletionBackend::capacity_snapshot,
             )],
         )
-        .map_err(|_| MaintenanceError::InvalidConfiguration)?,
+        .map_err(|_| MaintenanceError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics),
     );
     let server = axum::serve(listener, process_observability_router(Arc::clone(&metrics)))
         .with_graceful_shutdown({

@@ -61,6 +61,9 @@ use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 #[path = "../capacity.rs"]
 mod capacity;
 use capacity::artifact_capacity_metric;
+#[path = "../dependency_observer.rs"]
+mod dependency_observer;
+use dependency_observer::install_artifact_dependency_metrics;
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CONFIG_DIGEST";
@@ -256,9 +259,14 @@ async fn run() -> Result<(), GatewayError> {
     verify_schema(&pool)
         .await
         .map_err(|_| GatewayError::SchemaMismatch)?;
-    let providers = AwsArtifactProviderCatalog::install(config.artifact_provider_catalog)
-        .await
-        .map_err(|_| GatewayError::InvalidConfiguration)?;
+    let (dependency_metrics, dependency_observer) =
+        install_artifact_dependency_metrics().map_err(|_| GatewayError::InvalidConfiguration)?;
+    let providers = AwsArtifactProviderCatalog::install_with_observer(
+        config.artifact_provider_catalog,
+        dependency_observer,
+    )
+    .await
+    .map_err(|_| GatewayError::InvalidConfiguration)?;
     providers
         .check_readiness()
         .await
@@ -317,7 +325,8 @@ async fn run() -> Result<(), GatewayError> {
                 BrokeredGatewayArtifactReader::capacity_snapshot,
             )],
         )
-        .map_err(|_| GatewayError::InvalidConfiguration)?,
+        .map_err(|_| GatewayError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics),
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)
