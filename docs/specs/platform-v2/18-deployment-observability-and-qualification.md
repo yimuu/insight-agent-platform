@@ -640,6 +640,11 @@ r323把first-release dependency owner inventory固化到observability checker：
 closed。observability、Sandbox及redaction门禁通过；六类external dependency的仓库内L1接线至此闭合，production scrape、fault injection、其他domain
 backlog/recovery series及L4～L5仍Pending。
 
+r324消除Orchestration process surface在r312后形成的重复Prometheus标签集。共享PostgreSQL transport observer仍是
+`insight_platform_dependency_observations_total{component_role,dependency,outcome}`的唯一owner；durable Job/Outbox只读查询的观测成功/失败改用独立
+`insight_platform_durable_observations_total{component_role,outcome}`，并保留last-known snapshot语义。组合render测试断言同一PostgreSQL dependency
+series恰好一次，目标tests、strict Clippy、observability/redaction、format与diff门禁通过；没有production Prometheus scrape、真实fault或L4～L5新增证据。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

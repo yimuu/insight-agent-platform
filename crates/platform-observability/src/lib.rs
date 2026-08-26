@@ -667,8 +667,8 @@ pub struct OrchestrationOperationalMetrics {
     durable_outbox_expired_claims: AtomicU64,
     durable_outbox_expired_oldest_lag_milliseconds: AtomicU64,
     durable_outbox_dead_events: AtomicU64,
-    database_observation_successes: AtomicU64,
-    database_observation_failures: AtomicU64,
+    durable_observation_successes: AtomicU64,
+    durable_observation_failures: AtomicU64,
 }
 
 impl OrchestrationOperationalMetrics {
@@ -710,12 +710,12 @@ impl OrchestrationOperationalMetrics {
             seconds_to_milliseconds(snapshot.expired_oldest_lag_seconds),
             Ordering::Release,
         );
-        self.database_observation_successes
+        self.durable_observation_successes
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn observe_database_failure(&self) {
-        self.database_observation_failures
+    pub fn observe_durable_observation_failure(&self) {
+        self.durable_observation_failures
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -734,7 +734,7 @@ impl OrchestrationOperationalMetrics {
         );
         self.durable_outbox_dead_events
             .store(snapshot.dead_events, Ordering::Release);
-        self.database_observation_successes
+        self.durable_observation_successes
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -841,20 +841,20 @@ impl OrchestrationOperationalMetrics {
             let _ = writeln!(output, "insight_platform_outbox_lag_seconds{{component_role=\"{role}\",queue=\"{queue}\"}} {}", lag_milliseconds as f64 / 1_000.0);
         }
         output.push_str(
-            "# HELP insight_platform_dependency_observations_total Bounded dependency observation outcomes.\n\
-             # TYPE insight_platform_dependency_observations_total counter\n",
+            "# HELP insight_platform_durable_observations_total PostgreSQL-backed durable queue observation outcomes.\n\
+             # TYPE insight_platform_durable_observations_total counter\n",
         );
         for (outcome, count) in [
             (
                 "success",
-                self.database_observation_successes.load(Ordering::Acquire),
+                self.durable_observation_successes.load(Ordering::Acquire),
             ),
             (
                 "failure",
-                self.database_observation_failures.load(Ordering::Acquire),
+                self.durable_observation_failures.load(Ordering::Acquire),
             ),
         ] {
-            let _ = writeln!(output, "insight_platform_dependency_observations_total{{component_role=\"{role}\",dependency=\"postgresql\",outcome=\"{outcome}\"}} {count}");
+            let _ = writeln!(output, "insight_platform_durable_observations_total{{component_role=\"{role}\",outcome=\"{outcome}\"}} {count}");
         }
     }
 }
@@ -1077,7 +1077,7 @@ mod tests {
             expired_leases: 2,
             expired_oldest_lag_seconds: 3.25,
         });
-        operational.observe_database_failure();
+        operational.observe_durable_observation_failure();
         operational.observe_durable_outbox(DurableOutboxSnapshot {
             due_events: 4,
             due_oldest_age_seconds: 8.5,
@@ -1085,12 +1085,22 @@ mod tests {
             expired_oldest_lag_seconds: 1.25,
             dead_events: 1,
         });
+        let dependencies = Arc::new(
+            DependencyObservationMetrics::install(&[PlatformDependency::Postgresql]).unwrap(),
+        );
+        dependencies
+            .observe(
+                PlatformDependency::Postgresql,
+                DependencyObservationOutcome::Success,
+            )
+            .unwrap();
         let metrics = ProcessHttpMetrics::install_with_orchestration(
             "scheduler-recovery",
             PROCESS_OBSERVABILITY_OPERATIONS,
             operational,
         )
-        .unwrap();
+        .unwrap()
+        .with_dependency_observations(dependencies);
         let rendered = metrics.render_prometheus();
         assert!(rendered.contains("lane=\"business\",state=\"available\"} 3"));
         assert!(rendered.contains("lane=\"business\",state=\"used\"} 5"));
@@ -1099,8 +1109,14 @@ mod tests {
         assert!(rendered.contains("queue=\"due\"} 9"));
         assert!(rendered.contains("queue=\"expired_lease\"} 2"));
         assert!(rendered.contains("queue=\"due\"} 12.5"));
-        assert!(rendered.contains("dependency=\"postgresql\",outcome=\"success\"} 2"));
-        assert!(rendered.contains("dependency=\"postgresql\",outcome=\"failure\"} 1"));
+        assert!(rendered.contains(
+            "insight_platform_durable_observations_total{component_role=\"scheduler-recovery\",outcome=\"success\"} 2"
+        ));
+        assert!(rendered.contains(
+            "insight_platform_durable_observations_total{component_role=\"scheduler-recovery\",outcome=\"failure\"} 1"
+        ));
+        let dependency_series = "insight_platform_dependency_observations_total{component_role=\"scheduler-recovery\",dependency=\"postgresql\",outcome=\"success\"} 1";
+        assert_eq!(rendered.matches(dependency_series).count(), 1);
         assert!(rendered.contains(
             "insight_platform_outbox_events{component_role=\"scheduler-recovery\",queue=\"due\"} 4"
         ));

@@ -672,6 +672,11 @@
 > Artifact/Secret、Model/Sandbox NATS adapter边界。移除observer/sampler/client注入会fail closed。相关门禁通过；六类external dependency仓库内L1接线
 > 闭合，但production scrape/fault、其他domain backlog/recovery series与L4～L5仍Pending。
 
+> 2026-08-27 implementation evidence：r324修复r312后Orchestration process scrape中同一PostgreSQL dependency标签集被两个renderer重复导出的
+> 问题。共享transport observer继续唯一拥有`insight_platform_dependency_observations_total`；durable Job/Outbox只读查询结果改由独立
+> `insight_platform_durable_observations_total`表达。组合render测试锁定dependency series恰好一次，目标tests、strict Clippy、observability/
+> redaction、format与diff门禁通过；本批不提供production scrape、真实fault或L4～L5证据。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

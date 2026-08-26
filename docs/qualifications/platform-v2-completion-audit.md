@@ -168,6 +168,10 @@ r323以observability checker锁定全部first-release dependency owner及AWS/NAT
 fail closed。门禁通过；PostgreSQL/NATS/S3/KMS/Secret/Egress六类external dependency仓库内L1接线闭合，但production scrape/fault、其他domain backlog/
 recovery series及L4～L5仍Pending。
 
+r324消除Orchestration process scrape中重复的PostgreSQL dependency Prometheus标签集：共享transport observer唯一拥有dependency outcome，durable
+Job/Outbox查询健康改用独立`insight_platform_durable_observations_total`。组合render测试断言同一dependency series只出现一次；目标tests、strict
+Clippy、observability/redaction、format与diff门禁通过。该仓库内修复不新增production scrape、真实fault或L4～L5证据。
+
 ## 3. Phase 1 审计
 
 ### 已满足

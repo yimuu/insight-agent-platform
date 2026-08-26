@@ -446,6 +446,11 @@ production scrape新证据。
 r323以observability checker锁定全部first-release dependency owner及AWS/NATS adapter inventory；移除observer、sampler或production client注入会fail
 closed。六类external dependency仓库内L1接线闭合；production scrape/fault、其他domain backlog/recovery series及L4～L5仍Pending。
 
+r324修复Orchestration process scrape中的重复Prometheus标签集：PostgreSQL dependency transport outcome继续只由共享
+`insight_platform_dependency_observations_total`拥有，durable queue查询本身的成功/失败改由
+`insight_platform_durable_observations_total`表达。组合render测试锁定同一dependency series只出现一次；目标测试、strict Clippy、
+observability/redaction、format与diff门禁通过。该修复不新增production scrape、fault injection或L4～L5证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

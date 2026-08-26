@@ -416,7 +416,7 @@ async fn run() -> Result<(), ProcessError> {
                         expired_leases: snapshot.expired_leases,
                         expired_oldest_lag_seconds: snapshot.expired_oldest_lag_seconds,
                     }),
-                    Err(_) => operational_metrics.observe_database_failure(),
+                    Err(_) => operational_metrics.observe_durable_observation_failure(),
                 }
                 match observe_durable_outbox(bulkheads.critical_control_pool()).await {
                     Ok(snapshot) => operational_metrics.observe_durable_outbox(DurableOutboxSnapshot {
@@ -426,7 +426,7 @@ async fn run() -> Result<(), ProcessError> {
                         expired_oldest_lag_seconds: snapshot.expired_oldest_lag_seconds,
                         dead_events: snapshot.dead_events,
                     }),
-                    Err(_) => operational_metrics.observe_database_failure(),
+                    Err(_) => operational_metrics.observe_durable_observation_failure(),
                 }
                 if runtime.is_finished() {
                     dependency_cancellation.cancel();
