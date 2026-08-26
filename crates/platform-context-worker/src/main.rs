@@ -4,20 +4,23 @@
 //! Sandbox, or arbitrary SQL execution client; exact Job state remains in PostgreSQL.
 
 mod dependency_observer;
+mod durable_queue_observer;
 
 use dependency_observer::install_context_dependency_metrics;
+use durable_queue_observer::run_context_queue_sampler;
 
 use insight_platform_context_worker::{
     ContextWorkerConfig, ContextWorkerDriver, ContextWorkerTiming, NativeCatalogAdapter,
     CONTEXT_WORKER_ROLE,
 };
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
-    ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
+    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JobKind, JsonLimits,
+    ResourceId, ResourceKind, Sha256Digest, WorkClass, WorkerManifest,
 };
 use insight_platform_observability::{
     process_observability_router, run_worker_permit_sampler, update_worker_permits,
-    ProcessHttpMetrics, WorkerPermitMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    DurableJobQueueMetrics, ProcessHttpMetrics, WorkerPermitMetrics,
+    PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{
     dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
@@ -150,6 +153,7 @@ async fn run() -> Result<(), ProcessError> {
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
     let database_health_pool = pool.clone();
+    let durable_queue_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
     let process_generation_id =
         ResourceId::from_uuid_v7(ResourceKind::WorkerProcessGeneration, Uuid::now_v7())
@@ -172,6 +176,7 @@ async fn run() -> Result<(), ProcessError> {
     let dependency_metrics = install_context_dependency_metrics(false)
         .map_err(|_| ProcessError::InvalidConfiguration)?;
     debug_assert!(dependency_metrics.egress.is_none());
+    let durable_queue_metrics = Arc::new(DurableJobQueueMetrics::default());
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_worker_permits(
             "context-native-worker",
@@ -179,7 +184,8 @@ async fn run() -> Result<(), ProcessError> {
             Arc::clone(&permit_metrics),
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?
-        .with_dependency_observations(dependency_metrics.process),
+        .with_dependency_observations(dependency_metrics.process)
+        .with_durable_job_queue(Arc::clone(&durable_queue_metrics)),
     );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
@@ -197,6 +203,12 @@ async fn run() -> Result<(), ProcessError> {
             run_postgres_health_sampler(
                 database_health_pool,
                 dependency_metrics.postgres,
+                sampler_cancellation.child_token(),
+            ),
+            run_context_queue_sampler(
+                durable_queue_pool,
+                durable_queue_metrics,
+                JobKind::ContextQueryNative,
                 sampler_cancellation,
             ),
         );

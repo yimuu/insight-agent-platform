@@ -707,6 +707,11 @@
 > sampler受process supervision并接到固定role metrics surface，新增两条role-set due/expired alert、runbook和静态inventory。Artifact目标8/8、baseline
 > 2/2入口、strict Clippy、Artifact部署、observability/redaction/format门禁通过；无fresh PG、production S3/KMS scrape或L4～L5，仅关闭Artifact
 > durable backlog/recovery仓库内L1接线。
+>
+> 2026-08-27 implementation evidence：r331让Context Native/Remote/Subscription三个production Worker分别按`ContextQueryNative`、
+> `ContextQueryRemote`、`ContextSubscriptionRefresh` exact JobKind采样，避免Dataset build或其他Context owner混计；sampler与permit/PostgreSQL health
+> 共同受process supervision。目标13/13、strict Clippy、Context部署、observability/redaction/format门禁通过；无fresh PG、production scrape或
+> remote fault，仅关闭三条Context Worker durable backlog/recovery仓库内L1接线。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

@@ -479,6 +479,11 @@ r330让Artifact Data Worker按`ArtifactScan|ArtifactRescan`、Maintenance按`Art
 due/expired告警、runbook和静态部署inventory；目标8/8、baseline 2/2入口、strict Clippy及Artifact/observability/redaction门禁通过。无fresh PG、
 production S3/KMS scrape或L4～L5，本批只关闭Artifact两条queue的仓库内L1接线。
 
+r331把Context Native、Remote与Subscription production Worker分别固定到`ContextQueryNative`、`ContextQueryRemote`与
+`ContextSubscriptionRefresh` durable queue；同WorkClass下Dataset build不会混入三条role series。sampler与permit/PostgreSQL health共同受process
+监督，新增Context role-set due/expired告警、runbook和静态inventory。目标13/13、strict Clippy、Context部署、observability/redaction门禁通过；
+无fresh PG、production scrape或remote fault，本批只关闭三条Context Worker queue的仓库内L1接线。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

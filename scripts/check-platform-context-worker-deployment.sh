@@ -14,6 +14,7 @@ root = Path(sys.argv[1])
 rendered = Path(sys.argv[2]).read_text(encoding="utf-8")
 dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 source = (root / "crates/platform-context-worker/src/main.rs").read_text(encoding="utf-8")
+remote_source = (root / "crates/platform-context-worker/src/remote_main.rs").read_text(encoding="utf-8")
 subscription_source = (root / "crates/platform-context-worker/src/subscription_main.rs").read_text(encoding="utf-8")
 failures = []
 
@@ -54,6 +55,14 @@ for token in [
 for token in ["SubscriptionContextWorkerDriver", "McpResourceRefreshGrpcClient"]:
     if token not in subscription_source:
         failures.append(f"subscription Context Worker composition is missing {token}")
+for role_source, kind in (
+    (source, "JobKind::ContextQueryNative"),
+    (remote_source, "JobKind::ContextQueryRemote"),
+    (subscription_source, "JobKind::ContextSubscriptionRefresh"),
+):
+    for token in ("with_durable_job_queue", "run_context_queue_sampler", kind):
+        if token not in role_source:
+            failures.append(f"Context Worker durable queue composition is missing {token}")
 if failures:
     raise SystemExit("\n".join(failures))
 PY

@@ -685,6 +685,10 @@ Host RPC composition和真实进程kill-window仍未完成。
 
 ## 25. 未决问题
 
+r331将Native query、Remote query与MCP subscription refresh按三个exact JobKind接入各自production Worker metrics surface；ContextDataset build仍由
+独立owner/lane承担，不计入这些Worker backlog。固定role due/expired告警与runbook要求关联permit、PostgreSQL及对应adapter/Host依赖，禁止跨role
+搬移或手工重放remote I/O。目标13/13、strict Clippy和静态部署/observability/redaction门禁通过；production scrape、fault与L4/L5仍按18取证。
+
 CR-181 cross-review已确认Plan v4 Context dispatch/result binding并恢复Accepted；r234已补齐expired-lease L2 owner recovery，独立production
 Context Worker及NativeCatalog受限部署已经接线，r240关闭其真实多进程kill-window；remote backend protocol L3 evidence仍待完成。
 

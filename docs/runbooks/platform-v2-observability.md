@@ -123,6 +123,20 @@ outcomes and Artifact owner fencing. Preserve the Artifact/Blob generation and J
 clear a lease or force Ready/Deleted through direct SQL; allow the owning recovery transaction to
 revalidate storage evidence and settle the attempt.
 
+## InsightPlatformContextDurableJobLagHigh
+
+Use `component_role` to distinguish Native query, Remote query and subscription-refresh work, then
+correlate due count and age with PostgreSQL, local permits and the exact adapter dependency. Do not
+move work between roles or change JobKind; repair the qualified adapter/Host path or use the
+qualified GitOps scaling path.
+
+## InsightPlatformContextExpiredLeaseRecoveryLagHigh
+
+Inspect the affected Context role's process restarts, PostgreSQL time, quota and Job fence. Remote
+and subscription work must preserve their frozen request/execution identity; never replay external
+I/O or clear leases manually. Let the Context owner transaction choose safe retry, recovery or
+terminal settlement.
+
 ## InsightPlatformDurableObservationFailureRatioHigh
 
 Confirm the affected fixed `component_role`, then correlate PostgreSQL transport health and pool

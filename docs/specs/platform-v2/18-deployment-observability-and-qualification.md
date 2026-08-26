@@ -679,6 +679,10 @@ PostgreSQL sampler和既有process metrics surface。两条role-set due/expired 
 入口、strict Clippy、Artifact部署、observability和redaction门禁通过。没有fresh PostgreSQL、production Prometheus、S3/KMS fault或L4～L5证据；
 因此只关闭Artifact durable backlog/recovery的仓库内L1 wiring。
 
+r331为Context Native、Remote与Subscription Worker按exact JobKind接入三个受监督PostgreSQL sampler，明确排除同WorkClass的Dataset build和其他owner。
+Context role-set due/expired symptom alert、runbook及静态inventory同步锁定；目标13/13、strict Clippy、Context部署、observability/redaction门禁通过。
+没有fresh PostgreSQL、production Prometheus、remote endpoint fault或L4～L5证据，因此只关闭三条Context Worker queue的仓库内L1 wiring。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。
