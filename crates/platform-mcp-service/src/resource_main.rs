@@ -3,7 +3,7 @@
 mod capacity;
 mod dependency_observer;
 
-use dependency_observer::install_postgres_dependency_metrics;
+use dependency_observer::install_mcp_dependency_metrics;
 
 use insight_platform_contracts::{canonical_digest, parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
@@ -182,11 +182,13 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::SchemaMismatch)?;
     let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
-    let (dependency_metrics, postgres_observer) =
-        install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
-    let egress = Arc::new(EgressBrokerGrpcClient::new(
+    let (dependency_metrics, postgres_observer, egress_observer) =
+        install_mcp_dependency_metrics(true).map_err(|_| ProcessError::InvalidConfiguration)?;
+    let postgres_observer = postgres_observer.ok_or(ProcessError::InvalidConfiguration)?;
+    let egress = Arc::new(EgressBrokerGrpcClient::new_with_observer(
         connect_egress(&config).await?,
         config.egress_rpc_limits()?,
+        egress_observer,
     ));
     let connector: Arc<dyn McpResourceRefreshConnector> = egress;
     let protocol = Arc::new(StreamableHttpMcpResourceRefreshProtocol::new(connector));

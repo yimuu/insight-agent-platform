@@ -146,6 +146,10 @@ r317只为production Remote Context Worker安装Egress observer并与PostgreSQL 
 RPC仅导出固定role/dependency/outcome。四组target tests、strict Clippy及Context部署/observability/redaction门禁通过；无production scrape或真实fault，
 其余Egress/MCP client仍待注入。
 
+r318为production MCP Tool Host、Resource Host与OAuth Cleanup Worker注入Egress observer；Tool为Egress-only，Resource/Cleanup为PostgreSQL+
+Egress。Tool/Resource/OAuth/cleanup/subscription实际transport只导出固定role/dependency/outcome。四组target tests、strict Clippy及MCP部署/observability/
+redaction门禁通过；无production scrape或真实fault，Callback/Sandbox Egress client仍待注入。
+
 ## 3. Phase 1 审计
 
 ### 已满足

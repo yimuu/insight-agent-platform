@@ -1,3 +1,4 @@
+use insight_platform_egress_rpc::{EgressRpcDependencyObserver, EgressRpcDependencyOutcome};
 use insight_platform_observability::{
     DependencyObservationMetrics, DependencyObservationOutcome, MetricsInstallError,
     PlatformDependency,
@@ -5,9 +6,9 @@ use insight_platform_observability::{
 use insight_platform_postgres::dependency_health::{PostgresHealthObserver, PostgresHealthOutcome};
 use std::sync::Arc;
 
-struct CleanupPostgresObserver(Arc<DependencyObservationMetrics>);
+struct CleanupDependencyObserver(Arc<DependencyObservationMetrics>);
 
-impl PostgresHealthObserver for CleanupPostgresObserver {
+impl PostgresHealthObserver for CleanupDependencyObserver {
     fn observe(&self, outcome: PostgresHealthOutcome) {
         self.0
             .observe(
@@ -21,19 +22,36 @@ impl PostgresHealthObserver for CleanupPostgresObserver {
     }
 }
 
-pub fn install_postgres_dependency_metrics() -> Result<
-    (
-        Arc<DependencyObservationMetrics>,
-        Arc<dyn PostgresHealthObserver>,
-    ),
-    MetricsInstallError,
-> {
+impl EgressRpcDependencyObserver for CleanupDependencyObserver {
+    fn observe(&self, outcome: EgressRpcDependencyOutcome) {
+        self.0
+            .observe(
+                PlatformDependency::Egress,
+                match outcome {
+                    EgressRpcDependencyOutcome::Success => DependencyObservationOutcome::Success,
+                    EgressRpcDependencyOutcome::Failure => DependencyObservationOutcome::Failure,
+                },
+            )
+            .expect("MCP Cleanup Worker installs its Egress dependency metric");
+    }
+}
+
+pub type InstalledCleanupDependencyMetrics = (
+    Arc<DependencyObservationMetrics>,
+    Arc<dyn PostgresHealthObserver>,
+    Arc<dyn EgressRpcDependencyObserver>,
+);
+
+pub fn install_cleanup_dependency_metrics(
+) -> Result<InstalledCleanupDependencyMetrics, MetricsInstallError> {
     let metrics = Arc::new(DependencyObservationMetrics::install(&[
         PlatformDependency::Postgresql,
+        PlatformDependency::Egress,
     ])?);
-    let observer: Arc<dyn PostgresHealthObserver> =
-        Arc::new(CleanupPostgresObserver(Arc::clone(&metrics)));
-    Ok((metrics, observer))
+    let observer = Arc::new(CleanupDependencyObserver(Arc::clone(&metrics)));
+    let postgres: Arc<dyn PostgresHealthObserver> = observer.clone();
+    let egress: Arc<dyn EgressRpcDependencyObserver> = observer;
+    Ok((metrics, postgres, egress))
 }
 
 #[cfg(test)]
@@ -43,14 +61,16 @@ mod tests {
 
     #[test]
     fn adapter_maps_postgresql_without_dynamic_database_labels() {
-        let (dependencies, observer) = install_postgres_dependency_metrics().unwrap();
-        observer.observe(PostgresHealthOutcome::Success);
+        let (dependencies, postgres, egress) = install_cleanup_dependency_metrics().unwrap();
+        postgres.observe(PostgresHealthOutcome::Success);
+        egress.observe(EgressRpcDependencyOutcome::Failure);
         let rendered =
             ProcessHttpMetrics::install("mcp-cleanup-worker", PROCESS_OBSERVABILITY_OPERATIONS)
                 .unwrap()
                 .with_dependency_observations(dependencies)
                 .render_prometheus();
         assert!(rendered.contains("dependency=\"postgresql\",outcome=\"success\"} 1"));
+        assert!(rendered.contains("dependency=\"egress\",outcome=\"failure\"} 1"));
         assert!(!rendered.contains("database="));
         assert!(!rendered.contains("pool="));
         assert!(!rendered.contains("error="));

@@ -606,6 +606,12 @@ Subscription Context安装路径保持PostgreSQL-only并显式断言无Egress ob
 `context-remote-worker + egress + outcome`，不携带endpoint、tenant/query、payload或error，不改变resume/readiness语义。四组binary target tests、strict
 Clippy、Context/Remote deployment、observability与redaction门禁通过；本轮无production scrape或真实fault，其余Egress/MCP client仍待注入。
 
+r318把共享Egress observer注入production MCP Tool Host、Resource Host与OAuth Cleanup Worker。Tool Host只安装Egress；Resource/Cleanup分别与
+既有PostgreSQL sampler共用process metrics。普通Tool调用、Resource Refresh、OAuth exchange/PKCE delete及subscription建连/读取只输出各自固定
+`component_role + egress + outcome`，不携带server/endpoint、tenant/task/resource、payload或error，不改变RPC/readiness/cleanup语义。四组binary target
+tests、strict Clippy、MCP Host/Cleanup deployment、observability与redaction门禁通过；本轮无production scrape或真实fault，Callback/Sandbox Egress client
+仍待注入。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

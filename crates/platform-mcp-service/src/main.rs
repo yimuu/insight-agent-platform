@@ -5,6 +5,9 @@
 //! late Secret resolution.
 
 mod capacity;
+mod dependency_observer;
+
+use dependency_observer::install_mcp_dependency_metrics;
 
 use insight_platform_contracts::{canonical_digest, parse_strict_json, JsonLimits, Sha256Digest};
 use insight_platform_egress_rpc::{EgressBrokerGrpcClient, EgressInternalRpcLimits};
@@ -165,9 +168,13 @@ async fn run() -> Result<(), ProcessError> {
         .listen_address
         .parse()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let egress = Arc::new(EgressBrokerGrpcClient::new(
+    let (dependency_metrics, postgres_observer, egress_observer) =
+        install_mcp_dependency_metrics(false).map_err(|_| ProcessError::InvalidConfiguration)?;
+    debug_assert!(postgres_observer.is_none());
+    let egress = Arc::new(EgressBrokerGrpcClient::new_with_observer(
         connect_egress(&config).await?,
         config.egress_rpc_limits()?,
+        egress_observer,
     ));
     let connector: Arc<dyn McpStreamableHttpConnector> = egress;
     let host = Arc::new(McpHostService::new(Arc::new(
@@ -215,7 +222,8 @@ async fn run() -> Result<(), ProcessError> {
             PROCESS_OBSERVABILITY_OPERATIONS,
             vec![capacity::request_capacity_metric(request_capacity)],
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics),
     );
     let observability_listener =
         tokio::net::TcpListener::bind(&config.observability_listen_address)

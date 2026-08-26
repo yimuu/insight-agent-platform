@@ -643,6 +643,11 @@
 > endpoint、tenant/query、payload或error。四组binary target tests、strict Clippy、Context/Remote deployment、observability及redaction门禁通过；无
 > production scrape/真实fault，其余Egress/MCP client与L4～L5仍Pending。
 
+> 2026-08-27 implementation evidence：r318把共享Egress observer注入production MCP Tool Host、Resource Host与OAuth Cleanup Worker；Tool
+> 只安装Egress，Resource/Cleanup为PostgreSQL+Egress。普通Tool、Resource Refresh、OAuth exchange/PKCE delete与subscription transport结果仅导出固定
+> role/dependency/outcome，不输出server/endpoint、tenant/task/resource、payload或error。四组binary target tests、strict Clippy、MCP Host/Cleanup
+> deployment、observability及redaction门禁通过；无production scrape/真实fault，Callback/Sandbox Egress client与L4～L5仍Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

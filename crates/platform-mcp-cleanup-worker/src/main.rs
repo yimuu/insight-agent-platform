@@ -6,7 +6,7 @@
 
 mod dependency_observer;
 
-use dependency_observer::install_postgres_dependency_metrics;
+use dependency_observer::install_cleanup_dependency_metrics;
 
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, JsonLimits, ResourceId, ResourceKind, Sha256Digest,
@@ -167,16 +167,17 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::SchemaMismatch)?;
     let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool));
-    let (dependency_metrics, postgres_observer) =
-        install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
+    let (dependency_metrics, postgres_observer, egress_observer) =
+        install_cleanup_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
     let rpc_limits = EgressInternalRpcLimits::new(
         config.maximum_rpc_metadata_bytes,
         config.maximum_rpc_payload_bytes,
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let broker = Arc::new(EgressBrokerGrpcClient::new(
+    let broker = Arc::new(EgressBrokerGrpcClient::new_with_observer(
         connect_egress(&config).await?,
         rpc_limits,
+        egress_observer,
     ));
     let consumer = Arc::new(McpOAuthPkceCleanupConsumer::new(repository.clone(), broker));
     let generation_id =
