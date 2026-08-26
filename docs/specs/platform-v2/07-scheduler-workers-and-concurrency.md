@@ -234,5 +234,9 @@ tenant无法生成critical-control work。
 
 基础调度合同无未决设计问题。具体容量数值只由18已资格的CapacityProfile拥有。
 
+r328把03既有Job kind要求落实为closed machine registry与合法kind/work-class/owner三元组，区分Artifact Data/Maintenance、Context
+Native/Remote/subscription、MCP discovery/subscription及两种Sandbox physical work。生成合同、Python checker、contracts tests与strict Clippy通过；
+本批尚未把kind写入PostgreSQL typed hot column，scheduler/claim SQL仍不得据此宣称已完成迁移。
+
 CR-193确认长调用heartbeat推进Job version只更新owner terminal fence，不创建新physical attempt，也不改变subscription refresh的
 `execution_identity_digest`；只有lease generation/token或attempt number变化才产生新identity。测试必须覆盖至少一次heartbeat后的成功提交。

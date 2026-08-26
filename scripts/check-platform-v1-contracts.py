@@ -922,6 +922,16 @@ def check_spec_registry_alignment(errors):
     ]
     if work_classes != registries.get("work_classes"):
         errors.append("07 WorkClass differs from the machine registry")
+    expected_job_kinds = [
+        "registry_validation", "orchestration_node", "model_turn",
+        "capability_invocation", "mcp_discovery", "mcp_subscription",
+        "context_query_native", "context_query_remote", "context_dataset_build",
+        "context_subscription_refresh", "sandbox_capability_execution",
+        "sandbox_managed_mcp_session", "interaction", "artifact_scan",
+        "artifact_rescan", "artifact_delete", "artifact_blob_cleanup", "recovery",
+    ]
+    if registries.get("job_kinds") != expected_job_kinds:
+        errors.append("03 JobKind registry is not closed")
     if registries.get("plan_node_kinds") != [
         "start", "compute", "branch", "fork", "join", "map", "loop",
         "error_boundary", "model_loop", "capability_call", "context_query",
@@ -973,6 +983,35 @@ def check_spec_registry_alignment(errors):
     ]
     if registries.get("execution_work_owner_pairs") != expected_work_owner_pairs:
         errors.append("03/07 execution work owner mapping is not closed")
+    expected_job_triples = [
+        {"job_kind": "registry_validation", "work_class": "registry_validation", "owner_kind": "job"},
+        {"job_kind": "orchestration_node", "work_class": "orchestration", "owner_kind": "node_execution"},
+        {"job_kind": "model_turn", "work_class": "model", "owner_kind": "model_turn"},
+        {"job_kind": "capability_invocation", "work_class": "capability_native", "owner_kind": "capability_invocation"},
+        {"job_kind": "capability_invocation", "work_class": "capability_remote", "owner_kind": "capability_invocation"},
+        {"job_kind": "mcp_discovery", "work_class": "mcp", "owner_kind": "mcp_operation"},
+        {"job_kind": "mcp_subscription", "work_class": "mcp", "owner_kind": "mcp_operation"},
+        {"job_kind": "context_query_native", "work_class": "context", "owner_kind": "context_query"},
+        {"job_kind": "context_query_remote", "work_class": "context", "owner_kind": "context_query"},
+        {"job_kind": "context_dataset_build", "work_class": "context", "owner_kind": "context_dataset"},
+        {"job_kind": "context_subscription_refresh", "work_class": "context", "owner_kind": "mcp_operation"},
+        {"job_kind": "sandbox_capability_execution", "work_class": "sandbox", "owner_kind": "job"},
+        {"job_kind": "sandbox_managed_mcp_session", "work_class": "sandbox", "owner_kind": "job"},
+        {"job_kind": "interaction", "work_class": "interaction", "owner_kind": "interaction"},
+        {"job_kind": "artifact_scan", "work_class": "artifact", "owner_kind": "artifact"},
+        {"job_kind": "artifact_rescan", "work_class": "artifact", "owner_kind": "artifact"},
+        {"job_kind": "artifact_delete", "work_class": "artifact", "owner_kind": "artifact"},
+        {"job_kind": "artifact_blob_cleanup", "work_class": "artifact", "owner_kind": "internal_blob"},
+        {"job_kind": "recovery", "work_class": "recovery", "owner_kind": "run"},
+        {"job_kind": "recovery", "work_class": "recovery", "owner_kind": "node_execution"},
+        {"job_kind": "recovery", "work_class": "recovery", "owner_kind": "capability_invocation"},
+        {"job_kind": "recovery", "work_class": "recovery", "owner_kind": "context_query"},
+        {"job_kind": "recovery", "work_class": "recovery", "owner_kind": "mcp_operation"},
+        {"job_kind": "recovery", "work_class": "recovery", "owner_kind": "model_turn"},
+        {"job_kind": "recovery", "work_class": "recovery", "owner_kind": "job"},
+    ]
+    if registries.get("job_kind_work_owner_triples") != expected_job_triples:
+        errors.append("03/07 JobKind x WorkClass x OwnerKind mapping is not closed")
     known_resource_kinds = {
         item.get("name") for item in registries.get("resource_kinds", [])
     }
@@ -982,6 +1021,15 @@ def check_spec_registry_alignment(errors):
         for item in expected_work_owner_pairs
     ):
         errors.append("execution work owner mapping references an unknown machine kind")
+    if any(
+        item["job_kind"] not in expected_job_kinds
+        or item["work_class"] not in registries.get("work_classes", [])
+        or item["owner_kind"] not in known_resource_kinds
+        or {"work_class": item["work_class"], "owner_kind": item["owner_kind"]}
+        not in expected_work_owner_pairs
+        for item in expected_job_triples
+    ):
+        errors.append("JobKind triple references an unknown or unregistered scheduler owner")
 
     if registries.get("agent_authoring_modes") != ["structured", "graph"]:
         errors.append("05 Agent authoring mode registry is not closed")

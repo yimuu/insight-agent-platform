@@ -464,6 +464,10 @@ r327新增closed `DurableJobOwnerKind` selector，并让Sandbox Controller只观
 WorkClass下MCP-owned `sandbox_job`。固定due/expired alert与runbook接线；lib tests 14/14、strict Clippy、Sandbox部署、observability/redaction门禁通过。
 本轮无fresh PostgreSQL、production scrape或runsc证据，只关闭Sandbox execution backlog/recovery的仓库内L1接线。
 
+r328修复剩余Artifact/Context/MCP队列审计暴露的上游合同缺口：按spec03既有要求建立18项internal `JobKind`及25项合法
+kind/work-class/owner三元组，生成registry与Python checker fail closed。contracts全目标、生成漂移与strict Clippy门禁通过；baseline typed column、
+31个production INSERT/读取及claim JSON hot predicate替换仍待下一批，因此不宣称JobKind persistence或剩余queue metrics闭合。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

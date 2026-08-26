@@ -79,6 +79,10 @@ JobKind、ReceiptKind、EventKind、ArtifactRelation与owner-kind pair来自一�
 nominal ID prefix、tenant、source row kind/state和合法pair。不使用generic `(owner_type: String, owner_id: UUID)`作为信任边界。
 Job可作为Artifact/Receipt等关联的typed owner，但首版Job kind-owner registry不允许Job拥有child Job。
 
+r328实现上述既有合同的internal nominal `JobKind` machine registry：18个closed kind及25个合法
+`JobKind × WorkClass × OwnerKind`三元组由Rust单一owner生成到`registries.json`，每个三元组必须投影到既有execution work-owner pair。
+该批只闭合上游machine contract；baseline `jobs.kind`、repository读写和JSON hot-predicate替换仍待下一实现批次，不能将r328视为持久化完成证据。
+
 `WorkClass::Context`的合法owner为`ContextQuery`、`ContextDataset`，以及仅用于MCP Resource subscription refresh/reconcile的
 `McpOperation`。最后一种pair必须由Context application owner transaction重载同tenant `invocation_kind=mcp_subscription` row、exact
 Deployment/Discovery/authorization/session/event evidence后创建；MCP Host不能凭该pair直接创建Job或执行Context backend。它复用已有

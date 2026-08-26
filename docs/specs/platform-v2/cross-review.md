@@ -799,6 +799,8 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 25. Selection Policy document schema v1非空且closed；`only_candidate | ordered_first | route_hash`使用唯一canonical排序/hash算法，
     Scheduler与repository共享纯evaluator并由owner transaction重算，unknown/route漂移/集合外结果/health fallback全部fail closed。
 26. Selection document不保存自引用digest；Policy `rules_digest`唯一等于document canonical digest，exact Revision/Deployment binding冻结runtime identity。
+27. r328将03已要求的Job kind落实为18项closed nominal registry及25项`JobKind × WorkClass × OwnerKind`machine mapping；该实施对齐不改变
+    表预算、authority、public route、Plan/Profile版本或首发拓扑。PostgreSQL typed column与所有claim predicate贯通前仍是implementation gap。
 
 ## 16. 未决项
 

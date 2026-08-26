@@ -693,6 +693,11 @@
 > 同步。lib tests 14/14、strict Clippy、Sandbox deployment、observability/redaction/format/diff门禁通过；无fresh PostgreSQL、production scrape或
 > runsc，只关闭Sandbox execution backlog/recovery仓库内L1。
 
+> 2026-08-27 implementation evidence：r328在Artifact/Context/MCP队列审计中发现claim仍解析JSON kind/backend，而03既有合同要求Job保存kind且
+> hot predicate为typed relational column。第一批上游修复建立18项nominal `JobKind`和25项合法kind/work-class/owner三元组，生成
+> `registries.json`并由Python checker逐项锁定。contracts全目标、生成漂移与strict Clippy通过；baseline column、31个production INSERT/读取、
+> owner-kind收敛与claim predicate替换仍待下一批，不能宣称持久化或剩余backlog metrics完成。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

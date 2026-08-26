@@ -402,6 +402,153 @@
     "url_consent",
     "business_input"
   ],
+  "job_kind_work_owner_triples": [
+    {
+      "job_kind": "registry_validation",
+      "owner_kind": "job",
+      "work_class": "registry_validation"
+    },
+    {
+      "job_kind": "orchestration_node",
+      "owner_kind": "node_execution",
+      "work_class": "orchestration"
+    },
+    {
+      "job_kind": "model_turn",
+      "owner_kind": "model_turn",
+      "work_class": "model"
+    },
+    {
+      "job_kind": "capability_invocation",
+      "owner_kind": "capability_invocation",
+      "work_class": "capability_native"
+    },
+    {
+      "job_kind": "capability_invocation",
+      "owner_kind": "capability_invocation",
+      "work_class": "capability_remote"
+    },
+    {
+      "job_kind": "mcp_discovery",
+      "owner_kind": "mcp_operation",
+      "work_class": "mcp"
+    },
+    {
+      "job_kind": "mcp_subscription",
+      "owner_kind": "mcp_operation",
+      "work_class": "mcp"
+    },
+    {
+      "job_kind": "context_query_native",
+      "owner_kind": "context_query",
+      "work_class": "context"
+    },
+    {
+      "job_kind": "context_query_remote",
+      "owner_kind": "context_query",
+      "work_class": "context"
+    },
+    {
+      "job_kind": "context_dataset_build",
+      "owner_kind": "context_dataset",
+      "work_class": "context"
+    },
+    {
+      "job_kind": "context_subscription_refresh",
+      "owner_kind": "mcp_operation",
+      "work_class": "context"
+    },
+    {
+      "job_kind": "sandbox_capability_execution",
+      "owner_kind": "job",
+      "work_class": "sandbox"
+    },
+    {
+      "job_kind": "sandbox_managed_mcp_session",
+      "owner_kind": "job",
+      "work_class": "sandbox"
+    },
+    {
+      "job_kind": "interaction",
+      "owner_kind": "interaction",
+      "work_class": "interaction"
+    },
+    {
+      "job_kind": "artifact_scan",
+      "owner_kind": "artifact",
+      "work_class": "artifact"
+    },
+    {
+      "job_kind": "artifact_rescan",
+      "owner_kind": "artifact",
+      "work_class": "artifact"
+    },
+    {
+      "job_kind": "artifact_delete",
+      "owner_kind": "artifact",
+      "work_class": "artifact"
+    },
+    {
+      "job_kind": "artifact_blob_cleanup",
+      "owner_kind": "internal_blob",
+      "work_class": "artifact"
+    },
+    {
+      "job_kind": "recovery",
+      "owner_kind": "run",
+      "work_class": "recovery"
+    },
+    {
+      "job_kind": "recovery",
+      "owner_kind": "node_execution",
+      "work_class": "recovery"
+    },
+    {
+      "job_kind": "recovery",
+      "owner_kind": "capability_invocation",
+      "work_class": "recovery"
+    },
+    {
+      "job_kind": "recovery",
+      "owner_kind": "context_query",
+      "work_class": "recovery"
+    },
+    {
+      "job_kind": "recovery",
+      "owner_kind": "mcp_operation",
+      "work_class": "recovery"
+    },
+    {
+      "job_kind": "recovery",
+      "owner_kind": "model_turn",
+      "work_class": "recovery"
+    },
+    {
+      "job_kind": "recovery",
+      "owner_kind": "job",
+      "work_class": "recovery"
+    }
+  ],
+  "job_kinds": [
+    "registry_validation",
+    "orchestration_node",
+    "model_turn",
+    "capability_invocation",
+    "mcp_discovery",
+    "mcp_subscription",
+    "context_query_native",
+    "context_query_remote",
+    "context_dataset_build",
+    "context_subscription_refresh",
+    "sandbox_capability_execution",
+    "sandbox_managed_mcp_session",
+    "interaction",
+    "artifact_scan",
+    "artifact_rescan",
+    "artifact_delete",
+    "artifact_blob_cleanup",
+    "recovery"
+  ],
   "lock_ranks": [
     {
       "name": "command_receipt",

@@ -156,6 +156,29 @@ string_enum! {
 }
 
 string_enum! {
+    pub enum JobKind, "job kind" {
+        RegistryValidation => "registry_validation",
+        OrchestrationNode => "orchestration_node",
+        ModelTurn => "model_turn",
+        CapabilityInvocation => "capability_invocation",
+        McpDiscovery => "mcp_discovery",
+        McpSubscription => "mcp_subscription",
+        ContextQueryNative => "context_query_native",
+        ContextQueryRemote => "context_query_remote",
+        ContextDatasetBuild => "context_dataset_build",
+        ContextSubscriptionRefresh => "context_subscription_refresh",
+        SandboxCapabilityExecution => "sandbox_capability_execution",
+        SandboxManagedMcpSession => "sandbox_managed_mcp_session",
+        Interaction => "interaction",
+        ArtifactScan => "artifact_scan",
+        ArtifactRescan => "artifact_rescan",
+        ArtifactDelete => "artifact_delete",
+        ArtifactBlobCleanup => "artifact_blob_cleanup",
+        Recovery => "recovery"
+    }
+}
+
+string_enum! {
     pub enum PlanNodeKind, "plan node kind" {
         Start => "start",
         Compute => "compute",

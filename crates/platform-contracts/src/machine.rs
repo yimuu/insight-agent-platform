@@ -9,7 +9,7 @@ use crate::{
         CapabilityProgressDurability, CapabilityProgressMode, CodeTrustClass, ContextBackendKind,
         ContextBackendOutcomeKind, ContextCitationStrength, ContextConsistencyMode, CursorPurpose,
         DataClassification, DependencySlotKind, Effect, EventDurability, FailureClass,
-        FailureSource, InteractionKind, LockRank, McpAuthorizationPrincipalKind,
+        FailureSource, InteractionKind, JobKind, LockRank, McpAuthorizationPrincipalKind,
         McpOAuthClientAuthenticationKind, McpTransportKind, ModelIdentityStability, ModelModality,
         Permission, PlanNodeKind, PlatformFailureCode, PolicyKind, PolicyReferenceRole,
         PrincipalKind, PublicJobKind, PublicRunEventSourceKind, PublicRunEventType,
@@ -1885,6 +1885,145 @@ pub const EXECUTION_WORK_OWNER_PAIRS: &[(WorkClass, ResourceKind)] = &[
     (WorkClass::Recovery, ResourceKind::Job),
 ];
 
+pub const JOB_KIND_WORK_OWNER_TRIPLES: &[(JobKind, WorkClass, ResourceKind)] = &[
+    (
+        JobKind::RegistryValidation,
+        WorkClass::RegistryValidation,
+        ResourceKind::Job,
+    ),
+    (
+        JobKind::OrchestrationNode,
+        WorkClass::Orchestration,
+        ResourceKind::NodeExecution,
+    ),
+    (
+        JobKind::ModelTurn,
+        WorkClass::Model,
+        ResourceKind::ModelTurn,
+    ),
+    (
+        JobKind::CapabilityInvocation,
+        WorkClass::CapabilityNative,
+        ResourceKind::CapabilityInvocation,
+    ),
+    (
+        JobKind::CapabilityInvocation,
+        WorkClass::CapabilityRemote,
+        ResourceKind::CapabilityInvocation,
+    ),
+    (
+        JobKind::McpDiscovery,
+        WorkClass::Mcp,
+        ResourceKind::McpOperation,
+    ),
+    (
+        JobKind::McpSubscription,
+        WorkClass::Mcp,
+        ResourceKind::McpOperation,
+    ),
+    (
+        JobKind::ContextQueryNative,
+        WorkClass::Context,
+        ResourceKind::ContextQuery,
+    ),
+    (
+        JobKind::ContextQueryRemote,
+        WorkClass::Context,
+        ResourceKind::ContextQuery,
+    ),
+    (
+        JobKind::ContextDatasetBuild,
+        WorkClass::Context,
+        ResourceKind::ContextDataset,
+    ),
+    (
+        JobKind::ContextSubscriptionRefresh,
+        WorkClass::Context,
+        ResourceKind::McpOperation,
+    ),
+    (
+        JobKind::SandboxCapabilityExecution,
+        WorkClass::Sandbox,
+        ResourceKind::Job,
+    ),
+    (
+        JobKind::SandboxManagedMcpSession,
+        WorkClass::Sandbox,
+        ResourceKind::Job,
+    ),
+    (
+        JobKind::Interaction,
+        WorkClass::Interaction,
+        ResourceKind::Interaction,
+    ),
+    (
+        JobKind::ArtifactScan,
+        WorkClass::Artifact,
+        ResourceKind::Artifact,
+    ),
+    (
+        JobKind::ArtifactRescan,
+        WorkClass::Artifact,
+        ResourceKind::Artifact,
+    ),
+    (
+        JobKind::ArtifactDelete,
+        WorkClass::Artifact,
+        ResourceKind::Artifact,
+    ),
+    (
+        JobKind::ArtifactBlobCleanup,
+        WorkClass::Artifact,
+        ResourceKind::InternalBlob,
+    ),
+    (JobKind::Recovery, WorkClass::Recovery, ResourceKind::Run),
+    (
+        JobKind::Recovery,
+        WorkClass::Recovery,
+        ResourceKind::NodeExecution,
+    ),
+    (
+        JobKind::Recovery,
+        WorkClass::Recovery,
+        ResourceKind::CapabilityInvocation,
+    ),
+    (
+        JobKind::Recovery,
+        WorkClass::Recovery,
+        ResourceKind::ContextQuery,
+    ),
+    (
+        JobKind::Recovery,
+        WorkClass::Recovery,
+        ResourceKind::McpOperation,
+    ),
+    (
+        JobKind::Recovery,
+        WorkClass::Recovery,
+        ResourceKind::ModelTurn,
+    ),
+    (JobKind::Recovery, WorkClass::Recovery, ResourceKind::Job),
+];
+
+pub const fn is_job_kind_work_owner_triple(
+    job_kind: JobKind,
+    work_class: WorkClass,
+    owner_kind: ResourceKind,
+) -> bool {
+    let mut index = 0;
+    while index < JOB_KIND_WORK_OWNER_TRIPLES.len() {
+        let candidate = JOB_KIND_WORK_OWNER_TRIPLES[index];
+        if candidate.0 as u8 == job_kind as u8
+            && candidate.1 as u8 == work_class as u8
+            && candidate.2 as u8 == owner_kind as u8
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 pub const fn is_execution_work_owner_pair(work_class: WorkClass, owner_kind: ResourceKind) -> bool {
     let mut index = 0;
     while index < EXECUTION_WORK_OWNER_PAIRS.len() {
@@ -1973,6 +2112,7 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
             json!({"name": rank.as_str(), "ordinal": rank.ordinal()})
         }).collect::<Vec<_>>(),
         "work_classes": wire_values(WorkClass::ALL, |value| value.as_str()),
+        "job_kinds": wire_values(JobKind::ALL, |value| value.as_str()),
         "qualification_layers": crate::QualificationLayer::ALL.iter().map(|layer| layer.as_str()).collect::<Vec<_>>(),
         "qualification_gates": crate::QualificationGate::ALL.iter().map(|gate| {
             json!({"name": gate.as_str(), "layer": gate.layer().as_str()})
@@ -1991,6 +2131,13 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
         "service_classes": wire_values(ServiceClass::ALL, |value| value.as_str()),
         "execution_work_owner_pairs": EXECUTION_WORK_OWNER_PAIRS.iter().map(|(work_class, owner_kind)| {
             json!({"work_class": work_class.as_str(), "owner_kind": owner_kind.descriptor().name})
+        }).collect::<Vec<_>>(),
+        "job_kind_work_owner_triples": JOB_KIND_WORK_OWNER_TRIPLES.iter().map(|(job_kind, work_class, owner_kind)| {
+            json!({
+                "job_kind": job_kind.as_str(),
+                "work_class": work_class.as_str(),
+                "owner_kind": owner_kind.descriptor().name,
+            })
         }).collect::<Vec<_>>(),
         "agent_authoring_modes": wire_values(AgentAuthoringMode::ALL, |value| value.as_str()),
         "dependency_slot_kinds": wire_values(DependencySlotKind::ALL, |value| value.as_str()),
@@ -3592,6 +3739,34 @@ mod tests {
         assert!(ServiceClass::ALL
             .iter()
             .all(|class| class.as_str() != "critical_control"));
+    }
+
+    #[test]
+    fn job_kind_work_owner_triples_are_closed_and_project_to_registered_pairs() {
+        let mut triples = BTreeSet::new();
+        for (job_kind, work_class, owner_kind) in JOB_KIND_WORK_OWNER_TRIPLES {
+            assert!(triples.insert((
+                job_kind.as_str(),
+                work_class.as_str(),
+                owner_kind.descriptor().name,
+            )));
+            assert!(is_job_kind_work_owner_triple(
+                *job_kind,
+                *work_class,
+                *owner_kind
+            ));
+            assert!(is_execution_work_owner_pair(*work_class, *owner_kind));
+        }
+        assert!(!is_job_kind_work_owner_triple(
+            JobKind::ArtifactScan,
+            WorkClass::Artifact,
+            ResourceKind::InternalBlob,
+        ));
+        assert!(!is_job_kind_work_owner_triple(
+            JobKind::ContextQueryRemote,
+            WorkClass::Context,
+            ResourceKind::McpOperation,
+        ));
     }
 
     #[test]

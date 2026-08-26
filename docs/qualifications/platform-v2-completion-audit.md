@@ -185,6 +185,10 @@ r327新增closed durable Job owner selector，并让Sandbox Controller只观察`
 due/expired alert、runbook和inventory同步。lib tests 14/14、strict Clippy、Sandbox部署、observability/redaction门禁通过；未运行fresh PostgreSQL、
 production scrape或runsc，故仅关闭Sandbox execution queue的L1接线。
 
+r328确认剩余Artifact/Context/MCP claim lane仍依赖JSON hot predicate，与spec03既有Job kind合同不一致；先交付18项nominal `JobKind`、25项closed
+kind/work-class/owner mapping、generated registry及Python checker。contracts全目标和strict Clippy通过；baseline/repository迁移尚未完成，故该批仅为
+上游machine contract证据，不关闭剩余queue或任何L2/L4资格门禁。
+
 ## 3. Phase 1 审计
 
 ### 已满足

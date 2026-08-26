@@ -43,7 +43,10 @@ pub use limits::{
     checked_in_hard_limit_profile, HardLimitProfile, Limit, LimitProfileError, LimitUnit,
     OverflowOutcome, HARD_LIMIT_PROFILE_VERSION, Q1_SANDBOX_RUNTIME_BUNDLE_BYTES,
 };
-pub use machine::{is_execution_work_owner_pair, EXECUTION_WORK_OWNER_PAIRS};
+pub use machine::{
+    is_execution_work_owner_pair, is_job_kind_work_owner_triple, EXECUTION_WORK_OWNER_PAIRS,
+    JOB_KIND_WORK_OWNER_TRIPLES,
+};
 pub use mcp::*;
 pub use model::*;
 pub use nominal::{
@@ -70,13 +73,13 @@ pub use registry::{
     CodeTrustClass, ContextBackendKind, ContextBackendOutcomeKind, ContextCitationStrength,
     ContextConsistencyMode, CursorPurpose, CursorPurposeMismatch, DataClassification,
     DependencySlotKind, Effect, EventDurability, EventEnvelopeError, FailureClass, FailureSource,
-    InteractionKind, LockRank, McpAuthorizationPrincipalKind, McpOAuthClientAuthenticationKind,
-    McpTransportKind, ModelIdentityStability, ModelModality, Permission, PlanNodeKind,
-    PlatformFailureCode, PolicyKind, PolicyReferenceRole, PrincipalKind, PublicJobKind,
-    PublicRunEventSourceKind, PublicRunEventType, QuotaAccountingMode, QuotaDimension,
-    QuotaScopeKind, QuotaWindowKind, Retryability, SandboxAbiVersion, SandboxCleanupPolicy,
-    SandboxEntrypointKind, SandboxIsolationClass, SandboxRuntimeFamily, SchedulerPriority,
-    ScopeKind, ServiceClass, SkillInstructionAudience, SkillInstructionPhase,
+    InteractionKind, JobKind, LockRank, McpAuthorizationPrincipalKind,
+    McpOAuthClientAuthenticationKind, McpTransportKind, ModelIdentityStability, ModelModality,
+    Permission, PlanNodeKind, PlatformFailureCode, PolicyKind, PolicyReferenceRole, PrincipalKind,
+    PublicJobKind, PublicRunEventSourceKind, PublicRunEventType, QuotaAccountingMode,
+    QuotaDimension, QuotaScopeKind, QuotaWindowKind, Retryability, SandboxAbiVersion,
+    SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass, SandboxRuntimeFamily,
+    SchedulerPriority, ScopeKind, ServiceClass, SkillInstructionAudience, SkillInstructionPhase,
     SkillPackageEntryKind, SkillRequirementKind, SkillSelectionMode, UnknownRegistryValue,
     WakeContractKind, WorkClass,
 };
