@@ -391,8 +391,6 @@ async fn execute_claim(
                 )
                 .ok_or(McpDiscoveryDriverError::InvalidGeneratedIdentity)?,
         },
-        snapshot_id: new_id(ResourceKind::McpDiscoverySnapshot)?,
-        artifact_link_id: new_id(ResourceKind::ArtifactLink)?,
         retry_at: now
             .checked_add_signed(
                 ChronoDuration::from_std(config.timing.retry_backoff)

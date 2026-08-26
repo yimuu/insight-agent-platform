@@ -72,6 +72,7 @@ impl McpDiscoveryContractQuery {
 pub struct ResolvedMcpDiscoveryExecution {
     pub operation_version: u64,
     pub admission_digest: Sha256Digest,
+    pub artifact_preallocation: McpDiscoveryArtifactPreallocation,
     pub attempt_limit: u32,
     pub contract: McpDiscoveryExecutionContract,
     pub request: McpDiscoveryRequest,
@@ -87,6 +88,7 @@ impl ResolvedMcpDiscoveryExecution {
         if self.operation_version == 0
             || self.attempt_limit == 0
             || self.request.physical_attempt > self.attempt_limit
+            || self.artifact_preallocation.validate().is_err()
             || self.contract.validate_canonical_at(now).is_err()
             || self.request.validate_for(&self.contract, now).is_err()
             || self.request.operation_id != query.operation_id
@@ -145,8 +147,6 @@ pub trait McpDiscoveryResultStore: Send + Sync {
 pub struct ExecuteMcpDiscoveryJob {
     pub query: McpDiscoveryContractQuery,
     pub audit: McpWorkerAudit,
-    pub snapshot_id: ResourceId,
-    pub artifact_link_id: ResourceId,
     pub retry_at: DateTime<Utc>,
 }
 
@@ -159,8 +159,6 @@ impl ExecuteMcpDiscoveryJob {
         if self.audit.tenant_id != self.query.tenant_id
             || self.audit.worker_process_generation_id
                 != self.query.fence.worker_process_generation_id
-            || self.snapshot_id.kind() != ResourceKind::McpDiscoverySnapshot
-            || self.artifact_link_id.kind() != ResourceKind::ArtifactLink
             || self.retry_at <= now
         {
             return Err(McpHostError::InvalidDiscovery);
@@ -274,8 +272,16 @@ impl McpDiscoveryWorker {
             .discover(&resolved.contract, &resolved.request)
             .await;
         if let Ok(McpDiscoveryOutcome::Candidate(candidate)) = outcome {
+            if candidate.objects_artifact.artifact_id()
+                != &resolved.artifact_preallocation.artifact_id
+            {
+                return Err(McpDiscoveryWorkerError::InvalidCommand);
+            }
             let snapshot = candidate
-                .into_snapshot(command.snapshot_id, &resolved.contract)
+                .into_snapshot(
+                    resolved.artifact_preallocation.snapshot_id.clone(),
+                    &resolved.contract,
+                )
                 .map_err(|_| McpDiscoveryWorkerError::InvalidCommand)?;
             return Ok(PreparedMcpDiscovery {
                 command: PreparedMcpDiscoveryCommand::Commit(Box::new(CommitMcpDiscovery {
@@ -284,7 +290,7 @@ impl McpDiscoveryWorker {
                     job_id: command.query.job_id,
                     fence: command.query.fence,
                     expected_operation_version: resolved.operation_version,
-                    artifact_link_id: command.artifact_link_id,
+                    artifact_link_id: resolved.artifact_preallocation.artifact_link_id.clone(),
                     snapshot,
                 })),
             });
@@ -694,6 +700,7 @@ pub struct NewMcpDiscoveryAdmission {
     pub authorization_generation: u64,
     pub authorization_context_digest: Sha256Digest,
     pub principal_id: ResourceId,
+    pub artifact_preallocation: McpDiscoveryArtifactPreallocation,
     pub requested_at: DateTime<Utc>,
     pub deadline: DateTime<Utc>,
 }
@@ -706,6 +713,7 @@ pub struct CreateMcpDiscoveryOperation {
     pub logical_key: String,
     pub mcp_deployment: ExactDeploymentRef,
     pub authorization_binding_id: ResourceId,
+    pub artifact_preallocation: McpDiscoveryArtifactPreallocation,
     pub attempt_limit: u16,
     pub deadline: DateTime<Utc>,
 }
@@ -723,6 +731,7 @@ impl CreateMcpDiscoveryOperation {
             || self.mcp_deployment.resource_kind != ResourceKind::McpDeployment
             || self.mcp_deployment.validate().is_err()
             || self.authorization_binding_id.kind() != ResourceKind::McpAuthorizationBinding
+            || self.artifact_preallocation.validate().is_err()
             || self.attempt_limit == 0
             || self.attempt_limit > 8
             || self.deadline <= now
@@ -997,6 +1006,7 @@ pub struct McpDiscoveryAdmission {
     pub authorization_generation: u64,
     pub authorization_context_digest: Sha256Digest,
     pub principal_id: ResourceId,
+    pub artifact_preallocation: McpDiscoveryArtifactPreallocation,
     pub requested_at: DateTime<Utc>,
     pub deadline: DateTime<Utc>,
     pub canonical_digest: Sha256Digest,
@@ -1016,6 +1026,7 @@ impl McpDiscoveryAdmission {
             authorization_generation: input.authorization_generation,
             authorization_context_digest: input.authorization_context_digest,
             principal_id: input.principal_id,
+            artifact_preallocation: input.artifact_preallocation,
             requested_at: input.requested_at,
             deadline: input.deadline,
             canonical_digest: placeholder_digest()?,
@@ -1047,7 +1058,73 @@ impl McpDiscoveryAdmission {
             || self.authorization_binding_id.kind() != ResourceKind::McpAuthorizationBinding
             || self.authorization_generation == 0
             || self.principal_id.kind() != ResourceKind::Principal
+            || self.artifact_preallocation.validate().is_err()
             || self.deadline <= self.requested_at
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpDiscoveryArtifactPreallocation {
+    pub schema_version: u32,
+    pub artifact_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub verification_job_id: ResourceId,
+    pub artifact_link_id: ResourceId,
+    pub snapshot_id: ResourceId,
+    pub quota_entry_id: ResourceId,
+    pub canonical_digest: Sha256Digest,
+}
+
+impl McpDiscoveryArtifactPreallocation {
+    pub fn build(
+        artifact_id: ResourceId,
+        blob_id: ResourceId,
+        verification_job_id: ResourceId,
+        artifact_link_id: ResourceId,
+        snapshot_id: ResourceId,
+        quota_entry_id: ResourceId,
+    ) -> Result<Self, McpHostError> {
+        let mut preallocation = Self {
+            schema_version: 1,
+            artifact_id,
+            blob_id,
+            verification_job_id,
+            artifact_link_id,
+            snapshot_id,
+            quota_entry_id,
+            canonical_digest: placeholder_digest()?,
+        };
+        preallocation.validate_shape()?;
+        preallocation.canonical_digest = digest_without_field(&preallocation, "canonical_digest")?;
+        Ok(preallocation)
+    }
+
+    pub fn validate(&self) -> Result<(), McpHostError> {
+        self.validate_shape()?;
+        if digest_without_field(self, "canonical_digest")? != self.canonical_digest {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> Result<(), McpHostError> {
+        let identities = [
+            (&self.artifact_id, ResourceKind::Artifact),
+            (&self.blob_id, ResourceKind::InternalBlob),
+            (&self.verification_job_id, ResourceKind::Job),
+            (&self.artifact_link_id, ResourceKind::ArtifactLink),
+            (&self.snapshot_id, ResourceKind::McpDiscoverySnapshot),
+            (&self.quota_entry_id, ResourceKind::QuotaLedgerEntry),
+        ];
+        if self.schema_version != 1
+            || identities
+                .iter()
+                .any(|(identity, kind)| identity.kind() != *kind)
         {
             return Err(McpHostError::InvalidDiscovery);
         }
@@ -1282,6 +1359,13 @@ impl McpDiscoveryOperationPayload {
         self.admission.validate()?;
         if let Some(result) = &self.result {
             result.validate()?;
+            if result.snapshot_id != self.admission.artifact_preallocation.snapshot_id
+                || result.artifact_link_id != self.admission.artifact_preallocation.artifact_link_id
+                || result.objects_artifact.artifact_id()
+                    != &self.admission.artifact_preallocation.artifact_id
+            {
+                return Err(McpHostError::InvalidDiscovery);
+            }
         }
         Ok(())
     }

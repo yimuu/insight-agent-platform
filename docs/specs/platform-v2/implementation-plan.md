@@ -741,6 +741,12 @@
 > expected version。bounded recovery按observation区分unstarted requeue、running retry、exhausted terminal，并在剩余deadline短于backoff时等待下一轮
 > timeout而非构造非法命令；shutdown有bounded drain。新driver tests 2/2与service all-target strict Clippy通过。该库尚未接入production binary，
 > Egress discovery/Artifact adapter、fresh PostgreSQL竞争与L3仍Pending。
+>
+> 2026-08-27 implementation evidence：r336实现CR-198第一段identity preallocation：public discovery application在内部生成Artifact、Blob、
+> `ArtifactScan` Job、Evidence Link、Discovery Snapshot与quota ledger entry六个typed ID，`McpDiscoveryArtifactPreallocation`以closed schema和
+> canonical digest进入admission与operation payload；PostgreSQL resolver只返回该exact closure，Worker不再为每个physical attempt临时生成
+> Snapshot/Link，并拒绝candidate Artifact与预分配identity漂移。MCP Host 58/58、service all-target tests与相关四crate strict Clippy通过。
+> 本批尚未创建Artifact/Blob/verification Job rows，也未冻结storage/policy/quota detail，故只关闭identity漂移L1缺口；stage/verify/finalize与L2/L3仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

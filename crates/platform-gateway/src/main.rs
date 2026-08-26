@@ -1707,6 +1707,16 @@ impl ResourceApplication for PgResources {
         .map_err(|_| ResourceApplicationError::Internal)?;
         let operation_id = new_id(ResourceKind::McpOperation)?;
         let job_id = new_id(ResourceKind::Job)?;
+        let artifact_preallocation =
+            insight_platform_mcp_host::McpDiscoveryArtifactPreallocation::build(
+                new_id(ResourceKind::Artifact)?,
+                new_id(ResourceKind::InternalBlob)?,
+                new_id(ResourceKind::Job)?,
+                new_id(ResourceKind::ArtifactLink)?,
+                new_id(ResourceKind::McpDiscoverySnapshot)?,
+                new_id(ResourceKind::QuotaLedgerEntry)?,
+            )
+            .map_err(|_| ResourceApplicationError::Internal)?;
         let audit = CommandAudit {
             trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id.clone(),
@@ -1727,6 +1737,7 @@ impl ResourceApplication for PgResources {
                 logical_key: intent.request_digest.to_string(),
                 mcp_deployment: exact_deployment,
                 authorization_binding_id: intent.authorization_binding_id,
+                artifact_preallocation,
                 attempt_limit: 3,
                 deadline: intent.deadline,
             })

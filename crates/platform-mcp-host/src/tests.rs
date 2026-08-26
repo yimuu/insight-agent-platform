@@ -37,6 +37,32 @@ fn sha(character: char) -> Sha256Digest {
         .unwrap()
 }
 
+fn discovery_preallocation(suffix: u16) -> McpDiscoveryArtifactPreallocation {
+    discovery_preallocation_for(
+        id(ResourceKind::Artifact, suffix),
+        id(ResourceKind::ArtifactLink, suffix + 3),
+        id(ResourceKind::McpDiscoverySnapshot, suffix + 4),
+        suffix,
+    )
+}
+
+fn discovery_preallocation_for(
+    artifact_id: ResourceId,
+    artifact_link_id: ResourceId,
+    snapshot_id: ResourceId,
+    suffix: u16,
+) -> McpDiscoveryArtifactPreallocation {
+    McpDiscoveryArtifactPreallocation::build(
+        artifact_id,
+        id(ResourceKind::InternalBlob, suffix + 1),
+        id(ResourceKind::Job, suffix + 2),
+        artifact_link_id,
+        snapshot_id,
+        id(ResourceKind::QuotaLedgerEntry, suffix + 5),
+    )
+    .unwrap()
+}
+
 fn exact(kind: ResourceKind, suffix: u16, character: char) -> ExactVersionRef {
     ExactVersionRef::new(id(kind, suffix), sha(character)).unwrap()
 }
@@ -1560,6 +1586,17 @@ fn discovery_authority_binds_operation_artifact_and_exact_admission() {
         authorization_generation: fixture.contract.authorization.generation,
         authorization_context_digest: fixture.contract.authorization.canonical_digest.clone(),
         principal_id: fixture.contract.authorization.principal_id.clone(),
+        artifact_preallocation: discovery_preallocation_for(
+            fixture
+                .contract
+                .discovery
+                .objects_artifact
+                .artifact_id()
+                .clone(),
+            artifact_link_id.clone(),
+            fixture.contract.discovery.snapshot_id.clone(),
+            50,
+        ),
         requested_at: now - ChronoDuration::seconds(2),
         deadline: now + ChronoDuration::minutes(10),
     })
@@ -1587,6 +1624,20 @@ fn discovery_authority_binds_operation_artifact_and_exact_admission() {
 
     let mut tampered = record;
     tampered.source_operation_id = id(ResourceKind::McpOperation, 42);
+    assert_eq!(tampered.validate(), Err(McpHostError::InvalidDiscovery));
+}
+
+#[test]
+fn discovery_preallocation_is_closed_and_digest_bound() {
+    let preallocation = discovery_preallocation(80);
+    assert!(preallocation.validate().is_ok());
+
+    let mut wrong_kind = preallocation.clone();
+    wrong_kind.verification_job_id = id(ResourceKind::Artifact, 82);
+    assert_eq!(wrong_kind.validate(), Err(McpHostError::InvalidDiscovery));
+
+    let mut tampered = preallocation;
+    tampered.snapshot_id = id(ResourceKind::McpDiscoverySnapshot, 90);
     assert_eq!(tampered.validate(), Err(McpHostError::InvalidDiscovery));
 }
 
@@ -1832,6 +1883,7 @@ fn discovery_resolution_is_bound_to_the_exact_running_job_fence() {
     let resolved = ResolvedMcpDiscoveryExecution {
         operation_version: 1,
         admission_digest: sha('8'),
+        artifact_preallocation: discovery_preallocation(60),
         attempt_limit: 3,
         request: McpDiscoveryRequest {
             schema_version: 1,
@@ -1889,9 +1941,21 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
             token_digest: sha('9'),
         },
     };
+    let artifact_preallocation = discovery_preallocation_for(
+        fixture
+            .contract
+            .discovery
+            .objects_artifact
+            .artifact_id()
+            .clone(),
+        id(ResourceKind::ArtifactLink, 73),
+        id(ResourceKind::McpDiscoverySnapshot, 74),
+        70,
+    );
     let resolved = ResolvedMcpDiscoveryExecution {
         operation_version: 1,
         admission_digest: sha('8'),
+        artifact_preallocation: artifact_preallocation.clone(),
         attempt_limit: 3,
         request: McpDiscoveryRequest {
             schema_version: 1,
@@ -1927,8 +1991,6 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
                 request_digest: sha('3'),
                 receipt_expires_at: now + ChronoDuration::hours(1),
             },
-            snapshot_id: id(ResourceKind::McpDiscoverySnapshot, 47),
-            artifact_link_id: id(ResourceKind::ArtifactLink, 48),
             retry_at: now + ChronoDuration::seconds(30),
         })
         .await
@@ -1958,8 +2020,12 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
     assert_eq!(commit.operation_id, query.operation_id);
     assert_eq!(commit.fence, heartbeat_fence);
     assert_eq!(
-        commit.snapshot.snapshot_id.kind(),
-        ResourceKind::McpDiscoverySnapshot
+        commit.snapshot.snapshot_id,
+        artifact_preallocation.snapshot_id
+    );
+    assert_eq!(
+        commit.artifact_link_id,
+        artifact_preallocation.artifact_link_id
     );
 }
 

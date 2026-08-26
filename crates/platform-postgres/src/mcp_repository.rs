@@ -1167,6 +1167,7 @@ impl PgRepository {
             authorization_generation: authorization.generation,
             authorization_context_digest: authorization.canonical_digest,
             principal_id: authorization.principal_id,
+            artifact_preallocation: command.artifact_preallocation.clone(),
             requested_at: database_now,
             deadline: command.deadline,
         })
@@ -4230,6 +4231,7 @@ impl McpDiscoveryExecutionContractResolver for PgRepository {
         let resolved = ResolvedMcpDiscoveryExecution {
             operation_version: operation.version,
             admission_digest: admission.canonical_digest.clone(),
+            artifact_preallocation: admission.artifact_preallocation.clone(),
             attempt_limit: job.attempt_limit,
             contract,
             request: McpDiscoveryRequest {

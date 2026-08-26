@@ -119,6 +119,20 @@ fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     .unwrap()
 }
 
+fn discovery_preallocation(
+    suffix: u16,
+) -> insight_platform_mcp_host::McpDiscoveryArtifactPreallocation {
+    insight_platform_mcp_host::McpDiscoveryArtifactPreallocation::build(
+        id(ResourceKind::Artifact, suffix),
+        id(ResourceKind::InternalBlob, suffix + 1),
+        id(ResourceKind::Job, suffix + 2),
+        id(ResourceKind::ArtifactLink, suffix + 3),
+        id(ResourceKind::McpDiscoverySnapshot, suffix + 4),
+        id(ResourceKind::QuotaLedgerEntry, suffix + 5),
+    )
+    .unwrap()
+}
+
 fn named_digest(name: &str) -> Sha256Digest {
     canonical_digest(&serde_json::json!({"fixture": name}))
         .unwrap()
@@ -1517,6 +1531,16 @@ async fn seed(
         authorization_generation: authorization.generation,
         authorization_context_digest: authorization_context.canonical_digest.clone(),
         principal_id: principal_id.clone(),
+        artifact_preallocation:
+            insight_platform_mcp_host::McpDiscoveryArtifactPreallocation::build(
+                objects.artifact_id().clone(),
+                id(ResourceKind::InternalBlob, 0x701),
+                id(ResourceKind::Job, 0x702),
+                artifact_link_id.clone(),
+                snapshot_id.clone(),
+                id(ResourceKind::QuotaLedgerEntry, 0x705),
+            )
+            .unwrap(),
         requested_at: now - Duration::seconds(3),
         deadline: now + Duration::hours(2),
     })
@@ -2804,6 +2828,7 @@ async fn mcp_subscription_fixture() {
         logical_key: "public-discovery-request".to_owned(),
         mcp_deployment: fixture.mcp_deployment.clone(),
         authorization_binding_id: fixture.authorization.authorization_binding_id.clone(),
+        artifact_preallocation: discovery_preallocation(0x630),
         attempt_limit: 3,
         deadline: now + Duration::minutes(30),
     };

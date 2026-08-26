@@ -2678,6 +2678,16 @@ async fn seed_remote_mcp_facts(
         authorization_generation: authorization.generation,
         authorization_context_digest: authorization_context.canonical_digest.clone(),
         principal_id: fixture.principal_id.clone(),
+        artifact_preallocation:
+            insight_platform_mcp_host::McpDiscoveryArtifactPreallocation::build(
+                package.artifact.artifact_id().clone(),
+                id(ResourceKind::InternalBlob, 0x991),
+                id(ResourceKind::Job, 0x992),
+                artifact_link_id.clone(),
+                snapshot_id.clone(),
+                id(ResourceKind::QuotaLedgerEntry, 0x995),
+            )
+            .unwrap(),
         requested_at: now - Duration::seconds(3),
         deadline: now + Duration::hours(2),
     })
