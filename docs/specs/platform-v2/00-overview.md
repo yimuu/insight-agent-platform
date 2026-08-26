@@ -394,6 +394,11 @@ r296为MCP Tool Host与MCP Resource Host各自的真实RPC admission semaphore�
 tests、真实mTLS、受影响fixtures编译、strict Clippy及部署/observability门禁通过。动态capacity coverage达到17/19；仅剩Security Authority与
 Egress Broker两个pool、production Prometheus scrape、telemetry backend/RBAC/retention及L4～L6未完成。
 
+r297从Security Authority唯一实际SQLx PostgreSQL pool导出fixed `postgresql_connections` available/used；capacity是配置上限，used由
+established减idle计算，available包含idle与尚可合法建立的槽位，不新增第二admission authority。fresh PostgreSQL 16验证checkout/drop使used
+0→1→0；unit tests、strict Clippy及Security/Egress、observability门禁通过。动态capacity coverage达到18/19；仅剩Egress Broker、production
+scrape、telemetry backend/RBAC/retention及L4～L6未完成。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

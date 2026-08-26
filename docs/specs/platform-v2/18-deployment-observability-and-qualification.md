@@ -494,6 +494,11 @@ r296为MCP Tool Host与MCP Resource Host各自安装构造期必选的process-lo
 available恢复。closed配置/hard max、owner/config tests、真实mTLS、受影响PostgreSQL fixtures编译、strict Clippy及MCP/observability门禁通过。
 动态capacity coverage达到17/19；Security Authority、Egress Broker、production scrape、telemetry backend/RBAC/retention及L4～L6保持Pending。
 
+r297从Security Authority唯一实际SQLx PostgreSQL pool导出fixed `postgresql_connections` available/used。capacity取配置上限，used由
+established减idle计算，available包含idle和未建立的合法槽位；不镜像数据库业务状态，也不添加重复admission authority。fresh PostgreSQL 16
+验证checkout/drop使used 0→1→0；unit tests、strict Clippy及Security/Egress、observability门禁通过。动态capacity coverage达到18/19；
+Egress Broker、production scrape、telemetry backend/RBAC/retention及L4～L6保持Pending。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

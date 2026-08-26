@@ -37,6 +37,14 @@ for name, manifest, source in (
     ):
         if required not in source:
             failures.append(f"{name} production composition is missing {required}")
+for required in (
+    "ProcessHttpMetrics::install_with_capacities",
+    "PostgresPoolCapacity",
+    "postgresql_connections",
+    "pool.clone()",
+):
+    if required not in authority_source:
+        failures.append(f"Security Authority capacity composition is missing {required}")
 for name, manifest in (
     ("Egress core", egress_core),
     ("Egress Broker", egress),

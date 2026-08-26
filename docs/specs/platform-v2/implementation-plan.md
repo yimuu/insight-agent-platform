@@ -526,6 +526,12 @@
 > 真实mTLS测试、受影响PostgreSQL fixtures编译、strict Clippy及MCP/observability部署门禁通过。动态capacity coverage达到17/19；仅剩Security
 > Authority与Egress Broker两个pool，production Prometheus scrape、telemetry backend/RBAC/retention及L4～L6仍保持Pending。
 
+> 2026-08-26 implementation evidence：r297从Security Authority唯一实际SQLx PostgreSQL pool导出fixed `postgresql_connections`
+> available/used；configured maximum是capacity，used由established减idle计算，available同时计入idle与尚未建立但可合法使用的槽位，没有复制
+> 业务状态或新增admission authority。fresh PostgreSQL 16证明checkout使used 0→1，drop后有界恢复0；unit tests、strict Clippy及Security/Egress、
+> observability部署门禁通过。动态capacity coverage达到18/19；仅剩Egress Broker，production scrape、telemetry backend/RBAC/retention及
+> L4～L6仍保持Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

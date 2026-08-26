@@ -9,7 +9,8 @@ use insight_platform_contracts::{
     canonical_digest, parse_strict_json, JsonLimits, ResourceId, Sha256Digest,
 };
 use insight_platform_observability::{
-    process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
+    process_observability_router, OperationalCapacityMetric, OperationalCapacitySnapshot,
+    OperationalCapacitySource, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_security::{
@@ -114,6 +115,41 @@ impl ProcessConfig {
     }
 }
 
+struct PostgresPoolCapacity {
+    pool: sqlx::PgPool,
+    maximum_connections: u32,
+}
+
+impl OperationalCapacitySource for PostgresPoolCapacity {
+    fn snapshot(&self) -> OperationalCapacitySnapshot {
+        let capacity = u64::from(self.maximum_connections);
+        let established = u64::from(self.pool.size());
+        let idle = u64::try_from(self.pool.num_idle()).unwrap_or(u64::MAX);
+        let used = established.saturating_sub(idle).min(capacity);
+        OperationalCapacitySnapshot::new(capacity, capacity.saturating_sub(used))
+            .expect("Security Authority PostgreSQL pool preserves its configured maximum")
+    }
+}
+
+fn install_security_metrics_with_postgres(
+    pool: sqlx::PgPool,
+    maximum_connections: u32,
+) -> Result<ProcessHttpMetrics, ProcessError> {
+    let source: Arc<dyn OperationalCapacitySource> = Arc::new(PostgresPoolCapacity {
+        pool,
+        maximum_connections,
+    });
+    ProcessHttpMetrics::install_with_capacities(
+        "security-authority",
+        PROCESS_OBSERVABILITY_OPERATIONS,
+        vec![OperationalCapacityMetric::new(
+            "postgresql_connections",
+            source,
+        )],
+    )
+    .map_err(|_| ProcessError::InvalidConfiguration)
+}
+
 /// Private composition wrapper: no caller can obtain the repository or any unrelated command
 /// trait through this process surface.
 struct RestrictedSecretAuthority {
@@ -175,6 +211,10 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
+    let metrics = Arc::new(install_security_metrics_with_postgres(
+        pool.clone(),
+        config.database_max_connections,
+    )?);
     let authority = Arc::new(RestrictedSecretAuthority {
         repository: PgRepository::new(pool),
         service_principal_id: config.service_principal_id.clone(),
@@ -221,10 +261,6 @@ async fn run() -> Result<(), ProcessError> {
         .add_service(service)
         .serve_with_shutdown(listen, server_cancellation.cancelled_owned());
     let mut server = tokio::spawn(server);
-    let metrics = Arc::new(
-        ProcessHttpMetrics::install("security-authority", PROCESS_OBSERVABILITY_OPERATIONS)
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
-    );
     let listener = tokio::net::TcpListener::bind(&config.observability_listen_address)
         .await
         .map_err(|_| ProcessError::ObservabilityFailure)?;
@@ -395,5 +431,52 @@ mod tests {
             "secret_manager_endpoint": "https://forbidden.example"
         }))
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn postgresql_capacity_includes_unopened_pool_slots() {
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let metrics = install_security_metrics_with_postgres(pool, 4).unwrap();
+        let rendered = metrics.render_prometheus();
+        assert!(rendered.contains(
+            "component_role=\"security-authority\",resource=\"postgresql_connections\",state=\"available\"} 4"
+        ));
+        assert!(rendered.contains(
+            "component_role=\"security-authority\",resource=\"postgresql_connections\",state=\"used\"} 0"
+        ));
+    }
+
+    #[tokio::test]
+    async fn postgresql_capacity_tracks_a_real_checked_out_connection() {
+        let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let metrics = install_security_metrics_with_postgres(pool.clone(), 2).unwrap();
+        let connection = pool.acquire().await.unwrap();
+        assert!(metrics
+            .render_prometheus()
+            .contains("resource=\"postgresql_connections\",state=\"used\"} 1"));
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if metrics
+                    .render_prometheus()
+                    .contains("resource=\"postgresql_connections\",state=\"used\"} 0")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("released SQLx connection must return to the idle pool");
     }
 }
