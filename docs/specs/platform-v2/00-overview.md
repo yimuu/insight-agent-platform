@@ -443,6 +443,9 @@ r322为首发Sandbox WASI/gVisor Executor补齐Core NATS dependency health；实
 仅导出固定role/nats/outcome，本地校验与业务字段不进入指标。目标测试、strict Clippy及Sandbox部署/observability/redaction门禁通过；本轮无真实NATS或
 production scrape新证据。
 
+r323以observability checker锁定全部first-release dependency owner及AWS/NATS adapter inventory；移除observer、sampler或production client注入会fail
+closed。六类external dependency仓库内L1接线闭合；production scrape/fault、其他domain backlog/recovery series及L4～L5仍Pending。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

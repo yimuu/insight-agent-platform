@@ -111,6 +111,47 @@ Dir.glob(File.join(root, "crates/**/*.rs")).each do |path|
   failures << "unexpected no-op Egress client constructor in #{relative}" unless allowed_noop_clients.include?(relative)
 end
 
+dependency_owner_contracts = {
+  "crates/platform-security-authority/src/main.rs" => %w[install_security_metrics_with_postgres postgresql_dependency_metrics],
+  "crates/platform-artifact-service/src/bin/gateway.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
+  "crates/platform-artifact-service/src/main.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
+  "crates/platform-artifact-service/src/bin/maintenance.rs" => %w[install_artifact_dependency_metrics run_postgres_health_sampler],
+  "crates/platform-model-worker/src/main.rs" => %w[install_model_dependency_metrics new_with_observer run_postgres_health_sampler],
+  "crates/platform-capability-worker/src/main.rs" => ["install_capability_dependency_metrics(false)", "run_postgres_health_sampler"],
+  "crates/platform-capability-worker/src/remote_main.rs" => ["install_capability_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler"],
+  "crates/platform-context-worker/src/main.rs" => ["install_context_dependency_metrics(false)", "run_postgres_health_sampler"],
+  "crates/platform-context-worker/src/remote_main.rs" => ["install_context_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler"],
+  "crates/platform-context-worker/src/subscription_main.rs" => ["install_context_dependency_metrics(false)", "run_postgres_health_sampler"],
+  "crates/platform-mcp-service/src/main.rs" => ["install_mcp_dependency_metrics(false)", "new_with_observer", "with_dependency_observations"],
+  "crates/platform-mcp-service/src/resource_main.rs" => ["install_mcp_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler"],
+  "crates/platform-mcp-cleanup-worker/src/main.rs" => %w[install_cleanup_dependency_metrics new_with_observer run_postgres_health_sampler],
+  "crates/platform-sandbox-controller/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler],
+  "crates/platform-sandbox-executor/src/main.rs" => %w[install_sandbox_executor_dependency_metrics bind_with_observer with_dependency_observations],
+  "crates/platform-callback-api/src/main.rs" => %w[install_callback_dependency_metrics new_with_observer run_postgres_health_sampler],
+  "crates/platform-gateway/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler],
+  "crates/platform-orchestration-worker/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler],
+  "crates/platform-egress-broker/src/main.rs" => ["DependencyObservationMetrics::install", "PlatformDependency::Secret", "PlatformDependency::Kms"],
+}
+dependency_owner_contracts.each do |relative, needles|
+  source = File.read(File.join(root, relative))
+  needles.each do |needle|
+    failures << "#{relative} lacks dependency owner wiring #{needle}" unless source.include?(needle)
+  end
+end
+
+adapter_dependency_contracts = {
+  "crates/platform-artifact-broker/src/aws.rs" => %w[ArtifactExternalDependency::S3 ArtifactExternalDependency::Kms observe_external],
+  "crates/platform-secret-broker/src/aws.rs" => %w[SecretExternalDependency::Secret SecretExternalDependency::Kms observe_external],
+  "crates/platform-model-worker/src/lib.rs" => %w[ModelNatsDependencyObserver ModelNatsDependencyOutcome],
+  "crates/platform-sandbox-rpc/src/control.rs" => %w[SandboxNatsDependencyObserver SandboxNatsDependencyOutcome],
+}
+adapter_dependency_contracts.each do |relative, needles|
+  source = File.read(File.join(root, relative))
+  needles.each do |needle|
+    failures << "#{relative} lacks dependency adapter boundary #{needle}" unless source.include?(needle)
+  end
+end
+
 unless failures.empty?
   warn failures.map { |failure| "observability deployment: #{failure}" }.join("\n")
   exit 1

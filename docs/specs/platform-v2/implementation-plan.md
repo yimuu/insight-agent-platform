@@ -667,6 +667,11 @@
 > envelope拒绝不计数，也不输出worker、tenant/job、payload、server或error。RPC/Executor tests、真实mTLS、strict Clippy及Sandbox deployment/
 > observability/redaction门禁通过；可选真实NATS fixture已有观测断言但本轮未配置，故不宣称真实NATS、production scrape或L4～L5完成。
 
+> 2026-08-27 implementation evidence：r323在observability checker固化全部first-release dependency owner inventory，覆盖Security、Artifact三role、
+> Model、Capability两role、Context三role、MCP双Host/Cleanup、Sandbox Controller/两Executor、Callback、双Gateway、Orchestration与Egress，以及AWS
+> Artifact/Secret、Model/Sandbox NATS adapter边界。移除observer/sampler/client注入会fail closed。相关门禁通过；六类external dependency仓库内L1接线
+> 闭合，但production scrape/fault、其他domain backlog/recovery series与L4～L5仍Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

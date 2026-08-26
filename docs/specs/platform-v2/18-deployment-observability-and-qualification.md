@@ -634,6 +634,12 @@ listener。subject/envelope/worker/tenant/job/payload/error不跨越port，本�
 RPC/Executor tests、真实mTLS、strict Clippy及Sandbox deployment/observability/redaction门禁通过；可选真实NATS fixture已增加request/reply/timeout观测断言，
 但本轮未配置外部NATS，故没有新的真实NATS或production scrape证据。
 
+r323把first-release dependency owner inventory固化到observability checker：Security、Artifact三role、Model、Capability两role、Context三role、MCP
+双Host/Cleanup、Sandbox Controller/两Executor、Callback、双Gateway、Orchestration与Egress Broker均必须保留其实际PostgreSQL/NATS/S3/KMS/Secret/Egress
+安装及调用边界；AWS Artifact/Secret、Model NATS、Sandbox NATS adapter port也进入清单。任一owner移除observer、sampler或production client注入都会fail
+closed。observability、Sandbox及redaction门禁通过；六类external dependency的仓库内L1接线至此闭合，production scrape、fault injection、其他domain
+backlog/recovery series及L4～L5仍Pending。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

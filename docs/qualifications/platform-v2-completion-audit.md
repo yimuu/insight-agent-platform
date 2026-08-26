@@ -164,6 +164,10 @@ r322为首发Sandbox WASI/gVisor Executor接入Core NATS dependency observer，�
 只导出固定role/nats/outcome，本地校验和业务字段不进入指标。RPC/Executor tests、真实mTLS、strict Clippy及Sandbox部署/observability/redaction门禁通过；
 可选真实NATS fixture本轮未配置，故无真实NATS或production scrape新证据。
 
+r323以observability checker锁定全部first-release dependency owner及AWS/NATS adapter inventory，移除任一observer、sampler或production client注入均
+fail closed。门禁通过；PostgreSQL/NATS/S3/KMS/Secret/Egress六类external dependency仓库内L1接线闭合，但production scrape/fault、其他domain backlog/
+recovery series及L4～L5仍Pending。
+
 ## 3. Phase 1 审计
 
 ### 已满足
@@ -289,11 +293,12 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
    但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
 2. 全部19个ComponentRole workload pool及Sandbox process attestor已有shared process metrics；Orchestration、Model、Capability Native/Remote、
    Context Native/Remote/Subscription、Sandbox WASI/gVisor共9个pool已有动态permit指标，Orchestration另有claim/recovery指标，production tracing/log字段已有
-   静态脱敏门禁；Orchestration现另有PostgreSQL authority的due/expired-lease Job及due/expired-claim/dead Outbox backlog/lag与observation health；仍缺其余role
-   backlog/dependency health、production Prometheus scrape及L5 mixed-load/saturation profile证据。
+   静态脱敏门禁；Orchestration现另有PostgreSQL authority的due/expired-lease Job及due/expired-claim/dead Outbox backlog/lag与observation health；六类
+   external dependency的仓库内L1 owner接线已闭合，仍缺其余role domain backlog/recovery series、production Prometheus scrape及L5 mixed-load/saturation
+   profile证据。
 3. 全部19个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP/Orchestration/Outbox dashboard及逐alert
-   runbook已扩展到14个panel和13条alert，包含operational capacity、Orchestration Job、shared Outbox lag/dead queue及通用dependency failure ratio；其他role backlog/
-   dependency与saturation对应的panel/alert仍待指标owner接线后补齐。
+   runbook已扩展到14个panel和13条alert，包含operational capacity、Orchestration Job、shared Outbox lag/dead queue及通用dependency failure ratio；其他role
+   domain backlog/recovery与saturation对应的panel/alert仍待指标owner接线后补齐。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
    mTLS与live identity enforcement仍须production-equivalent L4验证。
 5. 可重现的signed image/SBOM/provenance candidate producer已实现并由CI静态/合同测试约束；尚无实际registry run artifact、GitOps
@@ -311,7 +316,7 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 按上游到下游执行，且每批通过后提交：
 
-1. 补其他role dependency/recovery/permit业务指标；
+1. 补其他role domain backlog/recovery/permit业务指标；
 2. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
 3. 在受保护CI environment实际运行signed candidate producer并把exact bundle交给GitOps environment repository；
 4. 外部L4～L6、GitOps clean cut、current文档与规范归档。
