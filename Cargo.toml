@@ -39,6 +39,7 @@ members = [
     "crates/platform-orchestrator",
     "crates/platform-registry",
     "crates/platform-runtime",
+    "crates/platform-rpc-trace",
     "crates/platform-sandbox",
     "crates/platform-sandbox-controller",
     "crates/platform-sandbox-attestor",
@@ -161,6 +162,7 @@ insight-platform-orchestration-worker = { path = "crates/platform-orchestration-
 insight-platform-postgres = { path = "crates/platform-postgres" }
 insight-platform-orchestrator = { path = "crates/platform-orchestrator" }
 insight-platform-registry = { path = "crates/platform-registry" }
+insight-platform-rpc-trace = { path = "crates/platform-rpc-trace" }
 insight-platform-runtime = { path = "crates/platform-runtime" }
 insight-platform-sandbox = { path = "crates/platform-sandbox" }
 insight-platform-sandbox-controller = { path = "crates/platform-sandbox-controller" }

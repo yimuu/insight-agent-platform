@@ -3035,6 +3035,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-rpc-trace"
+version = "0.1.0"
+dependencies = [
+ "insight-platform-contracts",
+ "tonic",
+]
+
+[[package]]
 name = "insight-platform-runtime"
 version = "0.1.0"
 dependencies = [
