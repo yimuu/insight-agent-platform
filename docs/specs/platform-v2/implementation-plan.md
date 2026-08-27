@@ -70,7 +70,10 @@
 > 越过Discovery后，在Subscription Receipt replay暴露同类`IdempotencyConflict`；r381先按应用/数据库时间验证包含原始deadline的客户端
 > `request_digest`，再在Receipt claim前把已验证deadline规范化，兼顾外部幂等摘要与内部持久化精度。fresh PG16 OAuth 8/8、Subscription 3/3、
 > format及strict Clippy通过；GitHub CI run `33102457010`的workspace all-target/all-feature tests、doc tests、Lint/format/strict Clippy、
-> RustSec/cargo-deny依赖策略及TypeScript/Go MCP SDK互操作全部成功。仓库资格门禁由此闭合，但不推进外部L4～L6。
+> RustSec/cargo-deny依赖策略及TypeScript/Go MCP SDK互操作全部成功。后续证据文档提交的实时cargo-deny在run `33104191217`发现
+> `chacha20 0.10.1`刚被crates.io撤回；r382不增加ignore，把锁文件与exact third-party feature baseline更新到兼容且未撤回的`0.10.2`。
+> runtime 123项测试、audit、deny、55-package/583-dependency boundary及workspace check本地通过；GitHub CI run `33105053408`四个Job全部
+> 成功。仓库资格门禁由此闭合，但不推进外部L4～L6。
 
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。

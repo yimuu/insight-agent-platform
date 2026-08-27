@@ -725,7 +725,9 @@ input Task与MCP OAuth external-authorization Task的deadline均在Receipt前统
 drift或replay `not_found`。MCP Discovery与Resource Subscription的operation deadline也已统一；Subscription在规范化前验证客户端原始
 `request_digest`，随后才claim Receipt，因而外部幂等意图与内部JSON/typed-column权威同时闭合。fresh PG16完整Subscription 3/3及GitHub CI
 run `33102457010`四个Job全部成功。这些结果关闭仓库qualification的确定性缺口与首发Context lane映射；真实multi-node rollout、runsc、
-Prometheus scrape、mixed load、soak、restore与signed promotion仍须L4～L6外部执行。
+Prometheus scrape、mixed load、soak、restore与signed promotion仍须L4～L6外部执行。r382另把实时cargo-deny刚发现已撤回的
+`chacha20 0.10.1`更新为兼容未撤回的`0.10.2`并同步exact dependency baseline；不增加advisory/yank ignore。GitHub CI run
+`33105053408`的Test、Lint、Dependency policy与MCP interoperability全部成功，该依赖卫生修复同样不构成L4～L6证据。
 
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际

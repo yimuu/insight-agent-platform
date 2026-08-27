@@ -653,7 +653,9 @@ Task typed column回读保持exact binding。r379同样在MCP OAuth start事务�
 后的replay因`timestamptz`微秒截断误判`not_found`。r380规范化MCP Discovery operation deadline；r381对MCP Resource Subscription先验证
 包含原始deadline的客户端`request_digest`，再在Receipt claim前规范化已验证deadline，使JSON binding与typed列回读一致且不改写外部幂等意图。
 fresh PostgreSQL 16完整OAuth文件8/8、Subscription文件3/3通过；GitHub CI run `33102457010`的Test、文档、Lint/format/strict Clippy、依赖策略
-和TypeScript/Go MCP SDK互操作四个Job全部成功。仓库资格门禁由此闭合；上述修复不产生production-equivalent L4～L6证据。
+和TypeScript/Go MCP SDK互操作四个Job全部成功。其后的文档证据提交run `33104191217`因`chacha20 0.10.1`在两次run间被crates.io撤回而被
+cargo-deny拒绝；r382没有增加ignore，而是更新锁文件及exact third-party feature baseline到兼容未撤回的`0.10.2`。GitHub CI run
+`33105053408`再次四个Job全部成功。仓库资格门禁由此闭合；上述修复不产生production-equivalent L4～L6证据。
 
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并

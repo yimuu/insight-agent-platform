@@ -79,7 +79,9 @@ Resource Subscription Receipt replay暴露同类`IdempotencyConflict`；r381先�
 `request_digest`，再在Receipt claim前规范化已验证deadline，使外部幂等摘要不被改写且内部JSON binding/typed列精确一致。fresh PG16
 Subscription文件3/3、format及strict Clippy通过。最终GitHub CI run `33102457010`的workspace all-target/all-feature Test与doc tests、
 Lint/format/strict Clippy、RustSec/cargo-deny依赖策略及TypeScript/Go MCP SDK互操作四个Job全部成功，仓库资格门禁闭合；该结果不改变
-L4～L6外部门禁状态。
+L4～L6外部门禁状态。随后证据文档提交的run `33104191217`在Dependency policy步骤发现`chacha20 0.10.1`刚被crates.io撤回；r382不增加
+ignore，把锁文件及exact third-party feature baseline更新为兼容未撤回的`0.10.2`。runtime 123项测试、cargo audit、cargo deny、workspace
+check及55-package/583-dependency boundary本地通过；GitHub CI run `33105053408`的四个Job再次全部成功，当前main仓库门禁绿色。
 
 r296为MCP Tool Host与MCP Resource Host各自安装构造期必选的真实RPC admission semaphore，并从同一owner导出fixed `rpc_requests`
 available/used。permit在身份/trace授权后、业务decode前获取；饱和返回`ResourceExhausted`，drop后恢复available。closed配置/hard max、
