@@ -857,6 +857,13 @@
 > finalize仍通过，证明观测读取不改变业务fence。fresh PostgreSQL目标测试通过。该证据只关闭单进程真实permit authority到HTTP surface的动态
 > 接线，不代表第二lane隔离、approved CapacityProfile、production Prometheus scrape、SLO/soak或L4～L6完成。
 
+> 2026-08-27 implementation evidence：r362以固定LocalStack Community 4.14.0 HTTPS S3/KMS-compatible endpoint执行既有真实provider
+> round-trip。测试安装exact immutable S3/KMS binding，通过HeadBucket/GetPublicKey readiness，使用KMS envelope加密object locator，向启用
+> versioning的隔离bucket写入bytes并取得真实generation；随后验证wrong-tenant解封拒绝、exact generation head/read、wrong generation NotFound、
+> exact generation delete及删除后NotFound，测试结束bucket无残留version。目标provider测试通过。该证据关闭AWS-compatible Artifact provider
+> adapter的真实HTTPS S3/KMS L3切片，不代表production Artifact Data Worker进程、AWS云服务/workload identity、KMS rotation、restore、真实
+> production scrape或L4～L6完成。
+
 > 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
 > Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
 > critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，

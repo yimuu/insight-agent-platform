@@ -577,6 +577,12 @@ r361在同一fresh PostgreSQL 16 production discovery进程夹具中补齐动态
 关闭单进程真实permit authority到HTTP surface的动态接线，不代表第二lane隔离、approved CapacityProfile、production Prometheus scrape、SLO/soak
 或L4～L6。
 
+r362以固定LocalStack Community 4.14.0 HTTPS S3/KMS-compatible endpoint执行既有真实provider round-trip：安装exact immutable S3/KMS binding、
+通过HeadBucket/GetPublicKey readiness，KMS envelope加密object locator，向启用versioning的隔离bucket写入bytes并取得非伪造generation；随后验证
+wrong-tenant解封拒绝、exact generation head/read、wrong generation NotFound、exact generation delete及删除后NotFound，测试结束bucket无残留version。
+该证据关闭AWS-compatible Artifact provider adapter的真实HTTPS S3/KMS L3切片；它不代表production Artifact Data Worker进程、AWS云服务/workload
+identity、KMS rotation、restore、真实生产scrape或L4～L6。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
