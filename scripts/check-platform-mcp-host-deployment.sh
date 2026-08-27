@@ -9,6 +9,7 @@ root = pathlib.Path.cwd()
 rpc = (root / "crates/platform-mcp-rpc/src/lib.rs").read_text(encoding="utf-8")
 source = (root / "crates/platform-mcp-service/src/main.rs").read_text(encoding="utf-8")
 resource_source = (root / "crates/platform-mcp-service/src/resource_main.rs").read_text(encoding="utf-8")
+discovery_source = (root / "crates/platform-mcp-service/src/discovery_main.rs").read_text(encoding="utf-8")
 dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 chart = root / "deploy/helm/insight-platform-mcp-host"
 failures = []
@@ -62,10 +63,33 @@ for required in (
 ):
     if required not in resource_source:
         failures.append(f"MCP Resource Host production composition is missing {required}")
+for required in (
+    "McpDiscoveryDriver",
+    "McpDiscoveryWorker",
+    "StreamableHttpMcpDiscoveryTransport",
+    "ArtifactDataWorkerGrpcClient",
+    "EgressBrokerGrpcClient",
+    "run_discovery_queue_sampler",
+    "discovery_capacity_metric",
+    "ProcessHttpMetrics::install_with_capacities",
+):
+    if required not in discovery_source:
+        failures.append(f"MCP Discovery Worker production composition is missing {required}")
+for forbidden in (
+    "TcpIncoming",
+    "Server::builder",
+    "reqwest::",
+    "std::process::Command",
+    "ManagedStdioMcpTransport",
+):
+    if forbidden in discovery_source:
+        failures.append(f"MCP Discovery Worker crosses a forbidden boundary through {forbidden}")
 if "/usr/local/bin/platform-mcp-host" not in dockerfile:
     failures.append("runtime image is missing platform-mcp-host")
 if "/usr/local/bin/platform-mcp-resource-host" not in dockerfile:
     failures.append("runtime image is missing platform-mcp-resource-host")
+if "/usr/local/bin/platform-mcp-discovery-worker" not in dockerfile:
+    failures.append("runtime image is missing platform-mcp-discovery-worker")
 
 try:
     subprocess.run(["helm", "lint", str(chart)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -85,6 +109,7 @@ for needle in (
     "path: /metrics",
     'command: ["/usr/local/bin/platform-mcp-host"]',
     'command: ["/usr/local/bin/platform-mcp-resource-host"]',
+    'command: ["/usr/local/bin/platform-mcp-discovery-worker"]',
     "insight.platform/workload-role: mcp-host",
     "insight.platform/workload-namespace: mcp-host",
     "automountServiceAccountToken: false",
@@ -94,6 +119,11 @@ for needle in (
     "PLATFORM_MCP_HOST_SERVER_CLIENT_CA_PATH",
     "PLATFORM_MCP_HOST_EGRESS_CA_PATH",
     "PLATFORM_MCP_RESOURCE_HOST_DATABASE_URL",
+    "PLATFORM_MCP_DISCOVERY_WORKER_DATABASE_URL",
+    "PLATFORM_MCP_DISCOVERY_WORKER_EGRESS_CA_PATH",
+    "PLATFORM_MCP_DISCOVERY_WORKER_ARTIFACT_CA_PATH",
+    "insight.platform/workload-role: mcp-discovery-worker",
+    "app.kubernetes.io/component: artifact-data-worker",
     "app.kubernetes.io/component: context-subscription-worker",
     "app.kubernetes.io/component: capability-remote-worker",
     "app.kubernetes.io/component: egress-broker",
@@ -112,10 +142,10 @@ for forbidden in (
 ):
     if forbidden in rendered:
         failures.append(f"rendered MCP Host has forbidden capability {forbidden}")
-if rendered.count("\nkind: Deployment\n") != 2 or rendered.count("\nkind: NetworkPolicy\n") != 3:
-    failures.append("MCP Host must render two isolated workload pools and three NetworkPolicies")
-if rendered.count("port: 5432") != 1:
-    failures.append("only the MCP Resource Host NetworkPolicy may reach PostgreSQL")
+if rendered.count("\nkind: Deployment\n") != 3 or rendered.count("\nkind: NetworkPolicy\n") != 4:
+    failures.append("MCP Host must render three isolated workload pools and four NetworkPolicies")
+if rendered.count("port: 5432") != 2:
+    failures.append("only the MCP Resource Host and Discovery Worker may reach PostgreSQL")
 
 negative_values = (
     ("--set", "replicas=1", "at least two replicas"),
@@ -126,6 +156,12 @@ negative_values = (
     ("--set", "autoscaling.minReplicas=1", "at least two replicas"),
     ("--set", "observability.port=9443", "observability port must be distinct"),
     ("--set-json", "networkPolicy.monitoringPodSelector=null", "monitoring requires exact"),
+    ("--set", "discoveryPool.replicas=1", "Discovery Worker requires at least two replicas"),
+    ("--set", "discoveryPool.config.digest=latest", "discoveryPool config.digest must be exact sha256"),
+    ("--set", "discoveryPool.clientTls.existingSecret=", "exact upstream TLS identities"),
+    ("--set", "discoveryPool.database.existingSecret=insight-platform-mcp-resource-host-database", "independently provisioned database credential"),
+    ("--set-json", "discoveryPool.artifactPodSelector=null", "exact PostgreSQL and Artifact destinations"),
+    ("--set", "discoveryPool.autoscaling.minReplicas=1", "Discovery Worker HPA requires at least two replicas"),
 )
 for flag, assignment, expected in negative_values:
     result = subprocess.run(["helm", "template", "platform", str(chart), flag, assignment], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)

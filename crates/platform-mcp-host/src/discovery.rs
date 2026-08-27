@@ -8,10 +8,11 @@ use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use insight_platform_artifacts::{StageWorkloadArtifactRequest, StagedWorkloadArtifact};
 use insight_platform_contracts::{
-    canonical_json, ArtifactRef, CommandAudit, CommandOutcome, DataClassification,
-    ExactDeploymentRef, ExactVersionRef, JobState, McpDeploymentClosure, McpDiscoverySnapshot,
-    McpExperimentalFeature, McpNegotiatedCapabilities, McpProtocolPolicyDocument,
-    McpServerExecutionContract, McpTransportKind, ResourceId, ResourceKind, Sha256Digest,
+    canonical_json, ArtifactRef, CanonicalHttpEndpoint, CommandAudit, CommandOutcome,
+    DataClassification, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, JobState,
+    McpClientCapabilities, McpDeploymentClosure, McpDiscoverySnapshot, McpExperimentalFeature,
+    McpNegotiatedCapabilities, McpProtocolPolicyDocument, McpServerExecutionContract,
+    McpTransportBinding, McpTransportKind, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_jobs::JobFence;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
@@ -272,6 +273,7 @@ impl McpDiscoveryTransportEvidence {
             || self.negotiated_version.len() > 64
             || self.negotiated_version.chars().any(char::is_control)
             || self.descriptor_size_bytes == 0
+            || self.descriptor_count > MAX_MCP_DISCOVERY_DESCRIPTOR_COUNT
             || self.verification_job_id.kind() != ResourceKind::Job
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
@@ -709,6 +711,273 @@ pub struct McpDiscoveryCandidate {
     pub observed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub canonical_digest: Sha256Digest,
+}
+
+pub const MAX_MCP_DISCOVERY_DESCRIPTOR_COUNT: u32 = 4_096;
+pub const MAX_MCP_DISCOVERY_PAGES_PER_KIND: u16 = 64;
+
+/// Credential-free, object-locator-free Host→Egress discovery request.
+///
+/// The Host derives every network and credential selector from the exact frozen execution
+/// contract. Egress may resolve only the exact Secret reference and returns descriptor bytes; it
+/// never receives Artifact identities or writes durable state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpDiscoveryTransportRequest {
+    pub schema_version: u32,
+    pub tenant_id: ResourceId,
+    pub deployment: ExactDeploymentRef,
+    pub endpoint: CanonicalHttpEndpoint,
+    pub endpoint_identity_digest: Sha256Digest,
+    pub server_identity_digest: Sha256Digest,
+    pub protocol_policy: ExactVersionRef,
+    pub network_policy: ExactVersionRef,
+    pub tls_policy: ExactVersionRef,
+    pub trust_policy: ExactVersionRef,
+    pub auth_policy: Option<ExactVersionRef>,
+    pub authorization_binding_id: ResourceId,
+    pub authorization_generation: u64,
+    pub principal_binding_generation: u64,
+    pub token_secret_binding: ExactSecretBindingRef,
+    pub offered_versions: Vec<String>,
+    pub client_capabilities: McpClientCapabilities,
+    pub operation_id: ResourceId,
+    pub job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
+    pub lease_generation: u64,
+    pub physical_attempt: u32,
+    pub request_digest: Sha256Digest,
+    pub deadline: DateTime<Utc>,
+    pub maximum_descriptor_bytes: u64,
+    pub maximum_descriptor_count: u32,
+    pub maximum_pages_per_kind: u16,
+    pub maximum_request_bytes: u32,
+    pub maximum_response_bytes: u32,
+    pub maximum_headers: u16,
+    pub maximum_sse_event_bytes: u32,
+    pub idle_timeout_milliseconds: u64,
+    pub initialize_timeout_milliseconds: u64,
+    pub request_timeout_milliseconds: u64,
+}
+
+impl McpDiscoveryTransportRequest {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), McpHostError> {
+        let policies = [
+            &self.protocol_policy,
+            &self.network_policy,
+            &self.tls_policy,
+            &self.trust_policy,
+        ];
+        if self.schema_version != 1
+            || self.tenant_id.kind() != ResourceKind::Tenant
+            || self.deployment.resource_kind != ResourceKind::McpDeployment
+            || self.deployment.validate().is_err()
+            || self.endpoint.validate().is_err()
+            || self.endpoint.canonical_digest().as_ref() != Ok(&self.endpoint_identity_digest)
+            || policies.iter().any(|policy| {
+                policy.resource_kind != ResourceKind::PolicyRevision || policy.validate().is_err()
+            })
+            || self.auth_policy.as_ref().is_some_and(|policy| {
+                policy.resource_kind != ResourceKind::PolicyRevision || policy.validate().is_err()
+            })
+            || self.authorization_binding_id.kind() != ResourceKind::McpAuthorizationBinding
+            || self.authorization_generation == 0
+            || self.principal_binding_generation == 0
+            || self.token_secret_binding.validate().is_err()
+            || self.offered_versions.is_empty()
+            || self.offered_versions.len() > 16
+            || self
+                .offered_versions
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || self.offered_versions.iter().any(|version| {
+                version.len() != 10
+                    || chrono::NaiveDate::parse_from_str(version, "%Y-%m-%d").is_err()
+            })
+            || self.operation_id.kind() != ResourceKind::McpOperation
+            || self.job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.lease_generation == 0
+            || self.physical_attempt == 0
+            || self.deadline <= now
+            || self.maximum_descriptor_bytes == 0
+            || self.maximum_descriptor_bytes > u64::from(self.maximum_response_bytes)
+            || self.maximum_descriptor_count == 0
+            || self.maximum_descriptor_count > MAX_MCP_DISCOVERY_DESCRIPTOR_COUNT
+            || self.maximum_pages_per_kind == 0
+            || self.maximum_pages_per_kind > MAX_MCP_DISCOVERY_PAGES_PER_KIND
+            || self.maximum_request_bytes == 0
+            || self.maximum_response_bytes == 0
+            || self.maximum_headers == 0
+            || self.maximum_sse_event_bytes == 0
+            || self.idle_timeout_milliseconds == 0
+            || self.initialize_timeout_milliseconds == 0
+            || self.request_timeout_milliseconds == 0
+            || digest_without_field(self, "request_digest")? != self.request_digest
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpDiscoveryTransportResponse {
+    pub schema_version: u32,
+    pub request_digest: Sha256Digest,
+    pub negotiated_version: String,
+    pub negotiated_capabilities: McpNegotiatedCapabilities,
+    #[serde(with = "canonical_base64url_bytes")]
+    pub descriptor_bytes: Vec<u8>,
+    pub descriptor_digest: Sha256Digest,
+    pub descriptor_count: u32,
+    pub observed_at: DateTime<Utc>,
+}
+
+impl McpDiscoveryTransportResponse {
+    pub fn validate_for(&self, request: &McpDiscoveryTransportRequest) -> Result<(), McpHostError> {
+        if self.schema_version != 1
+            || self.request_digest != request.request_digest
+            || !request.offered_versions.contains(&self.negotiated_version)
+            || self.descriptor_bytes.is_empty()
+            || u64::try_from(self.descriptor_bytes.len()).unwrap_or(u64::MAX)
+                > request.maximum_descriptor_bytes
+            || self.descriptor_count > request.maximum_descriptor_count
+            || raw_descriptor_digest(&self.descriptor_bytes)? != self.descriptor_digest
+            || descriptor_document_count(&self.descriptor_bytes)? != self.descriptor_count
+            || self.observed_at > request.deadline
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+pub trait McpDiscoveryTransportConnector: Send + Sync {
+    async fn discover(
+        &self,
+        request: McpDiscoveryTransportRequest,
+    ) -> Result<McpDiscoveryTransportResponse, McpTransportFailure>;
+}
+
+pub struct StreamableHttpMcpDiscoveryTransport {
+    connector: Arc<dyn McpDiscoveryTransportConnector>,
+}
+
+impl StreamableHttpMcpDiscoveryTransport {
+    pub fn new(connector: Arc<dyn McpDiscoveryTransportConnector>) -> Self {
+        Self { connector }
+    }
+}
+
+#[async_trait]
+impl McpDiscoveryTransport for StreamableHttpMcpDiscoveryTransport {
+    fn kind(&self) -> McpTransportKind {
+        McpTransportKind::StreamableHttp
+    }
+
+    async fn discover(
+        &self,
+        contract: &McpDiscoveryExecutionContract,
+        request: &McpDiscoveryRequest,
+    ) -> Result<McpDiscoveryCandidate, McpTransportFailure> {
+        let transport_request = discovery_transport_request(contract, request)?;
+        let response = self.connector.discover(transport_request.clone()).await?;
+        response.validate_for(&transport_request).map_err(|_| {
+            McpTransportFailure::Permanent(SafeMcpFailure {
+                safe_code: "mcp_discovery_egress_response_invalid".to_owned(),
+                safe_message: "MCP discovery response failed boundary validation".to_owned(),
+                evidence_digest: static_digest("mcp_discovery_egress_response_invalid"),
+            })
+        })?;
+        McpDiscoveryCandidate::build(
+            response.negotiated_version,
+            response.negotiated_capabilities,
+            response.descriptor_bytes,
+            response.descriptor_count,
+            response.observed_at,
+            request.deadline.min(contract.authorization.expires_at),
+            contract,
+        )
+        .map_err(|_| {
+            McpTransportFailure::Permanent(SafeMcpFailure {
+                safe_code: "mcp_discovery_egress_response_invalid".to_owned(),
+                safe_message: "MCP discovery response failed boundary validation".to_owned(),
+                evidence_digest: static_digest("mcp_discovery_egress_response_invalid"),
+            })
+        })
+    }
+}
+
+fn discovery_transport_request(
+    contract: &McpDiscoveryExecutionContract,
+    request: &McpDiscoveryRequest,
+) -> Result<McpDiscoveryTransportRequest, McpTransportFailure> {
+    contract
+        .validate_at(Utc::now())
+        .map_err(|_| invalid_discovery_transport_contract())?;
+    request
+        .validate_for(contract, Utc::now())
+        .map_err(|_| invalid_discovery_transport_contract())?;
+    let McpTransportBinding::StreamableHttp {
+        endpoint,
+        endpoint_identity_digest,
+        network_policy,
+        tls_policy,
+    } = &contract.deployment_closure.transport;
+    let maximum_descriptor_bytes = u64::from(contract.server.limits.maximum_response_bytes);
+    let mut transport = McpDiscoveryTransportRequest {
+        schema_version: 1,
+        tenant_id: request.tenant_id.clone(),
+        deployment: contract.deployment.clone(),
+        endpoint: endpoint.clone(),
+        endpoint_identity_digest: endpoint_identity_digest.clone(),
+        server_identity_digest: contract.deployment_closure.server_identity_digest.clone(),
+        protocol_policy: contract.server.protocol_policy.clone(),
+        network_policy: network_policy.clone(),
+        tls_policy: tls_policy.clone(),
+        trust_policy: contract.deployment_closure.trust_policy.clone(),
+        auth_policy: contract.deployment_closure.auth_policy.clone(),
+        authorization_binding_id: contract.authorization.authorization_binding_id.clone(),
+        authorization_generation: contract.authorization.generation,
+        principal_binding_generation: contract.authorization.principal_binding_generation,
+        token_secret_binding: contract.authorization.token_secret_binding.clone(),
+        offered_versions: contract.protocol_profile.offered_versions.to_vec(),
+        client_capabilities: contract.protocol_profile.client_capabilities.clone(),
+        operation_id: request.operation_id.clone(),
+        job_id: request.job_id.clone(),
+        worker_process_generation_id: request.worker_process_generation_id.clone(),
+        lease_generation: request.lease_generation,
+        physical_attempt: request.physical_attempt,
+        request_digest: placeholder_digest().map_err(|_| invalid_discovery_transport_contract())?,
+        deadline: request.deadline,
+        maximum_descriptor_bytes,
+        maximum_descriptor_count: MAX_MCP_DISCOVERY_DESCRIPTOR_COUNT,
+        maximum_pages_per_kind: MAX_MCP_DISCOVERY_PAGES_PER_KIND,
+        maximum_request_bytes: contract.server.limits.maximum_message_bytes,
+        maximum_response_bytes: contract.server.limits.maximum_response_bytes,
+        maximum_headers: contract.server.limits.maximum_headers,
+        maximum_sse_event_bytes: contract.server.limits.maximum_sse_event_bytes,
+        idle_timeout_milliseconds: contract.server.limits.idle_timeout_milliseconds,
+        initialize_timeout_milliseconds: contract.server.limits.initialize_timeout_milliseconds,
+        request_timeout_milliseconds: contract.server.limits.request_timeout_milliseconds,
+    };
+    transport.request_digest = digest_without_field(&transport, "request_digest")
+        .map_err(|_| invalid_discovery_transport_contract())?;
+    transport
+        .validate_at(Utc::now())
+        .map_err(|_| invalid_discovery_transport_contract())?;
+    Ok(transport)
+}
+
+fn invalid_discovery_transport_contract() -> McpTransportFailure {
+    McpTransportFailure::Permanent(SafeMcpFailure {
+        safe_code: "mcp_discovery_transport_contract_invalid".to_owned(),
+        safe_message: "MCP discovery transport contract is invalid".to_owned(),
+        evidence_digest: static_digest("mcp_discovery_transport_contract_invalid"),
+    })
 }
 
 mod canonical_base64url_bytes {

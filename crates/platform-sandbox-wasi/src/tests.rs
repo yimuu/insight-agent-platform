@@ -71,7 +71,7 @@ fn deployment(kind: ResourceKind, suffix: u16, character: char) -> ExactDeployme
 fn policy_closure() -> SandboxExecutionPolicyClosure {
     SandboxExecutionPolicyClosure {
         isolation: SandboxIsolationPolicyDocument {
-            schema_version: 2,
+            schema_version: 1,
             minimum_isolation: SandboxIsolationClass::Wasm,
             allowed_runtime_families: vec![SandboxRuntimeFamily::WasmWasi],
             allowed_trust_classes: vec![CodeTrustClass::BuiltIn],
@@ -80,7 +80,7 @@ fn policy_closure() -> SandboxExecutionPolicyClosure {
             deny_host_devices: true,
         },
         resource: SandboxResourcePolicyDocument {
-            schema_version: 3,
+            schema_version: 1,
             maximum_cpu_millicores: 1_000,
             maximum_memory_mebibytes: 1_024,
             maximum_pids: 64,
@@ -118,7 +118,7 @@ fn policy_closure() -> SandboxExecutionPolicyClosure {
             deny_udp: true,
         },
         artifact_io: SandboxArtifactIoPolicyDocument {
-            schema_version: 1,
+            schema_version: 3,
             allowed_input_media_types: vec![
                 "application/json".to_owned(),
                 "application/octet-stream".to_owned(),

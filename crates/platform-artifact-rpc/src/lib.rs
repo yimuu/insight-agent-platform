@@ -61,7 +61,8 @@ pub const MODEL_WORKER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/work
 pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-controller";
 pub const SCHEDULER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/scheduler";
-pub const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
+pub const MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/mcp-discovery-worker";
 pub const MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD: usize = 1_048_576;
 pub const MAX_ARTIFACT_RPC_WRITE_REQUEST_BYTES_HARD: usize = 96 * 1_048_576;
 pub const MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD: usize = 262_144;
@@ -204,11 +205,11 @@ impl tonic::service::Interceptor for SchedulerWorkloadIdentity {
     }
 }
 
-/// Authorizes only the independently deployed MCP Host at the workload stage boundary.
+/// Authorizes only the independently deployed MCP discovery worker at the stage boundary.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct McpHostWorkloadIdentity;
+pub struct McpDiscoveryWorkerWorkloadIdentity;
 
-impl tonic::service::Interceptor for McpHostWorkloadIdentity {
+impl tonic::service::Interceptor for McpDiscoveryWorkerWorkloadIdentity {
     fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
         let certificates = request
             .peer_certs()
@@ -216,7 +217,7 @@ impl tonic::service::Interceptor for McpHostWorkloadIdentity {
         let leaf = certificates
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
-        require_exact_workload_uri(leaf.as_ref(), MCP_HOST_WORKLOAD_IDENTITY)?;
+        require_exact_workload_uri(leaf.as_ref(), MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY)?;
         require_trace_interceptor(request)
     }
 }
@@ -2080,6 +2081,8 @@ mod tests {
         sandbox_controller_key_pem: String,
         scheduler_certificate_pem: String,
         scheduler_key_pem: String,
+        discovery_certificate_pem: String,
+        discovery_key_pem: String,
         mcp_host_certificate_pem: String,
         mcp_host_key_pem: String,
     }
@@ -2124,8 +2127,18 @@ mod tests {
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
+        let (discovery_certificate_pem, discovery_key_pem) = issue(
+            vec![SanType::URI(
+                MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY.try_into().unwrap(),
+            )],
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
         let (mcp_host_certificate_pem, mcp_host_key_pem) = issue(
-            vec![SanType::URI(MCP_HOST_WORKLOAD_IDENTITY.try_into().unwrap())],
+            vec![SanType::URI(
+                "spiffe://insight.platform/workload/mcp-host"
+                    .try_into()
+                    .unwrap(),
+            )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
         MtlsFixture {
@@ -2138,6 +2151,8 @@ mod tests {
             sandbox_controller_key_pem,
             scheduler_certificate_pem,
             scheduler_key_pem,
+            discovery_certificate_pem,
+            discovery_key_pem,
             mcp_host_certificate_pem,
             mcp_host_key_pem,
         }
@@ -2550,7 +2565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workload_stage_mtls_accepts_only_mcp_host_before_authority() {
+    async fn workload_stage_mtls_accepts_only_discovery_worker_before_authority() {
         let fixture = mtls_fixture();
         let authority = Arc::new(RecordingStageAuthority {
             calls: AtomicUsize::new(0),
@@ -2565,8 +2580,10 @@ mod tests {
             )
             .max_encoding_message_size(rpc_limits.maximum_message_bytes())
             .max_decoding_message_size(rpc_limits.maximum_message_bytes());
-        let service =
-            tonic::service::interceptor::InterceptedService::new(service, McpHostWorkloadIdentity);
+        let service = tonic::service::interceptor::InterceptedService::new(
+            service,
+            McpDiscoveryWorkerWorkloadIdentity,
+        );
         let tls = ServerTlsConfig::new()
             .identity(Identity::from_pem(
                 &fixture.server_certificate_pem,
@@ -2607,8 +2624,8 @@ mod tests {
         let accepted_channel = channel(
             &endpoint,
             &fixture,
-            &fixture.mcp_host_certificate_pem,
-            &fixture.mcp_host_key_pem,
+            &fixture.discovery_certificate_pem,
+            &fixture.discovery_key_pem,
         )
         .await;
         let client = ArtifactDataWorkerGrpcClient::new(accepted_channel, rpc_limits);
@@ -2638,8 +2655,27 @@ mod tests {
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
         assert_eq!(authority.calls.load(Ordering::Acquire), 1);
 
+        let old_host_channel = channel(
+            &endpoint,
+            &fixture,
+            &fixture.mcp_host_certificate_pem,
+            &fixture.mcp_host_key_pem,
+        )
+        .await;
+        let mut old_host = ArtifactDataWorkerServiceClient::new(old_host_channel);
+        let rejected = old_host
+            .stage_workload_artifact(
+                encode_write_request(WORKLOAD_ARTIFACT_STAGE_OPERATION, &request, rpc_limits)
+                    .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
+        assert_eq!(authority.calls.load(Ordering::Acquire), 1);
+
         drop(client);
         drop(wrong);
+        drop(old_host);
         shutdown_sender.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), server)
             .await

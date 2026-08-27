@@ -7,6 +7,9 @@
 {{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) }}
 {{- fail "monitoring requires exact namespace and Pod selectors" }}
 {{- end }}
+{{- if or (empty .Values.networkPolicy.mcpDiscoveryNamespaceSelector) (empty .Values.networkPolicy.mcpDiscoveryPodSelector) }}
+{{- fail "MCP discovery Artifact ingress requires exact namespace and Pod selectors" }}
+{{- end }}
 {{- if ne (join "," (keys .Values.roles | sortAlpha)) "data-worker,gateway,maintenance" }}
 {{- fail "roles must contain exactly gateway, data-worker, and maintenance" }}
 {{- end }}

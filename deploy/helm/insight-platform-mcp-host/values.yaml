@@ -67,3 +67,36 @@ resourcePool:
   callerNamespace: platform-context-worker
   callerPodSelector: {app.kubernetes.io/component: context-subscription-worker}
   postgresCidrs: [10.10.0.0/24]
+discoveryPool:
+  enabled: true
+  replicas: 2
+  observability: {port: 9290}
+  config:
+    existingConfigMap: insight-platform-mcp-discovery-worker-candidate
+    fileKey: mcp-discovery-worker.json
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  database:
+    existingSecret: insight-platform-mcp-discovery-worker-database
+    urlKey: database-url
+  clientTls:
+    existingSecret: insight-platform-mcp-discovery-worker-client-tls
+    keys: {certificate: client.pem, privateKey: client-key.pem}
+  egressTls:
+    existingSecret: insight-platform-mcp-discovery-worker-egress-ca
+    caKey: ca.pem
+  artifactTls:
+    existingSecret: insight-platform-mcp-discovery-worker-artifact-ca
+    caKey: ca.pem
+  resources:
+    requests: {cpu: 250m, memory: 256Mi, ephemeral-storage: 64Mi}
+    limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 1Gi}
+  podDisruptionBudget: {enabled: true, minAvailable: 1}
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 16
+    targetCPUUtilizationPercentage: 70
+  postgresCidrs: [10.10.0.0/24]
+  artifactNamespace: platform-artifacts
+  artifactPodSelector: {app.kubernetes.io/component: artifact-data-worker}
+  artifactPort: 8443

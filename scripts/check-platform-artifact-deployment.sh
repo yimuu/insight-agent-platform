@@ -83,6 +83,7 @@ negative_values=(
   "--set|roles.data-worker.observabilityPort=9443"
   "--set|roles.maintenance.observabilityPort=8082"
   "--set-json|networkPolicy.monitoringPodSelector=null"
+  "--set-json|networkPolicy.mcpDiscoveryPodSelector=null"
   "--set|image.digest=latest"
   "--set|roles.extra.replicas=2"
   "--set-json|roles.maintenance=null"
@@ -168,8 +169,15 @@ failures << "Artifact roles share a database Secret" unless identities.flat_map(
 failures << "Artifact roles share a storage identity" unless identities.map(&:last).uniq.length == 3
 
 data_policy = policies.find { |doc| doc.dig("metadata", "name") == "insight-platform-artifact-data-worker" }
-data_ports = data_policy.to_h.dig("spec", "ingress").to_a.flat_map { |entry| entry.fetch("ports", []).map { |port| port["port"] } }.sort
-failures << "Data Worker ingress must split monitoring, Scheduler/Controller, and guest listeners" unless data_ports == [9090, 9443, 9443, 9444]
+data_ingress = data_policy.to_h.dig("spec", "ingress").to_a
+data_ports = data_ingress.flat_map { |entry| entry.fetch("ports", []).map { |port| port["port"] } }.sort
+failures << "Data Worker ingress must split monitoring, Scheduler/Controller, discovery, and guest listeners" unless data_ports == [9090, 9443, 9443, 9443, 9444]
+discovery_ingress = data_ingress.find do |entry|
+  entry.fetch("from", []).any? do |source|
+    source.dig("podSelector", "matchLabels", "insight.platform/workload-role") == "mcp-discovery-worker"
+  end
+end
+failures << "Data Worker stage ingress must select only the MCP discovery workload role" unless discovery_ingress && discovery_ingress.fetch("ports", []).map { |port| port["port"] } == [9443]
 maintenance_policy = policies.find { |doc| doc.dig("metadata", "name") == "insight-platform-artifact-maintenance" }
 maintenance_ingress = maintenance_policy.to_h.dig("spec", "ingress").to_a
 maintenance_ports = maintenance_ingress.flat_map { |entry| entry.fetch("ports", []).map { |port| port["port"] } }

@@ -813,6 +813,17 @@
 > `Verified -> Ready`、Evidence Link、immutable Snapshot及双方Job/配额结算。Rejected/Quarantined/Corrupt/expired evidence走closed failed终态并释放
 > reservation；旧`CommitMcpDiscovery`直写Snapshot路径已删除。Artifact 31/31、MCP Host 60/60、PostgreSQL lib 14/14、相关strict Clippy、workspace
 > all-target、contract/schema静态门禁通过；本轮无fresh PostgreSQL、真实S3或L2/L3 kill-window，独立discovery process composition与L4仍Pending。
+>
+> 2026-08-27 implementation evidence：r347把MCP discovery接入独立production workload。新增只claim/recover `McpDiscovery + Mcp +
+> mcp_operation`的`platform-mcp-discovery-worker`，以受限PostgreSQL pool、独立Semaphore、heartbeat/fence刷新、bounded drain组合真实
+> Egress与Artifact Data Worker mTLS client；进程导出exact discovery capacity及due/expired durable queue指标。Host→Egress新增credential-free、
+> object-locator-free discovery RPC，Egress执行Streamable HTTP initialize/initialized及Tool/Resource/Prompt bounded pagination，只经raw payload lane返回
+> canonical descriptor bytes；Artifact stage只接受exact discovery worker SPIFFE identity，旧MCP Host与其他角色在authority前拒绝。Helm/Docker加入独立
+> ServiceAccount、Deployment、Service、PDB/HPA/ServiceMonitor、数据库凭据、双上游TLS与仅Egress/Artifact/PostgreSQL/DNS的NetworkPolicy，并更新MCP/
+> Artifact fail-closed deployment门禁。Artifact RPC 9/9、Egress 58/58、Egress RPC 6/6、MCP Host 60/60、workspace all-target、workspace strict
+> Clippy、contract/schema及deployment/observability/redaction门禁通过；同时修复workspace feature-unified并发下telemetry capture测试的dispatcher作用域，
+> 并将Sandbox资格测试夹具对齐当前1/1/3策略schema版本，均不改变runtime行为。本轮无fresh PostgreSQL、真实外部MCP/S3、production cluster或
+> kill-window，故L2/L3及L4～L6仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

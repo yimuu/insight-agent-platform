@@ -180,15 +180,17 @@ mod tests {
     use axum::{routing::get, Router};
     use std::{
         io,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex as StdMutex},
     };
     use tower::ServiceExt;
     use tracing::instrument::WithSubscriber as _;
 
-    #[derive(Clone, Default)]
-    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
+    static TRACE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    struct CapturedTelemetryWriter(Arc<Mutex<Vec<u8>>>);
+    #[derive(Clone, Default)]
+    struct CapturedTelemetry(Arc<StdMutex<Vec<u8>>>);
+
+    struct CapturedTelemetryWriter(Arc<StdMutex<Vec<u8>>>);
 
     impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry {
         type Writer = CapturedTelemetryWriter;
@@ -218,6 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_exact_parent_and_returns_its_trace_id() {
+        let _trace_test_guard = TRACE_TEST_LOCK.lock().await;
         let trace_id = "0af7651916cd43dd8448eb211c80319c";
         let response = traced_router()
             .oneshot(
@@ -238,6 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn generates_a_trace_when_parent_is_absent() {
+        let _trace_test_guard = TRACE_TEST_LOCK.lock().await;
         let response = traced_router()
             .oneshot(
                 Request::builder()
@@ -257,6 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn problem_body_and_response_header_share_the_request_trace() {
+        let _trace_test_guard = TRACE_TEST_LOCK.lock().await;
         let trace_id = "0af7651916cd43dd8448eb211c80319c";
         let response = traced_router()
             .oneshot(
@@ -281,6 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_malformed_parent_and_forbidden_context_headers() {
+        let _trace_test_guard = TRACE_TEST_LOCK.lock().await;
         for (name, value) in [
             (TRACEPARENT_HEADER, "00-bad-parent"),
             (TRACESTATE_HEADER, "vendor=value"),
@@ -305,54 +311,61 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn dynamic_public_trace_capture_rejects_extended_context_without_leaking_it() {
+    #[test]
+    fn dynamic_public_trace_capture_rejects_extended_context_without_leaking_it() {
         const TRACE_ID: &str = "0af7651916cd43dd8448eb211c80319c";
         const TRACESTATE_CANARY: &str = "vendor=trace-canary-49fa124a";
         const BAGGAGE_CANARY: &str = "private=baggage-canary-ff8ad715";
 
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _trace_test_guard = runtime.block_on(TRACE_TEST_LOCK.lock());
         let captured = CapturedTelemetry::default();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
             .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW)
             .with_writer(captured.clone())
             .finish();
-        async {
-            let accepted = traced_router()
-                .oneshot(
-                    Request::builder()
-                        .uri("/v1/test")
-                        .header(
-                            TRACEPARENT_HEADER,
-                            format!("00-{TRACE_ID}-b7ad6b7169203331-01"),
-                        )
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
-
-            for (name, value) in [
-                (TRACESTATE_HEADER, TRACESTATE_CANARY),
-                (BAGGAGE_HEADER, BAGGAGE_CANARY),
-            ] {
-                let rejected = traced_router()
+        runtime.block_on(
+            async {
+                let accepted = traced_router()
                     .oneshot(
                         Request::builder()
                             .uri("/v1/test")
-                            .header(name, value)
+                            .header(
+                                TRACEPARENT_HEADER,
+                                format!("00-{TRACE_ID}-b7ad6b7169203331-01"),
+                            )
                             .body(Body::empty())
                             .unwrap(),
                     )
                     .await
                     .unwrap();
-                assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+                assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+
+                for (name, value) in [
+                    (TRACESTATE_HEADER, TRACESTATE_CANARY),
+                    (BAGGAGE_HEADER, BAGGAGE_CANARY),
+                ] {
+                    let rejected = traced_router()
+                        .oneshot(
+                            Request::builder()
+                                .uri("/v1/test")
+                                .header(name, value)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+                }
             }
-        }
-        .with_subscriber(subscriber)
-        .await;
+            .with_subscriber(subscriber),
+        );
 
         let telemetry = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
         assert!(telemetry.contains("platform.public_request"));

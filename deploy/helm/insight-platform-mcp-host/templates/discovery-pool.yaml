@@ -1,0 +1,131 @@
+{{- if .Values.discoveryPool.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "insight-platform-mcp-host.discoveryName" . }}, namespace: {{ .Values.namespace }}}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-mcp-host.discoveryName" . }}
+  namespace: {{ .Values.namespace }}
+  labels: {{ include "insight-platform-mcp-host.discoveryLabels" . | nindent 4 }}
+spec:
+  selector: {{ include "insight-platform-mcp-host.discoveryLabels" . | nindent 4 }}
+  ports:
+    - {name: observability, protocol: TCP, port: {{ int .Values.discoveryPool.observability.port }}, targetPort: observability}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: {{ include "insight-platform-mcp-host.discoveryName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  replicas: {{ int .Values.discoveryPool.replicas }}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-mcp-host.discoveryLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "insight-platform-mcp-host.discoveryLabels" . | nindent 8 }}
+        insight.platform/workload-role: mcp-discovery-worker
+        insight.platform/component-role: mcp_host
+      annotations:
+        insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
+    spec:
+      serviceAccountName: {{ include "insight-platform-mcp-host.discoveryName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mcp-discovery-worker
+          image: {{ include "insight-platform-mcp-host.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-mcp-discovery-worker"]
+          ports:
+            - {name: observability, containerPort: {{ int .Values.discoveryPool.observability.port }}, protocol: TCP}
+          env:
+            - {name: PLATFORM_MCP_DISCOVERY_WORKER_CONFIG, value: /etc/insight/config/mcp-discovery-worker.json}
+            - {name: PLATFORM_MCP_DISCOVERY_WORKER_CONFIG_DIGEST, value: {{ .Values.discoveryPool.config.digest | quote }} }
+            - name: PLATFORM_MCP_DISCOVERY_WORKER_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.discoveryPool.database.existingSecret }}, key: {{ .Values.discoveryPool.database.urlKey }}}}
+            - {name: PLATFORM_MCP_DISCOVERY_WORKER_CLIENT_CERT_PATH, value: /etc/insight/client-tls/client.pem}
+            - {name: PLATFORM_MCP_DISCOVERY_WORKER_CLIENT_KEY_PATH, value: /etc/insight/client-tls/client-key.pem}
+            - {name: PLATFORM_MCP_DISCOVERY_WORKER_EGRESS_CA_PATH, value: /etc/insight/egress-tls/ca.pem}
+            - {name: PLATFORM_MCP_DISCOVERY_WORKER_ARTIFACT_CA_PATH, value: /etc/insight/artifact-tls/ca.pem}
+          startupProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          resources: {{ toYaml .Values.discoveryPool.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: client-tls, mountPath: /etc/insight/client-tls, readOnly: true}
+            - {name: egress-tls, mountPath: /etc/insight/egress-tls, readOnly: true}
+            - {name: artifact-tls, mountPath: /etc/insight/artifact-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.discoveryPool.config.existingConfigMap }}
+            items: [{key: {{ .Values.discoveryPool.config.fileKey }}, path: mcp-discovery-worker.json}]
+        - name: client-tls
+          secret:
+            secretName: {{ .Values.discoveryPool.clientTls.existingSecret }}
+            items:
+              - {key: {{ .Values.discoveryPool.clientTls.keys.certificate }}, path: client.pem}
+              - {key: {{ .Values.discoveryPool.clientTls.keys.privateKey }}, path: client-key.pem}
+        - name: egress-tls
+          secret:
+            secretName: {{ .Values.discoveryPool.egressTls.existingSecret }}
+            items: [{key: {{ .Values.discoveryPool.egressTls.caKey }}, path: ca.pem}]
+        - name: artifact-tls
+          secret:
+            secretName: {{ .Values.discoveryPool.artifactTls.existingSecret }}
+            items: [{key: {{ .Values.discoveryPool.artifactTls.caKey }}, path: ca.pem}]
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+{{- if .Values.discoveryPool.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ include "insight-platform-mcp-host.discoveryName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  minAvailable: {{ int .Values.discoveryPool.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-mcp-host.discoveryLabels" . | nindent 6 }}
+{{- end }}
+{{- if .Values.discoveryPool.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: {{ include "insight-platform-mcp-host.discoveryName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "insight-platform-mcp-host.discoveryName" . }}}
+  minReplicas: {{ int .Values.discoveryPool.autoscaling.minReplicas }}
+  maxReplicas: {{ int .Values.discoveryPool.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: {{ int .Values.discoveryPool.autoscaling.targetCPUUtilizationPercentage }}}}
+{{- end }}
+{{- if .Values.monitoring.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: {name: {{ include "insight-platform-mcp-host.discoveryName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  namespaceSelector: {matchNames: [{{ .Values.namespace }}]}
+  selector:
+    matchLabels: {{ include "insight-platform-mcp-host.discoveryLabels" . | nindent 6 }}
+  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
+{{- end }}
+{{- end }}

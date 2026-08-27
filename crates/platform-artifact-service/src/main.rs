@@ -29,10 +29,10 @@ use insight_platform_artifact_rpc::{
     ArtifactDataWorkerGrpcService, ArtifactGvisorGuestGrpcService, ArtifactInternalRpcLimits,
     ArtifactSandboxBrokerGrpcService, ArtifactSchedulerGrpcService, ArtifactWorkloadStageAuthority,
     ArtifactWorkloadStageError, GvisorGuestResponseMaterializer, LeasedArtifactBytes,
-    McpHostWorkloadIdentity, SandboxControllerWorkloadIdentity, SchedulerRunValueResponseBroker,
-    SchedulerSkillPackageResponseBroker, SchedulerTypedPlanResponseBroker,
-    SchedulerWorkloadIdentity, WasiArtifactBrokerError, WasiArtifactReadRequest,
-    WasiArtifactResponseBroker,
+    McpDiscoveryWorkerWorkloadIdentity, SandboxControllerWorkloadIdentity,
+    SchedulerRunValueResponseBroker, SchedulerSkillPackageResponseBroker,
+    SchedulerTypedPlanResponseBroker, SchedulerWorkloadIdentity, WasiArtifactBrokerError,
+    WasiArtifactReadRequest, WasiArtifactResponseBroker,
 };
 use insight_platform_artifacts::{
     SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerSkillPackageReadError,
@@ -589,7 +589,10 @@ async fn run() -> Result<(), ProcessError> {
         ))
         .max_encoding_message_size(maximum)
         .max_decoding_message_size(maximum);
-        tonic::service::interceptor::InterceptedService::new(service, McpHostWorkloadIdentity)
+        tonic::service::interceptor::InterceptedService::new(
+            service,
+            McpDiscoveryWorkerWorkloadIdentity,
+        )
     };
     let guest_materializer = Arc::new(GvisorGuestMaterializer {
         authority: Arc::clone(&read_repository),

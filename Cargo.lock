@@ -2878,6 +2878,8 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "insight-platform-artifact-rpc",
+ "insight-platform-artifacts",
  "insight-platform-capability-adapters",
  "insight-platform-contracts",
  "insight-platform-egress-rpc",

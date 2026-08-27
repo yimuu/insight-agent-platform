@@ -758,7 +758,7 @@ fn process_tls_fixture() -> ProcessTlsFixture {
 fn sandbox_policy_closure(token_purpose: SecretPurpose) -> SandboxExecutionPolicyClosure {
     SandboxExecutionPolicyClosure {
         isolation: SandboxIsolationPolicyDocument {
-            schema_version: 2,
+            schema_version: 1,
             minimum_isolation: SandboxIsolationClass::SandboxedContainer,
             allowed_runtime_families: vec![SandboxRuntimeFamily::Python],
             allowed_trust_classes: vec![CodeTrustClass::BuiltIn],
@@ -767,7 +767,7 @@ fn sandbox_policy_closure(token_purpose: SecretPurpose) -> SandboxExecutionPolic
             deny_host_devices: true,
         },
         resource: SandboxResourcePolicyDocument {
-            schema_version: 3,
+            schema_version: 1,
             maximum_cpu_millicores: 1_000,
             maximum_memory_mebibytes: 1_024,
             maximum_pids: 64,
@@ -805,7 +805,7 @@ fn sandbox_policy_closure(token_purpose: SecretPurpose) -> SandboxExecutionPolic
             deny_udp: true,
         },
         artifact_io: SandboxArtifactIoPolicyDocument {
-            schema_version: 1,
+            schema_version: 3,
             allowed_input_media_types: vec!["application/octet-stream".to_owned()],
             allowed_output_media_types: vec![],
             maximum_input_artifacts: 8,

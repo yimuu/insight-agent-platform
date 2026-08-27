@@ -129,6 +129,22 @@ pub struct McpDiscoveryDriver {
     config: McpDiscoveryDriverConfig,
 }
 
+#[derive(Clone)]
+pub struct McpDiscoveryCapacity {
+    permits: Arc<Semaphore>,
+    maximum: usize,
+}
+
+impl McpDiscoveryCapacity {
+    pub fn maximum(&self) -> usize {
+        self.maximum
+    }
+
+    pub fn available(&self) -> usize {
+        self.permits.available_permits()
+    }
+}
+
 impl McpDiscoveryDriver {
     pub fn new(
         repository: Arc<PgRepository>,
@@ -151,6 +167,13 @@ impl McpDiscoveryDriver {
 
     pub fn available_permits(&self) -> usize {
         self.permits.available_permits()
+    }
+
+    pub fn capacity(&self) -> McpDiscoveryCapacity {
+        McpDiscoveryCapacity {
+            permits: Arc::clone(&self.permits),
+            maximum: self.config.maximum_concurrency,
+        }
     }
 
     pub async fn drive_once(

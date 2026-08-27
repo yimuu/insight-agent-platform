@@ -22,6 +22,7 @@ RUN cargo build --locked --release --bin insight-agent-platform \
     && cargo build --locked --release -p insight-platform-mcp-cleanup-worker --bin platform-mcp-cleanup-worker \
     && cargo build --locked --release -p insight-platform-mcp-service --bin platform-mcp-host \
     && cargo build --locked --release -p insight-platform-mcp-service --bin platform-mcp-resource-host \
+    && cargo build --locked --release -p insight-platform-mcp-service --bin platform-mcp-discovery-worker \
     && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-data-worker \
     && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-gateway \
     && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-maintenance \
@@ -57,6 +58,7 @@ COPY --from=builder /workspace/target/release/platform-capability-remote-worker 
 COPY --from=builder /workspace/target/release/platform-mcp-cleanup-worker /usr/local/bin/platform-mcp-cleanup-worker
 COPY --from=builder /workspace/target/release/platform-mcp-host /usr/local/bin/platform-mcp-host
 COPY --from=builder /workspace/target/release/platform-mcp-resource-host /usr/local/bin/platform-mcp-resource-host
+COPY --from=builder /workspace/target/release/platform-mcp-discovery-worker /usr/local/bin/platform-mcp-discovery-worker
 COPY --from=builder /workspace/target/release/platform-artifact-data-worker /usr/local/bin/platform-artifact-data-worker
 COPY --from=builder /workspace/target/release/platform-artifact-gateway /usr/local/bin/platform-artifact-gateway
 COPY --from=builder /workspace/target/release/platform-artifact-maintenance /usr/local/bin/platform-artifact-maintenance

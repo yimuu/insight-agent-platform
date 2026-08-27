@@ -14,8 +14,9 @@ use insight_platform_contracts::{
     Sha256Digest, MAX_MCP_SESSION_MILLISECONDS,
 };
 use insight_platform_mcp_host::{
-    EncryptedMcpState, EstablishedMcpSubscription, McpElicitationAction, McpElicitationResponse,
-    McpOperationOutcome, McpRemoteTaskCancelOutcome, McpRemoteTaskLimits,
+    EncryptedMcpState, EstablishedMcpSubscription, McpDiscoveryTransportConnector,
+    McpDiscoveryTransportRequest, McpDiscoveryTransportResponse, McpElicitationAction,
+    McpElicitationResponse, McpOperationOutcome, McpRemoteTaskCancelOutcome, McpRemoteTaskLimits,
     McpResourceRefreshConnector, McpResourceRefreshTransportEvidence,
     McpResourceRefreshTransportRequest, McpStreamableHttpConnector, McpStreamableHttpRequest,
     McpStreamableHttpSubscriptionConnector, McpStreamableHttpSubscriptionNotification,
@@ -934,6 +935,19 @@ impl InstalledMcpStreamableHttpEndpoint {
             && request.auth_policy.as_ref() == Some(&self.auth_policy)
             && request.token_secret_binding.purpose == self.token_credential_purpose
     }
+
+    fn matches_discovery(&self, request: &McpDiscoveryTransportRequest) -> bool {
+        self.deployment == request.deployment
+            && self.endpoint == request.endpoint
+            && self.endpoint_identity_digest == request.endpoint_identity_digest
+            && self.server_identity_digest == request.server_identity_digest
+            && self.protocol_policy == request.protocol_policy
+            && self.network_policy == request.network_policy
+            && self.tls_policy == request.tls_policy
+            && self.trust_policy == request.trust_policy
+            && request.auth_policy.as_ref() == Some(&self.auth_policy)
+            && request.token_secret_binding.purpose == self.token_credential_purpose
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1016,6 +1030,21 @@ impl InstalledMcpStreamableHttpEndpointCatalog {
             .filter(|entry| entry.matches_resource_refresh(request))
             .cloned()
             .ok_or_else(|| rejected("mcp_egress_resource_refresh_endpoint_not_installed"))
+    }
+
+    fn resolve_discovery(
+        &self,
+        request: &McpDiscoveryTransportRequest,
+    ) -> Result<InstalledMcpStreamableHttpEndpoint, McpTransportFailure> {
+        let key = (
+            request.deployment.deployment_id.clone(),
+            request.deployment.deployment_digest.clone(),
+        );
+        self.entries
+            .get(&key)
+            .filter(|entry| entry.matches_discovery(request))
+            .cloned()
+            .ok_or_else(|| rejected("mcp_egress_discovery_endpoint_not_installed"))
     }
 }
 
@@ -1546,6 +1575,51 @@ impl ReqwestMcpStreamableHttpConnector {
         let mut authorization = parsed.map_err(|_| rejected("mcp_egress_secret_rejected"))?;
         authorization.set_sensitive(true);
         let protocol_version = HeaderValue::from_str(&request.protocol_version)
+            .map_err(|_| rejected("mcp_egress_invalid_protocol_version"))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        headers.insert(AUTHORIZATION, authorization);
+        headers.insert(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
+        Ok(headers)
+    }
+
+    async fn resolve_discovery_headers(
+        &self,
+        request: &McpDiscoveryTransportRequest,
+        protocol_version: &str,
+    ) -> Result<HeaderMap, McpTransportFailure> {
+        let resolved = self
+            .secrets
+            .resolve(&request.tenant_id, &request.token_secret_binding)
+            .await
+            .map_err(|failure| match failure {
+                SecretMaterialResolutionError::Unavailable => {
+                    retryable("mcp_egress_secret_unavailable")
+                }
+                SecretMaterialResolutionError::NotFound
+                | SecretMaterialResolutionError::Revoked
+                | SecretMaterialResolutionError::InvalidEvidence => {
+                    rejected("mcp_egress_secret_rejected")
+                }
+            })?;
+        if !resolved.validate_for(
+            &request.token_secret_binding,
+            self.limits.maximum_secret_material_bytes,
+        ) {
+            return Err(rejected("mcp_egress_secret_rejected"));
+        }
+        let mut bearer = Vec::with_capacity(7 + resolved.material.as_bytes().len());
+        bearer.extend_from_slice(b"Bearer ");
+        bearer.extend_from_slice(resolved.material.as_bytes());
+        let parsed = HeaderValue::from_bytes(&bearer);
+        bearer.fill(0);
+        let mut authorization = parsed.map_err(|_| rejected("mcp_egress_secret_rejected"))?;
+        authorization.set_sensitive(true);
+        let protocol_version = HeaderValue::from_str(protocol_version)
             .map_err(|_| rejected("mcp_egress_invalid_protocol_version"))?;
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -2395,6 +2469,271 @@ impl McpStreamableHttpConnector for ReqwestMcpStreamableHttpConnector {
 }
 
 #[async_trait]
+impl McpDiscoveryTransportConnector for ReqwestMcpStreamableHttpConnector {
+    async fn discover(
+        &self,
+        request: McpDiscoveryTransportRequest,
+    ) -> Result<McpDiscoveryTransportResponse, McpTransportFailure> {
+        validate_discovery_request(&request, Utc::now())?;
+        let entry = self.catalog.resolve_discovery(&request)?;
+        let _permit = self.acquire().await?;
+        let (dns_host, addresses) = self.resolve_addresses(&entry.endpoint).await?;
+        let proposed_version = request
+            .offered_versions
+            .last()
+            .ok_or_else(|| rejected("mcp_egress_discovery_protocol_missing"))?
+            .clone();
+        let headers = self
+            .resolve_discovery_headers(&request, &proposed_version)
+            .await?;
+        let external_identity = discovery_external_identity(&request, &addresses)?;
+        let remaining = (request.deadline - Utc::now())
+            .to_std()
+            .map_err(|_| rejected("mcp_egress_discovery_deadline_elapsed"))?;
+        let initialize_timeout = remaining.min(Duration::from_millis(
+            request.initialize_timeout_milliseconds,
+        ));
+        let request_timeout =
+            remaining.min(Duration::from_millis(request.request_timeout_milliseconds));
+        let idle_timeout = remaining.min(Duration::from_millis(request.idle_timeout_milliseconds));
+        if initialize_timeout.is_zero() || request_timeout.is_zero() || idle_timeout.is_zero() {
+            return Err(rejected("mcp_egress_discovery_deadline_elapsed"));
+        }
+        let initialize_id = format!(
+            "{}:{}:discovery:initialize",
+            request.job_id, request.physical_attempt
+        );
+        let initialize_body = canonical_json(&discovery_initialize_request(
+            &request,
+            &proposed_version,
+            &initialize_id,
+        ))
+        .map_err(|_| rejected("mcp_egress_discovery_request_not_canonical"))?;
+        if initialize_body.len() > request.maximum_request_bytes as usize {
+            return Err(rejected(
+                "mcp_egress_discovery_initialize_request_too_large",
+            ));
+        }
+        let initialize = self
+            .post(
+                &entry,
+                &dns_host,
+                &addresses,
+                &headers,
+                None,
+                initialize_body,
+                initialize_timeout,
+                idle_timeout,
+                request.maximum_response_bytes as usize,
+                request.maximum_sse_event_bytes as usize,
+                request.maximum_headers as usize,
+                Some(&initialize_id),
+                false,
+                0,
+                external_identity.clone(),
+            )
+            .await?;
+        if initialize.status == StatusCode::UNAUTHORIZED
+            || initialize.status == StatusCode::FORBIDDEN
+        {
+            return Err(reauthorization(&initialize.headers));
+        }
+        require_success_status(initialize.status, &external_identity)?;
+        let initialize_wire = response_json(
+            &initialize,
+            request.maximum_response_bytes,
+            &external_identity,
+        )?;
+        let (negotiated_version, negotiated_capabilities) =
+            parse_discovery_initialize_response(&initialize_wire, &initialize_id, &request)?;
+        let session = SensitiveSessionId::from_headers(&initialize.headers)?;
+        let initialized = canonical_json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .map_err(|_| rejected("mcp_egress_discovery_request_not_canonical"))?;
+        if initialized.len() > request.maximum_request_bytes as usize {
+            return Err(rejected(
+                "mcp_egress_discovery_initialized_request_too_large",
+            ));
+        }
+        let acknowledged = self
+            .post(
+                &entry,
+                &dns_host,
+                &addresses,
+                &headers,
+                session.as_ref(),
+                initialized,
+                initialize_timeout,
+                idle_timeout,
+                request.maximum_response_bytes as usize,
+                request.maximum_sse_event_bytes as usize,
+                request.maximum_headers as usize,
+                None,
+                false,
+                0,
+                external_identity.clone(),
+            )
+            .await?;
+        if acknowledged.status != StatusCode::ACCEPTED || !acknowledged.body.is_empty() {
+            return Err(uncertain(
+                "mcp_egress_discovery_initialized_not_accepted",
+                external_identity,
+            ));
+        }
+
+        let mut descriptor_count = 0_u32;
+        let mut tools = Vec::new();
+        let mut resources = Vec::new();
+        let mut prompts = Vec::new();
+        for (enabled, method, field, target) in [
+            (
+                negotiated_capabilities.tools,
+                "tools/list",
+                "tools",
+                &mut tools,
+            ),
+            (
+                negotiated_capabilities.resources,
+                "resources/list",
+                "resources",
+                &mut resources,
+            ),
+            (
+                negotiated_capabilities.prompts,
+                "prompts/list",
+                "prompts",
+                &mut prompts,
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
+            let mut cursor: Option<String> = None;
+            for page in 0..request.maximum_pages_per_kind {
+                let operation_id = format!(
+                    "{}:{}:discovery:{}:{}",
+                    request.job_id,
+                    request.physical_attempt,
+                    field,
+                    u32::from(page) + 1
+                );
+                let params = cursor.as_ref().map_or_else(
+                    || serde_json::json!({}),
+                    |cursor| serde_json::json!({"cursor": cursor}),
+                );
+                let result = self
+                    .discovery_call(
+                        &entry,
+                        &dns_host,
+                        &addresses,
+                        &headers,
+                        session.as_ref(),
+                        &operation_id,
+                        method,
+                        params,
+                        &request,
+                        request_timeout,
+                        idle_timeout,
+                        external_identity.clone(),
+                    )
+                    .await?;
+                let object = result.as_object().ok_or_else(|| {
+                    uncertain(
+                        "mcp_egress_discovery_list_invalid",
+                        external_identity.clone(),
+                    )
+                })?;
+                if object.keys().any(|key| key != field && key != "nextCursor") {
+                    return Err(uncertain(
+                        "mcp_egress_discovery_list_invalid",
+                        external_identity,
+                    ));
+                }
+                let values = object.get(field).and_then(Value::as_array).ok_or_else(|| {
+                    uncertain(
+                        "mcp_egress_discovery_list_invalid",
+                        external_identity.clone(),
+                    )
+                })?;
+                descriptor_count = descriptor_count
+                    .checked_add(u32::try_from(values.len()).map_err(|_| {
+                        uncertain(
+                            "mcp_egress_discovery_count_exceeded",
+                            external_identity.clone(),
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        uncertain(
+                            "mcp_egress_discovery_count_exceeded",
+                            external_identity.clone(),
+                        )
+                    })?;
+                if descriptor_count > request.maximum_descriptor_count {
+                    return Err(uncertain(
+                        "mcp_egress_discovery_count_exceeded",
+                        external_identity,
+                    ));
+                }
+                target.extend(values.iter().cloned());
+                cursor = object
+                    .get("nextCursor")
+                    .map(|value| bounded_discovery_cursor(value, &external_identity))
+                    .transpose()?;
+                if cursor.is_none() {
+                    break;
+                }
+                if page + 1 == request.maximum_pages_per_kind {
+                    return Err(uncertain(
+                        "mcp_egress_discovery_page_limit_exceeded",
+                        external_identity,
+                    ));
+                }
+            }
+        }
+        let descriptor_bytes = canonical_json(&serde_json::json!({
+            "prompts": prompts,
+            "resources": resources,
+            "schema_version": 1,
+            "tools": tools,
+        }))
+        .map_err(|_| {
+            uncertain(
+                "mcp_egress_discovery_document_invalid",
+                external_identity.clone(),
+            )
+        })?;
+        if u64::try_from(descriptor_bytes.len()).unwrap_or(u64::MAX)
+            > request.maximum_descriptor_bytes
+        {
+            return Err(uncertain(
+                "mcp_egress_discovery_bytes_exceeded",
+                external_identity,
+            ));
+        }
+        let descriptor_digest = raw_bytes_digest(&descriptor_bytes)?;
+        let observed_at = Utc::now();
+        if observed_at > request.deadline {
+            return Err(uncertain(
+                "mcp_egress_discovery_deadline_elapsed",
+                external_identity,
+            ));
+        }
+        Ok(McpDiscoveryTransportResponse {
+            schema_version: 1,
+            request_digest: request.request_digest,
+            negotiated_version,
+            negotiated_capabilities,
+            descriptor_bytes,
+            descriptor_digest,
+            descriptor_count,
+            observed_at,
+        })
+    }
+}
+
+#[async_trait]
 impl McpResourceRefreshConnector for ReqwestMcpStreamableHttpConnector {
     async fn refresh_resources(
         &self,
@@ -2729,6 +3068,78 @@ impl McpResourceRefreshConnector for ReqwestMcpStreamableHttpConnector {
 }
 
 impl ReqwestMcpStreamableHttpConnector {
+    #[allow(clippy::too_many_arguments)]
+    async fn discovery_call(
+        &self,
+        entry: &InstalledMcpStreamableHttpEndpoint,
+        dns_host: &str,
+        addresses: &[SocketAddr],
+        headers: &HeaderMap,
+        session: Option<&SensitiveSessionId>,
+        operation_id: &str,
+        method: &str,
+        params: Value,
+        request: &McpDiscoveryTransportRequest,
+        request_timeout: Duration,
+        idle_timeout: Duration,
+        external_identity: Sha256Digest,
+    ) -> Result<Value, McpTransportFailure> {
+        let body = canonical_json(&serde_json::json!({
+            "id": operation_id,
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }))
+        .map_err(|_| rejected("mcp_egress_discovery_request_not_canonical"))?;
+        if body.len() > request.maximum_request_bytes as usize {
+            return Err(rejected("mcp_egress_discovery_request_too_large"));
+        }
+        let response = self
+            .post(
+                entry,
+                dns_host,
+                addresses,
+                headers,
+                session,
+                body,
+                request_timeout,
+                idle_timeout,
+                request.maximum_response_bytes as usize,
+                request.maximum_sse_event_bytes as usize,
+                request.maximum_headers as usize,
+                Some(operation_id),
+                false,
+                0,
+                external_identity.clone(),
+            )
+            .await?;
+        if response.status == StatusCode::UNAUTHORIZED || response.status == StatusCode::FORBIDDEN {
+            return Err(reauthorization(&response.headers));
+        }
+        let wire = response_json(
+            &response,
+            request.maximum_response_bytes,
+            &external_identity,
+        )?;
+        if !response.status.is_success() && !is_matching_jsonrpc_error(&wire, operation_id) {
+            return Err(uncertain(
+                "mcp_egress_discovery_http_failure",
+                external_identity,
+            ));
+        }
+        matching_result(&wire, operation_id)
+            .cloned()
+            .ok_or_else(|| {
+                if is_matching_jsonrpc_error(&wire, operation_id) {
+                    McpTransportFailure::Permanent(safe_failure(
+                        "mcp_egress_discovery_jsonrpc_error",
+                    ))
+                } else {
+                    uncertain("mcp_egress_discovery_invalid_response", external_identity)
+                }
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn resource_refresh_call(
         &self,
@@ -3681,6 +4092,27 @@ fn validate_resource_refresh_request(
     Ok(())
 }
 
+fn validate_discovery_request(
+    request: &McpDiscoveryTransportRequest,
+    now: DateTime<Utc>,
+) -> Result<(), McpTransportFailure> {
+    request
+        .validate_at(now)
+        .map_err(|_| rejected("mcp_egress_discovery_request_invalid"))?;
+    if request.endpoint.scheme != CapabilityEndpointScheme::Https
+        || request.maximum_request_bytes > MAX_MCP_HTTP_REQUEST_BYTES_HARD
+        || request.maximum_response_bytes > MAX_MCP_HTTP_RESPONSE_BYTES_HARD
+        || request.maximum_headers > MAX_MCP_HTTP_HEADERS_HARD
+        || request.maximum_sse_event_bytes > request.maximum_response_bytes
+        || request.idle_timeout_milliseconds > MAX_MCP_HTTP_TIMEOUT_MILLISECONDS_HARD
+        || request.initialize_timeout_milliseconds > MAX_MCP_HTTP_TIMEOUT_MILLISECONDS_HARD
+        || request.request_timeout_milliseconds > MAX_MCP_HTTP_TIMEOUT_MILLISECONDS_HARD
+    {
+        return Err(rejected("mcp_egress_discovery_request_invalid"));
+    }
+    Ok(())
+}
+
 fn validate_subscription_request(
     request: &McpStreamableHttpSubscriptionRequest,
     now: DateTime<Utc>,
@@ -3933,6 +4365,50 @@ fn initialize_request(request: &McpStreamableHttpRequest, id: &str) -> Value {
     })
 }
 
+fn discovery_initialize_request(
+    request: &McpDiscoveryTransportRequest,
+    protocol_version: &str,
+    id: &str,
+) -> Value {
+    let clients = &request.client_capabilities;
+    let mut capabilities = Map::new();
+    if clients.elicitation_form || clients.elicitation_url {
+        let mut elicitation = Map::new();
+        if clients.elicitation_form {
+            elicitation.insert("form".to_owned(), Value::Object(Map::new()));
+        }
+        if clients.elicitation_url {
+            elicitation.insert("url".to_owned(), Value::Object(Map::new()));
+        }
+        capabilities.insert("elicitation".to_owned(), Value::Object(elicitation));
+    }
+    if clients.tasks_elicitation_create {
+        capabilities.insert(
+            "tasks".to_owned(),
+            serde_json::json!({"requests": {"elicitation": {"create": {}}}}),
+        );
+    }
+    if clients.sampling {
+        capabilities.insert("sampling".to_owned(), Value::Object(Map::new()));
+    }
+    if clients.roots {
+        capabilities.insert(
+            "roots".to_owned(),
+            serde_json::json!({"listChanged": false}),
+        );
+    }
+    serde_json::json!({
+        "id": id,
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+            "capabilities": capabilities,
+            "clientInfo": {"name": "insight-platform-mcp-discovery", "version": "1"},
+            "protocolVersion": protocol_version,
+        }
+    })
+}
+
 fn resource_refresh_initialize_request(
     request: &McpResourceRefreshTransportRequest,
     id: &str,
@@ -4033,6 +4509,94 @@ fn validate_initialize_response(
         ));
     }
     Ok(())
+}
+
+fn parse_discovery_initialize_response(
+    wire: &Value,
+    id: &str,
+    request: &McpDiscoveryTransportRequest,
+) -> Result<(String, McpNegotiatedCapabilities), McpTransportFailure> {
+    let result = matching_result(wire, id)
+        .ok_or_else(|| uncertain("mcp_egress_discovery_initialize_invalid", static_external()))?;
+    let object = result
+        .as_object()
+        .ok_or_else(|| uncertain("mcp_egress_discovery_initialize_invalid", static_external()))?;
+    let negotiated_version = object
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .filter(|version| {
+            request
+                .offered_versions
+                .iter()
+                .any(|offered| offered == *version)
+        })
+        .ok_or_else(|| {
+            uncertain(
+                "mcp_egress_discovery_protocol_unsupported",
+                static_external(),
+            )
+        })?
+        .to_owned();
+    let capabilities = object
+        .get("capabilities")
+        .and_then(Value::as_object)
+        .ok_or_else(|| uncertain("mcp_egress_discovery_initialize_invalid", static_external()))?;
+    if capabilities.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "tools" | "resources" | "prompts" | "logging" | "tasks"
+        )
+    }) || capabilities.values().any(|value| !value.is_object())
+    {
+        return Err(uncertain(
+            "mcp_egress_discovery_capability_unsupported",
+            static_external(),
+        ));
+    }
+    let present = |name: &str| capabilities.get(name).is_some();
+    let resources_subscribe = capabilities
+        .get("resources")
+        .and_then(Value::as_object)
+        .and_then(|resources| resources.get("subscribe"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let tasks = capabilities.get("tasks").and_then(Value::as_object);
+    let task_flag = |name: &str| {
+        tasks
+            .and_then(|value| value.get(name))
+            .is_some_and(Value::is_object)
+    };
+    let tasks_tools_call = tasks
+        .and_then(|value| value.get("requests"))
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("tools"))
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("call"))
+        .is_some_and(Value::is_object);
+    let negotiated = McpNegotiatedCapabilities {
+        tools: present("tools"),
+        resources: present("resources"),
+        prompts: present("prompts"),
+        logging: present("logging"),
+        tasks: present("tasks"),
+        tasks_list: task_flag("list"),
+        tasks_cancel: task_flag("cancel"),
+        tasks_tools_call,
+        elicitation: request.client_capabilities.elicitation_form
+            || request.client_capabilities.elicitation_url,
+        sampling: request.client_capabilities.sampling,
+        roots: request.client_capabilities.roots,
+        subscriptions: resources_subscribe,
+    };
+    if !negotiated.tasks
+        && (negotiated.tasks_list || negotiated.tasks_cancel || negotiated.tasks_tools_call)
+    {
+        return Err(uncertain(
+            "mcp_egress_discovery_capability_invalid",
+            static_external(),
+        ));
+    }
+    Ok((negotiated_version, negotiated))
 }
 
 fn completed_operation(
@@ -4600,6 +5164,42 @@ fn resource_refresh_external_identity(
     }))
 }
 
+fn discovery_external_identity(
+    request: &McpDiscoveryTransportRequest,
+    addresses: &[SocketAddr],
+) -> Result<Sha256Digest, McpTransportFailure> {
+    digest_value(&serde_json::json!({
+        "addresses": addresses.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "authorization_binding_id": request.authorization_binding_id,
+        "authorization_generation": request.authorization_generation,
+        "deployment": request.deployment,
+        "endpoint_identity_digest": request.endpoint_identity_digest,
+        "job_id": request.job_id,
+        "operation_id": request.operation_id,
+        "physical_attempt": request.physical_attempt,
+        "request_digest": request.request_digest,
+        "schema_version": 1,
+    }))
+}
+
+fn bounded_discovery_cursor(
+    value: &Value,
+    external_identity: &Sha256Digest,
+) -> Result<String, McpTransportFailure> {
+    value
+        .as_str()
+        .filter(|cursor| {
+            !cursor.is_empty() && cursor.len() <= 2_048 && !cursor.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            uncertain(
+                "mcp_egress_discovery_cursor_invalid",
+                external_identity.clone(),
+            )
+        })
+}
+
 fn remote_task_identity(
     request: &McpStreamableHttpRequest,
     task_id: &str,
@@ -4667,6 +5267,15 @@ fn digest_value(value: &Value) -> Result<Sha256Digest, McpTransportFailure> {
         .map_err(|_| rejected("mcp_egress_canonicalization"))?
         .parse()
         .map_err(|_| rejected("mcp_egress_canonicalization"))
+}
+
+fn raw_bytes_digest(bytes: &[u8]) -> Result<Sha256Digest, McpTransportFailure> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| rejected("mcp_egress_discovery_document_invalid"))?;
+    if canonical_json(&value).as_deref() != Ok(bytes) {
+        return Err(rejected("mcp_egress_discovery_document_invalid"));
+    }
+    digest_value(&value)
 }
 
 fn static_external() -> Sha256Digest {
@@ -5450,6 +6059,122 @@ mod tests {
             initialize_timeout_milliseconds: 2_000,
             request_timeout_milliseconds: 5_000,
         }
+    }
+
+    fn discovery_request(fixture: &Fixture) -> McpDiscoveryTransportRequest {
+        let mut request = McpDiscoveryTransportRequest {
+            schema_version: 1,
+            tenant_id: fixture.request.tenant_id.clone(),
+            deployment: fixture.request.deployment.clone(),
+            endpoint: fixture.request.endpoint.clone(),
+            endpoint_identity_digest: fixture.request.endpoint_identity_digest.clone(),
+            server_identity_digest: fixture.request.server_identity_digest.clone(),
+            protocol_policy: fixture.request.protocol_policy.clone(),
+            network_policy: fixture.request.network_policy.clone(),
+            tls_policy: fixture.request.tls_policy.clone(),
+            trust_policy: fixture.request.trust_policy.clone(),
+            auth_policy: fixture.request.auth_policy.clone(),
+            authorization_binding_id: fixture.request.authorization_binding_id.clone(),
+            authorization_generation: fixture.request.authorization_generation,
+            principal_binding_generation: fixture.request.principal_binding_generation,
+            token_secret_binding: fixture.request.token_secret_binding.clone(),
+            offered_versions: vec![MCP_PROTOCOL_BASELINE.to_owned()],
+            client_capabilities: fixture.request.client_capabilities.clone(),
+            operation_id: id(ResourceKind::McpOperation, 0x71),
+            job_id: id(ResourceKind::Job, 0x72),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 0x73),
+            lease_generation: 4,
+            physical_attempt: 2,
+            request_digest: digest('0'),
+            deadline: Utc::now() + chrono::Duration::seconds(30),
+            maximum_descriptor_bytes: 65_536,
+            maximum_descriptor_count: 32,
+            maximum_pages_per_kind: 4,
+            maximum_request_bytes: 4_096,
+            maximum_response_bytes: 65_536,
+            maximum_headers: 32,
+            maximum_sse_event_bytes: 8_192,
+            idle_timeout_milliseconds: 2_000,
+            initialize_timeout_milliseconds: 2_000,
+            request_timeout_milliseconds: 5_000,
+        };
+        let mut value = serde_json::to_value(&request).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("request_digest")
+            .unwrap();
+        request.request_digest = canonical_digest(&value).unwrap().parse().unwrap();
+        request
+    }
+
+    #[tokio::test]
+    async fn discovery_negotiates_and_returns_only_bounded_canonical_descriptor_bytes() {
+        let fixture = fixture();
+        let request = discovery_request(&fixture);
+        let initialize_id = format!(
+            "{}:{}:discovery:initialize",
+            request.job_id, request.physical_attempt
+        );
+        let tools_id = format!(
+            "{}:{}:discovery:tools:1",
+            request.job_id, request.physical_attempt
+        );
+        let transport = Arc::new(FixtureHttpTransport::new(vec![
+            response(
+                StatusCode::OK,
+                headers(Some("application/json"), Some("discovery-session-canary")),
+                serde_json::to_vec(&serde_json::json!({
+                    "id": initialize_id,
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "capabilities": {"tools": {}},
+                        "protocolVersion": MCP_PROTOCOL_BASELINE,
+                        "serverInfo": {"name": "fixture", "version": "1"}
+                    }
+                }))
+                .unwrap(),
+            ),
+            response(StatusCode::ACCEPTED, HeaderMap::new(), Vec::new()),
+            response(
+                StatusCode::OK,
+                headers(Some("application/json"), None),
+                serde_json::to_vec(&serde_json::json!({
+                    "id": tools_id,
+                    "jsonrpc": "2.0",
+                    "result": {"tools": [{
+                        "description": "Weather lookup",
+                        "inputSchema": {"type": "object"},
+                        "name": "weather"
+                    }]}
+                }))
+                .unwrap(),
+            ),
+        ]));
+        let connector = connector(&fixture, secrets(), public_dns(), transport.clone());
+        let response = connector.discover(request.clone()).await.unwrap();
+        response.validate_for(&request).unwrap();
+        assert_eq!(response.request_digest, request.request_digest);
+        assert_eq!(response.descriptor_count, 1);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&response.descriptor_bytes).unwrap(),
+            serde_json::json!({
+                "prompts": [],
+                "resources": [],
+                "schema_version": 1,
+                "tools": [{
+                    "description": "Weather lookup",
+                    "inputSchema": {"type": "object"},
+                    "name": "weather"
+                }]
+            })
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 3);
+        let observed = transport.observed.lock().unwrap();
+        assert!(observed.iter().all(|request| {
+            let wire = String::from_utf8_lossy(&request.body);
+            !wire.contains("artifact_id") && !wire.contains("blob_id")
+        }));
     }
 
     #[tokio::test]

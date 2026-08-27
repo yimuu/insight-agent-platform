@@ -22,7 +22,8 @@ use insight_platform_contracts::{
     Sha256Digest,
 };
 use insight_platform_mcp_host::{
-    AuthorizedMcpOAuthPkceCleanup, McpOAuthAuthorizedGrant, McpOAuthCredentialBroker,
+    AuthorizedMcpOAuthPkceCleanup, McpDiscoveryTransportConnector, McpDiscoveryTransportRequest,
+    McpDiscoveryTransportResponse, McpOAuthAuthorizedGrant, McpOAuthCredentialBroker,
     McpOAuthCredentialBrokerError, McpOAuthExchangeContract, McpOAuthPkceSecretCleaner,
     McpOAuthPkceSecretCleanupDisposition, McpOAuthPkceSecretCleanupError, McpOperationOutcome,
     McpRemoteTaskCancelOutcome, McpResourceRefreshConnector, McpResourceRefreshTransportEvidence,
@@ -69,6 +70,8 @@ pub const MODEL_WORKER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/work
 pub const CAPABILITY_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/capability-worker";
 pub const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
+pub const MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/mcp-discovery-worker";
 pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-worker";
 pub const MAX_EGRESS_METADATA_BYTES_HARD: usize = 1_048_576;
@@ -96,6 +99,8 @@ const DELETE_MCP_OAUTH_PKCE_SECRET: &str = "mcp_oauth.delete_pkce_secret/v1";
 const MCP_OAUTH_PKCE_SECRET_DELETE_OUTCOME: &str = "mcp_oauth.pkce_secret_delete_outcome/v1";
 const EXECUTE_MCP_STREAMABLE_HTTP: &str = "mcp_streamable_http.execute/v1";
 const MCP_STREAMABLE_HTTP_OUTCOME: &str = "mcp_streamable_http.outcome/v1";
+const DISCOVER_MCP_STREAMABLE_HTTP: &str = "mcp_streamable_http.discover/v1";
+const MCP_STREAMABLE_HTTP_DISCOVERY_OUTCOME: &str = "mcp_streamable_http.discovery_outcome/v1";
 const REFRESH_MCP_RESOURCES: &str = "mcp_resource_refresh.execute/v1";
 const MCP_RESOURCE_REFRESH_OUTCOME: &str = "mcp_resource_refresh.outcome/v1";
 const CANCEL_MCP_REMOTE_TASK: &str = "mcp_streamable_http.cancel_remote_task/v1";
@@ -534,6 +539,7 @@ pub enum EgressCallerRole {
     ModelWorker,
     CapabilityWorker,
     ContextWorker,
+    McpDiscoveryWorker,
     McpHost,
 }
 
@@ -543,6 +549,7 @@ impl EgressCallerRole {
             MODEL_WORKER_WORKLOAD_IDENTITY => Some(Self::ModelWorker),
             CAPABILITY_WORKER_WORKLOAD_IDENTITY => Some(Self::CapabilityWorker),
             CONTEXT_WORKER_WORKLOAD_IDENTITY => Some(Self::ContextWorker),
+            MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY => Some(Self::McpDiscoveryWorker),
             MCP_HOST_WORKLOAD_IDENTITY => Some(Self::McpHost),
             _ => None,
         }
@@ -1080,6 +1087,49 @@ impl McpOAuthPkceSecretCleaner for EgressBrokerGrpcClient {
 }
 
 #[async_trait]
+impl McpDiscoveryTransportConnector for EgressBrokerGrpcClient {
+    async fn discover(
+        &self,
+        request: McpDiscoveryTransportRequest,
+    ) -> Result<McpDiscoveryTransportResponse, McpTransportFailure> {
+        request
+            .validate_at(Utc::now())
+            .map_err(|_| mcp_rpc_rejected("mcp_discovery_rpc_request_invalid"))?;
+        let request_identity = request.request_digest.clone();
+        let envelope = encode_metadata(&request, DISCOVER_MCP_STREAMABLE_HTTP, self.limits)
+            .map_err(|_| mcp_rpc_rejected("mcp_discovery_rpc_request_invalid"))?;
+        let mut client = self.client.clone();
+        let response = client
+            .discover_mcp_streamable_http(Request::new(envelope))
+            .await;
+        observe_egress_rpc(&self.dependency_observer, response.is_ok());
+        let response =
+            response.map_err(|status| mcp_rpc_status_failure(status, request_identity.clone()))?;
+        let outcome =
+            decode_mcp_discovery_outcome(response.into_inner(), self.limits).map_err(|_| {
+                mcp_rpc_uncertain(
+                    "mcp_discovery_rpc_response_invalid",
+                    request_identity.clone(),
+                )
+            })?;
+        match outcome {
+            UnaryOutcome::Succeeded(response) => {
+                response.validate_for(&request).map_err(|_| {
+                    mcp_rpc_uncertain("mcp_discovery_rpc_response_invalid", request_identity)
+                })?;
+                Ok(response)
+            }
+            UnaryOutcome::Failed(failure) => {
+                failure.validate_wire_shape().map_err(|_| {
+                    mcp_rpc_uncertain("mcp_discovery_rpc_response_invalid", request_identity)
+                })?;
+                Err(failure)
+            }
+        }
+    }
+}
+
+#[async_trait]
 impl McpStreamableHttpConnector for EgressBrokerGrpcClient {
     async fn execute(
         &self,
@@ -1541,6 +1591,7 @@ pub struct EgressBrokerGrpcService<M, H, G> {
     remote_context: Option<Arc<dyn RemoteContextSearchConnector>>,
     mcp_oauth: Option<Arc<dyn McpOAuthCredentialBroker>>,
     mcp_oauth_pkce_cleaner: Option<Arc<dyn McpOAuthPkceSecretCleaner>>,
+    mcp_discovery: Option<Arc<dyn McpDiscoveryTransportConnector>>,
     mcp_streamable_http: Option<Arc<dyn McpStreamableHttpConnector>>,
     mcp_resource_refresh: Option<Arc<dyn McpResourceRefreshConnector>>,
     mcp_streamable_http_subscription: Option<Arc<dyn McpStreamableHttpSubscriptionConnector>>,
@@ -1557,6 +1608,7 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
             remote_context: None,
             mcp_oauth: None,
             mcp_oauth_pkce_cleaner: None,
+            mcp_discovery: None,
             mcp_streamable_http: None,
             mcp_resource_refresh: None,
             mcp_streamable_http_subscription: None,
@@ -1585,6 +1637,14 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
         connector: Arc<dyn McpStreamableHttpConnector>,
     ) -> Self {
         self.mcp_streamable_http = Some(connector);
+        self
+    }
+
+    pub fn with_mcp_discovery(
+        mut self,
+        connector: Arc<dyn McpDiscoveryTransportConnector>,
+    ) -> Self {
+        self.mcp_discovery = Some(connector);
         self
     }
 
@@ -1900,6 +1960,46 @@ where
         )?))
     }
 
+    async fn discover_mcp_streamable_http(
+        &self,
+        request: Request<ClosedEgressEnvelope>,
+    ) -> Result<Response<ClosedEgressEnvelope>, Status> {
+        require_role(&request, EgressCallerRole::McpDiscoveryWorker)?;
+        let trace = trace_context(&request)?;
+        let connector = self
+            .mcp_discovery
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("MCP discovery connector is not installed"))?;
+        let request: McpDiscoveryTransportRequest = decode_metadata(
+            request.into_inner(),
+            DISCOVER_MCP_STREAMABLE_HTTP,
+            self.limits,
+        )?;
+        request
+            .validate_at(Utc::now())
+            .map_err(|_| Status::invalid_argument("invalid MCP discovery request"))?;
+        let outcome = match scope_trace(trace, connector.discover(request.clone())).await {
+            Ok(response) => {
+                response.validate_for(&request).map_err(|_| {
+                    Status::failed_precondition("MCP discovery connector returned invalid response")
+                })?;
+                UnaryOutcome::Succeeded(response)
+            }
+            Err(failure) => {
+                failure.validate_wire_shape().map_err(|_| {
+                    Status::failed_precondition(
+                        "MCP discovery connector returned invalid failure evidence",
+                    )
+                })?;
+                UnaryOutcome::Failed(failure)
+            }
+        };
+        Ok(Response::new(encode_mcp_discovery_outcome(
+            outcome,
+            self.limits,
+        )?))
+    }
+
     async fn refresh_mcp_resources(
         &self,
         request: Request<ClosedEgressEnvelope>,
@@ -2187,6 +2287,52 @@ fn encode_http_outcome(
             CAPABILITY_HTTP_OUTCOME,
             limits,
         ),
+    }
+}
+
+fn encode_mcp_discovery_outcome(
+    outcome: UnaryOutcome<McpDiscoveryTransportResponse, McpTransportFailure>,
+    limits: EgressInternalRpcLimits,
+) -> Result<ClosedEgressEnvelope, EgressRpcError> {
+    match outcome {
+        UnaryOutcome::Succeeded(mut response) => {
+            let payload = std::mem::take(&mut response.descriptor_bytes);
+            encode_metadata_payload(
+                &UnaryOutcome::<McpDiscoveryTransportResponse, McpTransportFailure>::Succeeded(
+                    response,
+                ),
+                payload,
+                MCP_STREAMABLE_HTTP_DISCOVERY_OUTCOME,
+                limits,
+            )
+        }
+        UnaryOutcome::Failed(failure) => encode_metadata_payload(
+            &UnaryOutcome::<McpDiscoveryTransportResponse, McpTransportFailure>::Failed(failure),
+            Vec::new(),
+            MCP_STREAMABLE_HTTP_DISCOVERY_OUTCOME,
+            limits,
+        ),
+    }
+}
+
+fn decode_mcp_discovery_outcome(
+    envelope: ClosedEgressEnvelope,
+    limits: EgressInternalRpcLimits,
+) -> Result<UnaryOutcome<McpDiscoveryTransportResponse, McpTransportFailure>, EgressRpcError> {
+    let (outcome, payload) = decode_metadata_payload::<
+        UnaryOutcome<McpDiscoveryTransportResponse, McpTransportFailure>,
+    >(envelope, MCP_STREAMABLE_HTTP_DISCOVERY_OUTCOME, limits)?;
+    match outcome {
+        UnaryOutcome::Succeeded(mut response) if response.descriptor_bytes.is_empty() => {
+            response.descriptor_bytes = payload;
+            Ok(UnaryOutcome::Succeeded(response))
+        }
+        UnaryOutcome::Failed(failure)
+            if payload.is_empty() && failure.validate_wire_shape().is_ok() =>
+        {
+            Ok(UnaryOutcome::Failed(failure))
+        }
+        _ => Err(EgressRpcError::InvalidEnvelope),
     }
 }
 
@@ -2667,6 +2813,54 @@ mod tests {
     }
 
     #[test]
+    fn discovery_response_keeps_descriptor_bytes_in_the_raw_payload_lane() {
+        let limits = EgressInternalRpcLimits::new(4_096, 4_096).unwrap();
+        let descriptor_bytes =
+            br#"{"prompts":[],"resources":[],"schema_version":1,"tools":[]}"#.to_vec();
+        let response = McpDiscoveryTransportResponse {
+            schema_version: 1,
+            request_digest: digest('1'),
+            negotiated_version: "2025-11-25".to_owned(),
+            negotiated_capabilities: insight_platform_contracts::McpNegotiatedCapabilities {
+                tools: false,
+                resources: false,
+                prompts: false,
+                logging: false,
+                tasks: false,
+                tasks_list: false,
+                tasks_cancel: false,
+                tasks_tools_call: false,
+                elicitation: false,
+                sampling: false,
+                roots: false,
+                subscriptions: false,
+            },
+            descriptor_digest: raw_digest(&descriptor_bytes).unwrap(),
+            descriptor_count: 0,
+            descriptor_bytes: descriptor_bytes.clone(),
+            observed_at: Utc::now(),
+        };
+        let envelope =
+            encode_mcp_discovery_outcome(UnaryOutcome::Succeeded(response.clone()), limits)
+                .unwrap();
+        assert_eq!(envelope.payload, descriptor_bytes);
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&envelope.canonical_metadata_json).unwrap();
+        assert_eq!(
+            metadata
+                .pointer("/value/descriptor_bytes")
+                .and_then(serde_json::Value::as_str),
+            Some("")
+        );
+        let UnaryOutcome::Succeeded(decoded) =
+            decode_mcp_discovery_outcome(envelope, limits).unwrap()
+        else {
+            panic!("discovery response unexpectedly decoded as a failure")
+        };
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
     fn worker_rejects_malformed_egress_failure_frames() {
         let limits = EgressInternalRpcLimits::new(4_096, 4_096).unwrap();
         let malformed_capability = CapabilityAdapterFailure {
@@ -3035,6 +3229,8 @@ mod tests {
         model_key_pem: String,
         mcp_certificate_pem: String,
         mcp_key_pem: String,
+        discovery_certificate_pem: String,
+        discovery_key_pem: String,
         context_certificate_pem: String,
         context_key_pem: String,
         unknown_certificate_pem: String,
@@ -3073,6 +3269,8 @@ mod tests {
             client(CAPABILITY_WORKER_WORKLOAD_IDENTITY);
         let (model_certificate_pem, model_key_pem) = client(MODEL_WORKER_WORKLOAD_IDENTITY);
         let (mcp_certificate_pem, mcp_key_pem) = client(MCP_HOST_WORKLOAD_IDENTITY);
+        let (discovery_certificate_pem, discovery_key_pem) =
+            client(MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY);
         let (context_certificate_pem, context_key_pem) = client(CONTEXT_WORKER_WORKLOAD_IDENTITY);
         let (unknown_certificate_pem, unknown_key_pem) =
             client("spiffe://insight.platform/workload/api");
@@ -3086,6 +3284,8 @@ mod tests {
             model_key_pem,
             mcp_certificate_pem,
             mcp_key_pem,
+            discovery_certificate_pem,
+            discovery_key_pem,
             context_certificate_pem,
             context_key_pem,
             unknown_certificate_pem,
@@ -3360,6 +3560,50 @@ mod tests {
             tonic::Code::Unavailable
         );
 
+        let discovery_envelope = encode_metadata(
+            &serde_json::json!({"schema_version": 1}),
+            DISCOVER_MCP_STREAMABLE_HTTP,
+            limits,
+        )
+        .unwrap();
+        assert_eq!(
+            mcp.discover_mcp_streamable_http(traced_request(discovery_envelope.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let mut discovery = connect(
+            address,
+            &fixture,
+            &fixture.discovery_certificate_pem,
+            &fixture.discovery_key_pem,
+        )
+        .await;
+        assert_eq!(
+            discovery
+                .discover_mcp_streamable_http(traced_request(discovery_envelope))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unavailable
+        );
+        assert_eq!(
+            discovery
+                .execute_mcp_streamable_http(traced_request(
+                    encode_metadata(
+                        &serde_json::json!({"schema_version": 1}),
+                        EXECUTE_MCP_STREAMABLE_HTTP,
+                        limits,
+                    )
+                    .unwrap()
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
         let mcp_cancel_envelope = encode_metadata(
             &serde_json::json!({"schema_version": 1}),
             CANCEL_MCP_REMOTE_TASK,
@@ -3427,6 +3671,7 @@ mod tests {
         drop(capability);
         drop(model);
         drop(mcp);
+        drop(discovery);
         drop(unknown);
         let _ = shutdown_sender.send(());
         tokio::time::timeout(std::time::Duration::from_secs(5), server)

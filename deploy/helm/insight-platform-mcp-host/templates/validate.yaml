@@ -17,3 +17,15 @@
 {{- if eq (int .Values.resourcePool.service.port) (int .Values.resourcePool.observability.port) -}}{{- fail "MCP Resource Host observability port must be distinct" -}}{{- end -}}
 {{- if and .Values.resourcePool.autoscaling.enabled (lt (int .Values.resourcePool.autoscaling.minReplicas) 2) -}}{{- fail "MCP Resource Host HPA requires at least two replicas" -}}{{- end -}}
 {{- end -}}
+{{- if .Values.discoveryPool.enabled -}}
+{{- if lt (int .Values.discoveryPool.replicas) 2 -}}{{- fail "MCP Discovery Worker requires at least two replicas" -}}{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.discoveryPool.config.digest) -}}{{- fail "discoveryPool config.digest must be exact sha256" -}}{{- end -}}
+{{- if or (empty .Values.discoveryPool.config.existingConfigMap) (empty .Values.discoveryPool.database.existingSecret) (empty .Values.discoveryPool.clientTls.existingSecret) (empty .Values.discoveryPool.egressTls.existingSecret) (empty .Values.discoveryPool.artifactTls.existingSecret) -}}{{- fail "MCP Discovery Worker config, database and exact upstream TLS identities are required" -}}{{- end -}}
+{{- if or (empty .Values.discoveryPool.postgresCidrs) (empty .Values.discoveryPool.artifactNamespace) (empty .Values.discoveryPool.artifactPodSelector) -}}{{- fail "MCP Discovery Worker exact PostgreSQL and Artifact destinations are required" -}}{{- end -}}
+{{- if or (lt (int .Values.discoveryPool.observability.port) 1) (gt (int .Values.discoveryPool.observability.port) 65535) (lt (int .Values.discoveryPool.artifactPort) 1) (gt (int .Values.discoveryPool.artifactPort) 65535) -}}{{- fail "MCP Discovery Worker ports must be in 1..65535" -}}{{- end -}}
+{{- if and .Values.resourcePool.enabled (eq .Values.discoveryPool.database.existingSecret .Values.resourcePool.database.existingSecret) -}}{{- fail "MCP Discovery Worker must use an independently provisioned database credential" -}}{{- end -}}
+{{- if .Values.discoveryPool.autoscaling.enabled -}}
+{{- if lt (int .Values.discoveryPool.autoscaling.minReplicas) 2 -}}{{- fail "MCP Discovery Worker HPA requires at least two replicas" -}}{{- end -}}
+{{- if lt (int .Values.discoveryPool.autoscaling.maxReplicas) (int .Values.discoveryPool.autoscaling.minReplicas) -}}{{- fail "MCP Discovery Worker HPA maximum must be at least minimum" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
