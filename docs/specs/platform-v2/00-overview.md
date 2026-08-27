@@ -599,6 +599,14 @@ strict JSON scanner错误拒绝合法`application/*+json` structured suffix；fr
 目标单测与strict Clippy通过。证据关闭两个production Worker+PostgreSQL+AWS-compatible provider的L3切片；remote MCP/Egress仍是独立TLS协议
 fixture，LocalStack不代表AWS云服务/workload identity、KMS rotation/restore、production scrape或L4～L6。
 
+r365把既有Model→Capability→Model→Return production进程测试从内存Typed Plan broker升级为production
+`platform-artifact-data-worker`与真实HTTPS S3/KMS。夹具先以production AWS provider写入1182-byte exact Typed Plan，再延后source Job，待
+Artifact Data Worker与Orchestration Worker均ready后锁定PostgreSQL Artifact authority、释放Job并在其进入`running`时同时强杀两个进程；数据库
+过期原lease，重启Data Worker和Orchestration Worker后由attempt 2重新claim、KMS解封并exact-generation读取Typed Plan，最终整条
+Model→Capability→Model→Return链及Run均`succeeded`、fence清空。该链同时修复旧Model夹具把EncryptionDomain伪装成Policy ID及使用host clock
+构造Artifact时间的问题。证据关闭Typed Plan production Scheduler RPC双进程kill/restart L3；Artifact-backed RunValue的同类故障窗口、AWS云
+workload identity及L4～L6仍未由此证明。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

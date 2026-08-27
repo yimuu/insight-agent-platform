@@ -880,6 +880,12 @@
 > 单测与strict Clippy通过。证据关闭两个production Worker+PostgreSQL+AWS-compatible provider L3切片；remote MCP/Egress仍为独立TLS协议fixture，
 > LocalStack不代表AWS云服务/workload identity、KMS rotation/restore、production scrape或L4～L6。
 
+> 2026-08-27 implementation evidence：r365把Model→Capability→Model→Return production进程测试的内存Typed Plan broker替换为
+> production `platform-artifact-data-worker`和真实HTTPS S3/KMS。测试写入1182-byte exact Typed Plan，在PostgreSQL Artifact authority锁定且
+> source Job进入`running`后同时强杀Data Worker与Orchestration Worker；过期原lease并按readiness顺序重启后，attempt 2重新claim、KMS解封和
+> exact-generation S3读取成功，整条链与Run终态`succeeded`且fence/active work归零。旧夹具错误的Policy-kind encryption-domain和host-clock
+> Artifact时间也已修正。该证据关闭Typed Plan production Scheduler RPC双进程kill/restart L3；Artifact-backed RunValue同类窗口与L4～L6仍Pending。
+
 > 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
 > Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
 > critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，

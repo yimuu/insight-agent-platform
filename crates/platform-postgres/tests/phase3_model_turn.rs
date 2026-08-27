@@ -1,14 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
-use insight_platform_artifact_rpc::{
-    proto::artifact_scheduler_service_server::ArtifactSchedulerServiceServer,
-    ArtifactInternalRpcLimits, ArtifactSchedulerGrpcService, LeasedArtifactBytes,
-    SchedulerRunValueResponseBroker, SchedulerSkillPackageResponseBroker,
-    SchedulerTypedPlanResponseBroker, SchedulerWorkloadIdentity, SCHEDULER_WORKLOAD_IDENTITY,
+use insight_platform_artifact_broker::{
+    AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig, AwsArtifactUploadRequest,
+    AwsKmsKeyBindingConfig, AwsS3StorageBindingConfig,
 };
-use insight_platform_artifacts::{
-    SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerSkillPackageReadError,
-    SchedulerSkillPackageReadRequest, SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest,
-};
+use insight_platform_artifact_rpc::SCHEDULER_WORKLOAD_IDENTITY;
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
     GrpcNetworkTransport, GrpcTransportRequest, GrpcTransportResponse, HttpNetworkTransport,
@@ -110,6 +105,133 @@ use std::{
 };
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+
+struct ProductionArtifactFixture {
+    binary: String,
+    endpoint: String,
+    bucket: String,
+    key_id: String,
+    kms_binding_digest: Sha256Digest,
+    storage_binding_digest: Sha256Digest,
+}
+
+impl ProductionArtifactFixture {
+    fn new(binary: String, endpoint: String, bucket: String, key_id: String) -> Self {
+        let kms_binding_digest: Sha256Digest = canonical_digest(&json!({
+            "connect_timeout_milliseconds": 1000,
+            "endpoint": endpoint,
+            "key_id": key_id,
+            "operation_timeout_milliseconds": 5000,
+            "provider": "aws_kms",
+            "region": "us-east-1",
+            "schema_version": 1,
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+        let storage_binding_digest: Sha256Digest = canonical_digest(&json!({
+            "backend": "s3",
+            "bucket": bucket,
+            "connect_timeout_milliseconds": 1000,
+            "endpoint": endpoint,
+            "force_path_style": true,
+            "kms_binding_digest": kms_binding_digest,
+            "maximum_object_bytes": 67108864,
+            "operation_timeout_milliseconds": 5000,
+            "region": "us-east-1",
+            "schema_version": 1,
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+        Self {
+            binary,
+            endpoint,
+            bucket,
+            key_id,
+            kms_binding_digest,
+            storage_binding_digest,
+        }
+    }
+
+    fn provider_config(&self) -> AwsArtifactProviderCatalogConfig {
+        AwsArtifactProviderCatalogConfig {
+            schema_version: 1,
+            write_storage_binding_digest: self.storage_binding_digest.clone(),
+            s3_storage_bindings: vec![AwsS3StorageBindingConfig {
+                schema_version: 1,
+                storage_binding_digest: self.storage_binding_digest.clone(),
+                endpoint: self.endpoint.clone(),
+                region: "us-east-1".to_owned(),
+                bucket: self.bucket.clone(),
+                force_path_style: true,
+                kms_binding_digest: self.kms_binding_digest.clone(),
+                connect_timeout_milliseconds: 1_000,
+                operation_timeout_milliseconds: 5_000,
+                maximum_object_bytes: 67_108_864,
+            }],
+            kms_key_bindings: vec![AwsKmsKeyBindingConfig {
+                schema_version: 1,
+                kms_binding_digest: self.kms_binding_digest.clone(),
+                endpoint: self.endpoint.clone(),
+                region: "us-east-1".to_owned(),
+                key_id: self.key_id.clone(),
+                connect_timeout_milliseconds: 1_000,
+                operation_timeout_milliseconds: 5_000,
+            }],
+        }
+    }
+
+    fn process_config(
+        &self,
+        controller_address: &str,
+        guest_address: &str,
+        observability_address: &str,
+    ) -> serde_json::Value {
+        json!({
+            "schema_version": 1,
+            "audience": "data_worker",
+            "controller_listen_address": controller_address,
+            "guest_listen_address": guest_address,
+            "observability_listen_address": observability_address,
+            "guest_identity": {
+                "issuer": "https://kubernetes.default.svc.cluster.local",
+                "audience": "insight-platform-gvisor-guest",
+                "namespace": "insight-platform-sandbox-guests",
+                "service_account_name": "insight-platform-gvisor-guest",
+                "jwks": {"keys": [{
+                    "kty": "RSA", "kid": "guest-key-1", "use": "sig", "alg": "RS256",
+                    "n": "sXch4-7u-lQpR0lJHJj3-JpGcC7dCqHj8P5mW52w8GQ", "e": "AQAB"
+                }]},
+                "jwks_digest": "sha256:ed90fd7173d7d068236917e3cf1f9f58a55977a88a6355375591ee694347ad49"
+            },
+            "read_database_max_connections": 4,
+            "work_database_max_connections": 4,
+            "database_acquire_timeout_milliseconds": 5000,
+            "artifact_provider_catalog": self.provider_config(),
+            "broker": {
+                "maximum_in_flight": 8,
+                "maximum_read_bytes": 67108864,
+                "operation_timeout_milliseconds": 5000
+            },
+            "rpc": {
+                "maximum_request_bytes": 1048576,
+                "maximum_write_request_bytes": 2097152,
+                "maximum_chunk_bytes": 262144
+            },
+            "scan_worker": {
+                "scanner_contract_digest": named_digest("artifact-scanner-contract"),
+                "ruleset_digest": named_digest("artifact-scanner-ruleset"),
+                "claim_batch": 1,
+                "lease_milliseconds": 30000,
+                "receipt_ttl_milliseconds": 60000,
+                "poll_milliseconds": 20
+            },
+            "tls_handshake_timeout_milliseconds": 5000,
+            "shutdown_grace_milliseconds": 1000
+        })
+    }
+}
 
 fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     format!(
@@ -408,56 +530,6 @@ fn model_process_tls() -> ModelProcessTls {
     }
 }
 
-struct ModelTypedPlanBroker {
-    bytes: Vec<u8>,
-    reads: AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl SchedulerTypedPlanResponseBroker for ModelTypedPlanBroker {
-    async fn read_typed_plan_for_response(
-        &self,
-        request: SchedulerTypedPlanReadRequest,
-    ) -> Result<LeasedArtifactBytes, SchedulerTypedPlanReadError> {
-        request
-            .validate_at(Utc::now())
-            .map_err(|_| SchedulerTypedPlanReadError::Denied)?;
-        let value: serde_json::Value = serde_json::from_slice(&self.bytes)
-            .map_err(|_| SchedulerTypedPlanReadError::Integrity)?;
-        let digest: Sha256Digest = canonical_digest(&value)
-            .map_err(|_| SchedulerTypedPlanReadError::Integrity)?
-            .parse()
-            .map_err(|_| SchedulerTypedPlanReadError::Integrity)?;
-        if digest != *request.artifact.content_digest()
-            || u64::try_from(self.bytes.len()).ok() != Some(request.artifact.byte_length())
-        {
-            return Err(SchedulerTypedPlanReadError::Integrity);
-        }
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
-    }
-}
-
-#[async_trait::async_trait]
-impl SchedulerRunValueResponseBroker for ModelTypedPlanBroker {
-    async fn read_run_value_for_response(
-        &self,
-        _request: SchedulerRunValueReadRequest,
-    ) -> Result<LeasedArtifactBytes, SchedulerRunValueReadError> {
-        Err(SchedulerRunValueReadError::Denied)
-    }
-}
-
-#[async_trait::async_trait]
-impl SchedulerSkillPackageResponseBroker for ModelTypedPlanBroker {
-    async fn read_skill_package_for_response(
-        &self,
-        _request: SchedulerSkillPackageReadRequest,
-    ) -> Result<LeasedArtifactBytes, SchedulerSkillPackageReadError> {
-        Err(SchedulerSkillPackageReadError::Denied)
-    }
-}
-
 fn model_orchestration_process_config(artifact_endpoint: String) -> serde_json::Value {
     json!({
         "schema_version": 1,
@@ -610,6 +682,118 @@ fn spawn_model_orchestration_worker(
         .stderr(Stdio::piped())
         .spawn()
         .unwrap()
+}
+
+fn spawn_production_artifact_worker(
+    fixture: &ProductionArtifactFixture,
+    config_path: &Path,
+    config_digest: &str,
+    database_url: &str,
+    ca_path: &Path,
+    cert_path: &Path,
+    key_path: &Path,
+) -> Child {
+    std::process::Command::new(&fixture.binary)
+        .env("PLATFORM_ARTIFACT_DATA_WORKER_CONFIG", config_path)
+        .env("PLATFORM_ARTIFACT_DATA_WORKER_CONFIG_DIGEST", config_digest)
+        .env("PLATFORM_ARTIFACT_DATA_WORKER_AUDIENCE", "data_worker")
+        .env(
+            "PLATFORM_ARTIFACT_DATA_WORKER_READ_DATABASE_URL",
+            database_url,
+        )
+        .env(
+            "PLATFORM_ARTIFACT_DATA_WORKER_WORK_DATABASE_URL",
+            database_url,
+        )
+        .env("PLATFORM_ARTIFACT_DATA_WORKER_CLIENT_CA_PATH", ca_path)
+        .env("PLATFORM_ARTIFACT_DATA_WORKER_CERT_PATH", cert_path)
+        .env("PLATFORM_ARTIFACT_DATA_WORKER_KEY_PATH", key_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+async fn install_production_typed_plan_object(
+    pool: &PgPool,
+    fixture: &Fixture,
+    artifact: &ProductionArtifactFixture,
+) {
+    let artifact_id = id(ResourceKind::Artifact, 0xa6);
+    let row: (String, String) = sqlx::query_as(
+        r#"
+        SELECT blob.blob_id, blob.encryption_domain_id
+        FROM insight_platform.artifacts AS artifact
+        JOIN insight_platform.artifact_blobs AS blob
+          ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+        WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(artifact_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let blob_id: ResourceId = row.0.parse().unwrap();
+    let encryption_domain_id: ResourceId = row.1.parse().unwrap();
+    let bytes = canonical_json(&serde_json::to_value(&fixture.runtime_plan).unwrap()).unwrap();
+    let digest = fixture
+        .runtime_plan
+        .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
+        .unwrap();
+    let byte_digest: Sha256Digest = format!(
+        "sha256:{}",
+        Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+    .parse()
+    .unwrap();
+    assert_eq!(
+        digest, byte_digest,
+        "Typed Plan bytes must bind the semantic digest"
+    );
+    let catalog = AwsArtifactProviderCatalog::install(artifact.provider_config())
+        .await
+        .unwrap();
+    catalog.check_readiness().await.unwrap();
+    let staged = catalog
+        .into_gateway_provider()
+        .stage_bytes(
+            AwsArtifactUploadRequest {
+                tenant_id: &fixture.tenant_id,
+                artifact_id: &artifact_id,
+                blob_id: &blob_id,
+                encryption_domain_id: &encryption_domain_id,
+                expected_size_bytes: u64::try_from(bytes.len()).unwrap(),
+                declared_media_type: Some("application/json"),
+                expires_in: StdDuration::from_secs(1),
+            },
+            &digest,
+            bytes,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.artifact_blobs
+        SET backend = $3, storage_binding_digest = $4,
+            object_reference_ciphertext = $5, object_generation = $6,
+            key_id = $7, updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND blob_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(blob_id.to_string())
+    .bind(staged.storage_backend)
+    .bind(staged.storage_binding_digest.to_string())
+    .bind(staged.object_reference_ciphertext)
+    .bind(staged.object_generation)
+    .bind(staged.key_id)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1168,7 +1352,10 @@ async fn insert_ready_artifact(
     suffix: u16,
 ) {
     let blob_id = id(ResourceKind::InternalBlob, suffix);
-    let database_now = Utc::now();
+    let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"
         INSERT INTO insight_platform.artifact_blobs (
@@ -1184,7 +1371,7 @@ async fn insert_ready_artifact(
     .bind(digest('1').to_string())
     .bind(digest('2').to_string())
     .bind(vec![1_u8, 2, 3])
-    .bind(id(ResourceKind::Policy, suffix).to_string())
+    .bind(id(ResourceKind::EncryptionDomain, suffix).to_string())
     .bind(artifact.content_digest().to_string())
     .bind(i64::try_from(artifact.byte_length()).unwrap())
     .bind(database_now)
@@ -3295,6 +3482,10 @@ fn production_workers_complete_model_tool_result_return_chain() {
         Ok(nats_ca_path),
         Ok(nats_cert_path),
         Ok(nats_key_path),
+        Ok(artifact_binary),
+        Ok(aws_endpoint),
+        Ok(s3_bucket),
+        Ok(kms_key_id),
     ) = (
         std::env::var("PLATFORM_MODEL_TOOL_CHAIN_TEST_DATABASE_URL"),
         std::env::var("PLATFORM_ORCHESTRATION_WORKER_BIN"),
@@ -3304,9 +3495,13 @@ fn production_workers_complete_model_tool_result_return_chain() {
         std::env::var("PLATFORM_TEST_NATS_CA_PATH"),
         std::env::var("PLATFORM_TEST_NATS_CERT_PATH"),
         std::env::var("PLATFORM_TEST_NATS_KEY_PATH"),
+        std::env::var("PLATFORM_ARTIFACT_DATA_WORKER_BIN"),
+        std::env::var("PLATFORM_TEST_AWS_ENDPOINT"),
+        std::env::var("PLATFORM_TEST_S3_BUCKET"),
+        std::env::var("PLATFORM_TEST_KMS_KEY_ID"),
     )
     else {
-        eprintln!("Model tool-chain database, Worker binaries, or TLS NATS fixture is unset; process chain skipped");
+        eprintln!("Model tool-chain database, Worker binaries, TLS NATS, or S3/KMS fixture is unset; process chain skipped");
         return;
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -3326,6 +3521,14 @@ fn production_workers_complete_model_tool_result_return_chain() {
         let fixture = seed_fixture(&pool, &repository).await;
         let (node_id, source_job_id) =
             seed_ready_model_orchestration(&pool, &repository, &fixture).await;
+        sqlx::query(
+            "UPDATE insight_platform.jobs SET scheduled_at = clock_timestamp() + interval '1 hour' WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(source_job_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let tls = model_process_tls();
         let wire = Arc::new(ToolChainModelWire {
@@ -3357,37 +3560,16 @@ fn production_workers_complete_model_tool_result_return_chain() {
                     let _ = egress_shutdown_receiver.await;
                 }),
         );
-        let broker = Arc::new(ModelTypedPlanBroker {
-            bytes: canonical_json(&serde_json::to_value(&fixture.runtime_plan).unwrap()).unwrap(),
-            reads: AtomicUsize::new(0),
-        });
-        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let address = incoming.local_addr().unwrap();
-        let service = ArtifactSchedulerServiceServer::new(ArtifactSchedulerGrpcService::new(
-            broker.clone(),
-            ArtifactInternalRpcLimits::new(262_144, 262_144).unwrap(),
-        ));
-        let service = tonic::service::interceptor::InterceptedService::new(
-            service,
-            SchedulerWorkloadIdentity,
+        let production_artifact = ProductionArtifactFixture::new(
+            artifact_binary,
+            aws_endpoint,
+            s3_bucket,
+            kms_key_id,
         );
-        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(
-            Server::builder()
-                .tls_config(
-                    ServerTlsConfig::new()
-                        .identity(Identity::from_pem(
-                            &tls.artifact_server_cert,
-                            &tls.artifact_server_key,
-                        ))
-                        .client_ca_root(Certificate::from_pem(tls.ca.clone())),
-                )
-                .unwrap()
-                .add_service(service)
-                .serve_with_incoming_shutdown(incoming, async move {
-                    let _ = shutdown_receiver.await;
-                }),
-        );
+        install_production_typed_plan_object(&pool, &fixture, &production_artifact).await;
+        let artifact_address = reserve_loopback_address();
+        let artifact_guest_address = reserve_loopback_address();
+        let artifact_observability_address = reserve_loopback_address();
         let prefix = PathBuf::from(format!(
             "/tmp/platform-model-tool-orchestration-{}",
             std::process::id()
@@ -3402,7 +3584,47 @@ fn production_workers_complete_model_tool_result_return_chain() {
         std::fs::write(&key_path, &tls.scheduler_key).unwrap();
         std::fs::write(&model_cert_path, &tls.client_cert).unwrap();
         std::fs::write(&model_key_path, &tls.client_key).unwrap();
-        let config = model_orchestration_process_config(format!("https://{address}/"));
+        let artifact_config = production_artifact.process_config(
+            &artifact_address,
+            &artifact_guest_address,
+            &artifact_observability_address,
+        );
+        let (artifact_config_path, artifact_config_digest) =
+            write_model_process_config(&prefix, "artifact-data-worker", &artifact_config);
+        let artifact_cert_path =
+            PathBuf::from(format!("{}-artifact-server.pem", prefix.display()));
+        let artifact_key_path =
+            PathBuf::from(format!("{}-artifact-server-key.pem", prefix.display()));
+        std::fs::write(&artifact_cert_path, &tls.artifact_server_cert).unwrap();
+        std::fs::write(&artifact_key_path, &tls.artifact_server_key).unwrap();
+        let mut artifact_worker = spawn_production_artifact_worker(
+            &production_artifact,
+            &artifact_config_path,
+            &artifact_config_digest,
+            &database_url,
+            &ca_path,
+            &artifact_cert_path,
+            &artifact_key_path,
+        );
+        if let Some(status) = artifact_worker.try_wait().unwrap() {
+            panic!("production Artifact Data Worker exited during startup: {status}");
+        }
+        let artifact_socket: std::net::SocketAddr = artifact_address.parse().unwrap();
+        tokio::time::timeout(StdDuration::from_secs(10), async {
+            loop {
+                if tokio::net::TcpStream::connect(artifact_socket).await.is_ok() {
+                    break;
+                }
+                if let Some(status) = artifact_worker.try_wait().unwrap() {
+                    panic!("production Artifact Data Worker exited during startup: {status}");
+                }
+                tokio::time::sleep(StdDuration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("production Artifact Data Worker did not become reachable");
+        let config =
+            model_orchestration_process_config(format!("https://{artifact_address}/"));
         let (config_path, config_digest) =
             write_model_process_config(&prefix, "orchestration", &config);
         let mut worker = spawn_model_orchestration_worker(
@@ -3415,6 +3637,94 @@ fn production_workers_complete_model_tool_result_return_chain() {
             &key_path,
         );
         let worker_log = observe_process_start(&mut worker);
+        let mut artifact_authority_lock = pool.acquire().await.unwrap();
+        sqlx::query("BEGIN")
+            .execute(&mut *artifact_authority_lock)
+            .await
+            .unwrap();
+        sqlx::query("LOCK TABLE insight_platform.artifacts IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *artifact_authority_lock)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE insight_platform.jobs SET scheduled_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(source_job_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        tokio::time::timeout(StdDuration::from_secs(10), async {
+            loop {
+                let state: String = sqlx::query_scalar(
+                    "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+                )
+                .bind(fixture.tenant_id.to_string())
+                .bind(source_job_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if state == "running" {
+                    break;
+                }
+                if let Some(status) = artifact_worker.try_wait().unwrap() {
+                    panic!("production Artifact Data Worker exited before fault injection: {status}");
+                }
+                tokio::time::sleep(StdDuration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Orchestration Job did not enter the locked Typed Plan RPC window");
+        artifact_worker.kill().unwrap();
+        artifact_worker.wait().unwrap();
+        worker.kill().unwrap();
+        worker.wait().unwrap();
+        worker_log.join().unwrap();
+        sqlx::query("ROLLBACK")
+            .execute(&mut *artifact_authority_lock)
+            .await
+            .unwrap();
+        drop(artifact_authority_lock);
+        sqlx::query(
+            "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(source_job_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        artifact_worker = spawn_production_artifact_worker(
+            &production_artifact,
+            &artifact_config_path,
+            &artifact_config_digest,
+            &database_url,
+            &ca_path,
+            &artifact_cert_path,
+            &artifact_key_path,
+        );
+        tokio::time::timeout(StdDuration::from_secs(10), async {
+            loop {
+                if tokio::net::TcpStream::connect(artifact_socket).await.is_ok() {
+                    break;
+                }
+                if let Some(status) = artifact_worker.try_wait().unwrap() {
+                    panic!("restarted Artifact Data Worker exited during startup: {status}");
+                }
+                tokio::time::sleep(StdDuration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("restarted Artifact Data Worker did not become reachable");
+        let mut recovered_worker = spawn_model_orchestration_worker(
+            &orchestration_binary,
+            &config_path,
+            &config_digest,
+            &database_url,
+            &ca_path,
+            &cert_path,
+            &key_path,
+        );
+        let recovered_worker_log = observe_process_start(&mut recovered_worker);
         let started = std::time::Instant::now();
         loop {
             let state: Option<(String, String, String, i32, i64)> = sqlx::query_as(
@@ -3450,12 +3760,10 @@ fn production_workers_complete_model_tool_result_return_chain() {
             }
             assert!(
                 started.elapsed() < StdDuration::from_secs(10),
-                "orchestration dispatch stalled with state={state:?}, artifact_reads={}",
-                broker.reads.load(Ordering::SeqCst)
+                "orchestration dispatch stalled with state={state:?}"
             );
             tokio::time::sleep(StdDuration::from_millis(10)).await;
         }
-        assert!(broker.reads.load(Ordering::SeqCst) >= 1);
         let model_owner: String = sqlx::query_scalar(
             "SELECT node_id FROM insight_platform.jobs WHERE tenant_id = $1 AND run_id = $2 AND work_class = 'model'",
         )
@@ -3465,6 +3773,15 @@ fn production_workers_complete_model_tool_result_return_chain() {
         .await
         .unwrap();
         assert_eq!(model_owner, node_id.to_string());
+        let orchestration_attempt: i32 = sqlx::query_scalar(
+            "SELECT attempt_no FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(source_job_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(orchestration_attempt >= 2);
 
         let model_config = model_tool_chain_worker_config(
             format!("https://{egress_address}/"),
@@ -3606,11 +3923,11 @@ fn production_workers_complete_model_tool_result_return_chain() {
         model_worker.wait().unwrap();
         model_log.join().unwrap();
 
-        worker.kill().unwrap();
-        worker.wait().unwrap();
-        worker_log.join().unwrap();
-        let _ = shutdown_sender.send(());
-        server.await.unwrap().unwrap();
+        recovered_worker.kill().unwrap();
+        recovered_worker.wait().unwrap();
+        recovered_worker_log.join().unwrap();
+        artifact_worker.kill().unwrap();
+        artifact_worker.wait().unwrap();
         let _ = egress_shutdown_sender.send(());
         egress_server.await.unwrap().unwrap();
         for path in [
@@ -3622,6 +3939,9 @@ fn production_workers_complete_model_tool_result_return_chain() {
             key_path,
             model_cert_path,
             model_key_path,
+            artifact_config_path,
+            artifact_cert_path,
+            artifact_key_path,
         ] {
             std::fs::remove_file(path).unwrap();
         }
