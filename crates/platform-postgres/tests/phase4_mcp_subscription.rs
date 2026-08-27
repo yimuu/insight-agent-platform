@@ -1093,7 +1093,10 @@ fn process_tls_fixture() -> ProcessTlsFixture {
     }
 }
 
-fn sandbox_policy_closure(token_purpose: SecretPurpose) -> SandboxExecutionPolicyClosure {
+fn sandbox_policy_closure(
+    token_purpose: SecretPurpose,
+    write_storage_binding_digest: Sha256Digest,
+) -> SandboxExecutionPolicyClosure {
     SandboxExecutionPolicyClosure {
         isolation: SandboxIsolationPolicyDocument {
             schema_version: 1,
@@ -1151,7 +1154,7 @@ fn sandbox_policy_closure(token_purpose: SecretPurpose) -> SandboxExecutionPolic
             scanner_contract_digest: named_digest("artifact-scanner-contract"),
             verification_evidence_ttl_milliseconds: 60_000,
             verification_retry_backoff_milliseconds: 1_000,
-            write_storage_binding_digest: named_digest("artifact-write-storage-binding"),
+            write_storage_binding_digest,
             encryption_domain_id: id(ResourceKind::EncryptionDomain, 0x0f05),
             deny_symlink: true,
             deny_hardlink: true,
@@ -1219,8 +1222,10 @@ fn policy_document(
         sandbox_artifact_io: None,
         sandbox_secret_resolution: None,
     };
-    let fixture_sandbox =
-        sandbox_policy_closure("fixture.policy.secret".parse::<SecretPurpose>().unwrap());
+    let fixture_sandbox = sandbox_policy_closure(
+        "fixture.policy.secret".parse::<SecretPurpose>().unwrap(),
+        named_digest("artifact-write-storage-binding"),
+    );
     match kind {
         PolicyKind::Network if document.mcp_protocol.is_none() => {
             document.rules_digest = fixture_sandbox.network.canonical_digest().unwrap();
@@ -1457,6 +1462,7 @@ async fn seed(
     repository: &PgRepository,
     now: DateTime<Utc>,
     mcp_port: u16,
+    write_storage_binding_digest: Sha256Digest,
 ) -> Fixture {
     let tenant_id = id(ResourceKind::Tenant, 1);
     let other_tenant_id = id(ResourceKind::Tenant, 2);
@@ -1582,9 +1588,11 @@ async fn seed(
         retention.canonical_digest().unwrap(),
     )
     .unwrap();
-    let artifact_io =
-        sandbox_policy_closure("fixture.policy.secret".parse::<SecretPurpose>().unwrap())
-            .artifact_io;
+    let artifact_io = sandbox_policy_closure(
+        "fixture.policy.secret".parse::<SecretPurpose>().unwrap(),
+        write_storage_binding_digest,
+    )
+    .artifact_io;
     let artifact_io_policy = ExactVersionRef::new(
         id(ResourceKind::PolicyRevision, 0x2c),
         artifact_io.canonical_digest().unwrap(),
@@ -2584,6 +2592,150 @@ fn available_address() -> std::net::SocketAddr {
     address
 }
 
+#[derive(Clone)]
+struct ProductionArtifactProcessFixture {
+    binary: String,
+    endpoint: String,
+    bucket: String,
+    key_id: String,
+    kms_binding_digest: Sha256Digest,
+    storage_binding_digest: Sha256Digest,
+}
+
+impl ProductionArtifactProcessFixture {
+    fn from_environment() -> Option<Self> {
+        let Ok(binary) = std::env::var("PLATFORM_ARTIFACT_DATA_WORKER_BIN") else {
+            return None;
+        };
+        let endpoint = std::env::var("PLATFORM_TEST_AWS_ENDPOINT")
+            .expect("production Artifact process fixture requires PLATFORM_TEST_AWS_ENDPOINT");
+        let bucket = std::env::var("PLATFORM_TEST_S3_BUCKET")
+            .expect("production Artifact process fixture requires PLATFORM_TEST_S3_BUCKET");
+        let key_id = std::env::var("PLATFORM_TEST_KMS_KEY_ID")
+            .expect("production Artifact process fixture requires PLATFORM_TEST_KMS_KEY_ID");
+        let kms_binding_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "connect_timeout_milliseconds": 1000,
+            "endpoint": endpoint,
+            "key_id": key_id,
+            "operation_timeout_milliseconds": 5000,
+            "provider": "aws_kms",
+            "region": "us-east-1",
+            "schema_version": 1,
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+        let storage_binding_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "backend": "s3",
+            "bucket": bucket,
+            "connect_timeout_milliseconds": 1000,
+            "endpoint": endpoint,
+            "force_path_style": true,
+            "kms_binding_digest": kms_binding_digest,
+            "maximum_object_bytes": 67108864,
+            "operation_timeout_milliseconds": 5000,
+            "region": "us-east-1",
+            "schema_version": 1,
+        }))
+        .unwrap()
+        .parse()
+        .unwrap();
+        Some(Self {
+            binary,
+            endpoint,
+            bucket,
+            key_id,
+            kms_binding_digest,
+            storage_binding_digest,
+        })
+    }
+
+    fn config(
+        &self,
+        controller_address: SocketAddr,
+        guest_address: SocketAddr,
+        observability_address: SocketAddr,
+    ) -> serde_json::Value {
+        let ruleset_digest = sandbox_policy_closure(
+            "fixture.policy.secret".parse::<SecretPurpose>().unwrap(),
+            self.storage_binding_digest.clone(),
+        )
+        .artifact_io
+        .canonical_digest()
+        .unwrap();
+        serde_json::json!({
+            "schema_version": 1,
+            "audience": "data_worker",
+            "controller_listen_address": controller_address.to_string(),
+            "guest_listen_address": guest_address.to_string(),
+            "observability_listen_address": observability_address.to_string(),
+            "guest_identity": {
+                "issuer": "https://kubernetes.default.svc.cluster.local",
+                "audience": "insight-platform-gvisor-guest",
+                "namespace": "insight-platform-sandbox-guests",
+                "service_account_name": "insight-platform-gvisor-guest",
+                "jwks": {"keys": [{
+                    "kty": "RSA",
+                    "kid": "guest-key-1",
+                    "use": "sig",
+                    "alg": "RS256",
+                    "n": "sXch4-7u-lQpR0lJHJj3-JpGcC7dCqHj8P5mW52w8GQ",
+                    "e": "AQAB"
+                }]},
+                "jwks_digest": "sha256:ed90fd7173d7d068236917e3cf1f9f58a55977a88a6355375591ee694347ad49"
+            },
+            "read_database_max_connections": 4,
+            "work_database_max_connections": 4,
+            "database_acquire_timeout_milliseconds": 5000,
+            "artifact_provider_catalog": {
+                "schema_version": 1,
+                "write_storage_binding_digest": self.storage_binding_digest,
+                "s3_storage_bindings": [{
+                    "schema_version": 1,
+                    "storage_binding_digest": self.storage_binding_digest,
+                    "endpoint": self.endpoint,
+                    "region": "us-east-1",
+                    "bucket": self.bucket,
+                    "force_path_style": true,
+                    "kms_binding_digest": self.kms_binding_digest,
+                    "connect_timeout_milliseconds": 1000,
+                    "operation_timeout_milliseconds": 5000,
+                    "maximum_object_bytes": 67108864
+                }],
+                "kms_key_bindings": [{
+                    "schema_version": 1,
+                    "kms_binding_digest": self.kms_binding_digest,
+                    "endpoint": self.endpoint,
+                    "region": "us-east-1",
+                    "key_id": self.key_id,
+                    "connect_timeout_milliseconds": 1000,
+                    "operation_timeout_milliseconds": 5000
+                }]
+            },
+            "broker": {
+                "maximum_in_flight": 8,
+                "maximum_read_bytes": 67108864,
+                "operation_timeout_milliseconds": 5000
+            },
+            "rpc": {
+                "maximum_request_bytes": 1048576,
+                "maximum_write_request_bytes": 2097152,
+                "maximum_chunk_bytes": 262144
+            },
+            "scan_worker": {
+                "scanner_contract_digest": named_digest("artifact-scanner-contract"),
+                "ruleset_digest": ruleset_digest,
+                "claim_batch": 1,
+                "lease_milliseconds": 30000,
+                "receipt_ttl_milliseconds": 60000,
+                "poll_milliseconds": 20
+            },
+            "tls_handshake_timeout_milliseconds": 5000,
+            "shutdown_grace_milliseconds": 1000
+        })
+    }
+}
+
 struct ProcessFixtureFiles {
     prefix: String,
     ca: PathBuf,
@@ -2844,6 +2996,48 @@ fn spawn_mcp_discovery_worker(input: DiscoveryWorkerSpawn<'_>) -> Child {
         .env(
             "PLATFORM_MCP_DISCOVERY_WORKER_ARTIFACT_CA_PATH",
             &input.files.ca,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+struct ArtifactDataWorkerSpawn<'a> {
+    fixture: &'a ProductionArtifactProcessFixture,
+    database_url: &'a str,
+    files: &'a ProcessFixtureFiles,
+    config_path: &'a PathBuf,
+    config_digest: &'a str,
+}
+
+fn spawn_artifact_data_worker(input: ArtifactDataWorkerSpawn<'_>) -> Child {
+    std::process::Command::new(&input.fixture.binary)
+        .env("PLATFORM_ARTIFACT_DATA_WORKER_CONFIG", input.config_path)
+        .env(
+            "PLATFORM_ARTIFACT_DATA_WORKER_CONFIG_DIGEST",
+            input.config_digest,
+        )
+        .env("PLATFORM_ARTIFACT_DATA_WORKER_AUDIENCE", "data_worker")
+        .env(
+            "PLATFORM_ARTIFACT_DATA_WORKER_READ_DATABASE_URL",
+            input.database_url,
+        )
+        .env(
+            "PLATFORM_ARTIFACT_DATA_WORKER_WORK_DATABASE_URL",
+            input.database_url,
+        )
+        .env(
+            "PLATFORM_ARTIFACT_DATA_WORKER_CLIENT_CA_PATH",
+            &input.files.ca,
+        )
+        .env(
+            "PLATFORM_ARTIFACT_DATA_WORKER_CERT_PATH",
+            &input.files.artifact_server_cert,
+        )
+        .env(
+            "PLATFORM_ARTIFACT_DATA_WORKER_KEY_PATH",
+            &input.files.artifact_server_key,
         )
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -3400,7 +3594,19 @@ async fn wait_for_control_file(path: &std::path::Path, timeout: StdDuration) {
 }
 
 async fn read_process_http(address: SocketAddr, path: &str) -> String {
-    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let started = std::time::Instant::now();
+    let mut stream = loop {
+        match tokio::net::TcpStream::connect(address).await {
+            Ok(stream) => break stream,
+            Err(error) => {
+                assert!(
+                    started.elapsed() < StdDuration::from_secs(10),
+                    "process HTTP endpoint {address} did not become ready: {error}"
+                );
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        }
+    };
     stream
         .write_all(
             format!("GET {path} HTTP/1.1\r\nHost: process.test\r\nConnection: close\r\n\r\n")
@@ -3447,6 +3653,7 @@ async fn run_discovery_worker_process_l3(
     operation: &McpDiscoveryOperationRecord,
     database_url: &str,
     discovery_worker_binary: &str,
+    production_artifact: Option<&ProductionArtifactProcessFixture>,
 ) {
     let tls = process_tls_fixture();
     let files = ProcessFixtureFiles::new(&tls);
@@ -3507,6 +3714,18 @@ async fn run_discovery_worker_process_l3(
         serde_json::to_vec(&artifact_config).unwrap(),
     )
     .unwrap();
+    let artifact_guest_address = available_address();
+    let artifact_observability_address = available_address();
+    let production_artifact_config = production_artifact.map(|fixture| {
+        files.write_config(
+            "artifact-data-worker",
+            &fixture.config(
+                artifact_address,
+                artifact_guest_address,
+                artifact_observability_address,
+            ),
+        )
+    });
     let observability_address = available_address();
     let worker_config = serde_json::json!({
         "schema_version": 1,
@@ -3553,12 +3772,33 @@ async fn run_discovery_worker_process_l3(
         })
     };
 
-    let mut artifact = spawn_discovery_artifact_process(&artifact_config_path, database_url);
+    let mut artifact = if let (Some(fixture), Some((config_path, config_digest))) =
+        (production_artifact, production_artifact_config.as_ref())
+    {
+        spawn_artifact_data_worker(ArtifactDataWorkerSpawn {
+            fixture,
+            database_url,
+            files: &files,
+            config_path,
+            config_digest,
+        })
+    } else {
+        spawn_discovery_artifact_process(&artifact_config_path, database_url)
+    };
     let (startup, artifact_stderr) = monitor_process_stderr(artifact.stderr.take().unwrap()).await;
-    assert!(
-        startup.contains("discovery Artifact fixture started"),
-        "{startup}"
-    );
+    if production_artifact.is_some() {
+        assert!(
+            startup.contains("platform-artifact-data-worker started for data_worker audience"),
+            "{startup}"
+        );
+        let ready = read_process_http(artifact_observability_address, "/readyz").await;
+        assert!(ready.starts_with("HTTP/1.1 200 OK"), "{ready}");
+    } else {
+        assert!(
+            startup.contains("discovery Artifact fixture started"),
+            "{startup}"
+        );
+    }
     let mut egress = spawn_protocol_egress_process(&protocol_config_path);
     let (startup, first_egress_stderr) =
         monitor_process_stderr(egress.stderr.take().unwrap()).await;
@@ -3618,108 +3858,110 @@ async fn run_discovery_worker_process_l3(
         startup.contains("platform-mcp-discovery-worker started"),
         "{startup}"
     );
-    wait_for_control_file(
-        &protocol_control_path(&control_prefix, "artifact-stage.started"),
-        StdDuration::from_secs(15),
-    )
-    .await;
-    wait_for_context_job_state(
-        pool,
-        &fixture.tenant_id,
-        &operation.job_id,
-        "waiting",
-        StdDuration::from_secs(15),
-    )
-    .await;
+    if production_artifact.is_none() {
+        wait_for_control_file(
+            &protocol_control_path(&control_prefix, "artifact-stage.started"),
+            StdDuration::from_secs(15),
+        )
+        .await;
+        wait_for_context_job_state(
+            pool,
+            &fixture.tenant_id,
+            &operation.job_id,
+            "waiting",
+            StdDuration::from_secs(15),
+        )
+        .await;
 
-    let artifact_row: (String, i64, String) = sqlx::query_as(
-        "SELECT expected_digest, expected_size_bytes, declared_media_type FROM insight_platform.artifacts WHERE tenant_id = $1 AND artifact_id = $2 AND state = 'verifying'",
-    )
-    .bind(fixture.tenant_id.to_string())
-    .bind(operation.payload.admission.artifact_preallocation.artifact_id.to_string())
-    .fetch_one(pool)
-    .await
-    .unwrap();
-    let scan_worker = id(ResourceKind::WorkerProcessGeneration, 0x748);
-    let mut claims = repository
-        .claim_artifact_jobs(ClaimArtifactJobs {
-            role: ArtifactWorkerRole::DataWorker,
-            worker_id: scan_worker.clone(),
-            limit: 1,
-            lease_milliseconds: 30_000,
-            lease_token_digests: vec![named_digest("discovery-process-scan-claim")],
-        })
+        let artifact_row: (String, i64, String) = sqlx::query_as(
+            "SELECT expected_digest, expected_size_bytes, declared_media_type FROM insight_platform.artifacts WHERE tenant_id = $1 AND artifact_id = $2 AND state = 'verifying'",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(operation.payload.admission.artifact_preallocation.artifact_id.to_string())
+        .fetch_one(pool)
         .await
         .unwrap();
-    assert_eq!(claims.len(), 1);
-    let claim = claims.pop().unwrap();
-    assert_eq!(
-        claim.job_id,
-        operation
-            .payload
-            .admission
-            .artifact_preallocation
-            .verification_job_id
-            .to_string()
-    );
-    let token: Sha256Digest = claim.lease_token_digest.as_ref().unwrap().parse().unwrap();
-    let started = repository
-        .start_job(RepositoryJobFence {
-            tenant_id: fixture.tenant_id.to_string(),
-            job_id: claim.job_id.clone(),
-            worker_id: scan_worker.clone(),
-            lease_epoch: claim.lease_epoch,
-            expected_job_version: claim.version,
-            lease_token_digest: token.clone(),
-        })
-        .await
-        .unwrap();
-    let execution = repository
-        .load_started_artifact_execution(
-            ArtifactWorkerRole::DataWorker,
-            fixture.tenant_id.clone(),
+        let scan_worker = id(ResourceKind::WorkerProcessGeneration, 0x748);
+        let mut claims = repository
+            .claim_artifact_jobs(ClaimArtifactJobs {
+                role: ArtifactWorkerRole::DataWorker,
+                worker_id: scan_worker.clone(),
+                limit: 1,
+                lease_milliseconds: 30_000,
+                lease_token_digests: vec![named_digest("discovery-process-scan-claim")],
+            })
+            .await
+            .unwrap();
+        assert_eq!(claims.len(), 1);
+        let claim = claims.pop().unwrap();
+        assert_eq!(
+            claim.job_id,
             operation
                 .payload
                 .admission
                 .artifact_preallocation
                 .verification_job_id
-                .clone(),
-            DomainJobFence {
-                expected_version: u64::try_from(started.version).unwrap(),
-                worker_process_generation_id: scan_worker,
-                lease_generation: u64::try_from(started.lease_epoch).unwrap(),
-                token_digest: token,
+                .to_string()
+        );
+        let token: Sha256Digest = claim.lease_token_digest.as_ref().unwrap().parse().unwrap();
+        let started = repository
+            .start_job(RepositoryJobFence {
+                tenant_id: fixture.tenant_id.to_string(),
+                job_id: claim.job_id.clone(),
+                worker_id: scan_worker.clone(),
+                lease_epoch: claim.lease_epoch,
+                expected_job_version: claim.version,
+                lease_token_digest: token.clone(),
+            })
+            .await
+            .unwrap();
+        let execution = repository
+            .load_started_artifact_execution(
+                ArtifactWorkerRole::DataWorker,
+                fixture.tenant_id.clone(),
+                operation
+                    .payload
+                    .admission
+                    .artifact_preallocation
+                    .verification_job_id
+                    .clone(),
+                DomainJobFence {
+                    expected_version: u64::try_from(started.version).unwrap(),
+                    worker_process_generation_id: scan_worker,
+                    lease_generation: u64::try_from(started.lease_epoch).unwrap(),
+                    token_digest: token,
+                },
+                ArtifactExecutionSlot {
+                    receipt_id: id(ResourceKind::Receipt, 0x749),
+                    event_id: id(ResourceKind::Event, 0x74a),
+                    outbox_id: id(ResourceKind::OutboxEvent, 0x74b),
+                    duplicate_blob_cleanup_job_id: id(ResourceKind::Job, 0x74c),
+                    receipt_expires_at: Utc::now() + Duration::minutes(10),
+                },
+            )
+            .await
+            .unwrap();
+        let StartedArtifactExecution::Scan(execution) = execution else {
+            panic!("discovery process verification Job must be a scan");
+        };
+        let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        ArtifactWorkerService::new(
+            DiscoveryArtifactScanner {
+                content_digest: artifact_row.0.parse().unwrap(),
+                size_bytes: u64::try_from(artifact_row.1).unwrap(),
+                media_type: artifact_row.2,
+                observed_at: scan_now,
             },
-            ArtifactExecutionSlot {
-                receipt_id: id(ResourceKind::Receipt, 0x749),
-                event_id: id(ResourceKind::Event, 0x74a),
-                outbox_id: id(ResourceKind::OutboxEvent, 0x74b),
-                duplicate_blob_cleanup_job_id: id(ResourceKind::Job, 0x74c),
-                receipt_expires_at: Utc::now() + Duration::minutes(10),
-            },
+            UnusedDiscoveryBlobBackend,
+            repository.clone(),
         )
+        .execute_scan(execution, scan_now)
         .await
         .unwrap();
-    let StartedArtifactExecution::Scan(execution) = execution else {
-        panic!("discovery process verification Job must be a scan");
-    };
-    let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    ArtifactWorkerService::new(
-        DiscoveryArtifactScanner {
-            content_digest: artifact_row.0.parse().unwrap(),
-            size_bytes: u64::try_from(artifact_row.1).unwrap(),
-            media_type: artifact_row.2,
-            observed_at: scan_now,
-        },
-        UnusedDiscoveryBlobBackend,
-        repository.clone(),
-    )
-    .execute_scan(execution, scan_now)
-    .await
-    .unwrap();
+    }
     wait_for_context_job_state(
         pool,
         &fixture.tenant_id,
@@ -3797,6 +4039,34 @@ async fn run_discovery_worker_process_l3(
             1
         )
     );
+    if let Some(provider) = production_artifact {
+        let blob: (String, String, i32, String, String, String) = sqlx::query_as(
+            r#"
+            SELECT backend, storage_binding_digest, octet_length(object_reference_ciphertext),
+              object_generation, key_id, state
+            FROM insight_platform.artifact_blobs
+            WHERE tenant_id = $1 AND blob_id = $2
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(
+            operation
+                .payload
+                .admission
+                .artifact_preallocation
+                .blob_id
+                .to_string(),
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(blob.0, "s3");
+        assert_eq!(blob.1, provider.storage_binding_digest.to_string());
+        assert!(blob.2 > 0);
+        assert!(!blob.3.is_empty());
+        assert_eq!(blob.4, provider.key_id);
+        assert_eq!(blob.5, "verified");
+    }
     let methods =
         std::fs::read_to_string(protocol_control_path(&control_prefix, "methods.log")).unwrap();
     assert_eq!(
@@ -4120,7 +4390,19 @@ async fn mcp_subscription_fixture() {
     verify_schema(&pool).await.unwrap();
     let repository = PgRepository::new(pool.clone());
     let now = Utc::now();
-    let fixture = seed(&pool, &repository, now, available_address().port()).await;
+    let production_artifact = ProductionArtifactProcessFixture::from_environment();
+    let write_storage_binding_digest = production_artifact
+        .as_ref()
+        .map(|fixture| fixture.storage_binding_digest.clone())
+        .unwrap_or_else(|| named_digest("artifact-write-storage-binding"));
+    let fixture = seed(
+        &pool,
+        &repository,
+        now,
+        available_address().port(),
+        write_storage_binding_digest,
+    )
+    .await;
     let context_quota_account_id = id(ResourceKind::QuotaAccount, 0x5f0);
     repository
         .create_quota_account(NewQuotaAccount {
@@ -4753,6 +5035,7 @@ async fn mcp_subscription_fixture() {
             &process_discovery,
             &database_url,
             &discovery_worker_binary,
+            production_artifact.as_ref(),
         )
         .await;
     } else {

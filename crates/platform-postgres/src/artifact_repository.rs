@@ -3663,8 +3663,8 @@ async fn authorize_artifact_scan_object(
         ArtifactScanKind::Rescan => BlobIntegrityState::Verified,
     };
     let valid = persisted_scan == request.job
-        && row.try_get::<String, _>("owner_kind")? == "job"
-        && row.try_get::<String, _>("owner_id")? == request.job.operation_id.to_string()
+        && row.try_get::<String, _>("owner_kind")? == "artifact"
+        && row.try_get::<String, _>("owner_id")? == request.job.artifact_id.to_string()
         && row.try_get::<Option<String>, _>("invocation_id")?.is_none()
         && row
             .try_get::<String, _>("artifact_state")?

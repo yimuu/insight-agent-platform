@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{
     ArtifactBackendFailure, ArtifactBlobBackend, ArtifactBlobCleanupExecution,
     ArtifactBlobDeletionEvidence, ArtifactDeletionEvidence, ArtifactDeletionExecution,
@@ -6,13 +6,14 @@ use insight_platform_artifacts::{
     ArtifactJobPayload, ArtifactLinkState, ArtifactObjectReadAuthority,
     ArtifactObjectReadAuthorityError, ArtifactProvenanceRecord, ArtifactReferenceRecord,
     ArtifactScanDisposition, ArtifactScanEvidence, ArtifactScanEvidenceDraft,
-    ArtifactScanExecution, ArtifactScanRequest, ArtifactScanWorkRecord, ArtifactScanner,
-    ArtifactTransaction, ArtifactWorkerAudit, ArtifactWorkerService, CommitArtifactBlobCleanup,
-    CommitArtifactScanOutcome, CompleteArtifactDeletion, CompleteArtifactUpload,
-    CompletedArtifactDeletion, CompletedArtifactUpload, CreateArtifactProvenance,
-    DeleteArtifactBlobGeneration, FinalizeArtifact, FinalizedArtifact, GatewayArtifactReadRequest,
-    MarkArtifactDeletion, MarkedArtifactDeletion, PlaceArtifactHold, PrepareArtifact,
-    PreparedArtifact, ReleaseArtifactHold, ReleaseArtifactReference, ScheduleArtifactRescan,
+    ArtifactScanExecution, ArtifactScanObjectReadAuthority, ArtifactScanRequest,
+    ArtifactScanWorkRecord, ArtifactScanner, ArtifactTransaction, ArtifactWorkerAudit,
+    ArtifactWorkerService, CommitArtifactBlobCleanup, CommitArtifactScanOutcome,
+    CompleteArtifactDeletion, CompleteArtifactUpload, CompletedArtifactDeletion,
+    CompletedArtifactUpload, CreateArtifactProvenance, DeleteArtifactBlobGeneration,
+    FinalizeArtifact, FinalizedArtifact, GatewayArtifactReadRequest, MarkArtifactDeletion,
+    MarkedArtifactDeletion, PlaceArtifactHold, PrepareArtifact, PreparedArtifact,
+    ReleaseArtifactHold, ReleaseArtifactReference, ScheduleArtifactRescan,
     ScheduleInitialArtifactScan,
 };
 use insight_platform_contracts::{
@@ -444,12 +445,10 @@ fn commit_scan_command(
     fence: &JobFence,
     base: u16,
     finding: ScanFinding,
+    observed_at: DateTime<Utc>,
 ) -> CommitArtifactScanOutcome {
-    // Keep external scanner evidence behind the database authority clock even when the
-    // container runtime and test process have sub-second clock skew.
-    let observed_at = Utc::now() - Duration::seconds(1);
     let evidence = ArtifactScanEvidenceDraft {
-        schema_version: 2,
+        schema_version: 1,
         scan_kind: scheduled.scan.scan_kind,
         scan_job_id: scheduled.scan_job_id.clone(),
         scan_policy_revision: scheduled.scan.scan_policy_revision.clone(),
@@ -1195,6 +1194,10 @@ async fn artifact_upload_lifecycle_fixture() {
         .unwrap();
     verify_schema(&pool).await.unwrap();
     let repository = PgRepository::new(pool.clone());
+    let authority_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let tenant_a = id(ResourceKind::Tenant, 0x0100);
     let tenant_b = id(ResourceKind::Tenant, 0x0101);
     let allowed_principal = id(ResourceKind::Principal, 0x0102);
@@ -1662,6 +1665,7 @@ async fn artifact_upload_lifecycle_fixture() {
         &expired_scan_fence,
         0x10c0,
         ScanFinding::verified(digest('8')),
+        authority_now,
     );
     assert!(matches!(
         execute_commit_scan(&repository, stale_completion).await,
@@ -1683,7 +1687,21 @@ async fn artifact_upload_lifecycle_fixture() {
         &scan_fence,
         0x10e0,
         ScanFinding::verified(digest('8')),
+        authority_now,
     );
+    let scan = scan_execution(&started, &complete_scan);
+    let authorized_scan = repository
+        .authorize_scan_object_read(&ArtifactScanRequest {
+            tenant_id: scan.audit.tenant_id.clone(),
+            job_id: scan.scan_job_id.clone(),
+            fence: scan.fence.clone(),
+            job: scan.scan.clone(),
+            observed_at: authority_now,
+        })
+        .await
+        .unwrap();
+    assert_eq!(authorized_scan.artifact_id, prepared_command.artifact_id);
+    assert_eq!(authorized_scan.blob_id, started.blob.blob_id);
     let scan_service = ArtifactWorkerService::new(
         FixtureScanner {
             evidence: Ok(complete_scan.evidence.clone()),
@@ -1697,7 +1715,7 @@ async fn artifact_upload_lifecycle_fixture() {
         repository.clone(),
     );
     let verified = scan_service
-        .execute_scan(scan_execution(&started, &complete_scan), Utc::now())
+        .execute_scan(scan_execution(&started, &complete_scan), authority_now)
         .await
         .unwrap();
     let CommandOutcome::Applied(verified) = verified else {
@@ -1726,7 +1744,7 @@ async fn artifact_upload_lifecycle_fixture() {
     );
     assert_eq!(
         scan_service
-            .execute_scan(scan_execution(&started, &complete_scan), Utc::now())
+            .execute_scan(scan_execution(&started, &complete_scan), authority_now)
             .await
             .unwrap(),
         CommandOutcome::Replayed(verified.clone())
@@ -1906,6 +1924,7 @@ async fn artifact_upload_lifecycle_fixture() {
         &duplicate_fence,
         0x1530,
         ScanFinding::verified(digest('8')),
+        authority_now,
     );
     let duplicate_verified = execute_commit_scan(&repository, duplicate_verification.clone())
         .await
@@ -1966,7 +1985,7 @@ async fn artifact_upload_lifecycle_fixture() {
             object_generation: "s3-version-0001".to_owned(),
             backend_receipt_digest: digest('e'),
             absence_evidence_digest: digest('f'),
-            observed_at: Utc::now(),
+            observed_at: authority_now,
         },
     };
     let mut cleanup_payload = duplicate_cleanup.3.clone();
@@ -1998,7 +2017,7 @@ async fn artifact_upload_lifecycle_fixture() {
         expected_blob_version: cleanup_command.expected_blob_version,
     };
     let cleaned = cleanup_service
-        .execute_blob_cleanup(cleanup_execution.clone(), Utc::now())
+        .execute_blob_cleanup(cleanup_execution.clone(), authority_now)
         .await
         .unwrap();
     let CommandOutcome::Applied(cleaned) = cleaned else {
@@ -2009,7 +2028,7 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(cleaned.cleanup_job_state.as_str(), "succeeded");
     assert_eq!(
         cleanup_service
-            .execute_blob_cleanup(cleanup_execution, Utc::now())
+            .execute_blob_cleanup(cleanup_execution, authority_now)
             .await
             .unwrap(),
         CommandOutcome::Replayed(cleaned)
@@ -2135,6 +2154,7 @@ async fn artifact_upload_lifecycle_fixture() {
         &concurrent_fence_a,
         0x1630,
         ScanFinding::verified(digest('a')),
+        authority_now,
     );
     let verify_b = commit_scan_command(
         &concurrent_b,
@@ -2143,6 +2163,7 @@ async fn artifact_upload_lifecycle_fixture() {
         &concurrent_fence_b,
         0x1730,
         ScanFinding::verified(digest('a')),
+        authority_now,
     );
     let (verified_a, verified_b) = tokio::join!(
         execute_commit_scan(&repository, verify_a),
@@ -2254,6 +2275,7 @@ async fn artifact_upload_lifecycle_fixture() {
             &isolated_fence,
             0x1830,
             ScanFinding::verified(digest('8')),
+            authority_now,
         ),
     )
     .await
@@ -2473,6 +2495,7 @@ async fn artifact_upload_lifecycle_fixture() {
         &rescan_fence,
         0x1960,
         ScanFinding::verified(digest('8')),
+        authority_now,
     );
     let rescanned = execute_commit_scan(&repository, rescan_completion.clone())
         .await
@@ -2532,6 +2555,7 @@ async fn artifact_upload_lifecycle_fixture() {
         &corruption_fence,
         0x1990,
         ScanFinding::corrupt(digest('8'), "scanner_integrity_failure"),
+        authority_now,
     );
     let CommandOutcome::Applied(corrupted) =
         execute_commit_scan(&repository, corruption_completion)
@@ -2799,7 +2823,7 @@ async fn artifact_upload_lifecycle_fixture() {
     );
     let shared_deletion_execution = deletion_execution(&marked_shared.deletion, &complete_shared);
     let completed_shared = shared_deletion_service
-        .execute_deletion(shared_deletion_execution.clone(), Utc::now())
+        .execute_deletion(shared_deletion_execution.clone(), authority_now)
         .await
         .unwrap();
     let CommandOutcome::Applied(completed_shared) = completed_shared else {
@@ -2811,7 +2835,7 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(completed_shared.blob.version, 3);
     assert_eq!(
         shared_deletion_service
-            .execute_deletion(shared_deletion_execution, Utc::now())
+            .execute_deletion(shared_deletion_execution, authority_now)
             .await
             .unwrap(),
         CommandOutcome::Replayed(completed_shared)
@@ -2900,7 +2924,7 @@ async fn artifact_upload_lifecycle_fixture() {
         object_generation: "s3-version-0001".to_owned(),
         backend_receipt_digest: digest('f'),
         absence_evidence_digest: digest('0'),
-        observed_at: Utc::now(),
+        observed_at: authority_now,
     };
     let physical_deletion_service = ArtifactWorkerService::new(
         FixtureScanner {
@@ -2917,7 +2941,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let physical_deletion_execution =
         deletion_execution(&marked_physical.deletion, &physical_completion);
     let completed_physical = physical_deletion_service
-        .execute_deletion(physical_deletion_execution.clone(), Utc::now())
+        .execute_deletion(physical_deletion_execution.clone(), authority_now)
         .await
         .unwrap();
     let CommandOutcome::Applied(completed_physical) = completed_physical else {
@@ -2929,7 +2953,7 @@ async fn artifact_upload_lifecycle_fixture() {
     assert_eq!(completed_physical.blob.version, 5);
     assert_eq!(
         physical_deletion_service
-            .execute_deletion(physical_deletion_execution, Utc::now())
+            .execute_deletion(physical_deletion_execution, authority_now)
             .await
             .unwrap(),
         CommandOutcome::Replayed(completed_physical)
@@ -3028,6 +3052,7 @@ async fn artifact_upload_lifecycle_fixture() {
         &recovery_scan_fence,
         0x1b30,
         ScanFinding::verified(digest('3')),
+        authority_now,
     );
     let failing_scan_service = ArtifactWorkerService::new(
         FixtureScanner {
@@ -3048,7 +3073,7 @@ async fn artifact_upload_lifecycle_fixture() {
         failing_scan_service
             .execute_scan(
                 scan_execution(&recovery_scan, &failed_scan_template),
-                Utc::now(),
+                authority_now,
             )
             .await,
         Err(
@@ -3120,6 +3145,7 @@ async fn artifact_upload_lifecycle_fixture() {
         &recovery_retry_fence,
         0x1bc0,
         ScanFinding::verified(digest('3')),
+        authority_now,
     );
     let successful_scan_service = ArtifactWorkerService::new(
         FixtureScanner {
@@ -3136,7 +3162,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let CommandOutcome::Applied(recovery_verified) = successful_scan_service
         .execute_scan(
             scan_execution(&recovery_scan, &recovery_success),
-            Utc::now(),
+            authority_now,
         )
         .await
         .unwrap()
@@ -3267,7 +3293,7 @@ async fn artifact_upload_lifecycle_fixture() {
     let failure = uncertain_service
         .execute_deletion(
             deletion_execution(&recovery_marked.deletion, &failure_template),
-            Utc::now(),
+            authority_now,
         )
         .await
         .unwrap_err();

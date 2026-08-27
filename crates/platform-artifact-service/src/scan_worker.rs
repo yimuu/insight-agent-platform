@@ -159,16 +159,30 @@ fn inspect_content(
             Some("archive_requires_published_scanner".to_owned()),
         );
     }
-    if declared_media_type
-        .is_some_and(|declared| declared != detected && declared != "application/octet-stream")
-    {
+    let verified_media_type = declared_media_type
+        .filter(|declared| {
+            detected == "application/json"
+                && declared
+                    .strip_prefix("application/")
+                    .is_some_and(|subtype| subtype.len() > 5 && subtype.ends_with("+json"))
+        })
+        .unwrap_or(detected);
+    if declared_media_type.is_some_and(|declared| {
+        declared != detected
+            && declared != "application/octet-stream"
+            && verified_media_type != declared
+    }) {
         return (
             detected.to_owned(),
             ArtifactScanDisposition::Quarantined,
             Some("declared_media_type_mismatch".to_owned()),
         );
     }
-    (detected.to_owned(), ArtifactScanDisposition::Verified, None)
+    (
+        verified_media_type.to_owned(),
+        ArtifactScanDisposition::Verified,
+        None,
+    )
 }
 
 fn map_read_failure(error: ArtifactScanReadError) -> ArtifactBackendFailure {
@@ -378,6 +392,21 @@ mod tests {
         assert_eq!(
             inspect_content(br#"{"safe":true}"#, Some("application/json")).1,
             ArtifactScanDisposition::Verified
+        );
+        assert_eq!(
+            inspect_content(
+                br#"{"safe":true}"#,
+                Some("application/vnd.insight.mcp-discovery+json"),
+            ),
+            (
+                "application/vnd.insight.mcp-discovery+json".to_owned(),
+                ArtifactScanDisposition::Verified,
+                None,
+            )
+        );
+        assert_eq!(
+            inspect_content(br#"{"safe":true}"#, Some("application/problem+xml")).1,
+            ArtifactScanDisposition::Quarantined
         );
     }
 }

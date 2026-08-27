@@ -589,6 +589,16 @@ r363修复production Artifact Data Worker把进程wall clock混入数据库裁�
 伪造StaleFence或使合法provider结果不可提交。Artifact domain/service目标测试与strict Clippy通过；本批无fresh PostgreSQL provider进程链，故仅
 关闭时间authority L1，不扩张r362的L3边界。
 
+r364在fresh PostgreSQL 16唯一baseline与LocalStack Community 4.14.0 HTTPS S3/KMS上运行production
+`platform-mcp-discovery-worker`和production `platform-artifact-data-worker`。进程链故意在第一次remote TLS MCP `initialize`后杀死Discovery
+Worker，lease recovery后完成descriptor stage；Data Worker以数据库authority time自动领取scan Job，经KMS Encrypt、versioned S3 Put、KMS
+Decrypt、exact-version Head/Get验证174-byte discovery descriptor，随后唤醒owner并由attempt 3 finalize。终态为Invocation/owner/verification
+`succeeded`、Artifact `ready`、Blob `verified`，保留vendor `application/vnd.insight.mcp-discovery+json`，数据库密文引用356 bytes，DB与S3
+exact generation一致，且active Snapshot/Artifact Link各唯一1行。该链发现并修复scan-read authority把持久Artifact owner误判为Job owner，以及
+strict JSON scanner错误拒绝合法`application/*+json` structured suffix；fresh PostgreSQL phase3 authority回归、production phase4进程测试、
+目标单测与strict Clippy通过。证据关闭两个production Worker+PostgreSQL+AWS-compatible provider的L3切片；remote MCP/Egress仍是独立TLS协议
+fixture，LocalStack不代表AWS云服务/workload identity、KMS rotation/restore、production scrape或L4～L6。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

@@ -870,6 +870,16 @@
 > commit。未来evidence校验未放宽，host/DB时钟偏差不再伪造StaleFence或使合法provider结果不可提交。Artifact domain/service目标测试与strict
 > Clippy通过。本批无fresh PostgreSQL provider进程链，仅关闭时间authority L1，不扩张r362的L3边界。
 
+> 2026-08-27 implementation evidence：r364在fresh PostgreSQL 16唯一baseline与LocalStack Community 4.14.0 HTTPS S3/KMS上运行
+> production `platform-mcp-discovery-worker`和production `platform-artifact-data-worker`。第一次remote TLS MCP `initialize`后故意杀死
+> Discovery Worker；lease recovery后完成descriptor stage，Data Worker以数据库authority time自动领取scan Job，经KMS Encrypt、versioned
+> S3 Put、KMS Decrypt与exact-version Head/Get验证174-byte descriptor，再唤醒owner由attempt 3 finalize。终态Invocation/owner/verification
+> `succeeded`、Artifact `ready`、Blob `verified`，保留`application/vnd.insight.mcp-discovery+json`；数据库密文引用356 bytes，DB/S3 exact
+> generation一致，active Snapshot/Artifact Link各唯一1行。该链发现并修复scan-read authority把持久Artifact owner误判为Job owner，以及strict
+> JSON scanner错误拒绝合法`application/*+json` structured suffix；fresh PostgreSQL phase3 authority回归、production phase4进程测试、目标
+> 单测与strict Clippy通过。证据关闭两个production Worker+PostgreSQL+AWS-compatible provider L3切片；remote MCP/Egress仍为独立TLS协议fixture，
+> LocalStack不代表AWS云服务/workload identity、KMS rotation/restore、production scrape或L4～L6。
+
 > 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
 > Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
 > critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，
