@@ -68,7 +68,7 @@ cc	1.2.65	parallel
 cel	0.14.0	chrono,default,json,regex
 cfg-if	1.0.4	-
 cfg_aliases	0.2.1	-
-chacha20	0.10.1	rng
+chacha20	0.10.2	rng
 chrono	0.4.45	alloc,clock,default,iana-time-zone,js-sys,now,oldtime,serde,std,wasm-bindgen,wasmbind,winapi,windows-link
 chrono-tz	0.10.4	default,std
 cmake	0.1.58	-
